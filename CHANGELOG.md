@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Framework-neutral agent continuity product surface**: added the versioned
+  Durable Agent Handoff Protocol, portable work offers and runtime passports,
+  verifiable execution receipts, a fail-closed placement-policy compiler,
+  HTTP/MCP/local/mobile gateway manifests, a fixed anti-gaming conformance
+  score with server-signed certificates and SVG badges, ten deployable
+  trust-boundary profiles, and enforceable hosted/private/OEM relay contracts.
+  The `orch8 portable` CLI discovers the protocol, compiles policy, wraps and
+  runs existing agents, prints profiles, and scores evidence. Ten stateless
+  `/api/v1/continuity/*` endpoints expose the same contracts and now appear in
+  generated OpenAPI. Domain boundary tests, black-box HTTP tests, compiled-CLI
+  E2E tests, and executable `examples/portable-agent-product` fixtures cover
+  the product surface and its failure modes.
+
 ## [0.7.1] — 2026-07-30
 
 ### Fixed

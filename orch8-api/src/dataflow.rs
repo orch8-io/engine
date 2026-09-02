@@ -1,6 +1,6 @@
 //! Static typed-dataflow analysis and deterministic SDK binding generation.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -36,10 +36,26 @@ pub fn routes() -> Router<AppState> {
 pub(crate) async fn compile_draft(
     State(_state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
-    Json(sequence): Json<SequenceDefinition>,
+    Query(options): Query<crate::sequences::DraftDecodeOptions>,
+    Json(value): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let (sequence, decode_warnings) =
+        crate::sequences::decode_draft_sequence(&value, options.strict)?;
     crate::auth::enforce_tenant_create(&tenant_ctx, &sequence.tenant_id)?;
-    compile_response(&sequence).map(Json)
+    let mut response = compile_response(&sequence)?;
+    response
+        .report
+        .findings
+        .extend(decode_warnings.into_iter().map(|summary| {
+            orch8_engine::dataflow::DataflowFinding {
+                code: "UNKNOWN_SEQUENCE_FIELD".into(),
+                severity: orch8_engine::dataflow::DataflowSeverity::Warning,
+                consumer: "sequence".into(),
+                reference: String::new(),
+                summary,
+            }
+        }));
+    Ok(Json(response))
 }
 
 #[utoipa::path(get, path = "/sequences/{id}/dataflow", tag = "sequences",

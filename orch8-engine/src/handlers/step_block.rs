@@ -81,11 +81,12 @@ pub(crate) enum BreakerDecision<'a> {
 /// writes: when the primary handler's breaker is Open, prefer the configured
 /// `fallback_handler`, else defer for the cooldown window. Skipped for
 /// untracked (pure control-flow) handlers and when no breaker registry is wired.
-pub(crate) fn breaker_preflight<'a>(
+pub(crate) fn breaker_preflight_at<'a>(
     handlers: &HandlerRegistry,
     instance_id: InstanceId,
     tenant_id: &orch8_types::ids::TenantId,
     step_def: &'a StepDef,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> BreakerDecision<'a> {
     let tracked = crate::circuit_breaker::is_breaker_tracked(&step_def.handler);
     let Some(cb) = handlers.circuit_breakers().filter(|_| tracked) else {
@@ -99,7 +100,7 @@ pub(crate) fn breaker_preflight<'a>(
     // is configured or the fallback's own breaker is also Open.
     let Some(fb) = step_def.fallback_handler.as_deref() else {
         #[allow(clippy::cast_possible_wrap)]
-        let fire_at = chrono::Utc::now() + chrono::Duration::seconds(remaining_secs as i64);
+        let fire_at = now + chrono::Duration::seconds(remaining_secs as i64);
         tracing::debug!(
             instance_id = %instance_id,
             handler = %step_def.handler,
@@ -118,7 +119,7 @@ pub(crate) fn breaker_preflight<'a>(
     if let Some(fb_rem) = fb_remaining_open {
         let defer_secs = remaining_secs.max(fb_rem);
         #[allow(clippy::cast_possible_wrap)]
-        let fire_at = chrono::Utc::now() + chrono::Duration::seconds(defer_secs as i64);
+        let fire_at = now + chrono::Duration::seconds(defer_secs as i64);
         tracing::debug!(
             instance_id = %instance_id,
             primary = %step_def.handler,
@@ -263,6 +264,20 @@ pub async fn execute_step_node(
     step_def: &StepDef,
     outputs: &OutputsSnapshot,
 ) -> Result<bool, EngineError> {
+    let clock = orch8_types::clock::SharedClock::default();
+    execute_step_node_with_clock(storage, handlers, instance, node, step_def, outputs, &clock).await
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub(crate) async fn execute_step_node_with_clock(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    instance: &TaskInstance,
+    node: &ExecutionNode,
+    step_def: &StepDef,
+    outputs: &OutputsSnapshot,
+    clock: &orch8_types::clock::SharedClock,
+) -> Result<bool, EngineError> {
     // Conditional guard: if `when` is set, evaluate the expression against
     // the current context + outputs. Skip the step entirely if falsy. Strict
     // evaluation: a guard that fails to *parse* is a malformed step
@@ -315,11 +330,12 @@ pub async fn execute_step_node(
             patched.context.runtime.current_step_started_at = Some(node_started);
             patched
         });
-        let deferred = crate::scheduler::check_human_input(
+        let deferred = crate::scheduler::check_human_input_at(
             storage.as_ref(),
             gate_instance.as_ref().unwrap_or(instance),
             step_def,
             human_def,
+            clock.now(),
         )
         .await?;
         if deferred {
@@ -340,7 +356,7 @@ pub async fn execute_step_node(
                 // read-mutate-write exactly once. If the retry also loses,
                 // proceed — the stamp is best-effort telemetry for the
                 // notifier and approvals API, never worth failing the step.
-                let stamped_at = node.started_at.unwrap_or_else(chrono::Utc::now);
+                let stamped_at = node.started_at.unwrap_or_else(|| clock.now());
                 let expected_updated_at = inst.updated_at;
                 inst.context.runtime.current_step = Some(step_def.id.clone());
                 inst.context.runtime.current_step_started_at = Some(stamped_at);
@@ -420,21 +436,26 @@ pub async fn execute_step_node(
     // remaining cooldown so the tick loop stops churning on it. The node stays
     // `Running`; when the evaluator re-enters after cooldown, the breaker is
     // HalfOpen and the next attempt probes the handler.
-    let cb_step_def: Cow<'_, StepDef> =
-        match breaker_preflight(handlers, instance.id, &instance.tenant_id, step_def) {
-            BreakerDecision::Proceed(cow) => cow,
-            BreakerDecision::Defer { fire_at } => {
-                storage
-                    .conditional_update_instance_state(
-                        instance.id,
-                        orch8_types::instance::InstanceState::Running,
-                        orch8_types::instance::InstanceState::Scheduled,
-                        Some(fire_at),
-                    )
-                    .await?;
-                return Ok(false);
-            }
-        };
+    let cb_step_def: Cow<'_, StepDef> = match breaker_preflight_at(
+        handlers,
+        instance.id,
+        &instance.tenant_id,
+        step_def,
+        clock.now(),
+    ) {
+        BreakerDecision::Proceed(cow) => cow,
+        BreakerDecision::Defer { fire_at } => {
+            storage
+                .conditional_update_instance_state(
+                    instance.id,
+                    orch8_types::instance::InstanceState::Running,
+                    orch8_types::instance::InstanceState::Scheduled,
+                    Some(fire_at),
+                )
+                .await?;
+            return Ok(false);
+        }
+    };
     // Shadow `step_def` so the rest of dispatch transparently sees the
     // fallback-swapped version (if any). `cb_step_def` owns the borrow.
     let step_def = cb_step_def.as_ref();
@@ -443,7 +464,8 @@ pub async fn execute_step_node(
     // If the handler is an ActivePieces sidecar call, dispatch via HTTP to the
     // Node worker. No plugin-registry lookup needed — the endpoint is a single
     // env-configured sidecar, and piece/action names live in the handler string.
-    if super::activepieces::is_ap_handler(&step_def.handler) {
+    let plugin_kind = super::PluginKind::detect(&step_def.handler);
+    if plugin_kind == Some(super::PluginKind::ActivePieces) {
         let handler_name = step_def.handler.clone();
         return dispatch_plugin(
             storage,
@@ -459,7 +481,7 @@ pub async fn execute_step_node(
     }
 
     // If the handler is a gRPC plugin, resolve via the plugin registry then dispatch.
-    if super::grpc_plugin::is_grpc_handler(&step_def.handler) {
+    if plugin_kind == Some(super::PluginKind::Grpc) {
         let Some(endpoint) =
             resolve_plugin_source(storage.as_ref(), &step_def.handler, PluginType::Grpc).await
         else {
@@ -491,7 +513,7 @@ pub async fn execute_step_node(
     }
 
     // If the handler is a WASM plugin, resolve via the plugin registry then dispatch.
-    if super::wasm_plugin::is_wasm_handler(&step_def.handler)
+    if plugin_kind == Some(super::PluginKind::Wasm)
         && let Some(plugin_name) = super::wasm_plugin::parse_plugin_name(&step_def.handler)
     {
         // SECURITY: WASM source MUST come from the plugin registry — which
@@ -663,7 +685,7 @@ pub async fn execute_step_node(
                     evaluator::fail_node(storage.as_ref(), node.id).await?;
                     return Ok(false);
                 }
-                let backoff = crate::handlers::step::calculate_backoff(
+                let backoff = crate::handlers::step::calculate_backoff_with_jitter(
                     attempt,
                     retry.initial_backoff,
                     retry.max_backoff,
@@ -671,7 +693,7 @@ pub async fn execute_step_node(
                 );
                 // Shared with the fast path: clamp a pathological backoff
                 // instead of collapsing it to zero (immediate hot retry).
-                let fire_at = crate::scheduler::clamped_fire_at(chrono::Utc::now(), backoff);
+                let fire_at = crate::scheduler::clamped_fire_at(clock.now(), backoff);
                 tracing::warn!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,

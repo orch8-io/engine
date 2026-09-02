@@ -117,11 +117,12 @@ export class Orch8Client {
     workerId: string,
     limit: number = 1,
   ): Promise<WorkerTask[]> {
-    return this.#post<WorkerTask[]>("/workers/tasks/poll", {
+    const response = await this.#post<{ tasks: WorkerTask[] }>("/workers/tasks/poll", {
       handler_name: handlerName,
       worker_id: workerId,
       limit,
     });
+    return response.tasks;
   }
 
   async completeWorkerTask(

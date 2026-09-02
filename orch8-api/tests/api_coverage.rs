@@ -10,6 +10,12 @@ use reqwest::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
 
+async fn poll_tasks(response: reqwest::Response) -> Vec<serde_json::Value> {
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["lease_secs"].as_u64().is_some());
+    body["tasks"].as_array().unwrap().clone()
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 fn mk_sequence_body(id: Uuid, tenant: &str, namespace: &str, name: &str) -> serde_json::Value {
@@ -79,6 +85,7 @@ async fn seed_worker_task(
         block_id: orch8_types::ids::BlockId::new("s1"),
         handler_name: handler.into(),
         queue_name: queue.map(String::from),
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,
@@ -1310,7 +1317,7 @@ async fn t51_poll_tasks_returns_task() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
 }
 
@@ -1326,7 +1333,7 @@ async fn t52_poll_tasks_no_match_returns_empty() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 0);
 }
 
@@ -1347,7 +1354,7 @@ async fn t53_poll_tasks_respects_limit() {
         .send()
         .await
         .unwrap();
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert!(tasks.len() <= 2);
 }
 
@@ -1361,7 +1368,7 @@ async fn t54_poll_tasks_from_named_queue() {
     seed_worker_task(&srv, inst_uuid, "handler_c", Some("my-queue")).await;
     let resp = client.post(format!("{}/workers/tasks/poll/queue", srv.base_url)).header("X-Tenant-Id", "t1").json(&json!({"queue_name":"my-queue","handler_name":"handler_c","worker_id":"w1","limit":10})).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
 }
 
@@ -1382,7 +1389,7 @@ async fn t55_poll_tasks_wrong_queue_empty() {
         .send()
         .await
         .unwrap();
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 0);
 }
 
@@ -2122,7 +2129,13 @@ async fn t91_not_found_error_body() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("not found"));
+    assert_eq!(v["error"]["code"], "not_found");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
 }
 
 #[tokio::test]
@@ -2140,7 +2153,13 @@ async fn t92_invalid_argument_error_body() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("invalid argument"));
+    assert_eq!(v["error"]["code"], "invalid_argument");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid argument")
+    );
 }
 
 #[tokio::test]
@@ -2157,7 +2176,8 @@ async fn t93_conflict_error_409() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("conflict"));
+    assert_eq!(v["error"]["code"], "conflict");
+    assert!(v["error"]["message"].as_str().unwrap().contains("conflict"));
 }
 
 #[tokio::test]

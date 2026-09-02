@@ -198,6 +198,10 @@ pub(crate) async fn dispatch_step_to_external_worker(
 ) -> Result<bool, EngineError> {
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
+    let (requirements, resolved_params) =
+        orch8_types::worker::take_runtime_requirements(resolved_params)
+            .map_err(orch8_types::error::StorageError::Query)?;
+
     // Apply dynamic queue routing: a (tenant, handler) rule may override the
     // step's declared queue at enqueue time.
     let queue_name = crate::queue_routing::resolve_queue(
@@ -229,6 +233,7 @@ pub(crate) async fn dispatch_step_to_external_worker(
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         queue_name,
+        requirements,
         params: resolved_params,
         // Apply the step's context_access policy before handing the context
         // off to an external worker. The remote process can't be trusted to
@@ -347,6 +352,9 @@ mod tests {
     use orch8_storage::{
         AdminStore, ExecutionTreeStore, InstanceStore, OutputStore, WorkerStore,
         sqlite::SqliteStorage,
+    };
+    use orch8_types::continuity::{
+        RuntimeCapabilities, RuntimeConnectivity, RuntimeId, RuntimeKind, RuntimeTrustLevel,
     };
     use orch8_types::execution::{BlockType, ExecutionNode};
     use orch8_types::ids::*;
@@ -710,5 +718,91 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].handler_name, "http");
         assert_eq!(tasks[0].params["url"], "https://example.com");
+    }
+
+    #[tokio::test]
+    async fn dispatch_persists_runtime_requirements_but_hides_reserved_param_from_worker() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+        let node = mk_node(inst.id, "ext", NodeState::Running);
+        s.create_execution_node(&node).await.unwrap();
+        let step_def = StepDef {
+            id: BlockId::new("ext"),
+            handler: "render".into(),
+            params: json!({}),
+            delay: None,
+            retry: None,
+            timeout: None,
+            rate_limit_key: None,
+            send_window: None,
+            context_access: None,
+            cancellable: true,
+            wait_for_input: None,
+            queue_name: Some("gpu".into()),
+            deadline: None,
+            on_deadline_breach: None,
+            fallback_handler: None,
+            cache_key: None,
+            output_schema: None,
+            when: None,
+            compensation: None,
+        };
+        let now = Utc::now();
+        let capabilities = RuntimeCapabilities {
+            runtime_id: RuntimeId::new(),
+            kind: RuntimeKind::Desktop,
+            trust: RuntimeTrustLevel::Registered,
+            handlers: vec!["render".into()],
+            plugins: vec!["chrome".into()],
+            credentials: Vec::new(),
+            regions: vec!["norway".into()],
+            hardware: vec!["cuda".into()],
+            offline_capable: false,
+            connectivity: Some(RuntimeConnectivity::Ethernet),
+            battery_percent: None,
+            estimated_cost_microunits: None,
+            estimated_latency_ms: None,
+            draining: false,
+            capsule_signing_public_key: None,
+            observed_at: now,
+            expires_at: now + chrono::Duration::minutes(4),
+        };
+
+        dispatch_step_to_external_worker(
+            &s,
+            &inst,
+            &node,
+            &step_def,
+            json!({
+                "$runtime": {
+                    "handlers": ["render"],
+                    "plugins": ["chrome"],
+                    "regions": ["norway"],
+                    "hardware": ["cuda"]
+                },
+                "report_id": "q3"
+            }),
+            ExecutionContext::default(),
+            0,
+        )
+        .await
+        .unwrap();
+
+        let tasks = s
+            .claim_worker_tasks_matching(
+                "render",
+                "gpu-worker",
+                Some(&inst.tenant_id),
+                Some("gpu"),
+                &capabilities,
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].requirements.hardware, ["cuda"]);
+        assert_eq!(tasks[0].requirements.regions, ["norway"]);
+        assert_eq!(tasks[0].params, json!({"report_id": "q3"}));
     }
 }

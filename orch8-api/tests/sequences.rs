@@ -53,6 +53,86 @@ async fn create_sequence_and_get_by_id_round_trip() {
 }
 
 #[tokio::test]
+async fn sequence_decode_is_lenient_by_default_and_strict_on_request() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let make_body = |id: Uuid, name: &str| {
+        json!({
+            "id": id,
+            "tenant_id": "t1",
+            "namespace": "ns1",
+            "name": name,
+            "version": 1,
+            "blocks": [{
+                "type": "router",
+                "id": "route",
+                "routes": [{
+                    "condition": "true",
+                    "blocks": [{
+                        "type": "step",
+                        "id": "work",
+                        "handler": "noop",
+                        "wehn": "true"
+                    }]
+                }]
+            }],
+            "created_at": chrono::Utc::now().to_rfc3339()
+        })
+    };
+
+    let response = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&make_body(Uuid::now_v7(), "lenient-sequence"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["warnings"].as_array().is_some_and(|warnings| {
+        warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("blocks[0].routes[0].blocks[0].wehn"))
+        })
+    }));
+
+    let response = client
+        .post(format!("{}/sequences?strict=true", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&make_body(Uuid::now_v7(), "strict-sequence"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    for endpoint in ["preflight", "dataflow"] {
+        let response = client
+            .post(format!("{}/sequences/{endpoint}", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&make_body(Uuid::now_v7(), &format!("lenient-{endpoint}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(
+            body.to_string().contains("UNKNOWN_SEQUENCE_FIELD"),
+            "{endpoint} omitted compatibility warnings: {body}"
+        );
+
+        let response = client
+            .post(format!("{}/sequences/{endpoint}?strict=true", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&make_body(Uuid::now_v7(), &format!("strict-{endpoint}")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{endpoint}");
+    }
+}
+
+#[tokio::test]
 async fn create_sequence_with_duplicate_block_ids_returns_400() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

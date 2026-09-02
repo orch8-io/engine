@@ -21,6 +21,17 @@ pub enum NodeState {
     Skipped,
 }
 
+impl NodeState {
+    /// Whether no further execution work can be performed for this node.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Skipped
+        )
+    }
+}
+
 impl FromStr for NodeState {
     type Err = String;
 

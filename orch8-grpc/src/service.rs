@@ -745,6 +745,8 @@ fn storage_err(e: orch8_types::error::StorageError) -> Status {
         // Transient external-backend (object store) failure — retryable,
         // mirrors the HTTP 503 mapping instead of signalling a server bug.
         StorageError::Backend(_) => Status::unavailable("storage backend unavailable"),
+        StorageError::Constraint(message) => Status::failed_precondition(message),
+        StorageError::Encryption(_) => Status::internal("storage encryption failed"),
         other => {
             tracing::error!(error = %other, "internal storage error");
             Status::internal("internal error")
@@ -927,6 +929,7 @@ fn retry_worker_task(task: &WorkerTask) -> WorkerTask {
         block_id: task.block_id.clone(),
         handler_name: task.handler_name.clone(),
         queue_name: task.queue_name.clone(),
+        requirements: task.requirements.clone(),
         params: task.params.clone(),
         context: task.context.clone(),
         attempt: task.attempt.saturating_add(1),

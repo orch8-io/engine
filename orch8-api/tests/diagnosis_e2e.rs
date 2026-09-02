@@ -179,6 +179,7 @@ fn mk_task(instance_id: &str, block: &str, handler: &str, state: WorkerTaskState
         block_id: BlockId::new(block),
         handler_name: handler.to_string(),
         queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,

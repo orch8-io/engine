@@ -1351,6 +1351,27 @@ impl crate::WorkerStore for SqliteStorage {
         workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit).await
     }
 
+    async fn claim_worker_tasks_matching(
+        &self,
+        handler_name: &str,
+        worker_id: &str,
+        tenant_id: Option<&orch8_types::TenantId>,
+        queue_name: Option<&str>,
+        capabilities: &orch8_types::continuity::RuntimeCapabilities,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        workers::claim_matching(
+            self,
+            handler_name,
+            worker_id,
+            tenant_id,
+            queue_name,
+            capabilities,
+            limit,
+        )
+        .await
+    }
+
     async fn complete_worker_task(
         &self,
         task_id: Uuid,
@@ -1424,15 +1445,16 @@ impl crate::WorkerStore for SqliteStorage {
 
         sqlx::query(
             r"INSERT INTO worker_tasks
-                (id, instance_id, block_id, handler_name, queue_name, params, context,
+                (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
                  attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at)
-              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         )
         .bind(new_task.id.to_string())
         .bind(new_task.instance_id.into_uuid().to_string())
         .bind(new_task.block_id.as_str())
         .bind(&new_task.handler_name)
         .bind(&new_task.queue_name)
+        .bind(serde_json::to_string(&new_task.requirements)?)
         .bind(&new_task.params)
         .bind(&new_task.context)
         .bind(new_task.attempt as i64)
@@ -2394,6 +2416,18 @@ impl crate::ResourceStore for SqliteStorage {
             .await
     }
 
+    async fn put_artifact_with_id(
+        &self,
+        instance_id: InstanceId,
+        artifact_id: Uuid,
+        content_type: &str,
+        bytes: bytes::Bytes,
+    ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
+        crate::artifacts::require_store(self.artifact_store.as_ref())?
+            .put_with_id(&instance_id.to_string(), artifact_id, content_type, bytes)
+            .await
+    }
+
     async fn get_artifact(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         crate::artifacts::require_store(self.artifact_store.as_ref())?
             .get(key)
@@ -2860,6 +2894,35 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(
+            "CREATE TABLE worker_tasks (
+                id TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL,
+                block_id TEXT NOT NULL,
+                handler_name TEXT NOT NULL,
+                params TEXT NOT NULL DEFAULT '{}',
+                context TEXT NOT NULL DEFAULT '{}',
+                state TEXT NOT NULL DEFAULT 'pending',
+                worker_id TEXT,
+                queue_name TEXT,
+                output TEXT,
+                error_message TEXT,
+                error_retryable INTEGER,
+                attempt INTEGER NOT NULL DEFAULT 0,
+                timeout_ms INTEGER,
+                claimed_at TEXT,
+                heartbeat_at TEXT,
+                claim_epoch INTEGER NOT NULL DEFAULT 0,
+                resume_checkpoint TEXT,
+                checkpoint_seq INTEGER NOT NULL DEFAULT 0,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(instance_id, block_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let storage = SqliteStorage {
             pool,
@@ -2885,6 +2948,13 @@ mod tests {
                 "reconcile should have added the missing `{added}` column, got {names:?}"
             );
         }
+        let worker_columns = column_defs(&storage.pool, "worker_tasks").await.unwrap();
+        assert!(
+            worker_columns
+                .iter()
+                .any(|column| column.name == "requirements"),
+            "reconcile should add durable worker requirements to an old database"
+        );
     }
 
     #[tokio::test]
@@ -3794,6 +3864,7 @@ mod tests {
                 block_id: BlockId::new("s1"),
                 handler_name: "h".into(),
                 queue_name: None,
+                requirements: orch8_types::continuity::CapsuleRequirements::default(),
                 params: serde_json::json!({}),
                 context: serde_json::json!({}),
                 attempt: 0,

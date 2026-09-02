@@ -664,6 +664,51 @@ impl crate::ContinuityStore for SqliteStorage {
         Ok(exists != 0)
     }
 
+    async fn record_external_capsule_import(
+        &self,
+        tenant_id: &TenantId,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance_id: InstanceId,
+        imported_at: DateTime<Utc>,
+    ) -> Result<InstanceId, StorageError> {
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO capsule_imports
+             (tenant_id,capsule_id,destination_runtime_id,instance_id,imported_at)
+             VALUES (?,?,?,?,?)",
+        )
+        .bind(tenant_id.as_str())
+        .bind(capsule_id.to_string())
+        .bind(destination_runtime_id.to_string())
+        .bind(instance_id.to_string())
+        .bind(imported_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        if inserted.rows_affected() == 1 {
+            return Ok(instance_id);
+        }
+        let row = sqlx::query(
+            "SELECT instance_id FROM capsule_imports
+             WHERE tenant_id=? AND capsule_id=? AND destination_runtime_id=?",
+        )
+        .bind(tenant_id.as_str())
+        .bind(capsule_id.to_string())
+        .bind(destination_runtime_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        let row = row.ok_or_else(|| {
+            StorageError::Conflict(
+                "external instance id is already bound to another capsule import".into(),
+            )
+        })?;
+        row.get::<String, _>("instance_id")
+            .parse::<uuid::Uuid>()
+            .map(InstanceId::from_uuid)
+            .map_err(|error| StorageError::Query(error.to_string()))
+    }
+
     async fn upsert_runtime_capabilities(
         &self,
         tenant_id: &TenantId,

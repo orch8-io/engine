@@ -98,9 +98,13 @@ pub fn evaluate(
     context: &ExecutionContext,
     outputs: &serde_json::Value,
 ) -> serde_json::Value {
-    let tokens = tokenize_cached(strip_template_braces(expr.trim()));
-    let mut parser = Parser::new(&tokens, context, outputs);
-    parser.parse_ternary().into_owned()
+    match try_evaluate(strip_template_braces(expr.trim()), context, outputs) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(%error, "invalid expression evaluated as null");
+            serde_json::Value::Null
+        }
+    }
 }
 
 /// Strip `{{ }}` template wrappers if present so callers can pass either
@@ -702,7 +706,18 @@ impl<'a> Parser<'a> {
                 warn!(error = %msg, "tokenizer error in expression");
                 Cow::Owned(serde_json::Value::Null)
             }
-            _ => Cow::Owned(serde_json::Value::Null),
+            Some(token) => {
+                if self.error.is_none() {
+                    self.error = Some(format!("expected an expression operand, found {token:?}"));
+                }
+                Cow::Owned(serde_json::Value::Null)
+            }
+            None => {
+                if self.error.is_none() {
+                    self.error = Some("expected an expression operand, found end of input".into());
+                }
+                Cow::Owned(serde_json::Value::Null)
+            }
         }
     }
 
@@ -1755,6 +1770,22 @@ mod tests {
         let display = err.to_string();
         assert!(display.contains("position 1"), "got: {display}");
         assert!(display.contains("5 5"), "got: {display}");
+    }
+
+    #[test]
+    fn strict_evaluation_rejects_missing_comparison_operand() {
+        let error = try_evaluate("context.data.x == ", &ctx(), &outputs()).unwrap_err();
+        assert!(error.message.contains("expected an expression operand"));
+        assert!(error.message.contains("end of input"));
+    }
+
+    #[test]
+    fn lenient_condition_is_false_for_missing_operand() {
+        assert!(!evaluate_condition(
+            "context.data.x == ",
+            &ctx(),
+            &outputs()
+        ));
     }
 
     // ------------------------------------------------------------------

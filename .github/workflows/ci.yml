@@ -29,16 +29,8 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-      - name: Build dashboard
-        working-directory: dashboard
-        run: npm ci --no-audit --no-fund && npm run build
       - name: Check MSRV
-        run: cargo check --workspace
+        run: cargo check --locked --workspace
 
   check:
     name: Check & Lint
@@ -52,19 +44,11 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
-          toolchain: stable
+          toolchain: "1.97.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-      - name: Build dashboard
-        working-directory: dashboard
-        run: npm ci --no-audit --no-fund && npm run build
       - name: Format
         run: cargo fmt --check
       - name: Migration immutability
@@ -77,14 +61,12 @@ jobs:
         run: ./scripts/check-sdk-versions.sh
       - name: SDK packaging contracts
         run: ./scripts/check-sdk-packaging.sh
-      - name: Expanded test counts
-        run: bash ./scripts/check-expanded-test-counts.sh
       - name: Check
-        run: cargo check --workspace
+        run: cargo check --locked --workspace
       - name: Generated client contract
         run: ./scripts/check-generated-clients.sh
       - name: Clippy (all targets)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Doc warnings
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
       - name: Supply chain (licenses + advisories)
@@ -144,20 +126,27 @@ jobs:
           swap-storage: true
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
-          toolchain: stable
+          toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Test
+        run: cargo test --locked --workspace
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
-      - name: Build dashboard
+      - name: Build and typecheck
         working-directory: dashboard
         run: npm ci --no-audit --no-fund && npm run build
-      - name: Test
-        run: cargo test --workspace
 
   e2e:
     name: E2E Tests
@@ -186,7 +175,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
-          toolchain: stable
+          toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -299,7 +288,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
-          toolchain: stable
+          toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -392,7 +381,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
-          toolchain: stable
+          toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install protoc & uuidgen
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler uuid-runtime

@@ -14,14 +14,11 @@ pub enum InstanceCmd {
         /// Sequence ID to run.
         #[arg(long)]
         sequence_id: Uuid,
-        /// Tenant identifier.
-        #[arg(long)]
-        tenant_id: String,
         /// Namespace.
         #[arg(long, default_value = "default")]
         namespace: String,
         /// JSON context (inline or @file path).
-        #[arg(long)]
+        #[arg(long = "input")]
         context: Option<String>,
     },
     /// Get a single instance by ID.
@@ -33,7 +30,7 @@ pub enum InstanceCmd {
     },
     /// List instances with optional filters.
     List {
-        #[arg(long)]
+        #[arg(long = "filter-tenant-id")]
         tenant_id: Option<String>,
         #[arg(long)]
         namespace: Option<String>,
@@ -58,7 +55,7 @@ pub enum InstanceCmd {
     Retry { id: Uuid },
     /// List failed instances (DLQ).
     Dlq {
-        #[arg(long)]
+        #[arg(long = "filter-tenant-id")]
         tenant_id: Option<String>,
         #[arg(long, default_value = "50")]
         limit: u32,
@@ -75,8 +72,8 @@ pub enum InstanceCmd {
     /// List durable reproductions attached to a DLQ fingerprint.
     DlqReproductions {
         fingerprint: String,
-        #[arg(long)]
-        tenant_id: String,
+        #[arg(long = "filter-tenant-id")]
+        tenant_id: Option<String>,
     },
     /// Diagnose why an instance is not progressing (Stuck Instance
     /// Doctor). Read-only: prints ranked explanations with evidence and
@@ -86,7 +83,7 @@ pub enum InstanceCmd {
     BulkState {
         /// New state.
         state: String,
-        #[arg(long)]
+        #[arg(long = "filter-tenant-id")]
         tenant_id: Option<String>,
         #[arg(long)]
         namespace: Option<String>,
@@ -101,14 +98,19 @@ pub async fn run(
     base: &str,
     cmd: InstanceCmd,
     format: OutputFormat,
+    global_tenant_id: Option<&str>,
 ) -> Result<()> {
     match cmd {
         InstanceCmd::Create {
             sequence_id,
-            tenant_id,
             namespace,
             context,
         } => {
+            let tenant_id = global_tenant_id.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "instance create requires --tenant-id or the ORCH8_TENANT_ID environment variable"
+                )
+            })?;
             let ctx_value = match context {
                 Some(s) if s.starts_with('@') => {
                     let path = &s[1..];
@@ -167,8 +169,8 @@ pub async fn run(
             limit,
         } => {
             let mut params = vec![("limit", limit.to_string())];
-            if let Some(t) = &tenant_id {
-                params.push(("tenant_id", t.clone()));
+            if let Some(t) = tenant_id.as_deref().or(global_tenant_id) {
+                params.push(("tenant_id", t.to_owned()));
             }
             if let Some(n) = &namespace {
                 params.push(("namespace", n.clone()));
@@ -254,6 +256,7 @@ pub async fn run(
             print_response(resp, format).await?;
         }
         InstanceCmd::SetState { id, state } => {
+            crate::confirm_destructive(&format!("Set instance {id} state to {state}?"))?;
             let resp = client
                 .patch(format!("{base}/instances/{id}/state"))
                 .json(&serde_json::json!({ "state": state }))
@@ -275,8 +278,8 @@ pub async fn run(
         } => {
             if groups {
                 let mut params: Vec<(&str, String)> = Vec::new();
-                if let Some(t) = &tenant_id {
-                    params.push(("tenant_id", t.clone()));
+                if let Some(t) = tenant_id.as_deref().or(global_tenant_id) {
+                    params.push(("tenant_id", t.to_owned()));
                 }
                 let resp = client
                     .get(format!("{base}/instances/dlq/groups"))
@@ -314,8 +317,8 @@ pub async fn run(
                 }
             } else {
                 let mut params = vec![("limit", limit.to_string())];
-                if let Some(t) = &tenant_id {
-                    params.push(("tenant_id", t.clone()));
+                if let Some(t) = tenant_id.as_deref().or(global_tenant_id) {
+                    params.push(("tenant_id", t.to_owned()));
                 }
                 let resp = client
                     .get(format!("{base}/instances/dlq"))
@@ -341,6 +344,9 @@ pub async fn run(
             fingerprint,
             tenant_id,
         } => {
+            let tenant_id = tenant_id.as_deref().or(global_tenant_id).ok_or_else(|| {
+                anyhow::anyhow!("listing DLQ reproductions requires --tenant-id or ORCH8_TENANT_ID")
+            })?;
             let response = client
                 .get(format!(
                     "{base}/instances/dlq/groups/{fingerprint}/reproductions"
@@ -370,6 +376,10 @@ pub async fn run(
             namespace,
             states,
         } => {
+            let tenant_id = tenant_id.as_deref().or(global_tenant_id).map(str::to_owned);
+            crate::confirm_destructive(&format!(
+                "Bulk change matching instances to state {state}?"
+            ))?;
             let resp = client
                 .patch(format!("{base}/instances/bulk/state"))
                 .json(&serde_json::json!({

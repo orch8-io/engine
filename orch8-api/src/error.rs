@@ -5,6 +5,20 @@ use orch8_engine::error::EngineError;
 use orch8_types::context::ContextTooLarge;
 use orch8_types::error::StorageError;
 
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ErrorDetail {
+    pub code: &'static str,
+    pub message: String,
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ErrorEnvelope {
+    pub error: ErrorDetail,
+}
+
 /// API-level errors mapped to HTTP status codes.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -46,6 +60,24 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "not_found",
+            Self::InvalidArgument(_) => "invalid_argument",
+            Self::AlreadyExists(_) => "already_exists",
+            Self::Conflict(_) => "conflict",
+            Self::Unauthorized => "unauthorized",
+            Self::Forbidden(_) => "forbidden",
+            Self::Internal(_) => "internal",
+            Self::Unavailable(_) => "unavailable",
+            Self::PayloadTooLarge(_) => "payload_too_large",
+            Self::UnprocessableEntity(_) => "unprocessable_entity",
+            Self::BadGateway(_) => "bad_gateway",
+            Self::RateLimited(_) => "rate_limited",
+        }
+    }
+
     pub fn from_storage(err: StorageError, entity: &str) -> Self {
         match err {
             StorageError::NotFound { entity: e, id } => Self::NotFound(format!("{e} {id}")),
@@ -86,12 +118,20 @@ impl IntoResponse for ApiError {
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
             Self::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         };
-        let body = match &self {
+        let message = match &self {
             Self::Internal(msg) => {
                 tracing::error!(error = %msg, "internal server error");
-                serde_json::json!({ "error": "internal server error" })
+                "internal server error".to_string()
             }
-            _ => serde_json::json!({ "error": self.to_string() }),
+            _ => self.to_string(),
+        };
+        let body = ErrorEnvelope {
+            error: ErrorDetail {
+                code: self.code(),
+                message,
+                request_id: None,
+                details: None,
+            },
         };
         (status, axum::Json(body)).into_response()
     }
@@ -176,6 +216,21 @@ mod tests {
             status_of(ApiError::PayloadTooLarge("context > max".into())),
             StatusCode::PAYLOAD_TOO_LARGE
         );
+    }
+
+    #[tokio::test]
+    async fn error_body_has_stable_machine_code() {
+        let response = ApiError::AlreadyExists("duplicate sequence".into()).into_response();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "already_exists");
+        assert_eq!(
+            value["error"]["message"],
+            "already exists: duplicate sequence"
+        );
+        assert!(value["error"]["request_id"].is_null());
     }
 
     #[test]

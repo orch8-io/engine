@@ -83,6 +83,8 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool, artifacts_enabled: b
         shutdown: shutdown.clone(),
         max_context_bytes: 0,
         externalization_mode: ExternalizationMode::default(),
+        worker_lease_secs: 60,
+        worker_heartbeat_interval_secs: 15,
         circuit_breakers: None,
         stream_limiter: Arc::new(tokio::sync::Semaphore::new(
             crate::DEFAULT_MAX_CONCURRENT_STREAMS,
@@ -97,6 +99,7 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool, artifacts_enabled: b
             crate::ContinuityCrypto::from_master_key(&"11".repeat(32))
                 .expect("test continuity key is valid"),
         )),
+        continuity_trusted_signing_keys: Arc::new(std::collections::BTreeMap::new()),
         federation_peers: Arc::new(Vec::new()),
         continuity_lab_enabled: false,
     };

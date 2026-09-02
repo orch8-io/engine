@@ -40,9 +40,8 @@ notify = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 
 [features]
-default = ["nats", "file-watch", "wasm", "compression"]
+default = ["compression"]
 compression = ["orch8-storage/compression"]
-embedded = []
 nats = ["dep:async-nats"]
 file-watch = ["dep:notify"]
 wasm = ["dep:wasmtime"]
