@@ -156,7 +156,7 @@ async fn create_rejects_invalid_poll_configs() {
         );
         let body: serde_json::Value = resp.json().await.unwrap();
         assert!(
-            body["error"]
+            body["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("activepieces_poll"),
