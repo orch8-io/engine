@@ -43,7 +43,21 @@ Content-Type: application/json
 }
 ```
 
-Returns an array of up to `limit` `WorkerTask` objects. Empty array means no work. Each task is locked to this `worker_id` until completion or heartbeat timeout.
+Returns an envelope containing up to `limit` tasks plus the server's current
+lease, heartbeat, and poll-delay hints:
+
+```json
+{
+  "tasks": [],
+  "lease_secs": 60,
+  "heartbeat_interval_secs": 15,
+  "poll_after_ms": 1000
+}
+```
+
+An empty `tasks` array means no work. Clients should wait at least
+`poll_after_ms` before polling again and heartbeat at the advertised interval.
+Each claimed task is locked to this `worker_id` until completion or lease expiry.
 
 For resumable work, a reclaimed or retried task also carries
 `resume_checkpoint` and its monotonic `checkpoint_seq`. Start from that
@@ -208,7 +222,8 @@ with httpx.Client(base_url=ENGINE, timeout=10, headers={
                 "worker_id": WORKER_ID,
                 "limit": 5,
             })
-            for task in r.json():
+            poll = r.json()
+            for task in poll["tasks"]:
                 try:
                     out = HANDLERS[handler_name](task)
                     http.post(f"/workers/tasks/{task['id']}/complete",
@@ -217,7 +232,7 @@ with httpx.Client(base_url=ENGINE, timeout=10, headers={
                     http.post(f"/workers/tasks/{task['id']}/fail",
                               json={"worker_id": WORKER_ID, "claim_epoch": task["claim_epoch"],
                                     "message": str(e), "retryable": True})
-        time.sleep(1)
+        time.sleep(poll["poll_after_ms"] / 1000)
 ```
 
 Add heartbeats for any handler that may take more than ~30 seconds.

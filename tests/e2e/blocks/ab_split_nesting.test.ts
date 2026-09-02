@@ -16,7 +16,7 @@ function abSplit(
   id: string,
   variants: { name: string; weight: number; blocks: Block[] }[],
 ): Block {
-  return { type: "a_b_split", id, variants } as unknown as Block;
+  return { type: "ab_split", id, variants } as unknown as Block;
 }
 
 describe("A/B Split Nesting", () => {

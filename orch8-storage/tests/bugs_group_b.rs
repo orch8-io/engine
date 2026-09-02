@@ -70,6 +70,7 @@ fn make_task(instance_id: InstanceId, handler: &str) -> WorkerTask {
         block_id: BlockId::new("step_1"),
         handler_name: handler.into(),
         queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,

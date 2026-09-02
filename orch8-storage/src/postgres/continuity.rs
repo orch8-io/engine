@@ -654,6 +654,48 @@ impl crate::ContinuityStore for PostgresStorage {
         Ok(exists)
     }
 
+    async fn record_external_capsule_import(
+        &self,
+        tenant_id: &TenantId,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance_id: InstanceId,
+        imported_at: DateTime<Utc>,
+    ) -> Result<InstanceId, StorageError> {
+        let inserted = sqlx::query(
+            "INSERT INTO capsule_imports
+             (tenant_id,capsule_id,destination_runtime_id,instance_id,imported_at)
+             VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING",
+        )
+        .bind(tenant_id.as_str())
+        .bind(capsule_id.into_uuid())
+        .bind(destination_runtime_id.into_uuid())
+        .bind(instance_id.into_uuid())
+        .bind(imported_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        if inserted.rows_affected() == 1 {
+            return Ok(instance_id);
+        }
+        let row = sqlx::query(
+            "SELECT instance_id FROM capsule_imports
+             WHERE tenant_id=$1 AND capsule_id=$2 AND destination_runtime_id=$3",
+        )
+        .bind(tenant_id.as_str())
+        .bind(capsule_id.into_uuid())
+        .bind(destination_runtime_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| InstanceId::from_uuid(row.get("instance_id")))
+            .ok_or_else(|| {
+                StorageError::Conflict(
+                    "external instance id is already bound to another capsule import".into(),
+                )
+            })
+    }
+
     async fn upsert_runtime_capabilities(
         &self,
         tenant_id: &TenantId,

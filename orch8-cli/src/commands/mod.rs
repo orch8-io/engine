@@ -15,6 +15,7 @@ pub mod init;
 pub mod inspect_cmd;
 pub mod instance;
 pub mod package_cmd;
+pub mod portable;
 pub mod release;
 pub mod sequence;
 pub mod signal;

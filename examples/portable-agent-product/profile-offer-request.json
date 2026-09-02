@@ -1,0 +1,7 @@
+{
+  "tenant_id": "example",
+  "continuity_id": "0191e4f2-a1b2-7c3d-8e4f-a5b6c7d8e9f0",
+  "expected_epoch": 0,
+  "input": { "query": "Summarize my local documents" },
+  "idempotency_key": "private-rag-example-1"
+}

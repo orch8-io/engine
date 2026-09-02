@@ -84,7 +84,7 @@ describe("Plan semantics: composite block compilation", () => {
     await caseSubSequenceInputCheckedAndOutputUnknown("plansem-composite-013");
   });
 
-  it("a_b_split: variant producers resolve downstream", async () => {
+  it("ab_split: variant producers resolve downstream", async () => {
     await caseAbSplitVariantProducersResolve("plansem-composite-014");
   });
 

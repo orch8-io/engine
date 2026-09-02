@@ -1,0 +1,1 @@
+classification=restricted;runtime_kinds=mobile,desktop;min_trust=signed;handlers=private_rag.query

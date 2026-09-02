@@ -276,9 +276,9 @@ async fn authenticate_request_with_workloads(
                 "x-tenant-id does not match workload identity tenant",
             ));
         }
-        extensions.insert(CallerTenant(TenantId::unchecked(
-            identity.tenant_id.clone(),
-        )));
+        let identity_tenant = TenantId::new(identity.tenant_id.clone())
+            .map_err(|_| Status::internal("workload identity has an invalid tenant"))?;
+        extensions.insert(CallerTenant(identity_tenant));
         extensions.insert(identity);
         return Ok(());
     }
@@ -291,7 +291,9 @@ async fn authenticate_request_with_workloads(
 
     if expected_digest.is_none() {
         if let Some(tenant) = tenant {
-            extensions.insert(CallerTenant(TenantId::unchecked(tenant.to_owned())));
+            let tenant = TenantId::new(tenant.to_owned())
+                .map_err(|message| Status::invalid_argument(message))?;
+            extensions.insert(CallerTenant(tenant));
             return Ok(());
         }
         return if require_tenant {
@@ -306,7 +308,9 @@ async fn authenticate_request_with_workloads(
         .is_some_and(|digest| orch8_types::auth::verify_secret_against_digest(provided, digest))
     {
         if let Some(tenant) = tenant {
-            extensions.insert(CallerTenant(TenantId::unchecked(tenant.to_owned())));
+            let tenant = TenantId::new(tenant.to_owned())
+                .map_err(|message| Status::invalid_argument(message))?;
+            extensions.insert(CallerTenant(tenant));
             return Ok(());
         }
         return if require_tenant {
@@ -328,7 +332,9 @@ async fn authenticate_request_with_workloads(
                     "x-tenant-id does not match key tenant",
                 ));
             }
-            extensions.insert(CallerTenant(TenantId::unchecked(record.tenant_id)));
+            let tenant = TenantId::new(record.tenant_id)
+                .map_err(|_| Status::internal("API key has an invalid tenant"))?;
+            extensions.insert(CallerTenant(tenant));
             Ok(())
         }
         Ok(_) => Err(Status::unauthenticated("invalid or missing x-api-key")),

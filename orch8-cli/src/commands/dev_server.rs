@@ -62,6 +62,8 @@ impl DevServer {
             shutdown: shutdown.clone(),
             max_context_bytes: 1_048_576,
             externalization_mode: orch8_types::config::ExternalizationMode::default(),
+            worker_lease_secs: 60,
+            worker_heartbeat_interval_secs: 15,
             circuit_breakers: Some(cb_registry.clone()),
             stream_limiter: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_STREAMS)),
             publisher: None,
@@ -73,6 +75,7 @@ impl DevServer {
             // command; report ready unconditionally.
             engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             continuity_crypto: None,
+            continuity_trusted_signing_keys: Arc::new(std::collections::BTreeMap::new()),
             federation_peers: Arc::new(Vec::new()),
             continuity_lab_enabled: false,
         };

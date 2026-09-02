@@ -407,6 +407,153 @@ resident for SQLx's ten-minute default; the pool keeps no minimum warm connectio
 Always call `pause()` when the app leaves the foreground. The host operating system's
 background task APIs should own longer-running background execution.
 
+## Portable execution on a trusted iPhone
+
+The Swift SDK can move execution ownership to an iPhone instance that exists
+only in the device's local SQLite database. The control plane records the
+capsule-to-instance binding as evidence; it does not pretend that the external
+instance is schedulable by the server.
+
+`TrustedDeviceHandoffCoordinator` is implemented on the current source branch
+and is intended for the next tagged Swift package release. The published
+`0.7.1` tag exposes the underlying continuity primitives but not this new
+coordinator wrapper.
+
+The Cloud → iPhone protocol is:
+
+1. Register the phone runtime and create/preview a handoff to it.
+2. Export a destination-bound capsule and issue a one-time `accept` grant.
+3. Notify the phone with an opaque handoff ID only. The app fetches the full
+   envelope over its authenticated TLS channel.
+4. Call `TrustedDeviceHandoffCoordinator.receive`. It imports locally, calls
+   `POST /continuity/handoffs/{id}/accept-external`, activates the imported
+   instance, then calls `POST /continuity/handoffs/{id}/resume-external`.
+5. Run bounded work with `runBackgroundWindow`. If the OS ends the execution
+   window, request another opportunity and retry from durable local state.
+
+```swift
+let transport = try URLSessionTrustedDeviceHandoffTransport(
+    baseUrl: URL(string: "https://api.example.com")!,
+    headers: ["authorization": "Bearer \(deviceScopedToken)"]
+)
+let coordinator = TrustedDeviceHandoffCoordinator(
+    runtime: engine,
+    transport: transport
+)
+
+let active = try await coordinator.receive(envelope)
+let result = try await coordinator.runBackgroundWindow(
+    maxTicks: 32,
+    timeBudgetMs: 20_000
+)
+if result.hasPendingWork {
+    scheduleSync()
+}
+```
+
+Both external control-plane calls and the full `receive` operation are
+idempotent. Retrying cannot bind the exported capsule to a different device
+instance. Acceptance requires the exact signed, destination-bound grant and
+its 32-byte bearer token on the first claim.
+
+For iPhone → Cloud, the backend first creates a return handoff and a paused
+cloud destination instance, then sends a `TrustedDeviceReturnPlan`. The
+coordinator refuses to export unless the local instance is paused or waiting.
+It then exports a new capsule and drives the existing
+`attach-device-capsule → accept → resume` server sequence idempotently:
+
+```swift
+let receipt = try await coordinator.returnToCloud(
+    active: active,
+    plan: returnPlan,
+    signer: deviceCapsuleSigner
+)
+```
+
+Treat `payloadKeyBase64`, `acceptanceToken`, and `signedGrantJson` as ephemeral
+secrets: keep them in memory, redact them from diagnostics, and never persist
+them in `UserDefaults` or include them in APNs payloads. Use a device-scoped
+credential for the transport headers and HTTPS outside loopback development.
+
+This feature promises durable recovery from interruption, not unrestricted
+background execution. iOS still decides when the process may run.
+
+## Capability-routed distributed work
+
+External steps may reserve the `$runtime` param for durable placement
+requirements. Orch8 removes it before delivering handler params and only an
+atomically compatible worker can claim the task:
+
+```json
+{
+  "handler": "render_private_report",
+  "params": {
+    "$runtime": {
+      "handlers": ["render_private_report"],
+      "plugins": ["chrome"],
+      "hardware": ["cuda"],
+      "regions": ["norway"],
+      "requires_network": true,
+      "requires_human_ui": true,
+      "minimum_trust": "registered"
+    },
+    "report_id": "quarterly-2026-q3"
+  }
+}
+```
+
+`DistributedWorkerClient` publishes a short-lived capability advertisement on
+every poll. Keep its runtime UUID stable for the installation, but refresh the
+observation and expiry before polling. Advertisements live for at most five
+minutes; draining and expired runtimes receive no new work.
+
+```swift
+let runtimeId = UUID(uuidString: persistedRuntimeId)!
+let client = try DistributedWorkerClient(
+    baseURL: URL(string: "https://cloud.example.com")!,
+    tenantId: "acme",
+    apiKey: token
+)
+let capabilities = DistributedRuntimeCapabilities(
+    runtimeId: runtimeId,
+    kind: "mobile",
+    handlers: ["collect_private_file"],
+    regions: ["norway"],
+    hardware: ["secure_enclave"],
+    connectivity: "wifi"
+)
+if let task = try await client.poll(
+    handler: "collect_private_file",
+    capabilities: capabilities
+).first {
+    let uploadId = persistedUploadIdForTask(task.id) // reuse after interruption
+    let receipt = try await client.upload(
+        fileURL: selectedFile,
+        task: task,
+        runtimeId: runtimeId,
+        uploadId: uploadId,
+        contentType: "application/pdf"
+    )
+    try await client.complete(
+        task: task,
+        runtimeId: runtimeId,
+        output: .object([
+            "artifact": .object([
+                "key": .string(receipt.artifact.key),
+                "uri": .string(receipt.artifact.uri),
+                "sha256": .string(receipt.sha256)
+            ])
+        ])
+    )
+}
+```
+
+The upload endpoint is tenant- and lease-scoped. The client-generated upload
+UUID is its idempotency key: identical retries return the same artifact, while
+different bytes under that UUID are rejected. Completing the task uses the
+existing server transition and reschedules the waiting workflow so execution
+continues in Cloud.
+
 ## Background Execution
 
 ### iOS

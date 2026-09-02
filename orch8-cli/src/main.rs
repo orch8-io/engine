@@ -22,6 +22,7 @@ use commands::doctor::DoctorCmd;
 use commands::inspect_cmd::InspectCmd;
 use commands::instance::InstanceCmd;
 use commands::package_cmd::PackageCmd;
+use commands::portable::PortableCmd;
 use commands::release::ReleaseCmd;
 use commands::sequence::SequenceCmd;
 use commands::support_bundle::SupportBundleCmd;
@@ -57,6 +58,7 @@ struct Cli {
     /// Base URL of the Orch8 API server.
     #[arg(
         long,
+        global = true,
         env = "ORCH8_URL",
         default_value = "http://127.0.0.1:8080/api/v1"
     )]
@@ -65,17 +67,21 @@ struct Cli {
     /// API key sent as `x-api-key`. Required when the server runs with auth
     /// (i.e. without `--insecure`). Reads `ORCH8_API_KEY` from the environment
     /// by default so secrets don't show in shell history.
-    #[arg(long, env = "ORCH8_API_KEY", hide_env_values = true)]
+    #[arg(long, global = true, env = "ORCH8_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
     /// Tenant identifier sent as `x-tenant-id`. Required when the server
     /// enforces tenant headers; optional otherwise.
-    #[arg(long, env = "ORCH8_TENANT_ID")]
+    #[arg(long, global = true, env = "ORCH8_TENANT_ID")]
     tenant_id: Option<String>,
 
     /// Output format: table (default) or json.
     #[arg(short, long, global = true, default_value = "table")]
     output: OutputFormat,
+
+    /// Skip confirmation prompts for destructive commands.
+    #[arg(long, global = true)]
+    yes: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -100,6 +106,9 @@ enum Commands {
     /// Runtime capability registration and discovery.
     #[command(subcommand)]
     Runtime(RuntimeCmd),
+    /// Framework-neutral agent handoff protocol, wrappers, profiles, and conformance.
+    #[command(subcommand)]
+    Portable(PortableCmd),
     /// Sequence management.
     #[command(subcommand)]
     Sequence(SequenceCmd),
@@ -301,7 +310,21 @@ pub async fn print_response(resp: reqwest::Response, _format: OutputFormat) -> R
     if status.is_success() {
         println!("{}", serde_json::to_string_pretty(&body)?);
     } else {
-        anyhow::bail!("{status}: {}", serde_json::to_string_pretty(&body)?);
+        let message = body
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .or_else(|| body.get("error").and_then(Value::as_str))
+            .unwrap_or_else(|| status.canonical_reason().unwrap_or("request failed"));
+        let hint = match status {
+            reqwest::StatusCode::UNAUTHORIZED => {
+                " Set --api-key or ORCH8_API_KEY to the server's configured key."
+            }
+            reqwest::StatusCode::BAD_REQUEST if message.contains("tenant") => {
+                " Set --tenant-id or ORCH8_TENANT_ID."
+            }
+            _ => "",
+        };
+        anyhow::bail!("{status}: {message}{hint}");
     }
     Ok(())
 }
@@ -349,10 +372,40 @@ pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()
     Ok(())
 }
 
+static ASSUME_YES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn confirm_destructive(prompt: &str) -> Result<()> {
+    use std::io::{IsTerminal as _, Write as _};
+
+    if cfg!(test) || ASSUME_YES.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!("{prompt}; rerun with --yes in non-interactive environments");
+    }
+    eprint!("{prompt} [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        anyhow::bail!("cancelled")
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    use std::io::IsTerminal as _;
+
     let mut cli = Cli::parse();
+    ASSUME_YES.store(cli.yes, std::sync::atomic::Ordering::Relaxed);
     let format = cli.output;
+    if std::env::var_os("NO_COLOR").is_some()
+        || (!std::io::stdout().is_terminal() && !std::io::stderr().is_terminal())
+    {
+        owo_colors::set_override(false);
+    }
 
     if let Commands::Completions { shell } = cli.command {
         let mut cmd = <Cli as clap::CommandFactory>::command();
@@ -405,15 +458,20 @@ async fn main() -> Result<()> {
     let base = cli.url.trim_end_matches('/');
 
     match cli.command {
-        Commands::Health => commands::health::run(&client, base).await?,
+        Commands::Health => commands::health::run(&client, base, format).await?,
         Commands::Doctor(cmd) => commands::doctor::run(&client, base, cmd, format).await?,
         Commands::SupportBundle(cmd) => commands::support_bundle::run(&client, base, cmd).await?,
-        Commands::Instance(cmd) => commands::instance::run(&client, base, cmd, format).await?,
+        Commands::Instance(cmd) => {
+            commands::instance::run(&client, base, cmd, format, cli.tenant_id.as_deref()).await?;
+        }
         Commands::Execution(cmd) => {
             commands::continuity::run_execution(&client, base, cmd, format).await?;
         }
         Commands::Runtime(cmd) => {
             commands::continuity::run_runtime(&client, base, cmd, format).await?;
+        }
+        Commands::Portable(cmd) => {
+            commands::portable::run(&client, base, cmd, format).await?;
         }
         Commands::Sequence(cmd) => commands::sequence::run(&client, base, cmd, format).await?,
         Commands::Cron(cmd) => commands::cron::run(&client, base, cmd, format).await?,
@@ -575,6 +633,48 @@ mod tests {
         assert!(cli.is_ok());
         let cli = cli.unwrap();
         assert!(matches!(cli.output, OutputFormat::Json));
+    }
+
+    #[test]
+    fn connection_flags_are_global_after_subcommand() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from([
+            "orch8",
+            "health",
+            "--url",
+            "http://127.0.0.1:18999/api/v1",
+            "--api-key",
+            "secret",
+            "--tenant-id",
+            "demo",
+        ])
+        .unwrap();
+        assert_eq!(cli.url, "http://127.0.0.1:18999/api/v1");
+        assert_eq!(cli.api_key.as_deref(), Some("secret"));
+        assert_eq!(cli.tenant_id.as_deref(), Some("demo"));
+        assert!(matches!(cli.command, Commands::Health));
+    }
+
+    #[test]
+    fn instance_create_uses_the_global_tenant_flag() {
+        use clap::Parser;
+        let sequence_id = uuid::Uuid::new_v4().to_string();
+        let cli = Cli::try_parse_from([
+            "orch8",
+            "instance",
+            "create",
+            "--sequence-id",
+            &sequence_id,
+            "--tenant-id",
+            "demo",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.tenant_id.as_deref(), Some("demo"));
+        assert!(matches!(
+            cli.command,
+            Commands::Instance(commands::instance::InstanceCmd::Create { .. })
+        ));
     }
 
     #[test]

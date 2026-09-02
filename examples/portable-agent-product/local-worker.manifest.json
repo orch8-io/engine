@@ -1,0 +1,12 @@
+{
+  "protocol": { "major": 1, "minor": 0 },
+  "name": "private-rag-local-worker",
+  "adapter": "local_process",
+  "entrypoint": "/bin/sh",
+  "arguments": ["examples/portable-agent-product/local-worker.sh"],
+  "handler": "private_rag.query",
+  "policy_source": "classification=restricted;runtime_kinds=mobile,desktop;min_trust=signed;handlers=private_rag.query",
+  "environment_allowlist": [],
+  "secret_references": ["keychain://private-rag/model-key"],
+  "receipt_required": true
+}

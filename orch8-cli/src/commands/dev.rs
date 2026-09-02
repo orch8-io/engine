@@ -49,7 +49,7 @@ pub struct DevCmd {
     pub sequence: Option<String>,
 
     /// Initial instance context as JSON (becomes `context.data`).
-    #[arg(long)]
+    #[arg(long = "input")]
     pub context: Option<String>,
 
     /// Run on a virtual clock that fast-forwards over delays, send windows
@@ -175,8 +175,8 @@ pub fn parse_sequence(raw: &str, version: i32) -> Result<LoadedSequence> {
     obj.insert("created_at".into(), serde_json::json!(Utc::now()));
 
     let handlers_by_block = block_handlers(&value);
-    let definition: SequenceDefinition =
-        serde_json::from_value(value).context("invalid sequence definition")?;
+    let definition = orch8_types::sequence::deserialize_sequence_strict(&value)
+        .context("invalid sequence definition")?;
     definition
         .validate()
         .map_err(|e| anyhow!("invalid sequence: {e}"))?;
@@ -851,6 +851,7 @@ async fn dev_loop(
     opts: &InstanceOpts,
 ) -> Result<Option<InstanceState>> {
     let mut last_watch_poll = Instant::now();
+    let mut consecutive_idle_ticks = 0_u8;
     loop {
         if !once && last_watch_poll.elapsed() >= WATCH_POLL_INTERVAL {
             last_watch_poll = Instant::now();
@@ -969,7 +970,7 @@ async fn dev_loop(
             }
         };
         match outcome {
-            StepOutcome::Progress | StepOutcome::Advanced => {}
+            StepOutcome::Progress | StepOutcome::Advanced => consecutive_idle_ticks = 0,
             StepOutcome::Terminal(state) => {
                 if once {
                     return Ok(Some(state));
@@ -980,7 +981,17 @@ async fn dev_loop(
                     seq_path.display(),
                 );
             }
-            StepOutcome::Idle => tokio::time::sleep(tick).await,
+            StepOutcome::Idle => {
+                consecutive_idle_ticks = consecutive_idle_ticks.saturating_add(1);
+                if once && consecutive_idle_ticks >= 3 && !session.unknown.is_empty() {
+                    session.print_stall_hint();
+                    bail!(
+                        "instance cannot make progress: unregistered handler(s): {}",
+                        session.unknown.join(", ")
+                    );
+                }
+                tokio::time::sleep(tick).await;
+            }
             StepOutcome::NoInstance => tokio::time::sleep(WATCH_POLL_INTERVAL).await,
         }
     }
@@ -1594,6 +1605,44 @@ mod tests {
         let instance = engine.get_instance(instance_id).await.unwrap();
         assert!(!instance.state.is_terminal());
 
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn once_exits_when_only_unregistered_handler_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let sequence_path = dir.path().join("sequence.json");
+        std::fs::write(&sequence_path, SIMPLE_SEQ).unwrap();
+
+        let engine = build_engine(&[], None).await.unwrap();
+        let mut session = DevSession::new(engine.clone(), None, HashSet::new());
+        let loaded = load_sequence(&sequence_path, 1).unwrap();
+        session
+            .start_instance(&loaded, CreateInstanceOptions::default())
+            .await
+            .unwrap();
+        let mut watch = FileWatch::new(&sequence_path);
+        let mut version = 1;
+        let options = InstanceOpts {
+            context_data: None,
+            dry_run: false,
+        };
+
+        let error = dev_loop(
+            &mut session,
+            &mut watch,
+            None,
+            &sequence_path,
+            &mut version,
+            true,
+            false,
+            Duration::from_millis(1),
+            &options,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("unregistered handler(s)"));
+        assert!(error.to_string().contains("custom_thing"));
         engine.shutdown().await;
     }
 }
