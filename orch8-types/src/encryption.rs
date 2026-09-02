@@ -53,9 +53,6 @@ pub struct FieldEncryptor {
     /// Set once [`NONCE_BUDGET_WARN_THRESHOLD`] is crossed, so the warning
     /// logs once per process instead of on every subsequent call.
     budget_warned: Arc<AtomicBool>,
-    /// Transitional compatibility for legacy v1 values read through an
-    /// AAD-bound field. Disable after all rows have been migrated to v2.
-    allow_legacy_unbound: bool,
 }
 
 // `Aes256Gcm` does not implement Debug; we redact the cipher material
@@ -97,7 +94,6 @@ impl FieldEncryptor {
             old_cipher: None,
             encrypt_count: Arc::new(AtomicU64::new(0)),
             budget_warned: Arc::new(AtomicBool::new(false)),
-            allow_legacy_unbound: true,
         })
     }
 
@@ -110,15 +106,7 @@ impl FieldEncryptor {
             old_cipher: None,
             encrypt_count: Arc::new(AtomicU64::new(0)),
             budget_warned: Arc::new(AtomicBool::new(false)),
-            allow_legacy_unbound: true,
         }
-    }
-
-    /// Reject legacy `enc:v1:` ciphertext in AAD-bound fields.
-    #[must_use]
-    pub fn require_aad(mut self) -> Self {
-        self.allow_legacy_unbound = false;
-        self
     }
 
     /// Number of AEAD seal operations performed with the primary key so far
@@ -310,9 +298,6 @@ impl FieldEncryptor {
             return Ok(value.clone());
         };
         let Some(encoded) = s.strip_prefix(ENC_PREFIX_V2) else {
-            if s.starts_with(ENC_PREFIX) && !self.allow_legacy_unbound {
-                return Err(EncryptionError::DecryptFailed);
-            }
             // Not v2 -- fall back to the plain (no-AAD) path, which also
             // handles the "not encrypted at all" passthrough case.
             return self.decrypt_value(value);
@@ -813,21 +798,6 @@ mod tests {
             .decrypt_value_with_aad(&encrypted_v1, b"whatever-context")
             .unwrap();
         assert_eq!(original, decrypted);
-    }
-
-    #[test]
-    fn strict_aad_mode_rejects_legacy_v1_payloads() {
-        let compatible = FieldEncryptor::from_bytes(&test_key());
-        let encrypted_v1 = compatible
-            .encrypt_value(&serde_json::json!({"legacy": true}))
-            .unwrap();
-        let strict = FieldEncryptor::from_bytes(&test_key()).require_aad();
-
-        assert!(
-            strict
-                .decrypt_value_with_aad(&encrypted_v1, b"instance-1")
-                .is_err()
-        );
     }
 
     /// The plain (non-AAD) `decrypt_value` must refuse v2 payloads outright

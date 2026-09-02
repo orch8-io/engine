@@ -19,11 +19,11 @@ async fn create_sends_file_context_to_the_instances_endpoint() {
         base,
         InstanceCmd::Create {
             sequence_id,
+            tenant_id: "tenant-a".into(),
             namespace: "billing".into(),
             context: Some(format!("@{}", context.path().display())),
         },
         OutputFormat::Json,
-        Some("tenant-a"),
     )
     .await
     .unwrap();
@@ -55,7 +55,6 @@ async fn list_encodes_every_filter_as_query_parameters() {
             limit: 17,
         },
         OutputFormat::Json,
-        None,
     )
     .await
     .unwrap();
@@ -92,19 +91,12 @@ async fn state_mutations_use_the_expected_methods_paths_and_bodies() {
             state: "paused".into(),
         },
         OutputFormat::Json,
-        None,
     )
     .await
     .unwrap();
-    run(
-        &client,
-        base,
-        InstanceCmd::Retry { id },
-        OutputFormat::Json,
-        None,
-    )
-    .await
-    .unwrap();
+    run(&client, base, InstanceCmd::Retry { id }, OutputFormat::Json)
+        .await
+        .unwrap();
     run(
         &client,
         base,
@@ -115,7 +107,6 @@ async fn state_mutations_use_the_expected_methods_paths_and_bodies() {
             states: Some("scheduled, running".into()),
         },
         OutputFormat::Json,
-        None,
     )
     .await
     .unwrap();
@@ -142,11 +133,11 @@ async fn invalid_inline_context_fails_before_any_request_is_sent() {
         "http://127.0.0.1:1",
         InstanceCmd::Create {
             sequence_id: Uuid::new_v4(),
+            tenant_id: "tenant-a".into(),
             namespace: "default".into(),
             context: Some("{not-json".into()),
         },
         OutputFormat::Json,
-        Some("tenant-a"),
     )
     .await
     .unwrap_err();

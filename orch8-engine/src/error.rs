@@ -43,12 +43,6 @@ pub enum EngineError {
         state: orch8_types::continuity::EffectState,
     },
 
-    #[error("effect receipt transition failed: {0}")]
-    EffectTransition(String),
-
-    #[error("serialization failed: {0}")]
-    Serialization(String),
-
     #[error("effect dispatch for block {block_id} violates invariant {invariant_id}")]
     InvariantViolation {
         invariant_id: orch8_types::continuity_advanced::InvariantId,

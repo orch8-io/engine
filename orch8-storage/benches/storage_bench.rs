@@ -290,7 +290,6 @@ fn bench_worker_tasks(c: &mut Criterion) {
                             block_id: BlockId::new(format!("step_{i}")),
                             handler_name: "bench_handler".into(),
                             queue_name: None,
-                            requirements: orch8_types::continuity::CapsuleRequirements::default(),
                             params: json!({"i": i}),
                             context: json!({}),
                             attempt: 1,

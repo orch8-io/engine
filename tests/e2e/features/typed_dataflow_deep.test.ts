@@ -542,7 +542,7 @@ describe("Typed Dataflow — deep coverage", () => {
     it("recurses into ab_split variants", async () => {
       const seq = testSequence("df-pos-absplit", [
         {
-          type: "ab_split",
+          type: "a_b_split",
           id: "ab",
           variants: [
             { name: "a", weight: 50, blocks: [step("variant_a", "noop", { v: "{{ outputs.missing.a }}" })] },

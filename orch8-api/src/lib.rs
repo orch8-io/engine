@@ -68,31 +68,22 @@ pub const UNVERSIONED_DEPRECATION: &str = "@1767225600";
 /// removed. Canonical `/api/v1` routes do not carry this header.
 pub const UNVERSIONED_SUNSET: &str = "Sat, 01 Jan 2028 00:00:00 GMT";
 
-/// Canonical cursor-capable response envelope for list endpoints.
+/// Generic paginated response envelope for list endpoints.
 #[derive(Debug, Serialize)]
-pub struct Page<T> {
+pub struct PaginatedResponse<T> {
     pub items: Vec<T>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
     pub has_more: bool,
 }
 
-impl<T: Serialize> Page<T> {
+impl<T: Serialize> PaginatedResponse<T> {
     pub fn from_vec(mut items: Vec<T>, limit: u32) -> Self {
         let has_more = items.len() > limit as usize;
         if has_more {
             items.truncate(limit as usize);
         }
-        Self {
-            items,
-            next_cursor: None,
-            has_more,
-        }
+        Self { items, has_more }
     }
 }
-
-/// Backwards-compatible type name; new endpoints should use [`Page`].
-pub type PaginatedResponse<T> = Page<T>;
 
 /// Shared application state injected into all handlers.
 #[derive(Clone)]
@@ -101,10 +92,6 @@ pub struct AppState {
     pub shutdown: CancellationToken,
     pub max_context_bytes: u32,
     pub externalization_mode: ExternalizationMode,
-    /// External-worker lease duration advertised by REST polling.
-    pub worker_lease_secs: u64,
-    /// Recommended heartbeat cadence advertised by REST polling.
-    pub worker_heartbeat_interval_secs: u64,
     pub circuit_breakers: Option<Arc<CircuitBreakerRegistry>>,
     pub stream_limiter: Arc<Semaphore>,
     /// Optional publisher for manifest/sequence publishing.
@@ -125,8 +112,6 @@ pub struct AppState {
     /// Stable capsule signing and destination payload keys. Absent in
     /// explicitly insecure local mode, where export/import stays disabled.
     pub continuity_crypto: Option<Arc<ContinuityCrypto>>,
-    /// Validated once at startup; provenance requests never parse env config.
-    pub continuity_trusted_signing_keys: Arc<std::collections::BTreeMap<String, String>>,
     /// Explicit operator-configured federation trust roots, keyed by peer id.
     pub federation_peers: Arc<Vec<orch8_types::continuity_advanced::FederationPeer>>,
     /// Enables bounded fault/state-space lab endpoints. Kept off in

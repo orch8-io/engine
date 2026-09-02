@@ -357,10 +357,7 @@ fn conformance_instance(tenant: &TenantId, sequence_id: SequenceId, run_id: Uuid
         tenant_id: tenant.clone(),
         namespace: Namespace::new("conformance"),
         state: InstanceState::Scheduled,
-        // Conformance owns this row's state transitions. Leaving it non-due
-        // prevents a scheduler/claim test sharing the database from claiming
-        // it between create and the CAS assertion below.
-        next_fire_at: None,
+        next_fire_at: Some(now),
         priority: Priority::Normal,
         timezone: "UTC".into(),
         metadata: json!({"orch8_storage_conformance": true}),
@@ -396,13 +393,5 @@ mod tests {
                 .state,
             InstanceState::Cancelled
         );
-    }
-
-    #[test]
-    fn conformance_instance_is_not_due_for_parallel_claimers() {
-        let tenant = TenantId::new("conformance-test").unwrap();
-        let instance = conformance_instance(&tenant, SequenceId::new(), Uuid::now_v7());
-        assert_eq!(instance.state, InstanceState::Scheduled);
-        assert!(instance.next_fire_at.is_none());
     }
 }

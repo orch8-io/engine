@@ -20,7 +20,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use orch8_engine::continuity::{CompatibilityFinding, assess_compatibility};
 use orch8_types::continuity::{
-    CapsuleId, CapsuleRequirements, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
+    CapsuleRequirements, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
     ContinuityExecution, ContinuityId, ContinuityStream, DataClassification, EffectId,
     EffectReceipt, EffectState, ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId,
     HandoffState, LocalityPolicy, OwnershipState, PlacementDecision, PlacementDecisionId,
@@ -47,12 +47,9 @@ use orch8_types::sequence::SequenceStatus;
 use crate::AppState;
 use crate::error::ApiError;
 
-pub(crate) mod product_api;
-
 #[allow(clippy::too_many_lines)] // one declarative map of the continuity HTTP surface
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .merge(product_api::routes())
         .route("/continuity/executions", post(create_execution))
         .route("/continuity/executions/{id}", get(get_execution))
         .route("/continuity/executions/{id}/locations", get(list_locations))
@@ -68,16 +65,8 @@ pub fn routes() -> Router<AppState> {
             post(attach_device_capsule),
         )
         .route("/continuity/handoffs/{id}/accept", post(accept_handoff))
-        .route(
-            "/continuity/handoffs/{id}/accept-external",
-            post(accept_external_handoff),
-        )
         .route("/continuity/handoffs/{id}/reject", post(reject_handoff))
         .route("/continuity/handoffs/{id}/resume", post(resume_handoff))
-        .route(
-            "/continuity/handoffs/{id}/resume-external",
-            post(resume_external_handoff),
-        )
         .route("/continuity/handoffs/{id}/revoke", post(revoke_handoff))
         .route("/continuity/capsules/import", post(import_capsule))
         .route("/continuity/grants", post(issue_continuation_grant))
@@ -1549,260 +1538,6 @@ struct AcceptHandoffResponse {
     execution: ContinuityExecution,
 }
 
-#[derive(Debug, Deserialize)]
-struct AcceptExternalHandoffRequest {
-    tenant_id: TenantId,
-    destination_instance_id: InstanceId,
-    capsule_id: CapsuleId,
-    token: String,
-    signed_grant: SignedContinuationGrant,
-}
-
-fn same_grant_claim(stored: &ContinuationGrant, presented: &ContinuationGrant) -> bool {
-    let mut normalized = stored.clone();
-    normalized.state = ContinuationGrantState::Active;
-    normalized.consumed_at = None;
-    normalized == *presented
-}
-
-async fn authorize_external_accept(
-    state: &AppState,
-    tenant_id: &TenantId,
-    handoff: &ExecutionHandoff,
-    signed_grant: &SignedContinuationGrant,
-    token: &str,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), ApiError> {
-    let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
-        ApiError::Unavailable(
-            "external handoff acceptance is disabled without a configured engine encryption key"
-                .into(),
-        )
-    })?;
-    let trusted_key = BASE64.encode(crypto.signing_key.verifying_key().to_bytes());
-    verify_signed_continuation_grant(signed_grant, &[trusted_key])
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    let grant = &signed_grant.grant;
-    grant
-        .validate_claim(
-            now,
-            tenant_id,
-            handoff.continuity_id,
-            handoff.expected_epoch,
-            handoff.destination_runtime_id,
-            GrantAction::Accept,
-        )
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    let token = BASE64
-        .decode(token)
-        .map_err(|_| ApiError::InvalidArgument("grant token is not valid base64".into()))?;
-    if token.len() != 32 {
-        return Err(ApiError::InvalidArgument(
-            "grant token must decode to 32 bytes".into(),
-        ));
-    }
-    let nonce_sha256 = hex_sha256(&token);
-    if grant.nonce_sha256 != nonce_sha256 {
-        return Err(ApiError::Conflict(
-            "grant token does not match signed grant".into(),
-        ));
-    }
-    let stored = state
-        .storage
-        .get_continuation_grant(tenant_id, grant.id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "continuation grant"))?
-        .ok_or_else(|| ApiError::NotFound("continuation grant".into()))?;
-    if !same_grant_claim(&stored, grant) {
-        return Err(ApiError::Conflict(
-            "presented grant does not match the retained authorization".into(),
-        ));
-    }
-    match stored.state {
-        ContinuationGrantState::Active => {
-            let consumed = state
-                .storage
-                .consume_continuation_grant(tenant_id, grant.id, &nonce_sha256, now)
-                .await
-                .map_err(|error| ApiError::from_storage(error, "continuation grant"))?;
-            if !consumed {
-                return Err(ApiError::Conflict(
-                    "continuation grant changed concurrently".into(),
-                ));
-            }
-        }
-        ContinuationGrantState::Consumed => {
-            // A retry carrying the same signed grant and bearer token may
-            // finish a claim interrupted after the one-time consume CAS.
-        }
-        ContinuationGrantState::Revoked => {
-            return Err(ApiError::Conflict("continuation grant is revoked".into()));
-        }
-    }
-    Ok(())
-}
-
-async fn replay_external_accept(
-    state: &AppState,
-    tenant_id: &TenantId,
-    handoff: ExecutionHandoff,
-    execution: ContinuityExecution,
-    capsule_id: CapsuleId,
-    destination_instance_id: InstanceId,
-) -> Result<Json<AcceptHandoffResponse>, ApiError> {
-    let import_matches = state
-        .storage
-        .is_capsule_import_instance(
-            tenant_id,
-            capsule_id,
-            handoff.destination_runtime_id,
-            destination_instance_id,
-        )
-        .await
-        .map_err(|error| ApiError::from_storage(error, "external capsule import"))?;
-    if execution.owner_runtime_id == handoff.destination_runtime_id
-        && execution.current_instance_id == destination_instance_id
-        && import_matches
-    {
-        return Ok(Json(AcceptHandoffResponse { handoff, execution }));
-    }
-    Err(ApiError::Conflict(
-        "external handoff is already owned by another destination instance".into(),
-    ))
-}
-
-async fn validate_external_capsule(
-    state: &AppState,
-    tenant_id: &TenantId,
-    handoff: &ExecutionHandoff,
-    capsule_id: CapsuleId,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), ApiError> {
-    let manifest = state
-        .storage
-        .get_capsule_manifest(tenant_id, capsule_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "capsule manifest"))?
-        .ok_or_else(|| ApiError::NotFound("capsule manifest".into()))?;
-    if manifest.expires_at <= now
-        || manifest.continuity_id != handoff.continuity_id
-        || manifest.allowed_destination_runtime_id != Some(handoff.destination_runtime_id)
-    {
-        return Err(ApiError::Conflict(
-            "capsule is expired or not bound to the external destination".into(),
-        ));
-    }
-    Ok(())
-}
-
-async fn accept_external_handoff(
-    State(state): State<AppState>,
-    tenant_ctx: crate::auth::OptionalTenant,
-    Path(id): Path<HandoffId>,
-    Json(body): Json<AcceptExternalHandoffRequest>,
-) -> Result<Json<AcceptHandoffResponse>, ApiError> {
-    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    let handoff = state
-        .storage
-        .get_handoff(&tenant_id, id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "handoff"))?
-        .ok_or_else(|| ApiError::NotFound(format!("handoff {id}")))?;
-    let execution = state
-        .storage
-        .get_continuity_execution(&tenant_id, handoff.continuity_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
-        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
-
-    if handoff.capsule_id != Some(body.capsule_id) {
-        return Err(ApiError::Conflict(
-            "external acceptance requires the exported capsule bound to this handoff".into(),
-        ));
-    }
-    if matches!(
-        handoff.state,
-        HandoffState::Accepted | HandoffState::Resumed
-    ) {
-        return replay_external_accept(
-            &state,
-            &tenant_id,
-            handoff,
-            execution,
-            body.capsule_id,
-            body.destination_instance_id,
-        )
-        .await;
-    }
-    if handoff.state != HandoffState::Exported {
-        return Err(ApiError::Conflict(
-            "external acceptance requires an exported handoff".into(),
-        ));
-    }
-    let now = Utc::now();
-    validate_external_capsule(&state, &tenant_id, &handoff, body.capsule_id, now).await?;
-    authorize_external_accept(
-        &state,
-        &tenant_id,
-        &handoff,
-        &body.signed_grant,
-        &body.token,
-        now,
-    )
-    .await?;
-    let bound_instance = state
-        .storage
-        .record_external_capsule_import(
-            &tenant_id,
-            body.capsule_id,
-            handoff.destination_runtime_id,
-            body.destination_instance_id,
-            now,
-        )
-        .await
-        .map_err(|error| ApiError::from_storage(error, "external capsule import"))?;
-    if bound_instance != body.destination_instance_id {
-        return Err(ApiError::Conflict(
-            "capsule is already bound to another external instance".into(),
-        ));
-    }
-
-    let mut accepted_handoff = handoff.clone();
-    accepted_handoff.state = HandoffState::Accepted;
-    accepted_handoff.version = handoff.version.saturating_add(1);
-    accepted_handoff.updated_at = now;
-    let mut accepted_execution = execution.clone();
-    accepted_execution.current_instance_id = body.destination_instance_id;
-    accepted_execution.owner_runtime_id = handoff.destination_runtime_id;
-    accepted_execution.epoch = execution
-        .epoch
-        .checked_next()
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    accepted_execution.state = OwnershipState::Owned;
-    accepted_execution.updated_at = now;
-    orch8_engine::continuity::accept_handoff(
-        state.storage.as_ref(),
-        &handoff,
-        &accepted_handoff,
-        &execution,
-        &accepted_execution,
-    )
-    .await
-    .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    append_provenance_boundary(
-        &state,
-        &accepted_execution,
-        "external_runtime_claimed",
-        "external destination runtime claimed ownership",
-        &accepted_handoff,
-    )
-    .await?;
-    Ok(Json(AcceptHandoffResponse {
-        handoff: accepted_handoff,
-        execution: accepted_execution,
-    }))
-}
-
 async fn accept_handoff(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -1992,89 +1727,6 @@ async fn resume_handoff(
     Ok(Json(resumed))
 }
 
-#[derive(Debug, Deserialize)]
-struct ResumeExternalHandoffRequest {
-    tenant_id: TenantId,
-    destination_instance_id: InstanceId,
-}
-
-async fn resume_external_handoff(
-    State(state): State<AppState>,
-    tenant_ctx: crate::auth::OptionalTenant,
-    Path(id): Path<HandoffId>,
-    Json(body): Json<ResumeExternalHandoffRequest>,
-) -> Result<Json<ExecutionHandoff>, ApiError> {
-    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    let handoff = state
-        .storage
-        .get_handoff(&tenant_id, id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "handoff"))?
-        .ok_or_else(|| ApiError::NotFound(format!("handoff {id}")))?;
-    let execution = state
-        .storage
-        .get_continuity_execution(&tenant_id, handoff.continuity_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
-        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
-    let capsule_id = handoff
-        .capsule_id
-        .ok_or_else(|| ApiError::Conflict("handoff has no capsule".into()))?;
-    let import_matches = state
-        .storage
-        .is_capsule_import_instance(
-            &tenant_id,
-            capsule_id,
-            handoff.destination_runtime_id,
-            body.destination_instance_id,
-        )
-        .await
-        .map_err(|error| ApiError::from_storage(error, "external capsule import"))?;
-    if execution.owner_runtime_id != handoff.destination_runtime_id
-        || execution.current_instance_id != body.destination_instance_id
-        || !import_matches
-    {
-        return Err(ApiError::Conflict(
-            "external runtime does not own the accepted destination instance".into(),
-        ));
-    }
-    if handoff.state == HandoffState::Resumed {
-        return Ok(Json(handoff));
-    }
-    if handoff.state != HandoffState::Accepted {
-        return Err(ApiError::Conflict(
-            "external handoff must be accepted before resume".into(),
-        ));
-    }
-    let mut resumed = handoff.clone();
-    resumed.state = HandoffState::Resumed;
-    resumed.version = handoff.version.saturating_add(1);
-    resumed.updated_at = Utc::now();
-    if !state
-        .storage
-        .cas_handoff(
-            &tenant_id,
-            id,
-            HandoffState::Accepted,
-            handoff.version,
-            &resumed,
-        )
-        .await
-        .map_err(|error| ApiError::from_storage(error, "handoff"))?
-    {
-        return Err(ApiError::Conflict("handoff changed concurrently".into()));
-    }
-    append_provenance_boundary(
-        &state,
-        &execution,
-        "external_execution_resumed",
-        "external destination runtime resumed execution",
-        &resumed,
-    )
-    .await?;
-    Ok(Json(resumed))
-}
-
 async fn list_effects(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -2248,11 +1900,32 @@ async fn verify_provenance(
         .list_provenance(&tenant_id, id, 10_000)
         .await
         .map_err(|error| ApiError::from_storage(error, "provenance"))?;
+    let mut trusted_keys =
+        state
+            .continuity_crypto
+            .as_ref()
+            .map_or_else(std::collections::BTreeMap::new, |crypto| {
+                std::collections::BTreeMap::from([(
+                    crypto.signing_key_id.clone(),
+                    BASE64.encode(crypto.signing_key.verifying_key().to_bytes()),
+                )])
+            });
+    if let Ok(encoded) = std::env::var("ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON") {
+        let historical: std::collections::BTreeMap<String, String> = serde_json::from_str(&encoded)
+            .map_err(|error| {
+                ApiError::Internal(format!(
+                    "invalid ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON: {error}"
+                ))
+            })?;
+        for (key_id, public_key) in historical {
+            trusted_keys.entry(key_id).or_insert(public_key);
+        }
+    }
     Ok(Json(
         orch8_engine::continuity::verify_provenance_chain_with_keys(
             &entries,
             query.expected_head.as_deref(),
-            &state.continuity_trusted_signing_keys,
+            &trusted_keys,
         ),
     ))
 }

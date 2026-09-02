@@ -34,10 +34,7 @@ pub(super) async fn list_by_instance(
 ) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError> {
     let rows = sqlx::query_as::<_, AuditLogRow>(
         r"SELECT id, instance_id, tenant_id, event_type, from_state, to_state, block_id, details, created_at
-          FROM audit_log
-          WHERE tenant_id = (SELECT tenant_id FROM task_instances WHERE id = $1)
-            AND instance_id = $1
-          ORDER BY created_at DESC LIMIT $2",
+          FROM audit_log WHERE instance_id = $1 ORDER BY created_at DESC LIMIT $2",
     )
     .bind(instance_id.into_uuid())
     .bind(i64::from(limit))

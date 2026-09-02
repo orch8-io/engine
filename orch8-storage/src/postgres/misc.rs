@@ -169,7 +169,6 @@ pub(super) async fn claim_worker_tasks_from_queue(
         WHERE id IN (
             SELECT id FROM worker_tasks
             WHERE handler_name = $1 AND state = 'pending' AND queue_name = $5
-              AND requirements = '{}'::jsonb
             ORDER BY created_at ASC
             LIMIT $3
             FOR UPDATE SKIP LOCKED
@@ -226,7 +225,6 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
             JOIN task_instances ti ON ti.id = wt.instance_id
             WHERE wt.handler_name = $1
               AND wt.state = 'pending'
-              AND wt.requirements = '{}'::jsonb
               AND wt.queue_name = $3
               AND ti.tenant_id = $5
             ORDER BY wt.created_at ASC

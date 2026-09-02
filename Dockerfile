@@ -7,7 +7,6 @@ WORKDIR /app
 
 # Copy manifests first for layer caching.
 COPY Cargo.toml Cargo.lock ./
-COPY orch8/Cargo.toml orch8/Cargo.toml
 COPY orch8-types/Cargo.toml orch8-types/Cargo.toml
 COPY orch8-storage/Cargo.toml orch8-storage/Cargo.toml
 COPY orch8-engine/Cargo.toml orch8-engine/Cargo.toml
@@ -20,8 +19,7 @@ COPY orch8-publisher/Cargo.toml orch8-publisher/Cargo.toml
 COPY orch8-push/Cargo.toml orch8-push/Cargo.toml
 
 # Create dummy source files so cargo can resolve the workspace and cache deps.
-RUN mkdir -p orch8/src && echo "" > orch8/src/lib.rs \
-    && mkdir -p orch8-types/src && echo "" > orch8-types/src/lib.rs \
+RUN mkdir -p orch8-types/src && echo "" > orch8-types/src/lib.rs \
     && mkdir -p orch8-storage/src && echo "" > orch8-storage/src/lib.rs \
     && mkdir -p orch8-engine/src && echo "" > orch8-engine/src/lib.rs \
     && mkdir -p orch8-api/src && echo "" > orch8-api/src/lib.rs \
@@ -45,14 +43,14 @@ RUN mkdir -p dashboard/dist
 ARG CARGO_PROFILE=release
 
 # Build dependencies only (cached unless Cargo.toml/lock changes).
-RUN cargo build --locked --profile ${CARGO_PROFILE} --bin orch8-server --bin orch8
+RUN cargo build --profile ${CARGO_PROFILE} --bin orch8-server --bin orch8 2>/dev/null || true
 
 # Copy real source and rebuild.
 COPY . .
 RUN mkdir -p dashboard/dist
 # Touch all source files so cargo knows they changed.
 RUN find orch8-*/src -name "*.rs" -exec touch {} + \
-    && cargo build --locked --profile ${CARGO_PROFILE} --bin orch8-server --bin orch8
+    && cargo build --profile ${CARGO_PROFILE} --bin orch8-server --bin orch8
 
 # Copy binaries to a fixed location so stage 2 doesn't need to know the profile.
 # /app/bin avoids colliding with the orch8-server/ crate directory from COPY . .

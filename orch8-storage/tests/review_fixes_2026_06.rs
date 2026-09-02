@@ -129,7 +129,6 @@ fn make_queue_task(instance_id: InstanceId, block: &str) -> WorkerTask {
         block_id: BlockId::new(block),
         handler_name: "h".into(),
         queue_name: Some("q1".into()),
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,

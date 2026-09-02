@@ -136,7 +136,7 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
                             .collect();
                         facts.routers.insert(id.to_string(), conditions);
                     }
-                    if matches!(ty, Some("ab_split" | "a_b_split"))
+                    if ty == Some("a_b_split")
                         && let Some(Value::Array(variants)) = map.get("variants")
                     {
                         let weights = variants

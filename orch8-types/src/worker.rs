@@ -7,27 +7,6 @@ use uuid::Uuid;
 
 use crate::ids::{BlockId, InstanceId};
 
-/// Reserved step-param key containing capability/location requirements for an
-/// external worker. The scheduler removes this key before exposing params to
-/// the handler and persists the parsed value on the durable task offer.
-pub const RUNTIME_REQUIREMENTS_PARAM: &str = "$runtime";
-
-/// Split routing requirements from handler input without widening every step
-/// definition. `params.$runtime` uses the `CapsuleRequirements` wire shape.
-pub fn take_runtime_requirements(
-    mut params: serde_json::Value,
-) -> Result<(crate::continuity::CapsuleRequirements, serde_json::Value), String> {
-    let Some(object) = params.as_object_mut() else {
-        return Ok((crate::continuity::CapsuleRequirements::default(), params));
-    };
-    let Some(raw) = object.remove(RUNTIME_REQUIREMENTS_PARAM) else {
-        return Ok((crate::continuity::CapsuleRequirements::default(), params));
-    };
-    let requirements = serde_json::from_value(raw)
-        .map_err(|error| format!("invalid {RUNTIME_REQUIREMENTS_PARAM} requirements: {error}"))?;
-    Ok((requirements, params))
-}
-
 /// State of a worker task in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -67,62 +46,6 @@ impl std::fmt::Display for WorkerTaskState {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn runtime_requirements_are_removed_from_handler_params() {
-        let input = serde_json::json!({
-            "$runtime": {
-                "hardware": ["cuda"],
-                "regions": ["norway"],
-                "requires_network": true
-            },
-            "report_id": "q3"
-        });
-
-        let (requirements, params) = take_runtime_requirements(input).unwrap();
-
-        assert_eq!(requirements.hardware, ["cuda"]);
-        assert_eq!(requirements.regions, ["norway"]);
-        assert!(requirements.requires_network);
-        assert_eq!(params, serde_json::json!({"report_id": "q3"}));
-    }
-
-    #[test]
-    fn absent_runtime_requirements_leave_params_unchanged() {
-        let input = serde_json::json!({"report_id": "q3"});
-
-        let (requirements, params) = take_runtime_requirements(input.clone()).unwrap();
-
-        assert_eq!(
-            requirements,
-            crate::continuity::CapsuleRequirements::default()
-        );
-        assert_eq!(params, input);
-    }
-
-    #[test]
-    fn non_object_params_have_default_runtime_requirements() {
-        let input = serde_json::json!(["one", "two"]);
-
-        let (requirements, params) = take_runtime_requirements(input.clone()).unwrap();
-
-        assert_eq!(
-            requirements,
-            crate::continuity::CapsuleRequirements::default()
-        );
-        assert_eq!(params, input);
-    }
-
-    #[test]
-    fn malformed_runtime_requirements_are_rejected() {
-        let error = take_runtime_requirements(serde_json::json!({
-            "$runtime": {"requires_network": "yes"}
-        }))
-        .unwrap_err();
-
-        assert!(error.contains("invalid $runtime requirements"));
-        assert!(error.contains("boolean"));
-    }
 
     #[test]
     fn worker_task_state_from_str_pending() {
@@ -197,10 +120,6 @@ pub struct WorkerTask {
     /// Named task queue for routing to dedicated worker pools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_name: Option<String>,
-    /// Capability, locality, and trust facts a runtime must satisfy before it
-    /// can atomically claim this task.
-    #[serde(default, skip_serializing_if = "is_default_requirements")]
-    pub requirements: crate::continuity::CapsuleRequirements,
     pub params: serde_json::Value,
     /// Serialized `ExecutionContext` — kept as raw JSON to avoid coupling workers to Rust types.
     pub context: serde_json::Value,
@@ -228,10 +147,6 @@ pub struct WorkerTask {
     pub error_message: Option<String>,
     pub error_retryable: Option<bool>,
     pub created_at: DateTime<Utc>,
-}
-
-fn is_default_requirements(value: &crate::continuity::CapsuleRequirements) -> bool {
-    value == &crate::continuity::CapsuleRequirements::default()
 }
 
 /// Proof that a caller owns one specific claim generation of a worker task.

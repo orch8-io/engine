@@ -15,7 +15,7 @@ use orch8_storage::StorageBackend;
 use orch8_types::config::SchedulerConfig;
 use orch8_types::ids::BlockId;
 use orch8_types::instance::InstanceState;
-use orch8_types::sequence::{BlockDefinition, DelaySpec, LoopDef, SendWindow};
+use orch8_types::sequence::{DelaySpec, SendWindow};
 
 mod common;
 use common::*;
@@ -189,51 +189,4 @@ async fn system_clock_default_keeps_delay_pending() {
     assert_eq!(result.steps_executed, 0);
     let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
     assert_eq!(refreshed.state, InstanceState::Scheduled);
-}
-
-/// Composite execution must use the same injected clock as the flat step path.
-#[tokio::test]
-async fn loop_poll_interval_uses_manual_clock() {
-    let s = storage().await;
-    let seq = mk_sequence(vec![BlockDefinition::Loop(Box::new(LoopDef {
-        id: BlockId::new("polling_loop"),
-        condition: "true".into(),
-        body: vec![mk_step("body", "noop")],
-        max_iterations: 2,
-        break_on: None,
-        continue_on_error: false,
-        poll_interval: Some(3 * 24 * 60 * 60),
-        retain_iterations: None,
-    }))]);
-    s.create_sequence(&seq).await.unwrap();
-    let inst = mk_instance_scheduled(seq.id, serde_json::json!({}));
-    s.create_instance(&inst).await.unwrap();
-
-    let start = Utc.with_ymd_and_hms(2030, 2, 1, 12, 0, 0).unwrap();
-    let manual = Arc::new(ManualClock::new(start));
-    let config = config_with_clock(&manual);
-    let handlers = Arc::new(registry());
-
-    tick(&s, &handlers, &config).await;
-    let deferred = s.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(deferred.state, InstanceState::Scheduled);
-    assert_eq!(
-        deferred.next_fire_at,
-        Some(start + chrono::Duration::days(3))
-    );
-
-    assert_eq!(tick(&s, &handlers, &config).await.steps_executed, 0);
-    manual.advance(chrono::Duration::days(3));
-    // Tree evaluation deliberately advances only bounded state transitions
-    // per claim; drain the immediately-due follow-up ticks without moving time.
-    for _ in 0..4 {
-        tick(&s, &handlers, &config).await;
-        if s.get_instance(inst.id).await.unwrap().unwrap().state == InstanceState::Completed {
-            break;
-        }
-    }
-    assert_eq!(
-        s.get_instance(inst.id).await.unwrap().unwrap().state,
-        InstanceState::Completed
-    );
 }

@@ -15,26 +15,6 @@ use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
 use crate::AppState;
 use crate::error::ApiError;
 
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct DraftDecodeOptions {
-    #[serde(default)]
-    pub(crate) strict: bool,
-}
-
-pub(crate) fn decode_draft_sequence(
-    value: &serde_json::Value,
-    strict: bool,
-) -> Result<(SequenceDefinition, Vec<String>), ApiError> {
-    if strict {
-        let sequence = orch8_types::sequence::deserialize_sequence_strict(value)
-            .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
-        Ok((sequence, Vec::new()))
-    } else {
-        orch8_types::sequence::deserialize_sequence_lenient(value)
-            .map_err(|error| ApiError::InvalidArgument(error.to_string()))
-    }
-}
-
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sequences", post(create_sequence).get(list_sequences))
@@ -59,10 +39,8 @@ pub fn routes() -> Router<AppState> {
 pub(crate) async fn create_sequence(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
-    Query(options): Query<DraftDecodeOptions>,
-    Json(value): Json<serde_json::Value>,
+    Json(mut seq): Json<SequenceDefinition>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (mut seq, decode_warnings) = decode_draft_sequence(&value, options.strict)?;
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &seq.tenant_id)?;
     seq.tenant_id = tenant_id;
 
@@ -87,8 +65,7 @@ pub(crate) async fn create_sequence(
         validate_output_schemas_in_blocks(on_cancel)?;
     }
 
-    let mut warnings = decode_warnings;
-    warnings.extend(seq.unknown_handler_warnings());
+    let mut warnings = seq.unknown_handler_warnings();
 
     let template_warnings = orch8_engine::template::validate_sequence_templates(&seq);
     for tw in &template_warnings {

@@ -13,11 +13,6 @@ use uuid::Uuid;
 
 use crate::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 
-#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip predicate requires `&T`.
-const fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 macro_rules! uuid_id {
     ($name:ident) => {
         #[derive(
@@ -246,69 +241,11 @@ pub struct CapsuleRequirements {
     pub regions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hardware: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub requires_network: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub requires_human_ui: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum_trust: Option<RuntimeTrustLevel>,
-}
-
-impl CapsuleRequirements {
-    /// Whether a live runtime may safely claim work with these requirements.
-    /// Unlike preview diagnostics, unknown network/UI facts fail closed here:
-    /// task claiming changes ownership and must be based on positive evidence.
-    #[must_use]
-    pub fn is_satisfied_by(&self, capabilities: &RuntimeCapabilities, now: DateTime<Utc>) -> bool {
-        if capabilities.expires_at <= now || capabilities.draining {
-            return false;
-        }
-        let contains_all = |required: &[String], offered: &[String]| {
-            required.iter().all(|item| offered.contains(item))
-        };
-        if !contains_all(&self.handlers, &capabilities.handlers)
-            || !contains_all(&self.plugins, &capabilities.plugins)
-            || !contains_all(&self.credentials, &capabilities.credentials)
-            || !contains_all(&self.hardware, &capabilities.hardware)
-        {
-            return false;
-        }
-        if !self.regions.is_empty()
-            && !self
-                .regions
-                .iter()
-                .any(|region| capabilities.regions.contains(region))
-        {
-            return false;
-        }
-        if self
-            .minimum_trust
-            .is_some_and(|minimum| capabilities.trust < minimum)
-        {
-            return false;
-        }
-        if self.requires_human_ui
-            && !matches!(
-                capabilities.kind,
-                RuntimeKind::Mobile | RuntimeKind::Desktop | RuntimeKind::Browser
-            )
-        {
-            return false;
-        }
-        if self.requires_network
-            && !matches!(
-                capabilities.connectivity,
-                Some(
-                    RuntimeConnectivity::Metered
-                        | RuntimeConnectivity::Wifi
-                        | RuntimeConnectivity::Ethernet
-                )
-            )
-        {
-            return false;
-        }
-        true
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -884,121 +821,6 @@ pub enum ContinuityError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn browser_runtime(now: DateTime<Utc>) -> RuntimeCapabilities {
-        RuntimeCapabilities {
-            runtime_id: RuntimeId::new(),
-            kind: RuntimeKind::Browser,
-            trust: RuntimeTrustLevel::Registered,
-            handlers: vec!["render".into()],
-            plugins: vec!["chrome".into()],
-            credentials: vec!["private-files".into()],
-            regions: vec!["norway".into()],
-            hardware: vec!["cuda".into()],
-            offline_capable: false,
-            connectivity: Some(RuntimeConnectivity::Wifi),
-            battery_percent: None,
-            estimated_cost_microunits: None,
-            estimated_latency_ms: None,
-            draining: false,
-            capsule_signing_public_key: None,
-            observed_at: now,
-            expires_at: now + chrono::Duration::minutes(4),
-        }
-    }
-
-    fn full_requirements() -> CapsuleRequirements {
-        CapsuleRequirements {
-            handlers: vec!["render".into()],
-            plugins: vec!["chrome".into()],
-            credentials: vec!["private-files".into()],
-            regions: vec!["norway".into()],
-            hardware: vec!["cuda".into()],
-            requires_network: true,
-            requires_human_ui: true,
-            minimum_trust: Some(RuntimeTrustLevel::Registered),
-        }
-    }
-
-    #[test]
-    fn runtime_requirements_match_hardware_region_and_interactive_kind() {
-        assert_eq!(
-            serde_json::to_value(CapsuleRequirements::default()).unwrap(),
-            serde_json::json!({})
-        );
-        let now = Utc::now();
-        let capabilities = browser_runtime(now);
-        let requirements = full_requirements();
-        assert!(requirements.is_satisfied_by(&capabilities, now));
-
-        let mut wrong_region = capabilities;
-        wrong_region.regions = vec!["sweden".into()];
-        assert!(!requirements.is_satisfied_by(&wrong_region, now));
-    }
-
-    #[test]
-    fn runtime_requirements_reject_each_missing_capability_set() {
-        let now = Utc::now();
-        let requirements = full_requirements();
-        let mut runtime = browser_runtime(now);
-        runtime.handlers.clear();
-        assert!(!requirements.is_satisfied_by(&runtime, now));
-
-        let mut runtime = browser_runtime(now);
-        runtime.plugins.clear();
-        assert!(!requirements.is_satisfied_by(&runtime, now));
-
-        let mut runtime = browser_runtime(now);
-        runtime.credentials.clear();
-        assert!(!requirements.is_satisfied_by(&runtime, now));
-
-        let mut runtime = browser_runtime(now);
-        runtime.hardware.clear();
-        assert!(!requirements.is_satisfied_by(&runtime, now));
-    }
-
-    #[test]
-    fn runtime_requirements_enforce_minimum_trust() {
-        let now = Utc::now();
-        let mut runtime = browser_runtime(now);
-        runtime.trust = RuntimeTrustLevel::Unverified;
-
-        assert!(!full_requirements().is_satisfied_by(&runtime, now));
-    }
-
-    #[test]
-    fn human_ui_requires_mobile_desktop_or_browser_runtime() {
-        let now = Utc::now();
-        let mut runtime = browser_runtime(now);
-        runtime.kind = RuntimeKind::Server;
-
-        assert!(!full_requirements().is_satisfied_by(&runtime, now));
-    }
-
-    #[test]
-    fn required_network_rejects_offline_and_unknown_connectivity() {
-        let now = Utc::now();
-        let requirements = full_requirements();
-        let mut runtime = browser_runtime(now);
-        runtime.connectivity = Some(RuntimeConnectivity::Offline);
-        assert!(!requirements.is_satisfied_by(&runtime, now));
-
-        runtime.connectivity = None;
-        assert!(!requirements.is_satisfied_by(&runtime, now));
-    }
-
-    #[test]
-    fn expired_or_draining_runtime_cannot_claim_work() {
-        let now = Utc::now();
-        let requirements = full_requirements();
-        let mut runtime = browser_runtime(now);
-        runtime.expires_at = now;
-        assert!(!requirements.is_satisfied_by(&runtime, now));
-
-        let mut runtime = browser_runtime(now);
-        runtime.draining = true;
-        assert!(!requirements.is_satisfied_by(&runtime, now));
-    }
 
     #[test]
     fn epoch_is_monotonic_and_checked() {

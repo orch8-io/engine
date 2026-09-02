@@ -3,26 +3,6 @@ use rand::Rng;
 
 use orch8_types::sequence::DelaySpec;
 
-/// Apply multiplicative jitter and clamp the randomized result to a hard
-/// scheduling ceiling.
-#[allow(clippy::cast_possible_truncation)]
-pub(crate) fn apply_percentage_jitter(
-    base: std::time::Duration,
-    maximum: std::time::Duration,
-    min_percent: u128,
-    max_percent: u128,
-) -> std::time::Duration {
-    debug_assert!(min_percent <= max_percent);
-    let base_ms = base.as_millis();
-    if base_ms == 0 {
-        return base;
-    }
-    let percent = rand::rng().random_range(min_percent..=max_percent);
-    let jittered_ms = base_ms.saturating_mul(percent) / 100;
-    let capped_ms = jittered_ms.min(maximum.as_millis());
-    std::time::Duration::from_millis(capped_ms.min(u128::from(u64::MAX)) as u64)
-}
-
 /// Calculate the next fire time given a base time, delay spec, timezone, and
 /// optional tenant-level config (for holiday calendar merging).
 pub fn calculate_next_fire_at(

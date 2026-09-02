@@ -2,9 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde_json::Value;
 
-use crate::OutputFormat;
-
-pub async fn run(client: &Client, base: &str, format: OutputFormat) -> Result<()> {
+pub async fn run(client: &Client, base: &str) -> Result<()> {
     let root = base.strip_suffix("/api/v1").unwrap_or(base);
     let resp = client
         .get(format!("{root}/health/ready"))
@@ -14,10 +12,7 @@ pub async fn run(client: &Client, base: &str, format: OutputFormat) -> Result<()
     let status = resp.status();
     let body: Value = resp.json().await.unwrap_or(Value::Null);
     if status.is_success() {
-        match format {
-            OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&body)?),
-            OutputFormat::Table => println!("OK {}", serde_json::to_string_pretty(&body)?),
-        }
+        println!("OK {}", serde_json::to_string_pretty(&body)?);
     } else {
         anyhow::bail!("Health check failed: {status} {body}");
     }

@@ -288,37 +288,26 @@ async fn claim_due_inner(
         // Rows trimmed by the pre-limit are claimed on a later tick.
         let overselect = i64::from(limit).saturating_mul(i64::from(max_per_tenant));
         sqlx::query(
-            "WITH candidates AS (
-                SELECT id, tenant_id, priority, next_fire_at
-                FROM task_instances
-                WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1)
-                ORDER BY priority DESC, next_fire_at ASC
-                LIMIT ?4
-            ), ranked AS (
-                SELECT id, tenant_id, priority, next_fire_at,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY tenant_id
-                           ORDER BY priority DESC, next_fire_at ASC
-                       ) AS rn
-                FROM candidates
-            ), winners AS (
-                SELECT id
-                FROM ranked
-                WHERE rn <= ?3
-                ORDER BY priority DESC, next_fire_at ASC
-                LIMIT ?2
-            )
-            SELECT task_instances.*
-            FROM task_instances
-            JOIN winners USING (id)
-            ORDER BY task_instances.priority DESC, task_instances.next_fire_at ASC",
+            "SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY priority DESC, next_fire_at ASC) AS rn
+                FROM (
+                    SELECT * FROM task_instances
+                    WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1)
+                    ORDER BY priority DESC, next_fire_at ASC
+                    LIMIT ?4
+                )
+            ) ranked
+            WHERE rn <= ?3
+            ORDER BY priority DESC, next_fire_at ASC
+            LIMIT ?2"
         )
         .bind(now_s)
         .bind(limit as i64)
         .bind(max_per_tenant as i64)
         .bind(overselect)
         .fetch_all(&mut *conn)
-        .await?
+        .await
+        ?
     } else {
         // No per-tenant cap — original fast path.
         sqlx::query(
@@ -1072,7 +1061,7 @@ pub(super) async fn delete_terminal_instances(
     cutoff: DateTime<Utc>,
     limit: u32,
 ) -> Result<u64, StorageError> {
-    let mut tx = super::helpers::begin_immediate(&storage.pool).await?;
+    let mut tx = storage.pool.begin().await?;
 
     // Same terminal-state set as `list_artifact_gc_candidates` -- keep in
     // sync with `InstanceState::is_terminal()`.

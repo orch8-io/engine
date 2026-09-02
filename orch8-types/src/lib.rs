@@ -10,7 +10,6 @@ pub mod config;
 pub mod context;
 pub mod continuity;
 pub mod continuity_advanced;
-pub mod continuity_product;
 pub mod contract;
 pub mod credential;
 pub mod cron;
@@ -96,14 +95,27 @@ pub mod serde_duration {
                 "duration must be non-negative (got {signed} ms); durations are expressed as milliseconds"
             ));
         }
-        if n.as_f64().is_some_and(|value| value < 0.0) {
-            return Err(format!(
-                "duration must be non-negative (got {n}); durations are expressed as integer milliseconds"
-            ));
+        let f = n
+            .as_f64()
+            .ok_or_else(|| format!("duration {n} is not a finite number"))?;
+        if !f.is_finite() {
+            return Err(format!("duration {f} is not finite"));
         }
-        Err(format!(
-            "duration must be an integer number of milliseconds (got {n})"
-        ))
+        if f < 0.0 {
+            return Err(format!("duration must be non-negative (got {f}s)"));
+        }
+        // Float inputs are interpreted as seconds for backwards compatibility
+        // with older configs; clamp to u64::MAX ms on overflow rather than
+        // wrapping. `2^64` is exactly representable in f64, so the compare
+        // here is precise even though `u64::MAX as f64` rounds up.
+        let ms = f * 1000.0;
+        #[allow(clippy::cast_precision_loss)]
+        let max_as_f64 = u64::MAX as f64;
+        if ms >= max_as_f64 {
+            return Ok(u64::MAX);
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        Ok(ms as u64)
     }
 
     // Re-exported so `serde_duration_opt` can share the parsing/validation.
@@ -125,8 +137,15 @@ pub mod serde_duration_opt {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-        // Only integer milliseconds are accepted. Float seconds made `30`
-        // mean 30ms while `30.0` meant 30s, an unsafe authoring ambiguity.
+        // Accept both integer (milliseconds) and float (seconds) values.
+        // Integers are treated as milliseconds; ALL floats are treated as
+        // seconds (e.g. `0.2` = 200 ms, `1.5` = 1500 ms, `3000.0` = 50 min) —
+        // see `serde_duration::ms_from_number` for the backwards-compat
+        // rationale. Write integer milliseconds to avoid the ambiguity.
+        //
+        // Ref#14: delegate to the shared validator in `serde_duration` so
+        // negative values are rejected consistently (previously negative
+        // floats silently saturated to `Duration::from_millis(0)`).
         let val: Option<serde_json::Value> = Option::deserialize(d)?;
         match val {
             None | Some(serde_json::Value::Null) => Ok(None),
@@ -256,9 +275,11 @@ mod tests {
     }
 
     #[test]
-    fn serde_duration_opt_rejects_fractional_seconds() {
-        let err = serde_json::from_str::<OptDurationWrapper>(r#"{"dur":0.2}"#).unwrap_err();
-        assert!(err.to_string().contains("integer number of milliseconds"));
+    fn serde_duration_opt_accepts_fractional_seconds() {
+        // Pre-existing behavior: sub-1.0 floats are interpreted as seconds.
+        // Must still work after the Ref#14 tightening.
+        let w: OptDurationWrapper = serde_json::from_str(r#"{"dur":0.2}"#).unwrap();
+        assert_eq!(w.dur, Some(Duration::from_millis(200)));
     }
 
     #[test]

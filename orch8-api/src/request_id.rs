@@ -48,56 +48,6 @@ pub async fn request_id_middleware(mut request: Request, next: Next) -> Response
 
     let mut response = next.run(request).await;
 
-    if response.status().is_client_error() || response.status().is_server_error() {
-        let status = response.status();
-        let (mut parts, body) = response.into_parts();
-        let bytes = axum::body::to_bytes(body, 1024 * 1024)
-            .await
-            .unwrap_or_default();
-        let fallback_code = status
-            .canonical_reason()
-            .unwrap_or("http_error")
-            .to_ascii_lowercase()
-            .replace(' ', "_");
-        let mut value = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(|_| {
-            serde_json::json!({
-                "error": {
-                    "code": fallback_code.clone(),
-                    "message": String::from_utf8_lossy(&bytes),
-                    "request_id": request_id.clone(),
-                }
-            })
-        });
-        // JSON-RPC uses an object-valued `error`; preserve that protocol.
-        // Normal HTTP errors use the backwards-compatible string field.
-        if value.get("error").is_some_and(serde_json::Value::is_string) {
-            let message = value["error"].as_str().unwrap_or_default().to_owned();
-            let code = value
-                .get("code")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!(fallback_code));
-            value = serde_json::json!({
-                "error": {
-                    "code": code,
-                    "message": message,
-                    "request_id": request_id.clone(),
-                }
-            });
-        } else if value.get("jsonrpc").is_none()
-            && let Some(error) = value
-                .get_mut("error")
-                .and_then(serde_json::Value::as_object_mut)
-        {
-            error.insert("request_id".into(), serde_json::json!(request_id.clone()));
-        }
-        parts.headers.insert(
-            axum::http::header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
-        response = Response::from_parts(parts, axum::body::Body::from(value.to_string()));
-    }
-
     // HeaderValue::from_str is now infallible because we sanitized above,
     // but we keep the check as a defence-in-depth guard.
     if let Ok(val) = HeaderValue::from_str(&request_id) {

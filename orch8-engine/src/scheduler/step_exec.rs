@@ -777,12 +777,11 @@ pub(super) async fn execute_step_block(
     // dispatch to `fallback_handler` or defers the instance for the cooldown
     // window.
     let cb_step_def: Cow<'_, orch8_types::sequence::StepDef> =
-        match crate::handlers::step_block::breaker_preflight_at(
+        match crate::handlers::step_block::breaker_preflight(
             handlers,
             instance_id,
             &instance.tenant_id,
             step_def,
-            clock.now(),
         ) {
             crate::handlers::step_block::BreakerDecision::Proceed(cow) => cow,
             crate::handlers::step_block::BreakerDecision::Defer { fire_at } => {
@@ -1212,7 +1211,7 @@ pub(super) async fn handle_retryable_failure(
 
         crate::metrics::inc(crate::metrics::STEPS_RETRIED);
 
-        let backoff = crate::handlers::step::calculate_backoff_with_jitter(
+        let backoff = crate::handlers::step::calculate_backoff(
             attempt,
             retry.initial_backoff,
             retry.max_backoff,
@@ -1334,10 +1333,6 @@ pub(super) async fn dispatch_to_external_worker(
 ) -> Result<StepOutcome, EngineError> {
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
-    let (requirements, resolved_params) =
-        orch8_types::worker::take_runtime_requirements(resolved_params)
-            .map_err(orch8_types::error::StorageError::Query)?;
-
     let _effect_guard = if step_context.runtime.dry_run {
         None
     } else {
@@ -1369,7 +1364,6 @@ pub(super) async fn dispatch_to_external_worker(
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         queue_name,
-        requirements,
         params: resolved_params,
         // Context has already had `context_access` filtering and
         // externalization-marker inflation applied upstream — the remote

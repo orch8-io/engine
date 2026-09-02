@@ -23,10 +23,5 @@ let package = Package(
             url: "https://github.com/orch8-io/engine/releases/download/v0.7.1/Orch8Mobile-v0.7.1.xcframework.zip",
             checksum: "0a83ce860c5b41bb7d5dcd9401e4466eb48fc0513658194293a4ca691b3f61d5"
         ),
-        .testTarget(
-            name: "Orch8MobileTests",
-            dependencies: ["Orch8Mobile"],
-            path: "Tests/Orch8MobileTests"
-        ),
     ]
 )

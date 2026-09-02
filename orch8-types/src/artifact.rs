@@ -9,11 +9,10 @@
 //! checkpointing, replay, and crash recovery like any other step output.
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// A durable reference to stored bytes. Travels in step outputs / context as
 /// `{ "artifact": { ... } }` — never the bytes themselves.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRef {
     /// Opaque artifact id (unique within the instance).
     pub id: String,

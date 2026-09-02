@@ -223,9 +223,8 @@ async fn run_contracts(
     };
     let seq_raw = std::fs::read_to_string(&seq_path)
         .with_context(|| format!("reading {}", seq_path.display()))?;
-    let seq_json: Value =
-        serde_json::from_str(&seq_raw).context("sequence file is not valid JSON")?;
-    let seq = decode_test_sequence(&seq_json)?;
+    let seq: SequenceDefinition =
+        serde_json::from_str(&seq_raw).context("sequence file is not a valid definition")?;
 
     let mut opts = orch8::contract::RunOptions::default();
     if let Some(recorded_path) = recorded {
@@ -455,7 +454,8 @@ async fn run_replay(
     }
     let engine = builder.build().await?;
 
-    let def = decode_test_sequence(target_json)?;
+    let def: SequenceDefinition = serde_json::from_value(target_json.clone())
+        .context("target sequence is not a valid definition")?;
     let seq_id = engine.upsert_sequence(def).await?;
     let context = ExecutionContext {
         data: context_data,
@@ -503,15 +503,6 @@ async fn run_replay(
         })
         .collect();
     Ok((blocks, reached_terminal))
-}
-
-fn decode_test_sequence(value: &Value) -> Result<SequenceDefinition> {
-    let (sequence, warnings) = orch8_types::sequence::deserialize_sequence_lenient(value)
-        .context("sequence is not a valid definition")?;
-    for warning in warnings {
-        eprintln!("warning: {warning}");
-    }
-    Ok(sequence)
 }
 
 async fn replay(client: &Client, base: &str, instance_id: Uuid, against: i32) -> Result<()> {

@@ -169,72 +169,6 @@ async function acceptedHandoff(tenantSuffix: string) {
   };
 }
 
-async function exportedExternalHandoff(tenantSuffix: string) {
-  const tenantId = `external-${tenantSuffix}-${uuid().slice(0, 8)}`;
-  const sequence = testSequence(
-    "external-mobile",
-    [
-      step("device_gate", "human_review", {}, {
-        wait_for_input: {
-          prompt: "run on trusted device?",
-          choices: [{ label: "continue", value: "continue" }],
-        },
-      }),
-    ],
-    { tenantId },
-  );
-  const createdSequence = await client.createSequence(sequence);
-  const instance = await client.createInstance({
-    sequence_id: createdSequence.id,
-    tenant_id: tenantId,
-    namespace: "default",
-  });
-  await client.waitForState(instance.id, "waiting");
-  await client.saveCheckpoint(instance.id, {
-    safe_boundary: "device_gate",
-    context_snapshot: { fixture: tenantId },
-  });
-  const sourceRuntimeId = uuid();
-  const destinationRuntimeId = uuid();
-  const execution = await client.createContinuityExecution({
-    tenant_id: tenantId,
-    instance_id: instance.id,
-    runtime_id: sourceRuntimeId,
-  });
-  const request = await authorizedHandoffRequest(
-    tenantId,
-    execution.continuity_id,
-    destinationRuntimeId,
-    { handlers: ["human_review"], requires_human_ui: true },
-    { kind: "mobile", offline_capable: true },
-  );
-  const handoff = await client.createHandoff(request);
-  const payloadKey = randomBytes(32).toString("base64");
-  const exported = await client.exportHandoff(handoff.id, {
-    tenant_id: tenantId,
-    requirements: { handlers: ["human_review"], requires_human_ui: true },
-    expires_in_seconds: 60,
-    payload_key_base64: payloadKey,
-  });
-  const grant = await client.issueContinuationGrant({
-    tenant_id: tenantId,
-    continuity_id: execution.continuity_id,
-    destination_runtime_id: destinationRuntimeId,
-    subject: "e2e-iphone",
-    allowed_actions: ["accept"],
-    ttl_seconds: 60,
-  });
-  return {
-    tenantId,
-    execution,
-    handoff,
-    exported,
-    grant,
-    destinationRuntimeId,
-    destinationInstanceId: uuid(),
-  };
-}
-
 function assert409(promise: Promise<unknown>, pattern?: RegExp) {
   return assert.rejects(() => promise, (error: unknown) => {
     assert.ok(error instanceof ApiError, "expected ApiError");
@@ -1195,63 +1129,6 @@ describe("Continuity Handoffs — state machine", () => {
       tenant_id: result.tenantId,
     });
     assert.equal(resumed.state, "resumed");
-  });
-
-  it("accepts and resumes an external mobile instance idempotently", async () => {
-    const result = await exportedExternalHandoff("sm-external");
-    const request = {
-      tenant_id: result.tenantId,
-      destination_instance_id: result.destinationInstanceId,
-      capsule_id: result.exported.capsule.manifest.capsule_id,
-      token: result.grant.token,
-      signed_grant: result.grant.signed_grant,
-    };
-    const accepted = await client.acceptExternalHandoff(result.handoff.id, request);
-    assert.equal(accepted.handoff.state, "accepted");
-    assert.equal(accepted.execution.epoch, 1);
-    assert.equal(accepted.execution.owner_runtime_id, result.destinationRuntimeId);
-    assert.equal(accepted.execution.current_instance_id, result.destinationInstanceId);
-
-    const acceptedRetry = await client.acceptExternalHandoff(result.handoff.id, request);
-    assert.equal(acceptedRetry.handoff.state, "accepted");
-    assert.equal(acceptedRetry.execution.current_instance_id, result.destinationInstanceId);
-    await assert409(
-      client.acceptExternalHandoff(result.handoff.id, {
-        ...request,
-        destination_instance_id: uuid(),
-      }),
-      /another destination instance/,
-    );
-
-    const resumed = await client.resumeExternalHandoff(result.handoff.id, {
-      tenant_id: result.tenantId,
-      destination_instance_id: result.destinationInstanceId,
-    });
-    assert.equal(resumed.state, "resumed");
-    const resumedRetry = await client.resumeExternalHandoff(result.handoff.id, {
-      tenant_id: result.tenantId,
-      destination_instance_id: result.destinationInstanceId,
-    });
-    assert.equal(resumedRetry.state, "resumed");
-    await assert409(
-      client.resumeExternalHandoff(result.handoff.id, {
-        tenant_id: result.tenantId,
-        destination_instance_id: uuid(),
-      }),
-      /does not own/,
-    );
-
-    const locations = await client.listContinuityLocations(
-      result.execution.continuity_id,
-      result.tenantId,
-    );
-    assert.ok(
-      locations.some(
-        (location) =>
-          location.runtime_id === result.destinationRuntimeId &&
-          location.instance_id === result.destinationInstanceId,
-      ),
-    );
   });
 
   it("cannot reject a handoff that has already been exported", async () => {

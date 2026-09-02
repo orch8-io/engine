@@ -159,14 +159,14 @@ function calculate(params) {
 console.log(`Worker ${workerId} polling ${api} for ${handlerName}`);
 
 while (true) {
-  const poll = await request("/workers/tasks/poll", {
+  const tasks = await request("/workers/tasks/poll", {
     handler_name: handlerName,
     worker_id: workerId,
     limit: 5,
     version: "1.0.0",
   });
 
-  for (const task of poll.tasks) {
+  for (const task of tasks) {
     try {
       console.log(`Claimed task ${task.id}`, task.params);
       const output = calculate(task.params);
@@ -185,7 +185,7 @@ while (true) {
     }
   }
 
-  await new Promise((resolve) => setTimeout(resolve, poll.poll_after_ms));
+  await new Promise((resolve) => setTimeout(resolve, 750));
 }
 ```
 

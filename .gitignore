@@ -1,7 +1,6 @@
 .env
 .env.*
 !.env.example
-.DS_Store
 
 # Rust/Cargo build output, including nested workspaces such as fuzz/target.
 target/

@@ -164,10 +164,10 @@ test("24 - etaEscalation buildContext returns data with task_id", () => {
 //  abSplitRollout (25-27)
 // ══════════════════════════════════════════════════════════════════════
 
-test("26 - abSplitRollout buildBlocks includes ab_split block", () => {
+test("26 - abSplitRollout buildBlocks includes a_b_split block", () => {
   const blocks = abSplitRollout.buildBlocks(rng());
-  const splits = findBlocks(blocks as Record<string, unknown>[], "ab_split");
-  assert.ok(splits.length >= 1, "no ab_split block found");
+  const splits = findBlocks(blocks as Record<string, unknown>[], "a_b_split");
+  assert.ok(splits.length >= 1, "no a_b_split block found");
 });
 
 test("27 - abSplitRollout buildContext returns data with experiment_id", () => {

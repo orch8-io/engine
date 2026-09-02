@@ -45,7 +45,7 @@ describe("A/B Split Determinism", () => {
       "ab-split-det",
       [
         {
-          type: "ab_split",
+          type: "a_b_split",
           id: "split",
           variants: [
             {

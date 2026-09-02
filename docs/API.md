@@ -7,12 +7,6 @@ Canonical base URL: `http://localhost:8080/api/v1` (listen address configurable 
 > `/swagger-ui` are generated from the current code and are authoritative for
 > fields, status codes, and routes.
 
-The Durable Agent Handoff Protocol endpoints—portable work offers, policy
-compilation, gateway validation, receipts, profiles, conformance certificates
-and badges, and commercial relay validation—are covered in
-[Agent continuity product](AGENT_CONTINUITY_PRODUCT.md) and generated under the
-`continuity-product` OpenAPI tag.
-
 All request/response bodies are JSON. Dates use ISO 8601 / RFC 3339 format.
 
 Product routes are served under `/api/v1`. Bare product paths remain compatibility
@@ -560,9 +554,8 @@ GET /instances/{id}/effects?tenant_id={tenant_id}
 **Response:** `200 OK`
 
 ```json
-{
-  "tasks": [
-    {
+[
+  {
     "id": "f1e2d3c4-...",
     "instance_id": "a1b2c3d4-...",
     "block_id": "send_welcome",
@@ -827,16 +820,11 @@ POST /workers/tasks/poll
     "error_message": null,
     "error_retryable": null,
     "created_at": "2024-01-15T13:59:58Z"
-    }
-  ],
-  "lease_secs": 60,
-  "heartbeat_interval_secs": 15,
-  "poll_after_ms": 1000
-}
+  }
+]
 ```
 
-Returns an empty `tasks` array if no tasks are available. Clients should use
-the advertised heartbeat and poll intervals instead of hard-coded timing.
+Returns empty array `[]` if no tasks available.
 
 **Mechanics:**
 - Uses `FOR UPDATE SKIP LOCKED` — concurrent workers never get the same task.

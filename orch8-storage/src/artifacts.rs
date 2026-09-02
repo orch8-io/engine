@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, path::Path};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use uuid::Uuid;
 
 use orch8_types::artifact::{ArtifactMeta, ArtifactRef};
@@ -181,70 +181,6 @@ impl ObjectArtifactStore {
         })
     }
 
-    /// Create an artifact at a caller-chosen id. Reusing the id with identical
-    /// bytes is an idempotent success; reusing it with different bytes is a
-    /// conflict. `PutMode::Create` makes this safe across concurrent retries.
-    pub async fn put_with_id(
-        &self,
-        instance_id: &str,
-        artifact_id: Uuid,
-        content_type: &str,
-        bytes: Bytes,
-    ) -> Result<ArtifactRef, StorageError> {
-        if instance_id.is_empty() {
-            return Err(StorageError::Query("instance_id must not be empty".into()));
-        }
-        if bytes.len() > Self::MAX_ARTIFACT_BYTES {
-            return Err(StorageError::Query(format!(
-                "artifact size {} bytes exceeds maximum {} bytes",
-                bytes.len(),
-                Self::MAX_ARTIFACT_BYTES
-            )));
-        }
-        let id = artifact_id.to_string();
-        let key = Self::object_key(instance_id, &id);
-        let path = Path::from(key.clone());
-        let size = bytes.len() as u64;
-        let result = self
-            .store
-            .put_opts(
-                &path,
-                PutPayload::from_bytes(bytes.clone()),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..Default::default()
-                },
-            )
-            .await;
-        match result {
-            Ok(_) => {}
-            Err(object_store::Error::AlreadyExists { .. }) => {
-                let existing = self
-                    .store
-                    .get(&path)
-                    .await
-                    .map_err(map_err)?
-                    .bytes()
-                    .await
-                    .map_err(map_err)?;
-                if existing != bytes {
-                    return Err(StorageError::Conflict(format!(
-                        "artifact upload id {artifact_id} already contains different bytes"
-                    )));
-                }
-            }
-            Err(error) => return Err(map_err(error)),
-        }
-        Ok(ArtifactRef {
-            id,
-            instance_id: instance_id.to_string(),
-            key: key.clone(),
-            content_type: content_type.to_string(),
-            size,
-            uri: format!("artifact://{key}"),
-        })
-    }
-
     /// Fetch the bytes for an artifact key. Returns `None` if absent.
     ///
     /// # Errors
@@ -334,26 +270,6 @@ mod tests {
     async fn get_missing_returns_none() {
         let store = ObjectArtifactStore::memory();
         assert!(store.get("inst1/nope").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn deterministic_put_is_idempotent_and_rejects_changed_bytes() {
-        let store = ObjectArtifactStore::memory();
-        let id = Uuid::new_v4();
-        let first = store
-            .put_with_id("inst1", id, "text/plain", Bytes::from_static(b"same"))
-            .await
-            .unwrap();
-        let retry = store
-            .put_with_id("inst1", id, "text/plain", Bytes::from_static(b"same"))
-            .await
-            .unwrap();
-        assert_eq!(first, retry);
-        let conflict = store
-            .put_with_id("inst1", id, "text/plain", Bytes::from_static(b"changed"))
-            .await
-            .unwrap_err();
-        assert!(matches!(conflict, StorageError::Conflict(_)));
     }
 
     #[tokio::test]

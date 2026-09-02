@@ -1081,27 +1081,6 @@ impl crate::WorkerStore for PostgresStorage {
         workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit).await
     }
 
-    async fn claim_worker_tasks_matching(
-        &self,
-        handler_name: &str,
-        worker_id: &str,
-        tenant_id: Option<&orch8_types::TenantId>,
-        queue_name: Option<&str>,
-        capabilities: &orch8_types::continuity::RuntimeCapabilities,
-        limit: u32,
-    ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim_matching(
-            self,
-            handler_name,
-            worker_id,
-            tenant_id,
-            queue_name,
-            capabilities,
-            limit,
-        )
-        .await
-    }
-
     async fn complete_worker_task(
         &self,
         task_id: Uuid,
@@ -1952,18 +1931,6 @@ impl crate::ResourceStore for PostgresStorage {
     ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
         crate::artifacts::require_store(self.artifact_store.as_ref())?
             .put(&instance_id.to_string(), content_type, bytes)
-            .await
-    }
-
-    async fn put_artifact_with_id(
-        &self,
-        instance_id: InstanceId,
-        artifact_id: Uuid,
-        content_type: &str,
-        bytes: bytes::Bytes,
-    ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
-        crate::artifacts::require_store(self.artifact_store.as_ref())?
-            .put_with_id(&instance_id.to_string(), artifact_id, content_type, bytes)
             .await
     }
 

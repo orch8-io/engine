@@ -67,7 +67,6 @@ pub(super) async fn dispatch_block(
     tree: &[ExecutionNode],
     interceptors: Option<&orch8_types::interceptor::InterceptorDef>,
     outputs: &OutputsSnapshot,
-    clock: &orch8_types::clock::SharedClock,
 ) -> Result<bool, EngineError> {
     // Mark node as running.
     if node.state == NodeState::Pending {
@@ -88,8 +87,8 @@ pub(super) async fn dispatch_block(
                 )
                 .await;
             }
-            let result = crate::handlers::step_block::execute_step_node_with_clock(
-                storage, handlers, instance, node, step_def, outputs, clock,
+            let result = crate::handlers::step_block::execute_step_node(
+                storage, handlers, instance, node, step_def, outputs,
             )
             .await;
             // Interceptor: after_step
@@ -138,13 +137,13 @@ pub(super) async fn dispatch_block(
             .await
         }
         BlockDefinition::Loop(loop_def) => {
-            crate::handlers::loop_block::execute_loop_with_clock(
+            crate::handlers::loop_block::execute_loop(
                 storage.as_ref(),
+                handlers,
                 instance,
                 node,
                 loop_def,
                 tree,
-                clock,
             )
             .await
         }
@@ -294,7 +293,7 @@ pub(super) async fn dispatch_block(
                         details: None,
                     })?;
 
-                let now = clock.now();
+                let now = chrono::Utc::now();
                 let child_context = child_context_from(&instance.context, ss_def.input.clone());
 
                 let child = orch8_types::instance::TaskInstance {

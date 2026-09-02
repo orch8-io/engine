@@ -16,7 +16,7 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
         fs::create_dir_all(base).context("failed to create directory")?;
     }
 
-    let secrets = write_scaffolds(base, template)?;
+    write_scaffolds(base, template)?;
 
     println!("Initialized Orch8 project in {dir}/");
     println!();
@@ -40,21 +40,12 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
     println!("Quick start with Postgres:");
     println!("  docker compose up -d");
     println!();
-    println!("Then create the example sequence:");
-    println!("{}", sequence_apply_command(&secrets.api_key));
+    println!("Then create a sequence:");
+    println!("  curl -X POST http://localhost:8080/api/v1/sequences \\");
+    println!("    -H 'Content-Type: application/json' \\");
+    println!("    -d @sequence.json");
 
     Ok(())
-}
-
-fn sequence_apply_command(api_key: &str) -> String {
-    format!(
-        concat!(
-            "  orch8 sequence apply sequence.json --url http://localhost:8080/api/v1 ",
-            "\\\n",
-            "    --api-key {api_key} --tenant-id demo",
-        ),
-        api_key = api_key,
-    )
 }
 
 /// Generate a 32-byte random token rendered as hex so the scaffold ships
@@ -132,13 +123,10 @@ const DOCKER_COMPOSE_TEMPLATE: &str = r#"services:
       - "8080:8080"
       - "50051:50051"
     environment:
-      ORCH8_STORAGE_BACKEND: postgres
+      ORCH8_DATABASE_BACKEND: postgres
       ORCH8_DATABASE_URL: postgres://orch8:orch8@postgres:5432/orch8
       ORCH8_HTTP_ADDR: 0.0.0.0:8080
       ORCH8_GRPC_ADDR: 0.0.0.0:50051
-      ORCH8_API_KEY: "{api_key}"
-      ORCH8_ENCRYPTION_KEY: "{encryption_key}"
-      ORCH8_REQUIRE_TENANT_HEADER: "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -147,11 +135,7 @@ volumes:
   pgdata:
 "#;
 
-struct ScaffoldSecrets {
-    api_key: String,
-}
-
-fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<ScaffoldSecrets> {
+fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<()> {
     let api_key = generate_secret_hex();
     let encryption_key = generate_secret_hex();
     #[allow(clippy::literal_string_with_formatting_args)]
@@ -168,11 +152,7 @@ fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<Scaffo
             .context("secure orch8.toml permissions")?;
     }
     write_if_absent(&base.join("sequence.json"), template.json)?;
-    let compose = DOCKER_COMPOSE_TEMPLATE
-        .replace("{api_key}", &api_key)
-        .replace("{encryption_key}", &encryption_key);
-    write_if_absent(&base.join("docker-compose.yml"), &compose)?;
-    Ok(ScaffoldSecrets { api_key })
+    write_if_absent(&base.join("docker-compose.yml"), DOCKER_COMPOSE_TEMPLATE)
 }
 
 fn write_if_absent(path: &Path, content: &str) -> Result<()> {
@@ -282,14 +262,6 @@ mod tests {
                 "generated secrets must not be group/world readable"
             );
         }
-
-        let compose = fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
-        assert!(compose.contains("ORCH8_STORAGE_BACKEND: postgres"));
-        assert!(!compose.contains("ORCH8_DATABASE_BACKEND"));
-        assert!(compose.contains("ORCH8_API_KEY:"));
-        assert!(compose.contains("ORCH8_ENCRYPTION_KEY:"));
-        assert!(!compose.contains("{api_key}"));
-        assert!(!compose.contains("{encryption_key}"));
     }
 
     #[test]
@@ -337,13 +309,6 @@ mod tests {
         let target = base.path().join("nested").join("project");
         run(target.to_str().unwrap(), "default").unwrap();
         assert!(target.join("sequence.json").exists());
-    }
-
-    #[test]
-    fn quick_start_continuation_has_no_literal_patch_marker() {
-        let command = sequence_apply_command("secret");
-        assert!(command.contains("\\\n    --api-key secret"));
-        assert!(!command.contains("\n+"));
     }
 }
 

@@ -951,7 +951,6 @@ mod tests {
             block_id: BlockId::new("blk"),
             handler_name: handler.to_string(),
             queue_name: None,
-            requirements: orch8_types::continuity::CapsuleRequirements::default(),
             params: json!({}),
             context: json!({}),
             attempt: 1,

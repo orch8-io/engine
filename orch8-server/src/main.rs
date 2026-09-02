@@ -4,7 +4,6 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use std::sync::Arc;
 
 use anyhow::Context;
-use base64::Engine as _;
 use clap::Parser;
 #[cfg(unix)]
 use tokio::signal::unix::SignalKind;
@@ -319,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_token.clone(),
         cb_registry.clone(),
         engine_ready.clone(),
-    )?;
+    );
     let push_outbox_handle = assembly.push_outbox.then(|| {
         spawn_push_outbox_worker(
             storage.clone(),
@@ -370,16 +369,16 @@ async fn main() -> anyhow::Result<()> {
     // Storage handle for the auth middleware: per-tenant API keys are resolved
     // by hash against the database.
     let auth_storage = storage.clone();
-    let metrics_auth_storage = storage.clone();
     let mut protected_app = if assembly.full_api {
         // Circuit-breaker routes are server-owned because they share the live
         // scheduler registry. Full control surfaces retain versioned and
-        // deprecated legacy mounts. Operational endpoints are assembled
-        // separately below so they do not require a tenant header.
+        // deprecated legacy mounts plus authenticated metrics/docs.
         let cb_routes = orch8_api::circuit_breakers::routes().with_state(app_state.clone());
         build_router(app_state.clone())
             .nest(API_V1_PREFIX, cb_routes.clone())
             .merge(orch8_api::mark_unversioned_deprecated(cb_routes))
+            .merge(orch8_api::metrics::routes().with_state(metrics_state))
+            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
     } else if assembly.continuity_gateway {
         orch8_api::build_continuity_gateway_router(app_state.clone())
     } else {
@@ -396,27 +395,7 @@ async fn main() -> anyhow::Result<()> {
         protected_app =
             protected_app.merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()));
     }
-    let operational_app = if assembly.full_api {
-        orch8_api::metrics::routes()
-            .with_state(metrics_state)
-            .layer(axum::middleware::from_fn(move |req, next| {
-                orch8_api::auth::api_key_middleware(
-                    metrics_auth_storage.clone(),
-                    root_key_digest,
-                    req,
-                    next,
-                )
-            }))
-            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-    } else {
-        axum::Router::new()
-    };
     let mut app = protected_app
-        // Prometheus authenticates with the deployment key, but metrics are
-        // operational rather than tenant-scoped and must not require
-        // X-Tenant-Id. OpenAPI is public so Swagger's browser-side fetch works
-        // in secured deployments without embedding secrets in the UI.
-        .merge(operational_app)
         // Health probes stay public for every role and reveal no route surface.
         .merge(orch8_api::health::routes().with_state(app_state))
         .layer(axum::middleware::from_fn(
@@ -426,14 +405,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Apply global body limit to prevent OOM from multi-GB JSON payloads.
     // Individual routes (e.g. webhooks) may override with their own limit.
-    app = app
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
-        // Bound slow request-body uploads without timing out long-lived SSE
-        // response streams. A blanket response TimeoutLayer would terminate
-        // valid event streams, while this layer only governs inbound bodies.
-        .layer(tower_http::timeout::RequestBodyTimeoutLayer::new(
-            std::time::Duration::from_secs(30),
-        ));
+    app = app.layer(DefaultBodyLimit::max(10 * 1024 * 1024));
 
     // Apply global concurrency limit if configured (caps in-flight requests).
     if config.api.max_concurrent_requests > 0 {
@@ -507,7 +479,7 @@ fn build_app_state(
     shutdown: CancellationToken,
     cb_registry: Arc<CircuitBreakerRegistry>,
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
-) -> anyhow::Result<AppState> {
+) -> AppState {
     let mobile_sync_enabled =
         std::env::var("ORCH8_MOBILE_SYNC_ENABLED").is_ok_and(|v| v == "true" || v == "1");
 
@@ -540,40 +512,11 @@ fn build_app_state(
     };
     let federation_peers = configured_federation_peers();
 
-    let mut trusted_signing_keys = std::collections::BTreeMap::new();
-    if let Some(crypto) = continuity_crypto.as_ref() {
-        trusted_signing_keys.insert(
-            crypto.signing_key_id.clone(),
-            base64::engine::general_purpose::STANDARD
-                .encode(crypto.signing_key.verifying_key().to_bytes()),
-        );
-    }
-    if let Ok(encoded) = std::env::var("ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON") {
-        let historical: std::collections::BTreeMap<String, String> = serde_json::from_str(&encoded)
-            .context(
-                "invalid ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON; expected a JSON object",
-            )?;
-        for (key_id, public_key) in historical {
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&public_key)
-                .with_context(|| format!("trusted signing key {key_id} is not valid base64"))?;
-            if decoded.len() != 32 {
-                anyhow::bail!(
-                    "trusted signing key {key_id} must decode to 32 bytes, got {}",
-                    decoded.len()
-                );
-            }
-            trusted_signing_keys.entry(key_id).or_insert(public_key);
-        }
-    }
-
-    Ok(AppState {
+    AppState {
         storage,
         shutdown,
         max_context_bytes: config.engine.max_context_bytes,
         externalization_mode: config.engine.externalization_mode,
-        worker_lease_secs: config.engine.worker_reaper_stale_secs,
-        worker_heartbeat_interval_secs: (config.engine.worker_reaper_stale_secs / 4).max(1),
         circuit_breakers: Some(cb_registry),
         stream_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(
             orch8_api::DEFAULT_MAX_CONCURRENT_STREAMS,
@@ -585,11 +528,10 @@ fn build_app_state(
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
         engine_ready,
         continuity_crypto,
-        continuity_trusted_signing_keys: Arc::new(trusted_signing_keys),
         federation_peers: Arc::new(federation_peers),
         continuity_lab_enabled: std::env::var("ORCH8_CONTINUITY_LAB_ENABLED")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
-    })
+    }
 }
 
 fn configured_federation_peers() -> Vec<orch8_types::continuity_advanced::FederationPeer> {
@@ -859,11 +801,6 @@ fn wrap_encryption(
             "Encryption key rotation enabled: new writes use primary key, \
              old key retained for decryption"
         );
-    }
-
-    if !config.engine.allow_legacy_unbound_encryption {
-        encryptor = encryptor.require_aad();
-        tracing::info!("Strict AAD encryption enabled; legacy enc:v1 context rows are rejected");
     }
 
     tracing::info!("Encryption at rest enabled for context.data and credentials");

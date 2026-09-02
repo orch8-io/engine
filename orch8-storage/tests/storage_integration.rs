@@ -16,10 +16,6 @@ use orch8_types::audit::AuditLogEntry;
 use orch8_types::checkpoint::Checkpoint;
 use orch8_types::cluster::{ClusterNode, NodeStatus};
 use orch8_types::context::{AuditEntry, ExecutionContext, RuntimeContext};
-use orch8_types::continuity::{
-    CapsuleRequirements, RuntimeCapabilities, RuntimeConnectivity, RuntimeId, RuntimeKind,
-    RuntimeTrustLevel,
-};
 use orch8_types::cron::CronSchedule;
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
 use orch8_types::filter::{InstanceFilter, Pagination};
@@ -88,67 +84,6 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
         on_cancel: None,
         created_at: Utc::now(),
         status: orch8_types::sequence::SequenceStatus::Production,
-    }
-}
-
-fn distributed_runtime(now: chrono::DateTime<Utc>, region: &str) -> RuntimeCapabilities {
-    RuntimeCapabilities {
-        runtime_id: RuntimeId::new(),
-        kind: RuntimeKind::Desktop,
-        trust: RuntimeTrustLevel::Registered,
-        handlers: vec!["render".into()],
-        plugins: vec!["chrome".into()],
-        credentials: Vec::new(),
-        regions: vec![region.into()],
-        hardware: vec!["cuda".into()],
-        offline_capable: false,
-        connectivity: Some(RuntimeConnectivity::Ethernet),
-        battery_percent: None,
-        estimated_cost_microunits: None,
-        estimated_latency_ms: None,
-        draining: false,
-        capsule_signing_public_key: None,
-        observed_at: now,
-        expires_at: now + Duration::minutes(4),
-    }
-}
-
-fn distributed_task(
-    instance_id: InstanceId,
-    block_id: impl Into<String>,
-    region: &str,
-    queue_name: Option<&str>,
-    created_at: chrono::DateTime<Utc>,
-) -> WorkerTask {
-    WorkerTask {
-        id: Uuid::now_v7(),
-        instance_id,
-        block_id: BlockId::new(block_id.into()),
-        handler_name: "render".into(),
-        queue_name: queue_name.map(String::from),
-        requirements: CapsuleRequirements {
-            handlers: vec!["render".into()],
-            plugins: vec!["chrome".into()],
-            regions: vec![region.into()],
-            hardware: vec!["cuda".into()],
-            ..Default::default()
-        },
-        params: json!({"input": "report"}),
-        context: json!({}),
-        attempt: 0,
-        timeout_ms: None,
-        state: WorkerTaskState::Pending,
-        worker_id: None,
-        claimed_at: None,
-        heartbeat_at: None,
-        claim_epoch: 0,
-        resume_checkpoint: None,
-        checkpoint_seq: 0,
-        completed_at: None,
-        output: None,
-        error_message: None,
-        error_retryable: None,
-        created_at,
     }
 }
 
@@ -434,7 +369,6 @@ async fn worker_task_full_lifecycle() {
         block_id: BlockId::new("step_1"),
         handler_name: "http_request".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({"url": "https://example.com"}),
         context: json!({}),
         attempt: 1,
@@ -513,201 +447,6 @@ async fn worker_task_full_lifecycle() {
 }
 
 #[tokio::test]
-async fn constrained_worker_task_is_claimed_only_by_matching_runtime() {
-    let s = store().await;
-    let instance_id = InstanceId::new();
-    seed_instance(&s, instance_id).await;
-    let now = Utc::now();
-    let task = WorkerTask {
-        id: Uuid::now_v7(),
-        instance_id,
-        block_id: BlockId::new("gpu_render"),
-        handler_name: "render".into(),
-        queue_name: None,
-        requirements: CapsuleRequirements {
-            handlers: vec!["render".into()],
-            plugins: vec!["chrome".into()],
-            regions: vec!["norway".into()],
-            hardware: vec!["cuda".into()],
-            ..Default::default()
-        },
-        params: json!({"input": "report"}),
-        context: json!({}),
-        attempt: 0,
-        timeout_ms: None,
-        state: WorkerTaskState::Pending,
-        worker_id: None,
-        claimed_at: None,
-        heartbeat_at: None,
-        claim_epoch: 0,
-        resume_checkpoint: None,
-        checkpoint_seq: 0,
-        completed_at: None,
-        output: None,
-        error_message: None,
-        error_retryable: None,
-        created_at: now,
-    };
-    s.create_worker_task(&task).await.unwrap();
-    assert!(
-        s.claim_worker_tasks("render", "legacy", 1)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-
-    let mut runtime = RuntimeCapabilities {
-        runtime_id: RuntimeId::new(),
-        kind: RuntimeKind::Desktop,
-        trust: RuntimeTrustLevel::Registered,
-        handlers: vec!["render".into()],
-        plugins: vec!["chrome".into()],
-        credentials: Vec::new(),
-        regions: vec!["sweden".into()],
-        hardware: vec!["cuda".into()],
-        offline_capable: false,
-        connectivity: Some(RuntimeConnectivity::Ethernet),
-        battery_percent: None,
-        estimated_cost_microunits: None,
-        estimated_latency_ms: None,
-        draining: false,
-        capsule_signing_public_key: None,
-        observed_at: now,
-        expires_at: now + Duration::minutes(4),
-    };
-    assert!(
-        s.claim_worker_tasks_matching("render", "wrong-region", None, None, &runtime, 1)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    runtime.regions = vec!["norway".into()];
-    let claimed = s
-        .claim_worker_tasks_matching("render", "gpu-no", None, None, &runtime, 1)
-        .await
-        .unwrap();
-    assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].id, task.id);
-}
-
-#[tokio::test]
-async fn capability_claim_respects_queue_inside_atomic_claim() {
-    let s = store().await;
-    let instance_id = InstanceId::new();
-    seed_instance(&s, instance_id).await;
-    let now = Utc::now();
-    let priority = distributed_task(instance_id, "priority", "norway", Some("gpu"), now);
-    let default = distributed_task(
-        instance_id,
-        "default",
-        "norway",
-        Some("default"),
-        now + Duration::microseconds(1),
-    );
-    s.create_worker_task(&priority).await.unwrap();
-    s.create_worker_task(&default).await.unwrap();
-
-    let claimed = s
-        .claim_worker_tasks_matching(
-            "render",
-            "gpu-worker",
-            None,
-            Some("gpu"),
-            &distributed_runtime(now, "norway"),
-            10,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].id, priority.id);
-    assert_eq!(
-        s.get_worker_task(default.id).await.unwrap().unwrap().state,
-        WorkerTaskState::Pending
-    );
-}
-
-#[tokio::test]
-async fn capability_claim_enforces_tenant_inside_atomic_claim() {
-    let s = store().await;
-    let now = Utc::now();
-    let tenant_a = make_instance("tenant-a", SequenceId::new());
-    let tenant_b = make_instance("tenant-b", SequenceId::new());
-    s.create_instance(&tenant_a).await.unwrap();
-    s.create_instance(&tenant_b).await.unwrap();
-    let task_a = distributed_task(tenant_a.id, "a", "norway", None, now);
-    let task_b = distributed_task(
-        tenant_b.id,
-        "b",
-        "norway",
-        None,
-        now + Duration::microseconds(1),
-    );
-    s.create_worker_task(&task_a).await.unwrap();
-    s.create_worker_task(&task_b).await.unwrap();
-
-    let claimed = s
-        .claim_worker_tasks_matching(
-            "render",
-            "tenant-a-worker",
-            Some(&TenantId::unchecked("tenant-a")),
-            None,
-            &distributed_runtime(now, "norway"),
-            10,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].id, task_a.id);
-    assert_eq!(
-        s.get_worker_task(task_b.id).await.unwrap().unwrap().state,
-        WorkerTaskState::Pending
-    );
-}
-
-#[tokio::test]
-async fn capability_claim_scans_past_more_than_one_page_of_incompatible_tasks() {
-    let s = store().await;
-    let instance_id = InstanceId::new();
-    seed_instance(&s, instance_id).await;
-    let now = Utc::now();
-    for index in 0..257 {
-        let task = distributed_task(
-            instance_id,
-            format!("incompatible-{index}"),
-            "sweden",
-            None,
-            now + Duration::microseconds(i64::from(index)),
-        );
-        s.create_worker_task(&task).await.unwrap();
-    }
-    let compatible = distributed_task(
-        instance_id,
-        "compatible",
-        "norway",
-        None,
-        now + Duration::microseconds(258),
-    );
-    s.create_worker_task(&compatible).await.unwrap();
-
-    let claimed = s
-        .claim_worker_tasks_matching(
-            "render",
-            "norway-worker",
-            None,
-            None,
-            &distributed_runtime(now, "norway"),
-            1,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].id, compatible.id);
-}
-
-#[tokio::test]
 async fn worker_activity_checkpoint_survives_lease_recovery() {
     let s = store().await;
     let inst_id = InstanceId::new();
@@ -718,7 +457,6 @@ async fn worker_activity_checkpoint_survives_lease_recovery() {
         block_id: BlockId::new("resumable"),
         handler_name: "long_activity".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,
@@ -813,7 +551,6 @@ async fn worker_task_fail_and_cancel() {
         block_id: BlockId::new("step_fail"),
         handler_name: "flaky_handler".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,
@@ -859,7 +596,6 @@ async fn worker_task_fail_and_cancel() {
         block_id: BlockId::new("step_cancel"),
         handler_name: "slow".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,
@@ -916,7 +652,6 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         block_id: BlockId::new("loop_body"),
         handler_name: "external_handler".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,
@@ -961,7 +696,6 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         block_id: BlockId::new("loop_body"),
         handler_name: "external_handler".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,
@@ -1005,7 +739,6 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         block_id: BlockId::new("race_branch"),
         handler_name: "external_handler".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,
@@ -1049,7 +782,6 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         block_id: BlockId::new("race_branch"),
         handler_name: "external_handler".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,
@@ -1103,7 +835,6 @@ async fn worker_task_queue_routing() {
         block_id: BlockId::new("q_step"),
         handler_name: "email_send".into(),
         queue_name: Some("priority_queue".into()),
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,
@@ -2710,7 +2441,6 @@ async fn worker_task_list_and_stats() {
             block_id: BlockId::new(format!("step_{i}")),
             handler_name: (*handler).into(),
             queue_name: None,
-            requirements: orch8_types::continuity::CapsuleRequirements::default(),
             params: json!({}),
             context: json!({}),
             attempt: 1,
@@ -2904,7 +2634,6 @@ async fn perf_concurrent_worker_claims() {
             block_id: BlockId::new(format!("step_{i}")),
             handler_name: "batch_handler".into(),
             queue_name: None,
-            requirements: orch8_types::continuity::CapsuleRequirements::default(),
             params: json!({"index": i}),
             context: json!({}),
             attempt: 1,
@@ -4062,7 +3791,6 @@ async fn retry_worker_task_atomically_replaces_task() {
         block_id: BlockId::new("step1"),
         handler_name: "h".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,
@@ -4088,7 +3816,6 @@ async fn retry_worker_task_atomically_replaces_task() {
         block_id: BlockId::new("step1"),
         handler_name: "h".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,

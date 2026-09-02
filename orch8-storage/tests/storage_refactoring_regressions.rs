@@ -79,7 +79,6 @@ fn make_worker_task(instance_id: InstanceId, timeout_ms: Option<i64>) -> WorkerT
         block_id: BlockId::new("s1"),
         handler_name: "h".into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,

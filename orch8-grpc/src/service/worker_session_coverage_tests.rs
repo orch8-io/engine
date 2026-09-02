@@ -341,7 +341,6 @@ fn pending_task(inst_id: &str, handler: &str) -> WorkerTask {
         block_id: orch8_types::ids::BlockId::new("step_1"),
         handler_name: handler.into(),
         queue_name: None,
-        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: serde_json::json!({"amount": 42}),
         context: serde_json::json!({}),
         attempt: 0,

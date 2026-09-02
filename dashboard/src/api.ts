@@ -236,7 +236,7 @@ export type BlockType =
   | "router"
   | "try_catch"
   | "sub_sequence"
-  | "ab_split"
+  | "a_b_split"
   | "cancellation_scope";
 
 export interface TaskInstance {

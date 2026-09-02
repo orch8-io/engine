@@ -1,8 +1,4 @@
 target/
-node_modules/
-packages/
-activepieces/
-.DS_Store
 .git/
 .worktrees/
 .env

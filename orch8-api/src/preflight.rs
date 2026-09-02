@@ -7,7 +7,7 @@
 //! queues, sub-sequences) fresh on every call — only static validation is
 //! cacheable, runtime readiness never is.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -47,38 +47,10 @@ pub fn routes() -> Router<AppState> {
 pub(crate) async fn preflight_draft(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
-    Query(options): Query<crate::sequences::DraftDecodeOptions>,
-    Json(value): Json<serde_json::Value>,
+    Json(seq): Json<SequenceDefinition>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (seq, decode_warnings) = crate::sequences::decode_draft_sequence(&value, options.strict)?;
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &seq.tenant_id)?;
-    let mut report = build_report(&state, &tenant_id, &seq).await;
-    if !decode_warnings.is_empty() {
-        let now = Utc::now();
-        report.checks.push(PreflightCheck::with_status(
-            "unknown_fields",
-            PreflightStatus::Warning,
-            "the draft contains fields ignored for compatibility",
-            decode_warnings
-                .into_iter()
-                .map(|message| {
-                    Finding::new(
-                        "UNKNOWN_SEQUENCE_FIELD",
-                        FindingSeverity::Warning,
-                        message,
-                        Confidence::Certain,
-                        now,
-                    )
-                })
-                .collect(),
-        ));
-        report.overall = report
-            .checks
-            .iter()
-            .map(|check| check.status)
-            .max()
-            .unwrap_or(PreflightStatus::Pass);
-    }
+    let report = build_report(&state, &tenant_id, &seq).await;
     Ok(Json(report))
 }
 

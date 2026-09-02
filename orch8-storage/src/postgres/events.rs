@@ -112,14 +112,11 @@ pub(super) async fn find_pending(
     event_names: &[String],
     correlation_key: &str,
 ) -> Result<Vec<EventEnvelope>, StorageError> {
-    if event_names.is_empty() {
-        return Ok(Vec::new());
-    }
     let rows = sqlx::query(&format!(
         "SELECT {EVENT_COLUMNS} FROM event_inbox
          WHERE tenant_id = $1 AND correlation_key = $2 AND status = 'pending'
            AND event_name = ANY($3)
-         ORDER BY received_at ASC LIMIT 10000"
+         ORDER BY received_at ASC"
     ))
     .bind(tenant_id)
     .bind(correlation_key)

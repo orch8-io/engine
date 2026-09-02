@@ -54,7 +54,7 @@ impl<'a> EffectGuard<'a> {
                 let expected = unresolved.state;
                 unresolved
                     .transition(EffectState::Unknown, Utc::now())
-                    .map_err(|error| EngineError::EffectTransition(error.to_string()))?;
+                    .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
                 let _ = storage
                     .cas_effect_receipt(tenant_id, unresolved.id, expected, &unresolved)
                     .await?;
@@ -124,7 +124,7 @@ impl<'a> EffectGuard<'a> {
         let mut updated = self.receipt.clone();
         updated
             .transition(EffectState::Dispatched, Utc::now())
-            .map_err(|error| EngineError::EffectTransition(error.to_string()))?;
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
         match self
             .storage
             .dispatch_effect_receipt_at_most_once(&updated.tenant_id, &updated)
@@ -158,7 +158,7 @@ impl<'a> EffectGuard<'a> {
         let mut updated = self.receipt.clone();
         updated
             .transition(next, Utc::now())
-            .map_err(|error| EngineError::EffectTransition(error.to_string()))?;
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
         if !self
             .storage
             .cas_effect_receipt(&updated.tenant_id, updated.id, expected, &updated)
@@ -335,7 +335,7 @@ async fn settle_external_worker_effect(
     receipt.provider_receipt_id = output.and_then(provider_receipt_id);
     receipt
         .transition(next, Utc::now())
-        .map_err(|error| EngineError::EffectTransition(error.to_string()))?;
+        .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
     if !storage
         .cas_effect_receipt(tenant_id, id, expected, &receipt)
         .await?
@@ -388,7 +388,7 @@ fn request_hash(handler: &str, params: &Value) -> Result<String, EngineError> {
         "handler": handler,
         "params": params,
     }))
-    .map_err(|error| EngineError::Serialization(error.to_string()))?;
+    .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
     Ok(hex_sha256(canonical.as_bytes()))
 }
 
@@ -412,7 +412,7 @@ fn destination_fingerprint(handler: &str, params: &Value) -> Result<String, Engi
         "handler": handler,
         "destination": selected,
     }))
-    .map_err(|error| EngineError::Serialization(error.to_string()))?;
+    .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
     Ok(hex_sha256(canonical.as_bytes()))
 }
 

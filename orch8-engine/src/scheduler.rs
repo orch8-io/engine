@@ -1144,13 +1144,12 @@ async fn dispatch_cleanup_step(
     hook: &'static str,
     ctx: crate::handlers::StepContext,
 ) -> Option<Result<serde_json::Value, orch8_types::error::StepError>> {
-    let plugin_kind = crate::handlers::PluginKind::detect(&step.handler);
     let result = if let Some(handler) = handlers.get(&step.handler) {
         dispatch_hook_bounded(handler(ctx)).await
-    } else if plugin_kind == Some(crate::handlers::PluginKind::ActivePieces) {
+    } else if crate::handlers::activepieces::is_ap_handler(&step.handler) {
         // ⚡ Bolt: Avoid cloning `step.handler` String just to pass a reference.
         dispatch_hook_bounded(crate::handlers::activepieces::handle_ap(ctx, &step.handler)).await
-    } else if plugin_kind == Some(crate::handlers::PluginKind::Grpc) {
+    } else if crate::handlers::grpc_plugin::is_grpc_handler(&step.handler) {
         let Some(endpoint) = crate::handlers::step_dispatch::resolve_plugin_source(
             storage.as_ref(),
             &step.handler,
@@ -1169,7 +1168,7 @@ async fn dispatch_cleanup_step(
         let mut ctx = ctx;
         ctx.params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
         dispatch_hook_bounded(crate::handlers::grpc_plugin::handle_grpc_plugin(ctx)).await
-    } else if let Some(plugin_name) = (plugin_kind == Some(crate::handlers::PluginKind::Wasm))
+    } else if let Some(plugin_name) = crate::handlers::wasm_plugin::is_wasm_handler(&step.handler)
         .then(|| crate::handlers::wasm_plugin::parse_plugin_name(&step.handler))
         .flatten()
     {
@@ -2074,7 +2073,9 @@ fn use_tree_evaluator(
         || {
             blocks.iter().any(|b| {
                 if let orch8_types::sequence::BlockDefinition::Step(step) = b {
-                    crate::handlers::PluginKind::detect(&step.handler).is_some()
+                    crate::handlers::activepieces::is_ap_handler(&step.handler)
+                        || crate::handlers::grpc_plugin::is_grpc_handler(&step.handler)
+                        || crate::handlers::wasm_plugin::is_wasm_handler(&step.handler)
                 } else {
                     false
                 }
@@ -2442,9 +2443,7 @@ async fn process_instance_tree(
         return Ok(());
     }
 
-    match crate::evaluator::evaluate_with_clock(storage, handlers, instance, sequence, ctx.clock)
-        .await
-    {
+    match crate::evaluator::evaluate(storage, handlers, instance, sequence).await {
         Ok(EvalOutcome::MoreWork { has_waiting_nodes }) => {
             handle_tree_more_work(ctx, instance, has_waiting_nodes).await?;
         }

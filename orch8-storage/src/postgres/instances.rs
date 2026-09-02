@@ -284,7 +284,7 @@ pub(super) async fn claim_due(
         sqlx::query_as::<_, InstanceRow>(
             r"
             WITH locked AS (
-                SELECT id, tenant_id, priority, next_fire_at
+                SELECT *
                 FROM task_instances
                 WHERE (next_fire_at IS NULL OR next_fire_at <= $1)
                   AND state = 'scheduled'
@@ -292,24 +292,18 @@ pub(super) async fn claim_due(
                 LIMIT $4
                 FOR UPDATE SKIP LOCKED
             ), ranked AS (
-                SELECT id, tenant_id, priority, next_fire_at,
+                SELECT *,
                        ROW_NUMBER() OVER (
                            PARTITION BY tenant_id
                            ORDER BY priority DESC, next_fire_at ASC NULLS FIRST
                        ) AS rn
                 FROM locked
-            ), winners AS (
-                SELECT id
-                FROM ranked
-                WHERE rn <= $3
-                ORDER BY priority DESC, next_fire_at ASC NULLS FIRST
-                LIMIT $2
             )
-            SELECT task_instances.*
-            FROM task_instances
-            JOIN winners USING (id)
-            ORDER BY task_instances.priority DESC,
-                     task_instances.next_fire_at ASC NULLS FIRST
+            SELECT *
+            FROM ranked
+            WHERE rn <= $3
+            ORDER BY priority DESC, next_fire_at ASC NULLS FIRST
+            LIMIT $2
             ",
         )
         .bind(now)

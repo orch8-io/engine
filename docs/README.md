@@ -18,7 +18,6 @@ health probes and inbound webhook routes are intentionally public.
 - [Sequences](SEQUENCES.md) — learn the workflow JSON model and block types.
 - [Agent patterns](agent-patterns/README.md) — run four composable AI workflow examples.
 - [Email classifier](../examples/email-classifier/README.md) — a complete TypeScript worker and webhook application.
-- [Portable agent product](../examples/portable-agent-product/README.md) — compile policy, wrap a local worker, score conformance, and validate an OEM plan.
 
 ## Operate
 
@@ -35,7 +34,6 @@ health probes and inbound webhook routes are intentionally public.
 - [Governed execution wakes](PUSH_GOVERNANCE.md) — tenant credential routing, signed wake metadata, collapse, and token quarantine.
 - [Continuity operations](CONTINUITY_OPERATIONS.md) — portable handoff, migration, effects, and provenance.
 - [Continuity debugging](CONTINUITY_DEBUGGING.md) — fault lab, DLQ reproduction, checkpoints, and fixture extraction.
-- [Agent continuity product](AGENT_CONTINUITY_PRODUCT.md) — protocol, portable work offers, wrappers, trust-boundary profiles, conformance, and commercial contracts.
 
 ## Reference
 

@@ -41,9 +41,6 @@ pub async fn run(
             print_response(resp, format).await?;
         }
         CheckpointCmd::Prune { instance_id, keep } => {
-            crate::confirm_destructive(&format!(
-                "Prune checkpoints for instance {instance_id}, keeping {keep}?"
-            ))?;
             let resp = client
                 .post(format!("{base}/instances/{instance_id}/checkpoints/prune"))
                 .json(&serde_json::json!({ "keep": keep }))

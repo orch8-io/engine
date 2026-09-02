@@ -548,19 +548,6 @@ pub fn calculate_backoff(
     Duration::from_millis(backoff_ms.max(0.0) as u64)
 }
 
-/// Calculate exponential retry backoff with bounded jitter. The deterministic
-/// base remains available for planning/tests, while scheduling uses this
-/// variant so simultaneous provider failures do not retry in lockstep.
-pub fn calculate_backoff_with_jitter(
-    attempt: u32,
-    initial_backoff: Duration,
-    max_backoff: Duration,
-    multiplier: f64,
-) -> Duration {
-    let base = calculate_backoff(attempt, initial_backoff, max_backoff, multiplier);
-    crate::scheduling::delay::apply_percentage_jitter(base, max_backoff, 80, 120)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,33 +574,6 @@ mod tests {
             calculate_backoff(3, initial, max, multiplier),
             Duration::from_secs(8)
         );
-    }
-
-    #[test]
-    fn retry_backoff_jitter_is_bounded_and_varies() {
-        let samples = (0..128)
-            .map(|_| {
-                calculate_backoff_with_jitter(
-                    0,
-                    Duration::from_secs(1),
-                    Duration::from_secs(60),
-                    2.0,
-                )
-            })
-            .collect::<std::collections::HashSet<_>>();
-        assert!(samples.len() > 1, "jitter must de-correlate retries");
-        assert!(samples.iter().all(|sample| {
-            *sample >= Duration::from_millis(800) && *sample <= Duration::from_millis(1200)
-        }));
-    }
-
-    #[test]
-    fn retry_backoff_jitter_never_exceeds_maximum() {
-        let maximum = Duration::from_secs(10);
-        for _ in 0..1_000 {
-            let value = calculate_backoff_with_jitter(20, Duration::from_secs(1), maximum, 2.0);
-            assert!(value <= maximum, "{value:?} exceeded {maximum:?}");
-        }
     }
 
     #[test]

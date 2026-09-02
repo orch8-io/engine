@@ -10,7 +10,7 @@ use crate::atomic_write;
 #[derive(Debug, Args)]
 pub struct SupportBundleCmd {
     /// Destination JSON file (atomically replaced).
-    #[arg(long = "out-file", default_value = "orch8-support-bundle.json")]
+    #[arg(long, default_value = "orch8-support-bundle.json")]
     pub output: PathBuf,
     /// Optional local typed config to include in redacted form.
     #[arg(long, default_value = "orch8.toml")]
