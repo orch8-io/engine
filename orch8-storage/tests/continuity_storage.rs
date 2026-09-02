@@ -4,7 +4,7 @@ use orch8_storage::{ContinuityStore, InstanceStore, InvariantStore, LiveMigratio
 use orch8_types::checkpoint::Checkpoint;
 use orch8_types::context::ExecutionContext;
 use orch8_types::continuity::{
-    ContinuationGrant, ContinuationGrantId, ContinuationGrantState, ContinuityExecution,
+    CapsuleId, ContinuationGrant, ContinuationGrantId, ContinuationGrantState, ContinuityExecution,
     ContinuityId, ContinuityStream, EffectDispatchOutcome, EffectId, EffectKind, EffectReceipt,
     EffectState, ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId, HandoffState,
     OwnershipState, PlacementDecision, PlacementDecisionId, PlacementEvidence,
@@ -20,12 +20,56 @@ use orch8_types::continuity_advanced::{
     WhatIfScenario,
 };
 use orch8_types::dlq::{DlqIncidentReproduction, ReproductionStatus};
+use orch8_types::error::StorageError;
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::sequence::CompensationVerificationPolicy;
 
 fn tenant(value: &str) -> TenantId {
     TenantId::new(value).unwrap()
+}
+
+#[tokio::test]
+async fn external_capsule_import_is_idempotent_and_instance_bound() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let tenant = tenant("tenant-external-import");
+    let capsule_id = CapsuleId::new();
+    let runtime_id = RuntimeId::new();
+    let first_instance = InstanceId::new();
+    let bound = storage
+        .record_external_capsule_import(&tenant, capsule_id, runtime_id, first_instance, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(bound, first_instance);
+    assert!(
+        storage
+            .is_capsule_import_instance(&tenant, capsule_id, runtime_id, first_instance)
+            .await
+            .unwrap()
+    );
+
+    let retry_with_another_instance = storage
+        .record_external_capsule_import(
+            &tenant,
+            capsule_id,
+            runtime_id,
+            InstanceId::new(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry_with_another_instance, first_instance);
+
+    let collision = storage
+        .record_external_capsule_import(
+            &tenant,
+            CapsuleId::new(),
+            runtime_id,
+            first_instance,
+            Utc::now(),
+        )
+        .await;
+    assert!(matches!(collision, Err(StorageError::Conflict(_))));
 }
 
 fn continuity_stream(tenant_id: TenantId, now: chrono::DateTime<Utc>) -> ContinuityStream {

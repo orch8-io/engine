@@ -5,6 +5,7 @@ Examples are grouped by the question they answer:
 | Example | What it demonstrates | Run from |
 |---|---|---|
 | [Safe release](safe-release/README.md) | Immutable versions, preflight, semantic diff, historical validation, and a canary gate | repository root |
+| [Portable agent product](portable-agent-product/README.md) | Placement policy, local worker wrapper, profile offer, conformance score, and OEM contract | repository root |
 | [Email classifier](email-classifier/README.md) | Webhook ingestion, TypeScript worker steps, LLM classification, Activepieces, Slack, and Resend | `examples/email-classifier` |
 | [iOS app](ios/) | Swift package integration and an observable mobile sequence | `examples/ios` |
 | [Android app](android/) | Gradle integration for the mobile engine | `examples/android` |

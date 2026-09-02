@@ -15,7 +15,7 @@ use super::helpers::{row_to_worker_task, ts};
 #[instrument(skip(storage, t), fields(task_id = %t.id, handler = %t.handler_name))]
 pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<(), StorageError> {
     sqlx::query(
-        "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,claim_epoch,resume_checkpoint,checkpoint_seq,completed_at,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21) ON CONFLICT(instance_id,block_id) DO NOTHING"
+        "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,requirements,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,claim_epoch,resume_checkpoint,checkpoint_seq,completed_at,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) ON CONFLICT(instance_id,block_id) DO NOTHING"
     )
     .bind(t.id.to_string())
     .bind(t.instance_id.into_uuid().to_string())
@@ -26,6 +26,7 @@ pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<()
     .bind(t.state.to_string())
     .bind(&t.worker_id)
     .bind(&t.queue_name)
+    .bind(serde_json::to_string(&t.requirements)?)
     .bind(t.output.as_ref().map(serde_json::to_string).transpose()?)
     .bind(&t.error_message)
     .bind(t.error_retryable.map(|b| b as i32))
@@ -125,7 +126,7 @@ pub(super) async fn claim(
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
     let select_res = sqlx::query(
-        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' ORDER BY created_at ASC LIMIT ?2",
+        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND requirements='{}' ORDER BY created_at ASC LIMIT ?2",
     )
     .bind(handler_name)
     .bind(limit as i64)
@@ -222,7 +223,7 @@ pub(super) async fn claim_for_tenant(
     let select_res = sqlx::query(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
-         WHERE wt.handler_name=?1 AND wt.state='pending' AND ti.tenant_id=?3
+         WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.requirements='{}' AND ti.tenant_id=?3
          ORDER BY wt.created_at ASC
          LIMIT ?2",
     )
@@ -296,6 +297,123 @@ pub(super) async fn claim_for_tenant(
     if let Err(e) = sqlx::query("COMMIT").execute(&mut *conn).await {
         rollback_quiet(&mut conn).await;
         return Err(StorageError::Query(e.to_string()));
+    }
+    Ok(tasks)
+}
+
+pub(super) async fn claim_matching(
+    storage: &SqliteStorage,
+    handler_name: &str,
+    worker_id: &str,
+    tenant_id: Option<&orch8_types::TenantId>,
+    queue_name: Option<&str>,
+    capabilities: &orch8_types::continuity::RuntimeCapabilities,
+    limit: u32,
+) -> Result<Vec<WorkerTask>, StorageError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let now_text = ts(Utc::now());
+    let mut conn = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let now = Utc::now();
+    let mut tasks = Vec::with_capacity(limit as usize);
+    let mut cursor: Option<(String, String)> = None;
+    while tasks.len() < limit as usize {
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT wt.* FROM worker_tasks wt");
+        if tenant_id.is_some() {
+            query.push(" JOIN task_instances ti ON ti.id=wt.instance_id");
+        }
+        query
+            .push(" WHERE wt.handler_name=")
+            .push_bind(handler_name);
+        query.push(" AND wt.state='pending'");
+        if let Some(queue) = queue_name {
+            query.push(" AND wt.queue_name=").push_bind(queue);
+        }
+        if let Some(tenant) = tenant_id {
+            query.push(" AND ti.tenant_id=").push_bind(tenant.as_str());
+        }
+        if let Some((created_at, id)) = cursor.as_ref() {
+            query
+                .push(" AND (wt.created_at > ")
+                .push_bind(created_at)
+                .push(" OR (wt.created_at = ")
+                .push_bind(created_at)
+                .push(" AND wt.id > ")
+                .push_bind(id)
+                .push("))");
+        }
+        query.push(" ORDER BY wt.created_at, wt.id LIMIT 256");
+        let rows = match query.build().fetch_all(&mut *conn).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                rollback_quiet(&mut conn).await;
+                return Err(StorageError::Query(error.to_string()));
+            }
+        };
+        if rows.is_empty() {
+            break;
+        }
+        let page = rows
+            .iter()
+            .map(row_to_worker_task)
+            .collect::<Result<Vec<_>, _>>()?;
+        cursor = page
+            .last()
+            .map(|task| (ts(task.created_at), task.id.to_string()));
+        tasks.extend(
+            page.into_iter()
+                .filter(|task| task.requirements.is_satisfied_by(capabilities, now))
+                .take(limit as usize - tasks.len()),
+        );
+    }
+    if !tasks.is_empty() {
+        let now_dt = Utc::now();
+        for task in &mut tasks {
+            task.state = orch8_types::worker::WorkerTaskState::Claimed;
+            task.worker_id = Some(worker_id.to_string());
+            task.claimed_at = Some(now_dt);
+            task.heartbeat_at = Some(now_dt);
+            task.claim_epoch = task.claim_epoch.saturating_add(1);
+        }
+        let mut update = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "UPDATE worker_tasks SET state='claimed', worker_id=",
+        );
+        update
+            .push_bind(worker_id)
+            .push(", claimed_at=")
+            .push_bind(&now_text)
+            .push(", heartbeat_at=")
+            .push_bind(&now_text)
+            .push(", claim_epoch=claim_epoch+1 WHERE id IN (");
+        let mut ids = update.separated(",");
+        for task in &tasks {
+            ids.push_bind(task.id.to_string());
+        }
+        ids.push_unseparated(")");
+        if let Err(error) = update.build().execute(&mut *conn).await {
+            rollback_quiet(&mut conn).await;
+            return Err(StorageError::Query(error.to_string()));
+        }
+        let events = tasks
+            .iter()
+            .map(|task| {
+                transition_event(
+                    task.id,
+                    task.claim_epoch,
+                    task.worker_id.clone(),
+                    WorkerAttemptEventKind::Claimed,
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        insert_attempt_events(&mut conn, &events).await?;
+    }
+    if let Err(error) = sqlx::query("COMMIT").execute(&mut *conn).await {
+        rollback_quiet(&mut conn).await;
+        return Err(StorageError::Query(error.to_string()));
     }
     Ok(tasks)
 }

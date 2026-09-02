@@ -80,6 +80,7 @@ fn task_named(state: WorkerTaskState, handler: &str, block: &str, age_secs: i64)
         block_id: BlockId::new(block),
         handler_name: handler.to_string(),
         queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 1,

@@ -1216,9 +1216,8 @@ fn is_block_object(map: &serde_json::Map<String, Value>) -> bool {
                 | "router"
                 | "try_catch"
                 | "sub_sequence"
-                // Serde tag for `BlockDefinition::ABSplit` (`rename_all =
-                // "snake_case"`) — `preflight.rs`/`release_diff.rs` use the
-                // same spelling.
+                | "ab_split"
+                // Legacy spelling emitted before v0.7.1.
                 | "a_b_split"
                 | "cancellation_scope"
                 | "saga"

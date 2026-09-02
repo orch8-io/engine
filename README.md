@@ -114,8 +114,7 @@ Run one local instance without starting a server:
 
 ```bash
 orch8 init my-project
-orch8 dev my-project --mock 'greet_user={"greeting":"hello"}' \
-  --skip-timers --once
+orch8 dev my-project --skip-timers --once
 ```
 
 Then follow the [progressive quick starts](docs/quick-starts/README.md) to add
@@ -330,6 +329,7 @@ engine/
 - [Mobile SDK](docs/MOBILE_SDK.md) — UniFFI bindings, iOS/Android setup, offline-first execution
 - [Continuity Operations](docs/CONTINUITY_OPERATIONS.md) — portable execution handoff, capsules, migrations, upgrade/recovery guidance
 - [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md) — checkpoint time-travel, what-if simulation, production-to-test extraction
+- [Agent Continuity Product](docs/AGENT_CONTINUITY_PRODUCT.md) — framework-neutral offers, wrappers, profiles, receipts, conformance, and relay/OEM contracts
 - [Typed Dataflow](docs/TYPED_DATAFLOW.md) — the `data.*`/`outputs.*` reference compiler and generated SDK bindings
 - [Safe Releases](docs/RELEASES.md) — semantic diff, historical replay, guarded canary, promotion, and rollback
 - [Operator Dashboard](docs/DASHBOARD.md) — connection, navigation, current surfaces, and verification

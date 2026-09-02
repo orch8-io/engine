@@ -22,6 +22,7 @@ fn mk_task(queue: Option<&str>) -> WorkerTask {
         block_id: BlockId::new("s1"),
         handler_name: "h".into(),
         queue_name: queue.map(String::from),
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: serde_json::json!({ "x": 1 }),
         context: serde_json::json!({}),
         attempt: 0,

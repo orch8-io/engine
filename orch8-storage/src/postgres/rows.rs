@@ -310,6 +310,7 @@ pub(super) struct WorkerTaskRow {
     pub block_id: String,
     pub handler_name: String,
     pub queue_name: Option<String>,
+    pub requirements: serde_json::Value,
     pub params: serde_json::Value,
     pub context: serde_json::Value,
     pub attempt: i16,
@@ -341,6 +342,8 @@ impl WorkerTaskRow {
             block_id: BlockId::new(self.block_id),
             handler_name: self.handler_name,
             queue_name: self.queue_name,
+            requirements: serde_json::from_value(self.requirements)
+                .map_err(StorageError::Serialization)?,
             params: self.params,
             context: self.context,
             attempt: self.attempt as u16,

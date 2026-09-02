@@ -1,0 +1,10 @@
+{
+  "deployment": "oem_embedded",
+  "tenant_isolation": true,
+  "signed_receipts": true,
+  "conformance_required": true,
+  "evidence_retention_days": 30,
+  "allowed_protocol_majors": [1],
+  "oem_product_id": "com.example.private-agent",
+  "usage_meter": "verified_handoff"
+}

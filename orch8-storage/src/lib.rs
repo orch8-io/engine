@@ -46,7 +46,7 @@ use orch8_types::trigger::{TriggerDef, TriggerPollState};
 use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 80;
+pub const STORAGE_SCHEMA_VERSION: u32 = 81;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -783,8 +783,9 @@ pub trait InstanceStore: Send + Sync + 'static {
     /// Atomically merge new blocks into an instance's existing injected-blocks
     /// array at the given position, inside a single transaction.
     ///
-    /// If `position` is `None`, `new_blocks_json` replaces any prior value
-    /// (equivalent to `inject_blocks`). If `position` is `Some(pos)`, the
+    /// If `position` is `None`, `new_blocks_json` replaces any prior value.
+    /// [`DynamicStepStore::inject_blocks`] remains the append-only operation.
+    /// If `position` is `Some(pos)`, the
     /// current injected blocks are read, `new_blocks_json`'s entries are
     /// inserted at `pos` (clamped to the current length), and the resulting
     /// array is written back -- all within one transaction so two concurrent
@@ -1349,6 +1350,18 @@ pub trait WorkerStore: Send + Sync + 'static {
         handler_name: &str,
         worker_id: &str,
         tenant_id: &TenantId,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    /// Atomically claim only tasks whose durable runtime requirements are
+    /// satisfied by this worker's current capability advertisement.
+    async fn claim_worker_tasks_matching(
+        &self,
+        handler_name: &str,
+        worker_id: &str,
+        tenant_id: Option<&TenantId>,
+        queue_name: Option<&str>,
+        capabilities: &RuntimeCapabilities,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError>;
 
@@ -2346,6 +2359,18 @@ pub trait ResourceStore: Send + Sync + 'static {
         ))
     }
 
+    async fn put_artifact_with_id(
+        &self,
+        _instance_id: InstanceId,
+        _artifact_id: Uuid,
+        _content_type: &str,
+        _bytes: bytes::Bytes,
+    ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
+        Err(StorageError::Unsupported(
+            "artifact storage is not configured".into(),
+        ))
+    }
+
     async fn get_artifact(&self, _key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         Err(StorageError::Unsupported(
             "artifact storage is not configured".into(),
@@ -2889,6 +2914,19 @@ pub trait ContinuityStore: Send + Sync + 'static {
         destination_runtime_id: RuntimeId,
         instance: &TaskInstance,
         checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<InstanceId, StorageError>;
+
+    /// Idempotently bind a capsule to an instance hosted by an external
+    /// runtime. Unlike `import_capsule_instance`, this records control-plane
+    /// evidence only; the instance and checkpoint remain in the destination
+    /// runtime's local store.
+    async fn record_external_capsule_import(
+        &self,
+        tenant_id: &TenantId,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance_id: InstanceId,
+        imported_at: DateTime<Utc>,
     ) -> Result<InstanceId, StorageError>;
 
     /// Verify that an imported instance was created from the given capsule for

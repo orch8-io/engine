@@ -31,7 +31,7 @@ const DEFAULT_JSON: &str = r#"{
     {
       "type": "step",
       "id": "greet",
-      "handler": "greet_user",
+      "handler": "noop",
       "params": { "message": "Hello from Orch8!" }
     },
     {

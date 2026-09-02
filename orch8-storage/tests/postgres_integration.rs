@@ -14,12 +14,17 @@ use std::sync::Arc;
 use chrono::Utc;
 use uuid::Uuid;
 
+use orch8_storage::conformance::run_core_conformance;
 use orch8_storage::postgres::PostgresStorage;
 use orch8_storage::{
     ExecutionTreeStore, InstanceStore, MobileSyncStore, OutputStore, ResourceStore,
     SchedulingStore, SequenceStore, WorkerStore,
 };
 use orch8_types::context::{ExecutionContext, RuntimeContext};
+use orch8_types::continuity::{
+    CapsuleRequirements, RuntimeCapabilities, RuntimeConnectivity, RuntimeId, RuntimeKind,
+    RuntimeTrustLevel,
+};
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
 use orch8_types::ids::{
     BlockId, ExecutionNodeId, InstanceId, Namespace, ResourceKey, SequenceId, TenantId,
@@ -50,6 +55,15 @@ macro_rules! require_postgres {
             }
         }
     };
+}
+
+#[tokio::test]
+async fn postgres_passes_public_core_conformance() {
+    let storage = require_postgres!();
+    let report = run_core_conformance(&storage)
+        .await
+        .expect("Postgres must satisfy the scheduler storage contract");
+    assert_eq!(report.checks.len(), 9);
 }
 
 fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
@@ -227,6 +241,7 @@ async fn tenant_worker_claim_does_not_lock_task_instances_row() {
         block_id: BlockId::new("step_1"),
         handler_name: "http_call".into(),
         queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: serde_json::json!({}),
         context: serde_json::json!({}),
         attempt: 1,
@@ -308,6 +323,96 @@ fn source_pins_for_update_of_wt_in_tenant_claim_queries() {
 }
 
 #[tokio::test]
+async fn capability_aware_postgres_claim_skips_incompatible_work_atomically() {
+    let s = require_postgres!();
+    let tenant = format!("t-capability-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let instance = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&instance).await.unwrap();
+    let now = Utc::now();
+    let incompatible_id = Uuid::new_v4();
+    let compatible_id = Uuid::new_v4();
+
+    for (id, block, region) in [
+        (incompatible_id, "wrong-region", "brazil"),
+        (compatible_id, "compatible", "norway"),
+    ] {
+        s.create_worker_task(&WorkerTask {
+            id,
+            instance_id: instance.id,
+            block_id: BlockId::new(block),
+            handler_name: "render".into(),
+            queue_name: Some("gpu".into()),
+            requirements: CapsuleRequirements {
+                handlers: vec!["render".into()],
+                regions: vec![region.into()],
+                hardware: vec!["cuda".into()],
+                requires_network: true,
+                ..Default::default()
+            },
+            params: serde_json::json!({"block": block}),
+            context: serde_json::json!({}),
+            attempt: 1,
+            timeout_ms: None,
+            state: WorkerTaskState::Pending,
+            worker_id: None,
+            claimed_at: None,
+            heartbeat_at: None,
+            claim_epoch: 0,
+            resume_checkpoint: None,
+            checkpoint_seq: 0,
+            completed_at: None,
+            output: None,
+            error_message: None,
+            error_retryable: None,
+            created_at: now,
+        })
+        .await
+        .unwrap();
+    }
+
+    let capabilities = RuntimeCapabilities {
+        runtime_id: RuntimeId::new(),
+        kind: RuntimeKind::Desktop,
+        trust: RuntimeTrustLevel::Registered,
+        handlers: vec!["render".into()],
+        plugins: Vec::new(),
+        credentials: Vec::new(),
+        regions: vec!["norway".into()],
+        hardware: vec!["cuda".into()],
+        offline_capable: false,
+        connectivity: Some(RuntimeConnectivity::Ethernet),
+        battery_percent: None,
+        estimated_cost_microunits: None,
+        estimated_latency_ms: None,
+        draining: false,
+        capsule_signing_public_key: None,
+        observed_at: now,
+        expires_at: now + chrono::Duration::minutes(5),
+    };
+    let claimed = s
+        .claim_worker_tasks_matching(
+            "render",
+            "gpu-worker",
+            Some(&TenantId::unchecked(&tenant)),
+            Some("gpu"),
+            &capabilities,
+            1,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].block_id.as_str(), "compatible");
+    assert_eq!(claimed[0].claim_epoch, 1);
+    let incompatible = s.get_worker_task(incompatible_id).await.unwrap().unwrap();
+    assert_eq!(incompatible.state, WorkerTaskState::Pending);
+}
+
+#[tokio::test]
 async fn worker_claim_epoch_fences_restarted_postgres_worker() {
     let s = require_postgres!();
     let tenant = format!("t-worker-fence-{}", Uuid::new_v4());
@@ -325,6 +430,7 @@ async fn worker_claim_epoch_fences_restarted_postgres_worker() {
         block_id: BlockId::new("fenced_step"),
         handler_name: handler.clone(),
         queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: serde_json::json!({}),
         context: serde_json::json!({}),
         attempt: 1,
