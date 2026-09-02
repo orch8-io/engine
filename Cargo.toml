@@ -82,7 +82,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 # advisory forces the move, so we don't take on a crypto-code migration for a
 # version-number bump alone. Revisit together, deliberately, if ever needed.
 aes-gcm = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 
 # HTTP client
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "multipart", "form", "query"] }
