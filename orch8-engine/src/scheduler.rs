@@ -1524,18 +1524,13 @@ async fn emit_sla_alerts(
         .collect();
     let existing = ctx.storage.get_block_outputs_batch(&keys).await?;
 
-    // Performance: Sorting keys and using binary search avoids
-    // the allocation and hashing overhead of building a HashSet for
-    // exclusion checking on the execution hot path.
-    let mut existing_keys: Vec<(&InstanceId, &BlockId)> =
-        existing.keys().map(|(iid, bid)| (iid, bid)).collect();
-    existing_keys.sort_unstable();
+    let mut existing_ref = std::collections::HashSet::with_capacity(existing.len());
+    for key in existing.keys() {
+        existing_ref.insert((&key.0, &key.1));
+    }
 
     for c in candidates {
-        if existing_keys
-            .binary_search(&(&c.instance_id, &c.block_id))
-            .is_ok()
-        {
+        if existing_ref.contains(&(&c.instance_id, &c.block_id)) {
             continue;
         }
         // Persist the sentinel BEFORE emitting so a crash mid-emit cannot
