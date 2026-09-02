@@ -13,8 +13,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
-use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
+use aes_gcm::Aes256Gcm;
+use aes_gcm::aead::{Aead, Generate, KeyInit, Nonce, Payload};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use zeroize::Zeroize;
@@ -89,8 +89,8 @@ impl FieldEncryptor {
             key_bytes.zeroize();
             return Err(EncryptionError::InvalidKeyLength(len));
         }
-        let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_bytes);
-        let cipher = Aes256Gcm::new(key);
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|_| EncryptionError::InvalidKeyLength(len))?;
         key_bytes.zeroize();
         Ok(Self {
             cipher,
@@ -104,9 +104,8 @@ impl FieldEncryptor {
     /// Create an encryptor from raw 32 bytes.
     #[must_use]
     pub fn from_bytes(key: &[u8; 32]) -> Self {
-        let key = aes_gcm::Key::<Aes256Gcm>::from_slice(key);
         Self {
-            cipher: Aes256Gcm::new(key),
+            cipher: Aes256Gcm::new(key.into()),
             old_cipher: None,
             encrypt_count: Arc::new(AtomicU64::new(0)),
             budget_warned: Arc::new(AtomicBool::new(false)),
@@ -165,8 +164,10 @@ impl FieldEncryptor {
             key_bytes.zeroize();
             return Err(EncryptionError::InvalidKeyLength(len));
         }
-        let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_bytes);
-        self.old_cipher = Some(Aes256Gcm::new(key));
+        self.old_cipher = Some(
+            Aes256Gcm::new_from_slice(&key_bytes)
+                .map_err(|_| EncryptionError::InvalidKeyLength(len))?,
+        );
         key_bytes.zeroize();
         Ok(self)
     }
@@ -177,7 +178,7 @@ impl FieldEncryptor {
         value: &serde_json::Value,
     ) -> Result<serde_json::Value, EncryptionError> {
         let plaintext = serde_json::to_vec(value)?;
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = self
             .cipher
             .encrypt(&nonce, plaintext.as_slice())
@@ -222,10 +223,11 @@ impl FieldEncryptor {
             return Err(EncryptionError::InvalidCiphertext);
         }
         let (nonce_bytes, ciphertext) = payload.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::<Aes256Gcm>::try_from(nonce_bytes)
+            .map_err(|_| EncryptionError::InvalidCiphertext)?;
 
         // Try primary key first.
-        if let Ok(plaintext) = self.cipher.decrypt(nonce, ciphertext) {
+        if let Ok(plaintext) = self.cipher.decrypt(&nonce, ciphertext) {
             let value = serde_json::from_slice(&plaintext)?;
             return Ok(value);
         }
@@ -233,7 +235,7 @@ impl FieldEncryptor {
         // Fall back to old key if present.
         if let Some(ref old) = self.old_cipher {
             let plaintext = old
-                .decrypt(nonce, ciphertext)
+                .decrypt(&nonce, ciphertext)
                 .map_err(|_| EncryptionError::DecryptFailed)?;
             let value = serde_json::from_slice(&plaintext)?;
             return Ok(value);
@@ -277,7 +279,7 @@ impl FieldEncryptor {
         aad: &[u8],
     ) -> Result<serde_json::Value, EncryptionError> {
         let plaintext = serde_json::to_vec(value)?;
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = self
             .cipher
             .encrypt(
@@ -323,10 +325,11 @@ impl FieldEncryptor {
             return Err(EncryptionError::InvalidCiphertext);
         }
         let (nonce_bytes, ciphertext) = payload.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::<Aes256Gcm>::try_from(nonce_bytes)
+            .map_err(|_| EncryptionError::InvalidCiphertext)?;
 
         if let Ok(plaintext) = self.cipher.decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad,
@@ -337,7 +340,7 @@ impl FieldEncryptor {
         if let Some(ref old) = self.old_cipher {
             let plaintext = old
                 .decrypt(
-                    nonce,
+                    &nonce,
                     Payload {
                         msg: ciphertext,
                         aad,
@@ -361,7 +364,7 @@ impl FieldEncryptor {
     /// # Errors
     /// Returns [`EncryptionError::EncryptFailed`] if the AEAD seal fails.
     pub fn encrypt_bytes(&self, plaintext: &[u8]) -> Result<Vec<u8>, EncryptionError> {
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = self
             .cipher
             .encrypt(&nonce, plaintext)
@@ -381,7 +384,7 @@ impl FieldEncryptor {
         plaintext: &[u8],
         aad: &[u8],
     ) -> Result<Vec<u8>, EncryptionError> {
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = self
             .cipher
             .encrypt(
@@ -410,13 +413,14 @@ impl FieldEncryptor {
             return Err(EncryptionError::InvalidCiphertext);
         }
         let (nonce_bytes, ciphertext) = sealed.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        if let Ok(plain) = self.cipher.decrypt(nonce, ciphertext) {
+        let nonce = Nonce::<Aes256Gcm>::try_from(nonce_bytes)
+            .map_err(|_| EncryptionError::InvalidCiphertext)?;
+        if let Ok(plain) = self.cipher.decrypt(&nonce, ciphertext) {
             return Ok(plain);
         }
         if let Some(ref old) = self.old_cipher {
             return old
-                .decrypt(nonce, ciphertext)
+                .decrypt(&nonce, ciphertext)
                 .map_err(|_| EncryptionError::DecryptFailed);
         }
         Err(EncryptionError::DecryptFailed)
@@ -433,18 +437,19 @@ impl FieldEncryptor {
             return Err(EncryptionError::InvalidCiphertext);
         }
         let (nonce_bytes, ciphertext) = sealed.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::<Aes256Gcm>::try_from(nonce_bytes)
+            .map_err(|_| EncryptionError::InvalidCiphertext)?;
         let payload = Payload {
             msg: ciphertext,
             aad,
         };
-        if let Ok(plain) = self.cipher.decrypt(nonce, payload) {
+        if let Ok(plain) = self.cipher.decrypt(&nonce, payload) {
             return Ok(plain);
         }
         if let Some(ref old) = self.old_cipher {
             return old
                 .decrypt(
-                    nonce,
+                    &nonce,
                     Payload {
                         msg: ciphertext,
                         aad,

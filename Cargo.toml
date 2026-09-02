@@ -81,7 +81,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 # aead::OsRng convenience API used in orch8-types/src/encryption.rs. No
 # advisory forces the move, so we don't take on a crypto-code migration for a
 # version-number bump alone. Revisit together, deliberately, if ever needed.
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 base64 = "0.23"
 
 # HTTP client
