@@ -22,11 +22,14 @@ COPY orch8-push/Cargo.toml orch8-push/Cargo.toml
 # Create dummy source files so cargo can resolve the workspace and cache deps.
 RUN mkdir -p orch8/src && echo "" > orch8/src/lib.rs \
     && mkdir -p orch8-types/src && echo "" > orch8-types/src/lib.rs \
-    && mkdir -p orch8-storage/src && echo "" > orch8-storage/src/lib.rs \
-    && mkdir -p orch8-engine/src && echo "" > orch8-engine/src/lib.rs \
+    && mkdir -p orch8-storage/src orch8-storage/benches && echo "" > orch8-storage/src/lib.rs \
+    && echo "fn main() {}" > orch8-storage/benches/storage_bench.rs \
+    && mkdir -p orch8-engine/src orch8-engine/benches && echo "" > orch8-engine/src/lib.rs \
+    && echo "fn main() {}" > orch8-engine/benches/engine_bench.rs \
     && mkdir -p orch8-api/src && echo "" > orch8-api/src/lib.rs \
     && mkdir -p orch8-grpc/src && echo "" > orch8-grpc/src/lib.rs \
     && mkdir -p orch8-server/src && echo "fn main() {}" > orch8-server/src/main.rs \
+    && echo "fn main() {}" > orch8-server/src/bench.rs \
     && mkdir -p orch8-cli/src && echo "fn main() {}" > orch8-cli/src/main.rs \
     && mkdir -p orch8-mobile/src/bin && echo "" > orch8-mobile/src/lib.rs \
     && echo "fn main() {}" > orch8-mobile/src/bin/uniffi-bindgen.rs \
