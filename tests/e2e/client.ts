@@ -302,8 +302,16 @@ export class Orch8Client {
     return this.#post(`/continuity/handoffs/${id}/accept`, req);
   }
 
+  async acceptExternalHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/accept-external`, req);
+  }
+
   async resumeHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
     return this.#post(`/continuity/handoffs/${id}/resume`, req);
+  }
+
+  async resumeExternalHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/resume-external`, req);
   }
 
   async rejectHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
@@ -868,7 +876,7 @@ export class Orch8Client {
     workerId: string,
     limit: number = 1,
   ): Promise<WorkerTask[]> {
-    const tasks = await this.#post<WorkerTask[]>("/workers/tasks/poll/queue", {
+    const { tasks } = await this.#post<{ tasks: WorkerTask[] }>("/workers/tasks/poll/queue", {
       queue_name: queueName,
       worker_id: workerId,
       limit,
@@ -906,7 +914,7 @@ export class Orch8Client {
     workerId: string,
     limit: number = 1,
   ): Promise<WorkerTask[]> {
-    const tasks = await this.#post<WorkerTask[]>("/workers/tasks/poll", {
+    const { tasks } = await this.#post<{ tasks: WorkerTask[] }>("/workers/tasks/poll", {
       handler_name: handlerName,
       worker_id: workerId,
       limit,

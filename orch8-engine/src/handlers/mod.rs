@@ -42,6 +42,30 @@ use orch8_types::sequence::HumanInputDef;
 
 use crate::circuit_breaker::CircuitBreakerRegistry;
 
+/// Supported out-of-process step protocols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PluginKind {
+    ActivePieces,
+    Grpc,
+    Wasm,
+}
+
+impl PluginKind {
+    /// Classify a handler once at the execution boundary.
+    #[must_use]
+    pub(crate) fn detect(handler: &str) -> Option<Self> {
+        if activepieces::is_ap_handler(handler) {
+            Some(Self::ActivePieces)
+        } else if grpc_plugin::is_grpc_handler(handler) {
+            Some(Self::Grpc)
+        } else if wasm_plugin::is_wasm_handler(handler) {
+            Some(Self::Wasm)
+        } else {
+            None
+        }
+    }
+}
+
 /// Step handlers are plain async functions. No activity ceremony.
 pub type StepHandler = Box<
     dyn Fn(

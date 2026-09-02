@@ -1,6 +1,6 @@
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -21,6 +21,33 @@ use crate::AppState;
 use crate::auth::OptionalAdmin;
 use crate::error::ApiError;
 
+const MAX_WORKER_ARTIFACT_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+
+#[derive(serde::Serialize, ToSchema)]
+pub(crate) struct PollTasksResponse {
+    tasks: Vec<orch8_types::worker::WorkerTask>,
+    lease_secs: u64,
+    heartbeat_interval_secs: u64,
+    poll_after_ms: u64,
+}
+
+fn poll_response(state: &AppState, tasks: Vec<orch8_types::worker::WorkerTask>) -> Response {
+    let poll_after_ms = if tasks.is_empty() { 1_000 } else { 0 };
+    let mut response = Json(PollTasksResponse {
+        tasks,
+        lease_secs: state.worker_lease_secs,
+        heartbeat_interval_secs: state.worker_heartbeat_interval_secs,
+        poll_after_ms,
+    })
+    .into_response();
+    if poll_after_ms > 0 {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+    }
+    response
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/workers", get(list_workers))
@@ -31,6 +58,10 @@ pub fn routes() -> Router<AppState> {
         .route("/workers/tasks/poll", post(poll_tasks))
         .route("/workers/tasks/poll/queue", post(poll_tasks_from_queue))
         .route("/workers/tasks/{id}/complete", post(complete_task))
+        .route(
+            "/workers/tasks/{id}/artifacts/{upload_id}",
+            post(upload_task_artifact),
+        )
         .route("/workers/tasks/{id}/fail", post(fail_task))
         .route("/workers/tasks/{id}/heartbeat", post(heartbeat_task))
         .route("/workers/commands", post(enqueue_command))
@@ -301,11 +332,17 @@ pub(crate) struct PollRequest {
     /// Optional worker build/deploy version, recorded on the worker registry.
     #[serde(default)]
     version: Option<String>,
+    /// Short-lived, fail-closed capability advertisement used for atomic
+    /// hardware, region, browser/mobile UI, network, and trust matching.
+    #[serde(default)]
+    capabilities: Option<orch8_types::continuity::RuntimeCapabilities>,
 }
 
 const fn default_poll_limit() -> u32 {
     1
 }
+
+const SHA256_HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Record a worker registration from a poll. Best-effort: a registry write
 /// failure must never fail the poll itself, so errors are logged and dropped.
@@ -363,9 +400,44 @@ async fn version_pin_blocks(
     }
 }
 
+async fn validate_and_record_capabilities(
+    state: &AppState,
+    scoped: Option<&orch8_types::ids::TenantId>,
+    worker_id: &str,
+    handler_name: &str,
+    capabilities: Option<&orch8_types::continuity::RuntimeCapabilities>,
+) -> Result<(), ApiError> {
+    let Some(capabilities) = capabilities else {
+        return Ok(());
+    };
+    crate::continuity::validate_runtime_registration(capabilities, chrono::Utc::now())?;
+    if capabilities.runtime_id.to_string() != worker_id {
+        return Err(ApiError::InvalidArgument(
+            "worker_id must equal capabilities.runtime_id".into(),
+        ));
+    }
+    if !capabilities
+        .handlers
+        .iter()
+        .any(|handler| handler == handler_name)
+    {
+        return Err(ApiError::InvalidArgument(
+            "capabilities.handlers must include handler_name".into(),
+        ));
+    }
+    if let Some(tenant_id) = scoped {
+        state
+            .storage
+            .upsert_runtime_capabilities(tenant_id, capabilities)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    }
+    Ok(())
+}
+
 #[utoipa::path(post, path = "/workers/tasks/poll", tag = "workers",
     request_body = PollRequest,
-    responses((status = 200, description = "Claimed worker tasks", body = Vec<orch8_types::worker::WorkerTask>))
+    responses((status = 200, description = "Claimed worker tasks and lease hints", body = PollTasksResponse))
 )]
 pub(crate) async fn poll_tasks(
     State(state): State<AppState>,
@@ -374,6 +446,14 @@ pub(crate) async fn poll_tasks(
 ) -> Result<impl IntoResponse, ApiError> {
     let limit = req.limit.min(1000);
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
+    validate_and_record_capabilities(
+        &state,
+        scoped.as_ref(),
+        &req.worker_id,
+        &req.handler_name,
+        req.capabilities.as_ref(),
+    )
+    .await?;
 
     // Version pin: a worker below the (tenant, handler) min version is given no
     // tasks for that handler. Still record the registration so the operator can
@@ -395,7 +475,7 @@ pub(crate) async fn poll_tasks(
             scoped.as_ref(),
         )
         .await;
-        return Ok(Json(Vec::<orch8_types::worker::WorkerTask>::new()));
+        return Ok(poll_response(&state, Vec::new()));
     }
 
     // When a tenant is scoped, route through the tenant-aware claim so
@@ -404,7 +484,20 @@ pub(crate) async fn poll_tasks(
     // with this worker_id, drop it from the response, and leave a ghost
     // `claimed` row invisible to its owning tenant until the stale-task
     // reaper reset it.
-    let tasks = if let Some(ref tid) = scoped {
+    let tasks = if let Some(capabilities) = req.capabilities.as_ref() {
+        state
+            .storage
+            .claim_worker_tasks_matching(
+                &req.handler_name,
+                &req.worker_id,
+                scoped.as_ref(),
+                None,
+                capabilities,
+                limit,
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
+    } else if let Some(ref tid) = scoped {
         state
             .storage
             .claim_worker_tasks_for_tenant(&req.handler_name, &req.worker_id, tid, limit)
@@ -428,7 +521,7 @@ pub(crate) async fn poll_tasks(
     )
     .await;
 
-    Ok(Json(tasks))
+    Ok(poll_response(&state, tasks))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -441,11 +534,13 @@ pub(crate) struct QueuePollRequest {
     /// Optional worker build/deploy version, recorded on the worker registry.
     #[serde(default)]
     version: Option<String>,
+    #[serde(default)]
+    capabilities: Option<orch8_types::continuity::RuntimeCapabilities>,
 }
 
 #[utoipa::path(post, path = "/workers/tasks/poll/queue", tag = "workers",
     request_body = QueuePollRequest,
-    responses((status = 200, description = "Claimed worker tasks from queue", body = Vec<orch8_types::worker::WorkerTask>))
+    responses((status = 200, description = "Claimed worker tasks from queue and lease hints", body = PollTasksResponse))
 )]
 pub(crate) async fn poll_tasks_from_queue(
     State(state): State<AppState>,
@@ -455,6 +550,14 @@ pub(crate) async fn poll_tasks_from_queue(
     let limit = req.limit.min(1000);
     // Tenant-scoped claim path — see `poll_tasks` comment for the rationale.
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
+    validate_and_record_capabilities(
+        &state,
+        scoped.as_ref(),
+        &req.worker_id,
+        &req.handler_name,
+        req.capabilities.as_ref(),
+    )
+    .await?;
 
     // Version pin (same as the default poll path).
     if version_pin_blocks(
@@ -474,10 +577,23 @@ pub(crate) async fn poll_tasks_from_queue(
             scoped.as_ref(),
         )
         .await;
-        return Ok(Json(Vec::<orch8_types::worker::WorkerTask>::new()));
+        return Ok(poll_response(&state, Vec::new()));
     }
 
-    let tasks = if let Some(ref tid) = scoped {
+    let tasks = if let Some(capabilities) = req.capabilities.as_ref() {
+        state
+            .storage
+            .claim_worker_tasks_matching(
+                &req.handler_name,
+                &req.worker_id,
+                scoped.as_ref(),
+                Some(&req.queue_name),
+                capabilities,
+                limit,
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
+    } else if let Some(ref tid) = scoped {
         state
             .storage
             .claim_worker_tasks_from_queue_for_tenant(
@@ -512,7 +628,7 @@ pub(crate) async fn poll_tasks_from_queue(
     )
     .await;
 
-    Ok(Json(tasks))
+    Ok(poll_response(&state, tasks))
 }
 
 /// Aggregated view of one worker on the fleet, grouped from its
@@ -676,6 +792,153 @@ pub(crate) struct CompleteRequest {
     /// Optional log lines the worker captured while running this task.
     #[serde(default)]
     logs: Vec<orch8_types::step_log::StepLogEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ArtifactUploadQuery {
+    worker_id: String,
+    claim_epoch: u64,
+    #[serde(default)]
+    file_name: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, ToSchema)]
+pub(crate) struct WorkerArtifactReceipt {
+    artifact: orch8_types::artifact::ArtifactRef,
+    upload_id: Uuid,
+    file_name: Option<String>,
+    sha256: String,
+    size: u64,
+}
+
+/// Upload a task-owned file before completion. The client chooses `upload_id`,
+/// so a phone can safely retry after suspension or a network transition.
+#[utoipa::path(
+    post,
+    path = "/workers/tasks/{id}/artifacts/{upload_id}",
+    tag = "workers",
+    params(
+        ("id" = Uuid, Path, description = "Worker task ID"),
+        ("upload_id" = Uuid, Path, description = "Stable client idempotency key"),
+        ("worker_id" = String, Query),
+        ("claim_epoch" = u64, Query),
+        ("file_name" = Option<String>, Query),
+        ("sha256" = Option<String>, Query),
+    ),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
+    responses(
+        (status = 201, description = "Artifact stored", body = WorkerArtifactReceipt),
+        (status = 409, description = "Lease changed or upload ID reused with other bytes"),
+    )
+)]
+pub(crate) async fn upload_task_artifact(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((task_id, upload_id)): Path<(Uuid, Uuid)>,
+    Query(query): Query<ArtifactUploadQuery>,
+    request: Request,
+) -> Result<impl IntoResponse, ApiError> {
+    use sha2::{Digest, Sha256};
+
+    let task = state
+        .storage
+        .get_worker_task(task_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker_task"))?
+        .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
+    let instance = state
+        .storage
+        .get_instance(task.instance_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {}", task.instance_id)))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("worker_task {task_id}"),
+    )?;
+    let claim = WorkerClaim::new(query.worker_id, query.claim_epoch);
+    if task.state != WorkerTaskState::Claimed
+        || task.worker_id.as_deref() != Some(claim.worker_id.as_str())
+        || task.claim_epoch != claim.claim_epoch
+    {
+        record_stale_rejection(
+            &state,
+            task_id,
+            &claim,
+            "artifact upload rejected: lease changed",
+        )
+        .await;
+        return Err(ApiError::Conflict("worker task lease changed".into()));
+    }
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    if request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > MAX_WORKER_ARTIFACT_UPLOAD_BYTES)
+    {
+        return Err(ApiError::PayloadTooLarge(
+            "artifact exceeds the 10 MiB request limit".into(),
+        ));
+    }
+    let body = axum::body::to_bytes(request.into_body(), MAX_WORKER_ARTIFACT_UPLOAD_BYTES)
+        .await
+        .map_err(|_| {
+            ApiError::PayloadTooLarge("artifact exceeds the 10 MiB request limit".into())
+        })?;
+    let hash = Sha256::digest(&body);
+    let mut digest = String::with_capacity(64);
+    for byte in hash {
+        digest.push(char::from(SHA256_HEX[usize::from(byte >> 4)]));
+        digest.push(char::from(SHA256_HEX[usize::from(byte & 0x0f)]));
+    }
+    if query
+        .sha256
+        .as_deref()
+        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&digest))
+    {
+        return Err(ApiError::InvalidArgument("artifact sha256 mismatch".into()));
+    }
+    let artifact = state
+        .storage
+        .put_artifact_with_id(task.instance_id, upload_id, &content_type, body)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "artifact"))?;
+    if !state
+        .storage
+        .heartbeat_worker_task(task_id, &claim)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker_task"))?
+    {
+        record_stale_rejection(
+            &state,
+            task_id,
+            &claim,
+            "artifact upload completed after lease changed",
+        )
+        .await;
+        return Err(ApiError::Conflict("worker task lease changed".into()));
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(WorkerArtifactReceipt {
+            size: artifact.size,
+            artifact,
+            upload_id,
+            file_name: query.file_name,
+            sha256: digest,
+        }),
+    ))
 }
 
 /// Persist worker-reported step logs (best-effort — a write failure must never
@@ -1140,6 +1403,7 @@ pub(crate) async fn fail_task(
                 block_id: task.block_id.clone(),
                 handler_name: task.handler_name.clone(),
                 queue_name: task.queue_name.clone(),
+                requirements: task.requirements.clone(),
                 params: task.params.clone(),
                 context: task.context.clone(),
                 attempt: task.attempt + 1,
@@ -1253,6 +1517,7 @@ pub(crate) async fn fail_task(
                 block_id: task.block_id.clone(),
                 handler_name: task.handler_name.clone(),
                 queue_name: task.queue_name.clone(),
+                requirements: task.requirements.clone(),
                 params: task.params.clone(),
                 context: task.context.clone(),
                 attempt: task.attempt + 1,

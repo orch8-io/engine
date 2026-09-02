@@ -6,6 +6,14 @@ use reqwest::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
 
+async fn poll_tasks(response: reqwest::Response) -> Vec<serde_json::Value> {
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["lease_secs"].as_u64().is_some());
+    assert!(body["heartbeat_interval_secs"].as_u64().is_some());
+    assert!(body["poll_after_ms"].as_u64().is_some());
+    body["tasks"].as_array().unwrap().clone()
+}
+
 fn mk_sequence_body(id: Uuid) -> serde_json::Value {
     json!({
         "id": id,
@@ -71,6 +79,7 @@ async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id
         block_id: orch8_types::ids::BlockId::new("s1"),
         handler_name: "external_handler".into(),
         queue_name: Some("q1".into()),
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,
@@ -112,7 +121,7 @@ async fn poll_tasks_returns_claimed_task() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0]["id"], task_id.to_string());
     // The claim API returns the task as it was selected (pending) even though
@@ -325,7 +334,7 @@ async fn reclaimed_task_fences_same_worker_process_and_explains_recovery() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let tasks: Vec<serde_json::Value> = response.json().await.unwrap();
+        let tasks = poll_tasks(response).await;
         assert_eq!(tasks[0]["claim_epoch"], expected_epoch);
         if expected_epoch == 1 {
             srv.storage
@@ -400,7 +409,7 @@ async fn poll_from_named_queue_isolates_tasks() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0]["id"], task_id.to_string());
 
@@ -418,7 +427,7 @@ async fn poll_from_named_queue_isolates_tasks() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 0);
 }
 
@@ -487,7 +496,7 @@ async fn get_workers_reports_in_flight_and_queue() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
 
     let resp = client
@@ -607,7 +616,7 @@ async fn version_pin_blocks_old_worker_and_allows_new() {
         .send()
         .await
         .unwrap();
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 0, "old worker must be blocked by the pin");
 
     // A worker with no version is also blocked.
@@ -618,10 +627,7 @@ async fn version_pin_blocks_old_worker_and_allows_new() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.json::<Vec<serde_json::Value>>().await.unwrap().len(),
-        0
-    );
+    assert_eq!(poll_tasks(resp).await.len(), 0);
 
     // A 2.1 worker satisfies the pin and claims the task.
     let resp = client
@@ -631,7 +637,7 @@ async fn version_pin_blocks_old_worker_and_allows_new() {
         .send()
         .await
         .unwrap();
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1, "new worker must satisfy the pin");
 }
 

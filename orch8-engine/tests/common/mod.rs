@@ -841,6 +841,7 @@ pub fn default_config() -> SchedulerConfig {
         webhooks: WebhookConfig::default(),
         externalize_output_threshold: 0,
         encryption_key: SecretString::default(),
+        allow_legacy_unbound_encryption: true,
         max_context_bytes: 256 * 1024,
         externalization_mode: ExternalizationMode::default(),
         worker_reaper_tick_secs: 30,

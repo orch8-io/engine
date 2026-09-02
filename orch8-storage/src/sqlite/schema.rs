@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     state TEXT NOT NULL DEFAULT 'pending',
     worker_id TEXT,
     queue_name TEXT,
+    requirements TEXT NOT NULL DEFAULT '{}',
     output TEXT,
     error_message TEXT,
     error_retryable INTEGER,

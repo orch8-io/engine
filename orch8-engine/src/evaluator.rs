@@ -72,6 +72,7 @@ pub enum EvalOutcome {
 struct EvalContext {
     tree: Vec<ExecutionNode>,
     instance: TaskInstance,
+    clock: orch8_types::clock::SharedClock,
     /// When true, the tree must be re-read from storage before the next use.
     tree_stale: bool,
     /// When true, the instance must be re-read from storage before the next use.
@@ -394,6 +395,19 @@ pub async fn evaluate(
     instance: &TaskInstance,
     sequence: &SequenceDefinition,
 ) -> Result<EvalOutcome, EngineError> {
+    let clock = orch8_types::clock::SharedClock::default();
+    evaluate_with_clock(storage, handlers, instance, sequence, &clock).await
+}
+
+/// Evaluate an execution tree using the scheduler's injected time source.
+#[allow(clippy::too_many_lines)]
+pub async fn evaluate_with_clock(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    instance: &TaskInstance,
+    sequence: &SequenceDefinition,
+    clock: &orch8_types::clock::SharedClock,
+) -> Result<EvalOutcome, EngineError> {
     // Merge sequence blocks with any dynamically injected blocks.
     let blocks = merged_blocks(storage.as_ref(), instance.id, sequence).await?;
 
@@ -416,6 +430,7 @@ pub async fn evaluate(
     let mut ctx = EvalContext {
         tree: initial_tree,
         instance: initial_instance,
+        clock: clock.clone(),
         tree_stale: false,
         instance_stale: false,
     };
@@ -690,6 +705,7 @@ async fn phase_root_activation(
             &ctx.tree,
             sequence.interceptors.as_ref(),
             outputs_snapshot,
+            &ctx.clock,
         )
         .await?;
         ctx.tree_stale = true;
@@ -745,6 +761,7 @@ async fn phase_running_steps(
                     &ctx.tree,
                     sequence.interceptors.as_ref(),
                     outputs_snapshot,
+                    &ctx.clock,
                 ),
                 dispatch_block(
                     storage,
@@ -755,6 +772,7 @@ async fn phase_running_steps(
                     &ctx.tree,
                     sequence.interceptors.as_ref(),
                     outputs_snapshot,
+                    &ctx.clock,
                 ),
             )
         })
@@ -786,6 +804,7 @@ async fn phase_running_steps(
         &ctx.tree,
         sequence.interceptors.as_ref(),
         outputs_snapshot,
+        &ctx.clock,
     )
     .await?;
     ctx.tree_stale = true;
@@ -905,6 +924,7 @@ async fn phase_composite_reevaluation(
             &ctx.tree,
             sequence.interceptors.as_ref(),
             outputs_snapshot,
+            &ctx.clock,
         )
         .await?;
         if may_mutate_instance(block) {
@@ -1213,12 +1233,7 @@ pub fn children_of(
 
 /// Check if all nodes in a set are in a terminal state.
 pub fn all_terminal(nodes: &[&ExecutionNode]) -> bool {
-    nodes.iter().all(|n| {
-        matches!(
-            n.state,
-            NodeState::Completed | NodeState::Failed | NodeState::Skipped | NodeState::Cancelled
-        )
-    })
+    nodes.iter().all(|n| n.state.is_terminal())
 }
 
 /// Check if any node in a set has completed.
@@ -1299,6 +1314,67 @@ pub async fn cancel_subtree(
         }
     }
 
+    Ok(())
+}
+
+/// Reset every strict descendant of `root_id` for another composite iteration.
+///
+/// User-visible step outputs remain append-only. Internal composite markers,
+/// effect receipts, and stale external-worker tasks are removed so a nested
+/// loop or `for_each` cannot inherit execution state from its prior iteration.
+pub async fn reset_subtree_to_pending(
+    storage: &dyn StorageBackend,
+    tree: &[ExecutionNode],
+    tenant_id: &orch8_types::ids::TenantId,
+    instance_id: InstanceId,
+    root_id: ExecutionNodeId,
+) -> Result<(), EngineError> {
+    let mut frontier = vec![root_id];
+    let mut descendants: Vec<(ExecutionNodeId, BlockType, BlockId)> = Vec::new();
+    while let Some(parent) = frontier.pop() {
+        for node in tree.iter().filter(|node| node.parent_id == Some(parent)) {
+            descendants.push((node.id, node.block_type, node.block_id.clone()));
+            frontier.push(node.id);
+        }
+    }
+    if descendants.is_empty() {
+        return Ok(());
+    }
+
+    let node_ids: Vec<_> = descendants.iter().map(|(id, _, _)| *id).collect();
+    storage
+        .update_nodes_state(&node_ids, NodeState::Pending)
+        .await?;
+
+    let composite_block_ids: Vec<_> = descendants
+        .iter()
+        .filter(|(_, kind, _)| matches!(kind, BlockType::Loop | BlockType::ForEach))
+        .map(|(_, _, block_id)| block_id.clone())
+        .collect();
+    if !composite_block_ids.is_empty() {
+        storage
+            .delete_block_outputs_batch(instance_id, &composite_block_ids)
+            .await?;
+    }
+
+    let step_block_ids: Vec<_> = descendants
+        .iter()
+        .filter(|(_, kind, _)| *kind == BlockType::Step)
+        .map(|(_, _, block_id)| block_id.clone())
+        .collect();
+    if !step_block_ids.is_empty() {
+        storage
+            .delete_effect_receipts_for_blocks(tenant_id, instance_id, &step_block_ids)
+            .await?;
+    }
+
+    let all_block_ids: Vec<_> = descendants
+        .iter()
+        .map(|(_, _, block_id)| block_id.as_str().to_owned())
+        .collect();
+    storage
+        .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &all_block_ids)
+        .await?;
     Ok(())
 }
 

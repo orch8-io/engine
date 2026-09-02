@@ -141,9 +141,7 @@ fn is_plugin_step(block: &BlockDefinition) -> bool {
     let BlockDefinition::Step(step) = block else {
         return false;
     };
-    crate::handlers::activepieces::is_ap_handler(&step.handler)
-        || crate::handlers::grpc_plugin::is_grpc_handler(&step.handler)
-        || crate::handlers::wasm_plugin::is_wasm_handler(&step.handler)
+    crate::handlers::PluginKind::detect(&step.handler).is_some()
 }
 
 #[derive(Default)]

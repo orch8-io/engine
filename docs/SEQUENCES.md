@@ -403,6 +403,43 @@ Protect critical blocks from cancellation until they complete.
 
 Use for cleanup, ledger writes, unlocks, and other consistency-sensitive work.
 
+## Expressions and Templates
+
+Orch8 has two related syntaxes. Expressions produce JSON values and are used
+by `when`, router/loop conditions, `retry_if`, and `break_on`. Templates inject
+values into step parameters.
+
+Expressions support JSON literals, paths, parentheses, `!`, arithmetic
+(`+ - * /`), comparisons (`== != < <= > >=`), membership (`in`), boolean
+operators (`&& ||`), ternaries (`condition ? yes : no`), arrays, and the
+documented built-ins `abs`, `len`, and `json`. A malformed expression is an
+authoring error; for example, `data.x ==` is rejected instead of treating the
+missing operand as `null`. There is no implicit string-to-number coercion for
+comparisons. Truthiness is: null, false, zero, empty strings, and empty arrays
+are false; objects and other non-empty values are true.
+
+Expression roots are `context.data`, `context.config`, `data`, `config`,
+`runtime`, `input`, `outputs`, `steps` (an alias of `outputs`), and
+`instance_id`. Example:
+
+```json
+{"when": "data.plan == \"pro\" && len(steps.lookup.items) > 0"}
+```
+
+Templates use `{{ path }}` and the same data/output aliases. A template that
+occupies the whole JSON string preserves the resolved JSON type; interpolation
+inside a larger string produces text. Supported pipe filters are `upper`,
+`lower`, `trim`, `abs`, `url_encode`, `base64`, `base64_decode`, `replace`,
+`default`, `truncate`, `join`, `split`, `hash`, and `round`. The `state` root is
+available only in handlers that explicitly supply local composite state.
+
+```json
+{"message": "Hello {{ data.user.name | default(\"friend\") | trim }}"}
+```
+
+`saga` steps use the same template rules. A `steps.<block-id>` reference and
+an `outputs.<block-id>` reference are identical.
+
 ## Scheduling
 
 Durable delay:

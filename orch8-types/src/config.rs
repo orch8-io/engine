@@ -370,6 +370,10 @@ pub struct SchedulerConfig {
     /// Can also be set via `ORCH8_ENCRYPTION_KEY` env var.
     #[serde(default)]
     pub encryption_key: SecretString,
+    /// Permit legacy unbound `enc:v1:` context ciphertext during migration.
+    /// Set false after every protected row has been rewritten as AAD-bound v2.
+    #[serde(default = "default_true")]
+    pub allow_legacy_unbound_encryption: bool,
     /// Maximum serialized size of a single instance's `ExecutionContext`
     /// in bytes. Writes exceeding this limit are rejected with 413. The
     /// whole context travels on every scheduler claim, so keeping it small
@@ -453,6 +457,7 @@ impl Default for SchedulerConfig {
             webhooks: WebhookConfig::default(),
             externalize_output_threshold: 0,
             encryption_key: SecretString::default(),
+            allow_legacy_unbound_encryption: true,
             max_context_bytes: default_max_context_bytes(),
             externalization_mode: ExternalizationMode::default(),
             worker_reaper_tick_secs: default_worker_reaper_tick_secs(),
@@ -490,6 +495,10 @@ const fn default_cron_tick_secs() -> u64 {
 
 const fn default_max_context_bytes() -> u32 {
     crate::context::DEFAULT_MAX_CONTEXT_BYTES
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -379,6 +379,7 @@ async fn grpc_worker_stream_negotiates_bounds_and_delivers_on_demand() {
         block_id: orch8_types::ids::BlockId::new("step"),
         handler_name: "payments".into(),
         queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: serde_json::json!({"amount": 42}),
         context: serde_json::json!({}),
         attempt: 0,

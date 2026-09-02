@@ -57,9 +57,9 @@ pub(super) fn transition_event(
 pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result<(), StorageError> {
     sqlx::query(
         r"INSERT INTO worker_tasks
-            (id, instance_id, block_id, handler_name, queue_name, params, context,
+            (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
              attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (instance_id, block_id) DO NOTHING",
     )
     .bind(task.id)
@@ -67,6 +67,7 @@ pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result
     .bind(task.block_id.as_str())
     .bind(&task.handler_name)
     .bind(&task.queue_name)
+    .bind(serde_json::to_value(&task.requirements)?)
     .bind(&task.params)
     .bind(&task.context)
     .bind(task.attempt as i16)
@@ -86,7 +87,7 @@ pub(super) async fn get(
     task_id: Uuid,
 ) -> Result<Option<WorkerTask>, StorageError> {
     let row = sqlx::query_as::<_, WorkerTaskRow>(
-        r"SELECT id, instance_id, block_id, handler_name, queue_name, params, context,
+        r"SELECT id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
                  attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
                  claim_epoch, resume_checkpoint, checkpoint_seq,
                  completed_at, output, error_message, error_retryable, created_at
@@ -111,12 +112,12 @@ pub(super) async fn claim(
               claim_epoch = claim_epoch + 1
           WHERE id IN (
               SELECT id FROM worker_tasks
-              WHERE handler_name = $1 AND state = 'pending'
+              WHERE handler_name = $1 AND state = 'pending' AND requirements = '{}'::jsonb
               ORDER BY created_at
               LIMIT $3
               FOR UPDATE SKIP LOCKED
           )
-          RETURNING id, instance_id, block_id, handler_name, queue_name, params, context,
+          RETURNING id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
                     claim_epoch, resume_checkpoint, checkpoint_seq,
                     completed_at, output, error_message, error_retryable, created_at",
@@ -170,12 +171,13 @@ pub(super) async fn claim_for_tenant(
               JOIN task_instances ti ON ti.id = wt.instance_id
               WHERE wt.handler_name = $1
                 AND wt.state = 'pending'
+                AND wt.requirements = '{}'::jsonb
                 AND ti.tenant_id = $4
               ORDER BY wt.created_at
               LIMIT $3
               FOR UPDATE OF wt SKIP LOCKED
           )
-          RETURNING id, instance_id, block_id, handler_name, queue_name, params, context,
+          RETURNING id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
                     claim_epoch, resume_checkpoint, checkpoint_seq,
                     completed_at, output, error_message, error_retryable, created_at",
@@ -202,6 +204,112 @@ pub(super) async fn claim_for_tenant(
             )
         })
         .collect();
+    insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(tasks)
+}
+
+pub(super) async fn claim_matching(
+    store: &PostgresStorage,
+    handler_name: &str,
+    worker_id: &str,
+    tenant_id: Option<&orch8_types::TenantId>,
+    queue_name: Option<&str>,
+    capabilities: &orch8_types::continuity::RuntimeCapabilities,
+    limit: u32,
+) -> Result<Vec<WorkerTask>, StorageError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut tx = store.pool.begin().await?;
+    let now = chrono::Utc::now();
+    let mut ids = Vec::with_capacity(limit as usize);
+    let mut cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)> = None;
+    while ids.len() < limit as usize {
+        let mut query = sqlx::QueryBuilder::<Postgres>::new(
+            "SELECT wt.id, wt.instance_id, wt.block_id, wt.handler_name, wt.queue_name, \
+             wt.requirements, wt.params, wt.context, wt.attempt, wt.timeout_ms, wt.state, \
+             wt.worker_id, wt.claimed_at, wt.heartbeat_at, wt.claim_epoch, \
+             wt.resume_checkpoint, wt.checkpoint_seq, wt.completed_at, wt.output, \
+             wt.error_message, wt.error_retryable, wt.created_at FROM worker_tasks wt",
+        );
+        if tenant_id.is_some() {
+            query.push(" JOIN task_instances ti ON ti.id = wt.instance_id");
+        }
+        query
+            .push(" WHERE wt.handler_name = ")
+            .push_bind(handler_name);
+        query.push(" AND wt.state = 'pending'");
+        if let Some(queue) = queue_name {
+            query.push(" AND wt.queue_name = ").push_bind(queue);
+        }
+        if let Some(tenant) = tenant_id {
+            query
+                .push(" AND ti.tenant_id = ")
+                .push_bind(tenant.as_str());
+        }
+        if let Some((created_at, id)) = cursor {
+            query
+                .push(" AND (wt.created_at, wt.id) > (")
+                .push_bind(created_at)
+                .push(", ")
+                .push_bind(id)
+                .push(")");
+        }
+        query.push(" ORDER BY wt.created_at, wt.id LIMIT 256 FOR UPDATE OF wt SKIP LOCKED");
+        let candidates = query
+            .build_query_as::<WorkerTaskRow>()
+            .fetch_all(&mut *tx)
+            .await?;
+        if candidates.is_empty() {
+            break;
+        }
+        let tasks = candidates
+            .into_iter()
+            .map(WorkerTaskRow::into_task)
+            .collect::<Result<Vec<_>, _>>()?;
+        cursor = tasks.last().map(|task| (task.created_at, task.id));
+        ids.extend(
+            tasks
+                .into_iter()
+                .filter(|task| task.requirements.is_satisfied_by(capabilities, now))
+                .take(limit as usize - ids.len())
+                .map(|task| task.id),
+        );
+    }
+    if ids.is_empty() {
+        tx.commit().await?;
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_as::<_, WorkerTaskRow>(
+        r"UPDATE worker_tasks SET state='claimed', worker_id=$1, claimed_at=NOW(),
+             heartbeat_at=NOW(), claim_epoch=claim_epoch+1
+           WHERE id = ANY($2)
+           RETURNING id, instance_id, block_id, handler_name, queue_name, requirements,
+             params, context, attempt, timeout_ms, state, worker_id, claimed_at,
+             heartbeat_at, claim_epoch, resume_checkpoint, checkpoint_seq, completed_at,
+             output, error_message, error_retryable, created_at",
+    )
+    .bind(worker_id)
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let tasks = rows
+        .into_iter()
+        .map(WorkerTaskRow::into_task)
+        .collect::<Result<Vec<_>, _>>()?;
+    let events = tasks
+        .iter()
+        .map(|task| {
+            transition_event(
+                task.id,
+                task.claim_epoch,
+                task.worker_id.clone(),
+                WorkerAttemptEventKind::Claimed,
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
     insert_attempt_events(&mut tx, &events).await?;
     tx.commit().await?;
     Ok(tasks)
@@ -480,9 +588,9 @@ pub(super) async fn retry(
 
     sqlx::query(
         r"INSERT INTO worker_tasks
-            (id, instance_id, block_id, handler_name, queue_name, params, context,
+            (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
              attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (instance_id, block_id) DO NOTHING",
     )
     .bind(new_task.id)
@@ -490,6 +598,7 @@ pub(super) async fn retry(
     .bind(new_task.block_id.as_str())
     .bind(&new_task.handler_name)
     .bind(&new_task.queue_name)
+    .bind(serde_json::to_value(&new_task.requirements)?)
     .bind(&new_task.params)
     .bind(&new_task.context)
     .bind(new_task.attempt as i16)
@@ -593,7 +702,7 @@ pub(super) async fn list(
     pagination: &orch8_types::filter::Pagination,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let mut qb = sqlx::QueryBuilder::new(
-        r"SELECT id, instance_id, block_id, handler_name, queue_name, params, context,
+        r"SELECT id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
                  attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
                  claim_epoch, resume_checkpoint, checkpoint_seq,
                  completed_at, output, error_message, error_retryable, created_at

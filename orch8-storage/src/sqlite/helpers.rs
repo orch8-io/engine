@@ -19,6 +19,17 @@ use orch8_types::session::{Session, SessionState};
 use orch8_types::signal::Signal;
 use orch8_types::worker::WorkerTask;
 
+/// Begin a SQLite transaction with the write reservation acquired up front.
+///
+/// Use this for read-modify-write operations. A deferred transaction can read
+/// a snapshot, lose a race to another writer, and then fail its upgrade with
+/// `SQLITE_BUSY_SNAPSHOT` without invoking SQLite's busy timeout.
+pub(super) async fn begin_immediate(
+    pool: &sqlx::SqlitePool,
+) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, StorageError> {
+    Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
+}
+
 pub(super) fn ts(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339()
 }
@@ -228,6 +239,7 @@ pub(super) fn row_to_worker_task(
         block_id: BlockId::new(row.get::<String, _>("block_id")),
         handler_name: row.get::<String, _>("handler_name"),
         queue_name: row.get::<Option<String>, _>("queue_name"),
+        requirements: parse_json(row.get::<&str, _>("requirements"))?,
         params: parse_json(row.get::<&str, _>("params"))?,
         context: parse_json(row.get::<&str, _>("context"))?,
         attempt: row.get::<i64, _>("attempt") as u16,

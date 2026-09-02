@@ -94,13 +94,22 @@ fn coverage_schema_009_sqlite_schema_version_is_current() {
 
 #[test]
 fn coverage_schema_010_crate_storage_schema_version_is_current() {
-    assert_eq!(crate::STORAGE_SCHEMA_VERSION, 80);
+    assert_eq!(crate::STORAGE_SCHEMA_VERSION, 81);
 }
 
 #[test]
 fn coverage_schema_018_worker_claim_fence_and_attempt_table_are_declared() {
     assert!(SCHEMA.contains("claim_epoch INTEGER NOT NULL DEFAULT 0"));
+    assert!(SCHEMA.contains("requirements TEXT NOT NULL DEFAULT '{}'"));
     assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS worker_task_attempt_events"));
+}
+
+#[tokio::test]
+async fn coverage_schema_020_worker_requirements_column_is_live() {
+    let storage = store().await;
+    let columns = table_columns(&storage, "worker_tasks").await;
+
+    assert!(columns.iter().any(|column| column == "requirements"));
 }
 
 #[tokio::test]
