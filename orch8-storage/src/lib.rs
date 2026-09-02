@@ -784,7 +784,7 @@ pub trait InstanceStore: Send + Sync + 'static {
     /// array at the given position, inside a single transaction.
     ///
     /// If `position` is `None`, `new_blocks_json` replaces any prior value.
-    /// [`DynamicStepStore::inject_blocks`] remains the append-only operation.
+    /// [`InstanceStore::inject_blocks`] remains the append-only operation.
     /// If `position` is `Some(pos)`, the
     /// current injected blocks are read, `new_blocks_json`'s entries are
     /// inserted at `pos` (clamped to the current length), and the resulting

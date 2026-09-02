@@ -56,7 +56,7 @@ pub(crate) async fn context_for_step(
     resolve_markers(storage, instance.id, filtered).await
 }
 
-/// Decision produced by [`breaker_preflight`], shared by the tree-evaluator
+/// Decision produced by [`breaker_preflight_at`], shared by the tree-evaluator
 /// (`execute_step_node`) and fast-path (`scheduler::step_exec`) dispatch sites
 /// so the open-breaker behaviour cannot drift between them.
 // `Proceed` carries a `Cow<StepDef>` (large when owned) and `Defer` is tiny —
