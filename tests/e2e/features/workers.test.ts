@@ -31,7 +31,8 @@ async function pollQueue(
   if (!res.ok) {
     throw new Error(`pollQueue failed: ${res.status} ${await res.text()}`);
   }
-  return (await res.json()) as WorkerTask[];
+  const body = (await res.json()) as { tasks: WorkerTask[] };
+  return body.tasks;
 }
 
 describe("External Workers", () => {
