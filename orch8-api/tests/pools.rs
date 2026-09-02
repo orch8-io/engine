@@ -34,7 +34,7 @@ async fn add_resource_rejects_invalid_warmup_date() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let msg = body["error"].as_str().unwrap_or("");
+    let msg = body["error"]["message"].as_str().unwrap_or("");
     assert!(
         msg.contains("warmup_start"),
         "error should mention warmup_start: {msg}"
