@@ -114,7 +114,7 @@ hmac = "0.13"
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 criterion = { version = "0.8", features = ["async_tokio"] }
 tikv-jemallocator = "0.6"
-async-nats = "0.49"
+async-nats = "0.50"
 notify = { version = "8", features = ["serde"] }
 wasmtime = "46"
 dashmap = "6"
