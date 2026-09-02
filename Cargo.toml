@@ -67,7 +67,7 @@ tower-http = { version = "0.7", features = ["cors", "timeout", "trace"] }
 
 # Configuration
 clap = { version = "4", features = ["derive", "env"] }
-toml = "0.8"
+toml = "1.1"
 
 # Async traits
 async-trait = "0.1"
