@@ -653,6 +653,7 @@ impl<'a> Parser<'a> {
             Some(Token::String(s)) => Cow::Owned(serde_json::Value::String(s)),
             Some(Token::Number(n)) => Cow::Owned(serde_json::json!(n)),
             Some(Token::Bool(b)) => Cow::Owned(serde_json::Value::Bool(b)),
+            Some(Token::Null) => Cow::Owned(serde_json::Value::Null),
             Some(Token::Path(path)) => {
                 if self.peek() == Some(&Token::LParen) {
                     self.advance(); // consume (
