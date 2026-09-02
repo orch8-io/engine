@@ -97,7 +97,10 @@ describe("Workflow Interceptors", () => {
       const tenantId = `intercept-sig-${uuid().slice(0, 8)}`;
       const seq = testSequence(
         "intercept-on-signal",
-        [step("s1", "log", { message: "x" })],
+        // Keep the instance alive until the signal is delivered. A single log
+        // step can complete between createInstance and sendSignal on a busy CI
+        // runner, making the signal interceptor assertion race the scheduler.
+        [step("s1", "sleep", { duration_ms: 2_000 })],
         { tenantId },
       );
       (seq as Record<string, unknown>).interceptors = {
@@ -118,8 +121,10 @@ describe("Workflow Interceptors", () => {
         namespace: "default",
       });
 
-      // Deliver a signal mid-flight. In the unblocked world, `on_signal`
-      // fires synchronously on delivery.
+      await client.waitForState(id, "running", { timeoutMs: 5_000 });
+
+      // Deliver a signal mid-flight. `on_signal` fires synchronously on
+      // delivery.
       // SignalType::Custom(String) is a newtype variant in serde — send
       // as { custom: "probe" } rather than the unit "custom".
       await client.sendSignal(id, { custom: "probe" } as unknown as string, {
