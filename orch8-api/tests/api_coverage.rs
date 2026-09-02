@@ -1754,7 +1754,7 @@ async fn t69_list_worker_tasks() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks = poll_tasks(resp).await;
+    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(tasks.len(), 1);
 }
 
@@ -2129,7 +2129,13 @@ async fn t91_not_found_error_body() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("not found"));
+    assert_eq!(v["error"]["code"], "not_found");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
 }
 
 #[tokio::test]
@@ -2147,7 +2153,13 @@ async fn t92_invalid_argument_error_body() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("invalid argument"));
+    assert_eq!(v["error"]["code"], "invalid_argument");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid argument")
+    );
 }
 
 #[tokio::test]
@@ -2164,7 +2176,8 @@ async fn t93_conflict_error_409() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("conflict"));
+    assert_eq!(v["error"]["code"], "conflict");
+    assert!(v["error"]["message"].as_str().unwrap().contains("conflict"));
 }
 
 #[tokio::test]

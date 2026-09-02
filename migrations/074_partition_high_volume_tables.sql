@@ -1,10 +1,6 @@
 -- Proactively partition the two append-heavy PostgreSQL tables while copying
 -- them is still cheap. Fixed hash partitions avoid future calendar-partition
 -- maintenance and keep the dominant lookup keys partition-prunable.
--- OPERATIONS: this migration rewrites block_outputs and audit_log while
--- holding ACCESS EXCLUSIVE locks. Run it in a planned write-maintenance
--- window, verify enough free disk for both old and new copies, and do not
--- cancel it after either rename has begun.
 
 ALTER TABLE block_outputs RENAME TO block_outputs_unpartitioned_074;
 ALTER TABLE block_outputs_unpartitioned_074
