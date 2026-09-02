@@ -116,7 +116,7 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 tikv-jemallocator = "0.7"
 async-nats = "0.50"
 notify = { version = "8", features = ["serde"] }
-wasmtime = "46"
+wasmtime = "48"
 dashmap = "6"
 tempfile = "3"
 serial_test = "4"
