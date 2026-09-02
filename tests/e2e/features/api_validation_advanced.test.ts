@@ -46,7 +46,7 @@ describe("API Validation Advanced", () => {
     }
   });
 
-  it("create sequence without blocks returns 422", async () => {
+  it("create sequence without blocks returns 400", async () => {
     try {
       await client.createSequence({
         id: uuid(),
@@ -56,13 +56,13 @@ describe("API Validation Advanced", () => {
         version: 1,
         blocks: [],
       } as any);
-      assert.fail("should throw 422");
+      assert.fail("should throw 400");
     } catch (err: any) {
-      assert.equal(err.status, 422);
+      assert.equal(err.status, 400);
     }
   });
 
-  it("create sequence with invalid block type returns 422", async () => {
+  it("create sequence with invalid block type returns 400", async () => {
     try {
       await client.createSequence({
         id: uuid(),
@@ -72,9 +72,9 @@ describe("API Validation Advanced", () => {
         version: 1,
         blocks: [{ type: "unknown_type", id: "bad" }],
       } as any);
-      assert.fail("should throw 422");
+      assert.fail("should throw 400");
     } catch (err: any) {
-      assert.equal(err.status, 422);
+      assert.equal(err.status, 400);
     }
   });
 

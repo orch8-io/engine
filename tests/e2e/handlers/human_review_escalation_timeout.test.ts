@@ -38,8 +38,9 @@ describe("Human Review Escalation on Timeout", () => {
             {
               wait_for_input: {
                 prompt: "approve?",
-                // 0.2s timeout — far shorter than the poll loop below.
-                timeout: 0.2,
+                // Durations are integer milliseconds; 200ms is far shorter
+                // than the poll loop below.
+                timeout: 200,
                 escalation_handler: "log",
               },
             },
