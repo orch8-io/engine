@@ -1,5 +1,5 @@
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc, Weekday};
-use rand::Rng;
+use rand::RngExt;
 
 use orch8_types::sequence::DelaySpec;
 

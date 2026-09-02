@@ -102,7 +102,7 @@ pub async fn run(client: &Client, base: &str, cmd: PackageCmd, format: OutputFor
 }
 
 fn keygen() {
-    let key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+    let key = ed25519_dalek::SigningKey::generate(&mut rand::rng());
     println!(
         "seed (SECRET — store safely): {}",
         BASE64.encode(key.to_bytes())

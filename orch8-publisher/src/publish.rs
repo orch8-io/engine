@@ -262,11 +262,11 @@ mod tests {
     use crate::manifest::ManifestGenerator;
     use ed25519_dalek::SigningKey;
     use orch8_types::sequence::SequenceStatus;
-    use rand_core::OsRng;
+    use rand::rng;
 
     fn setup() -> (SequencePublisher, SigningKey) {
         let cdn = Box::new(MemoryCdnBackend::new());
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = SigningKey::generate(&mut rng());
         let manifest_gen = ManifestGenerator::new(signing_key.clone(), "key1".to_string());
         let publisher =
             SequencePublisher::new(cdn, manifest_gen, "tenant1".to_string(), "key1".to_string())
@@ -324,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn publish_sequence_uploads_json_and_sig() {
         let cdn = Box::new(MemoryCdnBackend::new());
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = SigningKey::generate(&mut rng());
         let manifest_gen = ManifestGenerator::new(signing_key.clone(), "key1".to_string());
         let publisher =
             SequencePublisher::new(cdn, manifest_gen, "t1".to_string(), "key1".to_string())
@@ -487,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn publish_sequence_deterministic_hash() {
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::generate(&mut rng());
 
         let seq = make_seq("deterministic", 1, "t");
 
@@ -533,7 +533,7 @@ mod tests {
     #[tokio::test]
     async fn min_sdk_version_override_via_builder() {
         let cdn = Box::new(MemoryCdnBackend::new());
-        let signing_key = SigningKey::generate(&mut OsRng);
+        let signing_key = SigningKey::generate(&mut rng());
         let manifest_gen = ManifestGenerator::new(signing_key.clone(), "key1".to_string());
         let publisher =
             SequencePublisher::new(cdn, manifest_gen, "tenant1".to_string(), "key1".to_string())
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn new_rejects_empty_tenant_id() {
         let cdn = Box::new(MemoryCdnBackend::new());
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::generate(&mut rng());
         let r#gen = ManifestGenerator::new(key, "k".to_string());
         let result = SequencePublisher::new(cdn, r#gen, String::new(), "k".to_string());
         let Err(err) = result else {
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn new_rejects_path_metacharacters_in_tenant_id() {
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::generate(&mut rng());
         for bad in ["a/b", "a\\\\b", "../tenant", ".."] {
             let cdn = Box::new(MemoryCdnBackend::new());
             let r#gen = ManifestGenerator::new(key.clone(), "k".to_string());

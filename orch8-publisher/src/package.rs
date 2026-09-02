@@ -319,10 +319,10 @@ pub fn contract_files(archive: &PackageArchive) -> Vec<(&String, &String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand_core::OsRng;
+    use rand::rng;
 
     fn key() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        SigningKey::generate(&mut rng())
     }
 
     fn manifest(name: &str, version: &str) -> PackageManifest {

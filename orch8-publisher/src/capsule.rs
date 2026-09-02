@@ -111,7 +111,7 @@ mod tests {
         ContinuityId, ExecutionEpoch, RuntimeId, SequenceIdentity,
     };
     use orch8_types::ids::{BlockId, InstanceId, SequenceId, TenantId};
-    use rand_core::OsRng;
+    use rand::rng;
 
     use super::*;
 
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn signature_detects_manifest_tampering_and_requires_separate_trust() {
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::generate(&mut rng());
         let mut signed = sign_capsule_manifest(manifest(), &key).unwrap();
         verify_signed_capsule(&signed).unwrap();
         check_capsule_key_trust(&signed, &[signed.public_key.clone()]).unwrap();

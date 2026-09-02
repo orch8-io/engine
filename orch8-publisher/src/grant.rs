@@ -100,14 +100,14 @@ mod tests {
         RuntimeId,
     };
     use orch8_types::ids::TenantId;
-    use rand_core::OsRng;
+    use rand::rng;
 
     use super::*;
 
     #[test]
     fn signed_grant_requires_trust_and_detects_scope_tampering() {
         let now = Utc::now();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::generate(&mut rng());
         let grant = ContinuationGrant {
             id: ContinuationGrantId::new(),
             tenant_id: TenantId::new("tenant-a").unwrap(),

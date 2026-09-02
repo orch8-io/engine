@@ -4,7 +4,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
-use rand_core::OsRng;
+use rand::rng;
 use serde_json::json;
 use std::sync::Mutex;
 
@@ -20,7 +20,7 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus,
 // ---------------------------------------------------------------------------
 
 fn test_key() -> SigningKey {
-    SigningKey::generate(&mut OsRng)
+    SigningKey::generate(&mut rng())
 }
 
 fn make_manifest_sequence(name: &str, version: i32) -> ManifestSequence {

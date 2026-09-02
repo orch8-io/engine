@@ -56,16 +56,15 @@ pub async fn get_usage(
     // A header-scoped caller is locked to its own tenant (the `?tenant=` param
     // is ignored, so it can't read another tenant's usage). Only an unscoped
     // caller may select a tenant via the query param.
-    let tenant = match &tenant_ctx {
-        Some(axum::Extension(ctx)) => ctx.tenant_id.as_str().to_string(),
-        None => {
-            require_admin(&admin_ctx)?;
-            q.tenant.clone().ok_or_else(|| {
-                ApiError::InvalidArgument(
-                    "usage requires a tenant (X-Tenant-Id header or ?tenant=)".into(),
-                )
-            })?
-        }
+    let tenant = if let Some(axum::Extension(ctx)) = &tenant_ctx {
+        ctx.tenant_id.as_str().to_string()
+    } else {
+        require_admin(&admin_ctx)?;
+        q.tenant.clone().ok_or_else(|| {
+            ApiError::InvalidArgument(
+                "usage requires a tenant (X-Tenant-Id header or ?tenant=)".into(),
+            )
+        })?
     };
 
     let end = q.end.unwrap_or_else(Utc::now);

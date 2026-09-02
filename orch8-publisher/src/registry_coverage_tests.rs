@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::TimeZone;
-use rand_core::OsRng;
+use rand::rng;
 
 use super::*;
 use crate::cdn::MemoryCdnBackend;
@@ -38,7 +38,7 @@ fn fixture() -> (
     let cdn = Arc::new(MemoryCdnBackend::new());
     let publisher =
         PackageRegistryPublisher::new(Box::new(Arc::clone(&cdn)), "tenant-a", "acme").unwrap();
-    let key = SigningKey::generate(&mut OsRng);
+    let key = SigningKey::generate(&mut rng());
     let index = RegistryIndex::new("tenant-a", "acme");
     let ledger = TransparencyLedger::default();
     (cdn, publisher, key, index, ledger)
@@ -301,7 +301,7 @@ async fn coverage_registry_010_immutable_objects_upload_before_index_head() {
     let cdn = Arc::new(RecordingBackend::new());
     let publisher =
         PackageRegistryPublisher::new(Box::new(Arc::clone(&cdn)), "tenant-a", "acme").unwrap();
-    let key = SigningKey::generate(&mut OsRng);
+    let key = SigningKey::generate(&mut rng());
     let mut index = RegistryIndex::new("tenant-a", "acme");
     let mut ledger = TransparencyLedger::default();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
@@ -551,7 +551,7 @@ async fn coverage_registry_019_out_of_namespace_package_is_rejected() {
 #[tokio::test]
 async fn coverage_registry_020_mismatched_ledger_signing_key_is_rejected() {
     let (_cdn, publisher, key, mut index, mut ledger) = fixture();
-    let other_key = SigningKey::generate(&mut OsRng);
+    let other_key = SigningKey::generate(&mut rng());
     let error = publisher
         .publish(
             &package(&key, "acme/checkout", "1.0.0"),
@@ -672,7 +672,7 @@ async fn coverage_registry_027_version_records_its_ledger_entry_hash() {
 async fn coverage_registry_028_failed_package_upload_leaves_state_unchanged() {
     let publisher =
         PackageRegistryPublisher::new(Box::new(FailUploadBackend), "tenant-a", "acme").unwrap();
-    let key = SigningKey::generate(&mut OsRng);
+    let key = SigningKey::generate(&mut rng());
     let mut index = RegistryIndex::new("tenant-a", "acme");
     let mut ledger = TransparencyLedger::default();
     let error = publisher
@@ -697,7 +697,7 @@ async fn coverage_registry_029_failed_head_write_is_safe_to_retry() {
     });
     let publisher =
         PackageRegistryPublisher::new(Box::new(Arc::clone(&cdn)), "tenant-a", "acme").unwrap();
-    let key = SigningKey::generate(&mut OsRng);
+    let key = SigningKey::generate(&mut rng());
     let mut index = RegistryIndex::new("tenant-a", "acme");
     let mut ledger = TransparencyLedger::default();
     let signed = package(&key, "acme/checkout", "1.0.0");

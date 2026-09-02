@@ -52,7 +52,7 @@ fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
 /// (e.g. a shared server outage) would retry in lockstep and re-hammer the
 /// server the instant it recovers -- real jitter decorrelates them.
 fn jittered_backoff(current: Duration) -> Duration {
-    use rand::Rng;
+    use rand::RngExt;
     let factor = rand::rng().random_range(1.5..2.5);
     current.mul_f64(factor)
 }

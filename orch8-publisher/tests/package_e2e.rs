@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{TimeZone, Utc};
 use ed25519_dalek::SigningKey;
-use rand_core::OsRng;
+use rand::rng;
 use serde_json::json;
 
 use orch8_publisher::package::{
@@ -30,7 +30,7 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus,
 // ---------------------------------------------------------------------------
 
 fn key() -> SigningKey {
-    SigningKey::generate(&mut OsRng)
+    SigningKey::generate(&mut rng())
 }
 
 fn step(id: &str, handler: &str) -> BlockDefinition {

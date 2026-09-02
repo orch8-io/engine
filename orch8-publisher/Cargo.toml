@@ -26,7 +26,7 @@ subtle.workspace = true
 [dev-dependencies]
 axum = { workspace = true }
 tokio = { workspace = true }
-rand_core = "0.6"
+rand.workspace = true
 
 [lints]
 workspace = true

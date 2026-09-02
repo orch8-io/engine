@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{TimeZone, Utc};
 use ed25519_dalek::{Signer, SigningKey};
-use rand_core::OsRng;
+use rand::rng;
 
 use orch8_publisher::package::{
     PACKAGE_FORMAT_VERSION, PackageArchive, PackageError, PackageManifest, PackageRequirements,
@@ -24,7 +24,7 @@ use orch8_publisher::package::{
 // ---------------------------------------------------------------------------
 
 fn key() -> SigningKey {
-    SigningKey::generate(&mut OsRng)
+    SigningKey::generate(&mut rng())
 }
 
 fn manifest(name: &str, version: &str) -> PackageManifest {

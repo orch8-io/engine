@@ -469,7 +469,7 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::TimeZone;
-    use rand_core::OsRng;
+    use rand::rng;
 
     use super::*;
     use crate::cdn::MemoryCdnBackend;
@@ -496,7 +496,7 @@ mod tests {
         let cdn = Arc::new(MemoryCdnBackend::new());
         let publisher =
             PackageRegistryPublisher::new(Box::new(Arc::clone(&cdn)), "tenant-a", "acme").unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::generate(&mut rng());
         let mut index = RegistryIndex::new("tenant-a", "acme");
         let mut ledger = TransparencyLedger::default();
 
@@ -539,7 +539,7 @@ mod tests {
     async fn rejects_cross_tenant_state_duplicate_versions_and_tampering() {
         let cdn = Arc::new(MemoryCdnBackend::new());
         let publisher = PackageRegistryPublisher::new(Box::new(cdn), "tenant-a", "acme").unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::generate(&mut rng());
         let mut wrong_index = RegistryIndex::new("tenant-b", "acme");
         let mut ledger = TransparencyLedger::default();
         let timestamp = Utc.with_ymd_and_hms(2026, 7, 25, 1, 0, 0).unwrap();
@@ -593,7 +593,7 @@ mod tests {
             PackageRegistryPublisher::new(Box::new(Arc::clone(&cdn)), "tenant-a", "acme").unwrap();
         let second_publisher =
             PackageRegistryPublisher::new(Box::new(cdn), "tenant-a", "acme").unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = SigningKey::generate(&mut rng());
         let mut first_index = RegistryIndex::new("tenant-a", "acme");
         let mut first_ledger = TransparencyLedger::default();
         let mut stale_index = first_index.clone();

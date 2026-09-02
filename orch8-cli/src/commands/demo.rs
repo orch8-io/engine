@@ -24,7 +24,7 @@ use orch8_types::encryption::FieldEncryptor;
 use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::sequence::SequenceDefinition;
-use rand::RngCore as _;
+use rand::Rng as _;
 use serde::Serialize;
 use serde_json::json;
 

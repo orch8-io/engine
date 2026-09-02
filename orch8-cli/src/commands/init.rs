@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rand::RngCore;
+use rand::Rng;
 
 use crate::templates;
 

@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use rand::Rng;
+use rand::RngExt;
 use rand::prelude::IndexedRandom;
 
 use orch8_types::pool::{PoolAssignment, PoolResource, RotationStrategy};
