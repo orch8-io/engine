@@ -401,7 +401,7 @@ pub struct DevSession {
 }
 
 impl DevSession {
-    /// Wrap an already-built engine (see [`build_engine`]).
+    /// Wrap an already-built engine created by the local dev bootstrap.
     pub fn new(
         engine: Engine,
         manual_clock: Option<Arc<ManualClock>>,
