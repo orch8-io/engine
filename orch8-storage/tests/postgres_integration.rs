@@ -68,6 +68,8 @@ async fn postgres_passes_public_core_conformance() {
 
 fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: seq_id,
         tenant_id: TenantId::unchecked(tenant),
         namespace: Namespace::new("default"),

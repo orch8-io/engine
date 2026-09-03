@@ -15,5 +15,28 @@ services:
       timeout: 5s
       retries: 5
 
+  engine:
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    environment:
+      ORCH8_STORAGE_BACKEND: postgres
+      ORCH8_DATABASE_URL: postgres://orch8:orch8@postgres:5432/orch8
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+      ORCH8_GRPC_ADDR: 0.0.0.0:50051
+      ORCH8_API_KEY: ${ORCH8_API_KEY:?set ORCH8_API_KEY}
+      ORCH8_ENCRYPTION_KEY: ${ORCH8_ENCRYPTION_KEY:?set ORCH8_ENCRYPTION_KEY}
+      ORCH8_REQUIRE_TENANT_HEADER: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orch8", "--url", "http://localhost:8080", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
 volumes:
   pgdata:

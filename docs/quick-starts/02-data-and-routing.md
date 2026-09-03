@@ -128,7 +128,7 @@ immutable server version.
 The `--context` value becomes `context.data` for the instance:
 
 ```bash
-orch8 dev . --once \
+orch8 dev . --no-server --once \
   --context '{"customer":"Ada","plan":"paid"}'
 ```
 
@@ -138,7 +138,7 @@ The completed blocks should include `prepare`, `paid_welcome`, and `done`.
 ## 3. Run the trial path
 
 ```bash
-orch8 dev . --once \
+orch8 dev . --no-server --once \
   --context '{"customer":"Linus","plan":"trial"}'
 ```
 
@@ -189,7 +189,7 @@ validated instance input -> handler -> validated block output -> consumer
 Run with an unsupported plan:
 
 ```bash
-orch8 dev . --once \
+orch8 dev . --no-server --once \
   --context '{"customer":"Grace","plan":"enterprise"}'
 ```
 
@@ -197,7 +197,7 @@ The instance must not execute normally because `enterprise` is outside the
 input schema's enum. Also try omitting `customer`:
 
 ```bash
-orch8 dev . --once --context '{"plan":"trial"}'
+orch8 dev . --no-server --once --context '{"plan":"trial"}'
 ```
 
 Both failures happen at the input boundary, before the workflow can send a

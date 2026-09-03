@@ -348,6 +348,7 @@ fn dev_once_completes_sequence_and_prints_mocked_output() {
     let stdout = sb.run_ok(&[
         "dev",
         sequence.to_str().unwrap(),
+        "--no-server",
         "--once",
         "--mock",
         r#"probe={"outcome":"accepted"}"#,
@@ -372,7 +373,7 @@ fn dev_once_returns_failure_and_prints_handler_error() {
 
     let output = sb
         .cmd()
-        .args(["dev", sequence.to_str().unwrap(), "--once"])
+        .args(["dev", sequence.to_str().unwrap(), "--no-server", "--once"])
         .output()
         .expect("spawn orch8 dev failure scenario");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -402,6 +403,7 @@ fn dev_once_fast_forwards_delayed_sequence_with_virtual_time() {
     let stdout = sb.run_ok(&[
         "dev",
         sequence.to_str().unwrap(),
+        "--no-server",
         "--once",
         "--skip-timers",
         "--mock",

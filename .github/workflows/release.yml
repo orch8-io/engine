@@ -178,6 +178,54 @@ jobs:
             orch8-*.tar.gz
             orch8-*.tar.gz.sha256
 
+  build-windows:
+    name: Build x86_64-pc-windows-msvc
+    runs-on: windows-latest
+    timeout-minutes: 45
+    needs: [verify]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        with:
+          toolchain: "1.97.0"
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          key: x86_64-pc-windows-msvc
+      - name: Install protoc
+        shell: pwsh
+        run: choco install protoc --no-progress -y
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm ci --no-audit --no-fund && npm run build
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc --bin orch8-server --bin orch8
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $target = "x86_64-pc-windows-msvc"
+          $dir = "orch8-$tag-$target"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item "target/$target/release/orch8-server.exe" $dir
+          Copy-Item "target/$target/release/orch8.exe" $dir
+          Copy-Item LICENSE $dir
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          $hash = (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $dir.zip" | Set-Content "$dir.zip.sha256"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binaries-x86_64-pc-windows-msvc
+          path: |
+            orch8-*.zip
+            orch8-*.zip.sha256
+
   # -- Docker image (uses pre-built binaries, no QEMU compilation) -----------
   docker:
     name: Docker ${{ matrix.platform }}
@@ -596,7 +644,7 @@ jobs:
     name: GitHub Release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [build, docker-manifest, xcframework, aar, bindings-archive]
+    needs: [build, build-windows, docker-manifest, xcframework, aar, bindings-archive]
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -613,12 +661,114 @@ jobs:
           files: |
             artifacts/orch8-*.tar.gz
             artifacts/orch8-*.tar.gz.sha256
+            artifacts/orch8-*.zip
+            artifacts/orch8-*.zip.sha256
             artifacts/Orch8Mobile-*.xcframework.zip
             artifacts/Orch8Mobile-*.xcframework.zip.sha256
             artifacts/orch8-mobile-*.aar
             artifacts/orch8-mobile-*.aar.sha256
             artifacts/orch8-bindings-*.zip
             artifacts/orch8-bindings-*.zip.sha256
+
+  homebrew:
+    name: Publish Homebrew formula
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [release]
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Update orch8-io/homebrew-orch8
+        if: env.TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          gh repo clone orch8-io/homebrew-orch8 tap
+          cd tap
+          mkdir -p Formula
+          mac_arm="orch8-${tag}-aarch64-apple-darwin.tar.gz"
+          mac_x64="orch8-${tag}-x86_64-apple-darwin.tar.gz"
+          curl -fsSLO "https://github.com/${{ github.repository }}/releases/download/${tag}/${mac_arm}.sha256"
+          curl -fsSLO "https://github.com/${{ github.repository }}/releases/download/${tag}/${mac_x64}.sha256"
+          arm_sha="$(awk '{print $1}' "${mac_arm}.sha256")"
+          x64_sha="$(awk '{print $1}' "${mac_x64}.sha256")"
+          cat > Formula/orch8.rb <<RUBY
+          class Orch8 < Formula
+            desc "Durable workflow orchestration engine"
+            homepage "https://orch8.io"
+            version "${version}"
+            license "BUSL-1.1"
+            on_arm do
+              url "https://github.com/${{ github.repository }}/releases/download/${tag}/${mac_arm}"
+              sha256 "${arm_sha}"
+            end
+            on_intel do
+              url "https://github.com/${{ github.repository }}/releases/download/${tag}/${mac_x64}"
+              sha256 "${x64_sha}"
+            end
+            def install
+              bin.install "orch8"
+              bin.install "orch8-server"
+            end
+            test do
+              assert_match version.to_s, shell_output("#{bin}/orch8 --version")
+            end
+          end
+          RUBY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Formula/orch8.rb
+          git commit -m "orch8 ${version}"
+          git push
+      - name: Require tap publishing token
+        if: env.TAP_TOKEN == ''
+        run: |
+          echo "::error::HOMEBREW_TAP_TOKEN is required to publish orch8-io/homebrew-orch8"
+          exit 1
+
+  publish-cli-npm:
+    name: Publish npm CLI shim
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [release]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+      - name: Stamp and publish shim
+        working-directory: packages/cli-npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version
+          ORCH8_SKIP_BINARY_INSTALL=1 node install.mjs --check
+          npm publish --access public --provenance
+
+  publish-cli-pypi:
+    name: Publish pipx CLI shim
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [release]
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Build shim
+        working-directory: packages/cli-python
+        run: |
+          sed -i "s/^version = .*/version = \"${GITHUB_REF_NAME#v}\"/" pyproject.toml
+          python -m pip install build
+          python -m build
+      - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
+        with:
+          packages-dir: packages/cli-python/dist/
 
   # -- install.sh smoke test -------------------------------------------------
   install-sh-smoke:

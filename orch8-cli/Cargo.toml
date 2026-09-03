@@ -17,7 +17,7 @@ serde.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "process", "signal", "time"] }
 tokio-util.workspace = true
 reqwest = { workspace = true }
 anyhow.workspace = true

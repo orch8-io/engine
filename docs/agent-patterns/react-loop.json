@@ -1,4 +1,6 @@
 {
+  "$schema": "https://orch8.io/contracts/sequence.schema.json",
+  "schema_version": 1,
   "name": "ReAct Loop Agent",
   "description": "Observe-Think-Act loop with tool calling. The agent reasons about the task, selects tools, observes results, and iterates until done or max iterations reached.",
   "blocks": [

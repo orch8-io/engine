@@ -18,10 +18,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use orch8_api::{AppState, DEFAULT_MAX_CONCURRENT_STREAMS, build_router};
 use orch8_engine::circuit_breaker::CircuitBreakerRegistry;
-use orch8_engine::handlers::HandlerRegistry;
 use orch8_storage::StorageBackend;
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_types::config::SchedulerConfig;
 
 #[derive(Embed)]
 #[folder = "../dashboard/dist/"]
@@ -40,7 +38,6 @@ struct DashboardAssets;
 pub struct DevServer {
     _storage: Arc<dyn StorageBackend>,
     pub shutdown: CancellationToken,
-    _engine_handle: tokio::task::JoinHandle<()>,
     _http_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -118,8 +115,6 @@ impl DevServer {
             }
         });
 
-        let engine_handle = spawn_engine(storage.clone(), shutdown.clone(), cb_registry);
-
         eprintln!(
             "  {} API:       http://localhost:{port}/api/v1",
             "→".cyan().bold(),
@@ -136,27 +131,9 @@ impl DevServer {
         Ok(Self {
             _storage: storage,
             shutdown,
-            _engine_handle: engine_handle,
             _http_handle: http_handle,
         })
     }
-}
-
-fn spawn_engine(
-    storage: Arc<dyn StorageBackend>,
-    shutdown: CancellationToken,
-    cb_registry: Arc<CircuitBreakerRegistry>,
-) -> tokio::task::JoinHandle<()> {
-    let mut handlers = HandlerRegistry::new();
-    orch8_engine::handlers::builtin::register_builtins(&mut handlers);
-    let handlers = handlers.with_circuit_breakers(cb_registry);
-    let engine = orch8_engine::Engine::new(storage, SchedulerConfig::default(), handlers, shutdown);
-
-    tokio::spawn(async move {
-        if let Err(e) = engine.run().await {
-            tracing::error!(error = %e, "dev engine tick loop error");
-        }
-    })
 }
 
 // -- Dashboard SPA serving ---------------------------------------------------

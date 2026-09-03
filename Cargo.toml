@@ -13,6 +13,7 @@ members = [
     "orch8-cli",
 ]
 resolver = "2"
+exclude = ["packages/node-native", "packages/python-native"]
 
 [workspace.package]
 version = "0.7.1"

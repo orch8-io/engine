@@ -1,4 +1,6 @@
 {
+  "$schema": "https://orch8.io/contracts/sequence.schema.json",
+  "schema_version": 1,
   "name": "Guardrail Validation Pipeline",
   "description": "Input validation -> LLM generation -> output validation -> human review gate. Ensures AI outputs meet safety and quality standards before delivery.",
   "blocks": [

@@ -76,12 +76,16 @@ pub struct DevCmd {
     #[arg(long, default_value_t = 25)]
     pub tick_ms: u64,
 
-    /// Start a local HTTP API server (SQLite-backed) alongside the dev loop.
-    /// Enables the full REST API, Swagger UI, and the embedded dashboard.
+    /// Start the local HTTP API, persistent `SQLite` store, and dashboard.
+    /// This is the default; use `--no-server` for an ephemeral CLI-only run.
     #[arg(long)]
     pub server: bool,
 
-    /// HTTP port for the dev server (requires --server).
+    /// Disable the local HTTP API/dashboard and use ephemeral in-memory `SQLite`.
+    #[arg(long, conflicts_with = "server")]
+    pub no_server: bool,
+
+    /// HTTP port for the dev server (enabled by default).
     #[arg(long, default_value_t = 8080)]
     pub port: u16,
 
@@ -397,7 +401,7 @@ pub struct DevSession {
 }
 
 impl DevSession {
-    /// Wrap an already-built engine (see [`build_engine`]).
+    /// Wrap an already-built engine created by the local dev bootstrap.
     pub fn new(
         engine: Engine,
         manual_clock: Option<Arc<ManualClock>>,
@@ -537,8 +541,17 @@ impl DevSession {
 /// Build the ephemeral in-process engine: in-memory `SQLite`, the full
 /// built-in handler set, any `--mock` stubs layered on top, and an optional
 /// injected clock for `--skip-timers`.
+#[cfg(test)]
 pub async fn build_engine(mocks: &[(String, Value)], clock: Option<SharedClock>) -> Result<Engine> {
-    let mut builder = Engine::builder().storage(Storage::sqlite_in_memory());
+    build_engine_with_storage(mocks, clock, Storage::sqlite_in_memory()).await
+}
+
+async fn build_engine_with_storage(
+    mocks: &[(String, Value)],
+    clock: Option<SharedClock>,
+    storage: Storage,
+) -> Result<Engine> {
+    let mut builder = Engine::builder().storage(storage);
     if let Some(clock) = clock {
         builder = builder.clock(clock);
     }
@@ -650,12 +663,14 @@ impl InstanceOpts {
 
 /// Boot the dev server (HTTP API + dashboard) when `--server` is set.
 async fn maybe_start_server(cmd: &DevCmd) -> Result<Option<super::dev_server::DevServer>> {
-    if !cmd.server {
+    if !server_enabled(cmd) {
         return Ok(None);
     }
-    let db_dir = Path::new(&cmd.path).join(".orch8");
-    std::fs::create_dir_all(&db_dir).with_context(|| format!("create {}", db_dir.display()))?;
-    let db_path = db_dir.join("dev.db");
+    let db_path = dev_db_path(cmd);
+    let db_dir = db_path
+        .parent()
+        .ok_or_else(|| anyhow!("dev database path has no parent"))?;
+    std::fs::create_dir_all(db_dir).with_context(|| format!("create {}", db_dir.display()))?;
 
     println!(
         "\n{} {} Local Workflow Studio",
@@ -672,6 +687,20 @@ async fn maybe_start_server(cmd: &DevCmd) -> Result<Option<super::dev_server::De
         super::dev_server::DevServer::start(cmd.port, &db_path.display().to_string()).await?;
     println!();
     Ok(Some(server))
+}
+
+fn server_enabled(cmd: &DevCmd) -> bool {
+    !cmd.no_server
+}
+
+fn dev_db_path(cmd: &DevCmd) -> PathBuf {
+    let base = Path::new(&cmd.path);
+    let project_dir = if base.is_file() {
+        base.parent().unwrap_or_else(|| Path::new("."))
+    } else {
+        base
+    };
+    project_dir.join(".orch8").join("dev.db")
 }
 
 /// Load all `*.json` files from the workflows directory and upsert them as
@@ -718,7 +747,7 @@ fn init_workflows(dir: &str, engine: &Engine) -> DirWatch {
 
 fn feature_line(cmd: &DevCmd) -> String {
     let mut features = Vec::new();
-    if cmd.server {
+    if server_enabled(cmd) {
         features.push(format!("server:{}", cmd.port));
     }
     features.push(
@@ -777,7 +806,12 @@ pub async fn run(cmd: DevCmd) -> Result<()> {
         .as_ref()
         .map(|c| SharedClock::from_arc(Arc::clone(c) as Arc<dyn Clock>));
 
-    let engine = build_engine(&mocks, shared_clock).await?;
+    let storage = if server_enabled(&cmd) {
+        Storage::sqlite(dev_db_path(&cmd))
+    } else {
+        Storage::sqlite_in_memory()
+    };
+    let engine = build_engine_with_storage(&mocks, shared_clock, storage).await?;
     let mut session = DevSession::new(engine.clone(), manual_clock, mock_names);
 
     let mut dir_watch = cmd
@@ -1378,6 +1412,7 @@ mod tests {
             once: false,
             tick_ms: 25,
             server: true,
+            no_server: false,
             port: 9090,
             workflows: None,
             auto_run: false,
@@ -1399,6 +1434,7 @@ mod tests {
             once: true,
             tick_ms: 25,
             server: true,
+            no_server: false,
             port: 8080,
             workflows: Some("workflows/".into()),
             auto_run: true,
@@ -1424,6 +1460,7 @@ mod tests {
             once: false,
             tick_ms: 25,
             server: false,
+            no_server: true,
             port: 8080,
             workflows: None,
             auto_run: false,

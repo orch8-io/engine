@@ -7,7 +7,7 @@ use std::time::Duration;
 use orch8::{
     AgentRuntime, CapsuleExportOptions, CapsuleRequirements, CapsuleSigningKey,
     CreateInstanceOptions, EffectContext, Engine, FieldEncryptor, InstanceId, InstanceState,
-    RuntimeId, SignalType, StepContext, Storage,
+    RuntimeId, SignalType, StepContext, Storage, run_sequence_once,
 };
 
 /// Bounded-wait helper: poll `get_instance` until the predicate holds.
@@ -57,6 +57,21 @@ async fn build_engine() -> Engine {
         .build()
         .await
         .expect("engine builds")
+}
+
+#[tokio::test]
+async fn one_shot_runner_uses_the_embedded_engine() {
+    let result = run_sequence_once(
+        two_step_sequence("one-shot", "noop"),
+        serde_json::json!({"request": "native-host"}),
+        100,
+    )
+    .await
+    .expect("one-shot execution");
+
+    assert_eq!(result.state, InstanceState::Completed);
+    assert_eq!(result.context.data["request"], "native-host");
+    assert_eq!(result.outputs.len(), 2);
 }
 
 /// Builder + in-memory sqlite + custom handler: the background loop runs a

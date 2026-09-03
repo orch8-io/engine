@@ -1,4 +1,6 @@
 {
+  "$schema": "https://orch8.io/contracts/sequence.schema.json",
+  "schema_version": 1,
   "name": "Tool-Calling Pipeline",
   "description": "LLM generates a plan, executes tools in sequence, then synthesizes results. Linear pipeline with no looping — suited for structured multi-step tasks.",
   "blocks": [

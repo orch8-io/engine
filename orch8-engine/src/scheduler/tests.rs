@@ -513,6 +513,8 @@ use orch8_types::sequence::{BlockDefinition, DelaySpec, SequenceDefinition, Sequ
 
 fn mk_sequence(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -1207,6 +1209,8 @@ fn backoff_formula_doubles_with_cap() {
 fn mk_sla_sequence(name: &str, max_runtime: std::time::Duration) -> SequenceDefinition {
     use orch8_types::sequence::{BlockDefinition, SequenceStatus, SlaPolicy};
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),

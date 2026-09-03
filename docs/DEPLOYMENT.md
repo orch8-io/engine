@@ -60,11 +60,15 @@ docker run --rm -p 8080:8080 -p 50051:50051 \
   ghcr.io/orch8-io/engine:latest
 ```
 
-The included `docker-compose.yml` runs Postgres on port 5434 for local dev — it does **not** launch the engine. For a local stack that runs both, add an `orch8` service pointing at `postgres://orch8:orch8@postgres:5432/orch8`.
+The included `docker-compose.yml` runs both Postgres and the engine. Export
+`ORCH8_API_KEY` and `ORCH8_ENCRYPTION_KEY`, then run `docker compose up`.
 
 ---
 
 ## Kubernetes
+
+Committed manifests live in `deploy/kubernetes/`; copy
+`secret.example.yaml`, replace every placeholder, and apply the directory.
 
 A minimal `Deployment + Service + Secret` pattern:
 

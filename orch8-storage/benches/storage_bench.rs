@@ -20,6 +20,8 @@ use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 fn make_sequence() -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("bench"),
         namespace: Namespace::new("default"),

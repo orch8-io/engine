@@ -47,6 +47,8 @@ fn make_step(id: &str) -> BlockDefinition {
 
 fn make_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("test-tenant"),
         namespace: Namespace::new("default"),

@@ -628,6 +628,8 @@ mod tests {
         let id = SequenceId::new();
         storage
             .create_sequence(&SequenceDefinition {
+                schema: None,
+                schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                 id,
                 tenant_id: TenantId::unchecked("t1"),
                 namespace: Namespace::new("default"),

@@ -479,6 +479,8 @@ mod tests {
         let inst_id = InstanceId::new();
         let now = chrono::Utc::now();
         let seq = orch8_types::sequence::SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
             namespace: Namespace::new("ns"),
@@ -654,6 +656,8 @@ mod tests {
         use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus, StepDef};
         let now = chrono::Utc::now();
         let seq = SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
             namespace: Namespace::new("ns"),

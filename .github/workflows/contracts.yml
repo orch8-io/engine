@@ -1,0 +1,44 @@
+name: Publish API contracts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "orch8-api/**"
+      - "orch8-types/**"
+      - "scripts/export-contracts.mjs"
+      - ".github/workflows/contracts.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: contracts-pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # stable
+        with:
+          toolchain: "1.97.0"
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Export OpenAPI and sequence JSON Schema
+        run: |
+          cargo run --locked -p orch8-api --example export_openapi -- contracts/openapi.json
+          node scripts/export-contracts.mjs contracts
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: contracts
+      - id: deploy
+        uses: actions/deploy-pages@4c30dbf64e4e7116c4a7cf4e05bf8f600d139a7 # v4.0.5

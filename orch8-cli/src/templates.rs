@@ -23,6 +23,8 @@ pub struct Template {
 /// The scaffold written by `orch8 init` when no `--template` is given:
 /// a minimal three-step hello-world sequence.
 const DEFAULT_JSON: &str = r#"{
+  "$schema": "https://orch8.io/contracts/sequence.schema.json",
+  "schema_version": 1,
   "tenant_id": "demo",
   "namespace": "default",
   "name": "hello-world",

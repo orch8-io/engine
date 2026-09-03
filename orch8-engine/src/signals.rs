@@ -1041,6 +1041,8 @@ mod tests {
     fn mk_sequence(blocks: Vec<orch8_types::sequence::BlockDefinition>) -> SequenceDefinition {
         use orch8_types::ids::{Namespace, SequenceId, TenantId};
         SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
             namespace: Namespace::new("ns"),

@@ -563,6 +563,8 @@ mod tests {
     async fn seed_sequence(storage: &SqliteStorage, name: &str) -> SequenceId {
         let id = SequenceId::new();
         let seq = SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id,
             tenant_id: TenantId::unchecked("t1"),
             namespace: Namespace::new("default"),
@@ -740,6 +742,8 @@ mod tests {
         let v2_id = SequenceId::new();
         let now = chrono::Utc::now();
         let mk_seq = |id: SequenceId, version: i32| SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id,
             tenant_id: TenantId::unchecked("t1"),
             namespace: Namespace::new("default"),
@@ -820,6 +824,8 @@ mod tests {
         let seq_id = SequenceId::new();
         storage
             .create_sequence(&SequenceDefinition {
+                schema: None,
+                schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                 id: seq_id,
                 tenant_id: TenantId::unchecked("t1"),
                 namespace: Namespace::new("prod"),

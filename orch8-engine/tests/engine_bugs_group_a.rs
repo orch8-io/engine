@@ -113,6 +113,8 @@ async fn setup_tree(
     let storage = SqliteStorage::in_memory().await.unwrap();
 
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -1367,6 +1369,8 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
 
     // FK constraint requires a parent task_instance row.
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -1659,6 +1663,8 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
     //     so both sequences must share tenant/namespace — see
     //     evaluator.rs:738-744.
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -1684,6 +1690,8 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
         input: json!({"from_parent": 42}),
     }));
     let parent_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -1926,6 +1934,8 @@ async fn a11_sla_breach_records_block_output() {
     // Re-build the sequence the evaluator will see. `evaluate` loads it by
     // reference; we pass the same shape we persisted in `setup_tree`.
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: instance.sequence_id,
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2223,6 +2233,8 @@ async fn a15_workers_receive_fair_share_under_load() {
     let storage = SqliteStorage::in_memory().await.unwrap();
 
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),

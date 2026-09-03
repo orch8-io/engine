@@ -129,6 +129,8 @@ pub(super) fn row_to_sequence(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<orch8_types::sequence::SequenceDefinition, StorageError> {
     Ok(orch8_types::sequence::SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::from_uuid(parse_uuid(row.get::<&str, _>("id"))?),
         tenant_id: TenantId::unchecked(row.get::<String, _>("tenant_id")),
         namespace: Namespace::new(row.get::<String, _>("namespace")),

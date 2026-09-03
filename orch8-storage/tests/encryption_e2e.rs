@@ -15,6 +15,8 @@ const TEST_KEY_2: &str = "ffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeff
 
 fn make_sequence() -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("test"),
         namespace: Namespace::new("default"),

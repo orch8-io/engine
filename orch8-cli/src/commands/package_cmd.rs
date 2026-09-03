@@ -18,10 +18,13 @@ use clap::Subcommand;
 use reqwest::Client;
 use serde_json::{Value, json};
 
+use orch8_publisher::cdn::S3CdnBackend;
 use orch8_publisher::package::{
     PackageManifest, PackageRequirements, SignedPackage, TrustLevel, TrustPolicy, build_package,
     check_trust, check_upgrade, contract_files, install_namespace, sequence_files, verify_package,
 };
+use orch8_publisher::registry::PackageRegistryPublisher;
+use orch8_publisher::registry::{RegistryIndex, RegistryVersion, TransparencyLedger};
 
 use crate::OutputFormat;
 use crate::atomic_write;
@@ -53,10 +56,50 @@ pub enum PackageCmd {
     },
     /// Show a package's manifest, contents, and requirements.
     Inspect { file: PathBuf },
+    /// Search a verified hosted registry index.
+    Search {
+        query: Option<String>,
+        #[arg(long, env = "ORCH8_PACKAGE_REGISTRY_URL")]
+        registry_url: String,
+    },
+    /// Publish a signed package to an S3-compatible, append-only registry.
+    Publish {
+        file: PathBuf,
+        /// Base64 publisher seed; must match the key used to sign the package.
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        tenant_id: String,
+        #[arg(long)]
+        namespace: String,
+        /// Public bucket URL used to load the current index and ledger.
+        #[arg(long, env = "ORCH8_PACKAGE_REGISTRY_PUBLIC_URL")]
+        public_url: String,
+        #[arg(long, env = "ORCH8_REGISTRY_S3_ENDPOINT")]
+        endpoint: String,
+        #[arg(long, env = "ORCH8_REGISTRY_S3_BUCKET")]
+        bucket: String,
+        #[arg(long, env = "ORCH8_REGISTRY_S3_REGION", default_value = "auto")]
+        region: String,
+        #[arg(long, env = "ORCH8_REGISTRY_S3_ACCESS_KEY", hide_env_values = true)]
+        access_key: String,
+        #[arg(long, env = "ORCH8_REGISTRY_S3_SECRET_KEY", hide_env_values = true)]
+        secret_key: String,
+    },
     /// Verify, test, and install a package's sequences under its own
     /// namespace. Never overwrites existing sequences.
     Install {
-        file: PathBuf,
+        /// Local .orch8pkg file. Omit when using --name.
+        file: Option<PathBuf>,
+        /// Package name from a hosted registry (for example acme/checkout).
+        #[arg(long, conflicts_with = "file")]
+        name: Option<String>,
+        /// Exact version; defaults to the newest published version.
+        #[arg(long, requires = "name")]
+        version: Option<String>,
+        /// Hosted registry namespace root containing index.json.
+        #[arg(long, env = "ORCH8_PACKAGE_REGISTRY_URL", requires = "name")]
+        registry_url: Option<String>,
         #[arg(long)]
         tenant_id: String,
         /// Trusted publisher public keys (base64). Repeatable.
@@ -80,13 +123,75 @@ pub async fn run(client: &Client, base: &str, cmd: PackageCmd, format: OutputFor
         PackageCmd::Build { dir, key, out } => build(&dir, &key, out.as_deref()),
         PackageCmd::Verify { file, trusted_keys } => verify(&file, &trusted_keys),
         PackageCmd::Inspect { file } => inspect(&file, format),
+        PackageCmd::Search {
+            query,
+            registry_url,
+        } => search_registry(&registry_url, query.as_deref()).await,
+        PackageCmd::Publish {
+            file,
+            key,
+            tenant_id,
+            namespace,
+            public_url,
+            endpoint,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+        } => {
+            let package = read_package(&file)?;
+            verify_package(&package)?;
+            let signing_key = load_signing_key(&key)?;
+            let root = format!(
+                "{}/{}/registry/{}",
+                public_url.trim_end_matches('/'),
+                tenant_id,
+                namespace
+            );
+            let (mut index, mut ledger) =
+                load_registry_state(&root, &tenant_id, &namespace).await?;
+            let backend = S3CdnBackend::new(endpoint, bucket, region, access_key, secret_key);
+            let publisher = PackageRegistryPublisher::new(Box::new(backend), tenant_id, namespace)?;
+            let publication = publisher
+                .publish(
+                    &package,
+                    &mut index,
+                    &mut ledger,
+                    &signing_key,
+                    chrono::Utc::now(),
+                )
+                .await?;
+            println!(
+                "published {}@{} → {}",
+                package.archive.manifest.name, publication.version, publication.package_url
+            );
+            Ok(())
+        }
         PackageCmd::Install {
             file,
+            name,
+            version,
+            registry_url,
             tenant_id,
             trusted_keys,
             allow_untrusted,
             skip_contracts,
         } => {
+            let downloaded;
+            let file = if let Some(file) = file {
+                file
+            } else {
+                let name = name.context("install requires a local file or --name")?;
+                let registry_url =
+                    registry_url.context("--registry-url is required with --name")?;
+                let (_, selected) =
+                    select_registry_package(&registry_url, &name, version.as_deref()).await?;
+                downloaded = tempfile::NamedTempFile::new()?;
+                let base = reqwest::Url::parse(&registry_url)?;
+                let url = base.join(&selected.package_url)?;
+                download_registry_package(url, downloaded.path()).await?;
+                downloaded.path().to_path_buf()
+            };
             install(
                 client,
                 base,
@@ -99,6 +204,139 @@ pub async fn run(client: &Client, base: &str, cmd: PackageCmd, format: OutputFor
             .await
         }
     }
+}
+
+async fn load_registry_state(
+    root: &str,
+    tenant: &str,
+    namespace: &str,
+) -> Result<(RegistryIndex, TransparencyLedger)> {
+    let client = Client::new();
+    let response = client.get(format!("{root}/index.json")).send().await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok((
+            RegistryIndex::new(tenant, namespace),
+            TransparencyLedger::default(),
+        ));
+    }
+    let response = response.error_for_status()?;
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let mut index: RegistryIndex = response.json().await?;
+    if let Some(etag) = etag {
+        index = index.with_source_etag(etag);
+    }
+    let ledger = if let Some(head) = index.ledger_head.as_deref() {
+        client
+            .get(format!("{root}/transparency/ledgers/{head}.json"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?
+    } else {
+        TransparencyLedger::default()
+    };
+    index.verify_against(&ledger)?;
+    Ok((index, ledger))
+}
+
+async fn verified_registry(base: &str) -> Result<RegistryIndex> {
+    // Hosted registries are a separate trust boundary and must never receive
+    // the engine client's default x-api-key or tenant headers.
+    let client = Client::new();
+    let base = base.trim_end_matches('/');
+    let index: RegistryIndex = client
+        .get(format!("{base}/index.json"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let head = index
+        .ledger_head
+        .as_deref()
+        .context("registry index has no ledger head")?;
+    let ledger: TransparencyLedger = client
+        .get(format!("{base}/transparency/ledgers/{head}.json"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    index.verify_against(&ledger)?;
+    Ok(index)
+}
+
+async fn search_registry(base: &str, query: Option<&str>) -> Result<()> {
+    let index = verified_registry(base).await?;
+    let needle = query.unwrap_or("").to_ascii_lowercase();
+    for (name, versions) in index.packages {
+        if needle.is_empty() || name.to_ascii_lowercase().contains(&needle) {
+            let latest = versions
+                .last()
+                .map_or("-", |version| version.version.as_str());
+            println!("{name}\t{latest}\t{} version(s)", versions.len());
+        }
+    }
+    Ok(())
+}
+
+async fn select_registry_package(
+    base: &str,
+    name: &str,
+    version: Option<&str>,
+) -> Result<(RegistryIndex, RegistryVersion)> {
+    let index = verified_registry(base).await?;
+    let versions = index
+        .packages
+        .get(name)
+        .with_context(|| format!("package {name} not found"))?;
+    let selected = version
+        .map_or_else(
+            || versions.last(),
+            |wanted| versions.iter().find(|item| item.version == wanted),
+        )
+        .with_context(|| {
+            format!(
+                "package {name} version {} not found",
+                version.unwrap_or("latest")
+            )
+        })?
+        .clone();
+    Ok((index, selected))
+}
+
+async fn download_registry_package(mut url: reqwest::Url, path: &Path) -> Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
+    // Never forward URL credentials into logs or redirects.
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("registry package URL must not contain credentials");
+    }
+    url.set_fragment(None);
+    let mut response = Client::new().get(url).send().await?.error_for_status()?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PACKAGE_BYTES)
+    {
+        bail!("registry package exceeds the 64 MiB download limit");
+    }
+    let mut output = tokio::fs::File::create(path).await?;
+    let mut total = 0_u64;
+    while let Some(chunk) = response.chunk().await? {
+        total = total.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+        if total > MAX_PACKAGE_BYTES {
+            bail!("registry package exceeds the 64 MiB download limit");
+        }
+        output.write_all(&chunk).await?;
+    }
+    output.sync_all().await?;
+    Ok(())
 }
 
 fn keygen() {

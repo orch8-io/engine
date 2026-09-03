@@ -1,0 +1,74 @@
+name: Orch8 workflow gate
+description: Validate an Orch8 sequence and optionally run a remote release gate
+inputs:
+  sequence:
+    description: Path to the sequence JSON file
+    required: true
+  release-id:
+    description: Existing Orch8 release ID to diff, validate, and gate
+    required: false
+  url:
+    description: Orch8 API base URL
+    required: false
+    default: http://127.0.0.1:8080/api/v1
+  api-key:
+    description: Orch8 API key
+    required: false
+  tenant-id:
+    description: Orch8 tenant ID
+    required: false
+    default: default
+  version:
+    description: Orch8 CLI release tag or latest
+    required: false
+    default: latest
+  comment:
+    description: Post the gate summary to the pull request
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - name: Install Orch8 CLI
+      shell: bash
+      env:
+        ORCH8_VERSION: ${{ inputs.version }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/orch8-bin"
+        sh "$GITHUB_ACTION_PATH/install.sh" --dir "$RUNNER_TEMP/orch8-bin" --version "$ORCH8_VERSION"
+        echo "$RUNNER_TEMP/orch8-bin" >> "$GITHUB_PATH"
+    - name: Validate sequence locally
+      id: local
+      shell: bash
+      env:
+        ORCH8_SEQUENCE_PATH: ${{ inputs.sequence }}
+      run: orch8 dev "$ORCH8_SEQUENCE_PATH" --no-server --dry-run --skip-timers --once
+    - name: Preflight, diff, historical replay, and canary gate
+      id: gate
+      if: inputs.release-id != ''
+      shell: bash
+      env:
+        ORCH8_URL: ${{ inputs.url }}
+        ORCH8_API_KEY: ${{ inputs.api-key }}
+        ORCH8_TENANT_ID: ${{ inputs.tenant-id }}
+        ORCH8_RELEASE_ID: ${{ inputs.release-id }}
+      run: |
+        orch8 release diff "$ORCH8_RELEASE_ID" --output json > "$RUNNER_TEMP/orch8-diff.json"
+        orch8 release validate "$ORCH8_RELEASE_ID" --sample 50 --output json
+        orch8 release gate "$ORCH8_RELEASE_ID" --sample 50 --output json | tee "$RUNNER_TEMP/orch8-gate.json"
+    - name: Comment on pull request
+      if: always() && inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ORCH8_SEQUENCE_PATH: ${{ inputs.sequence }}
+        ORCH8_RELEASE_ID: ${{ inputs.release-id }}
+        ORCH8_LOCAL_OUTCOME: ${{ steps.local.outcome }}
+        ORCH8_GATE_OUTCOME: ${{ steps.gate.outcome }}
+      run: |
+        if [[ "$ORCH8_LOCAL_OUTCOME" == "success" && ( "$ORCH8_RELEASE_ID" == "" || "$ORCH8_GATE_OUTCOME" == "success" ) ]]; then
+          summary="✅ Orch8 workflow gate passed for \`$ORCH8_SEQUENCE_PATH\`."
+        else
+          summary="❌ Orch8 workflow gate failed for \`$ORCH8_SEQUENCE_PATH\`. See the action log."
+        fi
+        gh pr comment "${{ github.event.pull_request.number }}" --body "$summary"
