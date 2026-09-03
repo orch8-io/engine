@@ -350,7 +350,9 @@ async fn cancel_scoped(
 
         // Check per-step cancellable flag.
         let step_cancellable = block_map
-            .get(&node.block_id)
+            .binary_search_by_key(&&node.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
+            .ok()
             .and_then(|block| match block {
                 BlockDefinition::Step(step) => Some(step.cancellable),
                 _ => None,

@@ -996,9 +996,18 @@ fn flatten_blocks_flat_steps() {
     let blocks = vec![mk_step("a"), mk_step("b"), mk_step("c")];
     let map = flatten_blocks(&blocks);
     assert_eq!(map.len(), 3);
-    assert!(map.contains_key(&BlockId::new("a")));
-    assert!(map.contains_key(&BlockId::new("b")));
-    assert!(map.contains_key(&BlockId::new("c")));
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("a"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("b"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("c"), |(id, _)| *id)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -1010,10 +1019,22 @@ fn flatten_blocks_parallel_nested() {
     }))];
     let map = flatten_blocks(&blocks);
     assert_eq!(map.len(), 4);
-    assert!(map.contains_key(&BlockId::new("par")));
-    assert!(map.contains_key(&BlockId::new("b1")));
-    assert!(map.contains_key(&BlockId::new("b2")));
-    assert!(map.contains_key(&BlockId::new("b3")));
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("par"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("b1"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("b2"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("b3"), |(id, _)| *id)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -1027,10 +1048,22 @@ fn flatten_blocks_try_catch_with_finally() {
     }))];
     let map = flatten_blocks(&blocks);
     assert_eq!(map.len(), 4);
-    assert!(map.contains_key(&BlockId::new("tc")));
-    assert!(map.contains_key(&BlockId::new("t1")));
-    assert!(map.contains_key(&BlockId::new("c1")));
-    assert!(map.contains_key(&BlockId::new("f1")));
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("tc"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("t1"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("c1"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("f1"), |(id, _)| *id)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -1052,10 +1085,22 @@ fn flatten_blocks_router_with_default() {
     }))];
     let map = flatten_blocks(&blocks);
     assert_eq!(map.len(), 4);
-    assert!(map.contains_key(&BlockId::new("router")));
-    assert!(map.contains_key(&BlockId::new("r1")));
-    assert!(map.contains_key(&BlockId::new("r2")));
-    assert!(map.contains_key(&BlockId::new("def")));
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("router"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("r1"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("r2"), |(id, _)| *id)
+            .is_ok()
+    );
+    assert!(
+        map.binary_search_by_key(&&BlockId::new("def"), |(id, _)| *id)
+            .is_ok()
+    );
 }
 
 #[test]

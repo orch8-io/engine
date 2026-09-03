@@ -413,7 +413,7 @@ pub async fn evaluate_with_clock(
 
     // Build a flat block map once per evaluation — avoids O(n) recursive scans
     // in find_block on the hot path.
-    let block_map: HashMap<&BlockId, &BlockDefinition> = flatten_blocks(&blocks);
+    let block_map = flatten_blocks(&blocks);
 
     // Ensure the execution tree exists (creates on first call, adds new injected nodes).
     let initial_tree = ensure_execution_tree(storage.as_ref(), instance, &blocks).await?;
@@ -633,7 +633,7 @@ async fn phase_root_activation(
     handlers: &HandlerRegistry,
     ctx: &mut EvalContext,
     instance_id: InstanceId,
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     sequence: &SequenceDefinition,
     outputs_snapshot: &OutputsSnapshot,
 ) -> Result<IterAction, EngineError> {
@@ -695,7 +695,10 @@ async fn phase_root_activation(
         return Ok(IterAction::Continue);
     }
 
-    if let Some(block) = block_map.get(&node.block_id).copied() {
+    if let Ok(block) = block_map
+        .binary_search_by_key(&&node.block_id, |(id, _)| *id)
+        .map(|idx| block_map[idx].1)
+    {
         dispatch_block(
             storage,
             handlers,
@@ -726,7 +729,7 @@ async fn phase_running_steps(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     ctx: &mut EvalContext,
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     sequence: &SequenceDefinition,
     outputs_snapshot: &OutputsSnapshot,
 ) -> Result<IterAction, EngineError> {
@@ -740,10 +743,16 @@ async fn phase_running_steps(
     {
         let left_node = &ctx.tree[left_idx];
         let right_node = &ctx.tree[right_idx];
-        let Some(left_block) = block_map.get(&left_node.block_id).copied() else {
+        let Ok(left_block) = block_map
+            .binary_search_by_key(&&left_node.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
+        else {
             return Ok(IterAction::FallThrough);
         };
-        let Some(right_block) = block_map.get(&right_node.block_id).copied() else {
+        let Ok(right_block) = block_map
+            .binary_search_by_key(&&right_node.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
+        else {
             return Ok(IterAction::FallThrough);
         };
 
@@ -791,7 +800,10 @@ async fn phase_running_steps(
     // Look up node and block by index — these are short-lived borrows that
     // end before we mutate ctx below.
     let node = &ctx.tree[idx];
-    let Some(block) = block_map.get(&node.block_id).copied() else {
+    let Ok(block) = block_map
+        .binary_search_by_key(&&node.block_id, |(id, _)| *id)
+        .map(|idx| block_map[idx].1)
+    else {
         return Ok(IterAction::FallThrough);
     };
 
@@ -820,7 +832,7 @@ async fn phase_running_steps(
 /// dispatched together.
 fn find_parallel_step_pair(
     tree: &[ExecutionNode],
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     handlers: &HandlerRegistry,
     node_index: &NodeIndex<'_>,
 ) -> Option<[usize; 2]> {
@@ -829,7 +841,10 @@ fn find_parallel_step_pair(
     let mut first_by_parallel: Vec<(ExecutionNodeId, usize, i16)> = Vec::new();
 
     for (idx, node) in tree.iter().enumerate() {
-        let Some(BlockDefinition::Step(step_def)) = block_map.get(&node.block_id).copied() else {
+        let Ok(BlockDefinition::Step(step_def)) = block_map
+            .binary_search_by_key(&&node.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
+        else {
             continue;
         };
         if node.state != NodeState::Running
@@ -862,16 +877,16 @@ fn find_parallel_step_pair(
 
 fn nearest_parallel_branch(
     node: &ExecutionNode,
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     node_index: &NodeIndex<'_>,
 ) -> Option<(ExecutionNodeId, i16)> {
     let mut child = node;
     while let Some(parent_id) = child.parent_id {
         let parent = get_node(node_index, parent_id)?;
         if block_map
-            .get(&parent.block_id)
-            .copied()
-            .is_some_and(|block| matches!(block, BlockDefinition::Parallel(_)))
+            .binary_search_by_key(&&parent.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
+            .is_ok_and(|block| matches!(block, BlockDefinition::Parallel(_)))
         {
             return child.branch_index.map(|branch| (parent_id, branch));
         }
@@ -892,7 +907,7 @@ async fn phase_composite_reevaluation(
     handlers: &HandlerRegistry,
     ctx: &mut EvalContext,
     instance_id: InstanceId,
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     sequence: &SequenceDefinition,
     outputs_snapshot: &OutputsSnapshot,
 ) -> Result<IterAction, EngineError> {
@@ -907,7 +922,10 @@ async fn phase_composite_reevaluation(
     let mut early_restart = false;
     for idx in &composite_indices {
         let node = &ctx.tree[*idx];
-        let Some(block) = block_map.get(&node.block_id).copied() else {
+        let Ok(block) = block_map
+            .binary_search_by_key(&&node.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
+        else {
             continue;
         };
 
@@ -984,7 +1002,7 @@ fn may_mutate_instance(block: &BlockDefinition) -> bool {
 /// Return indices (into `tree`) of all Running composite nodes, deepest first.
 fn find_all_running_composite_indices(
     tree: &[ExecutionNode],
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     node_index: &NodeIndex<'_>,
 ) -> Vec<usize> {
     let mut composites: Vec<(usize, usize)> = tree
@@ -997,9 +1015,9 @@ fn find_all_running_composite_indices(
         })
         .filter(|(_, n)| {
             block_map
-                .get(&n.block_id)
-                .copied()
-                .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
+                .binary_search_by_key(&&n.block_id, |(id, _)| *id)
+                .map(|idx| block_map[idx].1)
+                .is_ok_and(|b| !matches!(b, BlockDefinition::Step(_)))
         })
         .map(|(i, n)| (i, count_ancestors(node_index, n.id)))
         .collect();
@@ -1013,7 +1031,7 @@ fn find_all_running_composite_indices(
 /// borrow into the tree across mutable operations.
 fn find_running_step_index(
     tree: &[ExecutionNode],
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     handlers: &HandlerRegistry,
     node_index: &NodeIndex<'_>,
 ) -> Option<usize> {
@@ -1021,7 +1039,10 @@ fn find_running_step_index(
         if node.state != NodeState::Running {
             continue;
         }
-        if let Some(BlockDefinition::Step(step_def)) = block_map.get(&node.block_id).copied() {
+        if let Ok(BlockDefinition::Step(step_def)) = block_map
+            .binary_search_by_key(&&node.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
+        {
             if is_inside_decided_race(tree, block_map, node, node_index) {
                 continue;
             }
@@ -1043,7 +1064,7 @@ fn find_running_step_index(
 #[cfg(test)]
 fn find_running_step<'a>(
     tree: &'a [ExecutionNode],
-    block_map: &HashMap<&BlockId, &'a BlockDefinition>,
+    block_map: &[(&BlockId, &'a BlockDefinition)],
     handlers: &HandlerRegistry,
     node_index: &NodeIndex<'_>,
 ) -> Option<(&'a ExecutionNode, &'a BlockDefinition)> {
@@ -1051,7 +1072,9 @@ fn find_running_step<'a>(
         if node.state != NodeState::Running {
             continue;
         }
-        if let Some(block) = block_map.get(&node.block_id).copied()
+        if let Ok(block) = block_map
+            .binary_search_by_key(&&node.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
             && let BlockDefinition::Step(step_def) = block
         {
             // Skip steps inside a race where another branch already won.
@@ -1076,7 +1099,7 @@ fn find_running_step<'a>(
 /// `sibling_matches`; return true on the first match.
 fn has_race_ancestor_with_matching_sibling(
     tree: &[ExecutionNode],
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     node: &ExecutionNode,
     node_index: &NodeIndex<'_>,
     sibling_matches: impl Fn(&ExecutionNode) -> bool,
@@ -1086,7 +1109,9 @@ fn has_race_ancestor_with_matching_sibling(
     while let Some(curr) = current_node {
         if let Some(parent_id) = curr.parent_id {
             if let Some(parent_node) = get_node(node_index, parent_id)
-                && let Some(parent_block) = block_map.get(&parent_node.block_id).copied()
+                && let Ok(parent_block) = block_map
+                    .binary_search_by_key(&&parent_node.block_id, |(id, _)| *id)
+                    .map(|idx| block_map[idx].1)
                 && matches!(parent_block, BlockDefinition::Race(_))
             {
                 let my_branch = curr.branch_index;
@@ -1113,7 +1138,7 @@ fn has_race_ancestor_with_matching_sibling(
 /// branch lost and should not be dispatched.
 fn is_inside_decided_race(
     tree: &[ExecutionNode],
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     node: &ExecutionNode,
     node_index: &NodeIndex<'_>,
 ) -> bool {
@@ -1129,16 +1154,16 @@ fn is_inside_decided_race(
 /// inline (e.g. a 1000ms sleep) would starve the composite branch.
 fn has_racing_composite_sibling(
     tree: &[ExecutionNode],
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     node: &ExecutionNode,
     node_index: &NodeIndex<'_>,
 ) -> bool {
     has_race_ancestor_with_matching_sibling(tree, block_map, node, node_index, |c| {
         c.state == NodeState::Running
             && block_map
-                .get(&c.block_id)
-                .copied()
-                .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
+                .binary_search_by_key(&&c.block_id, |(id, _)| *id)
+                .map(|idx| block_map[idx].1)
+                .is_ok_and(|b| !matches!(b, BlockDefinition::Step(_)))
     })
 }
 
@@ -1156,20 +1181,18 @@ fn count_ancestors(node_index: &NodeIndex<'_>, mut node_id: ExecutionNodeId) -> 
     count
 }
 
-/// Flatten a nested block tree into a `HashMap` for O(1) lookups.
-pub fn flatten_blocks(blocks: &[BlockDefinition]) -> HashMap<&BlockId, &BlockDefinition> {
-    fn walk<'b>(
-        blocks: &'b [BlockDefinition],
-        map: &mut HashMap<&'b BlockId, &'b BlockDefinition>,
-    ) {
+/// Flatten a nested block tree into a sorted `Vec` for O(log N) zero-allocation lookups.
+pub fn flatten_blocks(blocks: &[BlockDefinition]) -> Vec<(&BlockId, &BlockDefinition)> {
+    fn walk<'b>(blocks: &'b [BlockDefinition], vec: &mut Vec<(&'b BlockId, &'b BlockDefinition)>) {
         for block in blocks {
-            map.insert(block_meta(block).0, block);
-            for_each_child_slice(block, &mut |_, children| walk(children, map));
+            vec.push((block_meta(block).0, block));
+            for_each_child_slice(block, &mut |_, children| walk(children, vec));
         }
     }
-    let mut map = HashMap::with_capacity(blocks.len() * 2);
-    walk(blocks, &mut map);
-    map
+    let mut vec = Vec::with_capacity(blocks.len() * 2);
+    walk(blocks, &mut vec);
+    vec.sort_unstable_by_key(|(id, _)| *id);
+    vec
 }
 
 /// Find a block definition by ID in the block tree.

@@ -1,7 +1,6 @@
 //! SLA deadline check: fail step nodes whose per-step deadline has been breached,
 //! invoking an escalation handler if configured.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::warn;
@@ -28,7 +27,7 @@ pub(super) async fn check_sla_deadlines(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
-    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    block_map: &[(&BlockId, &BlockDefinition)],
     tree: &[ExecutionNode],
 ) -> Result<bool, EngineError> {
     let now = chrono::Utc::now();
@@ -40,7 +39,11 @@ pub(super) async fn check_sla_deadlines(
         let Some(started_at) = node.started_at else {
             continue;
         };
-        let Some(BlockDefinition::Step(step_def)) = block_map.get(&node.block_id).copied() else {
+        let Some(BlockDefinition::Step(step_def)) = block_map
+            .binary_search_by_key(&&node.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
+            .ok()
+        else {
             continue;
         };
         let Some(deadline) = step_def.deadline else {
