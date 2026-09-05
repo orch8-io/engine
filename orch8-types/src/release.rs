@@ -289,9 +289,11 @@ impl VariantStats {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct GateEvaluation {
     pub gate: ReleaseGate,
-    /// `None` while either variant lacks `min_sample` observations.
+    /// Observed baseline rate, or `None` when it has no observations.
+    /// A populated rate does not imply that `min_sample` has been reached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_rate: Option<f64>,
+    /// Observed candidate rate, or `None` when it has no observations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_rate: Option<f64>,
     pub verdict: GateVerdict,

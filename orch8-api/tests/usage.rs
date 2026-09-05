@@ -110,3 +110,28 @@ async fn get_usage_empty_window_has_zero_total() {
     assert_eq!(body["total_cost_usd"], 0.0);
     assert_eq!(body["cost_is_estimate"], true);
 }
+
+#[tokio::test]
+async fn usage_rejects_reversed_window_and_accepts_equal_bounds() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    for (start, expected) in [
+        ("2026-09-02T00:00:00Z", StatusCode::BAD_REQUEST),
+        ("2026-09-01T00:00:00Z", StatusCode::OK),
+    ] {
+        let response = client
+            .get(format!("{}/usage", srv.v1_url()))
+            .header("X-Tenant-Id", "t1")
+            .query(&[("start", start), ("end", "2026-09-01T00:00:00Z")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        let body: serde_json::Value = response.json().await.unwrap();
+        if expected == StatusCode::BAD_REQUEST {
+            assert_eq!(body["error"]["code"], "invalid_argument");
+        } else {
+            assert_eq!(body["start"], body["end"]);
+        }
+    }
+}

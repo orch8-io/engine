@@ -138,8 +138,8 @@ pub struct SlaPolicy {
 /// A block is either a leaf (step) or a composite (parallel, race, etc.).
 ///
 /// This recursive enum IS the workflow DSL.
-/// Each variant wraps its definition in `Box<T>` so the enum itself stays a
-/// single word. `StepDef` is large (14 fields with many `Option<...>`), and
+/// Each variant wraps its definition in `Box<T>` so the enum carries a pointer
+/// plus its variant tag. `StepDef` is large, with many `Option<...>` fields, and
 /// without boxing every `BlockDefinition` — even `SubSequence`, which is small
 /// — paid the full size. `Box<T>` is transparent to both `serde` (the default
 /// impl delegates to the inner type so wire format is unchanged) and `utoipa`
@@ -1379,11 +1379,31 @@ impl SequenceDefinition {
         Ok(())
     }
 
-    /// Collect all handler names referenced by Step blocks in the sequence.
+    /// Collect all locally referenced handlers, including recovery and lifecycle
+    /// hooks. Sub-sequence definitions must be inspected separately.
     pub fn handler_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         for block in &self.blocks {
             collect_handler_names(block, &mut names);
+        }
+        for blocks in [&self.on_failure, &self.on_cancel].into_iter().flatten() {
+            for block in blocks {
+                collect_handler_names(block, &mut names);
+            }
+        }
+        if let Some(hooks) = &self.interceptors {
+            for action in [
+                &hooks.before_step,
+                &hooks.after_step,
+                &hooks.on_signal,
+                &hooks.on_complete,
+                &hooks.on_failure,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                names.push(action.handler.clone());
+            }
         }
         names.sort();
         names.dedup();
@@ -1415,6 +1435,19 @@ fn collect_handler_names(block: &BlockDefinition, names: &mut Vec<String>) {
     match block {
         BlockDefinition::Step(s) => {
             names.push(s.handler.clone());
+            if let Some(handler) = &s.fallback_handler {
+                names.push(handler.clone());
+            }
+            if let Some(escalation) = &s.on_deadline_breach {
+                names.push(escalation.handler.clone());
+            }
+            if let Some(handler) = s
+                .wait_for_input
+                .as_ref()
+                .and_then(|input| input.escalation_handler.as_ref())
+            {
+                names.push(handler.clone());
+            }
             if let Some(compensation) = &s.compensation {
                 names.push(compensation.handler.clone());
             }
@@ -1555,8 +1588,11 @@ fn validate_step(
         if retry.max_attempts == 0 {
             return Err(block_err(id, "retry.max_attempts must be > 0"));
         }
-        if retry.backoff_multiplier <= 0.0 {
-            return Err(block_err(id, "retry.backoff_multiplier must be > 0"));
+        if !retry.backoff_multiplier.is_finite() || retry.backoff_multiplier <= 0.0 {
+            return Err(block_err(
+                id,
+                "retry.backoff_multiplier must be finite and > 0",
+            ));
         }
         if retry.initial_backoff > retry.max_backoff {
             return Err(block_err(
@@ -2813,6 +2849,80 @@ mod tests {
         let seq = sample_seq(vec![step("a"), step("b")]);
         let names = seq.handler_names();
         assert_eq!(names, vec!["noop"]); // step() helper uses "noop"
+    }
+
+    #[test]
+    fn handler_names_include_recovery_and_lifecycle_hooks() {
+        let mut value = serde_json::to_value(sample_seq(vec![step("main")])).unwrap();
+        value["blocks"][0]["fallback_handler"] = serde_json::json!("fallback");
+        value["blocks"][0]["on_deadline_breach"] = serde_json::json!({"handler": "deadline"});
+        value["blocks"][0]["wait_for_input"] =
+            serde_json::json!({"escalation_handler": "human_timeout"});
+        value["on_failure"] = serde_json::json!([
+            {"type": "step", "id": "cleanup", "handler": "failure_cleanup"}
+        ]);
+        value["on_cancel"] = serde_json::json!([
+            {"type": "step", "id": "cleanup", "handler": "cancel_cleanup"}
+        ]);
+        for hook in [
+            "before_step",
+            "after_step",
+            "on_signal",
+            "on_complete",
+            "on_failure",
+        ] {
+            value["interceptors"][hook] = serde_json::json!({"handler": hook});
+        }
+        let sequence: SequenceDefinition = serde_json::from_value(value).unwrap();
+        assert!(sequence.validate().is_ok());
+        assert_eq!(
+            sequence.handler_names(),
+            [
+                "after_step",
+                "before_step",
+                "cancel_cleanup",
+                "deadline",
+                "failure_cleanup",
+                "fallback",
+                "human_timeout",
+                "noop",
+                "on_complete",
+                "on_failure",
+                "on_signal",
+            ]
+        );
+    }
+
+    #[test]
+    fn retry_multiplier_must_be_positive_and_finite() {
+        let mut block = step("retry");
+        let BlockDefinition::Step(definition) = &mut block else {
+            unreachable!()
+        };
+        definition.retry = Some(RetryPolicy {
+            max_attempts: 2,
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(10),
+            backoff_multiplier: 2.0,
+            retry_if: None,
+            non_retryable_codes: None,
+        });
+        for multiplier in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            definition.retry.as_mut().unwrap().backoff_multiplier = multiplier;
+            assert!(
+                sample_seq(vec![BlockDefinition::Step(definition.clone())])
+                    .validate()
+                    .is_err()
+            );
+        }
+        for multiplier in [0.5, 1.0, 2.0] {
+            definition.retry.as_mut().unwrap().backoff_multiplier = multiplier;
+            assert!(
+                sample_seq(vec![BlockDefinition::Step(definition.clone())])
+                    .validate()
+                    .is_ok()
+            );
+        }
     }
 
     #[test]

@@ -283,7 +283,10 @@ async fn authenticate_request_with_workloads(
         return Ok(());
     }
 
-    if provided.is_empty() && !workload_identities.is_empty() && expected_digest.is_none() {
+    // A configured workload registry is an authentication requirement even
+    // when no root API key is configured. Never fall through to permissive
+    // mode unless both authentication mechanisms are unconfigured.
+    if !workload_identities.is_empty() && expected_digest.is_none() {
         return Err(Status::unauthenticated(
             "client certificate is not mapped to a workload identity",
         ));

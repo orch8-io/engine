@@ -537,14 +537,14 @@ pub fn calculate_backoff(
     max_backoff: Duration,
     multiplier: f64,
 ) -> Duration {
-    if attempt == 0 {
-        return initial_backoff;
+    if attempt == 0 || initial_backoff.is_zero() {
+        return initial_backoff.min(max_backoff);
     }
     let initial_ms = initial_backoff.as_millis() as f64;
     let max_ms = max_backoff.as_millis() as f64;
-    #[allow(clippy::cast_possible_wrap)]
-    let exponent = attempt.min(63) as i32;
-    let backoff_ms = (initial_ms * multiplier.powi(exponent)).min(max_ms);
+    // All u32 attempts are exactly representable as f64. Capping the
+    // exponent at 63 silently freezes slowly growing retry schedules.
+    let backoff_ms = (initial_ms * multiplier.powf(f64::from(attempt))).min(max_ms);
     Duration::from_millis(backoff_ms.max(0.0) as u64)
 }
 
@@ -564,6 +564,34 @@ pub fn calculate_backoff_with_jitter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_first_attempt_respects_maximum() {
+        assert_eq!(
+            calculate_backoff(0, Duration::from_secs(10), Duration::from_secs(2), 2.0),
+            Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn zero_backoff_stays_zero_even_when_exponent_overflows() {
+        assert_eq!(
+            calculate_backoff(u32::MAX, Duration::ZERO, Duration::from_secs(60), 2.0),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn backoff_continues_growing_after_sixty_three_attempts() {
+        let initial = Duration::from_secs(1);
+        let maximum = Duration::from_secs(60);
+        let earlier = calculate_backoff(63, initial, maximum, 1.01);
+        let later = calculate_backoff(100, initial, maximum, 1.01);
+        assert!(later > earlier);
+        assert!(later >= Duration::from_millis(2700));
+        assert!(later <= Duration::from_millis(2710));
+        assert_eq!(calculate_backoff(u32::MAX, initial, maximum, 1.01), maximum);
+    }
 
     #[test]
     fn backoff_exponential() {

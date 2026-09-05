@@ -203,7 +203,17 @@ impl ReleaseChannel {
             &release.requirements.credentials,
             &runtime.credentials,
         )?;
-        require_all("region", &release.requirements.regions, &runtime.regions)?;
+        if !release.requirements.regions.is_empty()
+            && !release
+                .requirements
+                .regions
+                .iter()
+                .any(|region| runtime.regions.contains(region))
+        {
+            return Err(DistributionError::Incompatible(
+                "runtime is not in any allowed region".into(),
+            ));
+        }
         require_all(
             "hardware",
             &release.requirements.hardware,
@@ -232,6 +242,7 @@ impl ReleaseChannel {
             && !matches!(
                 runtime.kind,
                 orch8_types::continuity::RuntimeKind::Mobile
+                    | orch8_types::continuity::RuntimeKind::Desktop
                     | orch8_types::continuity::RuntimeKind::Browser
             )
         {
@@ -686,6 +697,44 @@ mod tests {
             tampered.verify(&[tampered.public_key.clone()]),
             Err(DistributionError::HashMismatch)
         );
+    }
+
+    #[test]
+    fn channel_region_and_ui_selection_agrees_with_task_claiming() {
+        let now = Utc::now();
+        let requirements = CapsuleRequirements {
+            regions: vec!["br".into(), "eu".into()],
+            requires_human_ui: true,
+            ..CapsuleRequirements::default()
+        };
+        let mut channel = ReleaseChannel::new("tenant-a", ReleaseChannelName::Stable);
+        channel
+            .promote(ChannelRelease {
+                package_name: "acme/app".into(),
+                version: "1.0.0".into(),
+                content_hash: hash('a'),
+                package_url: "/full".into(),
+                requirements: requirements.clone(),
+                selected_runtime_id: None,
+                promoted_at: now,
+            })
+            .unwrap();
+        for kind in [
+            RuntimeKind::Desktop,
+            RuntimeKind::Mobile,
+            RuntimeKind::Browser,
+            RuntimeKind::Server,
+        ] {
+            for region in ["br", "eu", "other"] {
+                let mut candidate = runtime();
+                candidate.kind = kind;
+                candidate.regions = vec![region.into()];
+                assert_eq!(
+                    channel.select(&candidate, now).is_ok(),
+                    requirements.is_satisfied_by(&candidate, now)
+                );
+            }
+        }
     }
 
     #[test]

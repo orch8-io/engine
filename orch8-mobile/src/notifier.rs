@@ -191,14 +191,12 @@ impl MobileNotifier {
                 .await
                 .ok()
                 .and_then(|seq| {
-                    seq.blocks.iter().find_map(|b| {
-                        if let orch8_types::sequence::BlockDefinition::Step(s) = b
-                            && s.id == inst.step_id
-                        {
-                            return Some(s.handler.clone());
+                    match orch8_engine::evaluator::find_block(&seq.blocks, &inst.step_id)? {
+                        orch8_types::sequence::BlockDefinition::Step(step) => {
+                            Some(step.handler.clone())
                         }
-                        None
-                    })
+                        _ => None,
+                    }
                 })
                 .unwrap_or_default();
 
@@ -361,6 +359,23 @@ mod tests {
 
     #[tokio::test]
     async fn waiting_projection_delivers_handler_once() {
+        assert_waiting_projection_delivers_handler_once(serde_json::json!([
+            {"type": "step", "id": "review", "handler": "human_review", "params": {}}
+        ]))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn waiting_projection_delivers_nested_handler_once() {
+        assert_waiting_projection_delivers_handler_once(serde_json::json!([
+            {"type": "router", "id": "approval_route", "routes": [], "default": [
+                {"type": "step", "id": "review", "handler": "human_review", "params": {}}
+            ]}
+        ]))
+        .await;
+    }
+
+    async fn assert_waiting_projection_delivers_handler_once(blocks: serde_json::Value) {
         struct RecordingListener {
             pending: std::sync::Mutex<Vec<(String, String, String)>>,
             notified: tokio::sync::Notify,
@@ -391,7 +406,7 @@ mod tests {
             "name": "approval",
             "version": 1,
             "deprecated": false,
-            "blocks": [{"type": "step", "id": "review", "handler": "human_review", "params": {}}],
+            "blocks": blocks,
             "created_at": chrono::Utc::now()
         }))
         .unwrap();

@@ -16,6 +16,7 @@ use orch8_types::worker::{
     WorkerAttemptEventKind, WorkerClaim, WorkerTask, WorkerTaskAttemptEvent, WorkerTaskState,
 };
 
+use crate::WORKER_STREAM_PROTOCOL_VERSION;
 use crate::auth::{caller_tenant, enforce_tenant_create, enforce_tenant_match, scoped_tenant_id};
 use crate::proto::{self, orch8_service_server::Orch8Service};
 
@@ -161,7 +162,6 @@ impl Orch8GrpcService {
     }
 }
 
-const WORKER_STREAM_PROTOCOL_VERSION: u32 = 2;
 const WORKER_STREAM_MAX_IN_FLIGHT: u32 = 256;
 const WORKER_STREAM_MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
 const WORKER_STREAM_HEARTBEAT_SECS: u32 = 15;
@@ -1311,7 +1311,7 @@ impl Orch8Service for Orch8GrpcService {
             .ok_or_else(|| Status::not_found("instance not found"))?;
         enforce_tenant_match(&req, &inst.tenant_id, "instance")?;
         self.storage
-            .enqueue_signal(&signal)
+            .enqueue_signal_if_active(&signal)
             .await
             .map_err(storage_err)?;
         Ok(Response::new(proto::Empty {}))
@@ -1784,15 +1784,23 @@ impl Orch8Service for Orch8GrpcService {
         let mut draining = initial_capabilities
             .as_ref()
             .is_some_and(|capabilities| capabilities.draining);
-        if features
-            .iter()
-            .any(|feature| feature == "placement_commands")
-        {
-            draining |= self.send_worker_commands(&open.worker_id, &sender).await?;
-        }
-
         let service = self.clone();
         tokio::spawn(async move {
+            // Return the receiver before sending queued commands. The hello
+            // can already fill a one-frame channel; awaiting another send in
+            // the RPC handler would prevent the client from draining it.
+            if features
+                .iter()
+                .any(|feature| feature == "placement_commands")
+            {
+                match service.send_worker_commands(&open.worker_id, &sender).await {
+                    Ok(drain_requested) => draining |= drain_requested,
+                    Err(status) => {
+                        let _ = sender.send(Err(status)).await;
+                        return;
+                    }
+                }
+            }
             let mut outstanding = std::collections::HashSet::new();
             let mut runtime_id = initial_capabilities.map(|capabilities| capabilities.runtime_id);
             while let Ok(Some(frame)) = inbound.message().await {
@@ -2130,11 +2138,8 @@ impl Orch8Service for Orch8GrpcService {
         let body_tenant = TenantId::unchecked(req.get_ref().tenant_id.clone());
         let tenant_id = enforce_tenant_create(&req, &body_tenant)?;
         let inner = req.into_inner();
-        let strategy: orch8_types::pool::RotationStrategy =
-            from_json_str(&serde_json::to_string(&inner.strategy).map_err(|e| {
-                tracing::error!(error = %e, "failed to encode rotation strategy");
-                Status::internal("internal error")
-            })?)?;
+        let strategy = orch8_types::pool::RotationStrategy::from_str(&inner.strategy)
+            .map_err(Status::invalid_argument)?;
         let now = chrono::Utc::now();
         let pool = orch8_types::pool::ResourcePool {
             id: Uuid::now_v7(),
@@ -2246,7 +2251,12 @@ impl Orch8Service for Orch8GrpcService {
         let r: AddReq = from_json_str(&inner.resource_json)?;
         let warmup_start = r
             .warmup_start
-            .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
+            .map(|s| {
+                chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").map_err(|e| {
+                    Status::invalid_argument(format!("invalid warmup_start date: {e}"))
+                })
+            })
+            .transpose()?;
 
         let resource = orch8_types::pool::PoolResource {
             id: Uuid::now_v7(),
@@ -2346,8 +2356,11 @@ impl Orch8Service for Orch8GrpcService {
             resource.daily_cap = daily_cap;
         }
         if let Some(warmup_start) = upd.warmup_start {
-            resource.warmup_start =
-                chrono::NaiveDate::parse_from_str(&warmup_start, "%Y-%m-%d").ok();
+            resource.warmup_start = Some(
+                chrono::NaiveDate::parse_from_str(&warmup_start, "%Y-%m-%d").map_err(|e| {
+                    Status::invalid_argument(format!("invalid warmup_start date: {e}"))
+                })?,
+            );
         }
         if let Some(warmup_days) = upd.warmup_days {
             resource.warmup_days = warmup_days;

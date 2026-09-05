@@ -1196,14 +1196,10 @@ fn find_handler(
     blocks: &[orch8_types::sequence::BlockDefinition],
     step_id: &BlockId,
 ) -> Option<String> {
-    blocks.iter().find_map(|b| {
-        if let orch8_types::sequence::BlockDefinition::Step(sd) = b
-            && sd.id == *step_id
-        {
-            return Some(sd.handler.clone());
-        }
-        None
-    })
+    match orch8_engine::evaluator::find_block(blocks, step_id)? {
+        BlockDefinition::Step(step) => Some(step.handler.clone()),
+        _ => None,
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -1211,27 +1207,23 @@ fn find_wait_info(
     blocks: &[orch8_types::sequence::BlockDefinition],
     step_id: &BlockId,
 ) -> Option<(Option<String>, Option<String>, Option<String>, Option<i64>)> {
-    blocks.iter().find_map(|b| {
-        if let orch8_types::sequence::BlockDefinition::Step(sd) = b
-            && sd.id == *step_id
-        {
-            return sd.wait_for_input.as_ref().map(|w| {
-                let choices_json = w
-                    .choices
-                    .as_ref()
-                    .and_then(|c| serde_json::to_string(c).ok());
-                #[allow(clippy::cast_possible_wrap)]
-                let timeout_secs = w.timeout.map(|d| d.as_secs() as i64);
-                (
-                    Some(w.prompt.clone()),
-                    choices_json,
-                    w.store_as.clone(),
-                    timeout_secs,
-                )
-            });
-        }
-        None
-    })
+    let BlockDefinition::Step(step) = orch8_engine::evaluator::find_block(blocks, step_id)? else {
+        return None;
+    };
+    let wait = step.wait_for_input.as_ref()?;
+    let choices_json = wait
+        .choices
+        .as_ref()
+        .and_then(|choices| serde_json::to_string(choices).ok());
+    let timeout_secs = wait
+        .timeout
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX));
+    Some((
+        Some(wait.prompt.clone()),
+        choices_json,
+        wait.store_as.clone(),
+        timeout_secs,
+    ))
 }
 
 #[cfg(test)]
@@ -1440,6 +1432,70 @@ mod tests {
         assert_eq!(status["current_step"], "review");
         assert_eq!(status["handler"], "human_review");
         assert_eq!(status["steps"][0]["block_id"], "review");
+    }
+
+    #[test]
+    fn approval_timeout_saturates_instead_of_becoming_negative() {
+        let mut block: BlockDefinition = serde_json::from_value(serde_json::json!({
+            "type": "step",
+            "id": "review",
+            "handler": "human_review",
+            "params": {},
+            "wait_for_input": {"prompt": "Approve?"}
+        }))
+        .unwrap();
+        let BlockDefinition::Step(step) = &mut block else {
+            panic!("expected a step fixture");
+        };
+        step.wait_for_input.as_mut().unwrap().timeout = Some(Duration::from_secs(u64::MAX));
+
+        let (_, _, _, timeout) = find_wait_info(&[block], &BlockId::new("review")).unwrap();
+
+        assert_eq!(timeout, Some(i64::MAX));
+    }
+
+    #[test]
+    fn approval_without_timeout_preserves_absent_deadline() {
+        let block: BlockDefinition = serde_json::from_value(serde_json::json!({
+            "type": "step",
+            "id": "review",
+            "handler": "human_review",
+            "params": {},
+            "wait_for_input": {"prompt": "Approve?"}
+        }))
+        .unwrap();
+
+        let (_, _, _, timeout) = find_wait_info(&[block], &BlockId::new("review")).unwrap();
+
+        assert_eq!(timeout, None);
+    }
+
+    #[test]
+    fn nested_approval_preserves_handler_and_input_contract() {
+        let sequence: SequenceDefinition = serde_json::from_str(include_str!(
+            "../tests/fixtures/workflows/onboarding-flow.json"
+        ))
+        .unwrap();
+        let instance = SyncInstanceProjection {
+            id: InstanceId::new(),
+            sequence_id: sequence.id,
+            state: InstanceState::Waiting,
+            current_step: Some(BlockId::new("setup_notifications")),
+        };
+        let (_, status) = build_status_entry(&instance, Some(&sequence), None, "now");
+        let status: serde_json::Value = serde_json::from_str(&status).unwrap();
+        assert_eq!(status["handler"], "setup_notifications");
+        let (_, approval) = build_approval_entry(&instance, Some(&sequence)).unwrap();
+        let approval: serde_json::Value = serde_json::from_str(&approval).unwrap();
+        assert_eq!(
+            approval["prompt"],
+            "Would you like to enable push notifications?"
+        );
+        assert_eq!(approval["choices"][0]["value"], "enabled");
+        assert_eq!(approval["store_as"], "notification_preference");
+        assert_eq!(approval["timeout_seconds"], 120);
+        assert!(find_handler(&sequence.blocks, &BlockId::new("missing")).is_none());
+        assert!(find_wait_info(&sequence.blocks, &BlockId::new("terms_gate")).is_none());
     }
 
     #[test]

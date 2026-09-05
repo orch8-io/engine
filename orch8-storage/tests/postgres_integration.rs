@@ -1011,3 +1011,68 @@ async fn run_initialization_and_reset_preserve_postgres_context() {
     assert!(reset.context.runtime.current_step.is_none());
     assert!(reset.context.runtime.started_at.is_none());
 }
+
+#[tokio::test]
+async fn duplicate_collapsible_wake_preserves_pending_replacement_postgres() {
+    use orch8_push::{CollapsibleWake, PushOutboxStore};
+    let storage = require_postgres!();
+    let scope = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    storage
+        .register_mobile_device(&orch8_storage::MobileDevice {
+            device_id: scope.clone(),
+            tenant_id: scope.clone(),
+            push_token: Some("test-token".into()),
+            platform: "ios".into(),
+            app_version: None,
+            active: true,
+            last_sync_at: None,
+            registered_at: String::new(),
+        })
+        .await
+        .unwrap();
+    let old = CollapsibleWake {
+        tenant_id: scope.clone(),
+        device_id: scope.clone(),
+        execution_id: scope,
+        topic: "resume".into(),
+        command_id: "old".into(),
+        created_at: now,
+    };
+    let old_id = storage.enqueue_collapsible_wake(&old).await.unwrap();
+    assert_eq!(
+        storage.enqueue_collapsible_wake(&old).await.unwrap(),
+        old_id
+    );
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let status: String = sqlx::query_scalar("SELECT status FROM push_wake_outbox WHERE id=$1")
+        .bind(old_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "pending");
+    let mut new = old.clone();
+    new.command_id = "new".into();
+    let new_id = storage.enqueue_collapsible_wake(&new).await.unwrap();
+    assert_eq!(
+        storage.enqueue_collapsible_wake(&old).await.unwrap(),
+        old_id
+    );
+    assert_eq!(
+        storage.enqueue_collapsible_wake(&new).await.unwrap(),
+        new_id
+    );
+    let rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id,status FROM push_wake_outbox WHERE id=ANY($1) ORDER BY status")
+            .bind(vec![old_id, new_id])
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        vec![(new_id, "pending".into()), (old_id, "terminal".into())]
+    );
+    pool.close().await;
+}

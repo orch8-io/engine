@@ -669,6 +669,101 @@ async fn capability_claim_enforces_tenant_inside_atomic_claim() {
 }
 
 #[tokio::test]
+async fn worker_claim_and_reap_roll_back_when_attempt_evidence_fails() {
+    for mode in 0..4 {
+        let s = store().await;
+        let instance = make_instance("test", SequenceId::new());
+        s.create_instance(&instance).await.unwrap();
+        let now = Utc::now();
+        let mut task = distributed_task(instance.id, "work", "norway", None, now);
+        task.requirements = CapsuleRequirements::default();
+        if mode == 3 {
+            task.state = WorkerTaskState::Claimed;
+            task.worker_id = Some("old-worker".into());
+            task.claim_epoch = 1;
+            task.heartbeat_at = Some(now - Duration::hours(1));
+        }
+        s.create_worker_task(&task).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_attempt_evidence BEFORE INSERT ON worker_task_attempt_events
+             BEGIN SELECT RAISE(ABORT, 'injected evidence persistence failure'); END",
+        )
+        .execute(s.pool())
+        .await
+        .unwrap();
+
+        let result = match mode {
+            0 => s
+                .claim_worker_tasks("render", "worker", 1)
+                .await
+                .map(|_| ()),
+            1 => s
+                .claim_worker_tasks_for_tenant("render", "worker", &instance.tenant_id, 1)
+                .await
+                .map(|_| ()),
+            2 => s
+                .claim_worker_tasks_matching(
+                    "render",
+                    "worker",
+                    None,
+                    None,
+                    &distributed_runtime(now, "norway"),
+                    1,
+                )
+                .await
+                .map(|_| ()),
+            _ => s
+                .reap_stale_worker_tasks(std::time::Duration::from_secs(60))
+                .await
+                .map(|_| ()),
+        };
+        assert!(
+            result.is_err(),
+            "mode {mode} must report the evidence failure"
+        );
+        let stored = s.get_worker_task(task.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, task.state, "mode {mode}");
+        assert_eq!(stored.worker_id, task.worker_id, "mode {mode}");
+        assert_eq!(stored.claim_epoch, task.claim_epoch, "mode {mode}");
+        assert!(
+            s.list_worker_task_attempt_events(task.id, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        sqlx::query("DROP TRIGGER fail_attempt_evidence")
+            .execute(s.pool())
+            .await
+            .unwrap();
+        // A subsequent transaction on the same in-memory pool must remain usable.
+        if mode == 3 {
+            assert_eq!(
+                s.reap_stale_worker_tasks(std::time::Duration::from_secs(60))
+                    .await
+                    .unwrap(),
+                1
+            );
+        } else {
+            assert_eq!(
+                s.claim_worker_tasks("render", "worker", 1)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        assert_eq!(
+            s.list_worker_task_attempt_events(task.id, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
 async fn capability_claim_scans_past_more_than_one_page_of_incompatible_tasks() {
     let s = store().await;
     let instance_id = InstanceId::new();

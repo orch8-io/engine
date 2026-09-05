@@ -3,10 +3,11 @@ use subtle::ConstantTimeEq;
 
 /// Constant-time secret comparison via SHA-256 length normalisation.
 ///
-/// Both inputs are hashed to a fixed 32-byte digest before comparison,
-/// preventing timing side-channels from differing input lengths.
-/// SHA-256 here is purely a length-normaliser — collision resistance is
-/// not load-bearing.
+/// Both inputs are hashed to a fixed 32-byte digest, then the digests are
+/// compared in constant time. Hashing work still depends on input length;
+/// this does not promise constant total runtime across different lengths.
+/// Equality relies on SHA-256's resistance to finding a different input with
+/// the same digest. Use for secret-token verification, not password storage.
 pub fn verify_secret_constant_time(provided: &str, expected: &str) -> bool {
     let provided_digest = Sha256::digest(provided.as_bytes());
     let expected_digest = Sha256::digest(expected.as_bytes());

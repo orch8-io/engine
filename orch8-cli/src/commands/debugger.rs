@@ -30,8 +30,12 @@ pub enum DebugCmd {
 pub async fn run(client: &Client, base: &str, cmd: DebugCmd, format: OutputFormat) -> Result<()> {
     match cmd {
         DebugCmd::Open { instance_id, limit } => {
+            let limit = limit.clamp(1, 500);
             let (timeline, checkpoints, effects) = tokio::try_join!(
-                get_json(client, format!("{base}/instances/{instance_id}/timeline")),
+                get_json(
+                    client,
+                    format!("{base}/instances/{instance_id}/timeline?limit={limit}")
+                ),
                 get_json(
                     client,
                     format!("{base}/instances/{instance_id}/checkpoints")
@@ -115,6 +119,30 @@ fn print_report(report: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn open_passes_timeline_limit_to_server() {
+        let api = crate::commands::test_support::mock_api().await;
+        let instance_id = Uuid::new_v4();
+        run(
+            &Client::new(),
+            &api.base,
+            DebugCmd::Open {
+                instance_id,
+                limit: 500,
+            },
+            OutputFormat::Json,
+        )
+        .await
+        .unwrap();
+        let requests = api.log.snapshot();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests.iter().any(
+                |request| request.uri == format!("/instances/{instance_id}/timeline?limit=500")
+            )
+        );
+    }
 
     #[test]
     fn bounded_debug_evidence_never_exceeds_limit() {

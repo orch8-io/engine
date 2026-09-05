@@ -22,6 +22,24 @@ fn round6(v: f64) -> f64 {
     (v * 1_000_000.0).round() / 1_000_000.0
 }
 
+fn resolve_window(
+    start: Option<DateTime<Utc>>,
+    end: DateTime<Utc>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
+    let start = match start {
+        Some(start) => start,
+        None => end.checked_sub_signed(Duration::days(30)).ok_or_else(|| {
+            ApiError::InvalidArgument("end is too early for the default 30-day usage window".into())
+        })?,
+    };
+    if start > end {
+        return Err(ApiError::InvalidArgument(
+            "usage start must not be after end".into(),
+        ));
+    }
+    Ok((start, end))
+}
+
 /// Query params for [`get_usage`].
 #[derive(Debug, Deserialize)]
 pub struct UsageQuery {
@@ -67,8 +85,7 @@ pub async fn get_usage(
         })?
     };
 
-    let end = q.end.unwrap_or_else(Utc::now);
-    let start = q.start.unwrap_or_else(|| end - Duration::days(30));
+    let (start, end) = resolve_window(q.start, q.end.unwrap_or_else(Utc::now))?;
 
     let usage = state
         .storage
@@ -112,4 +129,27 @@ pub async fn get_usage(
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/usage", get(get_usage))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_window_handles_date_bounds_and_preserves_explicit_start() {
+        assert!(matches!(
+            resolve_window(None, DateTime::<Utc>::MIN_UTC),
+            Err(ApiError::InvalidArgument(_))
+        ));
+        let lower = DateTime::<Utc>::MIN_UTC;
+        assert_eq!(resolve_window(Some(lower), lower).unwrap(), (lower, lower));
+        let end = DateTime::<Utc>::MAX_UTC;
+        let (start, actual_end) = resolve_window(None, end).unwrap();
+        assert_eq!(actual_end, end);
+        assert_eq!(end - start, Duration::days(30));
+        assert!(matches!(
+            resolve_window(Some(end), start),
+            Err(ApiError::InvalidArgument(_))
+        ));
+    }
 }

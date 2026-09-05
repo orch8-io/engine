@@ -129,8 +129,10 @@ impl Storage {
         };
         match self.kind {
             StorageKind::SqliteFile(path) => {
-                let path = path.to_string_lossy().into_owned();
-                let mut storage = SqliteStorage::file(&path).await?;
+                let path = path.to_str().ok_or_else(|| {
+                    Error::Config("SQLite database path must be valid UTF-8".into())
+                })?;
+                let mut storage = SqliteStorage::file(path).await?;
                 if let Some(store) = artifact_store {
                     storage = storage.with_artifact_store(store);
                 }
@@ -267,6 +269,20 @@ mod tests {
 
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sqlite_database_path_must_be_valid_utf8() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid_path = PathBuf::from(OsString::from_vec(vec![0xff]));
+        let result = Storage::sqlite(invalid_path).connect().await;
+        let Err(error) = result else {
+            panic!("non-UTF-8 database paths must not be silently rewritten");
+        };
+        assert!(matches!(error, Error::Config(_)));
     }
 
     #[cfg(unix)]

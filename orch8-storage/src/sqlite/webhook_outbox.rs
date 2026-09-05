@@ -5,7 +5,7 @@ use orch8_types::error::StorageError;
 use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
 
 use super::SqliteStorage;
-use super::helpers::{parse_ts, ts};
+use super::helpers::{begin_immediate, parse_ts, ts};
 
 fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> Result<WebhookOutboxEntry, StorageError> {
     let payload_str: String = row.get("payload");
@@ -126,53 +126,38 @@ pub(super) async fn claim_due(
     // Same BEGIN IMMEDIATE discipline as `instances::claim_due`: serialize the
     // read-then-mark so two drain loops can't claim the same row (the SQLite
     // analogue of `FOR UPDATE SKIP LOCKED`).
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut conn = begin_immediate(&storage.pool).await?;
 
-    let result = async {
-        let rows = sqlx::query(
-            "SELECT id, url, event_type, instance_id, payload, attempts, last_error, created_at, delivery_id, status, next_attempt_at, claimed_at \
-             FROM webhook_outbox \
-             WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1) \
-             ORDER BY created_at ASC LIMIT ?2",
-        )
-        .bind(&now_s)
-        .bind(i64::from(limit))
-        .fetch_all(&mut *conn)
-        .await?;
-        let mut entries: Vec<WebhookOutboxEntry> =
-            rows.iter().map(row_to_entry).collect::<Result<_, _>>()?;
-        if !entries.is_empty() {
-            let mut qb = sqlx::QueryBuilder::new(
-                "UPDATE webhook_outbox SET status='in_flight', claimed_at=",
-            );
-            qb.push_bind(now_s);
-            qb.push(" WHERE id IN (");
-            let mut separated = qb.separated(",");
-            for e in &entries {
-                separated.push_bind(e.id.to_string());
-            }
-            separated.push_unseparated(")");
-            qb.build().execute(&mut *conn).await?;
-            for entry in &mut entries {
-                entry.status = WebhookOutboxStatus::InFlight;
-                entry.claimed_at = Some(now);
-            }
+    let rows = sqlx::query(
+        "SELECT id, url, event_type, instance_id, payload, attempts, last_error, created_at, delivery_id, status, next_attempt_at, claimed_at \
+         FROM webhook_outbox \
+         WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1) \
+         ORDER BY created_at ASC LIMIT ?2",
+    )
+    .bind(&now_s)
+    .bind(i64::from(limit))
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut entries: Vec<WebhookOutboxEntry> =
+        rows.iter().map(row_to_entry).collect::<Result<_, _>>()?;
+    if !entries.is_empty() {
+        let mut qb =
+            sqlx::QueryBuilder::new("UPDATE webhook_outbox SET status='in_flight', claimed_at=");
+        qb.push_bind(now_s);
+        qb.push(" WHERE id IN (");
+        let mut separated = qb.separated(",");
+        for e in &entries {
+            separated.push_bind(e.id.to_string());
         }
-        Ok::<_, StorageError>(entries)
-    }
-    .await;
-
-    match result {
-        Ok(entries) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
-            Ok(entries)
-        }
-        Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            Err(e)
+        separated.push_unseparated(")");
+        qb.build().execute(&mut *conn).await?;
+        for entry in &mut entries {
+            entry.status = WebhookOutboxStatus::InFlight;
+            entry.claimed_at = Some(now);
         }
     }
+    conn.commit().await?;
+    Ok(entries)
 }
 
 pub(super) async fn claim_row(

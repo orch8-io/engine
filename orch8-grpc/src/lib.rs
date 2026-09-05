@@ -7,6 +7,9 @@
 pub mod auth;
 pub mod service;
 
+/// Worker-stream wire protocol supported by this release.
+pub const WORKER_STREAM_PROTOCOL_VERSION: u32 = 2;
+
 pub mod proto {
     #![allow(
         clippy::default_constructed_unit_structs,

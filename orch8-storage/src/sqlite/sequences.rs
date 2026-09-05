@@ -176,53 +176,24 @@ pub(super) async fn update_status(
 async fn delete_on(conn: &mut sqlx::SqliteConnection, id: SequenceId) -> Result<(), StorageError> {
     let id_str = id.to_string();
 
-    // Gather instance IDs referencing this sequence.
-    let instance_ids: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM task_instances WHERE sequence_id = ?1")
-            .bind(&id_str)
-            .fetch_all(&mut *conn)
-            .await?;
-
-    if !instance_ids.is_empty() {
-        // Delete child tables that lack ON DELETE CASCADE. Previously this
-        // issued `instance_ids.len() * 5` round-trips — on a sequence with 10k
-        // instances that is 50k queries, all under an IMMEDIATE txn holding
-        // the write lock. Now we issue exactly one `DELETE ... WHERE
-        // instance_id IN (...)` per child table (5 total) regardless of
-        // instance count, drastically reducing lock-hold time.
-        for table in &[
-            "block_outputs",
-            "execution_tree",
-            "signal_inbox",
-            "worker_tasks",
-            "externalized_state",
-            "instance_kv_state",
-            "injected_blocks",
-        ] {
-            let sql = match *table {
-                "block_outputs" => "DELETE FROM block_outputs WHERE instance_id IN (",
-                "execution_tree" => "DELETE FROM execution_tree WHERE instance_id IN (",
-                "signal_inbox" => "DELETE FROM signal_inbox WHERE instance_id IN (",
-                "worker_tasks" => "DELETE FROM worker_tasks WHERE instance_id IN (",
-                "externalized_state" => "DELETE FROM externalized_state WHERE instance_id IN (",
-                "instance_kv_state" => "DELETE FROM instance_kv_state WHERE instance_id IN (",
-                "injected_blocks" => "DELETE FROM injected_blocks WHERE instance_id IN (",
-                _ => continue,
-            };
-            let mut qb = sqlx::QueryBuilder::new(sql);
-            let mut sep = qb.separated(", ");
-            for iid in &instance_ids {
-                sep.push_bind(iid);
-            }
-            sep.push_unseparated(")");
-            qb.build().execute(&mut *conn).await?;
-        }
-
-        sqlx::query("DELETE FROM task_instances WHERE sequence_id = ?1")
-            .bind(&id_str)
-            .execute(&mut *conn)
-            .await?;
+    // Select dependent IDs inside SQLite instead of expanding one bind per
+    // instance. The query stays within the bind limit regardless of run count.
+    for sql in [
+        "DELETE FROM block_outputs WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
+        "DELETE FROM execution_tree WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
+        "DELETE FROM signal_inbox WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
+        "DELETE FROM worker_tasks WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
+        "DELETE FROM externalized_state WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
+        "DELETE FROM instance_kv_state WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
+        "DELETE FROM injected_blocks WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
+    ] {
+        sqlx::query(sql).bind(&id_str).execute(&mut *conn).await?;
     }
+
+    sqlx::query("DELETE FROM task_instances WHERE sequence_id = ?1")
+        .bind(&id_str)
+        .execute(&mut *conn)
+        .await?;
 
     sqlx::query("DELETE FROM cron_schedules WHERE sequence_id = ?1")
         .bind(&id_str)

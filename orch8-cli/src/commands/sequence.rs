@@ -137,21 +137,21 @@ enum ApplyDecision {
 /// Decide what to do with `local` given the `server`'s current version (if any).
 /// New sequence → apply v1; identical content → unchanged; differing content →
 /// apply at `server.version + 1`.
-fn decide(server: Option<&serde_json::Value>, local: &serde_json::Value) -> ApplyDecision {
-    match server {
-        None => ApplyDecision::Apply(1),
-        Some(s) => {
-            if content_fingerprint(s) == content_fingerprint(local) {
-                ApplyDecision::Unchanged(s["version"].as_i64().unwrap_or(0))
-            } else {
-                let cur = s["version"]
-                    .as_i64()
-                    .and_then(|v| i32::try_from(v).ok())
-                    .unwrap_or(0);
-                ApplyDecision::Apply(cur.saturating_add(1))
-            }
-        }
+fn decide(server: Option<&serde_json::Value>, local: &serde_json::Value) -> Result<ApplyDecision> {
+    let Some(server) = server else {
+        return Ok(ApplyDecision::Apply(1));
+    };
+    let current = server["version"]
+        .as_i64()
+        .and_then(|version| i32::try_from(version).ok())
+        .context("server sequence has a missing or invalid i32 version")?;
+    if content_fingerprint(server) == content_fingerprint(local) {
+        return Ok(ApplyDecision::Unchanged(i64::from(current)));
     }
+    let next = current
+        .checked_add(1)
+        .context("sequence version limit reached; cannot apply a newer version")?;
+    Ok(ApplyDecision::Apply(next))
 }
 
 /// Apply a single sequence JSON file. Returns a human-readable status line.
@@ -193,14 +193,14 @@ async fn apply_one(
         Some(
             resp.json::<serde_json::Value>()
                 .await
-                .unwrap_or(serde_json::Value::Null),
+                .context("invalid sequence lookup response")?,
         )
     } else {
         let status = resp.status();
         anyhow::bail!("{}: server returned {status}", file.display());
     };
 
-    let next_version = match decide(server.as_ref(), &local) {
+    let next_version = match decide(server.as_ref(), &local)? {
         ApplyDecision::Unchanged(v) => return Ok(format!("unchanged  {name} v{v} (no diff)")),
         ApplyDecision::Apply(v) => v,
     };
@@ -231,7 +231,9 @@ async fn apply_one(
 fn collect_json_files(path: &std::path::Path) -> Result<Vec<PathBuf>> {
     if path.is_dir() {
         let mut files: Vec<PathBuf> = std::fs::read_dir(path)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
             .collect();
         files.sort();
@@ -552,7 +554,7 @@ mod tests {
 
     #[test]
     fn new_sequence_applies_v1() {
-        assert_eq!(decide(None, &seq(0, "a")), ApplyDecision::Apply(1));
+        assert_eq!(decide(None, &seq(0, "a")).unwrap(), ApplyDecision::Apply(1));
     }
 
     #[test]
@@ -560,14 +562,20 @@ mod tests {
         // Same blocks, different id/version/created_at → unchanged.
         let server = seq(3, "a");
         let local = seq(99, "a"); // different id + version, same content
-        assert_eq!(decide(Some(&server), &local), ApplyDecision::Unchanged(3));
+        assert_eq!(
+            decide(Some(&server), &local).unwrap(),
+            ApplyDecision::Unchanged(3)
+        );
     }
 
     #[test]
     fn changed_content_bumps_version() {
         let server = seq(3, "a");
         let local = seq(3, "b"); // different handler
-        assert_eq!(decide(Some(&server), &local), ApplyDecision::Apply(4));
+        assert_eq!(
+            decide(Some(&server), &local).unwrap(),
+            ApplyDecision::Apply(4)
+        );
     }
 
     #[test]
@@ -615,30 +623,59 @@ mod tests {
     }
 
     #[test]
-    fn decide_unchanged_with_missing_server_version_defaults_to_zero() {
-        // Server record matches content but carries no `version` field.
-        let server =
-            json!({ "blocks": [{ "type": "step", "id": "s1", "handler": "a", "params": {} }] });
-        let local = seq(7, "a");
-        assert_eq!(decide(Some(&server), &local), ApplyDecision::Unchanged(0));
+    fn invalid_server_versions_are_rejected_even_without_content_changes() {
+        for version in [
+            json!(null),
+            json!("3"),
+            json!(1.5),
+            json!(i64::from(i32::MAX) + 1),
+        ] {
+            let mut server = seq(3, "a");
+            server["version"] = version;
+            for handler in ["a", "b"] {
+                assert!(decide(Some(&server), &seq(3, handler)).is_err());
+            }
+        }
+        let mut server = seq(3, "a");
+        server.as_object_mut().unwrap().remove("version");
+        assert!(decide(Some(&server), &seq(3, "a")).is_err());
     }
 
     #[test]
-    fn decide_changed_with_missing_server_version_applies_v1() {
-        // Changed content + absent server version → bump from the 0 fallback to 1.
-        let server =
-            json!({ "blocks": [{ "type": "step", "id": "s1", "handler": "a", "params": {} }] });
-        let local = seq(7, "b");
-        assert_eq!(decide(Some(&server), &local), ApplyDecision::Apply(1));
+    fn maximum_version_is_unchanged_or_rejected_but_never_reused() {
+        let server = seq(i64::from(i32::MAX), "a");
+        assert_eq!(
+            decide(Some(&server), &seq(1, "a")).unwrap(),
+            ApplyDecision::Unchanged(i64::from(i32::MAX))
+        );
+        assert!(decide(Some(&server), &seq(1, "b")).is_err());
+        let penultimate = seq(i64::from(i32::MAX - 1), "a");
+        assert_eq!(
+            decide(Some(&penultimate), &seq(1, "b")).unwrap(),
+            ApplyDecision::Apply(i32::MAX)
+        );
     }
 
-    #[test]
-    fn decide_changed_with_overflowing_server_version_does_not_panic() {
-        // A version beyond i32::MAX must clamp to the 0 fallback (→ Apply(1)),
-        // never panic or wrap.
-        let mut server = seq(0, "a");
-        server["version"] = json!(i64::from(i32::MAX) + 1000);
-        let local = seq(0, "b");
-        assert_eq!(decide(Some(&server), &local), ApplyDecision::Apply(1));
+    #[tokio::test]
+    async fn apply_rejects_invalid_lookup_before_posting() {
+        use crate::commands::test_support::mock_api_with_responses;
+        for response in [
+            "not JSON".to_string(),
+            "{}".to_string(),
+            seq(i64::from(i32::MAX), "a").to_string(),
+        ] {
+            let api = mock_api_with_responses(vec![(reqwest::StatusCode::OK, response)]).await;
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("sequence.json");
+            std::fs::write(&file, seq(1, "b").to_string()).unwrap();
+            assert!(
+                apply_one(&Client::new(), &api.base, &file, false)
+                    .await
+                    .is_err()
+            );
+            let requests = api.log.snapshot();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].method, reqwest::Method::GET);
+        }
     }
 }

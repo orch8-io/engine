@@ -311,7 +311,10 @@ fn write_table_separator(output: &mut String, widths: &[usize]) {
 
 pub async fn print_response(resp: reqwest::Response, _format: OutputFormat) -> Result<()> {
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let text = resp
+        .text()
+        .await
+        .with_context(|| format!("failed to read response body (HTTP {status})"))?;
     let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
 
     if status.is_success() {
@@ -338,8 +341,8 @@ pub async fn print_response(resp: reqwest::Response, _format: OutputFormat) -> R
 
 /// Build the shared reqwest client, stamping `x-api-key` and `x-tenant-id`
 /// as default headers so every subcommand authenticates without having to
-/// thread the values through. Invalid header values (control chars, non-
-/// ASCII) fall through with a warning instead of crashing the CLI.
+/// thread the values through. Invalid header values return an input error
+/// before any request is sent.
 fn build_client(api_key: Option<&str>, tenant_id: Option<&str>) -> Result<Client> {
     let mut headers = header::HeaderMap::new();
     if let Some(k) = api_key.filter(|s| !s.is_empty()) {
@@ -521,6 +524,40 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn print_response_rejects_incomplete_success_body() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (close, closed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{}")
+                .await
+                .unwrap();
+            closed.await.unwrap();
+        });
+        let response = build_client(None, None)
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        close.send(()).unwrap();
+        let error = print_response(response, OutputFormat::Json)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to read response body (HTTP 200 OK)")
+        );
+        server.await.unwrap();
+    }
 
     #[test]
     fn humanize_time_just_now() {

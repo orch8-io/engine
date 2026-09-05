@@ -326,8 +326,12 @@ impl InstanceLifecycleManager {
     /// Returns the number of instances expired.
     pub async fn gc_expired_instances(&self, max_lifetime_secs: u64) -> Result<u64, MobileError> {
         let max_lifetime = Duration::from_secs(max_lifetime_secs);
-        let cutoff = chrono::Utc::now()
-            - chrono::Duration::from_std(max_lifetime).unwrap_or(chrono::Duration::hours(24));
+        // A lifetime beyond the clock's range cannot expire any representable
+        // instance. Do not wrap, panic, or silently substitute a shorter TTL.
+        let cutoff = chrono::Duration::from_std(max_lifetime)
+            .ok()
+            .and_then(|lifetime| chrono::Utc::now().checked_sub_signed(lifetime))
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
 
         let instance_ids = self
             .mobile_storage
@@ -507,6 +511,21 @@ mod tests {
         assert_eq!(seq_name, "seq");
         assert_eq!(inst.state, InstanceState::Scheduled);
         assert_eq!(inst.context.data["key"], "val");
+    }
+
+    #[tokio::test]
+    async fn extreme_lifetimes_do_not_expire_existing_instances() {
+        let (lifecycle, _mobile_storage, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let id = lifecycle.start("seq", "{}", None).await.unwrap();
+        let (mut old, _) = lifecycle.get_instance(&id).await.unwrap();
+        old.id = InstanceId::new();
+        old.created_at = chrono::Utc::now() - chrono::Duration::days(2);
+        lifecycle.storage.create_instance(&old).await.unwrap();
+        for lifetime in [u64::MAX, i64::MAX as u64 / 1000] {
+            assert_eq!(lifecycle.gc_expired_instances(lifetime).await.unwrap(), 0);
+        }
+        assert_eq!(lifecycle.gc_expired_instances(86_400).await.unwrap(), 1);
     }
 
     #[tokio::test]

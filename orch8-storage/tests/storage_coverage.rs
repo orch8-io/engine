@@ -744,6 +744,62 @@ async fn t27_delete_sequence() {
 }
 
 #[tokio::test]
+async fn sequence_deletion_removes_dependents_and_preserves_other_sequences() {
+    let storage = store().await;
+    let target = make_sequence_named("t", "target", "default");
+    let other = make_sequence_named("t", "other", "default");
+    storage.create_sequence(&target).await.unwrap();
+    storage.create_sequence(&other).await.unwrap();
+    let mut instances = Vec::new();
+    for sequence_id in [target.id, target.id, other.id] {
+        let instance = make_instance("t", sequence_id);
+        storage.create_instance(&instance).await.unwrap();
+        storage
+            .create_execution_node(&make_execution_node(instance.id, "s1"))
+            .await
+            .unwrap();
+        instances.push(instance);
+    }
+    // A failed replacement must roll back deletion of the old definition and
+    // its execution history, even when the replacement conflicts with a row.
+    assert!(storage.replace_sequence(target.id, &other).await.is_err());
+    for instance in &instances {
+        assert!(storage.get_instance(instance.id).await.unwrap().is_some());
+        assert_eq!(
+            storage.get_execution_tree(instance.id).await.unwrap().len(),
+            1
+        );
+    }
+    storage.delete_sequence(target.id).await.unwrap();
+    for instance in &instances[..2] {
+        assert!(storage.get_instance(instance.id).await.unwrap().is_none());
+        assert!(
+            storage
+                .get_execution_tree(instance.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert!(storage.get_sequence(other.id).await.unwrap().is_some());
+    assert!(
+        storage
+            .get_instance(instances[2].id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        storage
+            .get_execution_tree(instances[2].id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn t28_get_sequence_by_name_and_namespace() {
     let s = store().await;
     let seq = make_sequence_named("t", "my_flow", "production");

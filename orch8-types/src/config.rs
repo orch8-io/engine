@@ -96,7 +96,8 @@ impl fmt::Display for SecretString {
 }
 
 impl PartialEq for SecretString {
-    /// Constant-time comparison to mitigate timing side channels on secrets.
+    /// Constant-time contents comparison for equal-length secrets.
+    /// Different lengths may be rejected early by the slice comparison.
     fn eq(&self, other: &Self) -> bool {
         use subtle::ConstantTimeEq;
         self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
@@ -396,8 +397,9 @@ pub struct SchedulerConfig {
     #[serde(default = "default_worker_reaper_tick_secs")]
     pub worker_reaper_tick_secs: u64,
     /// How old a worker task's heartbeat can be before the reaper resets
-    /// it, in seconds. Must be greater than the expected handler latency
-    /// to avoid yanking still-active workers. Default: 60s.
+    /// it, in seconds. Must allow the worker's heartbeat cadence plus expected
+    /// scheduling and network delay. Long-running handlers must keep sending
+    /// heartbeats while they run. Default: 60s.
     #[serde(default = "default_worker_reaper_stale_secs")]
     pub worker_reaper_stale_secs: u64,
     /// How often the cluster-node reaper ticks, in seconds. Default: 60s.
@@ -779,6 +781,18 @@ impl EngineConfig {
         if self.engine.max_concurrent_steps == 0 {
             errors.push("engine.max_concurrent_steps must be > 0".into());
         }
+        for (name, seconds) in [
+            (
+                "worker_reaper_tick_secs",
+                self.engine.worker_reaper_tick_secs,
+            ),
+            ("node_reaper_tick_secs", self.engine.node_reaper_tick_secs),
+            ("cron_tick_secs", self.engine.cron_tick_secs),
+        ] {
+            if seconds == 0 {
+                errors.push(format!("engine.{name} must be > 0"));
+            }
+        }
         if self.engine.stale_instance_threshold_secs > 0 && self.engine.tick_interval_ms > 0 {
             match self.engine.stale_instance_threshold_secs.checked_mul(1000) {
                 Some(stale_ms) if stale_ms <= self.engine.tick_interval_ms => {
@@ -803,6 +817,10 @@ impl EngineConfig {
                     .all(|byte| byte.is_ascii_hexdigit()))
         {
             errors.push("engine.encryption_key must be exactly 64 hexadecimal characters".into());
+        }
+
+        if let Err(error) = self.artifacts.backend_kind() {
+            errors.push(error);
         }
 
         // Logging
@@ -1051,6 +1069,35 @@ mod tests {
         cfg.engine.batch_size = 0;
         let errs = cfg.validate().unwrap_err();
         assert!(errs.iter().any(|e| e.contains("batch_size")));
+    }
+
+    #[test]
+    fn validate_rejects_zero_background_intervals() {
+        for field in [
+            "worker_reaper_tick_secs",
+            "node_reaper_tick_secs",
+            "cron_tick_secs",
+        ] {
+            let cfg: EngineConfig =
+                serde_json::from_value(serde_json::json!({"engine": {field: 0}})).unwrap();
+            assert_eq!(
+                cfg.validate().unwrap_err(),
+                [format!("engine.{field} must be > 0")]
+            );
+            let cfg: EngineConfig =
+                serde_json::from_value(serde_json::json!({"engine": {field: 1}})).unwrap();
+            assert!(cfg.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unknown_artifact_backend() {
+        let mut cfg = EngineConfig::default();
+        cfg.artifacts.backend = "s33".into();
+        assert_eq!(
+            cfg.validate().unwrap_err(),
+            [cfg.artifacts.backend_kind().unwrap_err()]
+        );
     }
 
     #[test]

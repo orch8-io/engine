@@ -11,7 +11,7 @@ use orch8_grpc::proto::{
 use orch8_grpc::{Orch8ServiceServer, service::Orch8GrpcService};
 use orch8_storage::WorkerStore;
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_storage::{ContinuityStore, InstanceStore, ResourceStore};
+use orch8_storage::{ContinuityStore, InstanceStore, ResourceStore, SignalStore};
 use orch8_types::continuity::RuntimeTrustLevel;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
@@ -315,7 +315,7 @@ async fn grpc_retry_instance_resets_run_state() {
 async fn grpc_send_signal_validates_instance_id_field() {
     const SEQ: &str = "00000000-0000-0000-0000-000000000007";
     const INST: &str = "00000000-0000-0000-0000-000000000008";
-    let (addr, _storage) = spawn_test_server().await;
+    let (addr, storage) = spawn_test_server().await;
     let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
         .await
         .expect("connect to test server");
@@ -347,10 +347,26 @@ async fn grpc_send_signal_validates_instance_id_field() {
     client
         .send_signal(SendSignalRequest {
             instance_id: INST.into(),
-            signal_json,
+            signal_json: signal_json.clone(),
         })
         .await
         .expect("matching instance_id must be accepted");
+    let id = InstanceId::from_uuid(INST.parse().unwrap());
+    storage
+        .update_instance_state(id, InstanceState::Cancelled, None)
+        .await
+        .unwrap();
+    let mut rejected_signal: serde_json::Value = serde_json::from_str(&signal_json).unwrap();
+    rejected_signal["id"] = serde_json::json!(uuid::Uuid::new_v4());
+    let err = client
+        .send_signal(SendSignalRequest {
+            instance_id: INST.into(),
+            signal_json: rejected_signal.to_string(),
+        })
+        .await
+        .expect_err("terminal instance must reject new signals");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(storage.get_pending_signals(id).await.unwrap().len(), 1);
 }
 
 fn worker_stream_frame(
@@ -498,7 +514,7 @@ async fn grpc_runtime_session_persists_capabilities_streams_commands_and_drains(
                 "draining".into(),
                 "placement_commands".into(),
             ],
-            max_in_flight: 4,
+            max_in_flight: 1,
             protocol_version: 2,
             runtime_capabilities_json: capabilities(false),
             tenant_id: "test".into(),
@@ -520,7 +536,14 @@ async fn grpc_runtime_session_persists_capabilities_streams_commands_and_drains(
     let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
         .await
         .unwrap();
-    let mut inbound = client.worker_stream(outbound).await.unwrap().into_inner();
+    let mut inbound = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.worker_stream(outbound),
+    )
+    .await
+    .expect("queued commands must not block the stream handshake")
+    .unwrap()
+    .into_inner();
 
     assert!(matches!(
         inbound.message().await.unwrap().unwrap().payload,

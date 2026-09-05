@@ -134,7 +134,7 @@ impl From<sqlx::Error> for StorageError {
 fn is_transient_db_code(code: Option<&str>) -> bool {
     matches!(
         code,
-        Some("40001" | "40P01" | "5" | "6" | "261" | "262" | "517" | "518")
+        Some("40001" | "40P01" | "5" | "6" | "261" | "262" | "517" | "518" | "773")
     )
 }
 
@@ -251,7 +251,10 @@ mod tests {
     /// transient so the scheduler reschedules instead of DLQ-ing.
     #[test]
     fn transient_db_error_codes_are_recognised() {
-        for code in ["40001", "40P01", "5", "6", "261", "262", "517", "518"] {
+        // 773 is SQLITE_BUSY_TIMEOUT (SQLITE_BUSY | (3 << 8)).
+        for code in [
+            "40001", "40P01", "5", "6", "261", "262", "517", "518", "773",
+        ] {
             assert!(is_transient_db_code(Some(code)), "{code} must be transient");
         }
         for code in ["23505", "22001", "42601", "999"] {

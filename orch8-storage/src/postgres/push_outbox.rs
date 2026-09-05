@@ -43,13 +43,16 @@ impl PushOutboxStore for PostgresStorage {
             .execute(&mut *transaction)
             .await
             .map_err(|error| error.to_string())?;
-        sqlx::query("UPDATE push_wake_outbox SET status='terminal',terminal_reason='superseded',superseded_by=$1 WHERE tenant_id=$2 AND device_id=$3 AND collapse_key=$4 AND status='pending'")
-            .bind(&wake.command_id).bind(&wake.tenant_id).bind(&wake.device_id).bind(&collapse_key)
-            .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
-        sqlx::query("INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,execution_id,topic,collapse_key,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,device_id,command_id) DO NOTHING")
+        let inserted = sqlx::query("INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,execution_id,topic,collapse_key,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,device_id,command_id) DO NOTHING")
             .bind(id).bind(&wake.tenant_id).bind(&wake.device_id).bind(&wake.command_id)
             .bind(&wake.execution_id).bind(&wake.topic).bind(&collapse_key).bind(wake.created_at)
             .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
+        // A replay of an existing command must not supersede pending work.
+        if inserted.rows_affected() == 1 {
+            sqlx::query("UPDATE push_wake_outbox SET status='terminal',terminal_reason='superseded',superseded_by=$1 WHERE tenant_id=$2 AND device_id=$3 AND collapse_key=$4 AND status='pending' AND id<>$5")
+                .bind(&wake.command_id).bind(&wake.tenant_id).bind(&wake.device_id).bind(&collapse_key).bind(id)
+                .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
+        }
         let stored = sqlx::query_scalar(
             "SELECT id FROM push_wake_outbox WHERE tenant_id=$1 AND device_id=$2 AND command_id=$3",
         )

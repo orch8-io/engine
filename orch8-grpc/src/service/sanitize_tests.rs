@@ -125,3 +125,73 @@ async fn configured_context_limit_is_enforced_before_creation() {
 
     assert_eq!(error.code(), Code::InvalidArgument);
 }
+
+#[tokio::test]
+async fn resource_warmup_dates_reject_invalid_values_without_mutation() {
+    use crate::Orch8Service;
+    use crate::proto::{AddResourceRequest, CreatePoolRequest, UpdateResourceRequest};
+    use orch8_types::pool::{PoolResource, ResourcePool};
+    use tonic::Request;
+
+    let service = service(1024 * 1024).await;
+    let response = service
+        .create_pool(Request::new(CreatePoolRequest {
+            tenant_id: "test".into(),
+            name: "warmup".into(),
+            strategy: "round_robin".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let pool: ResourcePool = serde_json::from_str(&response.pool_json).unwrap();
+    let resource_json = |date: &str| {
+        serde_json::json!({
+            "resource_key": "sender", "name": "sender", "warmup_start": date,
+            "daily_cap": 100, "warmup_days": 10, "warmup_start_cap": 1
+        })
+        .to_string()
+    };
+    let err = service
+        .add_resource(Request::new(AddResourceRequest {
+            pool_id: pool.id.to_string(),
+            resource_json: resource_json("2026-02-30"),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    assert!(
+        service
+            .storage
+            .list_pool_resources(pool.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let response = service
+        .add_resource(Request::new(AddResourceRequest {
+            pool_id: pool.id.to_string(),
+            resource_json: resource_json("2026-02-28"),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let resource: PoolResource = serde_json::from_str(&response.resource_json).unwrap();
+    let err = service
+        .update_resource(Request::new(UpdateResourceRequest {
+            pool_id: pool.id.to_string(),
+            resource_id: resource.id.to_string(),
+            update_json: serde_json::json!({"name": "changed", "warmup_start": "invalid"})
+                .to_string(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    let persisted = service
+        .storage
+        .list_pool_resources(pool.id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(persisted.warmup_start, resource.warmup_start);
+    assert_eq!(persisted.name, resource.name);
+}

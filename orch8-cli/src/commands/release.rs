@@ -369,13 +369,11 @@ fn evaluate_gate(
     max_divergences: u32,
     max_inconclusive: u32,
 ) -> GateReport {
-    let severity = diff["max_severity"].as_str().unwrap_or_else(|| {
-        if diff["entries"].as_array().is_none_or(Vec::is_empty) {
-            "none"
-        } else {
-            "unknown"
-        }
-    });
+    let severity = match diff.get("max_severity") {
+        Some(Value::String(severity)) => severity.as_str(),
+        None | Some(Value::Null) if diff["entries"].as_array().is_some_and(Vec::is_empty) => "none",
+        _ => "unknown",
+    };
     let diff_passed = match severity {
         "none" | "informational" | "behavioral" => true,
         "side_effect_risk" => allow_side_effect_risk,
@@ -385,14 +383,14 @@ fn evaluate_gate(
     let preflight_passed = matches!(preflight_status, "pass" | "warning");
     let divergences = validation["divergences"]
         .as_array()
-        .map_or(u32::MAX, |values| {
-            u32::try_from(values.len()).unwrap_or(u32::MAX)
-        });
+        .and_then(|values| u32::try_from(values.len()).ok());
     let inconclusive = validation["inconclusive"]
         .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(u32::MAX);
-    let validation_passed = divergences <= max_divergences && inconclusive <= max_inconclusive;
+        .and_then(|value| u32::try_from(value).ok());
+    let validation_passed = divergences.is_some_and(|count| count <= max_divergences)
+        && inconclusive.is_some_and(|count| count <= max_inconclusive);
+    let divergences = divergences.map_or_else(|| "invalid".into(), |count| count.to_string());
+    let inconclusive = inconclusive.map_or_else(|| "invalid".into(), |count| count.to_string());
     let checks = vec![
         GateCheck {
             name: "semantic_diff",

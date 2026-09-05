@@ -245,6 +245,51 @@ async fn resume_from_rejects_non_object_context_patch() {
 }
 
 #[tokio::test]
+async fn oversized_resume_patch_preserves_execution_evidence() {
+    let srv = orch8_api::test_harness::spawn_test_server_with_context_limit(1024).await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let inst = create_instance(&client, &srv.base_url, seq_id).await;
+    let instance_id = InstanceId::from_uuid(inst);
+    srv.storage
+        .update_instance_state(instance_id, InstanceState::Failed, None)
+        .await
+        .unwrap();
+    let output = mk_output(inst, "s2");
+    srv.storage.save_block_output(&output).await.unwrap();
+    let before = srv
+        .storage
+        .get_instance(instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let response = client
+        .post(format!("{}/instances/{inst}/resume-from/s2", srv.v1_url()))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"context": {"large": "x".repeat(2048)}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let after = srv
+        .storage
+        .get_instance(instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.state, before.state);
+    assert_eq!(
+        serde_json::to_value(&after.context).unwrap(),
+        serde_json::to_value(&before.context).unwrap()
+    );
+    let outputs = srv.storage.get_all_outputs(instance_id).await.unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].id, output.id);
+    assert_eq!(outputs[0].output, output.output);
+}
+
+#[tokio::test]
 async fn resume_from_unknown_block_returns_400() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

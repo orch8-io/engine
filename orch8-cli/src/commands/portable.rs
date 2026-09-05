@@ -404,24 +404,10 @@ async fn execute_mcp(
             retryable: response.status().is_server_error(),
         });
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > PortableWorkOffer::MAX_INPUT_BYTES as u64)
-    {
-        return Ok(LocalProcessOutcome::Fail {
-            message: "MCP response exceeds 1 MiB".into(),
-            retryable: false,
-        });
+    match read_gateway_output(response, "MCP").await? {
+        LocalProcessOutcome::Complete(value) => Ok(parse_mcp_output(&value)),
+        failure @ LocalProcessOutcome::Fail { .. } => Ok(failure),
     }
-    let bytes = response.bytes().await?;
-    if bytes.len() > PortableWorkOffer::MAX_INPUT_BYTES {
-        return Ok(LocalProcessOutcome::Fail {
-            message: "MCP response exceeds 1 MiB".into(),
-            retryable: false,
-        });
-    }
-    let value = serde_json::from_slice(&bytes).context("MCP response must be JSON-RPC JSON")?;
-    Ok(parse_mcp_output(&value))
 }
 
 async fn execute_http_gateway(
@@ -449,23 +435,31 @@ async fn execute_http_gateway(
             retryable: response.status().is_server_error(),
         });
     }
+    read_gateway_output(response, "HTTP gateway").await
+}
+
+async fn read_gateway_output(
+    response: reqwest::Response,
+    label: &str,
+) -> Result<LocalProcessOutcome> {
+    use orch8_engine::handlers::builtin::{BodyReadError, read_body_capped};
+    let oversized = || LocalProcessOutcome::Fail {
+        message: format!("{label} response exceeds 1 MiB"),
+        retryable: false,
+    };
     if response
         .content_length()
         .is_some_and(|length| length > PortableWorkOffer::MAX_INPUT_BYTES as u64)
     {
-        return Ok(LocalProcessOutcome::Fail {
-            message: "HTTP gateway response exceeds 1 MiB".into(),
-            retryable: false,
-        });
+        return Ok(oversized());
     }
-    let bytes = response.bytes().await?;
-    if bytes.len() > PortableWorkOffer::MAX_INPUT_BYTES {
-        return Ok(LocalProcessOutcome::Fail {
-            message: "HTTP gateway response exceeds 1 MiB".into(),
-            retryable: false,
-        });
-    }
-    let value = serde_json::from_slice(&bytes).context("HTTP gateway response must be JSON")?;
+    let bytes = match read_body_capped(response, PortableWorkOffer::MAX_INPUT_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(BodyReadError::TooLarge(_)) => return Ok(oversized()),
+        Err(BodyReadError::Io(error)) => bail!("read {label} response: {error}"),
+    };
+    let value =
+        serde_json::from_slice(&bytes).with_context(|| format!("{label} response must be JSON"))?;
     Ok(LocalProcessOutcome::Complete(value))
 }
 
@@ -553,6 +547,51 @@ fn print_value(value: &impl Serialize, format: OutputFormat) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gateway_stream_is_bounded_without_content_length() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        for (body, oversized) in [
+            (b"{}".to_vec(), false),
+            (vec![b' '; PortableWorkOffer::MAX_INPUT_BYTES + 1], true),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                // Reader may close the connection immediately after reaching its cap.
+                let _ = socket.write_all(&body).await;
+            });
+            let response = Client::new()
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.content_length().is_none());
+            let outcome = read_gateway_output(response, "test gateway").await.unwrap();
+            if oversized {
+                assert!(matches!(
+                    outcome,
+                    LocalProcessOutcome::Fail {
+                        retryable: false,
+                        ..
+                    }
+                ));
+            } else {
+                assert_eq!(
+                    outcome,
+                    LocalProcessOutcome::Complete(serde_json::json!({}))
+                );
+            }
+            server.await.unwrap();
+        }
+    }
 
     #[test]
     fn every_cli_profile_maps_to_a_valid_product_contract() {

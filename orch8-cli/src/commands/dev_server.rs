@@ -41,6 +41,13 @@ pub struct DevServer {
     _http_handle: tokio::task::JoinHandle<()>,
 }
 
+impl Drop for DevServer {
+    fn drop(&mut self) {
+        // Startup failures and cancelled callers must also stop accepting work.
+        self.shutdown.cancel();
+    }
+}
+
 impl DevServer {
     /// Boot the local dev server: `SQLite` storage, engine tick loop, HTTP API.
     pub async fn start(port: u16, db_path: &str) -> Result<Self> {
@@ -166,5 +173,32 @@ fn mime_from_path(path: &str) -> &'static str {
         Some("woff") => "font/woff",
         Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_server_signals_background_shutdown() {
+        let shutdown = CancellationToken::new();
+        let background_shutdown = shutdown.clone();
+        let (finished, completion) = tokio::sync::oneshot::channel();
+        let server = DevServer {
+            _storage: Arc::new(SqliteStorage::in_memory().await.unwrap()),
+            shutdown,
+            _http_handle: tokio::spawn(async move {
+                background_shutdown.cancelled().await;
+                let _ = finished.send(());
+            }),
+        };
+
+        drop(server);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), completion)
+            .await
+            .expect("dropping the server must signal shutdown")
+            .expect("background task should finish normally");
     }
 }

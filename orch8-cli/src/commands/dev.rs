@@ -465,11 +465,13 @@ impl DevSession {
     /// idle, or report the instance terminal. Never sleeps — pacing is the
     /// caller's job, which keeps this fully testable.
     pub async fn step(&mut self) -> Result<StepOutcome> {
+        // The dashboard and directory watcher can create work after the
+        // displayed instance finishes. Keep driving the shared engine.
+        let tick = self.engine.tick_once().await?;
+        self.steps_executed += u64::from(tick.steps_executed);
         let Some(run) = self.run.as_mut() else {
             return Ok(StepOutcome::NoInstance);
         };
-        let tick = self.engine.tick_once().await?;
-        self.steps_executed += u64::from(tick.steps_executed);
 
         let outputs = self.engine.block_outputs(run.id).await?;
         let mut printed = false;
@@ -1470,6 +1472,58 @@ mod tests {
     }
 
     // -- e2e: dev session with virtual time -----------------------------------
+
+    #[tokio::test]
+    async fn dev_session_drives_other_work_after_displayed_instance_finishes() {
+        let engine = build_engine(&[], None).await.unwrap();
+        let mut session = DevSession::new(engine.clone(), None, HashSet::new());
+        let loaded = parse_sequence(
+            r#"{"name":"background-work","blocks":[{"type":"step","id":"work","handler":"noop","params":{}}]}"#,
+            1,
+        ).unwrap();
+        session
+            .start_instance(&loaded, CreateInstanceOptions::default())
+            .await
+            .unwrap();
+        let mut finished = false;
+        for _ in 0..50 {
+            if session.step().await.unwrap() == StepOutcome::Terminal(InstanceState::Completed) {
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "the displayed workflow must complete first");
+
+        let instance = engine
+            .create_instance(loaded.definition.id, CreateInstanceOptions::default())
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            assert_eq!(session.step().await.unwrap(), StepOutcome::NoInstance);
+            if engine
+                .get_instance(instance)
+                .await
+                .unwrap()
+                .state
+                .is_terminal()
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.get_instance(instance).await.unwrap().state,
+            InstanceState::Completed
+        );
+        assert!(
+            engine
+                .block_outputs(instance)
+                .await
+                .unwrap()
+                .iter()
+                .any(|output| output.block_id.as_str() == "work")
+        );
+        engine.shutdown().await;
+    }
 
     /// A sequence with a 3-day delay completes near-instantly under
     /// `--skip-timers`: the session advances the `ManualClock` to the deferral

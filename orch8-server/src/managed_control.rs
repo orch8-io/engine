@@ -92,6 +92,23 @@ async fn handle_command(
     Ok(())
 }
 
+fn open_frame(config: &ManagedControlConfig) -> Result<WorkerStreamClient> {
+    Ok(client_frame(ClientPayload::Open(WorkerStreamOpen {
+        worker_id: config.worker_id.clone(),
+        handler_names: vec!["managed-control".into()],
+        supported_features: vec![
+            "task_delivery".into(),
+            "runtime_capabilities".into(),
+            "draining".into(),
+            "placement_commands".into(),
+        ],
+        max_in_flight: 1,
+        protocol_version: orch8_grpc::WORKER_STREAM_PROTOCOL_VERSION,
+        runtime_capabilities_json: capabilities_json(config, false)?,
+        tenant_id: config.tenant_id.clone(),
+    })))
+}
+
 async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken) -> Result<()> {
     let endpoint = Endpoint::from_shared(config.endpoint.clone())?
         .connect_timeout(Duration::from_secs(10))
@@ -103,20 +120,7 @@ async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken
     let mut client = Orch8ServiceClient::new(channel);
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
     sender
-        .send(client_frame(ClientPayload::Open(WorkerStreamOpen {
-            worker_id: config.worker_id.clone(),
-            handler_names: vec!["managed-control".into()],
-            supported_features: vec![
-                "task_delivery".into(),
-                "runtime_capabilities".into(),
-                "draining".into(),
-                "placement_commands".into(),
-            ],
-            max_in_flight: 1,
-            protocol_version: 1,
-            runtime_capabilities_json: capabilities_json(config, false)?,
-            tenant_id: config.tenant_id.clone(),
-        })))
+        .send(open_frame(config)?)
         .await
         .context("queue managed control open")?;
     let mut request = Request::new(tokio_stream::wrappers::ReceiverStream::new(receiver));

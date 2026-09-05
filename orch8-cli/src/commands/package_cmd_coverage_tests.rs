@@ -1,6 +1,6 @@
 //! Coverage tests for signed workflow package tooling.
 //!
-//! Count contract: 28 independently named unit tests.
+//! Count contract: 29 independently named unit tests.
 
 use super::*;
 
@@ -358,4 +358,18 @@ fn coverage_package_028_upgrade_comparison_is_numeric_not_lexical() {
         ),
         "{error}"
     );
+}
+
+#[test]
+fn verify_returns_untrusted_error_to_caller() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("package.orch8pkg");
+    std::fs::write(&path, serde_json::to_vec(&test_package(1)).unwrap()).unwrap();
+    let unrelated = BASE64.encode(
+        SigningKey::from_bytes(&seed_bytes(2))
+            .verifying_key()
+            .to_bytes(),
+    );
+    let error = verify(&path, &[unrelated]).unwrap_err();
+    assert!(error.to_string().contains("package is not trusted"));
 }

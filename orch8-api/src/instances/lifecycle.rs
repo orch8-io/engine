@@ -1043,6 +1043,21 @@ pub async fn resume_from_block(
         collect_block_ids(block, &mut wipe_ids);
     }
 
+    // Validate the fully merged context before deleting any execution evidence.
+    let patched_context = if let Some(patch) = patch {
+        let mut context = instance.context.clone();
+        if !context.data.is_object() {
+            context.data = serde_json::json!({});
+        }
+        if let Some(data) = context.data.as_object_mut() {
+            data.extend(patch);
+        }
+        context.check_size(state.max_context_bytes)?;
+        Some(context)
+    } else {
+        None
+    };
+
     // Delete the stale execution tree so the evaluator rebuilds it from
     // scratch (same mechanics as `retry_instance`). Earlier blocks keep
     // their outputs and are memoized on the re-run.
@@ -1081,20 +1096,7 @@ pub async fn resume_from_block(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_tasks"))?;
 
-    // Apply the context patch: shallow per-key merge into `context.data`
-    // (the same per-key semantics as `StorageBackend::merge_context_data`,
-    // which the engine uses for handler-driven context writes).
-    if let Some(patch) = patch {
-        let mut context = instance.context.clone();
-        if !context.data.is_object() {
-            context.data = serde_json::json!({});
-        }
-        if let Some(data) = context.data.as_object_mut() {
-            for (key, value) in patch {
-                data.insert(key, value);
-            }
-        }
-        context.check_size(state.max_context_bytes)?;
+    if let Some(context) = patched_context {
         state
             .storage
             .update_instance_context(instance_id, &context)

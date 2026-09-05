@@ -135,26 +135,47 @@ struct DispatchingPushProvider {
     fcm: Option<FcmProvider>,
 }
 
-#[async_trait]
-impl PushProvider for DispatchingPushProvider {
-    async fn send_silent_push(&self, token: &str, platform: &str) -> Result<(), PushError> {
+impl DispatchingPushProvider {
+    fn provider_for(&self, platform: &str) -> Result<&dyn PushProvider, PushError> {
         match platform.to_ascii_lowercase().as_str() {
-            "ios" => match &self.apns {
-                Some(provider) => provider.send_silent_push(token, platform).await,
-                None => Err(PushError::Config(
-                    "no APNs provider configured for iOS device".to_string(),
-                )),
-            },
-            "android" => match &self.fcm {
-                Some(provider) => provider.send_silent_push(token, platform).await,
-                None => Err(PushError::Config(
-                    "no FCM provider configured for Android device".to_string(),
-                )),
-            },
+            "ios" => self
+                .apns
+                .as_ref()
+                .map(|provider| provider as &dyn PushProvider)
+                .ok_or_else(|| {
+                    PushError::Config("no APNs provider configured for iOS device".into())
+                }),
+            "android" => self
+                .fcm
+                .as_ref()
+                .map(|provider| provider as &dyn PushProvider)
+                .ok_or_else(|| {
+                    PushError::Config("no FCM provider configured for Android device".into())
+                }),
             other => Err(PushError::Config(format!(
                 "unknown device platform: {other}"
             ))),
         }
+    }
+}
+
+#[async_trait]
+impl PushProvider for DispatchingPushProvider {
+    async fn send_silent_push(&self, token: &str, platform: &str) -> Result<(), PushError> {
+        self.provider_for(platform)?
+            .send_silent_push(token, platform)
+            .await
+    }
+
+    async fn send_signed_wake(
+        &self,
+        token: &str,
+        platform: &str,
+        metadata: &SignedWakeMetadata,
+    ) -> Result<(), PushError> {
+        self.provider_for(platform)?
+            .send_signed_wake(token, platform, metadata)
+            .await
     }
 }
 
@@ -240,6 +261,35 @@ mod tests {
             .await
             .expect_err("unknown platform must be a config error");
         assert!(matches!(err, PushError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn create_provider_routes_signed_wakes_to_the_configured_platform() {
+        let provider = create_provider(None, Some(fcm_test_config())).unwrap();
+        let now = chrono::Utc::now();
+        let metadata = SignedWakeMetadata::sign(
+            "tenant",
+            "device",
+            "command",
+            "key",
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            now,
+            now + chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        // Local provider validation proves forwarding without contacting FCM.
+        let error = provider
+            .send_signed_wake(&"a".repeat(513), "ANDROID", &metadata)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PushError::InvalidToken));
+        for platform in ["ios", "unknown"] {
+            let error = provider
+                .send_signed_wake("token", platform, &metadata)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, PushError::Config(_)));
+        }
     }
 
     #[tokio::test]

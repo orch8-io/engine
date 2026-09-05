@@ -1,6 +1,6 @@
 //! Coverage tests for the strict release proof gate evaluation.
 //!
-//! Count contract: 27 independently named unit tests.
+//! Count contract: 29 independently named unit tests.
 
 use super::*;
 
@@ -338,7 +338,7 @@ fn coverage_gate_025_report_serializes_stable_field_names() {
 }
 
 #[test]
-fn coverage_gate_026_empty_diff_object_means_no_entries_and_passes() {
+fn coverage_gate_026_empty_diff_object_is_missing_evidence() {
     let report = evaluate_gate(
         Uuid::nil(),
         &json!({}),
@@ -348,9 +348,9 @@ fn coverage_gate_026_empty_diff_object_means_no_entries_and_passes() {
         0,
         0,
     );
-    assert!(report.checks[0].passed);
-    assert_eq!(report.checks[0].evidence, "max severity: none");
-    assert!(report.passed);
+    assert!(!report.checks[0].passed);
+    assert_eq!(report.checks[0].evidence, "max severity: unknown");
+    assert!(!report.passed);
 }
 
 gate_case!(
@@ -363,3 +363,38 @@ gate_case!(
     0,
     false
 );
+
+#[test]
+fn malformed_validation_is_rejected_even_with_maximum_thresholds() {
+    for validation in [
+        json!({}),
+        json!({"divergences": [], "inconclusive": "bad"}),
+        json!({"divergences": null, "inconclusive": 0}),
+    ] {
+        let report = evaluate_gate(
+            Uuid::nil(),
+            &json!({"entries": []}),
+            &clean_preflight(),
+            &validation,
+            true,
+            u32::MAX,
+            u32::MAX,
+        );
+        assert!(!report.passed);
+        assert!(report.checks[2].evidence.contains("invalid"));
+    }
+}
+
+#[test]
+fn malformed_diff_severity_is_not_an_empty_diff() {
+    let report = evaluate_gate(
+        Uuid::nil(),
+        &json!({"max_severity": 12, "entries": []}),
+        &clean_preflight(),
+        &clean_validation(),
+        false,
+        0,
+        0,
+    );
+    assert!(!report.passed);
+}

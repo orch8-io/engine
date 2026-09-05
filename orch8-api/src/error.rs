@@ -152,13 +152,7 @@ impl From<ContextTooLarge> for ApiError {
 impl From<EngineError> for ApiError {
     fn from(err: EngineError) -> Self {
         match err {
-            EngineError::Storage(StorageError::NotFound { entity, id }) => {
-                Self::NotFound(format!("{entity} {id}"))
-            }
-            EngineError::Storage(StorageError::Conflict(msg)) => Self::AlreadyExists(msg),
-            EngineError::Storage(StorageError::TerminalTarget { entity, id }) => {
-                Self::AlreadyExists(format!("{entity} {id} is in a terminal state"))
-            }
+            EngineError::Storage(error) => Self::from(error),
             EngineError::InvalidTransition { .. } => Self::InvalidArgument(err.to_string()),
             EngineError::HandlerNotFound(h) => Self::NotFound(format!("handler: {h}")),
             EngineError::ShuttingDown => Self::Unavailable("shutdown in progress".into()),
@@ -328,6 +322,45 @@ mod tests {
     fn engine_error_storage_maps_to_internal() {
         let err: ApiError = EngineError::Storage(StorageError::Query("bad sql".into())).into();
         assert_eq!(status_of(err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn wrapped_storage_failures_preserve_retry_status_and_redaction() {
+        for (storage, status, code, message) in [
+            (
+                StorageError::Connection("private database address".into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "unavailable: storage backend temporarily unavailable",
+            ),
+            (
+                StorageError::Backend("private object store address".into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "unavailable: storage backend temporarily unavailable",
+            ),
+            (
+                StorageError::PoolExhausted,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                "unavailable: pool exhausted",
+            ),
+            (
+                StorageError::QuotaExceeded("plan exhausted".into()),
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "rate limit exceeded: plan exhausted",
+            ),
+        ] {
+            let response = ApiError::from(EngineError::Storage(storage)).into_response();
+            assert_eq!(response.status(), status);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["message"], message);
+        }
     }
 
     #[test]

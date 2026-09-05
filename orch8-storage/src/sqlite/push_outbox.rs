@@ -7,7 +7,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::SqliteStorage;
-use super::helpers::ts;
+use super::helpers::{begin_immediate, ts};
 
 #[async_trait]
 impl PushOutboxStore for SqliteStorage {
@@ -38,13 +38,16 @@ impl PushOutboxStore for SqliteStorage {
         let mut transaction = self.pool.begin().await.map_err(|error| error.to_string())?;
         let id = Uuid::new_v4();
         let collapse_key = wake.collapse_key();
-        sqlx::query("UPDATE push_wake_outbox SET status='terminal',terminal_reason='superseded',superseded_by=? WHERE tenant_id=? AND device_id=? AND collapse_key=? AND status='pending'")
-            .bind(&wake.command_id).bind(&wake.tenant_id).bind(&wake.device_id).bind(&collapse_key)
-            .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
-        sqlx::query("INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,execution_id,topic,collapse_key,created_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,device_id,command_id) DO NOTHING")
+        let inserted = sqlx::query("INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,execution_id,topic,collapse_key,created_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,device_id,command_id) DO NOTHING")
             .bind(id.to_string()).bind(&wake.tenant_id).bind(&wake.device_id).bind(&wake.command_id)
             .bind(&wake.execution_id).bind(&wake.topic).bind(&collapse_key).bind(ts(wake.created_at))
             .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
+        // A replay of an existing command must not supersede pending work.
+        if inserted.rows_affected() == 1 {
+            sqlx::query("UPDATE push_wake_outbox SET status='terminal',terminal_reason='superseded',superseded_by=? WHERE tenant_id=? AND device_id=? AND collapse_key=? AND status='pending' AND id<>?")
+                .bind(&wake.command_id).bind(&wake.tenant_id).bind(&wake.device_id).bind(&collapse_key).bind(id.to_string())
+                .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
+        }
         let stored: String = sqlx::query_scalar(
             "SELECT id FROM push_wake_outbox WHERE tenant_id=? AND device_id=? AND command_id=?",
         )
@@ -67,44 +70,41 @@ impl PushOutboxStore for SqliteStorage {
         lease_until: DateTime<Utc>,
         limit: u32,
     ) -> Result<Vec<ClaimedWake>, String> {
-        let mut connection = self
-            .pool
-            .acquire()
+        let mut connection = begin_immediate(&self.pool)
             .await
             .map_err(|error| error.to_string())?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *connection)
-            .await
-            .map_err(|error| error.to_string())?;
-        let result = async {
-            let rows = sqlx::query("SELECT o.id,o.tenant_id,o.device_id,o.command_id,o.attempts,d.push_token,d.platform FROM push_wake_outbox o JOIN mobile_devices d ON d.device_id=o.device_id AND d.tenant_id=o.tenant_id WHERE d.active=1 AND d.push_token IS NOT NULL AND ((o.status='pending' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?)) OR (o.status='in_flight' AND o.lease_until<=?)) ORDER BY o.created_at LIMIT ?")
-                .bind(ts(now)).bind(ts(now)).bind(limit).fetch_all(&mut *connection).await.map_err(|error| error.to_string())?;
-            let wakes = rows.iter().map(|row| Ok(ClaimedWake {
-                id: Uuid::parse_str(row.get::<&str,_>("id")).map_err(|error| error.to_string())?,
-                tenant_id: row.get("tenant_id"), device_id: row.get("device_id"), command_id: row.get("command_id"),
-                push_token: row.get::<String,_>("push_token"), platform: row.get("platform"),
-                attempts: u32::try_from(row.get::<i64,_>("attempts")).map_err(|error| error.to_string())?,
-                lease_until,
-            })).collect::<Result<Vec<_>,String>>()?;
-            for wake in &wakes {
-                sqlx::query("UPDATE push_wake_outbox SET status='in_flight',lease_until=? WHERE id=?")
-                    .bind(ts(lease_until)).bind(wake.id.to_string()).execute(&mut *connection).await.map_err(|error| error.to_string())?;
-            }
-            Ok::<_,String>(wakes)
-        }.await;
-        match result {
-            Ok(wakes) => {
-                sqlx::query("COMMIT")
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Ok(wakes)
-            }
-            Err(error) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
-                Err(error)
-            }
+        let rows = sqlx::query("SELECT o.id,o.tenant_id,o.device_id,o.command_id,o.attempts,d.push_token,d.platform FROM push_wake_outbox o JOIN mobile_devices d ON d.device_id=o.device_id AND d.tenant_id=o.tenant_id WHERE d.active=1 AND d.push_token IS NOT NULL AND ((o.status='pending' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?)) OR (o.status='in_flight' AND o.lease_until<=?)) ORDER BY o.created_at LIMIT ?")
+            .bind(ts(now)).bind(ts(now)).bind(limit).fetch_all(&mut *connection).await.map_err(|error| error.to_string())?;
+        let wakes = rows
+            .iter()
+            .map(|row| {
+                Ok(ClaimedWake {
+                    id: Uuid::parse_str(row.get::<&str, _>("id"))
+                        .map_err(|error| error.to_string())?,
+                    tenant_id: row.get("tenant_id"),
+                    device_id: row.get("device_id"),
+                    command_id: row.get("command_id"),
+                    push_token: row.get::<String, _>("push_token"),
+                    platform: row.get("platform"),
+                    attempts: u32::try_from(row.get::<i64, _>("attempts"))
+                        .map_err(|error| error.to_string())?,
+                    lease_until,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        for wake in &wakes {
+            sqlx::query("UPDATE push_wake_outbox SET status='in_flight',lease_until=? WHERE id=?")
+                .bind(ts(lease_until))
+                .bind(wake.id.to_string())
+                .execute(&mut *connection)
+                .await
+                .map_err(|error| error.to_string())?;
         }
+        connection
+            .commit()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(wakes)
     }
 
     async fn record_wake_outcome(
@@ -392,6 +392,48 @@ mod tests {
             .unwrap();
         assert!(!device.active);
         assert!(device.push_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn duplicate_collapsible_wake_preserves_pending_replacement() {
+        let storage = storage_with_device().await;
+        let now = Utc::now();
+        let old = CollapsibleWake {
+            tenant_id: "tenant-a".into(),
+            device_id: "device-a".into(),
+            execution_id: "execution-a".into(),
+            topic: "resume".into(),
+            command_id: "old".into(),
+            created_at: now,
+        };
+        let old_id = storage.enqueue_collapsible_wake(&old).await.unwrap();
+        assert_eq!(
+            storage.enqueue_collapsible_wake(&old).await.unwrap(),
+            old_id
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM push_wake_outbox WHERE id=?")
+            .bind(old_id.to_string())
+            .fetch_one(&storage.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "pending");
+        let mut new = old.clone();
+        new.command_id = "new".into();
+        let new_id = storage.enqueue_collapsible_wake(&new).await.unwrap();
+        assert_eq!(
+            storage.enqueue_collapsible_wake(&old).await.unwrap(),
+            old_id
+        );
+        assert_eq!(
+            storage.enqueue_collapsible_wake(&new).await.unwrap(),
+            new_id
+        );
+        let claimed = storage
+            .claim_due_wakes(now, now + Duration::seconds(30), 10)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, new_id);
     }
 
     #[tokio::test]

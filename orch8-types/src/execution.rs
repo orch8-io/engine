@@ -77,6 +77,7 @@ pub enum BlockType {
     Router,
     TryCatch,
     SubSequence,
+    #[serde(rename = "ab_split", alias = "a_b_split")]
     ABSplit,
     CancellationScope,
     Saga,
@@ -202,6 +203,31 @@ mod tests {
             let back: BlockType = serde_json::from_str(&json).unwrap();
             assert_eq!(back, bt);
         }
+    }
+
+    #[test]
+    fn block_type_wire_names_match_storage_names() {
+        for block_type in [
+            BlockType::Step,
+            BlockType::Parallel,
+            BlockType::Race,
+            BlockType::Loop,
+            BlockType::ForEach,
+            BlockType::Router,
+            BlockType::TryCatch,
+            BlockType::SubSequence,
+            BlockType::ABSplit,
+            BlockType::CancellationScope,
+            BlockType::Saga,
+        ] {
+            let name = block_type.to_string();
+            assert_eq!(serde_json::to_value(block_type).unwrap(), name);
+            assert_eq!(name.parse::<BlockType>().unwrap(), block_type);
+        }
+        assert_eq!(
+            serde_json::from_str::<BlockType>(r#""a_b_split""#).unwrap(),
+            BlockType::ABSplit
+        );
     }
 
     #[test]

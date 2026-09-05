@@ -236,7 +236,10 @@ fn seq_15_retry_policy_negative_multiplier_rejected() {
     }
     let seq = make_seq(vec![s]);
     let err = seq.validate().unwrap_err();
-    assert!(err.to_string().contains("backoff_multiplier must be > 0"));
+    assert!(
+        err.to_string()
+            .contains("backoff_multiplier must be finite and > 0")
+    );
 }
 
 #[test]

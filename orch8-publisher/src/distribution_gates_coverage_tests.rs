@@ -152,9 +152,9 @@ human_ui_case!(
     false
 );
 human_ui_case!(
-    coverage_distribution_gate_010_desktop_fails_human_ui_gate,
+    coverage_distribution_gate_010_desktop_satisfies_human_ui_gate,
     RuntimeKind::Desktop,
-    false
+    true
 );
 
 #[test]

@@ -1,6 +1,6 @@
 //! Coverage tests for golden-path signed package deployment.
 //!
-//! Count contract: 24 independently named unit tests.
+//! Count contract: 25 independently named tests.
 
 use super::*;
 
@@ -475,4 +475,73 @@ fn coverage_deploy_024_canary_percent_one_is_accepted() {
     ])
     .unwrap();
     assert_eq!(cmd.canary_percent, 1);
+}
+
+#[tokio::test]
+async fn deploy_obeys_evaluation_report_before_promotion() {
+    use crate::commands::test_support::mock_api_with_responses;
+    use reqwest::StatusCode;
+    for promote in [false, true] {
+        for (evaluation, accepted) in [
+            (
+                json!({"release_state": "canary", "auto_rolled_back": false, "gates": []}),
+                true,
+            ),
+            (
+                json!({"release_state": "rolled_back", "auto_rolled_back": true, "gates": []}),
+                false,
+            ),
+            (
+                json!({"release_state": "paused", "auto_rolled_back": false, "gates": []}),
+                false,
+            ),
+            (
+                json!({"release_state": "canary", "auto_rolled_back": true, "gates": []}),
+                false,
+            ),
+            (json!({"state": "canary"}), false),
+            (json!({}), false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_package(dir.path(), &signed_package(1));
+            let mut command = deploy_cmd(path);
+            command.promote = promote;
+            // Diff and preflight are concurrent; this response satisfies both
+            // contracts without depending on their arrival order.
+            let proof = json!({"entries": [], "overall": "pass"});
+            let release = json!({"candidate_sequence_id": Uuid::new_v4(),
+                "state": "ready", "validation_summary": {"divergences": [], "inconclusive": 0}});
+            let api = mock_api_with_responses(
+                vec![
+                    release,
+                    proof.clone(),
+                    proof,
+                    json!({}),
+                    evaluation,
+                    json!({}),
+                ]
+                .into_iter()
+                .map(|body| (StatusCode::OK, body.to_string()))
+                .collect(),
+            )
+            .await;
+            let result = run(&Client::new(), &api.base, command, OutputFormat::Json).await;
+            assert_eq!(result.is_ok(), accepted, "{result:?}");
+            let requests = api.log.snapshot();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.uri.ends_with("/promote"))
+                    .count(),
+                usize::from(accepted && promote)
+            );
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.uri.ends_with("/evaluate"))
+                    .count(),
+                1
+            );
+        }
+    }
 }

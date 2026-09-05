@@ -111,7 +111,8 @@ impl PoolResource {
         }
 
         // Linear ramp from warmup_start_cap to daily_cap over warmup_days.
-        let range = self.daily_cap.saturating_sub(self.warmup_start_cap);
+        let start_cap = self.warmup_start_cap.min(self.daily_cap);
+        let range = self.daily_cap - start_cap;
         // Widen to u64 for the multiply: `range * days_active` can overflow
         // u32 for extreme (DB-stored) caps. The quotient is < `range`
         // (days_active < warmup_days here), so the cast back is exact and
@@ -119,15 +120,15 @@ impl PoolResource {
         #[allow(clippy::cast_possible_truncation)]
         let ramped =
             (u64::from(range) * u64::from(days_active) / u64::from(self.warmup_days)) as u32;
-        self.warmup_start_cap + ramped
+        start_cap + ramped
     }
 
     /// Check if this resource has capacity remaining today.
     #[must_use]
     pub fn has_capacity(&self, today: NaiveDate) -> bool {
         let cap = self.effective_daily_cap(today);
-        if cap == 0 {
-            return true; // unlimited
+        if self.daily_cap == 0 {
+            return true; // Only an explicitly unlimited daily cap is unlimited.
         }
 
         // Reset if it's a new day.
@@ -216,6 +217,23 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2024, 1, 5).unwrap();
         assert!(r.has_capacity(today));
         assert_eq!(r.effective_daily_cap(today), 0);
+    }
+
+    #[test]
+    fn zero_warmup_allowance_is_not_unlimited_capacity() {
+        let resource = make_resource(100, 10, 0);
+        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        assert_eq!(resource.effective_daily_cap(start), 0);
+        assert!(!resource.has_capacity(start));
+        assert!(resource.has_capacity(start.succ_opt().unwrap()));
+    }
+
+    #[test]
+    fn warmup_start_above_daily_cap_is_bounded() {
+        let resource = make_resource(10, 10, u32::MAX);
+        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        assert_eq!(resource.effective_daily_cap(start), 10);
+        assert_eq!(resource.effective_daily_cap(start.succ_opt().unwrap()), 10);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use orch8_types::worker::{
 };
 
 use super::SqliteStorage;
-use super::helpers::{row_to_worker_task, ts};
+use super::helpers::{begin_immediate, row_to_worker_task, ts};
 
 #[instrument(skip(storage, t), fields(task_id = %t.id, handler = %t.handler_name))]
 pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<(), StorageError> {
@@ -117,13 +117,9 @@ pub(super) async fn claim(
     // the lock, the other either waits on `busy_timeout` or fails with
     // `SQLITE_BUSY`.
     //
-    // sqlx's `Transaction` wrapper hard-codes `BEGIN`, so we manage the
-    // transaction manually on a pooled connection and run explicit
-    // COMMIT / ROLLBACK. Mirrors the pattern in
-    // `sqlite::signals::enqueue_if_active`.
-    let mut conn = storage.pool.acquire().await?;
-
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    // Keep transaction ownership in SQLx so errors and cancelled futures
+    // roll back before the connection is reused.
+    let mut conn = begin_immediate(&storage.pool).await?;
 
     let select_res = sqlx::query(
         "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND requirements='{}' ORDER BY created_at ASC LIMIT ?2",
@@ -133,21 +129,12 @@ pub(super) async fn claim(
     .fetch_all(&mut *conn)
     .await;
 
-    let rows = match select_res {
-        Ok(r) => r,
-        Err(e) => {
-            rollback_quiet(&mut conn).await;
-            return Err(StorageError::Query(e.to_string()));
-        }
-    };
+    let rows = select_res?;
 
-    let mut tasks: Vec<WorkerTask> = match rows.iter().map(row_to_worker_task).collect() {
-        Ok(t) => t,
-        Err(e) => {
-            rollback_quiet(&mut conn).await;
-            return Err(e);
-        }
-    };
+    let mut tasks: Vec<WorkerTask> = rows
+        .iter()
+        .map(row_to_worker_task)
+        .collect::<Result<_, _>>()?;
 
     if !tasks.is_empty() {
         // Reflect the state change in the returned objects so callers don't
@@ -174,10 +161,7 @@ pub(super) async fn claim(
         }
         separated.push_unseparated(")");
 
-        if let Err(e) = qb.build().execute(&mut *conn).await {
-            rollback_quiet(&mut conn).await;
-            return Err(StorageError::Query(e.to_string()));
-        }
+        qb.build().execute(&mut *conn).await?;
         let events: Vec<_> = tasks
             .iter()
             .map(|task| {
@@ -190,16 +174,10 @@ pub(super) async fn claim(
                 )
             })
             .collect();
-        if let Err(e) = insert_attempt_events(&mut conn, &events).await {
-            rollback_quiet(&mut conn).await;
-            return Err(e);
-        }
+        insert_attempt_events(&mut conn, &events).await?;
     }
 
-    if let Err(e) = sqlx::query("COMMIT").execute(&mut *conn).await {
-        rollback_quiet(&mut conn).await;
-        return Err(StorageError::Query(e.to_string()));
-    }
+    conn.commit().await?;
     Ok(tasks)
 }
 
@@ -216,9 +194,7 @@ pub(super) async fn claim_for_tenant(
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let now = ts(Utc::now());
-    let mut conn = storage.pool.acquire().await?;
-
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut conn = begin_immediate(&storage.pool).await?;
 
     let select_res = sqlx::query(
         "SELECT wt.* FROM worker_tasks wt
@@ -233,21 +209,12 @@ pub(super) async fn claim_for_tenant(
     .fetch_all(&mut *conn)
     .await;
 
-    let rows = match select_res {
-        Ok(r) => r,
-        Err(e) => {
-            rollback_quiet(&mut conn).await;
-            return Err(StorageError::Query(e.to_string()));
-        }
-    };
+    let rows = select_res?;
 
-    let mut tasks: Vec<WorkerTask> = match rows.iter().map(row_to_worker_task).collect() {
-        Ok(t) => t,
-        Err(e) => {
-            rollback_quiet(&mut conn).await;
-            return Err(e);
-        }
-    };
+    let mut tasks: Vec<WorkerTask> = rows
+        .iter()
+        .map(row_to_worker_task)
+        .collect::<Result<_, _>>()?;
 
     if !tasks.is_empty() {
         let now_dt = chrono::Utc::now();
@@ -272,10 +239,7 @@ pub(super) async fn claim_for_tenant(
         }
         separated.push_unseparated(")");
 
-        if let Err(e) = qb.build().execute(&mut *conn).await {
-            rollback_quiet(&mut conn).await;
-            return Err(StorageError::Query(e.to_string()));
-        }
+        qb.build().execute(&mut *conn).await?;
         let events: Vec<_> = tasks
             .iter()
             .map(|task| {
@@ -288,16 +252,10 @@ pub(super) async fn claim_for_tenant(
                 )
             })
             .collect();
-        if let Err(e) = insert_attempt_events(&mut conn, &events).await {
-            rollback_quiet(&mut conn).await;
-            return Err(e);
-        }
+        insert_attempt_events(&mut conn, &events).await?;
     }
 
-    if let Err(e) = sqlx::query("COMMIT").execute(&mut *conn).await {
-        rollback_quiet(&mut conn).await;
-        return Err(StorageError::Query(e.to_string()));
-    }
+    conn.commit().await?;
     Ok(tasks)
 }
 
@@ -314,8 +272,7 @@ pub(super) async fn claim_matching(
         return Ok(Vec::new());
     }
     let now_text = ts(Utc::now());
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut conn = begin_immediate(&storage.pool).await?;
 
     let now = Utc::now();
     let mut tasks = Vec::with_capacity(limit as usize);
@@ -346,13 +303,7 @@ pub(super) async fn claim_matching(
                 .push("))");
         }
         query.push(" ORDER BY wt.created_at, wt.id LIMIT 256");
-        let rows = match query.build().fetch_all(&mut *conn).await {
-            Ok(rows) => rows,
-            Err(error) => {
-                rollback_quiet(&mut conn).await;
-                return Err(StorageError::Query(error.to_string()));
-            }
-        };
+        let rows = query.build().fetch_all(&mut *conn).await?;
         if rows.is_empty() {
             break;
         }
@@ -393,10 +344,7 @@ pub(super) async fn claim_matching(
             ids.push_bind(task.id.to_string());
         }
         ids.push_unseparated(")");
-        if let Err(error) = update.build().execute(&mut *conn).await {
-            rollback_quiet(&mut conn).await;
-            return Err(StorageError::Query(error.to_string()));
-        }
+        update.build().execute(&mut *conn).await?;
         let events = tasks
             .iter()
             .map(|task| {
@@ -411,21 +359,8 @@ pub(super) async fn claim_matching(
             .collect::<Vec<_>>();
         insert_attempt_events(&mut conn, &events).await?;
     }
-    if let Err(error) = sqlx::query("COMMIT").execute(&mut *conn).await {
-        rollback_quiet(&mut conn).await;
-        return Err(StorageError::Query(error.to_string()));
-    }
+    conn.commit().await?;
     Ok(tasks)
-}
-
-/// Issue `ROLLBACK` on a pooled connection, swallowing any error. The
-/// caller's real error is the signal to propagate — a secondary rollback
-/// failure would just shadow the root cause, and sqlx resets the
-/// connection when it returns to the pool in a broken txn state.
-async fn rollback_quiet(conn: &mut sqlx::SqliteConnection) {
-    if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
-        tracing::warn!(error = %e, "claim: ROLLBACK failed, connection will be reset");
-    }
 }
 
 #[instrument(skip(storage, output), fields(%task_id, worker_id))]
@@ -605,8 +540,7 @@ pub(super) async fn reap_stale(
     let cutoff = Utc::now()
         - chrono::Duration::from_std(stale_threshold)
             .unwrap_or_else(|_| chrono::Duration::seconds(300));
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut conn = begin_immediate(&storage.pool).await?;
     let rows: Vec<(String, i64, Option<String>)> = sqlx::query_as(
         "SELECT id,claim_epoch,worker_id FROM worker_tasks WHERE state='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
     )
@@ -622,10 +556,7 @@ pub(super) async fn reap_stale(
             ids.push_bind(id);
         }
         ids.push_unseparated(")");
-        if let Err(error) = update.build().execute(&mut *conn).await {
-            rollback_quiet(&mut conn).await;
-            return Err(error.into());
-        }
+        update.build().execute(&mut *conn).await?;
     }
     let events: Vec<_> = rows
         .iter()
@@ -639,14 +570,8 @@ pub(super) async fn reap_stale(
             ))
         })
         .collect();
-    if let Err(error) = insert_attempt_events(&mut conn, &events).await {
-        rollback_quiet(&mut conn).await;
-        return Err(error);
-    }
-    if let Err(error) = sqlx::query("COMMIT").execute(&mut *conn).await {
-        rollback_quiet(&mut conn).await;
-        return Err(error.into());
-    }
+    insert_attempt_events(&mut conn, &events).await?;
+    conn.commit().await?;
     Ok(rows.len() as u64)
 }
 

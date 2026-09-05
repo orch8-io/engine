@@ -116,49 +116,52 @@ pub(crate) async fn stream_changes(
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(128);
     tokio::spawn(async move {
         let _permit = permit;
-        loop {
-            if shutdown.is_cancelled() {
-                break;
-            }
-            match storage.list_tenant_changes(&tenant, cursor, limit).await {
-                Ok(changes) if changes.is_empty() => {
-                    tokio::select! {
-                        () = shutdown.cancelled() => break,
-                        () = tokio::time::sleep(Duration::from_millis(500)) => {}
-                    }
+        let producer = async {
+            loop {
+                if shutdown.is_cancelled() {
+                    break;
                 }
-                Ok(changes) => {
-                    for change in changes {
-                        let next = ChangeCursor::from(&change);
-                        let encoded = encode_cursor(next);
-                        let Ok(event) = Event::default()
-                            .event("change")
-                            .id(encoded)
-                            .json_data(&change)
-                        else {
-                            continue;
-                        };
-                        if sender.send(Ok(event)).await.is_err() {
+                match storage.list_tenant_changes(&tenant, cursor, limit).await {
+                    Ok(changes) if changes.is_empty() => {
+                        tokio::select! {
+                            () = shutdown.cancelled() => break,
+                            () = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        }
+                    }
+                    Ok(changes) => {
+                        for change in changes {
+                            let next = ChangeCursor::from(&change);
+                            let encoded = encode_cursor(next);
+                            let Ok(event) = Event::default()
+                                .event("change")
+                                .id(encoded)
+                                .json_data(&change)
+                            else {
+                                continue;
+                            };
+                            if sender.send(Ok(event)).await.is_err() {
+                                return;
+                            }
+                            cursor = Some(next);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, tenant = %tenant, "change stream storage read failed");
+                        if sender
+                            .send(Ok(Event::default().event("error").data(
+                                "change feed temporarily unavailable; reconnect with Last-Event-ID",
+                            )))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
-                        cursor = Some(next);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, tenant = %tenant, "change stream storage read failed");
-                    if sender
-                        .send(Ok(Event::default().event("error").data(
-                            "change feed temporarily unavailable; reconnect with Last-Event-ID",
-                        )))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
-        }
+        };
+        crate::streaming::run_until_stream_closed(&shutdown, &sender, producer).await;
     });
     Ok(
         Sse::new(tokio_stream::wrappers::ReceiverStream::new(receiver))
@@ -184,6 +187,57 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn dropping_idle_change_stream_releases_its_slot() {
+        use axum::response::IntoResponse as _;
+        use std::sync::Arc;
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let state = AppState {
+            storage: Arc::new(
+                orch8_storage::sqlite::SqliteStorage::in_memory()
+                    .await
+                    .unwrap(),
+            ),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            max_context_bytes: 0,
+            externalization_mode: orch8_types::config::ExternalizationMode::default(),
+            worker_lease_secs: 60,
+            worker_heartbeat_interval_secs: 15,
+            circuit_breakers: None,
+            stream_limiter: slots.clone(),
+            publisher: None,
+            push_provider: Arc::new(orch8_push::NoopPushProvider),
+            mobile_sync_enabled: false,
+            entitlements: crate::entitlements::unlimited_provider(),
+            builtin_handlers: Arc::new(Vec::new()),
+            engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            continuity_crypto: None,
+            continuity_trusted_signing_keys: Arc::new(std::collections::BTreeMap::new()),
+            federation_peers: Arc::new(Vec::new()),
+            continuity_lab_enabled: false,
+        };
+        let response = stream_changes(
+            State(state),
+            None,
+            Query(ChangeQuery {
+                tenant_id: Some("idle-tenant".into()),
+                cursor: None,
+                limit: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(slots.available_permits(), 0);
+        drop(response);
+        let permit = tokio::time::timeout(Duration::from_secs(5), slots.acquire())
+            .await
+            .expect("disconnected idle stream must release its slot")
+            .unwrap();
+        drop(permit);
+    }
 
     #[test]
     fn opaque_cursor_round_trips_and_rejects_garbage() {

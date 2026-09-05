@@ -6,7 +6,7 @@ use orch8_types::error::StorageError;
 use orch8_types::ids::*;
 
 use super::SqliteStorage;
-use super::helpers::{row_to_cron, ts};
+use super::helpers::{begin_immediate, row_to_cron, ts};
 
 pub(super) async fn create(storage: &SqliteStorage, s: &CronSchedule) -> Result<(), StorageError> {
     sqlx::query(
@@ -124,27 +124,12 @@ pub(super) async fn claim_due(
 ) -> Result<Vec<CronSchedule>, StorageError> {
     let now_str = ts(now);
 
-    // `BEGIN IMMEDIATE` acquires a RESERVED write lock up-front, closing the
-    // check-then-act window between the SELECT and the per-id UPDATE above --
-    // sqlx's `pool.begin()` uses DEFERRED, which lets two concurrent claimers
-    // both read the same due rows before either takes the write lock,
-    // double-firing the loser's schedule. Same pattern as
-    // `signals.rs::enqueue_if_active` and `instances.rs::claim_due`.
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
-
-    let result = claim_due_inner(&mut conn, &now_str).await;
-
-    match result {
-        Ok(schedules) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
-            Ok(schedules)
-        }
-        Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            Err(e)
-        }
-    }
+    // Retain transaction ownership through row decoding: errors and cancelled
+    // futures roll back the claim before the connection is reused.
+    let mut conn = begin_immediate(&storage.pool).await?;
+    let schedules = claim_due_inner(&mut conn, &now_str).await?;
+    conn.commit().await?;
+    Ok(schedules)
 }
 
 pub(super) async fn update_fire_times(

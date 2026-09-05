@@ -31,6 +31,9 @@ pub async fn run(client: &Client, base: &str, cmd: CronCmd, format: OutputFormat
                 .query(&params)
                 .send()
                 .await?;
+            if !resp.status().is_success() {
+                return print_response(resp, format).await;
+            }
             let body: Value = resp.json().await?;
 
             match format {
@@ -82,4 +85,29 @@ pub async fn run(client: &Client, base: &str, cmd: CronCmd, format: OutputFormat
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn list_rejects_error_response_in_both_formats() {
+        for format in [OutputFormat::Json, OutputFormat::Table] {
+            let api = crate::commands::test_support::mock_api_with_responses(vec![(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":{"message":"storage unavailable"}}"#.into(),
+            )])
+            .await;
+            let error = run(
+                &Client::new(),
+                &api.base,
+                CronCmd::List { tenant_id: None },
+                format,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("storage unavailable"));
+        }
+    }
 }

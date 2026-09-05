@@ -164,11 +164,9 @@ pub async fn tick_once(
         states: Some(vec![InstanceState::Scheduled]),
         ..InstanceFilter::default()
     };
-    let has_pending = storage
-        .count_instances(&scheduled_filter)
-        .await
-        .unwrap_or(0)
-        > 0;
+    // A failed query does not prove the queue is idle. Embedded callers use
+    // this flag to stop draining, so propagate storage failures for retry.
+    let has_pending = storage.count_instances(&scheduled_filter).await? > 0;
 
     Ok(TickOnceResult {
         instances_advanced: counters.instances_advanced.load(Ordering::Relaxed),
@@ -333,6 +331,16 @@ pub async fn run_tick_loop(
     }
 }
 
+/// Preserve subsecond cadence for short staleness windows. A zero threshold
+/// has no positive safe heartbeat interval; retain a nonzero fallback cadence
+/// for callers using zero for immediate recovery checks.
+fn instance_heartbeat_interval(stale_threshold_secs: u64) -> Duration {
+    if stale_threshold_secs == 0 {
+        return Duration::from_secs(5);
+    }
+    Duration::from_secs(stale_threshold_secs) / 3
+}
+
 /// Wait until all semaphore permits are available (all in-flight tasks drained).
 ///
 /// Uses `acquire_many` which blocks until `max_permits` are free — no polling.
@@ -495,8 +503,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                 // Tick at a fraction of the reaper's own staleness window so
                 // several heartbeats land comfortably before this instance
                 // could ever look stale.
-                let heartbeat_interval =
-                    Duration::from_secs(std::cmp::max(stale_instance_threshold_secs / 3, 5));
+                let heartbeat_interval = instance_heartbeat_interval(stale_instance_threshold_secs);
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(heartbeat_interval);
                     ticker.tick().await; // first tick fires immediately; claiming already set updated_at

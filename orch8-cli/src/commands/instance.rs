@@ -187,6 +187,9 @@ pub async fn run(
                 .query(&params)
                 .send()
                 .await?;
+            if !resp.status().is_success() {
+                return print_response(resp, format).await;
+            }
             let body: Value = resp.json().await?;
 
             match format {

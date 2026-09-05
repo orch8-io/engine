@@ -296,6 +296,7 @@ impl MobileEngine {
     /// Create a new mobile engine backed by a `SQLite` database at `db_path`.
     #[uniffi::constructor]
     pub fn new(db_path: String, config: MobileEngineConfig) -> Result<Arc<Self>, MobileError> {
+        config.validate()?;
         let rt = runtime::MobileRuntime::new(config.max_concurrent_steps)
             .map_err(|e| MobileError::Engine { message: e })?;
 
@@ -430,6 +431,9 @@ impl MobileEngine {
 
     /// Execute a single tick.
     pub fn tick_once(&self) -> Result<TickResult, MobileError> {
+        if self.cancel.is_cancelled() {
+            return Err(MobileError::Shutdown);
+        }
         if let Some(rss) = self
             .memory_sampler
             .over_budget(self.config.memory_budget_bytes)
@@ -451,7 +455,7 @@ impl MobileEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         self.run_with_timeout(async {
-            let _guard = self.tick_controller.tick_mutex().lock().await;
+            let guard = self.tick_controller.tick_mutex().lock().await;
 
             if self.cancel.is_cancelled() {
                 return Err(MobileError::Shutdown);
@@ -466,6 +470,10 @@ impl MobileEngine {
                 &self.cancel,
             )
             .await?;
+
+            // Match the foreground loop: host callbacks and maintenance must
+            // not retain the scheduler lock while re-entering the engine.
+            drop(guard);
 
             self.fire_terminal_events().await;
             self.fire_step_pending_events().await;
@@ -1553,6 +1561,21 @@ mod tests {
             .load_sequence_from_json(seq_json.to_string())
             .unwrap();
         (engine, dir)
+    }
+
+    #[test]
+    fn invalid_concurrency_is_rejected_before_opening_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("must-not-exist.db");
+        let config = MobileEngineConfig {
+            max_concurrent_steps: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            MobileEngine::new(path.to_string_lossy().into_owned(), config),
+            Err(MobileError::InvalidInput { .. })
+        ));
+        assert!(!path.exists());
     }
 
     #[test]

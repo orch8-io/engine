@@ -103,7 +103,7 @@ async fn get_json(client: &Client, url: &str) -> Value {
                 Err(_) => json!({"status": status.as_u16()}),
             }
         }
-        Err(error) => json!({"error": error.to_string()}),
+        Err(error) => json!({"error": error.without_url().to_string()}),
     }
 }
 
@@ -166,6 +166,19 @@ pub async fn run(client: &Client, base: &str, command: SupportBundleCmd) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transport_errors_do_not_export_request_urls() {
+        let result = get_json(
+            &Client::new(),
+            "ftp://example.invalid/private?token=sample-secret",
+        )
+        .await;
+        assert!(result.get("error").is_some());
+        let rendered = result.to_string();
+        assert!(!rendered.contains("sample-secret"));
+        assert!(!rendered.contains("example.invalid"));
+    }
 
     #[test]
     fn recursive_sanitizer_removes_execution_data_and_secrets() {

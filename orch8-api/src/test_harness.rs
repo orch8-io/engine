@@ -56,20 +56,29 @@ impl Drop for TestServer {
 /// Panics if the in-memory storage cannot be initialised or the TCP listener
 /// fails to bind — both indicate a broken test environment, not a product bug.
 pub async fn spawn_test_server() -> TestServer {
-    spawn_test_server_inner(false, false).await
+    spawn_test_server_inner(false, false, 0).await
 }
 
 /// Like [`spawn_test_server`] but with mobile sync endpoints enabled.
 pub async fn spawn_test_server_with_mobile_sync() -> TestServer {
-    spawn_test_server_inner(true, false).await
+    spawn_test_server_inner(true, false, 0).await
 }
 
 /// Like [`spawn_test_server`] but with an ephemeral artifact backend enabled.
 pub async fn spawn_test_server_with_artifacts() -> TestServer {
-    spawn_test_server_inner(false, true).await
+    spawn_test_server_inner(false, true, 0).await
 }
 
-async fn spawn_test_server_inner(mobile_sync_enabled: bool, artifacts_enabled: bool) -> TestServer {
+/// Spawn a test server enforcing the supplied serialized-context byte limit.
+pub async fn spawn_test_server_with_context_limit(max_context_bytes: u32) -> TestServer {
+    spawn_test_server_inner(false, false, max_context_bytes).await
+}
+
+async fn spawn_test_server_inner(
+    mobile_sync_enabled: bool,
+    artifacts_enabled: bool,
+    max_context_bytes: u32,
+) -> TestServer {
     let mut storage = SqliteStorage::in_memory()
         .await
         .expect("in-memory sqlite storage must initialise for tests");
@@ -81,7 +90,7 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool, artifacts_enabled: b
     let state = AppState {
         storage: storage.clone(),
         shutdown: shutdown.clone(),
-        max_context_bytes: 0,
+        max_context_bytes,
         externalization_mode: ExternalizationMode::default(),
         worker_lease_secs: 60,
         worker_heartbeat_interval_secs: 15,

@@ -76,12 +76,27 @@ impl std::fmt::Debug for ObjectArtifactStore {
 }
 
 // Takes the error by value so it works as `.map_err(map_err)` (object_store
-// methods yield an owned error). Object-store failures are transient
-// (network / throttling / temporary unavailability) → `Backend` (retryable),
-// NOT `Unsupported` (reserved for permanent "not configured / not supported").
+// methods yield an owned error). Preserve permanent backend diagnostics;
+// only unclassified operational failures retain the retryable fallback.
 #[allow(clippy::needless_pass_by_value)]
 fn map_err(e: object_store::Error) -> StorageError {
-    StorageError::Backend(format!("artifact backend: {e}"))
+    let message = format!("artifact backend: {e}");
+    match e {
+        object_store::Error::NotFound { path, .. } => StorageError::NotFound {
+            entity: "artifact",
+            id: path,
+        },
+        object_store::Error::InvalidPath { .. } => StorageError::Constraint(message),
+        object_store::Error::AlreadyExists { .. }
+        | object_store::Error::Precondition { .. }
+        | object_store::Error::NotModified { .. } => StorageError::Conflict(message),
+        object_store::Error::NotSupported { .. }
+        | object_store::Error::NotImplemented { .. }
+        | object_store::Error::PermissionDenied { .. }
+        | object_store::Error::Unauthenticated { .. }
+        | object_store::Error::UnknownConfigurationKey { .. } => StorageError::Unsupported(message),
+        _ => StorageError::Backend(message),
+    }
 }
 
 impl ObjectArtifactStore {
@@ -293,6 +308,62 @@ impl ObjectArtifactStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_error_mapping_preserves_retryability() {
+        let error_source = || Box::new(std::io::Error::other("fixture"));
+        for error in [
+            object_store::Error::PermissionDenied {
+                path: "artifact".into(),
+                source: error_source(),
+            },
+            object_store::Error::Unauthenticated {
+                path: "artifact".into(),
+                source: error_source(),
+            },
+            object_store::Error::NotSupported {
+                source: error_source(),
+            },
+            object_store::Error::NotImplemented {
+                operation: "put".into(),
+                implementer: "fixture".into(),
+            },
+            object_store::Error::UnknownConfigurationKey {
+                store: "fixture",
+                key: "unknown".into(),
+            },
+        ] {
+            let mapped = map_err(error);
+            assert!(matches!(mapped, StorageError::Unsupported(_)));
+            assert!(!mapped.is_transient());
+        }
+        for error in [
+            object_store::Error::AlreadyExists {
+                path: "artifact".into(),
+                source: error_source(),
+            },
+            object_store::Error::Precondition {
+                path: "artifact".into(),
+                source: error_source(),
+            },
+            object_store::Error::NotModified {
+                path: "artifact".into(),
+                source: error_source(),
+            },
+        ] {
+            assert!(matches!(map_err(error), StorageError::Conflict(_)));
+        }
+        assert!(matches!(map_err(object_store::Error::NotFound {
+            path: "artifact".into(), source: error_source(),
+        }), StorageError::NotFound { entity: "artifact", id } if id == "artifact"));
+        assert!(
+            map_err(object_store::Error::Generic {
+                store: "fixture",
+                source: error_source(),
+            })
+            .is_transient()
+        );
+    }
 
     async fn roundtrip(store: ObjectArtifactStore) {
         let r = store

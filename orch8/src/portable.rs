@@ -136,8 +136,7 @@ impl Engine {
             .storage_backend()
             .get_artifact(&signed_manifest.manifest.payload_artifact.key)
             .await?
-            .ok_or(orch8_engine::capsule::CapsuleServiceError::MissingArtifact)?
-            .clone();
+            .ok_or(orch8_engine::capsule::CapsuleServiceError::MissingArtifact)?;
         Ok(PortableCapsule {
             signed_manifest,
             encrypted_payload,

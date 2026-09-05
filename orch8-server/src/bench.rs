@@ -144,7 +144,7 @@ async fn main() {
 /// Benchmark 1: Batch INSERT 100K instances.
 /// Target: < 3 seconds.
 async fn bench_batch_insert(storage: Arc<PostgresStorage>) {
-    let tenant = format!("bench-insert-{}", &uuid::Uuid::now_v7().to_string()[..8]);
+    let tenant = format!("bench-insert-{}", uuid::Uuid::now_v7());
     let seq = make_sequence(&tenant, 1);
     storage.create_sequence(&seq).await.unwrap();
 
@@ -172,7 +172,7 @@ async fn bench_batch_insert(storage: Arc<PostgresStorage>) {
 /// Benchmark 2: `claim_due_instances` throughput.
 /// How fast can we claim batches of 256 from a pool of 10K scheduled instances?
 async fn bench_claim_throughput(storage: Arc<PostgresStorage>) {
-    let tenant = format!("bench-claim-{}", &uuid::Uuid::now_v7().to_string()[..8]);
+    let tenant = format!("bench-claim-{}", uuid::Uuid::now_v7());
     let seq = make_sequence(&tenant, 1);
     storage.create_sequence(&seq).await.unwrap();
 
@@ -211,7 +211,7 @@ async fn bench_claim_throughput(storage: Arc<PostgresStorage>) {
 /// Benchmark: End-to-end throughput.
 /// Schedule N instances with noop handler(s), run engine, measure time to complete all.
 async fn bench_e2e_throughput(storage: Arc<PostgresStorage>, num_steps: usize) {
-    let tenant = format!("bench-e2e-{}", &uuid::Uuid::now_v7().to_string()[..8]);
+    let tenant = format!("bench-e2e-{}", uuid::Uuid::now_v7());
     let seq = make_sequence(&tenant, num_steps);
     storage.create_sequence(&seq).await.unwrap();
 
@@ -247,8 +247,10 @@ async fn bench_e2e_throughput(storage: Arc<PostgresStorage>, num_steps: usize) {
     let start = Instant::now();
 
     // Spawn engine
-    let engine_handle = tokio::spawn(async move {
-        engine.run().await.ok();
+    let mut engine_handle = tokio::spawn(async move {
+        if let Err(error) = engine.run().await {
+            eprintln!("  Engine failed: {error}");
+        }
     });
 
     // Poll until all instances reach terminal state
@@ -292,6 +294,10 @@ async fn bench_e2e_throughput(storage: Arc<PostgresStorage>, num_steps: usize) {
                         all_done = false;
                         break;
                     }
+                } else {
+                    // Missing rows and failed reads are not completion evidence.
+                    all_done = false;
+                    break;
                 }
             }
 
@@ -310,7 +316,13 @@ async fn bench_e2e_throughput(storage: Arc<PostgresStorage>, num_steps: usize) {
     }
 
     cancel.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(5), engine_handle).await;
+    if tokio::time::timeout(Duration::from_secs(5), &mut engine_handle)
+        .await
+        .is_err()
+    {
+        engine_handle.abort();
+        let _ = engine_handle.await;
+    }
 
     println!();
     cleanup(storage.as_ref(), &tenant).await;

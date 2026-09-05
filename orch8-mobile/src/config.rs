@@ -3,11 +3,11 @@
 pub struct MobileEngineConfig {
     /// Tick interval in milliseconds for the foreground loop (default: 500).
     pub tick_interval_ms: u64,
-    /// Maximum concurrent step executions (default: 4).
+    /// Maximum concurrent step executions; must be positive (default: 4).
     pub max_concurrent_steps: u32,
     /// Maximum steps per instance before forced failure (default: 1000).
     pub max_steps_per_instance: u32,
-    /// Maximum concurrent running instances (default: 10).
+    /// Maximum concurrent running instances; must be positive (default: 10).
     pub max_concurrent_instances: u32,
     /// Maximum tick duration in milliseconds before yielding (default: 5000).
     pub max_tick_duration_ms: u64,
@@ -79,6 +79,24 @@ impl Default for MobileEngineConfig {
 }
 
 impl MobileEngineConfig {
+    pub(crate) fn validate(&self) -> Result<(), crate::MobileError> {
+        if self.max_concurrent_steps == 0
+            || u64::from(self.max_concurrent_steps) > tokio::sync::Semaphore::MAX_PERMITS as u64
+        {
+            return Err(crate::MobileError::InvalidInput {
+                message:
+                    "max_concurrent_steps must be positive and fit the platform semaphore limit"
+                        .into(),
+            });
+        }
+        if self.max_concurrent_instances == 0 {
+            return Err(crate::MobileError::InvalidInput {
+                message: "max_concurrent_instances must be greater than zero".into(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn to_scheduler_config(&self) -> orch8_types::config::SchedulerConfig {
         orch8_types::config::SchedulerConfig {
             tick_interval_ms: self.tick_interval_ms,
@@ -114,6 +132,30 @@ mod tests {
         assert_eq!(config.environment, "production");
         assert!(config.root_public_key.is_empty());
         assert_eq!(config.memory_budget_bytes, 0);
+    }
+
+    #[test]
+    fn concurrency_limits_are_validated() {
+        assert!(MobileEngineConfig::default().validate().is_ok());
+        for (steps, instances) in [(0, 1), (1, 0)] {
+            let config = MobileEngineConfig {
+                max_concurrent_steps: steps,
+                max_concurrent_instances: instances,
+                ..Default::default()
+            };
+            assert!(matches!(
+                config.validate(),
+                Err(crate::MobileError::InvalidInput { .. })
+            ));
+        }
+        let config = MobileEngineConfig {
+            max_concurrent_steps: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(
+            config.validate().is_ok(),
+            u64::from(u32::MAX) <= tokio::sync::Semaphore::MAX_PERMITS as u64
+        );
     }
 
     #[test]

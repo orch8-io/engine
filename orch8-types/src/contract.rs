@@ -340,12 +340,8 @@ impl ContractCase {
             return Err("path expectation with empty traversed list".to_string());
         }
         for a in &self.expect.assertions {
-            if let AssertionOp::InRange {
-                min: None,
-                max: None,
-            } = a.op
-            {
-                return Err("in_range assertion with neither min nor max".to_string());
+            if let AssertionOp::InRange { min, max } = a.op {
+                validate_range(min, max)?;
             }
             if let AssertionOp::HasType { expected } = &a.op {
                 const TYPES: &[&str] = &["string", "number", "boolean", "array", "object", "null"];
@@ -356,6 +352,21 @@ impl ContractCase {
         }
         Ok(())
     }
+}
+
+fn validate_range(min: Option<f64>, max: Option<f64>) -> Result<(), String> {
+    if min.is_none() && max.is_none() {
+        return Err("in_range assertion with neither min nor max".into());
+    }
+    if min.is_some_and(|n| !n.is_finite()) || max.is_some_and(|n| !n.is_finite()) {
+        return Err("in_range bounds must be finite; omit an unbounded end".into());
+    }
+    if let (Some(min), Some(max)) = (min, max)
+        && min > max
+    {
+        return Err(format!("in_range minimum {min} exceeds maximum {max}"));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +438,7 @@ pub fn check_op(op: &AssertionOp, actual: Option<&serde_json::Value>) -> Result<
             }
         }
         AssertionOp::InRange { min, max } => {
+            validate_range(*min, *max)?;
             let Some(n) = actual.and_then(serde_json::Value::as_f64) else {
                 return Err(format!(
                     "expected a number, got {}",
@@ -638,6 +650,32 @@ mod tests {
     }
 
     // --- serde round-trips ---
+
+    #[test]
+    fn invalid_ranges_fail_validation_and_direct_evaluation() {
+        for (min, max) in [
+            (None, None),
+            (Some(2.0), Some(1.0)),
+            (Some(f64::NAN), None),
+            (None, Some(f64::NAN)),
+            (Some(f64::NEG_INFINITY), None),
+            (None, Some(f64::INFINITY)),
+        ] {
+            let op = AssertionOp::InRange { min, max };
+            let mut suite: ContractSuite = serde_json::from_value(suite_json()).unwrap();
+            suite.cases[0].expect.assertions = vec![Assertion {
+                subject: AssertionSubject::Context {
+                    path: String::new(),
+                },
+                op: op.clone(),
+            }];
+            assert!(suite.validate().is_err());
+            assert!(check_op(&op, Some(&json!(1))).is_err());
+        }
+        for (min, max) in [(Some(1.0), Some(1.0)), (None, Some(1.0)), (Some(1.0), None)] {
+            assert!(check_op(&AssertionOp::InRange { min, max }, Some(&json!(1))).is_ok());
+        }
+    }
 
     #[test]
     fn suite_deserializes_from_documented_shape() {

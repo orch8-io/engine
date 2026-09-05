@@ -180,6 +180,9 @@ impl Engine {
     /// that drive the engine manually (test harnesses, cooperative
     /// schedulers) instead of running the background loop.
     pub async fn tick_once(&self) -> Result<TickOnceResult, Error> {
+        if self.inner.cancel.is_cancelled() {
+            return Err(orch8_engine::error::EngineError::ShuttingDown.into());
+        }
         let result = tick_once(
             &self.inner.storage,
             &self.inner.handlers,
@@ -277,7 +280,10 @@ impl Engine {
             tenant_id: self.inner.tenant.clone(),
             namespace: opts.namespace,
             state: InstanceState::Scheduled,
-            next_fire_at: Some(opts.next_fire_at.unwrap_or(now)),
+            next_fire_at: Some(
+                opts.next_fire_at
+                    .unwrap_or_else(|| self.inner.config.clock.now()),
+            ),
             priority: opts.priority,
             timezone: opts.timezone,
             metadata: opts.metadata,

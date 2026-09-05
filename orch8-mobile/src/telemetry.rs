@@ -237,7 +237,7 @@ impl TelemetryManager {
 
         let response = self.send_batch(endpoint_url, body).await?;
         if !response.status().is_success() {
-            return Err(flush_response_error(response).await);
+            return Err(flush_response_error(response.status()));
         }
         *self
             .last_endpoint
@@ -332,10 +332,8 @@ fn mobile_storage_error(error: orch8_types::error::StorageError) -> MobileError 
     }
 }
 
-async fn flush_response_error(response: reqwest::Response) -> MobileError {
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    tracing::warn!(%status, %body, "telemetry flush failed");
+fn flush_response_error(status: reqwest::StatusCode) -> MobileError {
+    tracing::warn!(%status, "telemetry flush failed");
     MobileError::Engine {
         message: format!("telemetry flush failed: {status}"),
     }

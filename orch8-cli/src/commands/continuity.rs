@@ -285,16 +285,29 @@ fn read_capsule(path: &Path) -> Result<SignedCapsuleManifest> {
 }
 
 fn read_bounded_file(path: &Path) -> Result<Vec<u8>> {
-    let metadata =
-        std::fs::metadata(path).with_context(|| format!("inspect {}", path.display()))?;
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect {}", path.display()))?;
     if metadata.len() > MAX_CONTINUITY_REQUEST_BYTES {
         bail!(
-            "{} exceeds the {} MiB continuity request limit",
-            path.display(),
-            MAX_CONTINUITY_REQUEST_BYTES / (1024 * 1024)
+            "{} exceeds the 16 MiB continuity request limit",
+            path.display()
         );
     }
-    std::fs::read(path).with_context(|| format!("read {}", path.display()))
+    read_bounded_contents(file).with_context(|| format!("read {}", path.display()))
+}
+
+fn read_bounded_contents(reader: impl std::io::Read) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_CONTINUITY_REQUEST_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CONTINUITY_REQUEST_BYTES {
+        bail!("input exceeds the 16 MiB continuity request limit");
+    }
+    Ok(bytes)
 }
 
 async fn response_json(response: reqwest::Response, action: &str) -> Result<Value> {
@@ -414,7 +427,7 @@ pub async fn run_execution(
             )
             .await?;
             if let Some(path) = output {
-                std::fs::write(&path, serde_json::to_vec_pretty(&value["capsule"])?)
+                crate::atomic_write(&path, &serde_json::to_vec_pretty(&value["capsule"])?)
                     .with_context(|| format!("write {}", path.display()))?;
             }
             print_json_value(&value, format)
@@ -980,6 +993,18 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+
+    #[test]
+    fn continuity_reader_enforces_limit_without_metadata() {
+        use std::io::Read as _;
+        let exact = std::io::repeat(0).take(MAX_CONTINUITY_REQUEST_BYTES);
+        assert_eq!(
+            read_bounded_contents(exact).unwrap().len() as u64,
+            MAX_CONTINUITY_REQUEST_BYTES
+        );
+        let error = read_bounded_contents(std::io::repeat(0)).unwrap_err();
+        assert!(error.to_string().contains("continuity request limit"));
+    }
 
     #[test]
     fn continuity_request_files_are_size_bounded() {

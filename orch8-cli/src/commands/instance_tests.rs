@@ -153,3 +153,32 @@ async fn invalid_inline_context_fails_before_any_request_is_sent() {
 
     assert!(error.to_string().contains("invalid JSON context"));
 }
+
+#[tokio::test]
+async fn list_rejects_http_errors_in_both_output_formats() {
+    use crate::commands::test_support::mock_api_with_responses;
+    for format in [OutputFormat::Json, OutputFormat::Table] {
+        let server = mock_api_with_responses(vec![(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            r#"{"error":{"message":"storage unavailable"}}"#.into(),
+        )])
+        .await;
+        let error = run(
+            &Client::new(),
+            &server.base,
+            InstanceCmd::List {
+                tenant_id: None,
+                namespace: None,
+                state: None,
+                sequence_id: None,
+                limit: 50,
+            },
+            format,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("storage unavailable"));
+        assert_eq!(server.log.snapshot().len(), 1);
+    }
+}

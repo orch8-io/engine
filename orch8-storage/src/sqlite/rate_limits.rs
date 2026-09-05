@@ -6,7 +6,7 @@ use orch8_types::ids::*;
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 
 use super::SqliteStorage;
-use super::helpers::{parse_ts, ts};
+use super::helpers::{begin_immediate, parse_ts, ts};
 
 pub(super) async fn check_rate_limit(
     storage: &SqliteStorage,
@@ -14,38 +14,12 @@ pub(super) async fn check_rate_limit(
     resource_key: &ResourceKey,
     now: DateTime<Utc>,
 ) -> Result<RateLimitCheck, StorageError> {
-    // Atomic check-and-increment inside a serialised transaction.
-    //
-    // `BEGIN IMMEDIATE` acquires a RESERVED lock up-front, preventing
-    // concurrent writers from interleaving between our SELECT and UPDATE.
-    // sqlx's `begin()` always uses DEFERRED, so we acquire a raw connection
-    // and start the transaction manually.
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
-
-    // Run the fallible body under the open transaction. On ANY error we must
-    // ROLLBACK before returning the connection to the pool — otherwise it is
-    // handed back mid-transaction still holding the RESERVED write lock, which
-    // deadlocks the single-connection in-memory pool permanently.
-    match check_rate_limit_inner(&mut conn, tenant_id, resource_key, now).await {
-        Ok(check) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
-            Ok(check)
-        }
-        Err(e) => {
-            rollback_quiet(&mut conn).await;
-            Err(e)
-        }
-    }
-}
-
-/// Issue `ROLLBACK` on a pooled connection, swallowing any secondary error —
-/// the caller's real error is what matters, and sqlx resets the connection on
-/// return to the pool anyway. Mirrors the pattern in `sqlite/signals.rs`.
-async fn rollback_quiet(conn: &mut sqlx::SqliteConnection) {
-    if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
-        tracing::warn!(error = %e, "check_rate_limit: ROLLBACK failed, connection will be reset");
-    }
+    // Keep the write reservation while deciding and incrementing. SQLx owns
+    // transaction cleanup, including when this future is cancelled.
+    let mut tx = begin_immediate(&storage.pool).await?;
+    let check = check_rate_limit_inner(&mut tx, tenant_id, resource_key, now).await?;
+    tx.commit().await?;
+    Ok(check)
 }
 
 /// Fallible body of [`check_rate_limit`], run inside an already-open

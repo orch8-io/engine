@@ -415,8 +415,9 @@ fn build(dir: &Path, key_arg: &str, out: Option<&Path>) -> Result<()> {
             continue;
         }
         let mut entries: Vec<PathBuf> = std::fs::read_dir(&sub_dir)?
-            .filter_map(std::result::Result::ok)
-            .map(|e| e.path())
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e == "json"))
             .collect();
         entries.sort();
@@ -489,8 +490,7 @@ fn verify(path: &Path, trusted_keys: &[String]) -> Result<()> {
                 bail!("package is untrusted (allow_untrusted is false)")
             }
             Err(e) => {
-                println!("trust:     NOT TRUSTED — {e}");
-                std::process::exit(1);
+                bail!("package is not trusted: {e}");
             }
         }
     }

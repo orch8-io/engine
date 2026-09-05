@@ -226,8 +226,8 @@ impl S3CdnBackend {
         format!(
             "{}/{}/{}",
             self.endpoint.trim_end_matches('/'),
-            self.bucket,
-            path.trim_start_matches('/')
+            sigv4_uri_encode(&self.bucket),
+            canonical_uri(path.trim_start_matches('/'))
         )
     }
 
@@ -878,6 +878,31 @@ mod tests {
             signing_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(42)).unwrap(),
             42
         );
+    }
+
+    #[test]
+    fn object_keys_remain_paths_when_they_contain_url_delimiters() {
+        let backend = S3CdnBackend::new(
+            "https://s3.example.com".into(),
+            "bucket".into(),
+            "us-east-1".into(),
+            "AKID".into(),
+            "secret".into(),
+        );
+        for (key, expected) in [
+            ("reports/draft#1.json", "/bucket/reports/draft%231.json"),
+            ("reports/what?.json", "/bucket/reports/what%3F.json"),
+            (
+                "reports/literal%20.json",
+                "/bucket/reports/literal%2520.json",
+            ),
+            ("reports/café.json", "/bucket/reports/caf%C3%A9.json"),
+        ] {
+            let url = reqwest::Url::parse(&backend.url(key)).unwrap();
+            assert_eq!(url.path(), expected);
+            assert!(url.query().is_none());
+            assert!(url.fragment().is_none());
+        }
     }
 
     // Regression: the canonical URI must be single-encoded from the raw

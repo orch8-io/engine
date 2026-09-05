@@ -52,6 +52,20 @@ async fn next_delta(
     }
 }
 
+/// Cancel pending storage reads and backpressured sends when the stream ends.
+pub(crate) async fn run_until_stream_closed(
+    shutdown: &tokio_util::sync::CancellationToken,
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    producer: impl std::future::Future<Output = ()>,
+) {
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => {},
+        () = tx.closed() => {},
+        () = producer => {},
+    }
+}
+
 const fn is_terminal(state: InstanceState) -> bool {
     matches!(
         state,
@@ -133,170 +147,173 @@ pub(crate) async fn stream_instance(
         // automatically on return/panic, freeing a slot.
         let _permit = permit;
 
-        let mut last_output_at: Option<chrono::DateTime<chrono::Utc>> = None;
-        // IDs of outputs already sent that share `last_output_at`'s exact
-        // timestamp. The storage query bound is inclusive (>=) so outputs
-        // created in the same millisecond as the cursor are re-fetched rather
-        // than silently skipped; this set filters out the ones already sent.
-        let mut sent_at_cursor: std::collections::HashSet<uuid::Uuid> =
-            std::collections::HashSet::new();
-        let mut last_state: Option<InstanceState> = None;
-        let mut ticker = tokio::time::interval(poll_interval);
-        // Skip the immediate first tick so we don't double-query right after the prefetch above.
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ticker.tick().await;
+        let producer = async {
+            let mut last_output_at: Option<chrono::DateTime<chrono::Utc>> = None;
+            // IDs of outputs already sent that share `last_output_at`'s exact
+            // timestamp. The storage query bound is inclusive (>=) so outputs
+            // created in the same millisecond as the cursor are re-fetched rather
+            // than silently skipped; this set filters out the ones already sent.
+            let mut sent_at_cursor: std::collections::HashSet<uuid::Uuid> =
+                std::collections::HashSet::new();
+            let mut last_state: Option<InstanceState> = None;
+            let mut ticker = tokio::time::interval(poll_interval);
+            // Skip the immediate first tick so we don't double-query right after the prefetch above.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
 
-        let mut consecutive_errors: u32 = 0;
+            let mut consecutive_errors: u32 = 0;
 
-        loop {
-            tokio::select! {
-                biased;
-                () = shutdown.cancelled() => break,
-                () = tx.closed() => break,
-                _ = ticker.tick() => {}
-                event = next_delta(delta_rx.as_mut()), if delta_rx.is_some() => {
-                    match event {
-                        Ok(ev) => {
-                            // `StreamEvent` serialization is infallible (plain
-                            // strings + tag); fall back to `{}` defensively.
-                            let payload = serde_json::to_string(&ev)
-                                .unwrap_or_else(|_| "{}".to_string());
-                            let sse = Event::default().event("llm_delta").data(payload);
-                            if tx.send(Ok(sse)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            // Best-effort live view: a slow client just loses
-                            // deltas; the durable output event carries the
-                            // full text anyway.
-                            tracing::debug!(
-                                skipped,
-                                instance_id = %instance_id.into_uuid(),
-                                "stream: client lagged behind llm_delta broadcast"
-                            );
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            delta_rx = None;
-                        }
-                    }
-                    // Deltas don't advance the storage poll; wait for the
-                    // next tick before re-querying.
-                    continue;
-                }
-            }
-
-            // If the last iterations failed, wait an extra backoff period
-            // BEFORE issuing the next query. Backoff doubles per failure
-            // (capped), and sits on top of the normal poll interval.
-            if consecutive_errors > 0 {
-                // `poll_interval` is clamped to ≤ 5000ms so `as_millis()`
-                // comfortably fits in a u64 before the multiplier applies.
-                let base_ms = u64::try_from(poll_interval.as_millis()).unwrap_or(u64::MAX);
-                let extra_ms = base_ms.saturating_mul(1u64 << consecutive_errors.min(8));
-                let extra = Duration::from_millis(extra_ms).min(MAX_BACKOFF);
+            loop {
                 tokio::select! {
                     biased;
                     () = shutdown.cancelled() => break,
                     () = tx.closed() => break,
-                    () = tokio::time::sleep(extra) => {}
+                    _ = ticker.tick() => {}
+                    event = next_delta(delta_rx.as_mut()), if delta_rx.is_some() => {
+                        match event {
+                            Ok(ev) => {
+                                // `StreamEvent` serialization is infallible (plain
+                                // strings + tag); fall back to `{}` defensively.
+                                let payload = serde_json::to_string(&ev)
+                                    .unwrap_or_else(|_| "{}".to_string());
+                                let sse = Event::default().event("llm_delta").data(payload);
+                                if tx.send(Ok(sse)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                // Best-effort live view: a slow client just loses
+                                // deltas; the durable output event carries the
+                                // full text anyway.
+                                tracing::debug!(
+                                    skipped,
+                                    instance_id = %instance_id.into_uuid(),
+                                    "stream: client lagged behind llm_delta broadcast"
+                                );
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
+                                delta_rx = None;
+                            }
+                        }
+                        // Deltas don't advance the storage poll; wait for the
+                        // next tick before re-querying.
+                        continue;
+                    }
                 }
-            }
 
-            // Fetch instance.
-            let instance = match storage.get_instance(instance_id).await {
-                Ok(Some(inst)) => inst,
-                Ok(None) => {
+                // If the last iterations failed, wait an extra backoff period
+                // BEFORE issuing the next query. Backoff doubles per failure
+                // (capped), and sits on top of the normal poll interval.
+                if consecutive_errors > 0 {
+                    // `poll_interval` is clamped to ≤ 5000ms so `as_millis()`
+                    // comfortably fits in a u64 before the multiplier applies.
+                    let base_ms = u64::try_from(poll_interval.as_millis()).unwrap_or(u64::MAX);
+                    let extra_ms = base_ms.saturating_mul(1u64 << consecutive_errors.min(8));
+                    let extra = Duration::from_millis(extra_ms).min(MAX_BACKOFF);
+                    tokio::select! {
+                        biased;
+                        () = shutdown.cancelled() => break,
+                        () = tx.closed() => break,
+                        () = tokio::time::sleep(extra) => {}
+                    }
+                }
+
+                // Fetch instance.
+                let instance = match storage.get_instance(instance_id).await {
+                    Ok(Some(inst)) => inst,
+                    Ok(None) => {
+                        let _ = tx
+                            .send(Ok(Event::default()
+                                .event("error")
+                                .data(r#"{"error":"instance not found"}"#)))
+                            .await;
+                        break;
+                    }
+                    Err(e) => {
+                        consecutive_errors = consecutive_errors.saturating_add(1);
+                        tracing::debug!(error = %e, instance_id = %instance_id.into_uuid(), consecutive_errors, "stream: get_instance failed, will back off");
+                        continue;
+                    }
+                };
+
+                // Emit state change.
+                if last_state != Some(instance.state) {
+                    let event = Event::default().event("state").data(
+                        serde_json::json!({
+                            "instance_id": instance_id.into_uuid(),
+                            "state": instance.state.to_string(),
+                        })
+                        .to_string(),
+                    );
+                    if tx.send(Ok(event)).await.is_err() {
+                        break;
+                    }
+                    last_state = Some(instance.state);
+                }
+
+                // Emit new block outputs.
+                // Use `get_outputs_after_created_at` to avoid fetching the entire
+                // history on every poll — critical for long-running instances that
+                // accumulate thousands of outputs.
+                match storage
+                    .get_outputs_after_created_at(instance_id, last_output_at)
+                    .await
+                {
+                    Ok(outputs) => {
+                        if !outputs.is_empty() {
+                            for output in &outputs {
+                                // Boundary rows at the inclusive cursor timestamp
+                                // may have been delivered on the previous poll.
+                                if Some(output.created_at) == last_output_at
+                                    && sent_at_cursor.contains(&output.id)
+                                {
+                                    continue;
+                                }
+                                // Serialisation of owned `BlockOutput` is infallible in practice —
+                                // if it ever fails, drop the payload but keep the stream alive.
+                                let payload = serde_json::to_string(output).unwrap_or_else(|e| {
+                                    tracing::error!(
+                                        instance_id = %instance_id.into_uuid(),
+                                        output_id = %output.id,
+                                        error = %e,
+                                        "failed to serialize output in SSE stream"
+                                    );
+                                    "{}".to_string()
+                                });
+                                let event = Event::default().event("output").data(payload);
+                                if tx.send(Ok(event)).await.is_err() {
+                                    return;
+                                }
+                                if last_output_at.is_none_or(|t| output.created_at > t) {
+                                    last_output_at = Some(output.created_at);
+                                    sent_at_cursor.clear();
+                                }
+                                if Some(output.created_at) == last_output_at {
+                                    sent_at_cursor.insert(output.id);
+                                }
+                            }
+                        }
+                        consecutive_errors = 0;
+                    }
+                    Err(e) => {
+                        consecutive_errors = consecutive_errors.saturating_add(1);
+                        tracing::debug!(error = %e, instance_id = %instance_id.into_uuid(), consecutive_errors, "stream: get_outputs_after_created_at failed, will back off");
+                        continue;
+                    }
+                }
+
+                // Close on terminal state.
+                if is_terminal(instance.state) {
                     let _ = tx
-                        .send(Ok(Event::default()
-                            .event("error")
-                            .data(r#"{"error":"instance not found"}"#)))
+                        .send(Ok(Event::default().event("done").data(
+                            serde_json::json!({"state": instance.state.to_string()}).to_string(),
+                        )))
                         .await;
                     break;
                 }
-                Err(e) => {
-                    consecutive_errors = consecutive_errors.saturating_add(1);
-                    tracing::debug!(error = %e, instance_id = %instance_id.into_uuid(), consecutive_errors, "stream: get_instance failed, will back off");
-                    continue;
-                }
-            };
-
-            // Emit state change.
-            if last_state != Some(instance.state) {
-                let event = Event::default().event("state").data(
-                    serde_json::json!({
-                        "instance_id": instance_id.into_uuid(),
-                        "state": instance.state.to_string(),
-                    })
-                    .to_string(),
-                );
-                if tx.send(Ok(event)).await.is_err() {
-                    break;
-                }
-                last_state = Some(instance.state);
             }
-
-            // Emit new block outputs.
-            // Use `get_outputs_after_created_at` to avoid fetching the entire
-            // history on every poll — critical for long-running instances that
-            // accumulate thousands of outputs.
-            match storage
-                .get_outputs_after_created_at(instance_id, last_output_at)
-                .await
-            {
-                Ok(outputs) => {
-                    if !outputs.is_empty() {
-                        for output in &outputs {
-                            // Boundary rows at the inclusive cursor timestamp
-                            // may have been delivered on the previous poll.
-                            if Some(output.created_at) == last_output_at
-                                && sent_at_cursor.contains(&output.id)
-                            {
-                                continue;
-                            }
-                            // Serialisation of owned `BlockOutput` is infallible in practice —
-                            // if it ever fails, drop the payload but keep the stream alive.
-                            let payload = serde_json::to_string(output).unwrap_or_else(|e| {
-                                tracing::error!(
-                                    instance_id = %instance_id.into_uuid(),
-                                    output_id = %output.id,
-                                    error = %e,
-                                    "failed to serialize output in SSE stream"
-                                );
-                                "{}".to_string()
-                            });
-                            let event = Event::default().event("output").data(payload);
-                            if tx.send(Ok(event)).await.is_err() {
-                                return;
-                            }
-                            if last_output_at.is_none_or(|t| output.created_at > t) {
-                                last_output_at = Some(output.created_at);
-                                sent_at_cursor.clear();
-                            }
-                            if Some(output.created_at) == last_output_at {
-                                sent_at_cursor.insert(output.id);
-                            }
-                        }
-                    }
-                    consecutive_errors = 0;
-                }
-                Err(e) => {
-                    consecutive_errors = consecutive_errors.saturating_add(1);
-                    tracing::debug!(error = %e, instance_id = %instance_id.into_uuid(), consecutive_errors, "stream: get_outputs_after_created_at failed, will back off");
-                    continue;
-                }
-            }
-
-            // Close on terminal state.
-            if is_terminal(instance.state) {
-                let _ = tx
-                    .send(Ok(Event::default().event("done").data(
-                        serde_json::json!({"state": instance.state.to_string()}).to_string(),
-                    )))
-                    .await;
-                break;
-            }
-        }
+        };
+        run_until_stream_closed(&shutdown, &tx, producer).await;
     });
 
     Ok(Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
@@ -306,6 +323,56 @@ pub(crate) async fn stream_instance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_releases_slot_while_event_send_is_backpressured() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = slots.clone().acquire_owned().await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        tx.send(Ok(Event::default().data("buffered")))
+            .await
+            .unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            run_until_stream_closed(&task_shutdown, &tx, async {
+                started.send(()).unwrap();
+                tx.send(Ok(Event::default().data("blocked"))).await.unwrap();
+                panic!("the full channel must not accept another event");
+            })
+            .await;
+        });
+        ready.await.unwrap();
+        assert_eq!(slots.available_permits(), 0);
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_cancels_pending_producer() {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            run_until_stream_closed(&shutdown, &tx, async {
+                started.send(()).unwrap();
+                std::future::pending::<()>().await;
+            })
+            .await;
+        });
+        ready.await.unwrap();
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn default_poll_ms_is_500() {

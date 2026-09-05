@@ -1431,3 +1431,14 @@ async fn sla_sweep_idles_when_no_sla_and_rescans_after_idle_window() {
         "the rescan after the idle window must discover the new SLA instance"
     );
 }
+
+#[test]
+fn instance_heartbeat_cadence_precedes_short_and_default_stale_windows() {
+    for threshold_secs in [1, 2, 3, 5, 10, 15, 300, u64::MAX] {
+        let cadence = instance_heartbeat_interval(threshold_secs);
+        assert!(!cadence.is_zero());
+        assert!(cadence * 2 < Duration::from_secs(threshold_secs));
+    }
+    assert_eq!(instance_heartbeat_interval(300), Duration::from_secs(100));
+    assert!(!instance_heartbeat_interval(0).is_zero());
+}

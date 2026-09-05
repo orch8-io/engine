@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Args;
+use orch8_types::release::{GateEvaluation, GateVerdict, ReleaseState};
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -63,10 +64,14 @@ pub async fn run(client: &Client, base: &str, cmd: DeployCmd, format: OutputForm
             json!({}),
         )
         .await?;
-        if evaluation
-            .get("state")
-            .and_then(Value::as_str)
-            .is_some_and(|state| matches!(state, "rolled_back" | "failed"))
+        let evaluation: CanaryEvaluation =
+            serde_json::from_value(evaluation).context("invalid canary evaluation response")?;
+        if evaluation.release_state != ReleaseState::Canary
+            || evaluation.auto_rolled_back
+            || evaluation
+                .gates
+                .iter()
+                .any(|gate| gate.verdict == GateVerdict::Fail)
         {
             bail!("canary evaluation failed; release was not promoted");
         }
@@ -97,6 +102,15 @@ pub async fn run(client: &Client, base: &str, cmd: DeployCmd, format: OutputForm
         ),
     }
     Ok(())
+}
+
+/// Required fields from the API's `EvaluationReport`. Unknown additional fields
+/// remain compatible, while incomplete observations cannot certify a canary.
+#[derive(Deserialize)]
+struct CanaryEvaluation {
+    release_state: ReleaseState,
+    auto_rolled_back: bool,
+    gates: Vec<GateEvaluation>,
 }
 
 async fn post_success(client: &Client, url: String, body: Value) -> Result<Value> {

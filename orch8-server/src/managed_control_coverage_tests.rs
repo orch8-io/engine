@@ -358,22 +358,23 @@ json_field_case!(
 
 #[test]
 fn coverage_tunnel_047_client_frame_preserves_open_payload() {
-    let open = WorkerStreamOpen {
-        worker_id: "worker-edge-7".into(),
-        handler_names: vec!["managed-control".into()],
-        supported_features: vec!["draining".into()],
-        max_in_flight: 1,
-        protocol_version: 1,
-        runtime_capabilities_json: "{}".into(),
-        tenant_id: "tenant-acme".into(),
-    };
-    let frame = client_frame(ClientPayload::Open(open));
+    let frame = open_frame(&config()).unwrap();
     let Some(ClientPayload::Open(payload)) = frame.payload else {
         panic!("open payload must survive framing");
     };
     assert_eq!(payload.worker_id, "worker-edge-7");
     assert_eq!(payload.tenant_id, "tenant-acme");
-    assert_eq!(payload.protocol_version, 1);
+    assert_eq!(
+        payload.protocol_version,
+        orch8_grpc::WORKER_STREAM_PROTOCOL_VERSION
+    );
+    assert!(
+        payload
+            .supported_features
+            .iter()
+            .any(|feature| feature == "task_delivery")
+    );
+    assert_eq!(payload.max_in_flight, 1);
 }
 
 #[test]

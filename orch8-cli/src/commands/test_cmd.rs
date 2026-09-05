@@ -247,8 +247,10 @@ async fn run_contracts(
     if report.passed {
         Ok(())
     } else {
-        // Non-zero exit for CI.
-        std::process::exit(1);
+        anyhow::bail!(
+            "contract suite failed: {} case(s) failed",
+            report.failed_cases().len()
+        );
     }
 }
 
@@ -326,11 +328,7 @@ async fn record(client: &Client, base: &str, instance_id: Uuid, out: Option<&Pat
         .as_str()
         .context("instance missing sequence_id")?;
     let seq = get_json(client, format!("{base}/sequences/{seq_id}")).await?;
-    let outputs: Vec<Value> = get_json(client, format!("{base}/instances/{instance_id}/outputs"))
-        .await?
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let outputs = get_recorded_outputs(client, base, instance_id).await?;
 
     let draft = build_recorded_case(&inst, &seq, &outputs, &RedactionPolicy::default());
     let rendered = serde_json::to_string_pretty(&draft)?;
@@ -422,6 +420,15 @@ async fn get_json(client: &Client, url: String) -> Result<Value> {
         anyhow::bail!("{url} → {}", resp.status());
     }
     Ok(resp.json().await?)
+}
+
+async fn get_recorded_outputs(
+    client: &Client,
+    base: &str,
+    instance_id: Uuid,
+) -> Result<Vec<Value>> {
+    let value = get_json(client, format!("{base}/instances/{instance_id}/outputs")).await?;
+    serde_json::from_value(value).context("instance outputs response must be an array")
 }
 
 /// Build an embedded engine (in-memory, virtual clock, a mock per handler the
@@ -549,11 +556,7 @@ async fn replay(client: &Client, base: &str, instance_id: Uuid, against: i32) ->
     let target_json: Value = target.json().await?;
 
     // 2. The recorded per-block outputs → block_id → output (last attempt wins).
-    let outputs: Vec<Value> = get_json(client, format!("{base}/instances/{instance_id}/outputs"))
-        .await?
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let outputs = get_recorded_outputs(client, base, instance_id).await?;
     let mut recorded: HashMap<String, Value> = HashMap::new();
     for o in &outputs {
         if let Some(bid) = o["block_id"].as_str() {
@@ -599,6 +602,91 @@ async fn replay(client: &Client, base: &str, instance_id: Uuid, against: i32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn record_rejects_invalid_output_envelopes_without_writing_fixture() {
+        use crate::commands::test_support::mock_api_with_responses;
+        use axum::http::StatusCode;
+
+        for body in ["null", "{}", "{\"outputs\": []}", "[]"] {
+            let api = mock_api_with_responses(vec![
+                (
+                    StatusCode::OK,
+                    serde_json::json!({
+                        "id": Uuid::now_v7(), "sequence_id": "sequence",
+                        "state": "completed", "context": {"data": {}}
+                    })
+                    .to_string(),
+                ),
+                (
+                    StatusCode::OK,
+                    serde_json::json!({"name": "recorded", "version": 1}).to_string(),
+                ),
+                (StatusCode::OK, body.into()),
+            ])
+            .await;
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("recorded.contracts.json");
+            let result = record(&Client::new(), &api.base, Uuid::now_v7(), Some(&out)).await;
+            if body == "[]" {
+                result.unwrap();
+                assert!(out.exists(), "a valid empty history is allowed");
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("outputs response must be an array")
+                );
+                assert!(
+                    !out.exists(),
+                    "malformed evidence must not create a fixture"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn contract_failure_returns_error_for_every_report_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let sequence = dir.path().join("example.json");
+        let contract = dir.path().join("example.contracts.json");
+        std::fs::write(
+            &sequence,
+            serde_json::json!({
+                "id": Uuid::now_v7(), "tenant_id": "default", "namespace": "default",
+                "name": "example", "version": 1, "created_at": "2026-01-01T00:00:00Z",
+                "blocks": [{"type": "step", "id": "only", "handler": "worker", "params": {}}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for expected in ["failed", "completed"] {
+            std::fs::write(
+                &contract,
+                serde_json::json!({"cases": [{
+                    "name": "check terminal state",
+                    "mocks": [{"handler": "worker", "type": "success", "output": {}}],
+                    "expect": {"terminal_state": expected}
+                }]})
+                .to_string(),
+            )
+            .unwrap();
+            for format in [ReportFormat::Human, ReportFormat::Json, ReportFormat::Junit] {
+                let result = run_contracts(&contract, None, None, format).await;
+                if expected == "failed" {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("contract suite failed: 1 case(s) failed")
+                    );
+                } else {
+                    result.unwrap();
+                }
+            }
+        }
+    }
 
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| (*s).to_string()).collect()

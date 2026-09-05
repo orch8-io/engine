@@ -699,3 +699,44 @@ async fn concurrent_create_with_same_idempotency_key_dedupes() {
         .expect("list");
     assert_eq!(all.len(), 1, "exactly one instance must be stored");
 }
+
+#[tokio::test]
+async fn injected_clock_controls_default_instance_schedule() {
+    let now = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let clock = std::sync::Arc::new(orch8::ManualClock::new(now));
+    let engine = Engine::builder()
+        .storage(Storage::sqlite_in_memory())
+        .clock(orch8::SharedClock::from_arc(clock))
+        .build()
+        .await
+        .unwrap();
+    let sequence_id = engine
+        .upsert_sequence(two_step_sequence("virtual-default", "noop"))
+        .await
+        .unwrap();
+    let id = engine
+        .create_instance(sequence_id, CreateInstanceOptions::default())
+        .await
+        .unwrap();
+    let instance = engine.get_instance(id).await.unwrap();
+    // The scheduling clock does not replace real audit timestamps.
+    assert!(instance.created_at > now);
+    assert!(instance.updated_at > now);
+    assert_eq!(instance.next_fire_at, Some(now));
+    let tick = engine.tick_once().await.unwrap();
+    assert!(
+        tick.steps_executed > 0,
+        "default work must be due on the injected clock"
+    );
+}
+
+#[tokio::test]
+async fn manual_ticks_are_rejected_after_shutdown() {
+    let engine = build_engine().await;
+    engine.shutdown().await;
+    let error = engine.tick_once().await.unwrap_err();
+    assert!(matches!(error, orch8::Error::Engine(error)
+        if matches!(*error, orch8_engine::error::EngineError::ShuttingDown)));
+}
