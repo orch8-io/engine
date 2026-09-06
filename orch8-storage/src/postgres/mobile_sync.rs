@@ -396,11 +396,12 @@ impl crate::MobileSyncStore for PostgresStorage {
         self.get_mobile_approval(id).await
     }
 
-    async fn list_mobile_approvals(
+    async fn list_mobile_approvals_page(
         &self,
         tenant_id: Option<&str>,
         state: Option<&str>,
         limit: u32,
+        offset: u64,
     ) -> Result<Vec<crate::MobileApprovalRequest>, StorageError> {
         let mut sql = String::from(
             "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, resolution,
@@ -418,7 +419,11 @@ impl crate::MobileSyncStore for PostgresStorage {
             let _ = write!(sql, " AND state = ${param_idx}");
             param_idx += 1;
         }
-        let _ = write!(sql, " ORDER BY created_at DESC LIMIT ${param_idx}");
+        let offset_idx = param_idx + 1;
+        let _ = write!(
+            sql,
+            " ORDER BY created_at DESC, id DESC LIMIT ${param_idx} OFFSET ${offset_idx}"
+        );
 
         let mut query = sqlx::query_as::<
             _,
@@ -446,7 +451,10 @@ impl crate::MobileSyncStore for PostgresStorage {
         if let Some(s) = state {
             query = query.bind(s);
         }
-        query = query.bind(limit as i32);
+        let offset = i64::try_from(offset).map_err(|_| {
+            StorageError::Query("Mobile approval offset exceeds supported range".into())
+        })?;
+        query = query.bind(i64::from(limit)).bind(offset);
 
         let rows = query
             .fetch_all(&self.pool)

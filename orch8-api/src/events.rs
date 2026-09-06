@@ -167,6 +167,21 @@ pub(crate) struct ListEventsQuery {
     status: Option<String>,
     #[serde(default = "default_limit")]
     limit: u32,
+    #[serde(default)]
+    offset: u32,
+    #[serde(default)]
+    paged: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+pub(crate) enum EventListResponse {
+    Legacy(Vec<EventEnvelope>),
+    Paged {
+        items: Vec<EventEnvelope>,
+        offset: u32,
+        has_more: bool,
+    },
 }
 
 fn default_limit() -> u32 {
@@ -178,9 +193,11 @@ fn default_limit() -> u32 {
         ("tenant_id" = Option<String>, Query, description = "Tenant"),
         ("status" = Option<String>, Query, description = "pending | consumed | expired"),
         ("limit" = Option<u32>, Query, description = "Max rows (default 100, max 1000)"),
+        ("offset" = Option<u32>, Query, description = "Rows to skip"),
+        ("paged" = Option<bool>, Query, description = "Return items, offset and has_more metadata instead of an array"),
     ),
     responses((status = 200, description = "Events, newest first (payloads redacted)",
-        body = Vec<EventEnvelope>))
+        body = EventListResponse))
 )]
 pub(crate) async fn list_events(
     State(state): State<AppState>,
@@ -196,16 +213,32 @@ pub(crate) async fn list_events(
                 .map_err(ApiError::InvalidArgument)?,
         ),
     };
+    let limit = q.limit.clamp(1, 1000);
     let mut events = state
         .storage
-        .list_events(scoped.as_str(), status, q.limit.clamp(1, 1000))
+        .list_events_page(
+            scoped.as_str(),
+            status,
+            limit + u32::from(q.paged),
+            q.offset,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "event"))?;
     let redaction = RedactionPolicy::default();
     for e in &mut events {
         e.payload = redaction.redacted(&e.payload);
     }
-    Ok(Json(events))
+    if q.paged {
+        let has_more = events.len() > limit as usize;
+        events.truncate(limit as usize);
+        Ok(Json(EventListResponse::Paged {
+            items: events,
+            offset: q.offset,
+            has_more,
+        }))
+    } else {
+        Ok(Json(EventListResponse::Legacy(events)))
+    }
 }
 
 #[utoipa::path(get, path = "/events/{id}", tag = "events",

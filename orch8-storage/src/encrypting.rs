@@ -1418,6 +1418,7 @@ passthrough_impl! {
     async fn ingest_event(&self, envelope: &orch8_types::event_correlation::EventEnvelope) -> Result<bool, StorageError>;
     async fn get_event(&self, id: Uuid) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError>;
     async fn list_events(&self, tenant_id: &str, status: Option<orch8_types::event_correlation::EventStatus>, limit: u32) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
+    async fn list_events_page(&self, tenant_id: &str, status: Option<orch8_types::event_correlation::EventStatus>, limit: u32, offset: u32) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
     async fn find_pending_events(&self, tenant_id: &str, event_names: &[String], correlation_key: &str) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
     async fn consume_events(&self, event_ids: &[Uuid], instance_id: InstanceId) -> Result<u64, StorageError>;
     async fn upsert_event_wait(&self, wait: &orch8_types::event_correlation::EventWait) -> Result<(), StorageError>;
@@ -1774,6 +1775,13 @@ passthrough_impl! {
         self.inner
             .update_trigger(&self.encrypt_trigger(trigger)?)
             .await
+    }
+    async fn update_trigger_cas(
+        &self,
+        trigger: &orch8_types::trigger::TriggerDef,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        self.inner.update_trigger_cas(&self.encrypt_trigger(trigger)?, expected_updated_at).await
     }
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
     async fn claim_webhook_nonce(&self, slug: &str, nonce: &str, expires_at: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
@@ -2241,6 +2249,7 @@ passthrough_impl! {
     async fn get_mobile_approval(&self, id: &str) -> Result<Option<crate::MobileApprovalRequest>, StorageError>;
     async fn resolve_mobile_approval(&self, id: &str, resolution: &str) -> Result<Option<crate::MobileApprovalRequest>, StorageError>;
     async fn list_mobile_approvals(&self, tenant_id: Option<&str>, state: Option<&str>, limit: u32) -> Result<Vec<crate::MobileApprovalRequest>, StorageError>;
+    async fn list_mobile_approvals_page(&self, tenant_id: Option<&str>, state: Option<&str>, limit: u32, offset: u64) -> Result<Vec<crate::MobileApprovalRequest>, StorageError>;
     async fn expire_mobile_approvals(&self) -> Result<u64, StorageError>;
 
     async fn create_mobile_command(

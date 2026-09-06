@@ -119,6 +119,34 @@ pub(super) async fn update(
     Ok(())
 }
 
+pub(super) async fn update_cas(
+    store: &SqliteStorage,
+    trigger: &TriggerDef,
+    expected_updated_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, StorageError> {
+    let config_str = trigger.config.to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query(
+        r"UPDATE triggers SET sequence_name=?2, version=?3, tenant_id=?4, namespace=?5,
+          enabled=?6, secret=?7, trigger_type=?8, config=?9, updated_at=?10
+          WHERE slug=?1 AND tenant_id=?4 AND updated_at=?11",
+    )
+    .bind(&trigger.slug)
+    .bind(&trigger.sequence_name)
+    .bind(trigger.version)
+    .bind(trigger.tenant_id.as_str())
+    .bind(&trigger.namespace)
+    .bind(trigger.enabled)
+    .bind(trigger.secret.as_ref().map(|s| s.expose().to_string()))
+    .bind(trigger.trigger_type.to_string())
+    .bind(&config_str)
+    .bind(&now)
+    .bind(expected_updated_at.to_rfc3339())
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(super) async fn delete(store: &SqliteStorage, slug: &str) -> Result<(), StorageError> {
     // Remove poll state first so a polling trigger never leaves an orphaned
     // cursor behind (SQLite schema declares no FK cascade for this table).

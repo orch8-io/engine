@@ -373,11 +373,12 @@ pub(super) async fn resolve_mobile_approval(
     get_mobile_approval(storage, id).await
 }
 
-pub(super) async fn list_mobile_approvals(
+pub(super) async fn list_mobile_approvals_page(
     storage: &SqliteStorage,
     tenant_id: Option<&str>,
     state: Option<&str>,
     limit: u32,
+    offset: u64,
 ) -> Result<Vec<crate::MobileApprovalRequest>, StorageError> {
     let mut sql = String::from(
         "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, resolution, created_at, resolved_at
@@ -389,7 +390,7 @@ pub(super) async fn list_mobile_approvals(
     if state.is_some() {
         sql.push_str(" AND state = ?");
     }
-    sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+    sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?");
 
     let mut query = sqlx::query_as::<
         _,
@@ -417,7 +418,10 @@ pub(super) async fn list_mobile_approvals(
     if let Some(s) = state {
         query = query.bind(s);
     }
-    query = query.bind(limit);
+    let offset = i64::try_from(offset).map_err(|_| {
+        StorageError::Query("Mobile approval offset exceeds supported range".into())
+    })?;
+    query = query.bind(limit).bind(offset);
 
     let rows = query
         .fetch_all(&storage.pool)

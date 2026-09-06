@@ -674,3 +674,47 @@ async fn full_sync_lifecycle() {
     let device = s.get_mobile_device("d1").await.unwrap().unwrap();
     assert!(device.last_sync_at.is_some());
 }
+
+#[tokio::test]
+async fn paged_approvals_keep_legacy_reads_and_stable_tied_ordering() {
+    let s = store().await;
+    for index in 0..5 {
+        let mut approval = make_approval("device", &format!("run-{index}"), "gate");
+        approval.id = format!("approval-{index}");
+        approval.created_at = "2026-09-06T00:00:00Z".into();
+        s.insert_mobile_approval(&approval).await.unwrap();
+    }
+    sqlx::query("UPDATE mobile_approval_requests SET created_at = '2026-09-06T00:00:00Z'")
+        .execute(s.pool())
+        .await
+        .unwrap();
+    let legacy = s
+        .list_mobile_approvals(Some("t1"), Some("pending"), 2)
+        .await
+        .unwrap();
+    let first = s
+        .list_mobile_approvals_page(Some("t1"), Some("pending"), 2, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        legacy.iter().map(|item| &item.id).collect::<Vec<_>>(),
+        first.iter().map(|item| &item.id).collect::<Vec<_>>()
+    );
+    let mut ids = Vec::new();
+    for offset in [0, 2, 4] {
+        ids.extend(
+            s.list_mobile_approvals_page(Some("t1"), Some("pending"), 2, offset)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|item| item.id),
+        );
+    }
+    assert_eq!(
+        ids,
+        (0..5)
+            .rev()
+            .map(|index| format!("approval-{index}"))
+            .collect::<Vec<_>>()
+    );
+}

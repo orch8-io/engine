@@ -59,6 +59,42 @@ pub(crate) struct ApprovalItem {
 pub(crate) struct ApprovalsResponse {
     pub items: Vec<ApprovalItem>,
     pub total: u64,
+    /// Number of waiting instances scanned, which can differ from item count.
+    pub scanned_count: u64,
+    /// Next waiting-instance offset; null confirms the end of this scan.
+    pub next_offset: Option<u64>,
+}
+
+async fn next_approval_offset(
+    state: &AppState,
+    filter: &InstanceFilter,
+    pagination: &Pagination,
+    scanned_count: u64,
+) -> Result<Option<u64>, ApiError> {
+    let next_offset = if pagination.limit > 0 && scanned_count == u64::from(pagination.limit) {
+        let offset = pagination
+            .offset
+            .checked_add(scanned_count)
+            .ok_or_else(|| {
+                ApiError::InvalidArgument("Approval pagination offset overflow".into())
+            })?;
+        let lookahead = state
+            .storage
+            .list_waiting_with_trees(
+                filter,
+                &Pagination {
+                    offset,
+                    limit: 1,
+                    sort_ascending: false,
+                },
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instances"))?;
+        (!lookahead.is_empty()).then_some(offset)
+    } else {
+        None
+    };
+    Ok(next_offset)
 }
 
 pub(crate) async fn list_approvals(
@@ -83,9 +119,10 @@ pub(crate) async fn list_approvals(
             .map(orch8_types::ids::Namespace::new),
         ..InstanceFilter::default()
     };
+    let page_limit = params.limit.min(1000);
     let pagination = Pagination {
         offset: params.offset,
-        limit: params.limit.min(1000),
+        limit: page_limit,
         sort_ascending: false,
     };
 
@@ -94,6 +131,9 @@ pub(crate) async fn list_approvals(
         .list_waiting_with_trees(&filter, &pagination)
         .await
         .map_err(|e| ApiError::from_storage(e, "instances"))?;
+
+    let scanned_count = pairs.len() as u64;
+    let next_offset = next_approval_offset(&state, &filter, &pagination, scanned_count).await?;
 
     // Perf: batch-fetch sequences and completed_block_ids concurrently
     // instead of N+1 sequential round-trips.
@@ -162,7 +202,12 @@ pub(crate) async fn list_approvals(
     }
 
     let total = items.len() as u64;
-    Ok(Json(ApprovalsResponse { items, total }))
+    Ok(Json(ApprovalsResponse {
+        items,
+        total,
+        scanned_count,
+        next_offset,
+    }))
 }
 
 fn default_yes_no_choices() -> Vec<HumanChoice> {

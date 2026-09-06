@@ -10,6 +10,7 @@ mod artifacts;
 mod audit;
 mod bulk;
 mod checkpoints;
+mod context_patch;
 mod fork;
 mod inject;
 mod lifecycle;
@@ -37,6 +38,7 @@ pub(crate) use checkpoints::{
     save_checkpoint,
 };
 pub use checkpoints::{PruneCheckpointsRequest, SaveCheckpointRequest};
+pub(crate) use context_patch::{__path_patch_context_data, patch_context_data};
 pub use fork::ForkResponse;
 pub(crate) use fork::{__path_fork_instance, fork_instance};
 pub(crate) use fork::{fork_target_idx, partition_fork_blocks};
@@ -73,6 +75,7 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/logs", get(get_instance_logs))
         .route("/instances/{id}/state", patch(update_state))
         .route("/instances/{id}/context", patch(update_context))
+        .route("/instances/{id}/context/data", patch(patch_context_data))
         .route("/instances/{id}/signals", post(send_signal))
         .route("/instances/{id}/outputs", get(get_outputs))
         .route("/instances/{id}/artifacts", get(list_instance_artifacts))

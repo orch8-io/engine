@@ -103,15 +103,17 @@ pub(super) async fn list(
     tenant_id: &str,
     status: Option<EventStatus>,
     limit: u32,
+    offset: u32,
 ) -> Result<Vec<EventEnvelope>, StorageError> {
     let rows = sqlx::query(&format!(
         "SELECT {EVENT_COLUMNS} FROM event_inbox
          WHERE tenant_id = ?1 AND (?2 IS NULL OR status = ?2)
-         ORDER BY received_at DESC LIMIT ?3"
+         ORDER BY received_at DESC, id DESC LIMIT ?3 OFFSET ?4"
     ))
     .bind(tenant_id)
     .bind(status.map(EventStatus::as_str))
     .bind(i64::from(limit))
+    .bind(i64::from(offset))
     .fetch_all(&storage.pool)
     .await?;
     rows.iter().map(row_to_event).collect()

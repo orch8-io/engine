@@ -503,6 +503,9 @@ Returns `400 Bad Request` if the transition is invalid.
 PATCH /instances/{id}/context
 ```
 
+This endpoint replaces the full context. Omitted sections receive their defaults.
+Use the data-patch endpoint below when changing selected values in an active execution.
+
 **Request Body:**
 
 ```json
@@ -514,6 +517,37 @@ PATCH /instances/{id}/context
 ```
 
 **Response:** `200 OK`
+
+---
+
+### Patch Instance Data
+
+```
+PATCH /instances/{id}/context/data
+```
+
+```json
+{
+  "patch": { "opened": true, "clicked_link": "pricing" },
+  "remove_keys": ["obsolete_setting"]
+}
+```
+
+Shallow-merges the supplied keys into `context.data`. Optional `remove_keys` removes
+only the named top-level keys before merging; a key also supplied in `patch` takes
+the patch value. Removing an absent key is harmless. Other omitted data keys and the
+`config`, `audit`, and `runtime` sections are preserved. Nested values supplied
+in the patch replace the value at that key; JSON `null` is stored as a value.
+The existing data must be an object. Unknown request fields are rejected.
+
+**Response:** `200 OK` after the context write succeeds. On SQL storage backends,
+a compare-and-swap write detects concurrent updates; the API re-reads and retries
+up to five times, then returns `409 Conflict`. Retry a conflicted data patch with
+bounded backoff. Oversized merged context returns `413`; non-object existing data
+returns `400`. The instance must belong to the caller's tenant.
+
+This route requires an engine build that includes it. Clients must not fall back
+to whole-context replacement when the route is unavailable.
 
 ---
 
@@ -1596,3 +1630,31 @@ All error responses follow this format:
 | `422` | Unprocessable entity (`context.data` fails the sequence's `input_schema`) |
 | `500` | Internal server error |
 | `503` | Service unavailable (storage connection failure) |
+
+### Retarget an existing trigger
+
+`PATCH /triggers/{slug}/target` updates the workflow binding without deleting the
+trigger or rotating its secret. Read the trigger first and send its `updated_at`
+value as the concurrency receipt:
+
+```json
+{
+  "sequence_id": "01900000-0000-7000-8000-000000000001",
+  "expected_updated_at": "2026-09-06T00:00:00Z"
+}
+```
+
+The referenced sequence must belong to the trigger's tenant. The handler resolves
+its namespace/name/version and pins that version. It rejects a name/version
+lookup that selects a different sequence; callers should use unique workflow
+names for independent replacement attempts. The trigger's enabled state, secret,
+configuration, type and creation time remain unchanged. This endpoint does not
+start or cancel executions, reset polling cursors, or move triggers between hosts.
+
+Success returns **204**. A stale receipt or concurrent update returns **409**;
+reload before deciding whether to retry. Missing/cross-tenant targets return
+**404**. Unknown request fields are rejected. SQLite and PostgreSQL use an atomic
+conditional update; the encryption adapter preserves encrypted fields. Custom
+storage backends must implement the atomic operation explicitly and fail closed
+when unsupported. Older engines do not expose this endpoint; clients must report
+unsynchronized webhooks rather than delete/recreate them as a fallback.

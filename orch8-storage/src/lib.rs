@@ -1235,6 +1235,15 @@ pub trait SignalStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
 
+    /// Read an offset page in deterministic newest-first order.
+    async fn list_events_page(
+        &self,
+        tenant_id: &str,
+        status: Option<orch8_types::event_correlation::EventStatus>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
+
     /// Pending events matching `(tenant, name ∈ names, correlation_key)`,
     /// oldest first.
     async fn find_pending_events(
@@ -1893,6 +1902,16 @@ pub trait AdminStore: Send + Sync + 'static {
     ) -> Result<Vec<TriggerDef>, StorageError>;
 
     async fn update_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
+
+    /// Update a trigger only if its tenant and modification timestamp match.
+    /// Backends must implement this atomically; there is no blind-write fallback.
+    async fn update_trigger_cas(
+        &self,
+        _trigger: &TriggerDef,
+        _expected_updated_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unsupported("atomic trigger updates".into()))
+    }
 
     /// Delete a trigger and its associated poll state (if any).
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
@@ -2742,6 +2761,17 @@ pub trait MobileSyncStore: Send + Sync + 'static {
         tenant_id: Option<&str>,
         state: Option<&str>,
         limit: u32,
+    ) -> Result<Vec<MobileApprovalRequest>, StorageError> {
+        self.list_mobile_approvals_page(tenant_id, state, limit, 0)
+            .await
+    }
+
+    async fn list_mobile_approvals_page(
+        &self,
+        tenant_id: Option<&str>,
+        state: Option<&str>,
+        limit: u32,
+        offset: u64,
     ) -> Result<Vec<MobileApprovalRequest>, StorageError>;
 
     async fn expire_mobile_approvals(&self) -> Result<u64, StorageError>;

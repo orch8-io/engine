@@ -413,6 +413,7 @@ impl Modify for ContinuityOpenApi {
         crate::instances::get_instance_logs,
         crate::instances::update_state,
         crate::instances::update_context,
+        crate::instances::patch_context_data,
         crate::instances::send_signal,
         crate::instances::get_outputs,
         crate::instances::list_instance_artifacts,
@@ -515,6 +516,7 @@ impl Modify for ContinuityOpenApi {
         crate::triggers::get_trigger,
         crate::triggers::delete_trigger,
         crate::triggers::fire_trigger,
+        crate::triggers::retarget_trigger,
         // Webhooks
         crate::webhooks::public_webhook,
         // Usage

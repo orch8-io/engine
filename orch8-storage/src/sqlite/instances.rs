@@ -922,9 +922,9 @@ pub(super) async fn list(
     apply_filter_sql(&mut qb, filter);
 
     if pagination.sort_ascending {
-        qb.push(" ORDER BY updated_at ASC LIMIT ");
+        qb.push(" ORDER BY updated_at ASC, id ASC LIMIT ");
     } else {
-        qb.push(" ORDER BY updated_at DESC LIMIT ");
+        qb.push(" ORDER BY updated_at DESC, id DESC LIMIT ");
     }
     qb.push_bind(i64::from(pagination.limit.min(1000)));
     qb.push(" OFFSET ");

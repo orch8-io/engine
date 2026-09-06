@@ -183,3 +183,60 @@ async fn outbox_batch_is_replay_safe_and_validates_before_writing() {
             .any(|event| event["producer_event_id"] == "not-written")
     );
 }
+
+#[tokio::test]
+async fn event_pages_have_stable_ties_and_preserve_filters_and_redaction() {
+    use orch8_storage::SignalStore;
+    use orch8_types::event_correlation::{EventEnvelope, EventStatus};
+    let srv = spawn_test_server().await;
+    let received_at = chrono::Utc::now();
+    for n in 1..=5_u128 {
+        srv.storage
+            .ingest_event(&EventEnvelope {
+                id: uuid::Uuid::from_u128(n),
+                tenant_id: if n == 5 { "other" } else { "t1" }.into(),
+                event_name: "paid".into(),
+                producer_event_id: format!("p{n}"),
+                correlation_key: "order".into(),
+                payload: json!({"api_key": "secret"}),
+                status: if n == 4 {
+                    EventStatus::Expired
+                } else {
+                    EventStatus::Pending
+                },
+                consumed_by: None,
+                received_at,
+            })
+            .await
+            .unwrap();
+    }
+    let client = reqwest::Client::new();
+    let base = srv.v1_url();
+    let mut seen = Vec::new();
+    for (offset, expected_len, has_more) in [(0, 2, true), (2, 1, false), (3, 0, false)] {
+        let response = client
+            .get(format!(
+                "{base}/events?paged=true&status=pending&limit=2&offset={offset}"
+            ))
+            .header("X-Tenant-Id", "t1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: Value = response.json().await.unwrap();
+        assert_eq!(page["offset"], offset);
+        assert_eq!(page["has_more"], has_more);
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), expected_len);
+        for row in items {
+            assert_eq!(row["tenant_id"], "t1");
+            assert_eq!(row["status"], "pending");
+            assert_eq!(row["payload"]["api_key"], "[REDACTED]");
+            seen.push(row["id"].as_str().unwrap().to_owned());
+        }
+    }
+    assert_eq!(
+        seen,
+        [3, 2, 1].map(|n| uuid::Uuid::from_u128(n).to_string())
+    );
+}

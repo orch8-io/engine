@@ -340,8 +340,12 @@ async fn t09_list_instances_pagination() {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
+    let timestamp = chrono::Utc::now();
+    let mut expected_ids = Vec::new();
     for _ in 0..5 {
-        let inst = make_instance("t", seq.id);
+        let mut inst = make_instance("t", seq.id);
+        inst.updated_at = timestamp;
+        expected_ids.push(inst.id.to_string());
         s.create_instance(&inst).await.unwrap();
     }
 
@@ -383,6 +387,14 @@ async fn t09_list_instances_pagination() {
         .await
         .unwrap();
     assert_eq!(page3.len(), 1);
+    expected_ids.sort_by(|a, b| b.cmp(a));
+    let actual_ids: Vec<_> = page1
+        .into_iter()
+        .chain(page2)
+        .chain(page3)
+        .map(|instance| instance.id.to_string())
+        .collect();
+    assert_eq!(actual_ids, expected_ids);
 }
 
 #[tokio::test]

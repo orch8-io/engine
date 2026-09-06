@@ -997,9 +997,9 @@ pub(super) async fn list(
     );
     apply_instance_filter(&mut qb, filter);
     if pagination.sort_ascending {
-        qb.push(" ORDER BY updated_at ASC");
+        qb.push(" ORDER BY updated_at ASC, id ASC");
     } else {
-        qb.push(" ORDER BY updated_at DESC");
+        qb.push(" ORDER BY updated_at DESC, id DESC");
     }
     qb.push(" LIMIT ")
         .push_bind(i64::from(pagination.limit.min(1000)));

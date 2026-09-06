@@ -1229,7 +1229,17 @@ impl crate::SignalStore for SqliteStorage {
         status: Option<orch8_types::event_correlation::EventStatus>,
         limit: u32,
     ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError> {
-        events::list(self, tenant_id, status, limit).await
+        events::list(self, tenant_id, status, limit, 0).await
+    }
+
+    async fn list_events_page(
+        &self,
+        tenant_id: &str,
+        status: Option<orch8_types::event_correlation::EventStatus>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError> {
+        events::list(self, tenant_id, status, limit, offset).await
     }
 
     async fn find_pending_events(
@@ -1990,6 +2000,13 @@ impl crate::AdminStore for SqliteStorage {
         triggers::update(self, trigger).await
     }
 
+    async fn update_trigger_cas(
+        &self,
+        trigger: &orch8_types::trigger::TriggerDef,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        triggers::update_cas(self, trigger, expected_updated_at).await
+    }
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
         triggers::delete(self, slug).await
     }
@@ -2781,13 +2798,14 @@ impl crate::MobileSyncStore for SqliteStorage {
         mobile_sync::resolve_mobile_approval(self, id, resolution).await
     }
 
-    async fn list_mobile_approvals(
+    async fn list_mobile_approvals_page(
         &self,
         tenant_id: Option<&str>,
         state: Option<&str>,
         limit: u32,
+        offset: u64,
     ) -> Result<Vec<crate::MobileApprovalRequest>, StorageError> {
-        mobile_sync::list_mobile_approvals(self, tenant_id, state, limit).await
+        mobile_sync::list_mobile_approvals_page(self, tenant_id, state, limit, offset).await
     }
 
     async fn expire_mobile_approvals(&self) -> Result<u64, StorageError> {

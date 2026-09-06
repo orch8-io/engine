@@ -455,6 +455,8 @@ struct ListApprovalsQuery {
     state: Option<String>,
     #[serde(default = "default_limit")]
     limit: u32,
+    #[serde(default)]
+    offset: u64,
 }
 
 const fn default_limit() -> u32 {
@@ -471,19 +473,30 @@ async fn list_approvals(
         .map(|axum::Extension(ctx)| ctx.tenant_id.to_string())
         .or(params.tenant_id);
 
-    let items = state
+    i64::try_from(params.offset).map_err(|_| {
+        ApiError::InvalidArgument("Mobile approval offset exceeds supported range".into())
+    })?;
+    let limit = params.limit.min(500);
+    let mut items = state
         .storage
-        .list_mobile_approvals(
+        .list_mobile_approvals_page(
             tenant_id.as_deref(),
             params.state.as_deref(),
-            params.limit.min(500),
+            if limit == 0 { 0 } else { limit + 1 },
+            params.offset,
         )
         .await
         .map_err(|e| ApiError::from_storage(e, "mobile_approval_requests"))?;
 
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let scanned_count = items.len();
+    let next_offset = has_more.then(|| params.offset + scanned_count as u64);
     Ok(Json(serde_json::json!({
         "items": items,
         "total": items.len(),
+        "scanned_count": scanned_count,
+        "next_offset": next_offset,
     })))
 }
 

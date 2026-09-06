@@ -959,7 +959,17 @@ impl crate::SignalStore for PostgresStorage {
         status: Option<orch8_types::event_correlation::EventStatus>,
         limit: u32,
     ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError> {
-        events::list(self, tenant_id, status, limit).await
+        events::list(self, tenant_id, status, limit, 0).await
+    }
+
+    async fn list_events_page(
+        &self,
+        tenant_id: &str,
+        status: Option<orch8_types::event_correlation::EventStatus>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError> {
+        events::list(self, tenant_id, status, limit, offset).await
     }
 
     async fn find_pending_events(
@@ -1656,6 +1666,13 @@ impl crate::AdminStore for PostgresStorage {
         triggers::update(self, trigger).await
     }
 
+    async fn update_trigger_cas(
+        &self,
+        trigger: &orch8_types::trigger::TriggerDef,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        triggers::update_cas(self, trigger, expected_updated_at).await
+    }
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
         triggers::delete(self, slug).await
     }

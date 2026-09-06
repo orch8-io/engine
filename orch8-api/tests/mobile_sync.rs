@@ -813,3 +813,53 @@ async fn resolve_approval_twice_returns_not_found() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn mobile_approval_pages_cover_the_limit_boundary_and_preserve_tenant_scope() {
+    use orch8_storage::{MobileApprovalRequest, MobileSyncStore};
+    let srv = spawn_test_server_with_mobile_sync().await;
+    for index in 0..502 {
+        srv.storage
+            .insert_mobile_approval(&MobileApprovalRequest {
+                id: format!("approval-{index:04}"),
+                device_id: DEVICE_ID.into(),
+                tenant_id: if index == 501 { "other" } else { "tenant-1" }.into(),
+                instance_id: format!("run-{index}"),
+                block_id: "gate".into(),
+                sequence_name: None,
+                prompt: None,
+                choices: None,
+                store_as: None,
+                timeout_secs: None,
+                metadata: None,
+                state: "pending".into(),
+                resolution: None,
+                created_at: "2026-09-06T00:00:00Z".into(),
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+    }
+    let client = reqwest::Client::new();
+    let mut ids = std::collections::HashSet::new();
+    for (offset, expected, next) in [(0, 500, Some(500)), (500, 1, None)] {
+        let response = client
+            .get(format!(
+                "{}/mobile/approvals?state=pending&limit=500&offset={offset}",
+                srv.v1_url()
+            ))
+            .header("X-Tenant-Id", "tenant-1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["scanned_count"], expected);
+        assert_eq!(body["next_offset"], json!(next));
+        for item in body["items"].as_array().unwrap() {
+            assert_eq!(item["tenant_id"], "tenant-1");
+            assert!(ids.insert(item["id"].as_str().unwrap().to_owned()));
+        }
+    }
+    assert_eq!(ids.len(), 501);
+}
