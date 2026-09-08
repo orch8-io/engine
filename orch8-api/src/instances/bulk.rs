@@ -38,10 +38,14 @@ fn metadata_filter(filter: &BulkFilter) -> Option<serde_json::Value> {
 )]
 pub async fn bulk_update_state(
     State(state): State<AppState>,
+    admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BulkUpdateStateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, req.filter.tenant_id.as_deref());
+    if tenant_ctx.is_none() {
+        crate::api_keys::require_admin(&admin_ctx)?;
+    }
     if scoped_tenant.is_none() {
         return Err(ApiError::InvalidArgument(
             "bulk operations require a tenant_id".into(),
@@ -72,10 +76,14 @@ pub async fn bulk_update_state(
 )]
 pub async fn bulk_reschedule(
     State(state): State<AppState>,
+    admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BulkRescheduleRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, req.filter.tenant_id.as_deref());
+    if tenant_ctx.is_none() {
+        crate::api_keys::require_admin(&admin_ctx)?;
+    }
     if scoped_tenant.is_none() {
         return Err(ApiError::InvalidArgument(
             "bulk operations require a tenant_id".into(),
@@ -112,10 +120,14 @@ pub async fn bulk_reschedule(
 )]
 pub async fn list_dlq(
     State(state): State<AppState>,
+    admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref());
+    if tenant_ctx.is_none() {
+        crate::api_keys::require_admin(&admin_ctx)?;
+    }
     let filter = InstanceFilter {
         tenant_id: scoped_tenant,
         namespace: q.namespace.map(Namespace::new),
@@ -153,10 +165,14 @@ pub async fn list_dlq(
 )]
 pub async fn batch_action(
     State(state): State<AppState>,
+    admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BatchActionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, req.filter.tenant_id.as_deref());
+    if tenant_ctx.is_none() {
+        crate::api_keys::require_admin(&admin_ctx)?;
+    }
     let Some(tenant_id) = scoped_tenant else {
         return Err(ApiError::InvalidArgument(
             "batch actions require a tenant_id".into(),
