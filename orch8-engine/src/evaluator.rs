@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -343,20 +342,25 @@ pub(crate) async fn compact_iteration_outputs(
     block_ids.dedup();
 
     let all = storage.get_all_outputs(instance_id).await?;
-    let mut by_block: HashMap<&BlockId, Vec<&orch8_types::output::BlockOutput>> = HashMap::new();
-    for o in &all {
-        if block_ids.binary_search(&&o.block_id).is_ok() {
-            by_block.entry(&o.block_id).or_default().push(o);
-        }
-    }
+
+    // ⚡ Bolt: Use a flat Vec, sort, and chunk_by to group outputs without HashMap allocations.
+    // Avoids hashing overhead and creating empty lists for blocks with no outputs.
+    let mut relevant: Vec<&orch8_types::output::BlockOutput> = all
+        .iter()
+        .filter(|o| block_ids.binary_search(&&o.block_id).is_ok())
+        .collect();
+
+    relevant.sort_unstable_by_key(|o| &o.block_id);
 
     let retain = retain as usize;
     let mut deleted = 0u64;
-    for (_, mut rows) in by_block {
-        if rows.len() <= retain {
+
+    for chunk in relevant.chunk_by(|a, b| a.block_id == b.block_id) {
+        if chunk.len() <= retain {
             continue;
         }
         // Oldest first; delete everything before the last `retain`.
+        let mut rows = chunk.to_vec();
         rows.sort_by_key(|o| o.created_at);
         let cut = rows.len() - retain;
         for o in rows.iter().take(cut) {
