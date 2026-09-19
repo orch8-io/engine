@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -343,23 +342,30 @@ pub(crate) async fn compact_iteration_outputs(
     block_ids.dedup();
 
     let all = storage.get_all_outputs(instance_id).await?;
-    let mut by_block: HashMap<&BlockId, Vec<&orch8_types::output::BlockOutput>> = HashMap::new();
-    for o in &all {
-        if block_ids.binary_search(&&o.block_id).is_ok() {
-            by_block.entry(&o.block_id).or_default().push(o);
-        }
-    }
+    let mut filtered_outputs: Vec<&orch8_types::output::BlockOutput> = all
+        .iter()
+        .filter(|o| block_ids.binary_search(&&o.block_id).is_ok())
+        .collect();
+
+    // ⚡ Bolt: Sort by block_id and created_at to allow chunking without HashMap allocation
+    filtered_outputs.sort_unstable_by(|a, b| {
+        a.block_id
+            .cmp(&b.block_id)
+            .then_with(|| a.created_at.cmp(&b.created_at))
+    });
 
     let retain = retain as usize;
     let mut deleted = 0u64;
-    for (_, mut rows) in by_block {
-        if rows.len() <= retain {
+
+    // ⚡ Bolt: Chunk sequentially by block_id to avoid HashMap construction overhead
+    for chunk in filtered_outputs.chunk_by(|a, b| a.block_id == b.block_id) {
+        if chunk.len() <= retain {
             continue;
         }
+        // Array is already sorted by created_at due to the unstable sort above.
         // Oldest first; delete everything before the last `retain`.
-        rows.sort_by_key(|o| o.created_at);
-        let cut = rows.len() - retain;
-        for o in rows.iter().take(cut) {
+        let cut = chunk.len() - retain;
+        for o in chunk.iter().take(cut) {
             storage.delete_block_output_by_id(o.id).await?;
             deleted += 1;
         }
