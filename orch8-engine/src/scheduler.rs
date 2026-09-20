@@ -1531,10 +1531,13 @@ async fn emit_sla_alerts(
         .collect();
     let existing = ctx.storage.get_block_outputs_batch(&keys).await?;
 
+    let mut existing_ref = std::collections::HashSet::with_capacity(existing.len());
+    for key in existing.keys() {
+        existing_ref.insert((&key.0, &key.1));
+    }
+
     for c in candidates {
-        // Performance: Query the pre-fetched existing map directly to achieve
-        // zero-allocation O(1) lookups instead of building an intermediate Set/Vec.
-        if existing.contains_key(&(c.instance_id, c.block_id.clone())) {
+        if existing_ref.contains(&(&c.instance_id, &c.block_id)) {
             continue;
         }
         // Persist the sentinel BEFORE emitting so a crash mid-emit cannot
