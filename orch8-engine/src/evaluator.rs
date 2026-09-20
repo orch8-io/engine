@@ -1250,18 +1250,12 @@ pub fn children_of(
     parent_id: ExecutionNodeId,
     branch_index: Option<i16>,
 ) -> Vec<&ExecutionNode> {
-    // ⚡ Bolt: Using a manual loop with pre-allocated capacity avoids
-    // multiple reallocation overheads associated with .filter().collect()
-    // on iterators of unknown size in execution hot paths.
-    let mut children = Vec::with_capacity(8);
-    for n in tree {
-        if n.parent_id == Some(parent_id)
-            && (branch_index.is_none() || n.branch_index == branch_index)
-        {
-            children.push(n);
-        }
-    }
-    children
+    tree.iter()
+        .filter(|n| {
+            n.parent_id == Some(parent_id)
+                && (branch_index.is_none() || n.branch_index == branch_index)
+        })
+        .collect()
 }
 
 /// Check if all nodes in a set are in a terminal state.
