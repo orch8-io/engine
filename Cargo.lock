@@ -1528,12 +1528,12 @@ dependencies = [
 
 [[package]]
 name = "fraction"
-version = "0.15.4"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e076045bb43dac435333ed5f04caf35c7463631d0dae2deb2638d94dd0a5b872"
+checksum = "e246562084dde8ebbcc943b261c406ce4f68e5032ec28029a251a47d6a295500"
 dependencies = [
- "lazy_static",
  "num",
+ "num-bigint",
 ]
 
 [[package]]
@@ -2390,9 +2390,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.49.9"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ec8a241beed129f06114aa68007e905ca350e7baeb6e17a7631bb7978d91b2"
+checksum = "7070bf0681439ff992bb94947cb3a361f57c880561c1e9e90ddb5941c7ec2d04"
 dependencies = [
  "ahash",
  "bytecount",
@@ -2401,7 +2401,6 @@ dependencies = [
  "fancy-regex",
  "fraction",
  "getrandom 0.3.4",
- "idna",
  "itoa",
  "jsonschema-regex",
  "jsonschema-value",
@@ -2419,25 +2418,27 @@ dependencies = [
 
 [[package]]
 name = "jsonschema-regex"
-version = "0.49.9"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91994f45017ed5e66aa8e59b8415f4cb033a6380d7200387b7cf117595fbdf85"
+checksum = "b6525f2f72c37c1a09f59a6d0d33f60ecf8beabd00be92fe8d49555cae15289c"
 dependencies = [
  "regex-syntax",
 ]
 
 [[package]]
 name = "jsonschema-value"
-version = "0.49.9"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ec7637f83e510868ae6ed625f7ebfbbde4554ee8ce49854caa5126a8b9b9ecb"
+checksum = "4309c6b52390b1ebdd2053e513e9f23d4bb18d0c3c2df8142eded3eb188a85bf"
 dependencies = [
  "ahash",
  "bytecount",
  "fraction",
+ "getrandom 0.3.4",
  "num-cmp",
  "num-traits",
  "serde_json",
+ "zmij",
 ]
 
 [[package]]
@@ -4126,9 +4127,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.49.9"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6efa2154ea6f5ce0fdecdd2a8d18f2fa1a39a8fbba91564f555a592e4dce8278"
+checksum = "0304d4734d208eaf24528093715e2cb5260c977b1be1eb81cd487f601e3ff35d"
 dependencies = [
  "ahash",
  "fluent-uri",
@@ -7081,9 +7082,9 @@ checksum = "b142a20ec14a91d5bc708c1dc21b080c550113d8aa77afa29635673a65dd02c5"
 
 [[package]]
 name = "zmij"
-version = "1.0.21"
+version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zopfli"
