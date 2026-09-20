@@ -426,7 +426,7 @@ async fn tool_list_dlq(state: AppState, tenant_ctx: OptionalTenant, args: &Value
         query.insert("limit".into(), json!(limit));
     }
     let q: crate::instances::ListQuery = parse_args(Value::Object(query))?;
-    rest_json(crate::instances::list_dlq(State(state), tenant_ctx, Query(q)).await).await
+    rest_json(crate::instances::list_dlq(State(state), None, tenant_ctx, Query(q)).await).await
 }
 
 /// `get_usage`: tenant-scoped LLM token/cost aggregation over a time window.

@@ -7,3 +7,7 @@
 ## 2026-09-19 - [Replace HashMap with Vec chunking]
 **Learning:** When grouping elements by a key, using `slice::chunk_by` on a flat `Vec` sorted by that key eliminates the hashing overhead and intermediate allocations of building a `HashMap<Key, Vec<T>>`. If secondary ordering within chunks is required, a composite sort before chunking ensures the data is ready to consume without further manipulation.
 **Action:** When grouping elements in hot paths, prefer `slice::chunk_by` over `HashMap` to improve cache locality and minimize memory allocations.
+
+## 2025-11-06 - [Optimize children_of using Vec::with_capacity]
+**Learning:** In `orch8-engine/src/evaluator.rs`, the `children_of` function is called heavily on the hot path for all execution node evaluations. It previously chained `.filter(...).collect()` on the execution tree slice. Because `.filter()` creates an iterator of unknown size, `.collect()` causes the resulting `Vec` to allocate and potentially reallocate multiple times as elements are found.
+**Action:** Replace `.filter(...).collect()` chains in hot paths with a manual `for` loop pushing to a `Vec` instantiated with `Vec::with_capacity(N)` when a reasonable small bound (like 8 for most child node scenarios) is known. This significantly eliminates redundant iterator and allocator overhead.
