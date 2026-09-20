@@ -673,10 +673,12 @@ async fn enforce_concurrency_limits(
     clock: &SharedClock,
 ) -> Result<Vec<orch8_types::instance::TaskInstance>, EngineError> {
     // Collect concurrency keys present in the batch.
-    let mut key_instances: HashMap<&str, Vec<usize>> = HashMap::with_capacity(instances.len() / 2);
+    // ⚡ Bolt: Use a flat Vec and `chunk_by` instead of a HashMap to avoid allocation
+    // and hashing overhead on the hot scheduling path.
+    let mut key_instances: Vec<(&str, usize)> = Vec::with_capacity(instances.len());
     for (idx, inst) in instances.iter().enumerate() {
         if let (Some(key), Some(_max)) = (&inst.concurrency_key, inst.max_concurrency) {
-            key_instances.entry(key.as_str()).or_default().push(idx);
+            key_instances.push((key.as_str(), idx));
         }
     }
 
@@ -684,31 +686,37 @@ async fn enforce_concurrency_limits(
         return Ok(instances);
     }
 
+    // Sort by key first, then by original index to preserve priority order.
+    key_instances.sort_unstable_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
+
     // Batch count running instances for all concurrency keys in a single query.
-    let keys: Vec<&str> = key_instances.keys().copied().collect();
+    let mut keys: Vec<&str> = key_instances.iter().map(|(k, _)| *k).collect();
+    keys.dedup();
     let running_counts = storage.count_running_by_concurrency_keys(&keys).await?;
 
     // For each concurrency key, determine how many slots are available.
     let mut deferred_indices = Vec::new();
-    for (key, indices) in &key_instances {
+    for chunk in key_instances.chunk_by(|a, b| a.0 == b.0) {
+        let key = chunk[0].0;
+
         // All instances in the group share the same max_concurrency.
-        let max = instances[indices[0]].max_concurrency.unwrap_or(u32::MAX);
+        let max = instances[chunk[0].1].max_concurrency.unwrap_or(u32::MAX);
 
         // Count how many instances with this key are currently Running in the
         // DB. This count includes the instances we just claimed (since
         // claim_due_instances already set them to Running). Subtract the batch
         // members to get the pre-existing running count.
-        let total_running = running_counts.get(*key).copied().unwrap_or(0);
+        let total_running = running_counts.get(key).copied().unwrap_or(0);
         #[allow(clippy::cast_possible_wrap)]
-        let batch_count = indices.len() as i64;
+        let batch_count = chunk.len() as i64;
         let already_running = total_running - batch_count;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let slots = i64::from(max).saturating_sub(already_running).max(0) as usize;
 
         // Keep the first `slots` instances (by batch order, which preserves
         // priority ordering from claim_due_instances), defer the rest.
-        if slots < indices.len() {
-            for &idx in &indices[slots..] {
+        if slots < chunk.len() {
+            for &(_, idx) in &chunk[slots..] {
                 deferred_indices.push(idx);
             }
         }
