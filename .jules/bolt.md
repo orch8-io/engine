@@ -14,3 +14,6 @@
 ## 2025-02-12 - Eliminate HashMap Allocation in Concurrency Scheduler
 **Learning:** In the task scheduler hot path (`enforce_concurrency_limits`), grouping concurrency keys was previously implemented using a `HashMap`. This resulted in unnecessary string allocation and hashing overhead on every tick.
 **Action:** When grouping slices into buckets for iterative logic on hot paths where preserving original indices is required, map the structure into a flat `Vec<(Key, usize)>`, sort it by key first (and original index second for priority preservation), and utilize the stable `slice::chunk_by` method to eliminate `HashMap` construction entirely. This leverages flat arrays and avoids dynamic hashing overhead.
+## 2025-11-06 - [Replace HashMap with Vec in DeadlineOutputs]
+**Learning:** In the `prefetch_deadline_outputs` phase of the scheduler (`orch8-engine/src/scheduler.rs`), building a `HashMap` of references incurred unnecessary hashing and allocation overhead on every tick.
+**Action:** When creating a lookup table from a batch of pre-fetched results on a hot path, replace the `HashMap` with a flat `Vec` initialized with `Vec::with_capacity()`, sort it by a composite key, and use `.binary_search_by()` for O(log N) zero-allocation lookups.
