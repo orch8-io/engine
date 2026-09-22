@@ -898,20 +898,27 @@ async fn prefetch_deadline_outputs(
 /// unnecessary `.clone()` on the `BlockId` (String allocation) for every
 /// deadline step inside the hot scheduler tick loops.
 struct DeadlineOutputs<'a> {
-    refs: HashMap<(&'a InstanceId, &'a BlockId), &'a BlockOutput>,
+    refs: Vec<(&'a InstanceId, &'a BlockId, &'a BlockOutput)>,
 }
 
 impl<'a> DeadlineOutputs<'a> {
     fn new(outputs: &'a HashMap<(InstanceId, BlockId), BlockOutput>) -> Self {
-        let mut refs = HashMap::with_capacity(outputs.len());
+        // ⚡ Bolt: We build a flat Vec sorted by the composite key instead of allocating
+        // a HashMap. This avoids hashing and map-building overhead on the hot path
+        // while still providing O(log N) zero-allocation lookups.
+        let mut refs = Vec::with_capacity(outputs.len());
         for (k, v) in outputs {
-            refs.insert((&k.0, &k.1), v);
+            refs.push((&k.0, &k.1, v));
         }
+        refs.sort_unstable_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
         Self { refs }
     }
 
     fn get(&self, instance: &InstanceId, block: &BlockId) -> Option<&BlockOutput> {
-        self.refs.get(&(instance, block)).copied()
+        self.refs
+            .binary_search_by(|(i, b, _)| i.cmp(&instance).then_with(|| b.cmp(&block)))
+            .ok()
+            .map(|idx| self.refs[idx].2)
     }
 }
 
