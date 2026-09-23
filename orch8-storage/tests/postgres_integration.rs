@@ -1783,6 +1783,82 @@ async fn assert_metadata_semantics(
 async fn postgres_metadata_merge_and_filter_semantics() {
     let storage = require_postgres!();
     let tenant = format!("meta-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let inst = mk_instance(&tenant, seq_id, None);
+    assert_metadata_semantics(&storage, &tenant, seq_id, inst).await;
+}
+
+/// Same-`created_at` outputs must resolve deterministically by `id`
+/// (`UUIDv7`, insertion order) in every reader, and a fork copy must preserve
+/// that order instead of minting random v4 ids.
+#[tokio::test]
+async fn postgres_block_output_ties_break_by_id_and_copy_preserves_order() {
+    use orch8_types::output::BlockOutput;
+    let s = require_postgres!();
+    let tenant = format!("t-out-tie-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let src = mk_instance(&tenant, seq_id, None);
+    let dst = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&src).await.unwrap();
+    s.create_instance(&dst).await.unwrap();
+    let block = BlockId::new("b");
+    let at = Utc::now();
+    for attempt in 1..=5u16 {
+        s.save_block_output(&BlockOutput {
+            id: Uuid::now_v7(),
+            instance_id: src.id,
+            block_id: block.clone(),
+            output: serde_json::json!({"attempt": attempt}),
+            output_ref: None,
+            output_size: 2,
+            attempt,
+            created_at: at,
+        })
+        .await
+        .unwrap();
+    }
+    let latest = s
+        .get_block_outputs_batch(&[(src.id, &block)])
+        .await
+        .unwrap();
+    assert_eq!(latest[&(src.id, block.clone())].attempt, 5);
+    let after: Vec<u16> = s
+        .get_outputs_after_created_at(src.id, None)
+        .await
+        .unwrap()
+        .iter()
+        .map(|o| o.attempt)
+        .collect();
+    assert_eq!(after, vec![1, 2, 3, 4, 5]);
+
+    assert_eq!(
+        s.copy_block_outputs(src.id, dst.id, std::slice::from_ref(&block))
+            .await
+            .unwrap(),
+        5
+    );
+    let copied: Vec<u16> = s
+        .get_all_outputs(dst.id)
+        .await
+        .unwrap()
+        .iter()
+        .map(|o| o.attempt)
+        .collect();
+    assert_eq!(copied, vec![1, 2, 3, 4, 5]);
+    let latest = s
+        .get_block_outputs_batch(&[(dst.id, &block)])
+        .await
+        .unwrap();
+    assert_eq!(latest[&(dst.id, block)].attempt, 5);
+}
+
 // ===========================================================================
 // Review 2026-09: leases for cron claims, trigger polls, credential refresh
 // ===========================================================================
@@ -1950,74 +2026,6 @@ async fn signal_sweep_skips_scheduled_instance_without_control_signal_postgres()
         .await
         .unwrap();
     let inst = mk_instance(&tenant, seq_id, None);
-    assert_metadata_semantics(&storage, &tenant, seq_id, inst).await;
-}
-
-/// Same-`created_at` outputs must resolve deterministically by `id`
-/// (`UUIDv7`, insertion order) in every reader, and a fork copy must preserve
-/// that order instead of minting random v4 ids.
-#[tokio::test]
-async fn postgres_block_output_ties_break_by_id_and_copy_preserves_order() {
-    use orch8_types::output::BlockOutput;
-    let s = require_postgres!();
-    let tenant = format!("t-out-tie-{}", Uuid::new_v4());
-    let seq_id = SequenceId::new();
-    s.create_sequence(&mk_sequence(&tenant, seq_id))
-        .await
-        .unwrap();
-    let src = mk_instance(&tenant, seq_id, None);
-    let dst = mk_instance(&tenant, seq_id, None);
-    s.create_instance(&src).await.unwrap();
-    s.create_instance(&dst).await.unwrap();
-    let block = BlockId::new("b");
-    let at = Utc::now();
-    for attempt in 1..=5u16 {
-        s.save_block_output(&BlockOutput {
-            id: Uuid::now_v7(),
-            instance_id: src.id,
-            block_id: block.clone(),
-            output: serde_json::json!({"attempt": attempt}),
-            output_ref: None,
-            output_size: 2,
-            attempt,
-            created_at: at,
-        })
-        .await
-        .unwrap();
-    }
-    let latest = s
-        .get_block_outputs_batch(&[(src.id, &block)])
-        .await
-        .unwrap();
-    assert_eq!(latest[&(src.id, block.clone())].attempt, 5);
-    let after: Vec<u16> = s
-        .get_outputs_after_created_at(src.id, None)
-        .await
-        .unwrap()
-        .iter()
-        .map(|o| o.attempt)
-        .collect();
-    assert_eq!(after, vec![1, 2, 3, 4, 5]);
-
-    assert_eq!(
-        s.copy_block_outputs(src.id, dst.id, std::slice::from_ref(&block))
-            .await
-            .unwrap(),
-        5
-    );
-    let copied: Vec<u16> = s
-        .get_all_outputs(dst.id)
-        .await
-        .unwrap()
-        .iter()
-        .map(|o| o.attempt)
-        .collect();
-    assert_eq!(copied, vec![1, 2, 3, 4, 5]);
-    let latest = s
-        .get_block_outputs_batch(&[(dst.id, &block)])
-        .await
-        .unwrap();
-    assert_eq!(latest[&(dst.id, block)].attempt, 5);
     storage.create_instance(&inst).await.unwrap();
     let mk = |st| Signal {
         id: Uuid::now_v7(),

@@ -5256,6 +5256,97 @@ async fn webhook_outbox_fail_and_complete_are_fenced_on_claim() {
             fresh_claim,
             "boom",
             Some(Utc::now() + chrono::Duration::seconds(5))
+        )
+        .await
+        .unwrap()
+    );
+    let row = s.get_webhook_outbox(entry.id).await.unwrap().unwrap();
+    assert_eq!(row.status, WebhookOutboxStatus::Pending);
+    assert_eq!(row.attempts, 1);
+
+    let reclaim = Utc::now();
+    assert!(s.claim_webhook_outbox_row(entry.id, reclaim).await.unwrap());
+    assert!(
+        s.complete_webhook_outbox_claim(entry.id, reclaim)
+            .await
+            .unwrap()
+    );
+    assert!(s.get_webhook_outbox(entry.id).await.unwrap().is_none());
+}
+
+/// M2/M3: metadata merge is shallow and the metadata filter follows Postgres
+/// `@>` containment (type-aware scalars, nested objects, arrays).
+async fn assert_metadata_semantics(
+    s: &dyn orch8_storage::StorageBackend,
+    tenant: &str,
+    seq_id: SequenceId,
+    inst: TaskInstance,
+) {
+    use orch8_types::filter::{InstanceFilter, Pagination};
+    let mut inst = inst;
+    inst.metadata = serde_json::json!({
+        "flag": true,
+        "n": 1,
+        "s": "1",
+        "nested": {"a": 1, "b": {"c": "x"}},
+        "tags": ["red", "blue", {"k": 2}],
+        "keep": "me"
+    });
+    inst.sequence_id = seq_id;
+    s.create_instance(&inst).await.unwrap();
+
+    let matches = |filter: serde_json::Value| {
+        let f = InstanceFilter {
+            tenant_id: Some(TenantId::unchecked(tenant)),
+            metadata_filter: Some(filter),
+            ..InstanceFilter::default()
+        };
+        async move {
+            s.list_instances(&f, &Pagination::default())
+                .await
+                .unwrap()
+                .len()
+                == 1
+        }
+    };
+    assert!(matches(serde_json::json!({"flag": true})).await);
+    assert!(!matches(serde_json::json!({"flag": 1})).await);
+    assert!(matches(serde_json::json!({"n": 1})).await);
+    assert!(!matches(serde_json::json!({"n": "1"})).await);
+    assert!(matches(serde_json::json!({"s": "1"})).await);
+    assert!(!matches(serde_json::json!({"s": 1})).await);
+    assert!(matches(serde_json::json!({"nested": {"b": {"c": "x"}}})).await);
+    assert!(!matches(serde_json::json!({"nested": {"b": {"c": "y"}}})).await);
+    assert!(matches(serde_json::json!({"tags": ["blue"]})).await);
+    assert!(matches(serde_json::json!({"tags": [{"k": 2}, "red"]})).await);
+    assert!(!matches(serde_json::json!({"tags": ["green"]})).await);
+    assert!(matches(serde_json::json!({})).await);
+    assert!(!matches(serde_json::json!(["x"])).await);
+
+    // Shallow merge: `nested` is replaced wholesale, `null` is stored.
+    s.merge_instance_metadata(
+        inst.id,
+        &serde_json::json!({"nested": {"z": 1}, "keep": null, "new": 2}),
+    )
+    .await
+    .unwrap();
+    let got = s.get_instance(inst.id).await.unwrap().unwrap().metadata;
+    assert_eq!(got["nested"], serde_json::json!({"z": 1}));
+    assert_eq!(got["keep"], serde_json::Value::Null);
+    assert!(got.as_object().unwrap().contains_key("keep"));
+    assert_eq!(got["new"], serde_json::json!(2));
+    assert_eq!(got["flag"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn sqlite_metadata_merge_and_filter_match_postgres_semantics() {
+    let s = store().await;
+    let seq = make_sequence("t_meta");
+    s.create_sequence(&seq).await.unwrap();
+    let inst = make_instance("t_meta", seq.id);
+    assert_metadata_semantics(&s, "t_meta", seq.id, inst).await;
+}
+
 // ===========================================================================
 // Review 2026-09: leases for cron claims, trigger polls, credential refresh
 // ===========================================================================
@@ -5381,91 +5472,6 @@ async fn credential_refresh_claim_and_cas_update() {
         .await
         .unwrap()
     );
-    let row = s.get_webhook_outbox(entry.id).await.unwrap().unwrap();
-    assert_eq!(row.status, WebhookOutboxStatus::Pending);
-    assert_eq!(row.attempts, 1);
-
-    let reclaim = Utc::now();
-    assert!(s.claim_webhook_outbox_row(entry.id, reclaim).await.unwrap());
-    assert!(
-        s.complete_webhook_outbox_claim(entry.id, reclaim)
-            .await
-            .unwrap()
-    );
-    assert!(s.get_webhook_outbox(entry.id).await.unwrap().is_none());
-}
-
-/// M2/M3: metadata merge is shallow and the metadata filter follows Postgres
-/// `@>` containment (type-aware scalars, nested objects, arrays).
-async fn assert_metadata_semantics(
-    s: &dyn orch8_storage::StorageBackend,
-    tenant: &str,
-    seq_id: SequenceId,
-    inst: TaskInstance,
-) {
-    use orch8_types::filter::{InstanceFilter, Pagination};
-    let mut inst = inst;
-    inst.metadata = serde_json::json!({
-        "flag": true,
-        "n": 1,
-        "s": "1",
-        "nested": {"a": 1, "b": {"c": "x"}},
-        "tags": ["red", "blue", {"k": 2}],
-        "keep": "me"
-    });
-    inst.sequence_id = seq_id;
-    s.create_instance(&inst).await.unwrap();
-
-    let matches = |filter: serde_json::Value| {
-        let f = InstanceFilter {
-            tenant_id: Some(TenantId::unchecked(tenant)),
-            metadata_filter: Some(filter),
-            ..InstanceFilter::default()
-        };
-        async move {
-            s.list_instances(&f, &Pagination::default())
-                .await
-                .unwrap()
-                .len()
-                == 1
-        }
-    };
-    assert!(matches(serde_json::json!({"flag": true})).await);
-    assert!(!matches(serde_json::json!({"flag": 1})).await);
-    assert!(matches(serde_json::json!({"n": 1})).await);
-    assert!(!matches(serde_json::json!({"n": "1"})).await);
-    assert!(matches(serde_json::json!({"s": "1"})).await);
-    assert!(!matches(serde_json::json!({"s": 1})).await);
-    assert!(matches(serde_json::json!({"nested": {"b": {"c": "x"}}})).await);
-    assert!(!matches(serde_json::json!({"nested": {"b": {"c": "y"}}})).await);
-    assert!(matches(serde_json::json!({"tags": ["blue"]})).await);
-    assert!(matches(serde_json::json!({"tags": [{"k": 2}, "red"]})).await);
-    assert!(!matches(serde_json::json!({"tags": ["green"]})).await);
-    assert!(matches(serde_json::json!({})).await);
-    assert!(!matches(serde_json::json!(["x"])).await);
-
-    // Shallow merge: `nested` is replaced wholesale, `null` is stored.
-    s.merge_instance_metadata(
-        inst.id,
-        &serde_json::json!({"nested": {"z": 1}, "keep": null, "new": 2}),
-    )
-    .await
-    .unwrap();
-    let got = s.get_instance(inst.id).await.unwrap().unwrap().metadata;
-    assert_eq!(got["nested"], serde_json::json!({"z": 1}));
-    assert_eq!(got["keep"], serde_json::Value::Null);
-    assert!(got.as_object().unwrap().contains_key("keep"));
-    assert_eq!(got["new"], serde_json::json!(2));
-    assert_eq!(got["flag"], serde_json::json!(true));
-}
-
-#[tokio::test]
-async fn sqlite_metadata_merge_and_filter_match_postgres_semantics() {
-    let s = store().await;
-    let seq = make_sequence("t_meta");
-    s.create_sequence(&seq).await.unwrap();
-    let inst = make_instance("t_meta", seq.id);
-    assert_metadata_semantics(&s, "t_meta", seq.id, inst).await;
 
     let read = s.get_credential(None, "c1").await.unwrap().unwrap();
     let mut rotated = read.clone();
