@@ -1604,6 +1604,32 @@ pub trait WorkerStore: Send + Sync + 'static {
         next_attempt_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
+    /// Fenced [`Self::fail_webhook_outbox_attempt`] for dispatchers: applies
+    /// only while the row is still `in_flight` under the claim stamped
+    /// `claimed_at` (the value returned by [`Self::claim_due_webhook_outbox`]
+    /// or passed to [`Self::claim_webhook_outbox_row`]). A dispatcher whose
+    /// claim went stale and was recovered/reclaimed by another node gets
+    /// `false` and must not touch the row, instead of clobbering the new
+    /// owner's attempt count / schedule.
+    async fn fail_webhook_outbox_attempt_fenced(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+        last_error: &str,
+        next_attempt_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError>;
+
+    /// Fenced delete of a delivered row: removes it only while it is still
+    /// `in_flight` under the claim stamped `claimed_at` (see
+    /// [`Self::fail_webhook_outbox_attempt_fenced`]). Returns whether the row
+    /// was deleted. [`Self::delete_webhook_outbox`] stays unfenced for the
+    /// admin discard/redeliver paths.
+    async fn complete_webhook_outbox_claim(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Reset `in_flight` rows whose claim predates `stale_before` back to
     /// `pending` — crash recovery for a dispatcher that died mid-dispatch.
     /// Returns the number of rows recovered.

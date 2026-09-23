@@ -1732,6 +1732,8 @@ passthrough_impl! {
     async fn claim_due_webhook_outbox(&self, now: DateTime<Utc>, limit: u32) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
     async fn claim_webhook_outbox_row(&self, id: Uuid, claimed_at: DateTime<Utc>) -> Result<bool, StorageError>;
     async fn fail_webhook_outbox_attempt(&self, id: Uuid, last_error: &str, next_attempt_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
+    async fn fail_webhook_outbox_attempt_fenced(&self, id: Uuid, claimed_at: DateTime<Utc>, last_error: &str, next_attempt_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
+    async fn complete_webhook_outbox_claim(&self, id: Uuid, claimed_at: DateTime<Utc>) -> Result<bool, StorageError>;
     async fn recover_stale_webhook_claims(&self, stale_before: DateTime<Utc>) -> Result<u64, StorageError>;
     async fn record_webhook_attempt(&self, attempt: &orch8_types::webhook_delivery::WebhookDeliveryAttempt) -> Result<(), StorageError>;
     async fn list_webhook_deliveries(&self, filter: &orch8_types::webhook_delivery::DeliveryFilter, limit: u32) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliverySummary>, StorageError>;
