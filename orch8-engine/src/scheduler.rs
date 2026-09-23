@@ -1175,6 +1175,7 @@ async fn dispatch_cleanup_step(
     } else if plugin_kind == Some(crate::handlers::PluginKind::Grpc) {
         let Some(endpoint) = crate::handlers::step_dispatch::resolve_plugin_source(
             storage.as_ref(),
+            &instance.tenant_id,
             &step.handler,
             orch8_types::plugin::PluginType::Grpc,
         )
@@ -1197,6 +1198,7 @@ async fn dispatch_cleanup_step(
     {
         let Some(wasm_path) = crate::handlers::step_dispatch::resolve_plugin_source(
             storage.as_ref(),
+            &instance.tenant_id,
             plugin_name,
             orch8_types::plugin::PluginType::Wasm,
         )
