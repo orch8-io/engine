@@ -301,25 +301,21 @@ async fn handle_sync(
     }))
 }
 
-/// Persist a server→device command, with a push wake only when a real push
-/// provider is configured. With the Noop provider nothing ever drains the
-/// wake outbox, so enqueueing would only grow it; the device still picks the
-/// command up on its next poll.
+/// Persist a server→device command together with its push wake. Wakes are
+/// enqueued even while the Noop provider is active: they drain once a real
+/// provider is configured, and the outbox worker's retention sweep prunes
+/// stale undelivered rows so the table stays bounded either way.
 async fn enqueue_command(
     state: &AppState,
     command: &MobileCommand,
     tenant_id: &str,
 ) -> Result<(), ApiError> {
-    let result = if state.push_provider.is_configured() {
-        state
-            .storage
-            .create_mobile_command_with_wake(command, tenant_id, chrono::Utc::now())
-            .await
-            .map(|_| ())
-    } else {
-        state.storage.create_mobile_command(command).await
-    };
-    result.map_err(|e| ApiError::from_storage(e, "mobile_commands"))
+    state
+        .storage
+        .create_mobile_command_with_wake(command, tenant_id, chrono::Utc::now())
+        .await
+        .map(|_| ())
+        .map_err(|e| ApiError::from_storage(e, "mobile_commands"))
 }
 
 // ---------------------------------------------------------------------------

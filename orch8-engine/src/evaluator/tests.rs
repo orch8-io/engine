@@ -859,6 +859,43 @@ async fn ensure_execution_tree_idempotent() {
     assert_eq!(first_ids, second_ids);
 }
 
+// EV8b: an instance that switches from the flat path to the tree path
+// mid-run (e.g. `self_modify` injects a composite) must not re-dispatch the
+// root steps the flat path already completed.
+#[tokio::test]
+async fn ensure_execution_tree_marks_flat_path_completed_steps() {
+    use orch8_storage::OutputStore as _;
+    use orch8_types::output::BlockOutput;
+    let s = SqliteStorage::in_memory().await.unwrap();
+    let inst_id = InstanceId::new();
+    seed_instance_ev(&s, inst_id).await;
+    let inst = s.get_instance(inst_id).await.unwrap().unwrap();
+    s.save_block_output(&BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId::new("a"),
+        output: serde_json::json!({ "ok": true }),
+        output_ref: None,
+        output_size: 0,
+        attempt: 0,
+        created_at: chrono::Utc::now(),
+    })
+    .await
+    .unwrap();
+    let nodes = ensure_execution_tree(&s, &inst, &[mk_step("a"), mk_step("b")])
+        .await
+        .unwrap();
+    let state_of = |id: &str| {
+        nodes
+            .iter()
+            .find(|n| n.block_id.as_str() == id)
+            .map(|n| n.state)
+            .unwrap()
+    };
+    assert_eq!(state_of("a"), NodeState::Completed);
+    assert_eq!(state_of("b"), NodeState::Pending);
+}
+
 // EV9: ensure_execution_tree adds nodes for newly-injected blocks.
 #[tokio::test]
 async fn ensure_execution_tree_adds_injected_nodes() {

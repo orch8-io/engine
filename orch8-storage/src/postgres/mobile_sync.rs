@@ -192,7 +192,7 @@ impl crate::MobileSyncStore for PostgresStorage {
     ) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO mobile_instance_status (device_id, instance_id, sequence_name, state, current_step, handler, context_summary, steps, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz)
              ON CONFLICT(device_id, instance_id) DO UPDATE SET
                sequence_name = EXCLUDED.sequence_name,
                state = EXCLUDED.state,
@@ -336,7 +336,7 @@ impl crate::MobileSyncStore for PostgresStorage {
     ) -> Result<Option<crate::MobileApprovalRequest>, StorageError> {
         let row: Option<(String, String, String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>, String, Option<String>, String, Option<String>)> =
             sqlx::query_as(
-                "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, resolution,
+                "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs::BIGINT AS timeout_secs, metadata, state, resolution,
                         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
                         to_char(resolved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
                  FROM mobile_approval_requests WHERE id = $1",
@@ -413,7 +413,7 @@ impl crate::MobileSyncStore for PostgresStorage {
         offset: u64,
     ) -> Result<Vec<crate::MobileApprovalRequest>, StorageError> {
         let mut sql = String::from(
-            "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, resolution,
+            "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs::BIGINT AS timeout_secs, metadata, state, resolution,
                     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
                     to_char(resolved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
              FROM mobile_approval_requests WHERE TRUE",

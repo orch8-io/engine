@@ -207,6 +207,25 @@ pub async fn ensure_execution_tree(
     let mut nodes = Vec::with_capacity(blocks.len() * 2);
     build_nodes(instance.id, None, None, blocks, &mut nodes);
 
+    // An instance can switch from the flat path to the tree path mid-run
+    // (e.g. a `self_modify` step injects a composite). Root-level steps the
+    // flat path already completed must start Completed, or the evaluator
+    // re-dispatches them — re-running their side effects, or tripping the
+    // effect guard on the committed receipt.
+    let completed = storage.get_completed_block_ids(instance.id).await?;
+    if !completed.is_empty() {
+        let now = chrono::Utc::now();
+        for node in &mut nodes {
+            if node.parent_id.is_none()
+                && node.block_type == BlockType::Step
+                && completed.contains(&node.block_id)
+            {
+                node.state = NodeState::Completed;
+                node.completed_at = Some(now);
+            }
+        }
+    }
+
     if !nodes.is_empty() {
         storage.create_execution_nodes_batch(&nodes).await?;
         debug!(
