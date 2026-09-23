@@ -635,6 +635,7 @@ CREATE INDEX IF NOT EXISTS idx_queue_routing_tenant_handler
 CREATE TABLE IF NOT EXISTS worker_commands (
     id         TEXT PRIMARY KEY,
     worker_id  TEXT NOT NULL,
+    tenant_id  TEXT NOT NULL DEFAULT '',
     command    TEXT NOT NULL,
     payload    TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
@@ -1108,4 +1109,4 @@ CREATE INDEX IF NOT EXISTS idx_tenant_storage_placements_backend
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 40;
+pub(super) const SCHEMA_VERSION: i64 = 43;

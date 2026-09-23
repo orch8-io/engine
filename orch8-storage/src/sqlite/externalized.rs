@@ -65,13 +65,15 @@ pub(super) async fn save(
 
 pub(super) async fn get(
     storage: &SqliteStorage,
+    instance_id: InstanceId,
     ref_key: &str,
 ) -> Result<Option<serde_json::Value>, StorageError> {
     let row = sqlx::query(
         "SELECT payload, payload_bytes, compression \
-         FROM externalized_state WHERE ref_key = ?1",
+         FROM externalized_state WHERE ref_key = ?1 AND instance_id = ?2",
     )
     .bind(ref_key)
+    .bind(instance_id.into_uuid().to_string())
     .fetch_optional(&storage.pool)
     .await?;
 
@@ -200,19 +202,19 @@ pub(super) async fn batch_save(
 /// called with more keys than the scheduler's usual small preload batch.
 pub(super) async fn batch_get(
     storage: &SqliteStorage,
-    ref_keys: &[String],
-) -> Result<HashMap<String, serde_json::Value>, StorageError> {
-    if ref_keys.is_empty() {
+    refs: &[(InstanceId, String)],
+) -> Result<HashMap<(InstanceId, String), serde_json::Value>, StorageError> {
+    if refs.is_empty() {
         return Ok(HashMap::new());
     }
 
     let mut out = HashMap::new();
-    for chunk in ref_keys.chunks(BATCH_GET_CHUNK_SIZE) {
+    for chunk in refs.chunks(BATCH_GET_CHUNK_SIZE) {
         let mut qb = sqlx::QueryBuilder::new(
-            "SELECT ref_key, payload, payload_bytes, compression FROM externalized_state WHERE ref_key IN (",
+            "SELECT instance_id, ref_key, payload, payload_bytes, compression FROM externalized_state WHERE ref_key IN (",
         );
         let mut separated = qb.separated(",");
-        for key in chunk {
+        for (_, key) in chunk {
             separated.push_bind(key);
         }
         separated.push_unseparated(")");
@@ -220,6 +222,18 @@ pub(super) async fn batch_get(
         let rows = qb.build().fetch_all(&storage.pool).await?;
         for row in rows {
             let ref_key: String = row.try_get("ref_key")?;
+            let owner: String = row.try_get("instance_id")?;
+            let Ok(owner) = uuid::Uuid::parse_str(&owner).map(InstanceId::from_uuid) else {
+                continue;
+            };
+            // Only rows owned by the instance that asked for them: a forged
+            // marker naming another instance's ref never resolves.
+            if !chunk
+                .iter()
+                .any(|(id, key)| *id == owner && *key == ref_key)
+            {
+                continue;
+            }
             let compression: Option<String> = row.try_get("compression").unwrap_or(None);
             let value = match compression.as_deref() {
                 Some("zstd") => {
@@ -244,7 +258,7 @@ pub(super) async fn batch_get(
                     )));
                 }
             };
-            out.insert(ref_key, value);
+            out.insert((owner, ref_key), value);
         }
     }
     Ok(out)
@@ -339,9 +353,9 @@ mod tests {
         let deleted = delete_expired(&store, 100).await.unwrap();
         assert_eq!(deleted, 1, "only the past-expired row should be deleted");
 
-        assert!(get(&store, "a:past").await.unwrap().is_none());
-        assert!(get(&store, "b:future").await.unwrap().is_some());
-        assert!(get(&store, "c:null").await.unwrap().is_some());
+        assert!(get(&store, inst, "a:past").await.unwrap().is_none());
+        assert!(get(&store, inst, "b:future").await.unwrap().is_some());
+        assert!(get(&store, inst, "c:null").await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -389,7 +403,7 @@ mod tests {
         let deleted = delete_expired(&store, 0).await.unwrap();
         assert_eq!(deleted, 0, "limit=0 must not delete anything");
         // Row is still present.
-        assert!(get(&store, "k:0").await.unwrap().is_some());
+        assert!(get(&store, inst, "k:0").await.unwrap().is_some());
     }
 
     /// Multiple instances with expired rows are all eligible for sweeping —
@@ -411,8 +425,8 @@ mod tests {
 
         let deleted = delete_expired(&store, 100).await.unwrap();
         assert_eq!(deleted, 2, "sweep must span instances");
-        assert!(get(&store, "a:1").await.unwrap().is_none());
-        assert!(get(&store, "b:1").await.unwrap().is_none());
+        assert!(get(&store, inst_a, "a:1").await.unwrap().is_none());
+        assert!(get(&store, inst_b, "b:1").await.unwrap().is_none());
     }
 
     /// Core M4 guarantee: deleting a `task_instances` row cascades to its
@@ -533,7 +547,7 @@ mod tests {
         let gc_swept = delete_expired(&store, 100).await.unwrap();
         assert_eq!(gc_swept, 0, "GC must not find the cascaded row");
         assert!(
-            get(&store, "will:cascade").await.unwrap().is_none(),
+            get(&store, inst, "will:cascade").await.unwrap().is_none(),
             "cascade deleted the row before GC could observe it"
         );
     }

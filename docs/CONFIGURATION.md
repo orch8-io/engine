@@ -168,6 +168,7 @@ mount a config file for those settings.
 | `ORCH8_MAX_INSTANCES_PER_TENANT` | `0` | Per-tenant claim limit (0 = unlimited) |
 | `ORCH8_ENCRYPTION_KEY` | — | 64 hex chars for AES-256-GCM encryption at rest (required unless `--insecure-storage`) |
 | `ORCH8_OLD_ENCRYPTION_KEY` | — | Previous encryption key, for rotation: new writes use `ORCH8_ENCRYPTION_KEY`, this key is retained as a decryption fallback for rows written before the rotation |
+| `ORCH8_WASM_PLUGIN_DIR` | — | When set, WASM plugin `source` paths must resolve (after canonicalization) inside this directory |
 | `ORCH8_CRON_TICK_SECS` | `10` | Cron loop check interval (seconds) |
 | `ORCH8_WORKER_REAPER_TICK_SECS` | `30` | How often the stale worker-task reaper runs (seconds) |
 | `ORCH8_WORKER_REAPER_STALE_SECS` | `60` | Claimed task is reclaimed after this long without a heartbeat (seconds) |

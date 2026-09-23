@@ -758,6 +758,9 @@ WASM plugin contract:
 - Output must be JSON.
 - The module must export `alloc`, `dealloc`, and `handle`.
 - Keep WASM plugins deterministic, small, and fast.
+- `source` must be a compiled binary module (starting with the `\0asm` magic, at most 32 MiB). WAT text, directories and device files are rejected; load errors never include the path or file contents.
+- Plugin registration (`POST`/`PATCH`/`DELETE /plugins`) requires an Operator key; `publisher` keys may only read plugins.
+- Set `ORCH8_WASM_PLUGIN_DIR` to pin every WASM `source` inside one directory (checked after resolving symlinks and `..`). Recommended in multi-tenant deployments.
 - Good fits: validation, normalization, scoring, transformations, policy checks.
 
 ### gRPC Sidecar Plugin

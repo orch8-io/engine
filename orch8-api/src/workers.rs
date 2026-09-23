@@ -243,6 +243,11 @@ pub(crate) async fn delete_version_pin(
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct EnqueueCommandRequest {
     worker_id: String,
+    /// Tenant owning the target worker. Tenant-scoped (per-tenant key) worker
+    /// streams only receive commands of their own tenant; leave empty to
+    /// address workers connected with the root key.
+    #[serde(default)]
+    tenant_id: String,
     /// `drain`, `reload`, `ping`, or `place`.
     command: orch8_types::worker::WorkerCommandKind,
     #[serde(default)]
@@ -273,6 +278,7 @@ pub(crate) async fn enqueue_command(
     let cmd = orch8_types::worker::WorkerCommand {
         id: Uuid::now_v7(),
         worker_id: req.worker_id,
+        tenant_id: req.tenant_id,
         command: req.command,
         payload: req.payload,
         created_at: chrono::Utc::now(),

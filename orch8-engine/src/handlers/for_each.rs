@@ -105,7 +105,10 @@ pub async fn execute_for_each(
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0);
-        let items_snap = match storage.get_externalized_state(&snapshot_ref_key).await {
+        let items_snap = match storage
+            .get_externalized_state(instance.id, &snapshot_ref_key)
+            .await
+        {
             Ok(Some(val)) => val.as_array().cloned().unwrap_or_default(),
             Ok(None) => {
                 warn!(

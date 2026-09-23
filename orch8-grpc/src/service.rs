@@ -382,16 +382,32 @@ impl Orch8GrpcService {
         Ok(capabilities)
     }
 
-    async fn send_worker_commands(
+    /// Pending commands for `worker_id` visible to this session. `worker_id`
+    /// is client-chosen, so a tenant-scoped session only sees commands
+    /// addressed to its own tenant; `None` (unscoped root/insecure) sees all.
+    async fn visible_worker_commands(
         &self,
         worker_id: &str,
-        sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
-    ) -> Result<bool, Status> {
-        let commands = self
+        tenant: Option<&TenantId>,
+    ) -> Result<Vec<orch8_types::worker::WorkerCommand>, Status> {
+        let mut commands = self
             .storage
             .list_worker_commands(worker_id)
             .await
             .map_err(storage_err)?;
+        if let Some(tenant) = tenant {
+            commands.retain(|command| command.tenant_id == tenant.as_str());
+        }
+        Ok(commands)
+    }
+
+    async fn send_worker_commands(
+        &self,
+        worker_id: &str,
+        tenant: Option<&TenantId>,
+        sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
+    ) -> Result<bool, Status> {
+        let commands = self.visible_worker_commands(worker_id, tenant).await?;
         let mut drain_requested = false;
         for command in commands {
             drain_requested |= command.command == orch8_types::worker::WorkerCommandKind::Drain;
@@ -418,13 +434,10 @@ impl Orch8GrpcService {
     async fn acknowledge_worker_command(
         &self,
         worker_id: &str,
+        tenant: Option<&TenantId>,
         command_id: Uuid,
     ) -> Result<(), Status> {
-        let commands = self
-            .storage
-            .list_worker_commands(worker_id)
-            .await
-            .map_err(storage_err)?;
+        let commands = self.visible_worker_commands(worker_id, tenant).await?;
         if commands.iter().any(|command| command.id == command_id) {
             self.storage
                 .delete_worker_command(command_id)
@@ -585,7 +598,9 @@ impl Orch8GrpcService {
                     .await?;
                 *runtime_id = Some(capabilities.runtime_id);
                 *draining |= capabilities.draining;
-                *draining |= self.send_worker_commands(&open.worker_id, sender).await?;
+                *draining |= self
+                    .send_worker_commands(&open.worker_id, tenant, sender)
+                    .await?;
                 sender
                     .send(Ok(worker_server_frame(
                         proto::worker_stream_server::Payload::Ack(proto::WorkerStreamAck {
@@ -604,7 +619,7 @@ impl Orch8GrpcService {
                     ));
                 }
                 let command_id = parse_uuid(&ack.command_id)?;
-                self.acknowledge_worker_command(&open.worker_id, command_id)
+                self.acknowledge_worker_command(&open.worker_id, tenant, command_id)
                     .await?;
                 sender
                     .send(Ok(worker_server_frame(
@@ -1793,7 +1808,10 @@ impl Orch8Service for Orch8GrpcService {
                 .iter()
                 .any(|feature| feature == "placement_commands")
             {
-                match service.send_worker_commands(&open.worker_id, &sender).await {
+                match service
+                    .send_worker_commands(&open.worker_id, tenant.as_ref(), &sender)
+                    .await
+                {
                     Ok(drain_requested) => draining |= drain_requested,
                     Err(status) => {
                         let _ = sender.send(Err(status)).await;

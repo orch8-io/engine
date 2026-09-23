@@ -2162,16 +2162,18 @@ impl crate::ResourceStore for PostgresStorage {
 
     async fn get_externalized_state(
         &self,
+        instance_id: InstanceId,
         ref_key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
-        externalized::get(self, ref_key).await
+        externalized::get(self, instance_id, ref_key).await
     }
 
     async fn batch_get_externalized_state(
         &self,
-        ref_keys: &[String],
-    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
-        externalized::batch_get(self, ref_keys).await
+        refs: &[(InstanceId, String)],
+    ) -> Result<std::collections::HashMap<(InstanceId, String), serde_json::Value>, StorageError>
+    {
+        externalized::batch_get(self, refs).await
     }
 
     async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError> {

@@ -42,8 +42,10 @@ accepts any combination of `operator`, `worker`, `device`, `publisher`,
 `approver`, and `auditor`; omission defaults to `operator`. The root key alone
 mints/revokes keys. `operator` covers the tenant API, while narrower roles are
 restricted before routing: workers to worker protocol paths, devices to mobile
-paths, publishers to sequence/release/plugin paths, approvers to approvals and
-instance signals, and auditors to read-only requests. Existing keys migrate
+paths, publishers to sequence/release paths plus read-only plugin paths
+(plugin registration and `POST /sequences/migrate-instance` need `operator`),
+approvers to approvals and `custom:human_input:<block>` instance signals (any
+other signal type answers 403), and auditors to read-only requests. Existing keys migrate
 with the compatibility grant and can be replaced progressively with
 least-privilege keys.
 

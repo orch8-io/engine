@@ -147,9 +147,9 @@ const DENIED_API_KEY_ENV: &[&str] = &[
 /// may carry (`STRIPE_SECRET_KEY`, `TWILIO_AUTH_TOKEN`, `DB_PASSWORD`, …) that
 /// an exact-match denylist can never fully enumerate.
 ///
-/// LLM provider keys conventionally end in `_API_KEY` / `_KEY` / `_TOKEN`, none
-/// of which appear here, so legitimate names (`OPENAI_API_KEY`, `MY_OPENAI_KEY`,
-/// `CUSTOM_LLM_TOKEN`) are unaffected.
+/// LLM provider keys conventionally end in `_API_KEY`, which none of these
+/// appear in, so legitimate names (`OPENAI_API_KEY`, `MY_LLM_API_KEY`) are
+/// unaffected.
 const DENIED_API_KEY_ENV_SUBSTRINGS: &[&str] = &[
     "SECRET",
     "PASSWORD",
@@ -169,17 +169,24 @@ const DENIED_API_KEY_ENV_SUBSTRINGS: &[&str] = &[
 /// store), `ORCH8_API_KEY`, `ORCH8_DATABASE_URL`, `ORCH8_ARTIFACT_S3_SECRET_*`
 /// — or common cloud/CI secrets, and exfiltrate them to an attacker host.
 ///
-/// Defence is layered: deny the engine's whole `ORCH8_` namespace, an exact
-/// list of well-known infrastructure names ([`DENIED_API_KEY_ENV`]), and any
-/// name *containing* a secret-shaped substring ([`DENIED_API_KEY_ENV_SUBSTRINGS`]).
-/// The substring rule is the important one — it covers third-party secrets a
-/// host may hold that no fixed list can anticipate. Legitimate provider keys
-/// (`OPENAI_API_KEY`, `MY_OPENAI_KEY`, …) are unaffected.
+/// Defence is layered: the name must look like an API key variable
+/// (`[A-Z0-9_]+` ending in `_API_KEY` — an allowlist shape, so arbitrary vars
+/// such as `PATH`, `SLACK_BOT_TOKEN` or `SENTRY_DSN` are refused), and on top
+/// of that deny the engine's whole `ORCH8_` namespace, an exact list of
+/// well-known infrastructure names ([`DENIED_API_KEY_ENV`]), and any name
+/// *containing* a secret-shaped substring ([`DENIED_API_KEY_ENV_SUBSTRINGS`]).
 ///
-/// This remains a *denylist*: it cannot prove an arbitrary var is safe. Operators
-/// running untrusted workflows should still avoid placing unrelated secrets in
-/// the engine's process environment, or move to an explicit allowlist.
+/// Env-sourced keys are additionally only sent to the provider's default
+/// endpoint — see [`env_key_allowed_for_base_url`].
 pub(crate) fn is_allowed_api_key_env(name: &str) -> bool {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        || !name.ends_with("_API_KEY")
+    {
+        return false;
+    }
     let upper = name.to_ascii_uppercase();
 
     // The engine reads all of its own configuration/secrets from this prefix.
@@ -197,10 +204,32 @@ pub(crate) fn is_allowed_api_key_env(name: &str) -> bool {
         .any(|needle| upper.contains(needle))
 }
 
+/// `true` when an operator-held (process env) key may be attached to a request
+/// for `base_url`: only when the workflow did not override the endpoint, or
+/// overrode it with the default itself. A workflow-chosen `base_url` would
+/// otherwise receive the operator's provider key (key exfiltration); such
+/// steps must pass an explicit `api_key` (e.g. from a credential reference).
+pub(crate) fn env_key_allowed_for_base_url(base_url: Option<&str>, default_base: &str) -> bool {
+    base_url.is_none_or(|url| url.trim_end_matches('/') == default_base.trim_end_matches('/'))
+}
+
 /// Resolve API key: direct param → env var param → provider default env var.
+/// Env-sourced keys are refused when `base_url` points anywhere but the
+/// provider's default endpoint.
 pub(super) fn resolve_api_key(params: &Value, provider: &str) -> Result<String, StepError> {
     if let Some(key) = params.get("api_key").and_then(Value::as_str) {
         return Ok(key.to_string());
+    }
+
+    if !env_key_allowed_for_base_url(
+        params.get("base_url").and_then(Value::as_str),
+        default_base_url(provider),
+    ) {
+        return Err(permanent(
+            "a custom base_url requires an explicit 'api_key': env-sourced \
+             provider keys are only sent to the provider's default endpoint"
+                .to_string(),
+        ));
     }
 
     if let Some(env_var) = params.get("api_key_env").and_then(Value::as_str) {
@@ -243,7 +272,11 @@ pub(super) fn resolve_base_url(params: &Value, provider: &str) -> String {
     if let Some(url) = params.get("base_url").and_then(Value::as_str) {
         return url.trim_end_matches('/').to_string();
     }
+    default_base_url(provider).to_string()
+}
 
+/// The provider's own API endpoint.
+pub(super) fn default_base_url(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "https://api.anthropic.com/v1",
         "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -256,7 +289,6 @@ pub(super) fn resolve_base_url(params: &Value, provider: &str) -> String {
         "openrouter" => "https://openrouter.ai/api/v1",
         _ => "https://api.openai.com/v1",
     }
-    .to_string()
 }
 
 pub(super) fn classify_reqwest_error(e: &reqwest::Error) -> StepError {
@@ -498,7 +530,7 @@ mod tests {
     #[serial(llm_common_env)]
     fn resolve_api_key_from_explicit_env_var_param() {
         // A legitimate (non-engine) provider key var name passes the guard.
-        let var = "MY_TEST_LLM_API_KEY_EXPLICIT";
+        let var = "MY_TEST_LLM_EXPLICIT_API_KEY";
         #[allow(unsafe_code)]
         // SAFETY: serialized via #[serial(llm_common_env)].
         unsafe {
@@ -518,7 +550,7 @@ mod tests {
     #[serial(llm_common_env)]
     fn resolve_api_key_returns_permanent_error_when_nothing_set() {
         // An allowed-but-unset var name exercises the missing-env-var path.
-        let params = json!({"api_key_env": "MY_TEST_LLM_KEY_NONE_UNSET_VAR"});
+        let params = json!({"api_key_env": "MY_TEST_LLM_NONE_UNSET_API_KEY"});
         let err = resolve_api_key(&params, "openai").expect_err("missing env var must error out");
         assert!(matches!(err, StepError::Permanent { .. }));
     }
@@ -598,11 +630,10 @@ mod tests {
     fn api_key_env_allows_legitimate_provider_keys() {
         for name in [
             "OPENAI_API_KEY",
-            "MY_OPENAI_KEY",
+            "MY_OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
-            "AZURE_OPENAI_KEY",
-            "CUSTOM_LLM_TOKEN",
-            "PATH",
+            "AZURE_OPENAI_API_KEY",
+            "LLM2_API_KEY",
         ] {
             assert!(is_allowed_api_key_env(name), "{name} should be allowed");
         }
@@ -656,10 +687,54 @@ mod tests {
     }
 
     #[test]
-    fn api_key_env_still_allows_token_and_key_suffixed_provider_names() {
-        // Provider keys end in _KEY / _TOKEN / _API_KEY — none are secret-shaped.
-        for name in ["OPENAI_API_KEY", "CUSTOM_LLM_TOKEN", "MY_GROQ_KEY"] {
-            assert!(is_allowed_api_key_env(name), "{name} should stay allowed");
+    fn api_key_env_only_allows_api_key_shaped_names() {
+        // ENG-P-N2: arbitrary env vars are not dereferenceable, only
+        // `[A-Z0-9_]+_API_KEY` names.
+        for name in [
+            "PATH",
+            "HOME",
+            "CUSTOM_LLM_TOKEN",
+            "MY_GROQ_KEY",
+            "SLACK_BOT_TOKEN",
+            "SENTRY_DSN",
+            "openai_api_key",
+            "_API_KEY_X",
+            "OPENAI-API_KEY",
+            "",
+        ] {
+            assert!(!is_allowed_api_key_env(name), "{name} must be blocked");
+        }
+    }
+
+    #[test]
+    #[serial(llm_common_env)]
+    fn env_keys_are_not_sent_to_a_custom_base_url() {
+        // ENG-P-N2: the operator's default provider key must not follow a
+        // workflow-chosen base_url.
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(llm_common_env)].
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "operator-key");
+        }
+        let custom = json!({"base_url": "https://attacker.example/v1"});
+        assert!(resolve_api_key(&custom, "openai").is_err());
+        let custom_env =
+            json!({"base_url": "https://attacker.example/v1", "api_key_env": "OPENAI_API_KEY"});
+        assert!(resolve_api_key(&custom_env, "openai").is_err());
+        // Explicit key with custom base_url is fine.
+        let explicit = json!({"base_url": "https://proxy.example/v1", "api_key": "k"});
+        assert_eq!(resolve_api_key(&explicit, "openai").unwrap(), "k");
+        // Default endpoint (unset or spelled out) still uses the env key.
+        assert_eq!(
+            resolve_api_key(&json!({}), "openai").unwrap(),
+            "operator-key"
+        );
+        let spelled = json!({"base_url": "https://api.openai.com/v1/"});
+        assert_eq!(resolve_api_key(&spelled, "openai").unwrap(), "operator-key");
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(llm_common_env)].
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
         }
     }
 

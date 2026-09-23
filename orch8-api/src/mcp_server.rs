@@ -405,8 +405,10 @@ async fn tool_send_signal(state: AppState, tenant_ctx: OptionalTenant, args: &Va
         signal_type,
         payload: args.get("payload").cloned().unwrap_or(Value::Null),
     };
-    rest_json(crate::instances::send_signal(State(state), tenant_ctx, Path(id), Json(req)).await)
-        .await
+    rest_json(
+        crate::instances::send_signal(State(state), tenant_ctx, None, Path(id), Json(req)).await,
+    )
+    .await
 }
 
 /// `retry_instance`: reschedule a Failed instance for immediate re-execution.

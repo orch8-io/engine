@@ -880,7 +880,7 @@ async fn for_each_first_tick_binds_item_var_and_activates_body() {
         .and_then(|v| v.as_str())
         .expect("marker must carry _snapshot_ref");
     let snap = storage
-        .get_externalized_state(snapshot_ref)
+        .get_externalized_state(instance.id, snapshot_ref)
         .await
         .unwrap()
         .expect("snapshot must be externalized");
@@ -967,7 +967,7 @@ async fn for_each_snapshot_is_stable_under_context_mutation() {
         .and_then(|v| v.as_str())
         .expect("marker must carry _snapshot_ref");
     let snap = storage
-        .get_externalized_state(snapshot_ref)
+        .get_externalized_state(instance.id, snapshot_ref)
         .await
         .unwrap()
         .expect("snapshot must be externalized");

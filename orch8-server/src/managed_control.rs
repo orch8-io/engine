@@ -203,6 +203,7 @@ mod tests {
         WorkerCommand {
             id: uuid::Uuid::new_v4(),
             worker_id: "edge-1".into(),
+            tenant_id: String::new(),
             command: kind,
             payload: serde_json::Value::Null,
             created_at: chrono::Utc::now(),

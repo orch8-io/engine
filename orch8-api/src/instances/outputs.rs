@@ -50,20 +50,25 @@ pub async fn get_outputs(
     //
     // Perf: collect all ref_keys and resolve them in a single batched query
     // instead of N+1 round-trips.
+    //
+    // Lookups are scoped to this instance: a forged marker in a worker-supplied
+    // output naming another instance's ref resolves to nothing.
+    let owner = InstanceId::from_uuid(id);
     let mut ref_keys = Vec::with_capacity(outputs.len());
     let mut output_indices = Vec::with_capacity(outputs.len());
     for (idx, out) in outputs.iter().enumerate() {
         if let Some(ref_key) = orch8_engine::externalized::extract_ref_key(&out.output) {
-            ref_keys.push(ref_key.to_string());
+            ref_keys.push((owner, ref_key.to_string()));
             output_indices.push(idx);
         }
     }
     if !ref_keys.is_empty() {
         match state.storage.batch_get_externalized_state(&ref_keys).await {
             Ok(resolved_map) => {
-                for (i, ref_key) in ref_keys.iter().enumerate() {
+                for (i, key) in ref_keys.iter().enumerate() {
                     let idx = output_indices[i];
-                    match resolved_map.get(ref_key) {
+                    let ref_key = key.1.as_str();
+                    match resolved_map.get(key) {
                         Some(resolved) => {
                             outputs[idx].output = resolved.clone();
                         }

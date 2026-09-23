@@ -1076,7 +1076,7 @@ async fn create_instance_externalized_still_externalizes_under_encryption() {
         "big",
     );
     let raw_ref = inner
-        .get_externalized_state(&ref_key)
+        .get_externalized_state(instance.id, &ref_key)
         .await
         .unwrap()
         .expect("big field must have been persisted to externalized_state");
@@ -1087,7 +1087,7 @@ async fn create_instance_externalized_still_externalizes_under_encryption() {
 
     // Through the wrapper, the externalized payload decrypts transparently.
     let decrypted_ref = storage
-        .get_externalized_state(&ref_key)
+        .get_externalized_state(instance.id, &ref_key)
         .await
         .unwrap()
         .unwrap();
