@@ -410,10 +410,7 @@ impl EncryptingStorage {
     ) -> Result<Cow<'a, orch8_types::worker::WorkerTask>, StorageError> {
         if self.is_sealed_value(&task.params)
             && self.is_sealed_value(&task.context)
-            && task
-                .output
-                .as_ref()
-                .is_none_or(|v| self.is_sealed_value(v))
+            && task.output.as_ref().is_none_or(|v| self.is_sealed_value(v))
             && task
                 .resume_checkpoint
                 .as_ref()

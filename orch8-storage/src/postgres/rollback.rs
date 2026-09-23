@@ -252,7 +252,10 @@ pub(super) async fn list_rollback_history(
         let _ = write!(query, " AND sequence_name = ${param_idx}");
         param_idx += 1;
     }
-    let _ = write!(query, " ORDER BY triggered_at DESC, id DESC LIMIT ${param_idx}");
+    let _ = write!(
+        query,
+        " ORDER BY triggered_at DESC, id DESC LIMIT ${param_idx}"
+    );
 
     let mut q = sqlx::query_as(&query);
     if let Some(t) = tenant_id {

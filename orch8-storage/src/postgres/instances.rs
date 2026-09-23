@@ -379,8 +379,7 @@ async fn filter_by_concurrency_pg(
 ) -> Result<Vec<TaskInstance>, StorageError> {
     // Concurrency keys are tenant-scoped: two tenants that happen to pick the
     // same key string must not share (or starve each other of) slots.
-    let mut keyed: HashMap<(&str, &str), Vec<usize>> =
-        HashMap::with_capacity(candidates.len() / 2);
+    let mut keyed: HashMap<(&str, &str), Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
         if let (Some(key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
             keyed

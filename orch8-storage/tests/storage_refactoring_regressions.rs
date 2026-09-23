@@ -603,7 +603,10 @@ async fn delete_sequence_and_purge_leave_no_orphans() {
 
     assert!(s.list_step_logs(inst.id).await.unwrap().is_empty());
     assert!(s.list_audit_log(inst.id, 10).await.unwrap().is_empty());
-    assert_eq!(s.query_instance_usage_totals(inst.id).await.unwrap(), (0, 0));
+    assert_eq!(
+        s.query_instance_usage_totals(inst.id).await.unwrap(),
+        (0, 0)
+    );
     let dedupe: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emit_event_dedupe")
         .fetch_one(s.pool())
         .await

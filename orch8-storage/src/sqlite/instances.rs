@@ -314,8 +314,8 @@ async fn claim_due_inner(
             ORDER BY task_instances.priority DESC, task_instances.next_fire_at ASC",
         )
         .bind(now_s)
-        .bind(limit as i64)
-        .bind(max_per_tenant as i64)
+        .bind(i64::from(limit))
+        .bind(i64::from(max_per_tenant))
         .bind(overselect)
         .fetch_all(&mut *conn)
         .await?
@@ -325,7 +325,7 @@ async fn claim_due_inner(
             "SELECT * FROM task_instances WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2"
         )
         .bind(now_s)
-        .bind(limit as i64)
+        .bind(i64::from(limit))
         .fetch_all(&mut *conn)
         .await
         ?
@@ -369,8 +369,7 @@ async fn filter_by_concurrency(
     // Group candidates by (tenant_id, concurrency_key): keys are
     // tenant-scoped, so two tenants that pick the same key string must not
     // share (or starve each other of) slots.
-    let mut keyed: HashMap<(&str, &str), Vec<usize>> =
-        HashMap::with_capacity(candidates.len() / 2);
+    let mut keyed: HashMap<(&str, &str), Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
         if let (Some(key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
             keyed
@@ -973,7 +972,7 @@ pub(super) async fn list(
     }
     qb.push_bind(i64::from(pagination.limit.min(1000)));
     qb.push(" OFFSET ");
-    qb.push_bind(pagination.offset as i64);
+    qb.push_bind(i64::try_from(pagination.offset).unwrap_or(i64::MAX));
 
     let rows = qb.build().fetch_all(&storage.pool).await?;
     rows.iter().map(row_to_instance).collect()
@@ -1091,16 +1090,19 @@ pub(super) async fn bulk_reschedule(
                 super::helpers::parse_ts(&raw)?
                     .checked_add_signed(offset)
                     .map(ts)
-                    .ok_or_else(|| StorageError::Query("bulk_reschedule: timestamp overflow".into()))
+                    .ok_or_else(|| {
+                        StorageError::Query("bulk_reschedule: timestamp overflow".into())
+                    })
             })
             .transpose()?;
-        updated += sqlx::query("UPDATE task_instances SET next_fire_at=?1, updated_at=?2 WHERE id=?3")
-            .bind(shifted)
-            .bind(&now)
-            .bind(&id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+        updated +=
+            sqlx::query("UPDATE task_instances SET next_fire_at=?1, updated_at=?2 WHERE id=?3")
+                .bind(shifted)
+                .bind(&now)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
     }
     tx.commit().await?;
     Ok(updated)

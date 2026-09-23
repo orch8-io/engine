@@ -2657,7 +2657,10 @@ async fn concurrency_control() {
         s.create_instance(&inst).await.unwrap();
     }
 
-    let count = s.count_running_by_concurrency_key("t1", conc_key).await.unwrap();
+    let count = s
+        .count_running_by_concurrency_key("t1", conc_key)
+        .await
+        .unwrap();
     assert_eq!(count, 3);
     // Concurrency keys are tenant-scoped (STO-N5).
     assert_eq!(
@@ -2763,10 +2766,7 @@ async fn bulk_reschedule() {
     // M1: the shifted rows must actually be in the future -- the old
     // `datetime()` rewrite stored a space-separated timestamp that sorted
     // before every RFC 3339 `now`, so they were claimed immediately.
-    let claimed = s
-        .claim_due_instances(Utc::now(), 10, 0)
-        .await
-        .unwrap();
+    let claimed = s.claim_due_instances(Utc::now(), 10, 0).await.unwrap();
     assert!(claimed.is_empty(), "rescheduled rows must not fire yet");
     let later = s
         .claim_due_instances(now + chrono::Duration::seconds(3601), 10, 0)
@@ -3917,7 +3917,10 @@ async fn count_running_by_concurrency_key_accurate() {
         s.create_instance(&inst).await.unwrap();
     }
 
-    let count = s.count_running_by_concurrency_key("t_cc", key).await.unwrap();
+    let count = s
+        .count_running_by_concurrency_key("t_cc", key)
+        .await
+        .unwrap();
     assert_eq!(count, 2);
 
     // An unrelated key returns 0.
@@ -4038,7 +4041,10 @@ async fn concurrent_claims_with_same_key_are_serialized() {
         h.await.unwrap();
     }
 
-    let count = s.count_running_by_concurrency_key("t_race", key).await.unwrap();
+    let count = s
+        .count_running_by_concurrency_key("t_race", key)
+        .await
+        .unwrap();
     assert_eq!(count, 8, "each parallel claim contributed exactly once");
 }
 
@@ -5163,13 +5169,18 @@ async fn webhook_outbox_fail_and_complete_are_fenced_on_claim() {
     };
     s.park_webhook(&entry).await.unwrap();
     let stale_claim = Utc::now() - chrono::Duration::seconds(60);
-    assert!(s.claim_webhook_outbox_row(entry.id, stale_claim).await.unwrap());
-    assert_eq!(
-        s.recover_stale_webhook_claims(Utc::now()).await.unwrap(),
-        1
+    assert!(
+        s.claim_webhook_outbox_row(entry.id, stale_claim)
+            .await
+            .unwrap()
     );
+    assert_eq!(s.recover_stale_webhook_claims(Utc::now()).await.unwrap(), 1);
     let fresh_claim = Utc::now();
-    assert!(s.claim_webhook_outbox_row(entry.id, fresh_claim).await.unwrap());
+    assert!(
+        s.claim_webhook_outbox_row(entry.id, fresh_claim)
+            .await
+            .unwrap()
+    );
 
     assert!(
         !s.fail_webhook_outbox_attempt_fenced(entry.id, stale_claim, "late", None)
@@ -5201,13 +5212,22 @@ async fn webhook_outbox_fail_and_complete_are_fenced_on_claim() {
 
     let reclaim = Utc::now();
     assert!(s.claim_webhook_outbox_row(entry.id, reclaim).await.unwrap());
-    assert!(s.complete_webhook_outbox_claim(entry.id, reclaim).await.unwrap());
+    assert!(
+        s.complete_webhook_outbox_claim(entry.id, reclaim)
+            .await
+            .unwrap()
+    );
     assert!(s.get_webhook_outbox(entry.id).await.unwrap().is_none());
 }
 
 /// M2/M3: metadata merge is shallow and the metadata filter follows Postgres
 /// `@>` containment (type-aware scalars, nested objects, arrays).
-async fn assert_metadata_semantics(s: &dyn orch8_storage::StorageBackend, tenant: &str, seq_id: SequenceId, inst: TaskInstance) {
+async fn assert_metadata_semantics(
+    s: &dyn orch8_storage::StorageBackend,
+    tenant: &str,
+    seq_id: SequenceId,
+    inst: TaskInstance,
+) {
     use orch8_types::filter::{InstanceFilter, Pagination};
     let mut inst = inst;
     inst.metadata = serde_json::json!({

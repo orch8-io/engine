@@ -1326,8 +1326,7 @@ impl crate::WorkerStore for PostgresStorage {
         last_error: &str,
         next_attempt_at: Option<DateTime<Utc>>,
     ) -> Result<bool, StorageError> {
-        webhook_outbox::fail_attempt_fenced(self, id, claimed_at, last_error, next_attempt_at)
-            .await
+        webhook_outbox::fail_attempt_fenced(self, id, claimed_at, last_error, next_attempt_at).await
     }
 
     async fn complete_webhook_outbox_claim(

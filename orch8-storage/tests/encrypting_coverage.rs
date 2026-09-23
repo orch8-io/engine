@@ -1868,7 +1868,10 @@ async fn enc_prefixed_plaintext_is_encrypted_and_round_trips() {
     // without layering.
     let mut ctx = got.context.clone();
     ctx.data = raw.context.data.clone();
-    storage.update_instance_context(instance.id, &ctx).await.unwrap();
+    storage
+        .update_instance_context(instance.id, &ctx)
+        .await
+        .unwrap();
     let got = storage.get_instance(instance.id).await.unwrap().unwrap();
     assert_eq!(got.context.data, lookalike);
 }
