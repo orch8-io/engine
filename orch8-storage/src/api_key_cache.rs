@@ -26,6 +26,7 @@
 //! incident response (e.g. compromised-key revocation) until cross-node
 //! invalidation (e.g. Postgres `LISTEN`/`NOTIFY` or a shared cache) is added.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -62,6 +63,24 @@ fn cache() -> &'static Cache<String, ApiKeyRecord> {
             .time_to_live(CACHE_TTL)
             .build()
     })
+}
+
+/// Invalidation counters, striped by key hash. [`invalidate`] bumps the
+/// key's stripe *before* it evicts. `authenticate` snapshots the stripe
+/// before its DB lookup and re-checks it after inserting into the cache: if
+/// an invalidation ran in between, the (possibly pre-revocation) record it
+/// read is evicted again instead of being served for a full `CACHE_TTL`.
+/// Striping keeps unrelated revocations from causing spurious evictions; a
+/// collision only costs one extra lookup.
+static INVALIDATIONS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+
+fn invalidations(key_hash: &str) -> &'static AtomicU64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key_hash.hash(&mut hasher);
+    #[allow(clippy::cast_possible_truncation)]
+    let stripe = (hasher.finish() % INVALIDATIONS.len() as u64) as usize;
+    &INVALIDATIONS[stripe]
 }
 
 fn negative_cache() -> &'static Cache<String, ()> {
@@ -106,11 +125,22 @@ pub async fn authenticate(
     }
 
     let now = Utc::now();
-    let fetched = storage.lookup_api_key_by_hash(key_hash).await?;
+    // `epoch` is always the snapshot taken *before* the lookup whose result
+    // we keep: a revoke commits its DB flip before bumping, so any bump that
+    // precedes the snapshot is already visible to the lookup.
+    let mut epoch = invalidations(key_hash).load(Ordering::SeqCst);
+    let mut fetched = storage.lookup_api_key_by_hash(key_hash).await?;
+    let after = invalidations(key_hash).load(Ordering::SeqCst);
+    if after != epoch {
+        // A revoke/rotation raced our read: the row we hold may predate it.
+        // Re-read once so this request sees the committed state too.
+        epoch = after;
+        fetched = storage.lookup_api_key_by_hash(key_hash).await?;
+    }
     if let Some(ref record) = fetched {
         if record.is_active(now) {
             touch(storage, record, now);
-            cache().insert(key_hash.to_string(), record.clone()).await;
+            insert_unless_invalidated(key_hash, record, epoch).await;
         } else {
             negative_cache().insert(key_hash.to_string(), ()).await;
         }
@@ -120,6 +150,19 @@ pub async fn authenticate(
     Ok(fetched)
 }
 
+/// Cache `record` unless an [`invalidate`] ran since `epoch` was taken.
+///
+/// Revoke = DB flip, then `invalidate` (bump, then evict). If a bump landed
+/// after the snapshot, its eviction may have run before this insert, so evict
+/// again here; a bump after this check is followed by its own eviction,
+/// which runs after the insert.
+async fn insert_unless_invalidated(key_hash: &str, record: &ApiKeyRecord, epoch: u64) {
+    cache().insert(key_hash.to_string(), record.clone()).await;
+    if invalidations(key_hash).load(Ordering::SeqCst) != epoch {
+        cache().invalidate(key_hash).await;
+    }
+}
+
 /// Drop the cached entry for `key_hash` so a revoked or rotated key stops
 /// authenticating *immediately* rather than after `CACHE_TTL`.
 ///
@@ -127,6 +170,7 @@ pub async fn authenticate(
 /// revocation path (HTTP, gRPC, the encrypting decorator) invalidates the
 /// cache without the caller having to know it exists.
 pub async fn invalidate(key_hash: &str) {
+    invalidations(key_hash).fetch_add(1, Ordering::SeqCst);
     cache().invalidate(key_hash).await;
     negative_cache().invalidate(key_hash).await;
 }
@@ -150,6 +194,24 @@ mod tests {
 
     async fn sqlite() -> Arc<dyn StorageBackend> {
         Arc::new(crate::sqlite::SqliteStorage::in_memory().await.unwrap())
+    }
+
+    /// M9: a lookup that read the row before a revoke must not re-insert
+    /// the stale active record after the revoke's eviction.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_lookup_is_not_cached_after_concurrent_revoke() {
+        let minted = orch8_types::api_key::mint("acme", "race", None);
+        let hash = minted.record.key_hash.clone();
+        let epoch = invalidations(&hash).load(Ordering::SeqCst);
+        // Revoke's invalidation runs between our DB read and our insert.
+        invalidate(&hash).await;
+        insert_unless_invalidated(&hash, &minted.record, epoch).await;
+        assert!(cache().get(&hash).await.is_none());
+
+        // Without an intervening invalidation the record is cached.
+        let epoch = invalidations(&hash).load(Ordering::SeqCst);
+        insert_unless_invalidated(&hash, &minted.record, epoch).await;
+        assert!(cache().get(&hash).await.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread")]

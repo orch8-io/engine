@@ -720,28 +720,34 @@ pub trait InstanceStore: Send + Sync + 'static {
 
     // === Concurrency ===
 
-    /// Count running instances with the given concurrency key.
+    /// Count running instances of `tenant_id` with the given concurrency key.
+    /// Concurrency keys are tenant-scoped: two tenants using the same key
+    /// string never share slots.
     ///
-    /// Default delegates to [] with a single key.
+    /// Default delegates to [`Self::count_running_by_concurrency_keys`].
     async fn count_running_by_concurrency_key(
         &self,
+        tenant_id: &str,
         concurrency_key: &str,
     ) -> Result<i64, StorageError> {
         let mut map = self
-            .count_running_by_concurrency_keys(&[concurrency_key])
+            .count_running_by_concurrency_keys(&[(tenant_id, concurrency_key)])
             .await?;
-        Ok(map.remove(concurrency_key).unwrap_or(0))
+        Ok(map
+            .remove(&(tenant_id.to_owned(), concurrency_key.to_owned()))
+            .unwrap_or(0))
     }
 
-    /// Batch count running instances for multiple concurrency keys.
-    /// Returns a map from key to count.
+    /// Batch count running instances for multiple `(tenant_id,
+    /// concurrency_key)` pairs. Returns a map from pair to count; pairs with
+    /// no running instance are absent.
     async fn count_running_by_concurrency_keys(
         &self,
-        concurrency_keys: &[&str],
-    ) -> Result<HashMap<String, i64>, StorageError>;
+        keys: &[(&str, &str)],
+    ) -> Result<HashMap<(String, String), i64>, StorageError>;
 
     /// Returns the 1-based position of an instance among running instances
-    /// with the same concurrency key, ordered by ID.
+    /// of the same tenant with the same concurrency key, ordered by ID.
     /// Used to deterministically pick which instances proceed vs. defer.
     async fn concurrency_position(
         &self,
@@ -1597,6 +1603,32 @@ pub trait WorkerStore: Send + Sync + 'static {
         last_error: &str,
         next_attempt_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
+
+    /// Fenced [`Self::fail_webhook_outbox_attempt`] for dispatchers: applies
+    /// only while the row is still `in_flight` under the claim stamped
+    /// `claimed_at` (the value returned by [`Self::claim_due_webhook_outbox`]
+    /// or passed to [`Self::claim_webhook_outbox_row`]). A dispatcher whose
+    /// claim went stale and was recovered/reclaimed by another node gets
+    /// `false` and must not touch the row, instead of clobbering the new
+    /// owner's attempt count / schedule.
+    async fn fail_webhook_outbox_attempt_fenced(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+        last_error: &str,
+        next_attempt_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError>;
+
+    /// Fenced delete of a delivered row: removes it only while it is still
+    /// `in_flight` under the claim stamped `claimed_at` (see
+    /// [`Self::fail_webhook_outbox_attempt_fenced`]). Returns whether the row
+    /// was deleted. [`Self::delete_webhook_outbox`] stays unfenced for the
+    /// admin discard/redeliver paths.
+    async fn complete_webhook_outbox_claim(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     /// Reset `in_flight` rows whose claim predates `stale_before` back to
     /// `pending` — crash recovery for a dispatcher that died mid-dispatch.

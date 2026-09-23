@@ -675,10 +675,11 @@ async fn enforce_concurrency_limits(
     // Collect concurrency keys present in the batch.
     // ⚡ Bolt: Use a flat Vec and `chunk_by` instead of a HashMap to avoid allocation
     // and hashing overhead on the hot scheduling path.
-    let mut key_instances: Vec<(&str, usize)> = Vec::with_capacity(instances.len());
+    // Keys are tenant-scoped: group by (tenant_id, concurrency_key).
+    let mut key_instances: Vec<((&str, &str), usize)> = Vec::with_capacity(instances.len());
     for (idx, inst) in instances.iter().enumerate() {
         if let (Some(key), Some(_max)) = (&inst.concurrency_key, inst.max_concurrency) {
-            key_instances.push((key.as_str(), idx));
+            key_instances.push(((inst.tenant_id.as_str(), key.as_str()), idx));
         }
     }
 
@@ -687,10 +688,10 @@ async fn enforce_concurrency_limits(
     }
 
     // Sort by key first, then by original index to preserve priority order.
-    key_instances.sort_unstable_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
+    key_instances.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
     // Batch count running instances for all concurrency keys in a single query.
-    let mut keys: Vec<&str> = key_instances.iter().map(|(k, _)| *k).collect();
+    let mut keys: Vec<(&str, &str)> = key_instances.iter().map(|(k, _)| *k).collect();
     keys.dedup();
     let running_counts = storage.count_running_by_concurrency_keys(&keys).await?;
 
@@ -706,7 +707,10 @@ async fn enforce_concurrency_limits(
         // DB. This count includes the instances we just claimed (since
         // claim_due_instances already set them to Running). Subtract the batch
         // members to get the pre-existing running count.
-        let total_running = running_counts.get(key).copied().unwrap_or(0);
+        let total_running = running_counts
+            .get(&(key.0.to_owned(), key.1.to_owned()))
+            .copied()
+            .unwrap_or(0);
         #[allow(clippy::cast_possible_wrap)]
         let batch_count = chunk.len() as i64;
         let already_running = total_running - batch_count;

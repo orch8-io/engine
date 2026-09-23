@@ -598,16 +598,17 @@ impl crate::InstanceStore for PostgresStorage {
 
     async fn count_running_by_concurrency_key(
         &self,
+        tenant_id: &str,
         concurrency_key: &str,
     ) -> Result<i64, StorageError> {
-        misc::count_running_by_concurrency_key(self, concurrency_key).await
+        misc::count_running_by_concurrency_key(self, tenant_id, concurrency_key).await
     }
 
     async fn count_running_by_concurrency_keys(
         &self,
-        concurrency_keys: &[&str],
-    ) -> Result<std::collections::HashMap<String, i64>, StorageError> {
-        misc::count_running_by_concurrency_keys(self, concurrency_keys).await
+        keys: &[(&str, &str)],
+    ) -> Result<std::collections::HashMap<(String, String), i64>, StorageError> {
+        misc::count_running_by_concurrency_keys(self, keys).await
     }
 
     async fn concurrency_position(
@@ -1316,6 +1317,24 @@ impl crate::WorkerStore for PostgresStorage {
         next_attempt_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError> {
         webhook_outbox::fail_attempt(self, id, last_error, next_attempt_at).await
+    }
+
+    async fn fail_webhook_outbox_attempt_fenced(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+        last_error: &str,
+        next_attempt_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        webhook_outbox::fail_attempt_fenced(self, id, claimed_at, last_error, next_attempt_at).await
+    }
+
+    async fn complete_webhook_outbox_claim(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        webhook_outbox::complete_claim(self, id, claimed_at).await
     }
 
     async fn recover_stale_webhook_claims(

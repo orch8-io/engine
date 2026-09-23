@@ -140,18 +140,39 @@ impl EncryptingStorage {
         *id.into_uuid().as_bytes()
     }
 
+    /// True when `data` is a genuine ciphertext for instance `id`, i.e. it
+    /// carries the `enc:` prefix *and* decrypts under this key + AAD. The
+    /// prefix alone is not trusted: user plaintext such as the string
+    /// `"enc:v1:hello"` would otherwise be stored verbatim as if it were
+    /// already encrypted, then fail every read (including the claim path).
+    /// Such values are encrypted like any other plaintext instead, so they
+    /// round-trip unchanged (reads decrypt exactly one layer).
+    fn is_sealed_context(&self, id: InstanceId, data: &serde_json::Value) -> bool {
+        FieldEncryptor::is_encrypted(data)
+            && self
+                .encryptor
+                .decrypt_value_with_aad(data, &Self::instance_aad(id))
+                .is_ok()
+    }
+
+    /// [`Self::is_sealed_context`] for values encrypted without AAD
+    /// (block outputs, signal payloads, worker tasks, externalized state).
+    fn is_sealed_value(&self, value: &serde_json::Value) -> bool {
+        FieldEncryptor::is_encrypted(value) && self.encryptor.decrypt_value(value).is_ok()
+    }
+
     /// Encrypt `context.data` on a `TaskInstance`, returning a `Cow` so callers
     /// can pass the result straight through when encryption is unnecessary.
     ///
-    /// If `context.data` already carries an `enc:` prefix, the instance is
-    /// returned borrowed (no clone, no re-encryption -- re-encrypting would
+    /// If `context.data` is already a genuine ciphertext for this instance
+    /// (see [`Self::is_sealed_context`]), the instance is returned borrowed (no clone, no re-encryption -- re-encrypting would
     /// produce a layered payload that `decrypt_value` cannot unwrap in a
     /// single pass, silently corrupting round-trips).
     fn encrypt_instance<'a>(
         &self,
         instance: &'a TaskInstance,
     ) -> Result<Cow<'a, TaskInstance>, StorageError> {
-        if FieldEncryptor::is_encrypted(&instance.context.data) {
+        if self.is_sealed_context(instance.id, &instance.context.data) {
             return Ok(Cow::Borrowed(instance));
         }
         let mut inst = instance.clone();
@@ -171,7 +192,7 @@ impl EncryptingStorage {
         id: InstanceId,
         context: &'a ExecutionContext,
     ) -> Result<Cow<'a, ExecutionContext>, StorageError> {
-        if FieldEncryptor::is_encrypted(&context.data) {
+        if self.is_sealed_context(id, &context.data) {
             return Ok(Cow::Borrowed(context));
         }
         let mut ctx = context.clone();
@@ -190,7 +211,7 @@ impl EncryptingStorage {
         id: InstanceId,
         context: &mut ExecutionContext,
     ) -> Result<(), StorageError> {
-        if !FieldEncryptor::is_encrypted(&context.data) {
+        if !self.is_sealed_context(id, &context.data) {
             let aad = Self::instance_aad(id);
             context.data = self
                 .encryptor
@@ -208,7 +229,7 @@ impl EncryptingStorage {
         &self,
         value: &serde_json::Value,
     ) -> Result<serde_json::Value, StorageError> {
-        if FieldEncryptor::is_encrypted(value) {
+        if self.is_sealed_value(value) {
             return Ok(value.clone());
         }
         self.encryptor
@@ -339,7 +360,7 @@ impl EncryptingStorage {
         &self,
         output: &'a orch8_types::output::BlockOutput,
     ) -> Result<Cow<'a, orch8_types::output::BlockOutput>, StorageError> {
-        if FieldEncryptor::is_encrypted(&output.output) {
+        if self.is_sealed_value(&output.output) {
             return Ok(Cow::Borrowed(output));
         }
         let mut o = output.clone();
@@ -364,7 +385,7 @@ impl EncryptingStorage {
         &self,
         signal: &'a orch8_types::signal::Signal,
     ) -> Result<Cow<'a, orch8_types::signal::Signal>, StorageError> {
-        if FieldEncryptor::is_encrypted(&signal.payload) {
+        if self.is_sealed_value(&signal.payload) {
             return Ok(Cow::Borrowed(signal));
         }
         let mut s = signal.clone();
@@ -387,16 +408,13 @@ impl EncryptingStorage {
         &self,
         task: &'a orch8_types::worker::WorkerTask,
     ) -> Result<Cow<'a, orch8_types::worker::WorkerTask>, StorageError> {
-        if FieldEncryptor::is_encrypted(&task.params)
-            && FieldEncryptor::is_encrypted(&task.context)
-            && task
-                .output
-                .as_ref()
-                .is_none_or(FieldEncryptor::is_encrypted)
+        if self.is_sealed_value(&task.params)
+            && self.is_sealed_value(&task.context)
+            && task.output.as_ref().is_none_or(|v| self.is_sealed_value(v))
             && task
                 .resume_checkpoint
                 .as_ref()
-                .is_none_or(FieldEncryptor::is_encrypted)
+                .is_none_or(|v| self.is_sealed_value(v))
         {
             return Ok(Cow::Borrowed(task));
         }
@@ -849,7 +867,7 @@ passthrough_impl! {
     ) -> Result<u64, StorageError> {
         if instances
             .iter()
-            .all(|i| FieldEncryptor::is_encrypted(&i.context.data))
+            .all(|i| self.is_sealed_context(i.id, &i.context.data))
         {
             return self.inner.create_instances_batch(instances).await;
         }
@@ -858,6 +876,34 @@ passthrough_impl! {
             .map(|i| self.encrypt_instance(i).map(Cow::into_owned))
             .collect::<Result<_, _>>()?;
         self.inner.create_instances_batch(&encrypted).await
+    }
+
+    // The trait's default `*_admitted` bodies are a racy count-then-insert;
+    // delegate to the inner backend's atomic (transaction + tenant lock)
+    // implementation instead, encrypting first like the plain create paths.
+    async fn create_instance_admitted(
+        &self,
+        instance: &TaskInstance,
+        max_active_instances: u64,
+    ) -> Result<(), StorageError> {
+        let encrypted = self.encrypt_instance(instance)?;
+        self.inner
+            .create_instance_admitted(encrypted.as_ref(), max_active_instances)
+            .await
+    }
+
+    async fn create_instances_batch_admitted(
+        &self,
+        instances: &[TaskInstance],
+        limits: &std::collections::HashMap<orch8_types::ids::TenantId, u64>,
+    ) -> Result<u64, StorageError> {
+        let encrypted: Vec<TaskInstance> = instances
+            .iter()
+            .map(|i| self.encrypt_instance(i).map(Cow::into_owned))
+            .collect::<Result<_, _>>()?;
+        self.inner
+            .create_instances_batch_admitted(&encrypted, limits)
+            .await
     }
 
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
@@ -874,11 +920,49 @@ passthrough_impl! {
         limit: u32,
         max_per_tenant: u32,
     ) -> Result<Vec<TaskInstance>, StorageError> {
-        let mut instances = self
+        // The inner claim has already flipped every row to `running`, so one
+        // undecryptable row must not fail the whole batch: that would strand
+        // every other claimed instance in `running` until the reaper, and the
+        // bad row would be re-claimed (and fail the batch again) every tick.
+        // Decrypt per row; release a failing row back to `scheduled` with a
+        // backoff instead of failing it, since the usual cause (a missing
+        // rotation key) is an operator fix that should not destroy work.
+        const UNDECRYPTABLE_RETRY_SECS: i64 = 300;
+        let claimed = self
             .inner
             .claim_due_instances(now, limit, max_per_tenant)
             .await?;
-        self.decrypt_instances(&mut instances)?;
+        let mut instances = Vec::with_capacity(claimed.len());
+        for mut instance in claimed {
+            match self.decrypt_instance(&mut instance) {
+                Ok(()) => instances.push(instance),
+                Err(error) => {
+                    tracing::error!(
+                        instance_id = %instance.id,
+                        tenant_id = %instance.tenant_id,
+                        %error,
+                        "claimed instance context failed to decrypt; releasing it"
+                    );
+                    let retry_at = now + chrono::Duration::seconds(UNDECRYPTABLE_RETRY_SECS);
+                    if let Err(release_error) = self
+                        .inner
+                        .conditional_update_instance_state(
+                            instance.id,
+                            orch8_types::instance::InstanceState::Running,
+                            orch8_types::instance::InstanceState::Scheduled,
+                            Some(retry_at),
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            instance_id = %instance.id,
+                            error = %release_error,
+                            "failed to release undecryptable claimed instance"
+                        );
+                    }
+                }
+            }
+        }
         Ok(instances)
     }
 
@@ -1052,7 +1136,7 @@ passthrough_impl! {
         instance: &TaskInstance,
         threshold_bytes: u32,
     ) -> Result<(), StorageError> {
-        if FieldEncryptor::is_encrypted(&instance.context.data) {
+        if self.is_sealed_context(instance.id, &instance.context.data) {
             // Nothing left to externalize -- pass through untouched.
             return self
                 .inner
@@ -1080,7 +1164,7 @@ passthrough_impl! {
     ) -> Result<u64, StorageError> {
         if instances
             .iter()
-            .all(|i| FieldEncryptor::is_encrypted(&i.context.data))
+            .all(|i| self.is_sealed_context(i.id, &i.context.data))
         {
             return self
                 .inner
@@ -1090,7 +1174,7 @@ passthrough_impl! {
         let mut clones: Vec<TaskInstance> = Vec::with_capacity(instances.len());
         let mut all_refs: Vec<(InstanceId, Vec<(String, serde_json::Value)>)> = Vec::new();
         for inst in instances {
-            if FieldEncryptor::is_encrypted(&inst.context.data) {
+            if self.is_sealed_context(inst.id, &inst.context.data) {
                 clones.push(inst.clone());
                 continue;
             }
@@ -1123,7 +1207,7 @@ passthrough_impl! {
         context: &orch8_types::context::ExecutionContext,
         threshold_bytes: u32,
     ) -> Result<(), StorageError> {
-        if FieldEncryptor::is_encrypted(&context.data) {
+        if self.is_sealed_context(id, &context.data) {
             return self
                 .inner
                 .update_instance_context_externalized(id, context, threshold_bytes)
@@ -1171,8 +1255,8 @@ passthrough_impl! {
     // increment is correct as-is.
     async fn increment_total_steps(&self, id: InstanceId) -> Result<u32, StorageError>;
     async fn update_instance_current_step_started_at(&self, id: InstanceId, ts: DateTime<Utc>) -> Result<(), StorageError>;
-    async fn count_running_by_concurrency_key(&self, concurrency_key: &str) -> Result<i64, StorageError>;
-    async fn count_running_by_concurrency_keys(&self, concurrency_keys: &[&str]) -> Result<std::collections::HashMap<String, i64>, StorageError>;
+    async fn count_running_by_concurrency_key(&self, tenant_id: &str, concurrency_key: &str) -> Result<i64, StorageError>;
+    async fn count_running_by_concurrency_keys(&self, keys: &[(&str, &str)]) -> Result<std::collections::HashMap<(String, String), i64>, StorageError>;
     async fn concurrency_position(&self, instance_id: InstanceId, concurrency_key: &str) -> Result<i64, StorageError>;
     async fn recover_stale_instances(&self, stale_threshold: std::time::Duration) -> Result<u64, StorageError>;
     async fn heartbeat_instance(&self, instance_id: InstanceId) -> Result<(), StorageError>;
@@ -1645,6 +1729,8 @@ passthrough_impl! {
     async fn claim_due_webhook_outbox(&self, now: DateTime<Utc>, limit: u32) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
     async fn claim_webhook_outbox_row(&self, id: Uuid, claimed_at: DateTime<Utc>) -> Result<bool, StorageError>;
     async fn fail_webhook_outbox_attempt(&self, id: Uuid, last_error: &str, next_attempt_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
+    async fn fail_webhook_outbox_attempt_fenced(&self, id: Uuid, claimed_at: DateTime<Utc>, last_error: &str, next_attempt_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
+    async fn complete_webhook_outbox_claim(&self, id: Uuid, claimed_at: DateTime<Utc>) -> Result<bool, StorageError>;
     async fn recover_stale_webhook_claims(&self, stale_before: DateTime<Utc>) -> Result<u64, StorageError>;
     async fn record_webhook_attempt(&self, attempt: &orch8_types::webhook_delivery::WebhookDeliveryAttempt) -> Result<(), StorageError>;
     async fn list_webhook_deliveries(&self, filter: &orch8_types::webhook_delivery::DeliveryFilter, limit: u32) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliverySummary>, StorageError>;
@@ -2115,6 +2201,7 @@ passthrough_impl! {
             .collect()
     }
     async fn delete_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<(), StorageError>;
+    async fn delete_instance_kv_batch(&self, instance_id: InstanceId, keys: &[String]) -> Result<(), StorageError>;
 
     async fn set_shared_knowledge(
         &self,
@@ -2162,6 +2249,12 @@ passthrough_impl! {
         tenant_id: &str,
         namespace: &str,
         key: &str,
+    ) -> Result<(), StorageError>;
+    async fn delete_shared_knowledge_batch(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        keys: &[String],
     ) -> Result<(), StorageError>;
 
     // --- Externalized State ---

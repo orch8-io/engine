@@ -164,6 +164,44 @@ pub(super) async fn fail_attempt(
     Ok(())
 }
 
+pub(super) async fn fail_attempt_fenced(
+    store: &PostgresStorage,
+    id: Uuid,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+    last_error: &str,
+    next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "UPDATE webhook_outbox \
+         SET attempts = attempts + 1, last_error = $3, \
+             status = CASE WHEN $4 IS NULL THEN 'parked' ELSE 'pending' END, \
+             next_attempt_at = $4, claimed_at = NULL \
+         WHERE id = $1 AND status = 'in_flight' AND claimed_at = $2",
+    )
+    .bind(id)
+    .bind(claimed_at)
+    .bind(last_error)
+    .bind(next_attempt_at)
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub(super) async fn complete_claim(
+    store: &PostgresStorage,
+    id: Uuid,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "DELETE FROM webhook_outbox WHERE id = $1 AND status = 'in_flight' AND claimed_at = $2",
+    )
+    .bind(id)
+    .bind(claimed_at)
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub(super) async fn recover_stale(
     store: &PostgresStorage,
     stale_before: chrono::DateTime<chrono::Utc>,

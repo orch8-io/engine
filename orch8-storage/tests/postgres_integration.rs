@@ -411,7 +411,7 @@ fn mk_instance(tenant: &str, seq_id: SequenceId, concurrency_key: Option<&str>) 
 }
 
 #[tokio::test]
-async fn postgres_max_concurrency_roundtrips_full_u32_and_rejects_invalid_storage() {
+async fn postgres_max_concurrency_saturates_and_rejects_invalid_storage() {
     let storage = require_postgres!();
     let tenant = format!("max-concurrency-{}", Uuid::new_v4());
     let sequence_id = SequenceId::new();
@@ -429,7 +429,7 @@ async fn postgres_max_concurrency_roundtrips_full_u32_and_rejects_invalid_storag
             .unwrap()
             .unwrap()
             .max_concurrency,
-        Some(u32::MAX)
+        Some(i32::MAX.unsigned_abs())
     );
 
     inst.id = InstanceId::new();
@@ -444,7 +444,7 @@ async fn postgres_max_concurrency_roundtrips_full_u32_and_rejects_invalid_storag
             .unwrap()
             .unwrap()
             .max_concurrency,
-        Some(u32::MAX)
+        Some(i32::MAX.unsigned_abs())
     );
 
     sqlx::query("UPDATE task_instances SET max_concurrency = -1 WHERE id = $1")
@@ -1415,4 +1415,431 @@ async fn duplicate_collapsible_wake_preserves_pending_replacement_postgres() {
         vec![(new_id, "pending".into()), (old_id, "terminal".into())]
     );
     pool.close().await;
+}
+
+/// STO-N2: migration 037 created `enabled`/`alert_sent` as INTEGER and the
+/// rate columns as REAL while the storage layer decodes bool/f64, so every
+/// rollback-policy/history read failed on Postgres. Round-trips both tables.
+#[tokio::test]
+async fn postgres_rollback_policy_and_history_roundtrip() {
+    let storage = require_postgres!();
+    let tenant = format!("rollback-{}", Uuid::new_v4());
+    storage
+        .create_rollback_policy(&tenant, "seq-a", 0.125, 300, Some(10), Some(5), None)
+        .await
+        .unwrap();
+    // Upsert path (`enabled = TRUE` on conflict) must also bind correctly.
+    storage
+        .create_rollback_policy(&tenant, "seq-a", 0.25, 600, None, None, Some("https://x"))
+        .await
+        .unwrap();
+    let policy = storage
+        .get_rollback_policy(&tenant, "seq-a")
+        .await
+        .unwrap()
+        .expect("policy");
+    assert!(policy.enabled);
+    assert!((policy.error_rate_threshold - 0.25).abs() < f64::EPSILON);
+    assert_eq!(policy.time_window_secs, 600);
+    assert_eq!(policy.webhook_url.as_deref(), Some("https://x"));
+    let listed = storage
+        .list_rollback_policies(Some(&tenant), 10)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+
+    storage
+        .record_rollback(&tenant, "seq-a", 0.5, 0.25, "threshold_breach")
+        .await
+        .unwrap();
+    let history = storage
+        .list_rollback_history(Some(&tenant), Some("seq-a"), 10)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert!((history[0].error_rate - 0.5).abs() < f64::EPSILON);
+    assert!((history[0].threshold - 0.25).abs() < f64::EPSILON);
+    assert!(!history[0].alert_sent);
+}
+
+/// STO-N10: error reports are written to `telemetry_mobile_errors`; the
+/// rollback error rate must count them (`SQLite` stores them as
+/// `InstanceFailed` telemetry events and counts them).
+#[tokio::test]
+async fn postgres_error_rate_counts_error_reports() {
+    let storage = require_postgres!();
+    let tenant = format!("error-rate-{}", Uuid::new_v4());
+    assert_eq!(
+        storage
+            .query_error_rate(&tenant, "seq", 3600)
+            .await
+            .unwrap(),
+        None
+    );
+    for _ in 0..2 {
+        storage
+            .ingest_telemetry_error(
+                "RuntimeError",
+                "boom",
+                None,
+                "d1",
+                "iOS",
+                "17",
+                "1.0",
+                "0.1",
+                &tenant,
+                Some("i1"),
+                Some("seq"),
+            )
+            .await
+            .unwrap();
+    }
+    storage
+        .ingest_telemetry_event(
+            "InstanceCompleted",
+            &serde_json::json!({"sequence_name": "seq"}).to_string(),
+            "d1",
+            "iOS",
+            "17",
+            "1.0",
+            "0.1",
+            &tenant,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let rate = storage
+        .query_error_rate(&tenant, "seq", 3600)
+        .await
+        .unwrap()
+        .expect("rate");
+    assert!((rate - 2.0 / 3.0).abs() < 1e-9, "rate = {rate}");
+}
+
+/// STO-N3: concurrent admitted creates through `EncryptingStorage` must be
+/// serialized by the inner backend's tenant lock (the trait default is a
+/// racy count-then-insert that admits several under contention).
+#[tokio::test]
+async fn postgres_encrypting_admitted_create_is_atomic() {
+    let storage = require_postgres!();
+    let tenant = format!("admitted-{}", Uuid::new_v4());
+    let sequence_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, sequence_id))
+        .await
+        .unwrap();
+    let inner: Arc<dyn orch8_storage::StorageBackend> = Arc::new(storage);
+    let encrypting = Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
+        inner,
+        orch8_types::encryption::FieldEncryptor::from_hex_key(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap(),
+    ));
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let encrypting = Arc::clone(&encrypting);
+        let inst = mk_instance(&tenant, sequence_id, None);
+        handles.push(tokio::spawn(async move {
+            encrypting.create_instance_admitted(&inst, 1).await
+        }));
+    }
+    let mut admitted = 0;
+    for handle in handles {
+        if handle.await.unwrap().is_ok() {
+            admitted += 1;
+        }
+    }
+    assert_eq!(admitted, 1);
+}
+
+/// STO-N5: concurrency counts/positions are scoped by (tenant, key).
+#[tokio::test]
+async fn postgres_concurrency_key_is_tenant_scoped() {
+    let storage = require_postgres!();
+    let key = format!("shared-{}", Uuid::new_v4());
+    let tenant_a = format!("ck-a-{}", Uuid::new_v4());
+    let tenant_b = format!("ck-b-{}", Uuid::new_v4());
+    let seq_a = SequenceId::new();
+    let seq_b = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant_a, seq_a))
+        .await
+        .unwrap();
+    storage
+        .create_sequence(&mk_sequence(&tenant_b, seq_b))
+        .await
+        .unwrap();
+    let mut a = mk_instance(&tenant_a, seq_a, Some(&key));
+    a.state = InstanceState::Running;
+    storage.create_instance(&a).await.unwrap();
+    let mut b = mk_instance(&tenant_b, seq_b, Some(&key));
+    b.state = InstanceState::Running;
+    storage.create_instance(&b).await.unwrap();
+
+    let counts = storage
+        .count_running_by_concurrency_keys(&[(&tenant_a, &key), (&tenant_b, &key)])
+        .await
+        .unwrap();
+    assert_eq!(counts.get(&(tenant_a.clone(), key.clone())), Some(&1));
+    assert_eq!(counts.get(&(tenant_b.clone(), key.clone())), Some(&1));
+    assert_eq!(storage.concurrency_position(b.id, &key).await.unwrap(), 1);
+}
+
+/// M6: a claimed task with a NULL heartbeat must age from `claimed_at` and
+/// be reclaimed (a bare `heartbeat_at < cutoff` never matched NULL on PG).
+#[tokio::test]
+async fn postgres_reaper_reclaims_null_heartbeat_by_claimed_at() {
+    let s = require_postgres!();
+    let tenant = format!("t-null-hb-{}", Uuid::new_v4());
+    let handler = format!("null_hb-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let instance = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&instance).await.unwrap();
+    let task = WorkerTask {
+        id: Uuid::new_v4(),
+        instance_id: instance.id,
+        block_id: BlockId::new("step"),
+        handler_name: handler.clone(),
+        queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
+        params: serde_json::json!({}),
+        context: serde_json::json!({}),
+        attempt: 1,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        claim_epoch: 0,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+    s.create_worker_task(&task).await.unwrap();
+    assert_eq!(
+        s.claim_worker_tasks(&handler, "w", 1).await.unwrap().len(),
+        1
+    );
+    sqlx::query(
+        "UPDATE worker_tasks SET heartbeat_at = NULL, claimed_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
+    )
+    .bind(task.id)
+    .execute(s.pool())
+    .await
+    .unwrap();
+    s.reap_stale_worker_tasks(std::time::Duration::from_secs(600))
+        .await
+        .unwrap();
+    let reaped = s.get_worker_task(task.id).await.unwrap().unwrap();
+    assert_eq!(reaped.state, WorkerTaskState::Pending);
+}
+
+/// M5: outbox fail/complete are fenced on the claim timestamp.
+#[tokio::test]
+async fn postgres_webhook_outbox_fail_and_complete_are_fenced_on_claim() {
+    let s = require_postgres!();
+    let entry = WebhookOutboxEntry {
+        id: Uuid::now_v7(),
+        url: "https://hooks.example.com/fenced".into(),
+        event_type: "instance.completed".into(),
+        instance_id: None,
+        payload: serde_json::json!({}),
+        attempts: 0,
+        last_error: None,
+        created_at: Utc::now(),
+        delivery_id: Some(Uuid::now_v7()),
+        // Inserted already in flight, with claim stamps in the future, so
+        // other tests' global claim/recover sweeps never touch it.
+        status: WebhookOutboxStatus::InFlight,
+        next_attempt_at: None,
+        claimed_at: Some(Utc::now() + chrono::Duration::days(1)),
+    };
+    s.park_webhook(&entry).await.unwrap();
+    let stale_claim = entry.claimed_at.unwrap();
+    // Simulate recovery + re-claim by another node.
+    let fresh_claim = Utc::now() + chrono::Duration::days(2);
+    sqlx::query("UPDATE webhook_outbox SET claimed_at = $2 WHERE id = $1")
+        .bind(entry.id)
+        .bind(fresh_claim)
+        .execute(s.pool())
+        .await
+        .unwrap();
+    assert!(
+        !s.fail_webhook_outbox_attempt_fenced(entry.id, stale_claim, "late", None)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s.complete_webhook_outbox_claim(entry.id, stale_claim)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        s.get_webhook_outbox(entry.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .attempts,
+        0
+    );
+    // Nanosecond-precision caller timestamp still matches the stored
+    // microsecond value.
+    assert!(
+        s.complete_webhook_outbox_claim(entry.id, fresh_claim)
+            .await
+            .unwrap()
+    );
+    assert!(s.get_webhook_outbox(entry.id).await.unwrap().is_none());
+}
+
+/// M2/M3: metadata merge is shallow and the metadata filter follows Postgres
+/// `@>` containment (type-aware scalars, nested objects, arrays).
+async fn assert_metadata_semantics(
+    s: &dyn orch8_storage::StorageBackend,
+    tenant: &str,
+    seq_id: SequenceId,
+    inst: TaskInstance,
+) {
+    use orch8_types::filter::{InstanceFilter, Pagination};
+    let mut inst = inst;
+    inst.metadata = serde_json::json!({
+        "flag": true,
+        "n": 1,
+        "s": "1",
+        "nested": {"a": 1, "b": {"c": "x"}},
+        "tags": ["red", "blue", {"k": 2}],
+        "keep": "me"
+    });
+    inst.sequence_id = seq_id;
+    s.create_instance(&inst).await.unwrap();
+
+    let matches = |filter: serde_json::Value| {
+        let f = InstanceFilter {
+            tenant_id: Some(TenantId::unchecked(tenant)),
+            metadata_filter: Some(filter),
+            ..InstanceFilter::default()
+        };
+        async move {
+            s.list_instances(&f, &Pagination::default())
+                .await
+                .unwrap()
+                .len()
+                == 1
+        }
+    };
+    assert!(matches(serde_json::json!({"flag": true})).await);
+    assert!(!matches(serde_json::json!({"flag": 1})).await);
+    assert!(matches(serde_json::json!({"n": 1})).await);
+    assert!(!matches(serde_json::json!({"n": "1"})).await);
+    assert!(matches(serde_json::json!({"s": "1"})).await);
+    assert!(!matches(serde_json::json!({"s": 1})).await);
+    assert!(matches(serde_json::json!({"nested": {"b": {"c": "x"}}})).await);
+    assert!(!matches(serde_json::json!({"nested": {"b": {"c": "y"}}})).await);
+    assert!(matches(serde_json::json!({"tags": ["blue"]})).await);
+    assert!(matches(serde_json::json!({"tags": [{"k": 2}, "red"]})).await);
+    assert!(!matches(serde_json::json!({"tags": ["green"]})).await);
+    assert!(matches(serde_json::json!({})).await);
+    assert!(!matches(serde_json::json!(["x"])).await);
+
+    // Shallow merge: `nested` is replaced wholesale, `null` is stored.
+    s.merge_instance_metadata(
+        inst.id,
+        &serde_json::json!({"nested": {"z": 1}, "keep": null, "new": 2}),
+    )
+    .await
+    .unwrap();
+    let got = s.get_instance(inst.id).await.unwrap().unwrap().metadata;
+    assert_eq!(got["nested"], serde_json::json!({"z": 1}));
+    assert_eq!(got["keep"], serde_json::Value::Null);
+    assert!(got.as_object().unwrap().contains_key("keep"));
+    assert_eq!(got["new"], serde_json::json!(2));
+    assert_eq!(got["flag"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn postgres_metadata_merge_and_filter_semantics() {
+    let storage = require_postgres!();
+    let tenant = format!("meta-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let inst = mk_instance(&tenant, seq_id, None);
+    assert_metadata_semantics(&storage, &tenant, seq_id, inst).await;
+}
+
+/// Same-`created_at` outputs must resolve deterministically by `id`
+/// (`UUIDv7`, insertion order) in every reader, and a fork copy must preserve
+/// that order instead of minting random v4 ids.
+#[tokio::test]
+async fn postgres_block_output_ties_break_by_id_and_copy_preserves_order() {
+    use orch8_types::output::BlockOutput;
+    let s = require_postgres!();
+    let tenant = format!("t-out-tie-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let src = mk_instance(&tenant, seq_id, None);
+    let dst = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&src).await.unwrap();
+    s.create_instance(&dst).await.unwrap();
+    let block = BlockId::new("b");
+    let at = Utc::now();
+    for attempt in 1..=5u16 {
+        s.save_block_output(&BlockOutput {
+            id: Uuid::now_v7(),
+            instance_id: src.id,
+            block_id: block.clone(),
+            output: serde_json::json!({"attempt": attempt}),
+            output_ref: None,
+            output_size: 2,
+            attempt,
+            created_at: at,
+        })
+        .await
+        .unwrap();
+    }
+    let latest = s
+        .get_block_outputs_batch(&[(src.id, &block)])
+        .await
+        .unwrap();
+    assert_eq!(latest[&(src.id, block.clone())].attempt, 5);
+    let after: Vec<u16> = s
+        .get_outputs_after_created_at(src.id, None)
+        .await
+        .unwrap()
+        .iter()
+        .map(|o| o.attempt)
+        .collect();
+    assert_eq!(after, vec![1, 2, 3, 4, 5]);
+
+    assert_eq!(
+        s.copy_block_outputs(src.id, dst.id, std::slice::from_ref(&block))
+            .await
+            .unwrap(),
+        5
+    );
+    let copied: Vec<u16> = s
+        .get_all_outputs(dst.id)
+        .await
+        .unwrap()
+        .iter()
+        .map(|o| o.attempt)
+        .collect();
+    assert_eq!(copied, vec![1, 2, 3, 4, 5]);
+    let latest = s
+        .get_block_outputs_batch(&[(dst.id, &block)])
+        .await
+        .unwrap();
+    assert_eq!(latest[&(dst.id, block)].attempt, 5);
 }
