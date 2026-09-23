@@ -29,8 +29,8 @@ mod step_exec;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use step_exec::clamped_fire_at;
 pub use step_exec::{check_human_input, check_human_input_at};
+pub(crate) use step_exec::{clamped_fire_at, park_tree_instance_until, step_preamble_deferral};
 
 /// Result of a single tick execution, suitable for mobile/embedded callers
 /// that drive the engine manually rather than via the continuous tick loop.
@@ -331,6 +331,10 @@ pub async fn run_tick_loop(
     }
 }
 
+/// Consecutive instance-heartbeat failures after which the lease is treated
+/// as lost (the heartbeat ticks at a third of the staleness window).
+const HEARTBEAT_LEASE_LOST_AFTER: u32 = 3;
+
 /// Preserve subsecond cadence for short staleness windows. A zero threshold
 /// has no positive safe heartbeat interval; retain a nonzero fallback cadence
 /// for callers using zero for immediate recovery checks.
@@ -507,12 +511,33 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(heartbeat_interval);
                     ticker.tick().await; // first tick fires immediately; claiming already set updated_at
+                    let mut consecutive_failures: u32 = 0;
                     loop {
                         tokio::select! {
                             () = heartbeat_stop.cancelled() => break,
                             _ = ticker.tick() => {
-                                if let Err(e) = heartbeat_storage.heartbeat_instance(instance_id).await {
-                                    warn!(instance_id = %instance_id, error = %e, "instance heartbeat failed");
+                                match heartbeat_storage.heartbeat_instance(instance_id).await {
+                                    Ok(()) => consecutive_failures = 0,
+                                    Err(e) => {
+                                        consecutive_failures = consecutive_failures.saturating_add(1);
+                                        // The interval is a third of the reaper's
+                                        // staleness window, so this many misses in a row
+                                        // means the lease has (almost certainly) lapsed
+                                        // and another node may re-dispatch the step.
+                                        // The step itself is not aborted: the step path
+                                        // has no safe cancellation point, and dropping it
+                                        // mid-write is worse than the overlap.
+                                        if consecutive_failures == HEARTBEAT_LEASE_LOST_AFTER {
+                                            error!(
+                                                instance_id = %instance_id,
+                                                error = %e,
+                                                consecutive_failures,
+                                                "instance heartbeat failing repeatedly — lease likely lost; the step may be re-dispatched by the stale-instance reaper"
+                                            );
+                                        } else {
+                                            warn!(instance_id = %instance_id, error = %e, consecutive_failures, "instance heartbeat failed");
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -763,6 +788,13 @@ async fn enforce_concurrency_limits(
     Ok(instances)
 }
 
+/// Signals that justify waking a `Scheduled` instance before its
+/// `next_fire_at` (see [`process_signalled_instances`]).
+fn wakes_scheduled_instance(signal_type: &orch8_types::signal::SignalType) -> bool {
+    use orch8_types::signal::SignalType;
+    matches!(signal_type, SignalType::Pause | SignalType::Cancel)
+}
+
 /// Process signals for instances in paused/waiting state.
 ///
 /// `claim_due_instances` only picks up `scheduled` instances. Signals (resume,
@@ -796,11 +828,24 @@ async fn process_signalled_instances(
             continue;
         }
 
-        // Scheduled instances with pending signals just need a wake-up so the
-        // normal tick picks them up immediately (check_human_input will consume
-        // the signal). Skip the full signal processor to avoid invalid state
-        // transitions.
+        // Scheduled instances with a pending *control* signal just need a
+        // wake-up so the normal tick processes it immediately. Skip the full
+        // signal processor to avoid invalid state transitions.
+        //
+        // Only pause/cancel justify cutting a delay, send window, or retry
+        // backoff short. Everything else (update_context, custom signals and
+        // `human_input:<step>` responses for a step not reached yet) is
+        // consumed when the instance next runs naturally — waking for those
+        // re-armed a parked instance on every sweep, which together with a
+        // step delay was a livelock (ENG-R-N1). Storage already filters
+        // these rows; this is the backend-independent guard.
         if current_state == InstanceState::Scheduled {
+            if !signals
+                .iter()
+                .any(|s| wakes_scheduled_instance(&s.signal_type))
+            {
+                continue;
+            }
             debug!(
                 instance_id = %instance_id,
                 "waking scheduled instance with pending signal"
@@ -987,9 +1032,31 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
         }
         let deadline_outputs = prefetch_deadline_outputs(storage, &deadline_keys).await?;
         let deadline_outputs_ref = DeadlineOutputs::new(&deadline_outputs);
+        // Steps that already completed can no longer breach their deadline
+        // (mirrors `check_fast_path_deadlines`): without this, an instance
+        // Waiting on step 3 was failed for step 1's long-finished deadline.
+        let mut completed = if deadline_keys.is_empty() {
+            HashMap::new()
+        } else {
+            let mut ids: Vec<InstanceId> = deadline_keys.iter().map(|(id, _)| *id).collect();
+            ids.dedup();
+            storage.get_completed_block_ids_batch(&ids).await?
+        };
 
         for (instance, seq) in instance_sequences {
-            check_waiting_instance(ctx, instance, &seq, &deadline_outputs_ref).await?;
+            let completed_ids = completed.remove(&instance.id).unwrap_or_default();
+            // Per-instance failures (a lost CAS, a transient write error) must
+            // not abort the sweep for every other Waiting instance.
+            if let Err(e) =
+                check_waiting_instance(ctx, instance, &seq, &deadline_outputs_ref, &completed_ids)
+                    .await
+            {
+                warn!(
+                    instance_id = %instance.id,
+                    error = %e,
+                    "waiting-deadline sweep: instance check failed; continuing sweep"
+                );
+            }
         }
 
         // A short page means we reached the end of the Waiting set; otherwise
@@ -1011,10 +1078,11 @@ async fn check_waiting_instance(
     instance: &orch8_types::instance::TaskInstance,
     seq: &SequenceDefinition,
     deadline_outputs_ref: &DeadlineOutputs<'_>,
+    completed_block_ids: &[BlockId],
 ) -> Result<(), EngineError> {
     for block in &seq.blocks {
         if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
-            if step_def.deadline.is_some() {
+            if step_def.deadline.is_some() && !completed_block_ids.contains(&step_def.id) {
                 let prev = deadline_outputs_ref.get(&instance.id, &step_def.id);
                 if check_step_deadline_waiting(
                     ctx.storage,
@@ -1308,7 +1376,6 @@ struct SlaSweepContext<'a> {
     pub storage: &'a Arc<dyn StorageBackend>,
     pub sequence_cache: &'a SequenceCache,
     pub webhook_config: &'a WebhookConfig,
-    pub cancel: &'a CancellationToken,
 }
 
 /// A pending SLA alert: which instance, what kind, the sentinel block id used
@@ -1375,7 +1442,9 @@ async fn process_sla_breaches(
     storage: &Arc<dyn StorageBackend>,
     sequence_cache: &SequenceCache,
     webhook_config: &WebhookConfig,
-    cancel: &CancellationToken,
+    // Unused since alerts go through the durable outbox (no in-line
+    // delivery to cancel); kept so the sweep's call shape stays uniform.
+    _cancel: &CancellationToken,
     batch_size: u32,
     clock: &SharedClock,
     cursor: &mut SlaSweepCursor,
@@ -1387,7 +1456,6 @@ async fn process_sla_breaches(
         storage,
         sequence_cache,
         webhook_config,
-        cancel,
     };
 
     // Idle skip: the last full rotation found no SLA-bearing sequence, so
@@ -1586,7 +1654,11 @@ async fn emit_sla_alerts(
                 "tenant_id": c.tenant_id.as_str(),
             }),
         );
-        crate::webhooks::emit(ctx.webhook_config, &event, ctx.cancel).await;
+        // Durable, non-blocking enqueue: `emit` awaited a 64-permit
+        // semaphore inline on the tick loop, so a slow webhook receiver
+        // stalled scheduling engine-wide (ENG-R-N6). The outbox loop owns
+        // delivery and retries.
+        crate::webhooks::enqueue_durable(ctx.storage.as_ref(), ctx.webhook_config, &event).await;
 
         warn!(
             instance_id = %c.instance_id,
@@ -1632,6 +1704,7 @@ async fn check_step_deadline_waiting(
 /// escalation handler if configured, record a breach output, and fail the
 /// instance. The only difference is the `from_state` passed to
 /// `transition_instance`. This function captures that shared logic.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_deadline_breach(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -1676,6 +1749,34 @@ pub(crate) async fn handle_deadline_breach(
         elapsed_ms = elapsed.num_milliseconds(),
         "SLA deadline breached ({state_label})"
     );
+
+    // CAS the instance to Failed FIRST and run the side effects only if this
+    // node won: the deadline sweep runs on every node, and the escalation
+    // handler / breach output used to fire before the CAS — once per node
+    // per breach (ENG-R-N5). A lost CAS means another writer already moved
+    // the instance (failed it, cancelled it, completed it); either way this
+    // caller must stop, so report "handled".
+    match crate::lifecycle::transition_instance(
+        storage.as_ref(),
+        instance_id,
+        Some(&instance.tenant_id),
+        from_state,
+        InstanceState::Failed,
+        None,
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(EngineError::InvalidTransition { .. }) => {
+            debug!(
+                instance_id = %instance_id,
+                block_id = %step_def.id,
+                "SLA breach: instance already moved by a concurrent writer; skipping escalation"
+            );
+            return Ok(true);
+        }
+        Err(e) => return Err(e),
+    }
 
     // Invoke escalation handler if configured.
     if let Some(ref escalation) = step_def.on_deadline_breach
@@ -1731,16 +1832,11 @@ pub(crate) async fn handle_deadline_breach(
         attempt: prev_output.as_ref().map_or(0, |o| o.attempt),
         created_at: Utc::now(),
     };
-    storage.save_block_output(&breach_output).await?;
-    crate::lifecycle::transition_instance(
-        storage.as_ref(),
-        instance_id,
-        Some(&instance.tenant_id),
-        from_state,
-        InstanceState::Failed,
-        None,
-    )
-    .await?;
+    // Best-effort: the instance is already terminal, so a failed marker
+    // write must not surface as a sweep error.
+    if let Err(e) = storage.save_block_output(&breach_output).await {
+        warn!(instance_id = %instance_id, error = %e, "failed to record SLA breach output");
+    }
     crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
 
     // Wake parent: SLA deadline breach → terminal Failed.

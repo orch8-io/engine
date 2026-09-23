@@ -312,6 +312,20 @@ pub(crate) async fn execute_step_node_with_clock(
         }
     }
 
+    // Shared step preamble (delay → send_window → rate limit), the same
+    // checks the flat path runs in `scheduler::step_exec`. Previously the
+    // tree path skipped them entirely, so one composite anywhere in a
+    // sequence silently disabled every step's delay/window/rate limit. On
+    // deferral the node stays Running and the instance is parked; the
+    // evaluator's top-of-loop state guard ends this tick.
+    if let Some(fire_at) =
+        crate::scheduler::step_preamble_deferral(storage.as_ref(), instance, step_def, clock)
+            .await?
+    {
+        crate::scheduler::park_tree_instance_until(storage.as_ref(), instance.id, fire_at).await?;
+        return Ok(false);
+    }
+
     // Human-in-the-loop: if this step has `wait_for_input`, check for a
     // matching signal before running the handler. If no signal exists yet,
     // set the node to Waiting so the tree evaluator transitions the instance
