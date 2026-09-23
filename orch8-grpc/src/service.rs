@@ -20,22 +20,30 @@ use crate::WORKER_STREAM_PROTOCOL_VERSION;
 use crate::auth::{caller_tenant, enforce_tenant_create, enforce_tenant_match, scoped_tenant_id};
 use crate::proto::{self, orch8_service_server::Orch8Service};
 
+/// How long an artifact transfer waits for the client's chunk ack before
+/// abandoning the transfer (and releasing the buffered object).
+const ARTIFACT_ACK_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Clone)]
 pub struct Orch8GrpcService {
     storage: Arc<dyn StorageBackend>,
     /// Semantic cap on a single instance's serialized `ExecutionContext`.
     /// Mirrors the HTTP path's `state.max_context_bytes`. `0` disables it.
     max_context_bytes: u32,
+    /// Process shutdown signal. Long-lived bidi streams (worker stream,
+    /// artifact transfer) observe it and close, otherwise the server's
+    /// graceful shutdown waits on them forever.
+    shutdown: tokio_util::sync::CancellationToken,
+    /// Mirrors HTTP `/health/ready`: cleared when the engine tick loop or a
+    /// serving surface dies so `Health` stops reporting `ok`.
+    engine_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Orch8GrpcService {
     /// Construct with the default context-size cap
     /// ([`orch8_types::context::DEFAULT_MAX_CONTEXT_BYTES`]).
     pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
-        Self {
-            storage,
-            max_context_bytes: orch8_types::context::DEFAULT_MAX_CONTEXT_BYTES,
-        }
+        Self::with_max_context_bytes(storage, orch8_types::context::DEFAULT_MAX_CONTEXT_BYTES)
     }
 
     /// Construct with an explicit context-size cap (server wires
@@ -49,7 +57,24 @@ impl Orch8GrpcService {
         Self {
             storage,
             max_context_bytes,
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
+    }
+
+    /// Close long-lived streams when `shutdown` is cancelled.
+    #[must_use]
+    pub fn with_shutdown(mut self, shutdown: tokio_util::sync::CancellationToken) -> Self {
+        self.shutdown = shutdown;
+        self
+    }
+
+    /// Share the process readiness flag so `Health` agrees with
+    /// `/health/ready`.
+    #[must_use]
+    pub fn with_engine_ready(mut self, engine_ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.engine_ready = engine_ready;
+        self
     }
 
     /// Validate and sanitize a client-supplied instance before creation.
@@ -969,6 +994,11 @@ impl Orch8Service for Orch8GrpcService {
         &self,
         _req: Request<proto::HealthRequest>,
     ) -> Result<Response<proto::HealthResponse>, Status> {
+        if !self.engine_ready.load(std::sync::atomic::Ordering::Relaxed)
+            || self.shutdown.is_cancelled()
+        {
+            return Err(Status::unavailable("engine not ready"));
+        }
         self.storage.ping().await.map_err(storage_err)?;
         Ok(Response::new(proto::HealthResponse {
             status: "ok".into(),
@@ -1629,6 +1659,7 @@ impl Orch8Service for Orch8GrpcService {
             .await
             .map_err(|_| Status::cancelled("artifact transfer closed during handshake"))?;
 
+        let shutdown = self.shutdown.clone();
         tokio::spawn(async move {
             let mut offset = usize::try_from(resume_offset).unwrap_or(bytes.len());
             loop {
@@ -1645,17 +1676,30 @@ impl Orch8Service for Orch8GrpcService {
                     sha256: chunk_digest,
                     final_chunk,
                 };
-                if sender
-                    .send(Ok(artifact_server_frame(
+                let sent = tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    sent = sender.send(Ok(artifact_server_frame(
                         proto::artifact_transfer_server::Payload::Chunk(chunk),
-                    )))
-                    .await
-                    .is_err()
-                {
+                    ))) => sent,
+                };
+                if sent.is_err() {
                     break;
                 }
                 let expected_offset = u64::try_from(end).unwrap_or(u64::MAX);
-                match inbound.message().await {
+                let next = tokio::select! {
+                    () = shutdown.cancelled() => {
+                        let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
+                        break;
+                    }
+                    next = tokio::time::timeout(ARTIFACT_ACK_IDLE_TIMEOUT, inbound.message()) => next,
+                };
+                let Ok(next) = next else {
+                    let _ = sender.try_send(Err(Status::deadline_exceeded(
+                        "artifact acknowledgement not received in time",
+                    )));
+                    break;
+                };
+                match next {
                     Ok(Some(proto::ArtifactTransferClient {
                         payload:
                             Some(proto::artifact_transfer_client::Payload::Ack(
@@ -1813,7 +1857,19 @@ impl Orch8Service for Orch8GrpcService {
             }
             let mut outstanding = std::collections::HashSet::new();
             let mut runtime_id = initial_capabilities.map(|capabilities| capabilities.runtime_id);
-            while let Ok(Some(frame)) = inbound.message().await {
+            loop {
+                // Stop accepting frames (Demand included) on shutdown and end
+                // the response stream so graceful shutdown can complete; the
+                // worker reconnects to a live node.
+                let frame = tokio::select! {
+                    biased;
+                    () = service.shutdown.cancelled() => {
+                        let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
+                        break;
+                    }
+                    frame = inbound.message() => frame,
+                };
+                let Ok(Some(frame)) = frame else { break };
                 let result = service
                     .handle_worker_stream_frame(
                         frame,

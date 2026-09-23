@@ -254,6 +254,14 @@ async fn main() -> anyhow::Result<()> {
         .context("config loader panicked")??;
     let assembly = NodeAssembly::for_role(config.node.role);
     automatic_startup_preflight(&config, assembly)?;
+    // Reject an unsafe auth configuration before any side effect (storage
+    // connect + migrations, managed-control session, listeners).
+    validate_auth_config(
+        !config.api.api_key.is_empty(),
+        config.api.require_tenant_header,
+        insecure_auth,
+        &config.api.cors_origins,
+    )?;
     let managed_control = if config.node.managed_control_endpoint.is_empty() {
         None
     } else {
@@ -331,12 +339,6 @@ async fn main() -> anyhow::Result<()> {
     let cors = build_cors_layer(&config.api.cors_origins);
     let require_tenant = config.api.require_tenant_header;
     let has_api_key = !config.api.api_key.is_empty();
-    validate_auth_config(
-        has_api_key,
-        require_tenant,
-        insecure_auth,
-        &config.api.cors_origins,
-    )?;
 
     // Precompute the root-key digest once, then drop the cleartext key from
     // the long-lived config so the secret does not sit in memory for the
@@ -472,16 +474,20 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Engine ready");
 
-    axum::serve(
+    let http_shutdown = shutdown_token.clone();
+    let served = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_token.cancelled().await;
+        http_shutdown.cancelled().await;
         tracing::info!("Shutting down gracefully...");
     })
     .await
-    .context("HTTP server error")?;
+    .context("HTTP server error");
+    // An HTTP serve error must still stop and drain the engine, gRPC and
+    // background workers instead of dropping them mid-flight.
+    shutdown_token.cancel();
 
     drain_shutdown(
         engine_handle,
@@ -497,6 +503,7 @@ async fn main() -> anyhow::Result<()> {
     // dead collector logs a warning, never fails shutdown.
     otel.shutdown().await;
 
+    served?;
     tracing::info!("Shutdown complete");
     Ok(())
 }
@@ -914,6 +921,18 @@ fn spawn_signal_handler(
     Ok(handle)
 }
 
+/// Aligned with the HTTP body limit (`DefaultBodyLimit::max(10 MiB)`) plus
+/// slack for the protobuf envelope around the JSON payload fields.
+const GRPC_MAX_MESSAGE_BYTES: usize = 10 * 1024 * 1024 + 64 * 1024;
+/// Per-RPC deadline for producing a response (streaming RPCs return their
+/// response stream immediately, so this doesn't cap stream lifetime).
+const GRPC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const GRPC_CONCURRENCY_PER_CONNECTION: usize = 256;
+const GRPC_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const GRPC_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const GRPC_MAX_CONNECTION_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const GRPC_MAX_CONNECTION_AGE_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 async fn spawn_grpc_server(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
@@ -974,7 +993,9 @@ async fn spawn_grpc_server(
     };
 
     let grpc_service =
-        Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes);
+        Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes)
+            .with_shutdown(shutdown.clone())
+            .with_engine_ready(engine_ready.clone());
     let mut auth_layer =
         orch8_grpc::auth::GrpcAuthLayer::new(storage, root_key_digest, require_tenant)
             .with_workload_identities(workload_identities);
@@ -984,7 +1005,17 @@ async fn spawn_grpc_server(
         GrpcSurface::ContinuityGateway => auth_layer.with_allowed_rpc_paths(GATEWAY_GRPC_RPCS),
         GrpcSurface::Disabled => anyhow::bail!("disabled gRPC surface cannot be spawned"),
     };
-    let mut server = tonic::transport::Server::builder();
+    // Transport limits: bound per-RPC latency, per-connection concurrency,
+    // detect dead peers, and recycle connections so a single long-lived
+    // client can't pin resources forever (streams get a grace window to
+    // finish, then the worker reconnects).
+    let mut server = tonic::transport::Server::builder()
+        .timeout(GRPC_REQUEST_TIMEOUT)
+        .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
+        .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+        .max_connection_age(GRPC_MAX_CONNECTION_AGE)
+        .max_connection_age_grace(GRPC_MAX_CONNECTION_AGE_GRACE);
     if let Some(tls_config) = tls_config {
         server = server
             .tls_config(tls_config)
@@ -994,7 +1025,11 @@ async fn spawn_grpc_server(
         tracing::info!("gRPC server listening on {}", grpc_addr);
         if let Err(e) = server
             .layer(auth_layer)
-            .add_service(Orch8ServiceServer::new(grpc_service))
+            .add_service(
+                Orch8ServiceServer::new(grpc_service)
+                    .max_decoding_message_size(GRPC_MAX_MESSAGE_BYTES)
+                    .max_encoding_message_size(GRPC_MAX_MESSAGE_BYTES),
+            )
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
                 async move {
@@ -1355,8 +1390,15 @@ fn init_logging(config: &orch8_types::config::LoggingConfig, otel: &telemetry::O
     let filter = match EnvFilter::try_from_default_env() {
         Ok(f) => f,
         Err(e) => {
-            tracing::warn!(error = %e, rust_log = %std::env::var("RUST_LOG").unwrap_or_default(),
-                "RUST_LOG is invalid; falling back to configured log level");
+            // The subscriber isn't installed yet, so a `tracing::warn!` here
+            // would be silently dropped — report straight to stderr. An unset
+            // RUST_LOG is the normal case and stays quiet.
+            if let Ok(rust_log) = std::env::var("RUST_LOG") {
+                eprintln!(
+                    "warning: RUST_LOG={rust_log:?} is invalid ({e}); falling back to configured log level {:?}",
+                    config.level
+                );
+            }
             EnvFilter::new(&config.level)
         }
     };

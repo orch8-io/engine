@@ -665,3 +665,77 @@ async fn grpc_artifact_transfer_resumes_with_chunk_acknowledgements() {
     }
     assert_eq!(reconstructed, original[4096..]);
 }
+
+/// GRPC-H2: an open worker stream (client still connected, never closing its
+/// side) must end when the service's shutdown token fires, so the server's
+/// graceful shutdown can complete. GRPC-M3: `Health` follows readiness.
+#[tokio::test]
+async fn grpc_worker_stream_closes_on_shutdown_and_health_tracks_readiness() {
+    use orch8_grpc::proto::worker_stream_client::Payload as ClientPayload;
+
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let service = Orch8GrpcService::new(storage)
+        .with_shutdown(shutdown.clone())
+        .with_engine_ready(ready.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_shutdown = shutdown.clone();
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(Orch8ServiceServer::new(service))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                server_shutdown.cancelled_owned(),
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+
+    client
+        .health(orch8_grpc::proto::HealthRequest {})
+        .await
+        .expect("healthy while ready");
+    ready.store(false, std::sync::atomic::Ordering::Relaxed);
+    let err = client
+        .health(orch8_grpc::proto::HealthRequest {})
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unavailable);
+
+    // Keep the client side open forever (never yields after the open frame).
+    let open = worker_stream_frame(ClientPayload::Open(orch8_grpc::proto::WorkerStreamOpen {
+        worker_id: "worker-shutdown".into(),
+        handler_names: vec!["h".into()],
+        supported_features: vec!["task_delivery".into()],
+        max_in_flight: 1,
+        protocol_version: 2,
+        runtime_capabilities_json: String::new(),
+        tenant_id: "test".into(),
+    }));
+    let outbound =
+        tokio_stream::StreamExt::chain(tokio_stream::iter([open]), tokio_stream::pending());
+    let mut inbound = client.worker_stream(outbound).await.unwrap().into_inner();
+    inbound.message().await.unwrap().expect("hello");
+
+    shutdown.cancel();
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match inbound.message().await {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
+            }
+        }
+    })
+    .await;
+    assert!(drained.is_ok(), "worker stream must close on shutdown");
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("graceful shutdown must not hang on open streams")
+        .unwrap()
+        .unwrap();
+}
