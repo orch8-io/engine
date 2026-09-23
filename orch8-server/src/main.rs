@@ -511,7 +511,18 @@ fn build_app_state(
     let mobile_sync_enabled =
         std::env::var("ORCH8_MOBILE_SYNC_ENABLED").is_ok_and(|v| v == "true" || v == "1");
 
-    let push_provider: Arc<dyn orch8_push::PushProvider> = Arc::new(orch8_push::NoopPushProvider);
+    // Build the push provider from ORCH8_APNS_* / ORCH8_FCM_* env vars. With
+    // nothing configured this is the Noop provider: the outbox worker then
+    // sends nothing and the API stops enqueueing wakes (devices still poll).
+    let (apns, fcm) = orch8_push::configs_from_env()
+        .map_err(|e| anyhow::anyhow!("invalid push provider configuration: {e}"))?;
+    let push_provider: Arc<dyn orch8_push::PushProvider> = Arc::from(
+        orch8_push::create_provider(apns, fcm)
+            .map_err(|e| anyhow::anyhow!("failed to initialize push provider: {e}"))?,
+    );
+    if push_provider.is_configured() {
+        tracing::info!("Push provider configured");
+    }
 
     if mobile_sync_enabled {
         tracing::info!("Mobile sync endpoints enabled");
@@ -1041,6 +1052,10 @@ fn spawn_engine(
     })
 }
 
+/// Push-outbox retention sweep cadence (in 1s drain ticks): keeps
+/// `push_wake_outbox` bounded even when no provider is configured.
+const PUSH_PRUNE_EVERY_TICKS: u32 = 600;
+
 fn spawn_push_outbox_worker(
     storage: Arc<dyn StorageBackend>,
     provider: Arc<dyn orch8_push::PushProvider>,
@@ -1056,16 +1071,27 @@ fn spawn_push_outbox_worker(
         ),
         None => worker,
     };
+    let retention = chrono::Duration::days(7);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut ticks: u32 = 0;
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    if let Err(error) = worker.drain_once(chrono::Utc::now()).await {
+                    let now = chrono::Utc::now();
+                    if let Err(error) = worker.drain_once(now).await {
                         tracing::warn!(%error, "push outbox drain failed");
                     }
+                    if ticks.is_multiple_of(PUSH_PRUNE_EVERY_TICKS) {
+                        match worker.prune_once(now, retention).await {
+                            Ok(0) => {}
+                            Ok(n) => tracing::debug!(pruned = n, "push outbox retention sweep"),
+                            Err(error) => tracing::warn!(%error, "push outbox prune failed"),
+                        }
+                    }
+                    ticks = ticks.wrapping_add(1);
                 }
             }
         }

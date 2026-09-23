@@ -14,14 +14,15 @@ impl crate::MobileSyncStore for PostgresStorage {
         &self,
         device: &crate::MobileDevice,
     ) -> Result<(), StorageError> {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO mobile_devices (device_id, tenant_id, push_token, platform, app_version, active, registered_at)
              VALUES ($1, $2, $3, $4, $5, TRUE, now())
              ON CONFLICT(device_id) DO UPDATE SET
                push_token = EXCLUDED.push_token,
                platform = EXCLUDED.platform,
                app_version = EXCLUDED.app_version,
-               active = TRUE",
+               active = TRUE
+             WHERE mobile_devices.tenant_id = EXCLUDED.tenant_id",
         )
         .bind(&device.device_id)
         .bind(&device.tenant_id)
@@ -31,6 +32,14 @@ impl crate::MobileSyncStore for PostgresStorage {
         .execute(&self.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
+        // The upsert only updates a row owned by the same tenant; 0 rows means
+        // the device id belongs to another tenant (never overwrite its token).
+        if result.rows_affected() == 0 {
+            return Err(StorageError::Conflict(format!(
+                "device {} is registered to another tenant",
+                device.device_id
+            )));
+        }
         Ok(())
     }
 

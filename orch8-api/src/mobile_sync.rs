@@ -301,6 +301,27 @@ async fn handle_sync(
     }))
 }
 
+/// Persist a server→device command, with a push wake only when a real push
+/// provider is configured. With the Noop provider nothing ever drains the
+/// wake outbox, so enqueueing would only grow it; the device still picks the
+/// command up on its next poll.
+async fn enqueue_command(
+    state: &AppState,
+    command: &MobileCommand,
+    tenant_id: &str,
+) -> Result<(), ApiError> {
+    let result = if state.push_provider.is_configured() {
+        state
+            .storage
+            .create_mobile_command_with_wake(command, tenant_id, chrono::Utc::now())
+            .await
+            .map(|_| ())
+    } else {
+        state.storage.create_mobile_command(command).await
+    };
+    result.map_err(|e| ApiError::from_storage(e, "mobile_commands"))
+}
+
 // ---------------------------------------------------------------------------
 // POST /mobile/devices/register
 // ---------------------------------------------------------------------------
@@ -580,11 +601,7 @@ async fn resolve_approval(
         acked_at: None,
     };
 
-    state
-        .storage
-        .create_mobile_command_with_wake(&command, &approval.tenant_id, chrono::Utc::now())
-        .await
-        .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
+    enqueue_command(&state, &command, &approval.tenant_id).await?;
 
     debug!(approval_id = %id, device_id = %approval.device_id, "approval resolved");
     Ok(StatusCode::OK)
@@ -676,11 +693,7 @@ async fn create_command(
         acked_at: None,
     };
 
-    state
-        .storage
-        .create_mobile_command_with_wake(&command, &device.tenant_id, chrono::Utc::now())
-        .await
-        .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
+    enqueue_command(&state, &command, &device.tenant_id).await?;
 
     Ok(StatusCode::CREATED)
 }

@@ -12,14 +12,15 @@ pub(super) async fn register_mobile_device(
     storage: &SqliteStorage,
     device: &crate::MobileDevice,
 ) -> Result<(), StorageError> {
-    sqlx::query(
+    let result = sqlx::query(
         "INSERT INTO mobile_devices (device_id, tenant_id, push_token, platform, app_version, active, registered_at)
          VALUES (?, ?, ?, ?, ?, 1, datetime('now'))
          ON CONFLICT(device_id) DO UPDATE SET
            push_token = excluded.push_token,
            platform = excluded.platform,
            app_version = excluded.app_version,
-           active = 1",
+           active = 1
+         WHERE mobile_devices.tenant_id = excluded.tenant_id",
     )
     .bind(&device.device_id)
     .bind(&device.tenant_id)
@@ -29,6 +30,14 @@ pub(super) async fn register_mobile_device(
     .execute(&storage.pool)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;
+    // The upsert only updates a row owned by the same tenant; 0 rows means
+    // the device id belongs to another tenant (never overwrite its token).
+    if result.rows_affected() == 0 {
+        return Err(StorageError::Conflict(format!(
+            "device {} is registered to another tenant",
+            device.device_id
+        )));
+    }
     Ok(())
 }
 
