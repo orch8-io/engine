@@ -29,7 +29,7 @@ mod step_exec;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use step_exec::clamped_fire_at;
+pub(crate) use step_exec::{HUMAN_GATE_MARKER, clamped_fire_at};
 pub use step_exec::{check_human_input, check_human_input_at};
 
 /// Result of a single tick execution, suitable for mobile/embedded callers

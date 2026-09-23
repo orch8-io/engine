@@ -16,7 +16,7 @@ use crate::handlers::HandlerRegistry;
 pub async fn execute_cancellation_scope(
     storage: &dyn StorageBackend,
     _handlers: &HandlerRegistry,
-    _instance: &TaskInstance,
+    instance: &TaskInstance,
     node: &ExecutionNode,
     _scope_def: &CancellationScopeDef,
     tree: &[ExecutionNode],
@@ -28,30 +28,16 @@ pub async fn execute_cancellation_scope(
         return Ok(true);
     }
 
-    // If all children are terminal, the scope is done.
-    if evaluator::all_terminal(&children) {
-        if evaluator::any_failed(&children) {
-            evaluator::fail_node(storage, node.id).await?;
-        } else {
-            evaluator::complete_node(storage, node.id).await?;
-        }
-        return Ok(true);
-    }
-
-    // Activate the next pending child (sequential execution).
-    for child in &children {
-        if child.state == NodeState::Pending {
-            storage
-                .update_node_state(child.id, NodeState::Running)
-                .await?;
-            return Ok(true);
-        }
-        // If a child is still running/waiting, wait for it.
-        if matches!(child.state, NodeState::Running | NodeState::Waiting) {
-            return Ok(true);
-        }
-    }
-
+    // Sequential cursor with fail-fast: a failed child stops the scope
+    // instead of letting its successors run.
+    let final_state = match evaluator::advance_sequence(storage, &children).await? {
+        evaluator::SeqProgress::Advanced | evaluator::SeqProgress::Blocked => return Ok(true),
+        evaluator::SeqProgress::Failed => NodeState::Failed,
+        // A cancelled child (e.g. an explicitly cancelled step) ends the
+        // scope; like before, only a genuine failure fails it.
+        evaluator::SeqProgress::Cancelled | evaluator::SeqProgress::Done => NodeState::Completed,
+    };
+    evaluator::settle_composite(storage, instance.id, tree, node.id, final_state).await?;
     Ok(true)
 }
 
@@ -488,5 +474,46 @@ mod tests {
         assert_eq!(node_by_block(&after, "done").state, NodeState::Completed);
         assert_eq!(node_by_block(&after, "next").state, NodeState::Running);
         assert_eq!(node_by_block(&after, "sc").state, NodeState::Running);
+    }
+
+    /// Run-past-failure: a failed child fails the scope immediately; the
+    /// next child never starts.
+    #[tokio::test]
+    async fn cs9_failed_child_stops_scope() {
+        let inst_id = InstanceId::new();
+        let scope = mk_node(
+            inst_id,
+            "scope",
+            BlockType::CancellationScope,
+            None,
+            NodeState::Running,
+        );
+        let a = mk_node(
+            inst_id,
+            "a",
+            BlockType::Step,
+            Some(scope.id),
+            NodeState::Failed,
+        );
+        let b = mk_node(
+            inst_id,
+            "b",
+            BlockType::Step,
+            Some(scope.id),
+            NodeState::Pending,
+        );
+        let (s, tree) = setup(vec![scope.clone(), a, b.clone()], inst_id).await;
+        let inst = mk_instance(inst_id);
+        let def = CancellationScopeDef {
+            id: BlockId::new("scope"),
+            blocks: vec![],
+        };
+        execute_cancellation_scope(&s, &HandlerRegistry::new(), &inst, &scope, &def, &tree)
+            .await
+            .unwrap();
+        let after = s.get_execution_tree(inst_id).await.unwrap();
+        let state = |id| after.iter().find(|n| n.id == id).unwrap().state;
+        assert_eq!(state(scope.id), NodeState::Failed);
+        assert_eq!(state(b.id), NodeState::Skipped, "successor must never run");
     }
 }

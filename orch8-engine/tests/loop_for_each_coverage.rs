@@ -201,8 +201,9 @@ async fn loop_falsy_condition_completes_without_activating_body() {
         .unwrap();
     let tree = refresh(&storage, &instance).await;
     assert_eq!(find_by_block(&tree, "lp").state, NodeState::Completed);
-    // Body child must not have been activated.
-    assert_eq!(find_by_block(&tree, "body").state, NodeState::Pending);
+    // Body child must not have been activated; completing the loop settles
+    // the never-started body as Skipped (no orphaned Pending nodes).
+    assert_eq!(find_by_block(&tree, "body").state, NodeState::Skipped);
 }
 
 // #149 — first tick with truthy condition activates body.
@@ -406,7 +407,8 @@ async fn loop_preexisting_marker_at_cap_short_circuits() {
         .unwrap();
     let tree = refresh(&storage, &instance).await;
     assert_eq!(find_by_block(&tree, "lp").state, NodeState::Completed);
-    assert_eq!(find_by_block(&tree, "body").state, NodeState::Pending);
+    // Never started → settled as Skipped when the loop completes.
+    assert_eq!(find_by_block(&tree, "body").state, NodeState::Skipped);
 }
 
 // #154 — running body leaves loop untouched (no flipping, no counter bump).
