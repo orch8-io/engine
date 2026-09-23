@@ -83,8 +83,8 @@ if [[ "$unit_count" -ne 1942 ]]; then
   exit 1
 fi
 
-if [[ "$e2e_count" -ne 413 ]]; then
-  echo "expected exactly 413 expanded Node E2E tests, found $e2e_count" >&2
+if [[ "$e2e_count" -ne 421 ]]; then
+  echo "expected exactly 421 expanded Node E2E tests, found $e2e_count" >&2
   exit 1
 fi
 

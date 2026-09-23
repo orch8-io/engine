@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload. `StorageBackend::get_externalized_state` /
   `batch_get_externalized_state` now take the owner instance id.
 - **Worker commands** carry a `tenant_id`; tenant-scoped gRPC worker streams
-  only receive and ack their own tenant's commands (migration 094).
+  only receive and ack their own tenant's commands (migration 088).
 
 ### Added
 

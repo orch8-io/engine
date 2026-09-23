@@ -52,7 +52,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub(crate) const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 94;
+pub const STORAGE_SCHEMA_VERSION: u32 = 88;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
