@@ -548,3 +548,84 @@ async fn rollback_history_triggered_at_survives_read_not_replaced_with_now() {
          not be silently replaced with the current read time"
     );
 }
+
+/// Sequence delete must not orphan per-instance history that has no FK
+/// cascade on SQLite (`step_logs`, `audit_log`, `usage_events`) nor the
+/// parent-scoped `emit_event_dedupe` rows; instance purge must also drop the
+/// dedupe rows.
+#[tokio::test]
+async fn delete_sequence_and_purge_leave_no_orphans() {
+    use orch8_storage::{DedupeScope, SequenceStore};
+    let s = store().await;
+    let inst = make_instance(InstanceState::Completed);
+    s.create_instance(&inst).await.unwrap();
+    s.append_step_logs(
+        inst.id,
+        &BlockId::new("s1"),
+        &[orch8_types::step_log::StepLogEntry {
+            ts: Utc::now(),
+            level: "info".into(),
+            message: "x".into(),
+        }],
+    )
+    .await
+    .unwrap();
+    s.append_audit_log(&orch8_types::audit::AuditLogEntry {
+        id: Uuid::now_v7(),
+        instance_id: inst.id,
+        tenant_id: inst.tenant_id.clone(),
+        event_type: "state_transition".into(),
+        from_state: None,
+        to_state: None,
+        block_id: None,
+        details: json!({}),
+        created_at: Utc::now(),
+    })
+    .await
+    .unwrap();
+    s.record_usage_event(&orch8_storage::UsageEvent {
+        tenant_id: inst.tenant_id.as_str().to_string(),
+        instance_id: Some(inst.id),
+        block_id: None,
+        kind: "llm_tokens".into(),
+        model: "m".into(),
+        input_tokens: 1,
+        output_tokens: 1,
+        created_at: Utc::now(),
+    })
+    .await
+    .unwrap();
+    s.record_or_get_emit_dedupe(&DedupeScope::Parent(inst.id), "k", InstanceId::new())
+        .await
+        .unwrap();
+
+    s.delete_sequence(inst.sequence_id).await.unwrap();
+
+    assert!(s.list_step_logs(inst.id).await.unwrap().is_empty());
+    assert!(s.list_audit_log(inst.id, 10).await.unwrap().is_empty());
+    assert_eq!(s.query_instance_usage_totals(inst.id).await.unwrap(), (0, 0));
+    let dedupe: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emit_event_dedupe")
+        .fetch_one(s.pool())
+        .await
+        .unwrap();
+    assert_eq!(dedupe, 0);
+
+    // Purge path.
+    let mut old = make_instance(InstanceState::Completed);
+    old.updated_at = Utc::now() - chrono::Duration::days(1);
+    s.create_instance(&old).await.unwrap();
+    s.record_or_get_emit_dedupe(&DedupeScope::Parent(old.id), "k", InstanceId::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        s.delete_terminal_instances(Utc::now() - chrono::Duration::hours(1), 10)
+            .await
+            .unwrap(),
+        1
+    );
+    let dedupe: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM emit_event_dedupe")
+        .fetch_one(s.pool())
+        .await
+        .unwrap();
+    assert_eq!(dedupe, 0);
+}

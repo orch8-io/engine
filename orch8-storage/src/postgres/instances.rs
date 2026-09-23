@@ -1225,6 +1225,14 @@ pub(super) async fn delete_terminal_instances(
         };
         sqlx::query(sql).bind(&ids).execute(&mut *tx).await?;
     }
+    // Parent-scoped dedupe rows of a purged parent can never match again.
+    sqlx::query(
+        "DELETE FROM emit_event_dedupe \
+         WHERE scope_kind = 'parent' AND scope_value = ANY($1::uuid[]::text[])",
+    )
+    .bind(&ids)
+    .execute(&mut *tx)
+    .await?;
 
     let result = sqlx::query("DELETE FROM task_instances WHERE id = ANY($1)")
         .bind(&ids)

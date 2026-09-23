@@ -1576,3 +1576,174 @@ async fn postgres_concurrency_key_is_tenant_scoped() {
     assert_eq!(counts.get(&(tenant_b.clone(), key.clone())), Some(&1));
     assert_eq!(storage.concurrency_position(b.id, &key).await.unwrap(), 1);
 }
+
+/// M6: a claimed task with a NULL heartbeat must age from `claimed_at` and
+/// be reclaimed (a bare `heartbeat_at < cutoff` never matched NULL on PG).
+#[tokio::test]
+async fn postgres_reaper_reclaims_null_heartbeat_by_claimed_at() {
+    let s = require_postgres!();
+    let tenant = format!("t-null-hb-{}", Uuid::new_v4());
+    let handler = format!("null_hb-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let instance = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&instance).await.unwrap();
+    let task = WorkerTask {
+        id: Uuid::new_v4(),
+        instance_id: instance.id,
+        block_id: BlockId::new("step"),
+        handler_name: handler.clone(),
+        queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
+        params: serde_json::json!({}),
+        context: serde_json::json!({}),
+        attempt: 1,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        claim_epoch: 0,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+    s.create_worker_task(&task).await.unwrap();
+    assert_eq!(s.claim_worker_tasks(&handler, "w", 1).await.unwrap().len(), 1);
+    sqlx::query(
+        "UPDATE worker_tasks SET heartbeat_at = NULL, claimed_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
+    )
+    .bind(task.id)
+    .execute(s.pool())
+    .await
+    .unwrap();
+    s.reap_stale_worker_tasks(std::time::Duration::from_secs(600))
+        .await
+        .unwrap();
+    let reaped = s.get_worker_task(task.id).await.unwrap().unwrap();
+    assert_eq!(reaped.state, WorkerTaskState::Pending);
+}
+
+/// M5: outbox fail/complete are fenced on the claim timestamp.
+#[tokio::test]
+async fn postgres_webhook_outbox_fail_and_complete_are_fenced_on_claim() {
+    let s = require_postgres!();
+    let entry = WebhookOutboxEntry {
+        id: Uuid::now_v7(),
+        url: "https://hooks.example.com/fenced".into(),
+        event_type: "instance.completed".into(),
+        instance_id: None,
+        payload: serde_json::json!({}),
+        attempts: 0,
+        last_error: None,
+        created_at: Utc::now(),
+        delivery_id: Some(Uuid::now_v7()),
+        // Inserted already in flight, with claim stamps in the future, so
+        // other tests' global claim/recover sweeps never touch it.
+        status: WebhookOutboxStatus::InFlight,
+        next_attempt_at: None,
+        claimed_at: Some(Utc::now() + chrono::Duration::days(1)),
+    };
+    s.park_webhook(&entry).await.unwrap();
+    let stale_claim = entry.claimed_at.unwrap();
+    // Simulate recovery + re-claim by another node.
+    let fresh_claim = Utc::now() + chrono::Duration::days(2);
+    sqlx::query("UPDATE webhook_outbox SET claimed_at = $2 WHERE id = $1")
+        .bind(entry.id)
+        .bind(fresh_claim)
+        .execute(s.pool())
+        .await
+        .unwrap();
+    assert!(
+        !s.fail_webhook_outbox_attempt_fenced(entry.id, stale_claim, "late", None)
+            .await
+            .unwrap()
+    );
+    assert!(!s.complete_webhook_outbox_claim(entry.id, stale_claim).await.unwrap());
+    assert_eq!(
+        s.get_webhook_outbox(entry.id).await.unwrap().unwrap().attempts,
+        0
+    );
+    // Nanosecond-precision caller timestamp still matches the stored
+    // microsecond value.
+    assert!(s.complete_webhook_outbox_claim(entry.id, fresh_claim).await.unwrap());
+    assert!(s.get_webhook_outbox(entry.id).await.unwrap().is_none());
+}
+
+/// M2/M3: metadata merge is shallow and the metadata filter follows Postgres
+/// `@>` containment (type-aware scalars, nested objects, arrays).
+async fn assert_metadata_semantics(s: &dyn orch8_storage::StorageBackend, tenant: &str, seq_id: SequenceId, inst: TaskInstance) {
+    use orch8_types::filter::{InstanceFilter, Pagination};
+    let mut inst = inst;
+    inst.metadata = serde_json::json!({
+        "flag": true,
+        "n": 1,
+        "s": "1",
+        "nested": {"a": 1, "b": {"c": "x"}},
+        "tags": ["red", "blue", {"k": 2}],
+        "keep": "me"
+    });
+    inst.sequence_id = seq_id;
+    s.create_instance(&inst).await.unwrap();
+
+    let matches = |filter: serde_json::Value| {
+        let f = InstanceFilter {
+            tenant_id: Some(TenantId::unchecked(tenant)),
+            metadata_filter: Some(filter),
+            ..InstanceFilter::default()
+        };
+        async move {
+            s.list_instances(&f, &Pagination::default())
+                .await
+                .unwrap()
+                .len()
+                == 1
+        }
+    };
+    assert!(matches(serde_json::json!({"flag": true})).await);
+    assert!(!matches(serde_json::json!({"flag": 1})).await);
+    assert!(matches(serde_json::json!({"n": 1})).await);
+    assert!(!matches(serde_json::json!({"n": "1"})).await);
+    assert!(matches(serde_json::json!({"s": "1"})).await);
+    assert!(!matches(serde_json::json!({"s": 1})).await);
+    assert!(matches(serde_json::json!({"nested": {"b": {"c": "x"}}})).await);
+    assert!(!matches(serde_json::json!({"nested": {"b": {"c": "y"}}})).await);
+    assert!(matches(serde_json::json!({"tags": ["blue"]})).await);
+    assert!(matches(serde_json::json!({"tags": [{"k": 2}, "red"]})).await);
+    assert!(!matches(serde_json::json!({"tags": ["green"]})).await);
+    assert!(matches(serde_json::json!({})).await);
+    assert!(!matches(serde_json::json!(["x"])).await);
+
+    // Shallow merge: `nested` is replaced wholesale, `null` is stored.
+    s.merge_instance_metadata(
+        inst.id,
+        &serde_json::json!({"nested": {"z": 1}, "keep": null, "new": 2}),
+    )
+    .await
+    .unwrap();
+    let got = s.get_instance(inst.id).await.unwrap().unwrap().metadata;
+    assert_eq!(got["nested"], serde_json::json!({"z": 1}));
+    assert_eq!(got["keep"], serde_json::Value::Null);
+    assert!(got.as_object().unwrap().contains_key("keep"));
+    assert_eq!(got["new"], serde_json::json!(2));
+    assert_eq!(got["flag"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn postgres_metadata_merge_and_filter_semantics() {
+    let storage = require_postgres!();
+    let tenant = format!("meta-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let inst = mk_instance(&tenant, seq_id, None);
+    assert_metadata_semantics(&storage, &tenant, seq_id, inst).await;
+}

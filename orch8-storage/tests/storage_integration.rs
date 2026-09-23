@@ -2759,6 +2759,20 @@ async fn bulk_reschedule() {
     // Shift forward by 3600 seconds (1 hour).
     let shifted = s.bulk_reschedule(&filter, 3600).await.unwrap();
     assert_eq!(shifted, 5);
+
+    // M1: the shifted rows must actually be in the future -- the old
+    // `datetime()` rewrite stored a space-separated timestamp that sorted
+    // before every RFC 3339 `now`, so they were claimed immediately.
+    let claimed = s
+        .claim_due_instances(Utc::now(), 10, 0)
+        .await
+        .unwrap();
+    assert!(claimed.is_empty(), "rescheduled rows must not fire yet");
+    let later = s
+        .claim_due_instances(now + chrono::Duration::seconds(3601), 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(later.len(), 5);
 }
 
 #[tokio::test]
@@ -5125,4 +5139,136 @@ async fn claim_concurrency_key_is_tenant_scoped() {
     let claimed = s.claim_due_instances(Utc::now(), 10, 0).await.unwrap();
     assert!(claimed.iter().any(|i| i.id == other.id));
     assert_eq!(s.concurrency_position(other.id, "shared").await.unwrap(), 1);
+}
+
+/// M5: a dispatcher whose outbox claim went stale (and was recovered +
+/// re-claimed by another node) must not be able to fail or delete the row.
+#[tokio::test]
+async fn webhook_outbox_fail_and_complete_are_fenced_on_claim() {
+    use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
+    let s = store().await;
+    let entry = WebhookOutboxEntry {
+        id: uuid::Uuid::now_v7(),
+        url: "https://hooks.example.com/x".into(),
+        event_type: "instance.completed".into(),
+        instance_id: None,
+        payload: serde_json::json!({}),
+        attempts: 0,
+        last_error: None,
+        created_at: Utc::now(),
+        delivery_id: Some(uuid::Uuid::now_v7()),
+        status: WebhookOutboxStatus::Pending,
+        next_attempt_at: None,
+        claimed_at: None,
+    };
+    s.park_webhook(&entry).await.unwrap();
+    let stale_claim = Utc::now() - chrono::Duration::seconds(60);
+    assert!(s.claim_webhook_outbox_row(entry.id, stale_claim).await.unwrap());
+    assert_eq!(
+        s.recover_stale_webhook_claims(Utc::now()).await.unwrap(),
+        1
+    );
+    let fresh_claim = Utc::now();
+    assert!(s.claim_webhook_outbox_row(entry.id, fresh_claim).await.unwrap());
+
+    assert!(
+        !s.fail_webhook_outbox_attempt_fenced(entry.id, stale_claim, "late", None)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s.complete_webhook_outbox_claim(entry.id, stale_claim)
+            .await
+            .unwrap()
+    );
+    let row = s.get_webhook_outbox(entry.id).await.unwrap().unwrap();
+    assert_eq!(row.status, WebhookOutboxStatus::InFlight);
+    assert_eq!(row.attempts, 0);
+
+    assert!(
+        s.fail_webhook_outbox_attempt_fenced(
+            entry.id,
+            fresh_claim,
+            "boom",
+            Some(Utc::now() + chrono::Duration::seconds(5))
+        )
+        .await
+        .unwrap()
+    );
+    let row = s.get_webhook_outbox(entry.id).await.unwrap().unwrap();
+    assert_eq!(row.status, WebhookOutboxStatus::Pending);
+    assert_eq!(row.attempts, 1);
+
+    let reclaim = Utc::now();
+    assert!(s.claim_webhook_outbox_row(entry.id, reclaim).await.unwrap());
+    assert!(s.complete_webhook_outbox_claim(entry.id, reclaim).await.unwrap());
+    assert!(s.get_webhook_outbox(entry.id).await.unwrap().is_none());
+}
+
+/// M2/M3: metadata merge is shallow and the metadata filter follows Postgres
+/// `@>` containment (type-aware scalars, nested objects, arrays).
+async fn assert_metadata_semantics(s: &dyn orch8_storage::StorageBackend, tenant: &str, seq_id: SequenceId, inst: TaskInstance) {
+    use orch8_types::filter::{InstanceFilter, Pagination};
+    let mut inst = inst;
+    inst.metadata = serde_json::json!({
+        "flag": true,
+        "n": 1,
+        "s": "1",
+        "nested": {"a": 1, "b": {"c": "x"}},
+        "tags": ["red", "blue", {"k": 2}],
+        "keep": "me"
+    });
+    inst.sequence_id = seq_id;
+    s.create_instance(&inst).await.unwrap();
+
+    let matches = |filter: serde_json::Value| {
+        let f = InstanceFilter {
+            tenant_id: Some(TenantId::unchecked(tenant)),
+            metadata_filter: Some(filter),
+            ..InstanceFilter::default()
+        };
+        async move {
+            s.list_instances(&f, &Pagination::default())
+                .await
+                .unwrap()
+                .len()
+                == 1
+        }
+    };
+    assert!(matches(serde_json::json!({"flag": true})).await);
+    assert!(!matches(serde_json::json!({"flag": 1})).await);
+    assert!(matches(serde_json::json!({"n": 1})).await);
+    assert!(!matches(serde_json::json!({"n": "1"})).await);
+    assert!(matches(serde_json::json!({"s": "1"})).await);
+    assert!(!matches(serde_json::json!({"s": 1})).await);
+    assert!(matches(serde_json::json!({"nested": {"b": {"c": "x"}}})).await);
+    assert!(!matches(serde_json::json!({"nested": {"b": {"c": "y"}}})).await);
+    assert!(matches(serde_json::json!({"tags": ["blue"]})).await);
+    assert!(matches(serde_json::json!({"tags": [{"k": 2}, "red"]})).await);
+    assert!(!matches(serde_json::json!({"tags": ["green"]})).await);
+    assert!(matches(serde_json::json!({})).await);
+    assert!(!matches(serde_json::json!(["x"])).await);
+
+    // Shallow merge: `nested` is replaced wholesale, `null` is stored.
+    s.merge_instance_metadata(
+        inst.id,
+        &serde_json::json!({"nested": {"z": 1}, "keep": null, "new": 2}),
+    )
+    .await
+    .unwrap();
+    let got = s.get_instance(inst.id).await.unwrap().unwrap().metadata;
+    assert_eq!(got["nested"], serde_json::json!({"z": 1}));
+    assert_eq!(got["keep"], serde_json::Value::Null);
+    assert!(got.as_object().unwrap().contains_key("keep"));
+    assert_eq!(got["new"], serde_json::json!(2));
+    assert_eq!(got["flag"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn sqlite_metadata_merge_and_filter_match_postgres_semantics() {
+    let s = store().await;
+    let seq = make_sequence("t_meta");
+    s.create_sequence(&seq).await.unwrap();
+    let inst = make_instance("t_meta", seq.id);
+    assert_metadata_semantics(&s, "t_meta", seq.id, inst).await;
 }
