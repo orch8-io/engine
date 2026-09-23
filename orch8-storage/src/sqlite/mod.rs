@@ -859,16 +859,17 @@ impl crate::InstanceStore for SqliteStorage {
 
     async fn count_running_by_concurrency_key(
         &self,
+        tenant_id: &str,
         concurrency_key: &str,
     ) -> Result<i64, StorageError> {
-        misc::count_running_by_concurrency_key(self, concurrency_key).await
+        misc::count_running_by_concurrency_key(self, tenant_id, concurrency_key).await
     }
 
     async fn count_running_by_concurrency_keys(
         &self,
-        concurrency_keys: &[&str],
-    ) -> Result<std::collections::HashMap<String, i64>, StorageError> {
-        misc::count_running_by_concurrency_keys(self, concurrency_keys).await
+        keys: &[(&str, &str)],
+    ) -> Result<std::collections::HashMap<(String, String), i64>, StorageError> {
+        misc::count_running_by_concurrency_keys(self, keys).await
     }
 
     async fn concurrency_position(

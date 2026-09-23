@@ -1258,8 +1258,8 @@ passthrough_impl! {
     // increment is correct as-is.
     async fn increment_total_steps(&self, id: InstanceId) -> Result<u32, StorageError>;
     async fn update_instance_current_step_started_at(&self, id: InstanceId, ts: DateTime<Utc>) -> Result<(), StorageError>;
-    async fn count_running_by_concurrency_key(&self, concurrency_key: &str) -> Result<i64, StorageError>;
-    async fn count_running_by_concurrency_keys(&self, concurrency_keys: &[&str]) -> Result<std::collections::HashMap<String, i64>, StorageError>;
+    async fn count_running_by_concurrency_key(&self, tenant_id: &str, concurrency_key: &str) -> Result<i64, StorageError>;
+    async fn count_running_by_concurrency_keys(&self, keys: &[(&str, &str)]) -> Result<std::collections::HashMap<(String, String), i64>, StorageError>;
     async fn concurrency_position(&self, instance_id: InstanceId, concurrency_key: &str) -> Result<i64, StorageError>;
     async fn recover_stale_instances(&self, stale_threshold: std::time::Duration) -> Result<u64, StorageError>;
     async fn heartbeat_instance(&self, instance_id: InstanceId) -> Result<(), StorageError>;

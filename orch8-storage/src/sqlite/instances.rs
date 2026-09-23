@@ -366,11 +366,17 @@ async fn filter_by_concurrency(
     conn: &mut sqlx::SqliteConnection,
     candidates: Vec<TaskInstance>,
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    // Group candidates by concurrency_key.
-    let mut keyed: HashMap<&str, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
+    // Group candidates by (tenant_id, concurrency_key): keys are
+    // tenant-scoped, so two tenants that pick the same key string must not
+    // share (or starve each other of) slots.
+    let mut keyed: HashMap<(&str, &str), Vec<usize>> =
+        HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
         if let (Some(key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
-            keyed.entry(key.as_str()).or_default().push(idx);
+            keyed
+                .entry((inst.tenant_id.as_str(), key.as_str()))
+                .or_default()
+                .push(idx);
         }
     }
 
@@ -378,28 +384,39 @@ async fn filter_by_concurrency(
         return Ok(candidates);
     }
 
-    // Single batched COUNT query for all concurrency keys.
+    // Single batched COUNT query for all (tenant, key) pairs. The candidate
+    // batch is bounded by the claim limit, so the bind count stays small.
     let mut qb = sqlx::QueryBuilder::new(
-        "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances WHERE state='running' AND concurrency_key IN (",
+        "SELECT tenant_id, concurrency_key, COUNT(*) as cnt FROM task_instances WHERE state='running' AND (",
     );
-    let mut separated = qb.separated(",");
-    for key in keyed.keys() {
-        separated.push_bind(key);
+    for (i, (tenant, key)) in keyed.keys().enumerate() {
+        if i > 0 {
+            qb.push(" OR ");
+        }
+        qb.push("(tenant_id=");
+        qb.push_bind(*tenant);
+        qb.push(" AND concurrency_key=");
+        qb.push_bind(*key);
+        qb.push(")");
     }
-    separated.push_unseparated(") GROUP BY concurrency_key");
+    qb.push(") GROUP BY tenant_id, concurrency_key");
 
     let rows = qb.build().fetch_all(&mut *conn).await?;
-    let mut running_counts: HashMap<String, i64> = HashMap::new();
+    let mut running_counts: HashMap<(String, String), i64> = HashMap::new();
     for row in rows {
+        let tenant: String = row.get("tenant_id");
         let key: String = row.get("concurrency_key");
         let cnt: i64 = row.get("cnt");
-        running_counts.insert(key, cnt);
+        running_counts.insert((tenant, key), cnt);
     }
 
     let mut excluded = Vec::new();
-    for (key, indices) in &keyed {
+    for (&(tenant, key), indices) in &keyed {
         let max = candidates[indices[0]].max_concurrency.unwrap_or(u32::MAX);
-        let already_running = running_counts.get(*key).copied().unwrap_or(0);
+        let already_running = running_counts
+            .get(&(tenant.to_owned(), key.to_owned()))
+            .copied()
+            .unwrap_or(0);
 
         let slots = (i64::from(max) - already_running).max(0) as usize;
         if slots < indices.len() {

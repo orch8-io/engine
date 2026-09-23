@@ -2657,8 +2657,15 @@ async fn concurrency_control() {
         s.create_instance(&inst).await.unwrap();
     }
 
-    let count = s.count_running_by_concurrency_key(conc_key).await.unwrap();
+    let count = s.count_running_by_concurrency_key("t1", conc_key).await.unwrap();
     assert_eq!(count, 3);
+    // Concurrency keys are tenant-scoped (STO-N5).
+    assert_eq!(
+        s.count_running_by_concurrency_key("t2", conc_key)
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -3896,12 +3903,12 @@ async fn count_running_by_concurrency_key_accurate() {
         s.create_instance(&inst).await.unwrap();
     }
 
-    let count = s.count_running_by_concurrency_key(key).await.unwrap();
+    let count = s.count_running_by_concurrency_key("t_cc", key).await.unwrap();
     assert_eq!(count, 2);
 
     // An unrelated key returns 0.
     assert_eq!(
-        s.count_running_by_concurrency_key("does-not-exist")
+        s.count_running_by_concurrency_key("t_cc", "does-not-exist")
             .await
             .unwrap(),
         0
@@ -3960,7 +3967,7 @@ async fn concurrency_count_empty_for_unused_key() {
 
     // Querying any key returns 0 because none of these rows set it.
     assert_eq!(
-        s.count_running_by_concurrency_key("anything")
+        s.count_running_by_concurrency_key("t_nokey", "anything")
             .await
             .unwrap(),
         0
@@ -4017,7 +4024,7 @@ async fn concurrent_claims_with_same_key_are_serialized() {
         h.await.unwrap();
     }
 
-    let count = s.count_running_by_concurrency_key(key).await.unwrap();
+    let count = s.count_running_by_concurrency_key("t_race", key).await.unwrap();
     assert_eq!(count, 8, "each parallel claim contributed exactly once");
 }
 
@@ -5090,4 +5097,32 @@ async fn claim_due_cron_schedules_is_capped_per_tick() {
 
     let second = s.claim_due_cron_schedules(now).await.unwrap();
     assert_eq!(second.len(), 5, "stragglers are claimed on the next tick");
+}
+
+/// STO-N5: a tenant saturating a `concurrency_key` must not block another
+/// tenant that happens to use the same key string.
+#[tokio::test]
+async fn claim_concurrency_key_is_tenant_scoped() {
+    let s = store().await;
+    let seq_a = make_sequence("t_ck_a");
+    let seq_b = make_sequence("t_ck_b");
+    s.create_sequence(&seq_a).await.unwrap();
+    s.create_sequence(&seq_b).await.unwrap();
+
+    let mut running = make_instance("t_ck_a", seq_a.id);
+    running.state = InstanceState::Running;
+    running.concurrency_key = Some("shared".into());
+    running.max_concurrency = Some(1);
+    s.create_instance(&running).await.unwrap();
+
+    let mut other = make_instance("t_ck_b", seq_b.id);
+    other.state = InstanceState::Scheduled;
+    other.next_fire_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    other.concurrency_key = Some("shared".into());
+    other.max_concurrency = Some(1);
+    s.create_instance(&other).await.unwrap();
+
+    let claimed = s.claim_due_instances(Utc::now(), 10, 0).await.unwrap();
+    assert!(claimed.iter().any(|i| i.id == other.id));
+    assert_eq!(s.concurrency_position(other.id, "shared").await.unwrap(), 1);
 }

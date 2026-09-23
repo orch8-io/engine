@@ -1549,3 +1549,30 @@ async fn postgres_encrypting_admitted_create_is_atomic() {
     }
     assert_eq!(admitted, 1);
 }
+
+/// STO-N5: concurrency counts/positions are scoped by (tenant, key).
+#[tokio::test]
+async fn postgres_concurrency_key_is_tenant_scoped() {
+    let storage = require_postgres!();
+    let key = format!("shared-{}", Uuid::new_v4());
+    let tenant_a = format!("ck-a-{}", Uuid::new_v4());
+    let tenant_b = format!("ck-b-{}", Uuid::new_v4());
+    let seq_a = SequenceId::new();
+    let seq_b = SequenceId::new();
+    storage.create_sequence(&mk_sequence(&tenant_a, seq_a)).await.unwrap();
+    storage.create_sequence(&mk_sequence(&tenant_b, seq_b)).await.unwrap();
+    let mut a = mk_instance(&tenant_a, seq_a, Some(&key));
+    a.state = InstanceState::Running;
+    storage.create_instance(&a).await.unwrap();
+    let mut b = mk_instance(&tenant_b, seq_b, Some(&key));
+    b.state = InstanceState::Running;
+    storage.create_instance(&b).await.unwrap();
+
+    let counts = storage
+        .count_running_by_concurrency_keys(&[(&tenant_a, &key), (&tenant_b, &key)])
+        .await
+        .unwrap();
+    assert_eq!(counts.get(&(tenant_a.clone(), key.clone())), Some(&1));
+    assert_eq!(counts.get(&(tenant_b.clone(), key.clone())), Some(&1));
+    assert_eq!(storage.concurrency_position(b.id, &key).await.unwrap(), 1);
+}
