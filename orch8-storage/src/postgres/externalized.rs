@@ -6,7 +6,7 @@ use orch8_types::error::StorageError;
 use orch8_types::ids::InstanceId;
 
 use super::PostgresStorage;
-use crate::compression::{COMPRESSION_THRESHOLD_BYTES, compress, decompress};
+use crate::compression::{compress, decompress, should_compress, validate_payload_size};
 
 pub(super) async fn save(
     store: &PostgresStorage,
@@ -15,9 +15,10 @@ pub(super) async fn save(
     payload: &serde_json::Value,
 ) -> Result<(), StorageError> {
     let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+    validate_payload_size(raw.len())?;
     let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
-    if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+    if should_compress(raw.len()) {
         let compressed = compress(payload)?;
         sqlx::query(
             r"INSERT INTO externalized_state
@@ -115,9 +116,10 @@ pub(super) async fn batch_save(
 
     for (ref_key, payload) in entries {
         let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+        validate_payload_size(raw.len())?;
         let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
-        if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+        if should_compress(raw.len()) {
             let c = compress(payload)?;
             compressed.push((ref_key.as_str(), c, raw_size));
         } else {

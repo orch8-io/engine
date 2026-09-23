@@ -22,8 +22,8 @@ export interface PieceError {
  * Classify an unknown thrown value into a `PieceError`.
  *
  * Heuristics:
- *   - HTTP 5xx, network/DNS/connection errors, timeouts → retryable
- *   - HTTP 4xx, JSON / validation / auth errors → permanent
+ *   - HTTP 5xx, 408/429, network/DNS/connection errors, timeouts → retryable
+ *   - Other HTTP 4xx, JSON / validation / auth errors → permanent
  *   - Everything unknown → retryable (fail-open so transient issues recover)
  *
  * Pieces use `@activepieces/pieces-common`'s httpClient which throws errors
@@ -46,7 +46,7 @@ export function classifyError(err: unknown): PieceError {
   const status = e?.response?.status ?? e?.status;
 
   if (typeof status === "number") {
-    if (status >= 500) {
+    if (status >= 500 || status === 408 || status === 429) {
       return { type: "retryable", message, details: { status, body: e?.response?.data } };
     }
     if (status >= 400) {

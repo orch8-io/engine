@@ -1,6 +1,8 @@
 //! Second-wave endpoint coverage for plugin, session, and audit contracts.
 
-use orch8_api::test_harness::{TestServer, spawn_test_server};
+use orch8_api::test_harness::{
+    TestServer, spawn_test_server, spawn_test_server_with_context_limit,
+};
 use orch8_storage::AdminStore;
 use orch8_types::audit::AuditLogEntry;
 use orch8_types::ids::{InstanceId, TenantId};
@@ -261,6 +263,74 @@ async fn session_lifecycle_round_trip_updates_data_and_state() {
         .await
         .unwrap();
     assert!(instances.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn session_create_and_update_apply_the_same_data_limit() {
+    let server = spawn_test_server_with_context_limit(32).await;
+    let client = Client::new();
+    let base = server.v1_url();
+    let key = format!("bounded-{}", Uuid::now_v7());
+
+    let created = client
+        .post(format!("{base}/sessions"))
+        .header("X-Tenant-Id", "tenant-a")
+        .json(&json!({"tenant_id": "tenant-a", "session_key": key, "data": "x".repeat(30)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let id = created.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let oversized_update = client
+        .patch(format!("{base}/sessions/{id}/data"))
+        .header("X-Tenant-Id", "tenant-a")
+        .json(&json!({"data": "x".repeat(31)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized_update.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let fetched: Value = client
+        .get(format!("{base}/sessions/{id}"))
+        .header("X-Tenant-Id", "tenant-a")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(fetched["data"], "x".repeat(30));
+
+    let rejected_key = format!("oversized-{}", Uuid::now_v7());
+    let oversized_create = client
+        .post(format!("{base}/sessions"))
+        .header("X-Tenant-Id", "tenant-a")
+        .json(
+            &json!({"tenant_id": "tenant-a", "session_key": rejected_key, "data": "x".repeat(31)}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized_create.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let absent = client
+        .get(format!("{base}/sessions/by-key/tenant-a/{rejected_key}"))
+        .header("X-Tenant-Id", "tenant-a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+
+    let blank = client
+        .post(format!("{base}/sessions"))
+        .header("X-Tenant-Id", "tenant-a")
+        .json(&json!({"tenant_id": "tenant-a", "session_key": "   "}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

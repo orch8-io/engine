@@ -39,7 +39,7 @@ pub(super) async fn get(
     .bind(id)
     .fetch_optional(&store.pool)
     .await?;
-    Ok(row.map(SessionRow::into_session))
+    row.map(SessionRow::into_session).transpose()
 }
 
 pub(super) async fn get_by_key(
@@ -55,7 +55,7 @@ pub(super) async fn get_by_key(
     .bind(session_key)
     .fetch_optional(&store.pool)
     .await?;
-    Ok(row.map(SessionRow::into_session))
+    row.map(SessionRow::into_session).transpose()
 }
 
 pub(super) async fn update_data(

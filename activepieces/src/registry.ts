@@ -177,14 +177,14 @@ export function findAction(piece: Piece, actionName: string): PieceAction {
   const raw = typeof piece.actions === "function" ? piece.actions() : piece.actions;
 
   if (Array.isArray(raw)) {
-    const found = raw.find((a) => a.name === actionName);
+    const found = raw.find((a) => a && a.name === actionName);
     if (found) return found;
   } else if (raw && typeof raw === "object") {
     const rec = raw as Record<string, PieceAction>;
     if (rec[actionName]) return rec[actionName];
     // Some pieces key by the action's display identifier, not `name`.
     for (const a of Object.values(rec)) {
-      if (a.name === actionName) return a;
+      if (a && a.name === actionName) return a;
     }
   }
 
@@ -201,7 +201,7 @@ export function findAction(piece: Piece, actionName: string): PieceAction {
  */
 export function findTrigger(piece: Piece, triggerName: string): PieceTrigger {
   const src = piece.triggers;
-  const raw = typeof src === "function" ? src() : src;
+  const raw = typeof src === "function" ? src.call(piece) : src;
 
   if (Array.isArray(raw)) {
     const found = raw.find((t) => t && t.name === triggerName);

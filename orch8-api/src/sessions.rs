@@ -47,12 +47,13 @@ async fn create_session(
     tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if body.session_key.is_empty() || body.session_key.len() > 512 {
+    if body.session_key.trim().is_empty() || body.session_key.len() > 512 {
         return Err(ApiError::InvalidArgument(
-            "session_key must be between 1 and 512 characters".into(),
+            "session_key must be non-blank and at most 512 bytes".into(),
         ));
     }
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    validate_session_data_size(&body.data, state.max_context_bytes)?;
     let now = chrono::Utc::now();
     let session = Session {
         id: Uuid::now_v7(),
@@ -156,24 +157,31 @@ async fn update_session_data(
         .map_err(|e| ApiError::from_storage(e, "session"))?
         .ok_or_else(|| ApiError::NotFound("session not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &session.tenant_id, &format!("session {id}"))?;
-    // Session data gets the same serialized-size ceiling as instance
-    // contexts (`max_context_bytes == 0` disables the check).
-    if state.max_context_bytes > 0 {
-        // Fail-safe: an unserializable value counts as over the limit.
-        let actual = serde_json::to_vec(&body.data).map_or(usize::MAX, |v| v.len());
-        if actual > state.max_context_bytes as usize {
-            return Err(ApiError::PayloadTooLarge(format!(
-                "session data is {actual} bytes, max is {}",
-                state.max_context_bytes
-            )));
-        }
-    }
+    validate_session_data_size(&body.data, state.max_context_bytes)?;
     state
         .storage
         .update_session_data(id, &body.data)
         .await
         .map_err(|e| ApiError::from_storage(e, "session"))?;
     Ok(StatusCode::OK)
+}
+
+/// Session data uses the same serialized-size ceiling on create and update.
+/// `max_context_bytes == 0` disables the check.
+fn validate_session_data_size(
+    data: &serde_json::Value,
+    max_context_bytes: u32,
+) -> Result<(), ApiError> {
+    if max_context_bytes > 0 {
+        // Fail-safe: an unserializable value counts as over the limit.
+        let actual = serde_json::to_vec(data).map_or(usize::MAX, |bytes| bytes.len());
+        if actual > max_context_bytes as usize {
+            return Err(ApiError::PayloadTooLarge(format!(
+                "session data is {actual} bytes, max is {max_context_bytes}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, ToSchema)]

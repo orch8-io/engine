@@ -94,7 +94,7 @@ fn coverage_schema_009_sqlite_schema_version_is_current() {
 
 #[test]
 fn coverage_schema_010_crate_storage_schema_version_is_current() {
-    assert_eq!(crate::STORAGE_SCHEMA_VERSION, 81);
+    assert_eq!(crate::STORAGE_SCHEMA_VERSION, 82);
 }
 
 #[test]

@@ -94,3 +94,37 @@ pub(super) async fn reap_stale(
     .await?;
     Ok(result.rows_affected())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orch8_types::cluster::NodeStatus;
+
+    #[tokio::test]
+    async fn unknown_persisted_node_status_is_not_active() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = Utc::now();
+        let node = ClusterNode {
+            id: Uuid::new_v4(),
+            name: "worker".into(),
+            status: NodeStatus::Active,
+            registered_at: now,
+            last_heartbeat_at: now,
+            drain: false,
+            drain_started_at: None,
+            stopped_at: None,
+            capabilities_withdrawn: false,
+            execution_handoff_evidence: None,
+        };
+        register(&storage, &node).await.unwrap();
+        sqlx::query("UPDATE cluster_nodes SET status = 'future-stopped' WHERE id = ?1")
+            .bind(node.id.to_string())
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        assert!(matches!(
+            list(&storage).await,
+            Err(StorageError::Query(message)) if message.contains("future-stopped")
+        ));
+    }
+}

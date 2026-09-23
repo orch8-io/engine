@@ -35,6 +35,30 @@ No crate is complete merely because Clippy passes.
 
 ## Findings and changes
 
+### Dependency refresh status
+
+- `cargo update --dry-run --verbose` on 2026-09-23 found zero newer versions
+  compatible with the current manifest constraints after the refresh. Nine
+  locked packages have newer versions outside those constraints.
+- A fresh `cargo outdated -w -R` scan on 2026-09-23 reported all direct workspace
+  dependencies current. `cargo audit` refreshed the RustSec advisory database
+  and found no vulnerabilities in the 659 packages in the current lockfile.
+- Upgraded the shared `jsonschema` constraint from 0.54 to 0.57 while keeping
+  `default-features = false` so remote `$ref` retrieval stays disabled. The
+  lockfile updated `jsonschema`, `jsonschema-regex`, `jsonschema-value`, and
+  `referencing` together. The locked workspace compiles; 1,901 engine library tests
+  and 507 API library/sequence/preflight HTTP tests pass serially. The API
+  regressions confirm an invalid field value returns 422 with its JSON pointer
+  and multiple invalid fields retain both paths.
+  Both crates pass all-target Clippy; a cached-advisory `cargo audit --no-fetch`
+  scan found no vulnerabilities.
+- SQLx 0.9 is a separate migration, not a patch refresh: the workspace still
+  declares 0.8, including its removed combined runtime/TLS feature, and uses
+  APIs affected by the 0.9 argument-lifetime and dynamic-query changes. The
+  [upstream 0.9 changelog](https://github.com/transact-rs/sqlx/blob/main/CHANGELOG.md#090---2026-05-06)
+  documents those breaks. Plan and verify it across types, storage, CLI, and
+  mobile before changing the shared dependency.
+
 ### Engine: scheduler and retry paths (partial crate review)
 
 - High, fixed: instance heartbeat floor could exceed short stale windows.
@@ -48,23 +72,69 @@ No crate is complete merely because Clippy passes.
 - Remaining: all other engine modules, broader cancellation and shutdown review,
   feature-specific paths. No full-crate completion claim.
 
+### Engine: embedding and governed memory (partial crate review)
+
+- Medium, fixed: `memory_store` accepted unbounded text when callers supplied
+  a precomputed embedding, bypassing the provider-input ceiling. Supplied text
+  now has the same 10 MiB limit on normal and dry-run paths; vector-only records
+  remain valid. Unit and storage-backed tests cover the boundary and rejection
+  before persistence.
+- Medium, fixed: tenant policies could admit a retention value that fit `i64`
+  but panicked in Chrono duration construction or timestamp addition. Both
+  conversions now fail with a permanent handler error instead. A regression
+  covers each overflow boundary.
+- High, fixed: the shared outbound SSRF classifier did not inspect the IPv4
+  payload inside IPv4-mapped IPv6 addresses. Redirect literals and connect-time
+  DNS results now apply the existing IPv4 blocklist to mapped addresses;
+  regressions cover loopback, metadata, and public mapped addresses.
+- Medium, fixed: the explicit internal-URL opt-in let the redirect policy
+  return before checking the URL scheme. HTTP(S) internal targets remain
+  allowed under opt-in, but `file:` and other schemes are always denied.
+- Medium, fixed: embedding-provider responses were body-read before HTTP status
+  classification, so an oversized 429 or 5xx error body became a permanent
+  size error instead of a retryable provider failure. Status is now classified
+  before reading any error body; a regression covers oversized 429, 503, 400,
+  and successful responses. The engine library suite passes 1,902 tests.
+- Low, fixed: embedding responses with a non-2xx status and a valid vector body
+  were accepted as success. Only 2xx statuses now reach response parsing;
+  regressions cover informational and redirect statuses and oversized redirect
+  bodies.
+- Medium, fixed: a present non-string memory `residency` was treated as absent,
+  silently selecting the instance default or bypassing the tenant policy's
+  requested-residency check. Store, search, and delete now reject that input;
+  regressions cover normal and dry-run handler paths. All 88 memory-handler
+  tests, engine library Clippy, formatting, and diff checks pass.
+- Medium, fixed: tenant search silently ranked only the newest 10,000 shared
+  records, so a better older match could be absent without any indication.
+  One lookahead record now distinguishes a complete corpus from a truncated
+  scan, and the response exposes `corpus_truncated`. A storage-backed boundary
+  test covers exactly 10,000 and 10,001 records; 89 memory-handler tests pass.
+- Verified: all 1,902 engine library tests pass serially; engine all-target
+  Clippy and crate documentation with warnings denied, workspace formatting,
+  and diff whitespace checks pass. Full engine crate review remains open.
+
 ### Push: provider dispatch (in progress)
 
 - High, fixed: factory-created dispatcher did not forward
   `send_signed_wake`, falling back to the trait's unsupported error even with
   a configured provider. Both delivery methods now share platform selection.
-- Verified: 193 push tests pass (including existing localhost FCM protocol
+- Verified: 196 push tests pass (including existing localhost FCM protocol
   fixtures); library Clippy with warnings denied passes. Initial sandbox run
   failed 11 mock-server binds; rerun with local socket access passed all tests.
 - Production files inspected: `lib.rs`, `apns.rs`, `fcm.rs`, `outbox.rs`,
   `governance.rs`; relevant provider, outbox, and governance tests inspected.
   Follow-up findings below keep the crate review open.
-- Follow-up: outbox claims a batch with one 30-second lease horizon, then sends
-  sequentially. Review elapsed time, provider retry bounds, and storage fencing
-  before changing delivery semantics. Do not treat as resolved.
-- Governance follow-up: the bounded nonce cache evicts unexpired entries at
-  capacity, weakening retained replay evidence. Evaluate rejecting at capacity
-  or using durable replay storage; do not silently equate eviction with expiry.
+- High, fixed: the outbox now claims one wake immediately before each provider
+  call instead of leasing the whole sequential batch at once. A 75-second
+  provider-call timeout fits within a 90-second lease, covering the built-in
+  FCM/APNs retry budgets. Due eligibility stays fixed at drain start so an
+  earlier retry cannot re-enter the same batch. The store still fences stale
+  outcomes after a lease is reclaimed. Delivery remains at-least-once: a
+  timed-out request may have reached the provider before cancellation.
+- Governance follow-up, fixed: the bounded nonce cache now rejects a fresh
+  wake at capacity rather than evicting unexpired replay evidence. Existing
+  nonces remain blocked; expiry frees capacity. The cache is still process-local,
+  so cross-process replay protection requires a durable/shared nonce boundary.
 - Medium, unresolved: collapse-key length prefixes use `usize::to_be_bytes`,
   giving different hashes on 32-bit and 64-bit builds. A fixed-width encoding
   needs a compatibility decision for existing 32-bit persisted keys.
@@ -317,9 +387,10 @@ No crate is complete merely because Clippy passes.
   is inconclusive; corrected the field documentation to match. Trace gate
   threshold validation and aggregate-count invariants in release callers before
   treating directly constructed `f64` gates and stats as validated input.
-- Suggestion follow-up: edit distance counts characters while its acceptance
-  threshold uses UTF-8 byte lengths. Current engine identifiers are mostly
-  ASCII; check Unicode-facing callers before promising language-neutral ranking.
+- Suggestion follow-up, fixed: the acceptance threshold now counts characters
+  like Levenshtein distance, rather than UTF-8 bytes. Candidate case is
+  normalized for comparison while preserving original spelling in suggestions;
+  multibyte regression tests cover close and unrelated strings.
 - Medium, fixed: contract range assertions accepted non-finite native bounds
   and lacked reversed-range authoring validation. One shared validator now
   rejects missing, non-finite, and reversed bounds at both suite validation and
@@ -335,9 +406,10 @@ No crate is complete merely because Clippy passes.
   not a durable global key budget. Plaintext JSON temporary buffers and partially
   decoded malformed-key buffers are not zeroized; consider `Zeroizing` ownership
   for these buffers during encryption hardening. No cryptographic algorithm change.
-- Product-contract follow-up: lifetime comparisons add durations to caller
-  timestamps and can overflow Chrono's upper bound. Prefer duration differences
-  for validation and checked addition for offer construction.
+- Product-contract follow-up, fixed: lifetime validation now compares elapsed
+  durations without adding to caller timestamps, and profile offer construction
+  returns an error if its expiry is outside Chrono's range. Boundary tests cover
+  offer, passport, and certificate behavior near the maximum timestamp.
 - Product-contract follow-up: seven mandatory conformance checks score 875/1000
   when optional offline-resume is absent; the certification threshold of 900
   effectively requires all eight. Reconcile the optional-check contract and
@@ -345,9 +417,10 @@ No crate is complete merely because Clippy passes.
 - Optimization candidate: conformance scoring repeatedly allocates matching
   result vectors to establish uniqueness. An iterator can establish zero/one/many
   matches without collecting, but no measured performance change is claimed.
-- Product-policy follow-up: empty list values become unrestricted lists and
-  statement-only separators can compile to an unrestricted default rule.
-  Review authoring validation and explicit unrestricted-policy syntax.
+- Product-policy follow-up, fixed: explicitly empty allow-lists and blank list
+  items now fail validation, as do separator-only policies. Omitted allow-lists
+  remain unrestricted; `classification=internal` explicitly expresses the
+  default internal placement rule. Parser regressions cover both behaviors.
 - Medium, fixed: sequence retry validation accepted native non-finite
   multipliers. It now requires a finite positive multiplier, retaining valid
   decreasing schedules below 1.0.
@@ -437,6 +510,10 @@ No crate is complete merely because Clippy passes.
   Both cron, webhook-outbox and push-outbox persistence implementations are
   source-reviewed; relevant engine cron/webhook callers were traced selectively.
   Most traits, decorators and both backend implementations remain pending.
+- Medium, fixed: SQLite and PostgreSQL cluster-node row decoders treated an
+  unknown persisted status as `active`. Node listing now returns a storage
+  error instead of misreporting the node; corrupt-row regressions and all 24
+  live PostgreSQL integration tests pass.
 - Sequence persistence follow-up: both backends omit `$schema` and schema version
   on write and reconstruct the current version on read. Trace immutable sequence
   identity/digests and future-version compatibility before treating this as a
@@ -446,13 +523,36 @@ No crate is complete merely because Clippy passes.
   statement, independent of instance count. Regression checks deletion scope
   and rollback of dependent history when replacement insertion fails. All 95
   storage coverage integration tests pass after the deletion and mapper fixes.
-- Sequence storage follow-up: SQLite bulk reads still build one parameter per
-  id without chunking. Deletion and replacement rely on callers to prevent
-  deleting active instances; verify atomic admission/transition fencing in
-  API and mobile callers.
-- Compression follow-up: writes accept JSON exceeding the decompressor's 16 MiB
-  limit, so successful writes can become unreadable. Align writer/reader bounds
-  and feature-disabled compatibility before changing persistence semantics.
+- Sequence storage follow-up: several SQLite bulk reads still build one
+  parameter per id without chunking. Externalized-state batch reads and
+  sequence batch lookups now use 500-key chunks, with >32,766-key regressions.
+  Signal inbox batch reads and deliveries also use 500-id chunks; delivery
+  retains one transaction, and multi-query reads use one snapshot. The
+  regression covers duplicate IDs and
+  >32,766 inputs. Deletion and
+  replacement still rely on callers to prevent deleting active instances;
+  verify atomic admission/transition fencing in API and mobile callers.
+  The storage library and SQLite integration suites pass serially: 461 tests.
+- Medium, fixed: SQLite instance-KV and shared-knowledge batch deletes bound
+  every key in one statement, so memory retention cleanup could fail above
+  SQLite's variable limit. Both paths now use 500-key chunks inside one
+  transaction. Regressions cover 32,768-key deletes, scope isolation, and
+  rollback when a later chunk fails. The sibling PostgreSQL deletes now bind
+  one `text[]` array with `ANY`, removing their per-key placeholder limit;
+  a live 65,536-key regression and all 19 PostgreSQL integration tests pass
+  against a fresh PostgreSQL 14 database.
+- PostgreSQL test-isolation follow-up: integration tests share database tables.
+  Re-running the suite against a previously used database can make global
+  scheduler/outbox assertions see old rows. The worker-row lock test now probes
+  its own instance directly; the outbox recovery test still verifies it can
+  reclaim its own row. The full suite is verified on a fresh database, not
+  proven repeatable against a populated one.
+- Compression follow-up, fixed: externalized-state single, bulk, and instance
+  writers now reject serialized JSON above the reader's 16 MiB limit before
+  persistence. Builds without compression write inline rows rather than labeling
+  raw JSON as zstd; their reader retains legacy mislabeled-JSON compatibility
+  and reports actual zstd frames as unsupported. Unit and SQLite integration
+  tests cover the size boundary, codec marker, and bulk-write atomicity.
 - Medium, fixed: artifact errors no longer uniformly become retryable `Backend`.
   Typed permission/configuration/unsupported errors are permanent; conditional
   conflicts and missing artifacts retain their distinct storage variants.
@@ -704,6 +804,13 @@ No crate is complete merely because Clippy passes.
   16 localhost-server tests required a rerun with local socket permission.
   Cleared only generated Cargo incremental caches to recover build space; no
   source or test data removed. Native iOS/Android execution remains unverified.
+- Medium, fixed: the RSS sampler cached an over-budget verdict instead of
+  re-evaluating its cached RSS against the caller's current budget. Raising a
+  budget could therefore continue rejecting work until the next probe. It now
+  recalculates the verdict without another probe; a deterministic regression
+  covers raising and lowering the budget within one sampling interval. The
+  current 326-test mobile library suite passes with localhost access, and
+  all-target Clippy passes with warnings denied.
 - Medium, fixed: failed telemetry uploads no longer read and log the response
   body. Error mapping accepts only an HTTP status, removing an unbounded buffer
   and raw response disclosure from that path. All 12 targeted telemetry tests
@@ -1017,10 +1124,11 @@ No crate is complete merely because Clippy passes.
   Direct command responses use inconsistent structured error handling.
 - Build-space maintenance: removed the unused generated mobile static archive
   (about 439 MiB), which is not a CLI dependency, after verifying its location.
-- Inspect follow-up: block ID is interpolated into a URL path without segment
-  encoding; query at_block uses correct encoding. Instance mode accepts outputs
-  but ignores it. CLI argument named context needs inspection with global context
-  selection. These remain static findings, without endpoint probing.
+- Inspect follow-up, fixed: instance block IDs are now appended as one encoded
+  URL path segment; a mock-request regression covers `/`, `?`, and `#` in the
+  ID, alongside the existing encoded `at_block` query test. Instance mode
+  still accepts outputs but ignores it. CLI argument named context needs
+  inspection with global context selection.
 
 ## Next review work
 
@@ -1320,24 +1428,40 @@ and measured optimization work remain; the overall goal is still active.
   underflow and inverted explicit ranges before querying storage. Explicit equal
   boundaries remain valid (empty half-open window). Unit tests exercise date
   extremes/default width and integration tests check 400 versus equal-bound 200.
-  Usage tests and Clippy pending.
-- Usage follow-ups: rounded per-model estimates are summed rather than rounding
-  the full total once. Large finite values can overflow during rounding/summing;
-  unknown-price entries are excluded without a total-completeness indicator.
-  Storage aggregates all distinct models/kinds without paging or a window cap;
-  signed counts and i64 sums permit invalid inputs/overflow failures. SQLite
-  compares RFC3339 strings, whose variable precision needs boundary-parity tests.
+  Usage HTTP tests and API all-target Clippy pass.
+- Usage cost follow-up, fixed: the API now sums raw estimates before rounding
+  the window total, so sub-micro-dollar rows do not disappear. It reports
+  `total_cost_is_complete` when unknown or invalid rows are omitted. Negative
+  token counts and invalid pricing overrides no longer produce negative cost;
+  non-finite estimates are omitted, and large finite rounding cannot overflow.
+  All 419 API library tests and four usage HTTP tests pass.
+- Usage storage follow-ups: aggregates fetch all distinct models/kinds without
+  paging or a window cap, and i64 sums permit overflow failures. Both storage
+  backends now reject negative usage token counts before insertion (zero
+  remains valid); SQLite and live PostgreSQL regressions check that invalid
+  events leave no rows. SQLite's RFC3339-text and PostgreSQL's native timestamp
+  windows now have matching half-open boundary tests across whole-second,
+  millisecond, and microsecond inputs. A live regression found that SQLx rounded
+  sub-microsecond PostgreSQL query bounds down, incorrectly including a row at
+  the preceding microsecond. Both query bounds now round up to the next stored
+  microsecond tick; the regression and 21 PostgreSQL integration tests pass
+  against a fresh temporary cluster (stopped and removed after verification).
 - Queue follow-ups: routing/dispatch lists fetch all matching rows. Routing order
   lacks an ID tie-breaker for identical priority/timestamp. Blankness checks do
-  not bound string lengths or validate optional match_queue. Dispatch update
-  replaces omitted secret with None and API returns a fresh created_at even when
-  storage preserves the existing timestamp. Unknown persisted dispatch modes
-  silently decode as Poll in both backends. Secret fields are explicitly omitted
-  from API responses, though list queries still fetch secret columns internally.
-- Session follow-ups: creation omits the data-size guard used on updates. Key
-  limits count bytes although errors say characters, and whitespace-only keys
-  are accepted. Expiration and allowed state transitions are not validated here.
-  Whole-data updates have no version/CAS; session instance listing is unbounded.
+  not bound string lengths or validate optional match_queue. Dispatch updates
+  now retain an omitted secret atomically, distinguish explicit null, and return
+  the persisted created_at; API regressions cover all three. Unknown persisted
+  dispatch modes previously decoded as `poll`; both backends now return an
+  explicit storage error, with corrupt-row regressions. All 22 live PostgreSQL
+  integration tests pass. Secret fields are explicitly omitted from API
+  responses, though list queries still fetch secret columns internally.
+- Session fixes: create and update apply the same serialized-data size limit;
+  creation rejects blank and over-512-byte keys. Unknown persisted session
+  states no longer decode as `active` in either backend; corrupt-row tests cover
+  ID and key lookups, and all 23 live PostgreSQL integration tests pass.
+  Remaining: expiration and allowed state transitions are
+  not validated here; whole-data updates have no version/CAS, and session
+  instance listing is unbounded.
 - Pool follow-ups: create name has no validation, update accepts zero weight or
   invalid names rejected by add, and warmup_start cannot be cleared with null.
   Update/delete fetch the entire pool resource list; missing-resource delete
@@ -1366,3 +1490,16 @@ and measured optimization work remain; the overall goal is still active.
   and Python package syntax parses; packaged native imports, optional features,
   non-host platforms, live external services, and fuzz campaigns remain outside
   this verification. Earlier unresolved review findings remain open.
+
+### Storage integer boundary follow-up (2026-09-23)
+
+- `TaskInstance.max_concurrency` is `u32`, but both backends cast it through
+  `i32`; values above `i32::MAX` wrapped negative on writes and back to large
+  positive values on reads. PostgreSQL migration 082 widens the column to
+  `BIGINT`; both backends now bind `i64` and reject negative or out-of-range
+  persisted values while decoding. Single and batch inserts round-trip
+  `u32::MAX` in regression tests.
+- SQLite storage library: 340 tests passed. Live PostgreSQL integration: 25
+  tests passed against a temporary local cluster, which was stopped and
+  removed afterward. Workspace all-target Clippy with warnings denied,
+  formatting, and diff checks passed.

@@ -4,6 +4,12 @@ use orch8_types::ids::TenantId;
 use super::PostgresStorage;
 use super::rows::{PoolResourceRow, ResourcePoolRow};
 
+fn pg_integer(value: u32, field: &str) -> Result<i32, StorageError> {
+    i32::try_from(value).map_err(|_| {
+        StorageError::Constraint(format!("{field} exceeds the PostgreSQL integer range"))
+    })
+}
+
 pub(super) async fn create(
     store: &PostgresStorage,
     pool: &orch8_types::pool::ResourcePool,
@@ -16,7 +22,7 @@ pub(super) async fn create(
     .bind(pool.tenant_id.as_str())
     .bind(&pool.name)
     .bind(serde_json::to_string(&pool.strategy)?.trim_matches('"'))
-    .bind(pool.round_robin_index as i32)
+    .bind(pg_integer(pool.round_robin_index, "round_robin_index")?)
     .bind(pool.created_at)
     .bind(pool.updated_at)
     .execute(&store.pool)
@@ -34,7 +40,7 @@ pub(super) async fn get(
     .bind(id)
     .fetch_optional(&store.pool)
     .await?;
-    Ok(row.map(ResourcePoolRow::into_pool))
+    row.map(ResourcePoolRow::into_pool).transpose()
 }
 
 pub(super) async fn list(
@@ -47,7 +53,7 @@ pub(super) async fn list(
     .bind(tenant_id.as_str())
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(ResourcePoolRow::into_pool).collect())
+    rows.into_iter().map(ResourcePoolRow::into_pool).collect()
 }
 
 pub(super) async fn update_round_robin(
@@ -59,7 +65,7 @@ pub(super) async fn update_round_robin(
         "UPDATE resource_pools SET round_robin_index = $2, updated_at = NOW() WHERE id = $1",
     )
     .bind(pool_id)
-    .bind(index as i32)
+    .bind(pg_integer(index, "round_robin_index")?)
     .execute(&store.pool)
     .await?;
     Ok(())
@@ -87,14 +93,14 @@ pub(super) async fn add_resource(
     .bind(resource.pool_id)
     .bind(resource.resource_key.as_str())
     .bind(&resource.name)
-    .bind(resource.weight as i32)
+    .bind(pg_integer(resource.weight, "weight")?)
     .bind(resource.enabled)
-    .bind(resource.daily_cap as i32)
-    .bind(resource.daily_usage as i32)
+    .bind(pg_integer(resource.daily_cap, "daily_cap")?)
+    .bind(pg_integer(resource.daily_usage, "daily_usage")?)
     .bind(resource.daily_usage_date)
     .bind(resource.warmup_start)
-    .bind(resource.warmup_days as i32)
-    .bind(resource.warmup_start_cap as i32)
+    .bind(pg_integer(resource.warmup_days, "warmup_days")?)
+    .bind(pg_integer(resource.warmup_start_cap, "warmup_start_cap")?)
     .bind(resource.created_at)
     .execute(&store.pool)
     .await?;
@@ -113,10 +119,9 @@ pub(super) async fn list_resources(
     .bind(pool_id)
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows
-        .into_iter()
+    rows.into_iter()
         .map(PoolResourceRow::into_resource)
-        .collect())
+        .collect()
 }
 
 pub(super) async fn update_resource(
@@ -131,12 +136,12 @@ pub(super) async fn update_resource(
     )
     .bind(resource.id)
     .bind(&resource.name)
-    .bind(resource.weight as i32)
+    .bind(pg_integer(resource.weight, "weight")?)
     .bind(resource.enabled)
-    .bind(resource.daily_cap as i32)
+    .bind(pg_integer(resource.daily_cap, "daily_cap")?)
     .bind(resource.warmup_start)
-    .bind(resource.warmup_days as i32)
-    .bind(resource.warmup_start_cap as i32)
+    .bind(pg_integer(resource.warmup_days, "warmup_days")?)
+    .bind(pg_integer(resource.warmup_start_cap, "warmup_start_cap")?)
     .execute(&store.pool)
     .await?;
     Ok(())
@@ -169,4 +174,18 @@ pub(super) async fn increment_usage(
     .execute(&store.pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pg_integer_rejects_values_that_would_wrap_negative() {
+        assert_eq!(pg_integer(i32::MAX as u32, "daily_cap").unwrap(), i32::MAX);
+        assert!(matches!(
+            pg_integer(i32::MAX as u32 + 1, "daily_cap"),
+            Err(StorageError::Constraint(message)) if message.contains("daily_cap")
+        ));
+    }
 }

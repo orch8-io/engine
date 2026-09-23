@@ -85,3 +85,40 @@ pub(super) async fn list_instances(
         .await?;
     rows.iter().map(row_to_instance).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unknown_persisted_state_is_not_treated_as_active() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = Utc::now();
+        let session = Session {
+            id: Uuid::now_v7(),
+            tenant_id: TenantId::unchecked("tenant"),
+            session_key: "key".into(),
+            data: serde_json::json!({}),
+            state: SessionState::Active,
+            created_at: now,
+            updated_at: now,
+            expires_at: None,
+        };
+        create(&storage, &session).await.unwrap();
+        sqlx::query("UPDATE sessions SET state = 'future-terminal' WHERE id = ?1")
+            .bind(session.id.to_string())
+            .execute(storage.pool())
+            .await
+            .unwrap();
+
+        for result in [
+            get(&storage, session.id).await,
+            get_by_key(&storage, &session.tenant_id, &session.session_key).await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(StorageError::Query(message)) if message.contains("future-terminal")
+            ));
+        }
+    }
+}

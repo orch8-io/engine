@@ -58,6 +58,39 @@ const fn default_weight() -> u32 {
     1
 }
 
+fn validate_resource_fields(
+    name: &str,
+    weight: u32,
+    daily_cap: u32,
+    warmup_days: u32,
+    warmup_start_cap: u32,
+) -> Result<(), ApiError> {
+    if name.is_empty() || name.len() > 255 {
+        return Err(ApiError::InvalidArgument(
+            "name must be 1-255 characters".into(),
+        ));
+    }
+    if weight == 0 {
+        return Err(ApiError::InvalidArgument(
+            "weight must be at least 1".into(),
+        ));
+    }
+    for (field, value) in [
+        ("weight", weight),
+        ("daily_cap", daily_cap),
+        ("warmup_days", warmup_days),
+        ("warmup_start_cap", warmup_start_cap),
+    ] {
+        if value > i32::MAX as u32 {
+            return Err(ApiError::InvalidArgument(format!(
+                "{field} must be at most {}",
+                i32::MAX
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct UpdateResourceRequest {
     pub name: Option<String>,
@@ -194,16 +227,13 @@ pub(crate) async fn add_resource(
             "resource_key must be 1-255 characters".into(),
         ));
     }
-    if req.name.is_empty() || req.name.len() > 255 {
-        return Err(ApiError::InvalidArgument(
-            "name must be 1-255 characters".into(),
-        ));
-    }
-    if req.weight == 0 {
-        return Err(ApiError::InvalidArgument(
-            "weight must be at least 1".into(),
-        ));
-    }
+    validate_resource_fields(
+        &req.name,
+        req.weight,
+        req.daily_cap,
+        req.warmup_days,
+        req.warmup_start_cap,
+    )?;
     let pool = state
         .storage
         .get_resource_pool(pool_id)
@@ -287,6 +317,14 @@ pub(crate) async fn update_resource(
     if let Some(warmup_start_cap) = req.warmup_start_cap {
         resource.warmup_start_cap = warmup_start_cap;
     }
+
+    validate_resource_fields(
+        &resource.name,
+        resource.weight,
+        resource.daily_cap,
+        resource.warmup_days,
+        resource.warmup_start_cap,
+    )?;
 
     state.storage.update_pool_resource(&resource).await?;
     Ok(Json(resource))

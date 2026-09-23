@@ -65,6 +65,7 @@ async fn get_usage_includes_cost_estimates() {
 
     assert_eq!(body["tenant"], "t1");
     assert_eq!(body["cost_is_estimate"], true);
+    assert_eq!(body["total_cost_is_complete"], false);
 
     let usage = body["usage"].as_array().unwrap();
     assert_eq!(usage.len(), 3, "grouped by (kind, model)");
@@ -109,6 +110,38 @@ async fn get_usage_empty_window_has_zero_total() {
     assert_eq!(body["usage"].as_array().unwrap().len(), 0);
     assert_eq!(body["total_cost_usd"], 0.0);
     assert_eq!(body["cost_is_estimate"], true);
+    assert_eq!(body["total_cost_is_complete"], true);
+}
+
+#[tokio::test]
+async fn get_usage_rounds_total_after_summing_sub_micro_costs() {
+    let srv = spawn_test_server().await;
+    for event in [
+        usage_event("tiny-costs", "nova-micro", 10, 0),
+        usage_event("tiny-costs", "gpt-5-nano", 5, 0),
+    ] {
+        srv.storage.record_usage_event(&event).await.unwrap();
+    }
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/usage", srv.v1_url()))
+        .header("X-Tenant-Id", "tiny-costs")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["usage"].as_array().unwrap().len(), 2);
+    assert!(
+        body["usage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["cost_usd"] == 0.0)
+    );
+    // $0.00000035 + $0.00000025 rounds to one micro-dollar.
+    assert_eq!(body["total_cost_usd"], 0.000_001);
+    assert_eq!(body["total_cost_is_complete"], true);
 }
 
 #[tokio::test]

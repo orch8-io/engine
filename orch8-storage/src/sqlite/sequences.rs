@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use orch8_types::error::StorageError;
 use orch8_types::ids::*;
 
@@ -82,14 +84,30 @@ pub(super) async fn get_many(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM sequences WHERE id IN (");
-    let mut separated = qb.separated(",");
-    for id in ids {
-        separated.push_bind(id.to_string());
+    let mut seen = HashSet::new();
+    let unique_ids = ids
+        .iter()
+        .copied()
+        .filter(|id| seen.insert(*id))
+        .collect::<Vec<_>>();
+    let mut result = Vec::new();
+    let mut tx = storage.pool.begin().await?;
+    for chunk in unique_ids.chunks(500) {
+        let mut qb = sqlx::QueryBuilder::new("SELECT * FROM sequences WHERE id IN (");
+        let mut separated = qb.separated(",");
+        for id in chunk {
+            separated.push_bind(id.to_string());
+        }
+        separated.push_unseparated(")");
+        let rows = qb.build().fetch_all(&mut *tx).await?;
+        result.extend(
+            rows.iter()
+                .map(row_to_sequence)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
     }
-    separated.push_unseparated(")");
-    let rows = qb.build().fetch_all(&storage.pool).await?;
-    rows.iter().map(row_to_sequence).collect()
+    tx.commit().await?;
+    Ok(result)
 }
 
 pub(super) async fn get_by_name(

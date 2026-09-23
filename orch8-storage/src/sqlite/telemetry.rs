@@ -48,6 +48,7 @@ pub(super) async fn record_usage_event(
     storage: &SqliteStorage,
     event: &crate::UsageEvent,
 ) -> Result<(), StorageError> {
+    crate::validate_usage_event(event)?;
     sqlx::query(
         "INSERT INTO usage_events \
          (tenant_id, instance_id, block_id, kind, model, input_tokens, output_tokens, created_at) \

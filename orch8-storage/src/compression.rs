@@ -15,11 +15,25 @@ use orch8_types::error::StorageError;
 /// threshold the frame overhead typically exceeds any savings.
 pub const COMPRESSION_THRESHOLD_BYTES: usize = 1024;
 
+/// Maximum serialized JSON size accepted for an externalized payload.
+pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+
 /// Maximum decompressed payload size. Prevents a small compressed payload
 /// (a "compression bomb") from expanding to an arbitrary size and exhausting
 /// memory during deserialization.
-#[cfg(feature = "compression")]
-const MAX_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+pub fn validate_payload_size(len: usize) -> Result<(), StorageError> {
+    if len > MAX_PAYLOAD_BYTES {
+        return Err(StorageError::Constraint(
+            "externalized payload exceeds 16 MiB limit".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Only feature-enabled builds may mark a row as zstd-compressed.
+pub const fn should_compress(raw_len: usize) -> bool {
+    cfg!(feature = "compression") && raw_len >= COMPRESSION_THRESHOLD_BYTES
+}
 
 #[cfg(feature = "compression")]
 const ZSTD_LEVEL: i32 = 3;
@@ -28,6 +42,7 @@ const ZSTD_LEVEL: i32 = 3;
 #[cfg(feature = "compression")]
 pub fn compress(value: &serde_json::Value) -> Result<Vec<u8>, StorageError> {
     let json = serde_json::to_vec(value).map_err(StorageError::Serialization)?;
+    validate_payload_size(json.len())?;
     zstd::encode_all(&json[..], ZSTD_LEVEL)
         .map_err(|e| StorageError::Query(format!("zstd encode: {e}")))
 }
@@ -39,7 +54,7 @@ pub fn decompress(bytes: &[u8]) -> Result<serde_json::Value, StorageError> {
 
     let mut decoder = zstd::stream::read::Decoder::new(bytes)
         .map_err(|e| StorageError::Query(format!("zstd decode init: {e}")))?;
-    let mut output = Vec::with_capacity(bytes.len().min(MAX_DECOMPRESSED_BYTES));
+    let mut output = Vec::with_capacity(bytes.len().min(MAX_PAYLOAD_BYTES));
     let mut buf = [0u8; 8192];
     loop {
         let n = decoder
@@ -48,7 +63,7 @@ pub fn decompress(bytes: &[u8]) -> Result<serde_json::Value, StorageError> {
         if n == 0 {
             break;
         }
-        if output.len() + n > MAX_DECOMPRESSED_BYTES {
+        if output.len() + n > MAX_PAYLOAD_BYTES {
             return Err(StorageError::Query(
                 "decompressed payload exceeds 16 MiB limit".into(),
             ));
@@ -62,12 +77,18 @@ pub fn decompress(bytes: &[u8]) -> Result<serde_json::Value, StorageError> {
 
 #[cfg(not(feature = "compression"))]
 pub fn compress(value: &serde_json::Value) -> Result<Vec<u8>, StorageError> {
-    serde_json::to_vec(value).map_err(StorageError::Serialization)
+    let json = serde_json::to_vec(value).map_err(StorageError::Serialization)?;
+    validate_payload_size(json.len())?;
+    Ok(json)
 }
 
 #[cfg(not(feature = "compression"))]
 pub fn decompress(bytes: &[u8]) -> Result<serde_json::Value, StorageError> {
-    serde_json::from_slice(bytes).map_err(StorageError::Serialization)
+    // Older feature-disabled builds mislabeled raw JSON as zstd. Keep those
+    // rows readable, but report an actual zstd frame as unsupported.
+    serde_json::from_slice(bytes).map_err(|_| {
+        StorageError::Unsupported("zstd-compressed payload requires the compression feature".into())
+    })
 }
 
 #[cfg(test)]
@@ -83,6 +104,41 @@ mod tests {
         let compressed = compress(&v).unwrap();
         let decompressed = decompress(&compressed).unwrap();
         assert_eq!(decompressed, v);
+    }
+
+    #[test]
+    fn writer_limit_matches_reader_limit() {
+        assert!(validate_payload_size(MAX_PAYLOAD_BYTES).is_ok());
+        assert!(matches!(
+            validate_payload_size(MAX_PAYLOAD_BYTES + 1),
+            Err(StorageError::Constraint(_))
+        ));
+        let oversized = json!({"blob": "x".repeat(MAX_PAYLOAD_BYTES)});
+        assert!(matches!(
+            compress(&oversized),
+            Err(StorageError::Constraint(_))
+        ));
+    }
+
+    #[test]
+    fn compression_marker_depends_on_build_feature() {
+        assert!(!should_compress(COMPRESSION_THRESHOLD_BYTES - 1));
+        assert_eq!(
+            should_compress(COMPRESSION_THRESHOLD_BYTES),
+            cfg!(feature = "compression")
+        );
+    }
+
+    #[cfg(not(feature = "compression"))]
+    #[test]
+    fn feature_disabled_reader_supports_legacy_mislabeled_raw_json() {
+        let value = json!({"legacy": true});
+        let raw = serde_json::to_vec(&value).unwrap();
+        assert_eq!(decompress(&raw).unwrap(), value);
+        assert!(matches!(
+            decompress(&[0x28, 0xb5, 0x2f, 0xfd]),
+            Err(StorageError::Unsupported(_))
+        ));
     }
 
     #[cfg(feature = "compression")]
@@ -110,9 +166,10 @@ mod tests {
     #[test]
     fn decompress_rejects_compression_bomb() {
         // A tiny zstd payload that decompresses to a huge repeated string.
-        let huge = "x".repeat(MAX_DECOMPRESSED_BYTES + 1);
+        let huge = "x".repeat(MAX_PAYLOAD_BYTES + 1);
         let value = json!({ "blob": huge });
-        let compressed = compress(&value).unwrap();
+        let raw = serde_json::to_vec(&value).unwrap();
+        let compressed = zstd::encode_all(raw.as_slice(), ZSTD_LEVEL).unwrap();
         assert!(
             compressed.len() < huge.len() / 100,
             "expected compression bomb to be much smaller than raw"

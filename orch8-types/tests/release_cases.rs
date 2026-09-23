@@ -256,6 +256,22 @@ fn fixed_release() -> Uuid {
 }
 
 #[test]
+fn legacy_release_cohort_assignments_remain_stable() {
+    // Persisted releases keep the existing hash algorithm. Pin representative
+    // assignments so a future hash change cannot silently reshuffle traffic.
+    let release = fixed_release();
+    for (key, expected) in [
+        ("tenant-a", ReleaseVariant::Candidate),
+        ("customer-42", ReleaseVariant::Baseline),
+        ("device-x", ReleaseVariant::Candidate),
+        ("a", ReleaseVariant::Baseline),
+        ("0", ReleaseVariant::Baseline),
+    ] {
+        assert_eq!(assign_variant(release, key, 50), expected, "{key}");
+    }
+}
+
+#[test]
 fn assignment_is_deterministic_across_repeat_calls() {
     let release = fixed_release();
     for key in ["tenant-a", "customer-42", "device-x", "a", "0"] {

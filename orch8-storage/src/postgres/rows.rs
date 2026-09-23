@@ -124,7 +124,7 @@ pub(super) struct InstanceRow {
     pub metadata: serde_json::Value,
     pub context: serde_json::Value,
     pub concurrency_key: Option<String>,
-    pub max_concurrency: Option<i32>,
+    pub max_concurrency: Option<i64>,
     pub idempotency_key: Option<String>,
     pub session_id: Option<Uuid>,
     pub parent_instance_id: Option<Uuid>,
@@ -152,7 +152,14 @@ impl InstanceRow {
             metadata: self.metadata,
             context,
             concurrency_key: self.concurrency_key,
-            max_concurrency: self.max_concurrency.map(|v| v as u32),
+            max_concurrency: self
+                .max_concurrency
+                .map(|v| {
+                    u32::try_from(v).map_err(|_| {
+                        StorageError::Query(format!("invalid max_concurrency value: {v}"))
+                    })
+                })
+                .transpose()?,
             idempotency_key: self.idempotency_key,
             session_id: self.session_id,
             parent_instance_id: self.parent_instance_id.map(InstanceId::from_uuid),
@@ -211,17 +218,19 @@ pub(super) struct BlockOutputRow {
 }
 
 impl BlockOutputRow {
-    pub fn into_output(self) -> BlockOutput {
-        BlockOutput {
+    pub fn into_output(self) -> Result<BlockOutput, StorageError> {
+        Ok(BlockOutput {
             id: self.id,
             instance_id: InstanceId::from_uuid(self.instance_id),
             block_id: BlockId::new(self.block_id),
             output: self.output,
             output_ref: self.output_ref,
-            output_size: self.output_size as u32,
-            attempt: self.attempt as u16,
+            output_size: nonnegative_integer(self.output_size, "output_size")?,
+            attempt: u16::try_from(self.attempt).map_err(|_| {
+                StorageError::Constraint("attempt is negative in PostgreSQL".into())
+            })?,
             created_at: self.created_at,
-        }
+        })
     }
 }
 
@@ -380,18 +389,18 @@ pub(super) struct ResourcePoolRow {
 }
 
 impl ResourcePoolRow {
-    pub fn into_pool(self) -> orch8_types::pool::ResourcePool {
+    pub fn into_pool(self) -> Result<orch8_types::pool::ResourcePool, StorageError> {
         use orch8_types::pool::RotationStrategy;
-        orch8_types::pool::ResourcePool {
+        Ok(orch8_types::pool::ResourcePool {
             id: self.id,
             tenant_id: TenantId::unchecked(self.tenant_id),
             name: self.name,
             strategy: RotationStrategy::from_str(&self.strategy)
                 .unwrap_or(RotationStrategy::RoundRobin),
-            round_robin_index: self.round_robin_index as u32,
+            round_robin_index: nonnegative_integer(self.round_robin_index, "round_robin_index")?,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }
 
@@ -413,23 +422,28 @@ pub(super) struct PoolResourceRow {
 }
 
 impl PoolResourceRow {
-    pub fn into_resource(self) -> orch8_types::pool::PoolResource {
-        orch8_types::pool::PoolResource {
+    pub fn into_resource(self) -> Result<orch8_types::pool::PoolResource, StorageError> {
+        Ok(orch8_types::pool::PoolResource {
             id: self.id,
             pool_id: self.pool_id,
             resource_key: ResourceKey::new(self.resource_key),
             name: self.name,
-            weight: self.weight as u32,
+            weight: nonnegative_integer(self.weight, "weight")?,
             enabled: self.enabled,
-            daily_cap: self.daily_cap as u32,
-            daily_usage: self.daily_usage as u32,
+            daily_cap: nonnegative_integer(self.daily_cap, "daily_cap")?,
+            daily_usage: nonnegative_integer(self.daily_usage, "daily_usage")?,
             daily_usage_date: self.daily_usage_date,
             warmup_start: self.warmup_start,
-            warmup_days: self.warmup_days as u32,
-            warmup_start_cap: self.warmup_start_cap as u32,
+            warmup_days: nonnegative_integer(self.warmup_days, "warmup_days")?,
+            warmup_start_cap: nonnegative_integer(self.warmup_start_cap, "warmup_start_cap")?,
             created_at: self.created_at,
-        }
+        })
     }
+}
+
+fn nonnegative_integer(value: i32, field: &str) -> Result<u32, StorageError> {
+    u32::try_from(value)
+        .map_err(|_| StorageError::Constraint(format!("{field} is negative in PostgreSQL")))
 }
 
 #[derive(sqlx::FromRow)]
@@ -474,9 +488,9 @@ pub(super) struct SessionRow {
 }
 
 impl SessionRow {
-    pub fn into_session(self) -> orch8_types::session::Session {
-        let state = SessionState::from_str(&self.state).unwrap_or(SessionState::Active);
-        orch8_types::session::Session {
+    pub fn into_session(self) -> Result<orch8_types::session::Session, StorageError> {
+        let state = SessionState::from_str(&self.state).map_err(StorageError::Query)?;
+        Ok(orch8_types::session::Session {
             id: self.id,
             tenant_id: TenantId::unchecked(self.tenant_id),
             session_key: self.session_key,
@@ -485,7 +499,7 @@ impl SessionRow {
             created_at: self.created_at,
             updated_at: self.updated_at,
             expires_at: self.expires_at,
-        }
+        })
     }
 }
 
@@ -504,10 +518,10 @@ pub(super) struct ClusterNodeRow {
 }
 
 impl ClusterNodeRow {
-    pub fn into_node(self) -> orch8_types::cluster::ClusterNode {
+    pub fn into_node(self) -> Result<orch8_types::cluster::ClusterNode, StorageError> {
         use orch8_types::cluster::NodeStatus;
-        let status = NodeStatus::from_str(&self.status).unwrap_or(NodeStatus::Active);
-        orch8_types::cluster::ClusterNode {
+        let status = NodeStatus::from_str(&self.status).map_err(StorageError::Query)?;
+        Ok(orch8_types::cluster::ClusterNode {
             id: self.id,
             name: self.name,
             status,
@@ -518,6 +532,56 @@ impl ClusterNodeRow {
             stopped_at: self.stopped_at,
             capabilities_withdrawn: self.capabilities_withdrawn,
             execution_handoff_evidence: self.execution_handoff_evidence,
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod integer_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_negative_persisted_pool_integer() {
+        assert_eq!(
+            nonnegative_integer(i32::MAX, "daily_cap").unwrap(),
+            i32::MAX as u32
+        );
+        assert!(matches!(
+            nonnegative_integer(-1, "daily_cap"),
+            Err(StorageError::Constraint(message)) if message.contains("daily_cap")
+        ));
+    }
+
+    #[test]
+    fn rejects_negative_persisted_output_size_and_attempt() {
+        let row = BlockOutputRow {
+            id: Uuid::now_v7(),
+            instance_id: Uuid::now_v7(),
+            block_id: "step".into(),
+            output: serde_json::Value::Null,
+            output_ref: None,
+            output_size: -1,
+            attempt: 0,
+            created_at: Utc::now(),
+        };
+        assert!(matches!(
+            row.into_output(),
+            Err(StorageError::Constraint(_))
+        ));
+
+        let row = BlockOutputRow {
+            id: Uuid::now_v7(),
+            instance_id: Uuid::now_v7(),
+            block_id: "step".into(),
+            output: serde_json::Value::Null,
+            output_ref: None,
+            output_size: 0,
+            attempt: -1,
+            created_at: Utc::now(),
+        };
+        assert!(matches!(
+            row.into_output(),
+            Err(StorageError::Constraint(_))
+        ));
     }
 }

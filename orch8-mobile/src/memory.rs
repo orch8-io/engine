@@ -41,10 +41,12 @@ impl MemoryBudgetSampler {
 
         if sample_due {
             state.rss = current_rss_bytes();
-            state.exceeded = state.rss.is_some_and(|rss| rss > budget_bytes);
             state.checked_at = Some(now);
         }
 
+        // Cache the RSS sample, not the verdict: a caller may supply a
+        // different budget before the next probe is due.
+        state.exceeded = state.rss.is_some_and(|rss| rss > budget_bytes);
         state.exceeded.then_some(state.rss).flatten()
     }
 }

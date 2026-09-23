@@ -44,16 +44,21 @@ fn coverage_memory_003_sampler_caches_the_over_budget_sample() {
 }
 
 #[test]
-fn coverage_memory_004_cached_verdict_outlives_budget_change_within_interval() {
-    if current_rss_bytes().is_some() {
-        let sampler = MemoryBudgetSampler::default();
-        assert!(sampler.over_budget(1).is_some(), "seed an exceeded verdict");
+fn coverage_memory_004_cached_rss_respects_budget_change_within_interval() {
+    let sampler = MemoryBudgetSampler::default();
+    let checked_at = Instant::now();
+    *sampler.state.lock().unwrap() = MemorySampleState {
+        checked_at: Some(checked_at),
+        rss: Some(1_024),
+        exceeded: true,
+    };
 
-        // Within the sample interval the verdict is served from cache, so a
-        // now-relaxed budget still reports the stale exceeded reading rather
-        // than paying for a fresh probe on every tick.
-        assert!(sampler.over_budget(u64::MAX).is_some());
-    }
+    // Changing the budget must re-evaluate the cached RSS, without
+    // launching another process/procfs probe within the sample interval.
+    assert_eq!(sampler.over_budget(u64::MAX), None);
+    assert_eq!(sampler.state.lock().unwrap().checked_at, Some(checked_at));
+    assert_eq!(sampler.over_budget(1), Some(1_024));
+    assert_eq!(sampler.state.lock().unwrap().checked_at, Some(checked_at));
 }
 
 #[test]

@@ -113,7 +113,7 @@ impl PortableWorkOffer {
         if self.expires_at <= now {
             return Err(ProductContractError::OfferExpired);
         }
-        if self.expires_at > now + chrono::Duration::hours(24) {
+        if self.expires_at.signed_duration_since(now) > chrono::Duration::hours(24) {
             return Err(ProductContractError::InvalidPolicy(
                 "work offer lifetime exceeds 24 hours".into(),
             ));
@@ -172,9 +172,9 @@ impl RuntimePassport {
         if self.expires_at <= now {
             return Err(ProductContractError::PassportExpired);
         }
-        if self.issued_at > now + chrono::Duration::minutes(5)
+        if self.issued_at.signed_duration_since(now) > chrono::Duration::minutes(5)
             || self.expires_at <= self.issued_at
-            || self.expires_at > self.issued_at + chrono::Duration::hours(24)
+            || self.expires_at.signed_duration_since(self.issued_at) > chrono::Duration::hours(24)
         {
             return Err(ProductContractError::PassportCapabilityMismatch);
         }
@@ -397,37 +397,38 @@ pub fn compile_placement_policy(
                 "duplicate key {key}"
             )));
         }
-        let list = || {
-            value
-                .split(',')
-                .map(|item| item.trim().to_string())
-                .filter(|item| !item.is_empty())
-                .collect::<Vec<_>>()
-        };
+        let list = || parse_policy_list(value, key);
         match key {
             "classification" => {
                 classification = parse_classification(value)?;
                 rule.classification = classification;
             }
-            "regions" => rule.allowed_regions = list(),
-            "handlers" => requirements.handlers = list(),
-            "plugins" => requirements.plugins = list(),
-            "credentials" => requirements.credentials = list(),
-            "hardware" => requirements.hardware = list(),
-            "require_hardware" => rule.require_hardware = Some(value.to_string()),
+            "regions" => rule.allowed_regions = list()?,
+            "handlers" => requirements.handlers = list()?,
+            "plugins" => requirements.plugins = list()?,
+            "credentials" => requirements.credentials = list()?,
+            "hardware" => requirements.hardware = list()?,
+            "require_hardware" => {
+                if value.is_empty() {
+                    return Err(ProductContractError::InvalidPolicy(
+                        "require_hardware must not be empty".into(),
+                    ));
+                }
+                rule.require_hardware = Some(value.to_string());
+            }
             "min_trust" => {
                 let trust = parse_trust(value)?;
                 rule.minimum_trust = Some(trust);
                 requirements.minimum_trust = Some(trust);
             }
             "runtime_kinds" => {
-                rule.allowed_runtime_kinds = list()
+                rule.allowed_runtime_kinds = list()?
                     .iter()
                     .map(|item| parse_runtime_kind(item))
                     .collect::<Result<Vec<_>, _>>()?;
             }
             "connectivity" => {
-                rule.allowed_connectivity = list()
+                rule.allowed_connectivity = list()?
                     .iter()
                     .map(|item| parse_connectivity(item))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -445,6 +446,11 @@ pub fn compile_placement_policy(
             }
         }
     }
+    if seen_keys.is_empty() {
+        return Err(ProductContractError::InvalidPolicy(
+            "policy must contain at least one declaration".into(),
+        ));
+    }
     let digest = sha256_hex(source);
     Ok(CompiledPlacementPolicy {
         source: source.into(),
@@ -456,6 +462,16 @@ pub fn compile_placement_policy(
         classification,
         source_sha256: digest,
     })
+}
+
+fn parse_policy_list(value: &str, key: &str) -> Result<Vec<String>, ProductContractError> {
+    let items = value.split(',').map(str::trim).collect::<Vec<_>>();
+    if items.iter().any(|item| item.is_empty()) {
+        return Err(ProductContractError::InvalidPolicy(format!(
+            "{key} must contain non-empty list items"
+        )));
+    }
+    Ok(items.into_iter().map(str::to_string).collect())
 }
 
 fn parse_classification(value: &str) -> Result<DataClassification, ProductContractError> {
@@ -728,7 +744,7 @@ pub fn issue_conformance_certificate(
             "certificate expiration must follow issuance".into(),
         ));
     }
-    if expires_at > issued_at + chrono::Duration::days(366) {
+    if expires_at.signed_duration_since(issued_at) > chrono::Duration::days(366) {
         return Err(ProductContractError::InvalidCommercialPlan(
             "certificate lifetime exceeds 366 days".into(),
         ));
@@ -898,7 +914,13 @@ impl TrustBoundaryProfile {
             classification: compiled.classification,
             idempotency_key,
             receipt_required: contract.requires_signed_receipt,
-            expires_at: now + chrono::Duration::minutes(15),
+            expires_at: now
+                .checked_add_signed(chrono::Duration::minutes(15))
+                .ok_or_else(|| {
+                    ProductContractError::InvalidPolicy(
+                        "work offer expiration is out of range".into(),
+                    )
+                })?,
         };
         offer.validate(now)?;
         Ok(offer)

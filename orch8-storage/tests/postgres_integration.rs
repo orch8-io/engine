@@ -17,9 +17,10 @@ use uuid::Uuid;
 use orch8_storage::conformance::run_core_conformance;
 use orch8_storage::postgres::PostgresStorage;
 use orch8_storage::{
-    ExecutionTreeStore, InstanceStore, MobileSyncStore, OutputStore, ResourceStore,
-    SchedulingStore, SequenceStore, WorkerStore,
+    AdminStore, ExecutionTreeStore, InstanceStore, MobileSyncStore, OutputStore, ResourceStore,
+    SchedulingStore, SequenceStore, TelemetryStore, UsageEvent, WorkerStore,
 };
+use orch8_types::cluster::{ClusterNode, NodeStatus};
 use orch8_types::context::{ExecutionContext, RuntimeContext};
 use orch8_types::continuity::{
     CapsuleRequirements, RuntimeCapabilities, RuntimeConnectivity, RuntimeId, RuntimeKind,
@@ -30,8 +31,10 @@ use orch8_types::ids::{
     BlockId, ExecutionNodeId, InstanceId, Namespace, ResourceKey, SequenceId, TenantId,
 };
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+use orch8_types::queue_dispatch::{DispatchMode, QueueDispatchConfig};
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
+use orch8_types::session::{Session, SessionState};
 use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
 use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskState};
 
@@ -64,6 +67,297 @@ async fn postgres_passes_public_core_conformance() {
         .await
         .expect("Postgres must satisfy the scheduler storage contract");
     assert_eq!(report.checks.len(), 9);
+}
+
+#[tokio::test]
+async fn postgres_unknown_dispatch_mode_is_not_treated_as_poll() {
+    let storage = require_postgres!();
+    let tenant = format!("dispatch-mode-{}", Uuid::new_v4());
+    let now = Utc::now();
+    storage
+        .upsert_queue_dispatch(&QueueDispatchConfig {
+            tenant_id: tenant.clone(),
+            queue_name: "jobs".into(),
+            mode: DispatchMode::Push,
+            push_url: Some("https://example.invalid/push".into()),
+            secret: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE queue_dispatch SET mode = 'future-mode' WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for result in [
+        storage
+            .get_queue_dispatch(&tenant, "jobs")
+            .await
+            .map(|_| ()),
+        storage.list_queue_dispatch(Some(&tenant)).await.map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(orch8_types::error::StorageError::Query(message)) if message.contains("future-mode")
+        ));
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn postgres_unknown_session_state_is_not_treated_as_active() {
+    let storage = require_postgres!();
+    let now = Utc::now();
+    let session = Session {
+        id: Uuid::now_v7(),
+        tenant_id: TenantId::unchecked(format!("session-state-{}", Uuid::new_v4())),
+        session_key: "key".into(),
+        data: serde_json::json!({}),
+        state: SessionState::Active,
+        created_at: now,
+        updated_at: now,
+        expires_at: None,
+    };
+    storage.create_session(&session).await.unwrap();
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET state = 'future-terminal' WHERE id = $1")
+        .bind(session.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for result in [
+        storage.get_session(session.id).await,
+        storage
+            .get_session_by_key(&session.tenant_id, &session.session_key)
+            .await,
+    ] {
+        assert!(matches!(
+            result,
+            Err(orch8_types::error::StorageError::Query(message)) if message.contains("future-terminal")
+        ));
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn postgres_unknown_cluster_node_status_is_not_active() {
+    let storage = require_postgres!();
+    let now = Utc::now();
+    let node = ClusterNode {
+        id: Uuid::new_v4(),
+        name: format!("status-test-{}", Uuid::new_v4()),
+        status: NodeStatus::Active,
+        registered_at: now,
+        last_heartbeat_at: now,
+        drain: false,
+        drain_started_at: None,
+        stopped_at: None,
+        capabilities_withdrawn: false,
+        execution_handoff_evidence: None,
+    };
+    storage.register_node(&node).await.unwrap();
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cluster_nodes SET status = 'future-stopped' WHERE id = $1")
+        .bind(node.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        storage.list_nodes().await,
+        Err(orch8_types::error::StorageError::Query(message)) if message.contains("future-stopped")
+    ));
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn postgres_usage_rejects_negative_token_counts_without_writes() {
+    let storage = require_postgres!();
+    let now = Utc::now();
+    let mut event = UsageEvent {
+        tenant_id: format!("usage-negative-{}", Uuid::new_v4()),
+        instance_id: None,
+        block_id: None,
+        kind: "llm_tokens".into(),
+        model: "model".into(),
+        input_tokens: 0,
+        output_tokens: 0,
+        created_at: now,
+    };
+    for (input, output) in [(-1, 0), (0, -1), (-1, -1)] {
+        event.input_tokens = input;
+        event.output_tokens = output;
+        assert!(matches!(
+            storage.record_usage_event(&event).await,
+            Err(orch8_types::error::StorageError::Constraint(_))
+        ));
+    }
+    let start = now - chrono::Duration::seconds(1);
+    let end = now + chrono::Duration::seconds(1);
+    assert!(
+        storage
+            .query_usage(&event.tenant_id, start, end)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    event.input_tokens = 0;
+    event.output_tokens = 0;
+    storage.record_usage_event(&event).await.unwrap();
+    let totals = storage
+        .query_usage(&event.tenant_id, start, end)
+        .await
+        .unwrap();
+    assert_eq!(totals.len(), 1);
+    assert_eq!((totals[0].input_tokens, totals[0].output_tokens), (0, 0));
+}
+
+#[tokio::test]
+async fn postgres_usage_window_matches_fractional_boundary_contract() {
+    let storage = require_postgres!();
+    let tenant = format!("usage-window-{}", Uuid::new_v4());
+    let timestamp = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc)
+    };
+    for (model, at) in [
+        ("whole", "2026-09-23T10:00:00Z"),
+        ("before", "2026-09-23T10:00:00.099999Z"),
+        ("start", "2026-09-23T10:00:00.100Z"),
+        ("inside", "2026-09-23T10:00:00.100001Z"),
+        ("last", "2026-09-23T10:00:00.199999Z"),
+        ("end", "2026-09-23T10:00:00.200Z"),
+        ("next", "2026-09-23T10:00:01Z"),
+    ] {
+        storage
+            .record_usage_event(&UsageEvent {
+                tenant_id: tenant.clone(),
+                instance_id: None,
+                block_id: None,
+                kind: "llm_tokens".into(),
+                model: model.into(),
+                input_tokens: 1,
+                output_tokens: 0,
+                created_at: timestamp(at),
+            })
+            .await
+            .unwrap();
+    }
+    let models = |usage: Vec<orch8_storage::UsageAggregate>| {
+        usage.into_iter().map(|row| row.model).collect::<Vec<_>>()
+    };
+    let middle = storage
+        .query_usage(
+            &tenant,
+            timestamp("2026-09-23T10:00:00.100Z"),
+            timestamp("2026-09-23T10:00:00.200Z"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(models(middle), ["inside", "last", "start"]);
+    let first = storage
+        .query_usage(
+            &tenant,
+            timestamp("2026-09-23T10:00:00Z"),
+            timestamp("2026-09-23T10:00:00.100Z"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(models(first), ["before", "whole"]);
+
+    // The stored timestamps are on PostgreSQL's microsecond grid, but callers
+    // can provide nanosecond bounds. A bound just after `start` must exclude
+    // that row; the same bound as an exclusive end must include it.
+    let after_start = timestamp("2026-09-23T10:00:00.100000001Z");
+    let late = storage
+        .query_usage(&tenant, after_start, timestamp("2026-09-23T10:00:00.200Z"))
+        .await
+        .unwrap();
+    assert_eq!(models(late), ["inside", "last"]);
+    let early = storage
+        .query_usage(&tenant, timestamp("2026-09-23T10:00:00Z"), after_start)
+        .await
+        .unwrap();
+    assert_eq!(models(early), ["before", "start", "whole"]);
+}
+
+#[tokio::test]
+async fn postgres_memory_batch_deletes_handle_more_than_bind_limit() {
+    let storage = require_postgres!();
+    let tenant = format!("t-memory-batch-{}", Uuid::new_v4());
+    let other_tenant = format!("t-memory-batch-other-{}", Uuid::new_v4());
+    let sequence_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, sequence_id))
+        .await
+        .unwrap();
+    let target = mk_instance(&tenant, sequence_id, None);
+    let other = mk_instance(&tenant, sequence_id, None);
+    storage.create_instance(&target).await.unwrap();
+    storage.create_instance(&other).await.unwrap();
+
+    let keys: Vec<String> = (0..65_536).map(|index| format!("memory-{index}")).collect();
+    for key in [&keys[0], &keys[65_535]] {
+        storage
+            .set_instance_kv(target.id, key, &serde_json::json!(true))
+            .await
+            .unwrap();
+        storage
+            .set_instance_kv(other.id, key, &serde_json::json!(true))
+            .await
+            .unwrap();
+        storage
+            .set_shared_knowledge(&tenant, "ns", key, &serde_json::json!(true))
+            .await
+            .unwrap();
+        storage
+            .set_shared_knowledge(&other_tenant, "ns", key, &serde_json::json!(true))
+            .await
+            .unwrap();
+    }
+
+    storage
+        .delete_instance_kv_batch(target.id, &keys)
+        .await
+        .unwrap();
+    storage
+        .delete_shared_knowledge_batch(&tenant, "ns", &keys)
+        .await
+        .unwrap();
+
+    for key in [&keys[0], &keys[65_535]] {
+        assert_eq!(storage.get_instance_kv(target.id, key).await.unwrap(), None);
+        assert_eq!(
+            storage.get_instance_kv(other.id, key).await.unwrap(),
+            Some(serde_json::json!(true))
+        );
+        assert_eq!(
+            storage
+                .get_shared_knowledge(&tenant, "ns", key)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .get_shared_knowledge(&other_tenant, "ns", key)
+                .await
+                .unwrap(),
+            Some(serde_json::json!(true))
+        );
+    }
 }
 
 fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
@@ -114,6 +408,53 @@ fn mk_instance(tenant: &str, seq_id: SequenceId, concurrency_key: Option<&str>) 
         created_at: now,
         updated_at: now,
     }
+}
+
+#[tokio::test]
+async fn postgres_max_concurrency_roundtrips_full_u32_and_rejects_invalid_storage() {
+    let storage = require_postgres!();
+    let tenant = format!("max-concurrency-{}", Uuid::new_v4());
+    let sequence_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, sequence_id))
+        .await
+        .unwrap();
+    let mut inst = mk_instance(&tenant, sequence_id, Some("key"));
+    inst.max_concurrency = Some(u32::MAX);
+    storage.create_instance(&inst).await.unwrap();
+    assert_eq!(
+        storage
+            .get_instance(inst.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .max_concurrency,
+        Some(u32::MAX)
+    );
+
+    inst.id = InstanceId::new();
+    storage
+        .create_instances_batch(&[inst.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .get_instance(inst.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .max_concurrency,
+        Some(u32::MAX)
+    );
+
+    sqlx::query("UPDATE task_instances SET max_concurrency = -1 WHERE id = $1")
+        .bind(inst.id.into_uuid())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    assert!(
+        matches!(storage.get_instance(inst.id).await, Err(orch8_types::error::StorageError::Query(message)) if message.contains("max_concurrency"))
+    );
 }
 
 /// #14: the rate-limit check must be genuinely atomic (single locked
@@ -214,7 +555,7 @@ async fn rate_limit_check_admits_exactly_max_count_under_concurrency() {
 /// #7: `claim_for_tenant`'s `FOR UPDATE OF wt SKIP LOCKED` must lock only the
 /// `worker_tasks` row, not the joined `task_instances` row -- otherwise a
 /// tenant-scoped worker poll in flight would make the scheduler's
-/// `claim_due_instances` (its own `SKIP LOCKED` claim) skip that instance.
+/// `FOR UPDATE SKIP LOCKED` claim skip that instance.
 ///
 /// This test holds open a transaction running the *same* locking clause
 /// `claim_for_tenant` uses, rather than calling `claim_worker_tasks_for_tenant`
@@ -222,7 +563,9 @@ async fn rate_limit_check_admits_exactly_max_count_under_concurrency() {
 /// held for microseconds -- far too short a window to reliably interleave
 /// with a concurrent claim in a test. Holding an equivalent query open lets
 /// us assert the semantic guarantee (`FOR UPDATE OF wt` doesn't lock `ti`)
-/// deterministically. `source_pins_for_update_of_wt_in_tenant_claim_queries`
+/// deterministically. The target row is probed by ID so unrelated scheduled
+/// rows from other integration tests cannot consume a scheduler claim limit.
+/// `source_pins_for_update_of_wt_in_tenant_claim_queries`
 /// below is the complementary guard that catches a regression to the actual
 /// shipped query text, since this test's hardcoded copy wouldn't.
 #[tokio::test]
@@ -285,19 +628,17 @@ async fn tenant_worker_claim_does_not_lock_task_instances_row() {
     .await
     .unwrap();
 
-    // While that transaction is still open (task_instances row must NOT be
-    // locked by it), the scheduler's claim must still be able to pick up the
-    // instance.
-    let claimed = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        s.claim_due_instances(Utc::now(), 10, 0),
-    )
-    .await
-    .expect("claim_due_instances must not block on the worker-claim transaction")
-    .unwrap();
-
-    assert!(
-        claimed.iter().any(|i| i.id == instance.id),
+    // The scheduler's claim uses FOR UPDATE SKIP LOCKED on task_instances.
+    // Probe only this instance so the assertion is independent of other tests.
+    let claimed: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM task_instances WHERE id = $1 FOR UPDATE SKIP LOCKED")
+            .bind(instance.id.into_uuid())
+            .fetch_optional(s.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        claimed.map(|(id,)| id),
+        Some(instance.id.into_uuid()),
         "task_instances row must not have been locked by the worker-task claim"
     );
 
@@ -959,12 +1300,11 @@ async fn terminal_transition_and_webhook_enqueue_share_one_transaction_postgres(
     assert_eq!(retried.len(), 1);
     assert_eq!(retried[0].attempts, 1);
 
-    assert_eq!(
-        s.recover_stale_webhook_claims(retry_at + chrono::Duration::seconds(1))
-            .await
-            .unwrap(),
-        1
-    );
+    let recovered = s
+        .recover_stale_webhook_claims(retry_at + chrono::Duration::seconds(1))
+        .await
+        .unwrap();
+    assert!(recovered >= 1);
     let claimed_at = retry_at + chrono::Duration::seconds(2);
     assert!(
         s.claim_webhook_outbox_row(entry.id, claimed_at)

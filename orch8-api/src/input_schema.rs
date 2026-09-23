@@ -122,6 +122,17 @@ mod tests {
     }
 
     #[test]
+    fn multiple_violations_keep_each_json_pointer() {
+        let s = schema();
+        let error = validate_input(Some(&s), &json!({ "email": 42, "age": -1 })).unwrap_err();
+        let ApiError::UnprocessableEntity(message) = error else {
+            panic!("schema violations must be unprocessable");
+        };
+        assert!(message.contains("/email"), "{message}");
+        assert!(message.contains("/age"), "{message}");
+    }
+
+    #[test]
     fn well_formed_check_rejects_non_object() {
         assert!(validate_schema_is_well_formed(&json!("nope")).is_err());
     }

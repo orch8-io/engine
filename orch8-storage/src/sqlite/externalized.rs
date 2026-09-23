@@ -8,7 +8,9 @@ use orch8_types::ids::*;
 
 use super::SqliteStorage;
 use super::helpers::ts;
-use crate::compression::{COMPRESSION_THRESHOLD_BYTES, compress, decompress};
+use crate::compression::{compress, decompress, should_compress, validate_payload_size};
+
+const BATCH_GET_CHUNK_SIZE: usize = 500;
 
 pub(super) async fn save(
     storage: &SqliteStorage,
@@ -17,9 +19,10 @@ pub(super) async fn save(
     payload: &serde_json::Value,
 ) -> Result<(), StorageError> {
     let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+    validate_payload_size(raw.len())?;
     let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
-    if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+    if should_compress(raw.len()) {
         let compressed = compress(payload)?;
         sqlx::query(
             "INSERT INTO externalized_state \
@@ -117,9 +120,10 @@ pub(super) async fn batch_save(
 
     for (ref_key, payload) in entries {
         let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+        validate_payload_size(raw.len())?;
         let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
-        if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+        if should_compress(raw.len()) {
             let c = compress(payload)?;
             compressed.push((ref_key.as_str(), c, raw_size));
         } else {
@@ -191,10 +195,9 @@ pub(super) async fn batch_save(
 /// an `IN (?,?,...)` clause dynamically. Missing keys are absent from the
 /// returned map — callers treat that as "nothing to hydrate".
 ///
-/// SQLite caps a single statement at `SQLITE_MAX_VARIABLE_NUMBER` bound params
-/// (default 32766 in modern builds). The scheduler preload path only batches
-/// the fields of *one* dispatched step, so in practice `ref_keys` is tiny —
-/// no chunking needed here.
+/// SQLite caps a single statement at `SQLITE_MAX_VARIABLE_NUMBER` bound params.
+/// Keep chunks below even older 999-variable builds; this trait method can be
+/// called with more keys than the scheduler's usual small preload batch.
 pub(super) async fn batch_get(
     storage: &SqliteStorage,
     ref_keys: &[String],
@@ -203,45 +206,46 @@ pub(super) async fn batch_get(
         return Ok(HashMap::new());
     }
 
-    let mut qb = sqlx::QueryBuilder::new(
-        "SELECT ref_key, payload, payload_bytes, compression FROM externalized_state WHERE ref_key IN (",
-    );
-    let mut separated = qb.separated(",");
-    for key in ref_keys {
-        separated.push_bind(key);
-    }
-    separated.push_unseparated(")");
+    let mut out = HashMap::new();
+    for chunk in ref_keys.chunks(BATCH_GET_CHUNK_SIZE) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT ref_key, payload, payload_bytes, compression FROM externalized_state WHERE ref_key IN (",
+        );
+        let mut separated = qb.separated(",");
+        for key in chunk {
+            separated.push_bind(key);
+        }
+        separated.push_unseparated(")");
 
-    let query = qb.build();
-    let rows = query.fetch_all(&storage.pool).await?;
-
-    let mut out = HashMap::with_capacity(rows.len());
-    for row in rows {
-        let ref_key: String = row.try_get("ref_key")?;
-        let compression: Option<String> = row.try_get("compression").unwrap_or(None);
-        let value = match compression.as_deref() {
-            Some("zstd") => {
-                let bytes: Vec<u8> = row.try_get("payload_bytes")?;
-                decompress(&bytes)?
-            }
-            None => {
-                let payload: Option<String> = row.try_get("payload").unwrap_or(None);
-                match payload {
-                    Some(s) => serde_json::from_str(&s).map_err(StorageError::Serialization)?,
-                    None => {
-                        return Err(StorageError::Query(
-                            "externalized_state row has compression=NULL and payload=NULL".into(),
-                        ));
+        let rows = qb.build().fetch_all(&storage.pool).await?;
+        for row in rows {
+            let ref_key: String = row.try_get("ref_key")?;
+            let compression: Option<String> = row.try_get("compression").unwrap_or(None);
+            let value = match compression.as_deref() {
+                Some("zstd") => {
+                    let bytes: Vec<u8> = row.try_get("payload_bytes")?;
+                    decompress(&bytes)?
+                }
+                None => {
+                    let payload: Option<String> = row.try_get("payload").unwrap_or(None);
+                    match payload {
+                        Some(s) => serde_json::from_str(&s).map_err(StorageError::Serialization)?,
+                        None => {
+                            return Err(StorageError::Query(
+                                "externalized_state row has compression=NULL and payload=NULL"
+                                    .into(),
+                            ));
+                        }
                     }
                 }
-            }
-            Some(other) => {
-                return Err(StorageError::Query(format!(
-                    "unknown externalized_state compression codec: {other}"
-                )));
-            }
-        };
-        out.insert(ref_key, value);
+                Some(other) => {
+                    return Err(StorageError::Query(format!(
+                        "unknown externalized_state compression codec: {other}"
+                    )));
+                }
+            };
+            out.insert(ref_key, value);
+        }
     }
     Ok(out)
 }

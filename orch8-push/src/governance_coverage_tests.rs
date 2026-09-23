@@ -1,8 +1,8 @@
-//! Governance coverage beyond the boundary suite: nonce-cache eviction and
+//! Governance coverage beyond the boundary suite: nonce-cache saturation and
 //! purge semantics, signature envelope tampering, shape limit boundaries,
 //! router fan-out, collapse-key encoding, and lifecycle persistence.
 //!
-//! Count contract: 28 independently named unit tests.
+//! Count contract: 29 independently named unit tests.
 
 use chrono::TimeZone as _;
 
@@ -33,14 +33,14 @@ fn coverage_governance_001_nonce_cache_capacity_clamps_to_one() {
     cache
         .consume(first, t0() + Duration::seconds(100), t0())
         .unwrap();
-    // Capacity of one: inserting the second nonce evicts the first.
-    cache
-        .consume(second, t0() + Duration::seconds(50), t0())
-        .unwrap();
-    assert!(
-        cache
-            .consume(first, t0() + Duration::seconds(200), t0())
-            .is_ok()
+    // Capacity of one: reject a fresh nonce without forgetting the first.
+    assert_eq!(
+        cache.consume(second, t0() + Duration::seconds(50), t0()),
+        Err(PushGovernanceError::ReplayCacheFull)
+    );
+    assert_eq!(
+        cache.consume(first, t0() + Duration::seconds(200), t0()),
+        Err(PushGovernanceError::Replay)
     );
 }
 
@@ -80,7 +80,7 @@ fn coverage_governance_004_expired_nonce_can_be_consumed_again() {
 }
 
 #[test]
-fn coverage_governance_005_eviction_removes_earliest_expiring_entry() {
+fn coverage_governance_005_full_cache_preserves_replay_evidence_until_expiry() {
     let mut cache = WakeNonceCache::new(2);
     let late = Uuid::new_v4();
     let early = Uuid::new_v4();
@@ -91,21 +91,30 @@ fn coverage_governance_005_eviction_removes_earliest_expiring_entry() {
     cache
         .consume(early, t0() + Duration::seconds(50), t0())
         .unwrap();
-    // Full: the earliest-expiring entry (early) is evicted, not the oldest insert.
-    cache
-        .consume(fresh, t0() + Duration::seconds(200), t0())
-        .unwrap();
+    // Full: neither unexpired entry can be evicted to admit a fresh nonce.
+    assert_eq!(
+        cache.consume(fresh, t0() + Duration::seconds(200), t0()),
+        Err(PushGovernanceError::ReplayCacheFull)
+    );
     assert_eq!(
         cache.consume(late, t0() + Duration::seconds(100), t0()),
         Err(PushGovernanceError::Replay)
     );
-    assert!(
-        cache
-            .consume(early, t0() + Duration::seconds(50), t0())
-            .is_ok()
+    assert_eq!(
+        cache.consume(early, t0() + Duration::seconds(50), t0()),
+        Err(PushGovernanceError::Replay)
     );
     assert_eq!(
         cache.consume(fresh, t0() + Duration::seconds(200), t0()),
+        Err(PushGovernanceError::ReplayCacheFull)
+    );
+    // Once the early entry expires, the cache can admit a new wake.
+    let after_early_expiry = t0() + Duration::seconds(50);
+    cache
+        .consume(fresh, t0() + Duration::seconds(200), after_early_expiry)
+        .unwrap();
+    assert_eq!(
+        cache.consume(late, t0() + Duration::seconds(100), after_early_expiry),
         Err(PushGovernanceError::Replay)
     );
 }
@@ -518,4 +527,69 @@ fn coverage_governance_028_verified_wake_nonce_replays_on_second_verify() {
         wake.verify("tenant", "device", now, &key.verifying_key(), &mut cache),
         Err(PushGovernanceError::Replay)
     );
+}
+
+#[test]
+fn coverage_governance_029_full_cache_rejects_signed_wake_until_capacity_expires() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let first = SignedWakeMetadata::sign(
+        "tenant",
+        "device",
+        "first-command",
+        "key-v1",
+        &key,
+        t0(),
+        t0() + Duration::seconds(30),
+    )
+    .unwrap();
+    let second = SignedWakeMetadata::sign(
+        "tenant",
+        "device",
+        "second-command",
+        "key-v1",
+        &key,
+        t0(),
+        t0() + Duration::seconds(60),
+    )
+    .unwrap();
+    let mut cache = WakeNonceCache::new(1);
+    let initial_time = t0() + Duration::seconds(1);
+    first
+        .verify(
+            "tenant",
+            "device",
+            initial_time,
+            &key.verifying_key(),
+            &mut cache,
+        )
+        .unwrap();
+    assert_eq!(
+        second.verify(
+            "tenant",
+            "device",
+            initial_time,
+            &key.verifying_key(),
+            &mut cache
+        ),
+        Err(PushGovernanceError::ReplayCacheFull)
+    );
+    assert_eq!(
+        first.verify(
+            "tenant",
+            "device",
+            initial_time,
+            &key.verifying_key(),
+            &mut cache
+        ),
+        Err(PushGovernanceError::Replay)
+    );
+    second
+        .verify(
+            "tenant",
+            "device",
+            t0() + Duration::seconds(30),
+            &key.verifying_key(),
+            &mut cache,
+        )
+        .unwrap();
 }

@@ -110,6 +110,7 @@ pub struct PushOutboxWorker {
     provider: Arc<dyn PushProvider>,
     batch_size: u32,
     lease_duration: Duration,
+    provider_timeout: std::time::Duration,
     max_attempts: u32,
     wake_signer: Option<(String, SigningKey)>,
 }
@@ -121,7 +122,10 @@ impl PushOutboxWorker {
             store,
             provider,
             batch_size: 100,
-            lease_duration: Duration::seconds(30),
+            // FCM can make three token requests and three delivery requests,
+            // each with a 10-second HTTP timeout, plus short retry backoffs.
+            lease_duration: Duration::seconds(90),
+            provider_timeout: std::time::Duration::from_secs(75),
             max_attempts: 8,
             wake_signer: None,
         }
@@ -145,37 +149,64 @@ impl PushOutboxWorker {
         if !self.provider.is_configured() {
             return Ok(0);
         }
-        let wakes = self
-            .store
-            .claim_due_wakes(now, now + self.lease_duration, self.batch_size)
-            .await?;
-        for wake in &wakes {
-            let provider_result = if let Some((key_id, key)) = &self.wake_signer {
-                match crate::SignedWakeMetadata::sign(
-                    &wake.tenant_id,
-                    &wake.device_id,
-                    &wake.command_id,
-                    key_id,
-                    key,
-                    now,
-                    now + Duration::minutes(5),
-                ) {
-                    Ok(metadata) => {
-                        self.provider
-                            .send_signed_wake(&wake.push_token, &wake.platform, &metadata)
-                            .await
-                    }
-                    Err(error) => Err(PushError::Permanent(error.to_string())),
-                }
-            } else {
-                self.provider
-                    .send_silent_push(&wake.push_token, &wake.platform)
-                    .await
+        // Lease one row at a time: a batch-wide deadline can expire before a
+        // slow provider lets us reach the later rows in a sequential batch.
+        let started = std::time::Instant::now();
+        let mut attempted = 0;
+        while attempted < self.batch_size {
+            let elapsed = Duration::from_std(started.elapsed())
+                .map_err(|error| format!("push outbox clock overflow: {error}"))?;
+            let attempt_at = now + elapsed;
+            // Count claim latency against the provider budget as well, leaving
+            // time to persist the result before this lease can be reclaimed.
+            let send_deadline = tokio::time::Instant::now() + self.provider_timeout;
+            // Keep due eligibility fixed for this drain. A retry recorded
+            // earlier in the batch must wait for a later drain, even if other
+            // provider calls make its backoff elapse in the meantime.
+            let mut wakes = self
+                .store
+                .claim_due_wakes(now, attempt_at + self.lease_duration, 1)
+                .await?;
+            let Some(wake) = wakes.pop() else {
+                break;
             };
-            let outcome = self.classify(wake, provider_result, now);
-            self.store.record_wake_outcome(wake, &outcome, now).await?;
+            let send = async {
+                if let Some((key_id, key)) = &self.wake_signer {
+                    match crate::SignedWakeMetadata::sign(
+                        &wake.tenant_id,
+                        &wake.device_id,
+                        &wake.command_id,
+                        key_id,
+                        key,
+                        attempt_at,
+                        attempt_at + Duration::minutes(5),
+                    ) {
+                        Ok(metadata) => {
+                            self.provider
+                                .send_signed_wake(&wake.push_token, &wake.platform, &metadata)
+                                .await
+                        }
+                        Err(error) => Err(PushError::Permanent(error.to_string())),
+                    }
+                } else {
+                    self.provider
+                        .send_silent_push(&wake.push_token, &wake.platform)
+                        .await
+                }
+            };
+            let provider_result = tokio::time::timeout_at(send_deadline, send)
+                .await
+                .unwrap_or_else(|_| Err(PushError::Retryable("push provider timed out".into())));
+            let completed_at = now
+                + Duration::from_std(started.elapsed())
+                    .map_err(|error| format!("push outbox clock overflow: {error}"))?;
+            let outcome = self.classify(&wake, provider_result, completed_at);
+            self.store
+                .record_wake_outcome(&wake, &outcome, completed_at)
+                .await?;
+            attempted += 1;
         }
-        Ok(wakes.len())
+        Ok(attempted as usize)
     }
 
     fn classify(

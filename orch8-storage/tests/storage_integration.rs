@@ -21,12 +21,14 @@ use orch8_types::continuity::{
     RuntimeTrustLevel,
 };
 use orch8_types::cron::CronSchedule;
+use orch8_types::error::StorageError;
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::*;
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::output::BlockOutput;
 use orch8_types::pool::{PoolResource, ResourcePool, RotationStrategy};
+use orch8_types::queue_dispatch::{DispatchMode, QueueDispatchConfig};
 use orch8_types::rate_limit::RateLimit;
 use orch8_types::rate_limit::RateLimitCheck;
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
@@ -40,6 +42,52 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskState};
 
 async fn store() -> SqliteStorage {
     SqliteStorage::in_memory().await.unwrap()
+}
+
+#[tokio::test]
+async fn queue_dispatch_preserve_secret_uses_current_row_atomically() {
+    let s = store().await;
+    let created_at = Utc::now() - Duration::seconds(10);
+    let mut config = QueueDispatchConfig {
+        tenant_id: "tenant-a".into(),
+        queue_name: "jobs".into(),
+        mode: DispatchMode::Push,
+        push_url: Some("https://example.invalid/first".into()),
+        secret: Some("first".into()),
+        created_at,
+        updated_at: created_at,
+    };
+    s.upsert_queue_dispatch(&config).await.unwrap();
+
+    // Construct the secret-preserving write before another writer rotates the
+    // secret. It must retain the secret that is current at commit time.
+    let mut stale_update = config.clone();
+    stale_update.secret = None;
+    stale_update.push_url = Some("https://example.invalid/second".into());
+    stale_update.updated_at = Utc::now();
+    config.secret = Some("rotated".into());
+    s.upsert_queue_dispatch(&config).await.unwrap();
+
+    let returned = s.set_queue_dispatch(&stale_update, true).await.unwrap();
+    assert_eq!(returned.secret.as_deref(), Some("rotated"));
+    assert_eq!(returned.created_at, created_at);
+    assert_eq!(
+        returned.push_url.as_deref(),
+        Some("https://example.invalid/second")
+    );
+    assert_eq!(
+        s.get_queue_dispatch("tenant-a", "jobs")
+            .await
+            .unwrap()
+            .unwrap()
+            .secret
+            .as_deref(),
+        Some("rotated")
+    );
+
+    let cleared = s.set_queue_dispatch(&stale_update, false).await.unwrap();
+    assert!(cleared.secret.is_none());
+    assert_eq!(cleared.created_at, created_at);
 }
 
 /// Create the parent `task_instances` row so the `externalized_state.instance_id`
@@ -347,6 +395,46 @@ async fn signal_batch_operations() {
         .unwrap();
     let remaining = s.get_pending_signals(inst1).await.unwrap();
     assert_eq!(remaining.len(), 0);
+}
+
+#[tokio::test]
+async fn signal_batches_chunk_large_id_lists_without_duplicate_delivery() {
+    let s = store().await;
+    let first = InstanceId::new();
+    let last = InstanceId::new();
+    seed_instance(&s, first).await;
+    seed_instance(&s, last).await;
+    let make_signal = |instance_id| Signal {
+        id: Uuid::now_v7(),
+        instance_id,
+        signal_type: SignalType::Resume,
+        payload: json!(null),
+        delivered: false,
+        created_at: Utc::now(),
+        delivered_at: None,
+    };
+    let first_signal = make_signal(first);
+    let last_signal = make_signal(last);
+    s.enqueue_signal(&first_signal).await.unwrap();
+    s.enqueue_signal(&last_signal).await.unwrap();
+
+    let mut instance_ids = Vec::with_capacity(33_003);
+    instance_ids.push(first);
+    instance_ids
+        .extend((1..=33_000_u128).map(|value| InstanceId::from_uuid(Uuid::from_u128(value))));
+    instance_ids.extend([first, last]);
+    let pending = s.get_pending_signals_batch(&instance_ids).await.unwrap();
+    assert_eq!(pending.len(), 33_002);
+    assert_eq!(pending[&first].len(), 1);
+    assert_eq!(pending[&last].len(), 1);
+
+    let mut signal_ids = Vec::with_capacity(33_003);
+    signal_ids.push(first_signal.id);
+    signal_ids.extend((1..=33_000_u128).map(Uuid::from_u128));
+    signal_ids.extend([last_signal.id, first_signal.id]);
+    s.mark_signals_delivered(&signal_ids).await.unwrap();
+    assert!(s.get_pending_signals(first).await.unwrap().is_empty());
+    assert!(s.get_pending_signals(last).await.unwrap().is_empty());
 }
 
 // Fix #8: mark_signals_delivered uses a single batched query, not N individual ones.
@@ -1532,6 +1620,58 @@ async fn resource_pool_lifecycle() {
     assert!(s.get_resource_pool(pool.id).await.unwrap().is_none());
 }
 
+#[tokio::test]
+async fn resource_pool_reads_reject_negative_persisted_limits() {
+    let s = store().await;
+    let now = Utc::now();
+    let pool = ResourcePool {
+        id: Uuid::now_v7(),
+        tenant_id: TenantId::unchecked("t_pool"),
+        name: "corrupt-pool".into(),
+        strategy: RotationStrategy::RoundRobin,
+        round_robin_index: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    s.create_resource_pool(&pool).await.unwrap();
+    let resource = PoolResource {
+        id: Uuid::now_v7(),
+        pool_id: pool.id,
+        resource_key: ResourceKey::new("sender"),
+        name: "sender".into(),
+        weight: 1,
+        enabled: true,
+        daily_cap: 10,
+        daily_usage: 0,
+        daily_usage_date: None,
+        warmup_start: None,
+        warmup_days: 0,
+        warmup_start_cap: 0,
+        created_at: now,
+    };
+    s.add_pool_resource(&resource).await.unwrap();
+
+    sqlx::query("UPDATE pool_resources SET daily_cap = -1 WHERE id = ?")
+        .bind(resource.id.to_string())
+        .execute(s.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        s.list_pool_resources(pool.id).await,
+        Err(StorageError::Constraint(message)) if message.contains("daily_cap")
+    ));
+
+    sqlx::query("UPDATE resource_pools SET round_robin_index = -1 WHERE id = ?")
+        .bind(pool.id.to_string())
+        .execute(s.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        s.get_resource_pool(pool.id).await,
+        Err(StorageError::Constraint(message)) if message.contains("round_robin_index")
+    ));
+}
+
 // ===========================================================================
 // Externalized State
 // ===========================================================================
@@ -1587,6 +1727,28 @@ async fn batch_get_externalized_state_fetches_multiple_keys() {
 }
 
 #[tokio::test]
+async fn batch_get_externalized_state_chunks_more_than_sqlite_bind_limit() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
+    s.save_externalized_state(inst_id, "first", &json!({"position": 0}))
+        .await
+        .unwrap();
+    s.save_externalized_state(inst_id, "last", &json!({"position": 1}))
+        .await
+        .unwrap();
+
+    let mut keys = Vec::with_capacity(33_002);
+    keys.push("first".to_string());
+    keys.extend((0..33_000).map(|index| format!("missing-{index}")));
+    keys.push("last".to_string());
+    let found = s.batch_get_externalized_state(&keys).await.unwrap();
+    assert_eq!(found.len(), 2);
+    assert_eq!(found["first"], json!({"position": 0}));
+    assert_eq!(found["last"], json!({"position": 1}));
+}
+
+#[tokio::test]
 async fn batch_get_externalized_state_empty_input_returns_empty_map() {
     let s = store().await;
     let map = s.batch_get_externalized_state(&[]).await.unwrap();
@@ -1600,7 +1762,7 @@ async fn batch_save_externalized_state_persists_all_entries() {
     seed_instance(&s, inst_id).await;
     let entries = vec![
         ("bs_a".to_string(), json!({"a": 1})),
-        ("bs_b".to_string(), json!({"b": "x".repeat(5_000)})), // crosses zstd threshold
+        ("bs_b".to_string(), json!({"b": "x".repeat(5_000)})), // crosses compression threshold
         ("bs_c".to_string(), json!([1, 2, 3])),
     ];
 
@@ -1608,12 +1770,21 @@ async fn batch_save_externalized_state_persists_all_entries() {
         .await
         .unwrap();
 
-    // Every entry should be readable; large one should roundtrip identically
-    // through the zstd path.
+    // Every entry should be readable in both feature configurations.
     for (key, expected) in &entries {
         let got = s.get_externalized_state(key).await.unwrap();
         assert_eq!(got.as_ref(), Some(expected), "key {key} mismatch");
     }
+    let codec: Option<String> =
+        sqlx::query_scalar("SELECT compression FROM externalized_state WHERE ref_key = ?")
+            .bind("bs_b")
+            .fetch_one(s.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        codec.as_deref(),
+        cfg!(feature = "compression").then_some("zstd")
+    );
 }
 
 #[tokio::test]
@@ -1670,7 +1841,7 @@ async fn externalized_state_roundtrip_across_compression_threshold() {
         Some(small)
     );
 
-    // Large payload (>1 KiB): written zstd-compressed, inflated on read.
+    // Large payload (>1 KiB): compressed when enabled, inline otherwise.
     let big = json!({"blob": "x".repeat(5_000)});
     s.save_externalized_state(inst_id, "ext_big", &big)
         .await
@@ -1678,6 +1849,44 @@ async fn externalized_state_roundtrip_across_compression_threshold() {
     assert_eq!(
         s.get_externalized_state("ext_big").await.unwrap(),
         Some(big)
+    );
+    let codec: Option<String> =
+        sqlx::query_scalar("SELECT compression FROM externalized_state WHERE ref_key = ?")
+            .bind("ext_big")
+            .fetch_one(s.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        codec.as_deref(),
+        cfg!(feature = "compression").then_some("zstd")
+    );
+}
+
+#[tokio::test]
+async fn externalized_state_rejects_payload_above_reader_limit() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
+    let oversized = json!({"blob": "x".repeat(orch8_storage::compression::MAX_PAYLOAD_BYTES)});
+    assert!(matches!(
+        s.save_externalized_state(inst_id, "too_big", &oversized)
+            .await,
+        Err(StorageError::Constraint(_))
+    ));
+    assert!(s.get_externalized_state("too_big").await.unwrap().is_none());
+    let batch = vec![
+        ("would_be_written".to_string(), json!({"ok": true})),
+        ("too_big_batch".to_string(), oversized),
+    ];
+    assert!(matches!(
+        InstanceStore::batch_save_externalized_state(&s, inst_id, &batch).await,
+        Err(StorageError::Constraint(_))
+    ));
+    assert!(
+        s.get_externalized_state("would_be_written")
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -2709,6 +2918,24 @@ async fn sequence_versioning_and_deprecation() {
     s.deprecate_sequence(seq_v1.id).await.unwrap();
     let deprecated = s.get_sequence(seq_v1.id).await.unwrap().unwrap();
     assert!(deprecated.deprecated);
+}
+
+#[tokio::test]
+async fn sequence_batch_lookup_handles_large_and_duplicate_id_lists() {
+    let s = store().await;
+    let first = make_sequence("t1");
+    let second = make_sequence("t2");
+    s.create_sequence(&first).await.unwrap();
+    s.create_sequence(&second).await.unwrap();
+
+    let mut ids = vec![first.id];
+    ids.extend((1..=33_000).map(|n| SequenceId::from_uuid(Uuid::from_u128(n))));
+    ids.extend([first.id, second.id]);
+
+    let sequences = s.get_sequences(&ids).await.unwrap();
+    assert_eq!(sequences.len(), 2);
+    assert!(sequences.iter().any(|seq| seq.id == first.id));
+    assert!(sequences.iter().any(|seq| seq.id == second.id));
 }
 
 #[tokio::test]

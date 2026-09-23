@@ -578,6 +578,23 @@ async fn input_schema_rejects_bad_instance_data_with_422() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
+    // A nested value violation reports the JSON pointer to the rejected field.
+    let invalid_age = json!({
+        "sequence_id": seq_id,
+        "tenant_id": "t1",
+        "namespace": "ns1",
+        "context": { "data": { "email": "a@b.com", "age": -1 }, "config": {}, "audit": [] }
+    });
+    let resp = client
+        .post(format!("{}/instances", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&invalid_age)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(resp.text().await.unwrap().contains("/age"));
+
     // Valid payload -> 201.
     let good = json!({
         "sequence_id": seq_id,

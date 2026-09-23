@@ -90,8 +90,12 @@ pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInsta
         context: parse_json(row.get::<&str, _>("context"))?,
         concurrency_key: row.get::<Option<String>, _>("concurrency_key"),
         max_concurrency: row
-            .get::<Option<i32>, _>("max_concurrency")
-            .map(|v| v as u32),
+            .get::<Option<i64>, _>("max_concurrency")
+            .map(|v| {
+                u32::try_from(v)
+                    .map_err(|_| StorageError::Query(format!("invalid max_concurrency value: {v}")))
+            })
+            .transpose()?,
         idempotency_key: row.get::<Option<String>, _>("idempotency_key"),
         session_id: parse_uuid_opt(row.get::<Option<String>, _>("session_id"))?,
         parent_instance_id: parse_uuid_opt(row.get::<Option<String>, _>("parent_instance_id"))?
@@ -277,7 +281,10 @@ pub(super) fn row_to_pool(row: &sqlx::sqlite::SqliteRow) -> Result<ResourcePool,
         tenant_id: TenantId::unchecked(row.get::<String, _>("tenant_id")),
         name: row.get::<String, _>("name"),
         strategy,
-        round_robin_index: row.get::<i64, _>("round_robin_index") as u32,
+        round_robin_index: unsigned_pool_integer(
+            row.get::<i64, _>("round_robin_index"),
+            "round_robin_index",
+        )?,
         created_at: parse_ts(row.get::<&str, _>("created_at"))?,
         updated_at: parse_ts(row.get::<&str, _>("updated_at"))?,
     })
@@ -291,20 +298,28 @@ pub(super) fn row_to_pool_resource(
         pool_id: parse_uuid(row.get::<&str, _>("pool_id"))?,
         resource_key: ResourceKey::new(row.get::<String, _>("resource_key")),
         name: row.get::<String, _>("name"),
-        weight: row.get::<i64, _>("weight") as u32,
+        weight: unsigned_pool_integer(row.get::<i64, _>("weight"), "weight")?,
         enabled: row.get::<i32, _>("enabled") != 0,
-        daily_cap: row.get::<i64, _>("daily_cap") as u32,
-        daily_usage: row.get::<i64, _>("daily_usage") as u32,
+        daily_cap: unsigned_pool_integer(row.get::<i64, _>("daily_cap"), "daily_cap")?,
+        daily_usage: unsigned_pool_integer(row.get::<i64, _>("daily_usage"), "daily_usage")?,
         daily_usage_date: row
             .get::<Option<String>, _>("daily_usage_date")
             .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
         warmup_start: row
             .get::<Option<String>, _>("warmup_start")
             .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
-        warmup_days: row.get::<i64, _>("warmup_days") as u32,
-        warmup_start_cap: row.get::<i64, _>("warmup_start_cap") as u32,
+        warmup_days: unsigned_pool_integer(row.get::<i64, _>("warmup_days"), "warmup_days")?,
+        warmup_start_cap: unsigned_pool_integer(
+            row.get::<i64, _>("warmup_start_cap"),
+            "warmup_start_cap",
+        )?,
         created_at: parse_ts(row.get::<&str, _>("created_at"))?,
     })
+}
+
+fn unsigned_pool_integer(value: i64, field: &str) -> Result<u32, StorageError> {
+    u32::try_from(value)
+        .map_err(|_| StorageError::Constraint(format!("{field} is outside the u32 range")))
 }
 
 pub(super) fn row_to_checkpoint(row: &sqlx::sqlite::SqliteRow) -> Result<Checkpoint, StorageError> {
@@ -317,7 +332,7 @@ pub(super) fn row_to_checkpoint(row: &sqlx::sqlite::SqliteRow) -> Result<Checkpo
 }
 
 pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<Session, StorageError> {
-    let state = SessionState::from_str(row.get::<&str, _>("state")).unwrap_or(SessionState::Active);
+    let state = SessionState::from_str(row.get::<&str, _>("state")).map_err(StorageError::Query)?;
     Ok(Session {
         id: parse_uuid(row.get::<&str, _>("id"))?,
         tenant_id: TenantId::unchecked(row.get::<String, _>("tenant_id")),
@@ -347,7 +362,7 @@ pub(super) fn row_to_audit(row: &sqlx::sqlite::SqliteRow) -> Result<AuditLogEntr
 pub(super) fn row_to_cluster_node(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<ClusterNode, StorageError> {
-    let status = NodeStatus::from_str(row.get::<&str, _>("status")).unwrap_or(NodeStatus::Active);
+    let status = NodeStatus::from_str(row.get::<&str, _>("status")).map_err(StorageError::Query)?;
     Ok(ClusterNode {
         id: parse_uuid(row.get::<&str, _>("id"))?,
         name: row.get::<String, _>("name"),

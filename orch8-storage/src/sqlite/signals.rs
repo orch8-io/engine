@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -14,6 +14,7 @@ use super::helpers::{begin_immediate, row_to_signal, ts};
 /// [`enqueue_if_active`] so adding a column touches one place.
 const SIGNAL_INSERT_SQL: &str = "INSERT INTO signal_inbox (id,instance_id,signal_type,payload,delivered,created_at,delivered_at) \
      VALUES (?1,?2,?3,?4,?5,?6,?7)";
+const SIGNAL_ID_CHUNK_SIZE: usize = 500;
 
 /// Bind a `Signal` to [`SIGNAL_INSERT_SQL`] in canonical column order.
 /// Serialization errors surface as [`StorageError::Serialization`] before
@@ -107,20 +108,29 @@ pub(super) async fn get_pending_batch(
     if instance_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM signal_inbox WHERE instance_id IN (");
-    let mut separated = qb.separated(",");
-    for id in instance_ids {
-        separated.push_bind(id.to_string());
-    }
-    separated.push_unseparated(") AND delivered=0 ORDER BY created_at ASC");
-    let query = qb.build();
-    let rows = query.fetch_all(&storage.pool).await?;
     let mut result: HashMap<InstanceId, Vec<Signal>> =
         instance_ids.iter().map(|id| (*id, Vec::new())).collect();
-    for row in &rows {
-        let signal = row_to_signal(row)?;
-        result.entry(signal.instance_id).or_default().push(signal);
+    let mut seen = HashSet::new();
+    let unique_ids = instance_ids
+        .iter()
+        .copied()
+        .filter(|id| seen.insert(*id))
+        .collect::<Vec<_>>();
+    let mut tx = storage.pool.begin().await?;
+    for chunk in unique_ids.chunks(SIGNAL_ID_CHUNK_SIZE) {
+        let mut qb = sqlx::QueryBuilder::new("SELECT * FROM signal_inbox WHERE instance_id IN (");
+        let mut separated = qb.separated(",");
+        for id in chunk {
+            separated.push_bind(id.to_string());
+        }
+        separated.push_unseparated(") AND delivered=0 ORDER BY created_at ASC");
+        let rows = qb.build().fetch_all(&mut *tx).await?;
+        for row in &rows {
+            let signal = row_to_signal(row)?;
+            result.entry(signal.instance_id).or_default().push(signal);
+        }
     }
+    tx.commit().await?;
     Ok(result)
 }
 
@@ -144,16 +154,19 @@ pub(super) async fn mark_delivered_batch(
         return Ok(());
     }
     let now = ts(chrono::Utc::now());
-    let mut qb = sqlx::QueryBuilder::new("UPDATE signal_inbox SET delivered=1, delivered_at=");
-    qb.push_bind(now);
-    qb.push(" WHERE id IN (");
-    let mut separated = qb.separated(",");
-    for id in signal_ids {
-        separated.push_bind(id.to_string());
+    let mut tx = storage.pool.begin().await?;
+    for chunk in signal_ids.chunks(SIGNAL_ID_CHUNK_SIZE) {
+        let mut qb = sqlx::QueryBuilder::new("UPDATE signal_inbox SET delivered=1, delivered_at=");
+        qb.push_bind(&now);
+        qb.push(" WHERE id IN (");
+        let mut separated = qb.separated(",");
+        for id in chunk {
+            separated.push_bind(id.to_string());
+        }
+        separated.push_unseparated(")");
+        qb.build().execute(&mut *tx).await?;
     }
-    separated.push_unseparated(")");
-    let query = qb.build();
-    query.execute(&storage.pool).await?;
+    tx.commit().await?;
     Ok(())
 }
 

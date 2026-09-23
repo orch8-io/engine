@@ -46,7 +46,7 @@ use orch8_types::trigger::{TriggerDef, TriggerPollState};
 use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 81;
+pub const STORAGE_SCHEMA_VERSION: u32 = 82;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -77,6 +77,15 @@ pub struct UsageEvent {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub created_at: DateTime<Utc>,
+}
+
+pub(crate) fn validate_usage_event(event: &UsageEvent) -> Result<(), StorageError> {
+    if event.input_tokens < 0 || event.output_tokens < 0 {
+        return Err(StorageError::Constraint(
+            "usage token counts must be non-negative".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Usage totals for a tenant over a window, grouped by `(kind, model)`.
@@ -1702,6 +1711,14 @@ pub trait WorkerStore: Send + Sync + 'static {
         &self,
         config: &orch8_types::queue_dispatch::QueueDispatchConfig,
     ) -> Result<(), StorageError>;
+
+    /// Atomically create-or-update a dispatch config, optionally retaining the
+    /// current secret on conflict. Returns the row written by this operation.
+    async fn set_queue_dispatch(
+        &self,
+        config: &orch8_types::queue_dispatch::QueueDispatchConfig,
+        preserve_secret: bool,
+    ) -> Result<orch8_types::queue_dispatch::QueueDispatchConfig, StorageError>;
 
     /// Fetch the dispatch config for a `(tenant, queue)` pair, if any.
     async fn get_queue_dispatch(

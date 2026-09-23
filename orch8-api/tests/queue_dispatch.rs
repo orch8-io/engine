@@ -1,6 +1,7 @@
 //! E2E tests for the queue dispatch config API.
 
 use orch8_api::test_harness::spawn_test_server;
+use orch8_storage::WorkerStore;
 use reqwest::StatusCode;
 use serde_json::json;
 
@@ -99,5 +100,73 @@ async fn dispatch_config_crud() {
             .unwrap()
             .len(),
         0
+    );
+}
+
+#[tokio::test]
+async fn updating_dispatch_preserves_secret_and_creation_time_unless_explicitly_cleared() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/queues/dispatch", srv.base_url);
+    let create = client
+        .post(&url)
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "tenant_id": "t1", "queue_name": "q1", "mode": "push",
+            "push_url": "https://example.invalid/first", "secret": "original"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let created: serde_json::Value = create.json().await.unwrap();
+    let original_created_at = created["created_at"].clone();
+
+    let update = client
+        .post(&url)
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "tenant_id": "t1", "queue_name": "q1", "mode": "push",
+            "push_url": "https://example.invalid/second"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update.status(), StatusCode::OK);
+    let updated: serde_json::Value = update.json().await.unwrap();
+    assert_eq!(updated["created_at"], original_created_at);
+    assert!(updated.get("secret").is_none());
+    let stored = srv
+        .storage
+        .get_queue_dispatch("t1", "q1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.secret.as_deref(), Some("original"));
+    assert_eq!(
+        stored.push_url.as_deref(),
+        Some("https://example.invalid/second")
+    );
+
+    let clear = client
+        .post(&url)
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "tenant_id": "t1", "queue_name": "q1", "mode": "poll", "secret": null
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(clear.status(), StatusCode::OK);
+    let cleared: serde_json::Value = clear.json().await.unwrap();
+    assert_eq!(cleared["created_at"], original_created_at);
+    assert!(
+        srv.storage
+            .get_queue_dispatch("t1", "q1")
+            .await
+            .unwrap()
+            .unwrap()
+            .secret
+            .is_none()
     );
 }

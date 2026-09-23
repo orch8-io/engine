@@ -143,10 +143,16 @@ test("classifyError with top-level status 500 is retryable", () => {
   assert.equal(classified.type, "retryable");
 });
 
-test("classifyError with top-level status 429 is permanent", () => {
+test("classifyError with top-level status 429 is retryable", () => {
   const err = { message: "rate limited", status: 429 };
   const classified = classifyError(err);
-  assert.equal(classified.type, "permanent");
+  assert.equal(classified.type, "retryable");
+});
+
+test("classifyError with response status 408 is retryable", () => {
+  const err = { message: "request timeout", response: { status: 408 } };
+  const classified = classifyError(err);
+  assert.equal(classified.type, "retryable");
 });
 
 // ---------------------------------------------------------------------------

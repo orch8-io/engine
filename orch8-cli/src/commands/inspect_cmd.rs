@@ -60,7 +60,18 @@ pub async fn run(client: &Client, base: &str, cmd: InspectCmd, format: OutputFor
             outputs,
         } => {
             let resp = if let Some(instance_id) = instance {
-                let url = format!("{base}/instances/{instance_id}/blocks/{block}/resolved-input");
+                let mut url = reqwest::Url::parse(base)?;
+                {
+                    let mut path = url.path_segments_mut().map_err(|()| {
+                        anyhow::anyhow!("base URL cannot accept API path segments")
+                    })?;
+                    path.pop_if_empty()
+                        .push("instances")
+                        .push(&instance_id.to_string())
+                        .push("blocks")
+                        .push(&block)
+                        .push("resolved-input");
+                }
                 let mut request = client.get(url);
                 if let Some(at) = &at_block {
                     // `.query()` percent-encodes the value; a block id with

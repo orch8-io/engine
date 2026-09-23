@@ -109,6 +109,56 @@ fn opportunity_04_runtime_passport_binds_runtime_and_capabilities() {
 }
 
 #[test]
+fn contract_lifetimes_near_chrono_max_do_not_overflow() {
+    let max = DateTime::<Utc>::MAX_UTC;
+    let near_max = max - Duration::minutes(1);
+
+    let mut work = offer(Utc::now());
+    work.expires_at = max;
+    assert_eq!(work.validate(near_max), Ok(()));
+
+    let mut caps = capabilities(RuntimeKind::Mobile, RuntimeTrustLevel::Attested);
+    caps.observed_at = near_max;
+    caps.expires_at = max;
+    let passport = RuntimePassport {
+        protocol: CURRENT_PROTOCOL,
+        runtime_id: caps.runtime_id,
+        issuer: "issuer".into(),
+        subject: "runtime".into(),
+        capabilities: caps,
+        public_key: "key".into(),
+        attestation_sha256: None,
+        issued_at: near_max,
+        expires_at: max,
+        signature: "signature".into(),
+    };
+    assert_eq!(passport.validate(near_max), Ok(()));
+
+    assert!(
+        issue_conformance_certificate(
+            "sdk".into(),
+            "orch8".into(),
+            &passing_results(),
+            near_max,
+            max,
+        )
+        .is_ok()
+    );
+
+    assert!(matches!(
+        TrustBoundaryProfile::PrivateRag.work_offer(
+            TenantId::new("acme").unwrap(),
+            ContinuityId::new(),
+            ExecutionEpoch::initial(),
+            serde_json::json!({}),
+            "near-max".into(),
+            near_max,
+        ),
+        Err(ProductContractError::InvalidPolicy(_))
+    ));
+}
+
+#[test]
 fn opportunity_05_and_25_execution_receipt_is_tamper_evident_bill_of_execution() {
     let now = Utc::now();
     let mut receipt = ExecutionReceipt {
@@ -526,6 +576,36 @@ fn policy_parser_rejects_unknown_duplicate_and_malformed_values() {
             "policy should fail closed: {source}"
         );
     }
+}
+
+#[test]
+fn policy_parser_rejects_empty_allowlists_and_separator_only_rules() {
+    for source in [
+        ";;",
+        " ; ; ",
+        "regions=",
+        "handlers=,",
+        "plugins=plugin-a,",
+        "credentials=,source_control",
+        "hardware= ",
+        "runtime_kinds=,",
+        "connectivity=wifi,,ethernet",
+        "require_hardware=",
+    ] {
+        assert!(
+            matches!(
+                compile_placement_policy(source),
+                Err(ProductContractError::InvalidPolicy(_))
+            ),
+            "empty policy declaration must fail closed: {source}"
+        );
+    }
+    let explicit_default = compile_placement_policy("classification=internal").unwrap();
+    assert_eq!(
+        explicit_default.classification,
+        DataClassification::Internal
+    );
+    assert!(explicit_default.policy.rules[0].allowed_regions.is_empty());
 }
 
 #[test]

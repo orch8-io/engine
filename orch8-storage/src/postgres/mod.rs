@@ -1435,6 +1435,14 @@ impl crate::WorkerStore for PostgresStorage {
         queue_dispatch::upsert(self, config).await
     }
 
+    async fn set_queue_dispatch(
+        &self,
+        config: &orch8_types::queue_dispatch::QueueDispatchConfig,
+        preserve_secret: bool,
+    ) -> Result<orch8_types::queue_dispatch::QueueDispatchConfig, StorageError> {
+        queue_dispatch::set(self, config, preserve_secret).await
+    }
+
     async fn get_queue_dispatch(
         &self,
         tenant_id: &str,

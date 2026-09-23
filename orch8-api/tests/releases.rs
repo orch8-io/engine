@@ -71,7 +71,10 @@ async fn create_release(base: &str, client: &reqwest::Client, fx: &Fixture, gate
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    resp.json().await.unwrap()
+    let release: Value = resp.json().await.unwrap();
+    let id = Uuid::parse_str(release["id"].as_str().unwrap()).unwrap();
+    assert_eq!(id.get_version_num(), 4);
+    release
 }
 
 async fn post(

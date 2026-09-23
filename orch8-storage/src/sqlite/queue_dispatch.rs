@@ -15,10 +15,14 @@ fn row_to_config(
     Ok(QueueDispatchConfig {
         tenant_id: row.get("tenant_id"),
         queue_name: row.get("queue_name"),
-        mode: if mode == "push" {
-            DispatchMode::Push
-        } else {
-            DispatchMode::Poll
+        mode: match mode.as_str() {
+            "push" => DispatchMode::Push,
+            "poll" => DispatchMode::Poll,
+            _ => {
+                return Err(StorageError::Query(format!(
+                    "unknown queue dispatch mode: {mode}"
+                )));
+            }
         },
         push_url: row.get("push_url"),
         secret: if include_secret {
@@ -55,6 +59,27 @@ pub(super) async fn upsert(
     .execute(&storage.pool)
     .await?;
     Ok(())
+}
+
+pub(super) async fn set(
+    storage: &SqliteStorage,
+    cfg: &QueueDispatchConfig,
+    preserve_secret: bool,
+) -> Result<QueueDispatchConfig, StorageError> {
+    let row = sqlx::query(
+        "INSERT INTO queue_dispatch (tenant_id, queue_name, mode, push_url, secret, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(tenant_id, queue_name) DO UPDATE SET mode=excluded.mode, push_url=excluded.push_url, secret=CASE WHEN ?8 THEN queue_dispatch.secret ELSE excluded.secret END, updated_at=excluded.updated_at RETURNING tenant_id, queue_name, mode, push_url, secret, created_at, updated_at",
+    )
+    .bind(&cfg.tenant_id)
+    .bind(&cfg.queue_name)
+    .bind(mode_str(cfg.mode))
+    .bind(&cfg.push_url)
+    .bind(&cfg.secret)
+    .bind(ts(cfg.created_at))
+    .bind(ts(cfg.updated_at))
+    .bind(preserve_secret)
+    .fetch_one(&storage.pool)
+    .await?;
+    row_to_config(&row, true)
 }
 
 pub(super) async fn get(
@@ -98,4 +123,43 @@ pub(super) async fn delete(
         .execute(&storage.pool)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unknown_persisted_mode_is_not_treated_as_poll() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = chrono::Utc::now();
+        upsert(
+            &storage,
+            &QueueDispatchConfig {
+                tenant_id: "tenant".into(),
+                queue_name: "jobs".into(),
+                mode: DispatchMode::Push,
+                push_url: Some("https://example.invalid/push".into()),
+                secret: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE queue_dispatch SET mode = 'future-mode' WHERE tenant_id = 'tenant'")
+            .execute(storage.pool())
+            .await
+            .unwrap();
+
+        for result in [
+            get(&storage, "tenant", "jobs").await.map(|_| ()),
+            list(&storage, Some("tenant")).await.map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(StorageError::Query(message)) if message.contains("future-mode")
+            ));
+        }
+    }
 }

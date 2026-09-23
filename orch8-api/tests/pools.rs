@@ -3,6 +3,76 @@ use reqwest::StatusCode;
 use serde_json::json;
 
 #[tokio::test]
+async fn resource_limits_are_rejected_without_mutating_existing_resource() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let pool_resp = client
+        .post(format!("{}/pools", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"tenant_id": "t1", "name": "limits-pool"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pool_resp.status(), StatusCode::CREATED);
+    let pool: serde_json::Value = pool_resp.json().await.unwrap();
+    let pool_id = pool["id"].as_str().unwrap();
+
+    for field in ["weight", "daily_cap", "warmup_days", "warmup_start_cap"] {
+        let mut body = json!({"resource_key": field, "name": field});
+        body[field] = json!(u32::MAX);
+        let response = client
+            .post(format!("{}/pools/{pool_id}/resources", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+    }
+
+    let response = client
+        .post(format!("{}/pools/{pool_id}/resources", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"resource_key": "valid", "name": "valid", "weight": 2}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let resource: serde_json::Value = response.json().await.unwrap();
+    let resource_id = resource["id"].as_str().unwrap();
+
+    for body in [
+        json!({"weight": 0}),
+        json!({"name": ""}),
+        json!({"daily_cap": u32::MAX}),
+    ] {
+        let response = client
+            .put(format!(
+                "{}/pools/{pool_id}/resources/{resource_id}",
+                srv.base_url
+            ))
+            .header("X-Tenant-Id", "t1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    let response = client
+        .get(format!("{}/pools/{pool_id}/resources", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let resources: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(resources[0]["weight"], 2);
+    assert_eq!(resources[0]["daily_cap"], 0);
+    assert_eq!(resources[0]["name"], "valid");
+}
+
+#[tokio::test]
 async fn add_resource_rejects_invalid_warmup_date() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

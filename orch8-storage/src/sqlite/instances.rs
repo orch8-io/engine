@@ -59,7 +59,7 @@ pub(super) fn bind_instance_insert<'q>(
         .bind(serde_json::to_string(&i.metadata)?)
         .bind(serde_json::to_string(&i.context)?)
         .bind(&i.concurrency_key)
-        .bind(i.max_concurrency.map(|v| v as i32))
+        .bind(i.max_concurrency.map(i64::from))
         .bind(&i.idempotency_key)
         .bind(i.session_id.map(|u| u.to_string()))
         .bind(i.parent_instance_id.map(|u| u.into_uuid().to_string()))
@@ -210,7 +210,7 @@ pub(super) async fn create_batch(
                     .push_bind(metadata)
                     .push_bind(context)
                     .push_bind(&i.concurrency_key)
-                    .push_bind(i.max_concurrency.map(|v| v as i32))
+                    .push_bind(i.max_concurrency.map(i64::from))
                     .push_bind(&i.idempotency_key)
                     .push_bind(i.session_id.map(|u| u.to_string()))
                     .push_bind(i.parent_instance_id.map(|u| u.into_uuid().to_string()))
@@ -772,11 +772,12 @@ async fn insert_externalized_row(
     ref_key: &str,
     payload: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    use crate::compression::{COMPRESSION_THRESHOLD_BYTES, compress};
+    use crate::compression::{compress, should_compress, validate_payload_size};
     let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+    validate_payload_size(raw.len())?;
     let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
-    if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+    if should_compress(raw.len()) {
         let compressed = compress(payload)?;
         sqlx::query(
             "INSERT INTO externalized_state \

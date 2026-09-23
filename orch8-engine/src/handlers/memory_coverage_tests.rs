@@ -84,12 +84,11 @@ fn coverage_governed_memory_005_above_max_retention_is_rejected() {
 }
 
 #[test]
-fn coverage_governed_memory_006_non_numeric_retention_falls_back_to_default() {
+fn coverage_governed_memory_006_non_numeric_retention_is_rejected() {
     let auth = authorization();
-    assert_eq!(
-        retention_secs(&json!({"retention_secs": "soon"}), &auth).unwrap(),
-        60
-    );
+    assert!(retention_secs(&json!({"retention_secs": "soon"}), &auth).is_err());
+    assert!(retention_secs(&json!({"retention_secs": -1}), &auth).is_err());
+    assert!(retention_secs(&json!({"retention_secs": null}), &auth).is_err());
 }
 
 #[test]
@@ -290,6 +289,7 @@ async fn coverage_governed_memory_019_record_envelope_records_provenance() {
     let record = memory_record(
         Some("the sky"),
         &[0.1, 0.2],
+        None,
         &json!({"src": "test"}),
         &auth,
         60,
@@ -315,7 +315,7 @@ async fn coverage_governed_memory_019_record_envelope_records_provenance() {
 async fn coverage_governed_memory_020_expiry_equals_creation_plus_retention() {
     let auth = authorization();
     let ctx = step_context().await;
-    let record = memory_record(None, &[1.0], &json!({}), &auth, 90, &ctx).unwrap();
+    let record = memory_record(None, &[1.0], None, &json!({}), &auth, 90, &ctx).unwrap();
     let created =
         DateTime::parse_from_rfc3339(record["governance"]["created_at"].as_str().unwrap()).unwrap();
     let expires =
@@ -327,7 +327,7 @@ async fn coverage_governed_memory_020_expiry_equals_creation_plus_retention() {
 async fn coverage_governed_memory_021_content_hash_is_64_hex_chars() {
     let auth = authorization();
     let ctx = step_context().await;
-    let record = memory_record(Some("fact"), &[1.0], &json!({}), &auth, 60, &ctx).unwrap();
+    let record = memory_record(Some("fact"), &[1.0], None, &json!({}), &auth, 60, &ctx).unwrap();
     let hash = record["governance"]["content_sha256"].as_str().unwrap();
     assert_eq!(hash.len(), 64);
     assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
@@ -337,10 +337,36 @@ async fn coverage_governed_memory_021_content_hash_is_64_hex_chars() {
 async fn coverage_governed_memory_022_content_hash_depends_only_on_content() {
     let auth = authorization();
     let ctx = step_context().await;
-    let first = memory_record(Some("fact"), &[1.0], &json!({"a": 1}), &auth, 60, &ctx).unwrap();
-    let second = memory_record(Some("fact"), &[1.0], &json!({"a": 1}), &auth, 60, &ctx).unwrap();
-    let different =
-        memory_record(Some("other"), &[1.0], &json!({"a": 1}), &auth, 60, &ctx).unwrap();
+    let first = memory_record(
+        Some("fact"),
+        &[1.0],
+        None,
+        &json!({"a": 1}),
+        &auth,
+        60,
+        &ctx,
+    )
+    .unwrap();
+    let second = memory_record(
+        Some("fact"),
+        &[1.0],
+        None,
+        &json!({"a": 1}),
+        &auth,
+        60,
+        &ctx,
+    )
+    .unwrap();
+    let different = memory_record(
+        Some("other"),
+        &[1.0],
+        None,
+        &json!({"a": 1}),
+        &auth,
+        60,
+        &ctx,
+    )
+    .unwrap();
     assert_eq!(
         first["governance"]["content_sha256"],
         second["governance"]["content_sha256"]
@@ -349,21 +375,112 @@ async fn coverage_governed_memory_022_content_hash_depends_only_on_content() {
         first["governance"]["content_sha256"],
         different["governance"]["content_sha256"]
     );
+    let other_model = memory_record(
+        Some("fact"),
+        &[1.0],
+        Some("different-model"),
+        &json!({"a": 1}),
+        &auth,
+        60,
+        &ctx,
+    )
+    .unwrap();
+    assert_ne!(
+        first["governance"]["content_sha256"],
+        other_model["governance"]["content_sha256"]
+    );
+}
+
+#[tokio::test]
+async fn governed_records_reject_tampered_committed_content() {
+    let auth = authorization();
+    let ctx = step_context().await;
+    let record = memory_record(
+        Some("fact"),
+        &[1.0, 0.0],
+        Some("model-a"),
+        &json!({"source": "trusted"}),
+        &auth,
+        60,
+        &ctx,
+    )
+    .unwrap();
+    let mut changed_vector = record.clone();
+    changed_vector["embedding"] = json!([0.0, 1.0]);
+    let mut changed_metadata = record.clone();
+    changed_metadata["metadata"] = json!({"source": "forged"});
+    let mut malformed_hash = record.clone();
+    malformed_hash["governance"]["content_sha256"] = json!(42);
+    let mut missing_hash = record.clone();
+    missing_hash["governance"]
+        .as_object_mut()
+        .unwrap()
+        .remove("content_sha256");
+    let mut unknown_schema = record.clone();
+    unknown_schema["governance"]["schema_version"] = json!(2);
+
+    let (active, expired) = governed_records(
+        vec![
+            ("valid".into(), record),
+            ("vector".into(), changed_vector),
+            ("metadata".into(), changed_metadata),
+            ("malformed".into(), malformed_hash),
+            ("missing".into(), missing_hash),
+            ("unknown-schema".into(), unknown_schema),
+        ],
+        &auth,
+        MemoryScope::Instance,
+        Utc::now(),
+    );
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].0, "valid");
+    assert!(expired.is_empty());
 }
 
 #[tokio::test]
 async fn coverage_governed_memory_023_unrepresentable_retention_is_rejected() {
     let auth = authorization();
     let ctx = step_context().await;
-    let error = memory_record(Some("fact"), &[1.0], &json!({}), &auth, u64::MAX, &ctx).unwrap_err();
+    let error = memory_record(
+        Some("fact"),
+        &[1.0],
+        None,
+        &json!({}),
+        &auth,
+        u64::MAX,
+        &ctx,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("too large"), "{error}");
+}
+
+#[tokio::test]
+async fn memory_record_rejects_retention_that_overflows_duration_or_timestamp() {
+    let auth = authorization();
+    let ctx = step_context().await;
+    for retention in [i64::MAX as u64, (i64::MAX / 1_000) as u64] {
+        let error = memory_record(
+            Some("fact"),
+            &[1.0],
+            None,
+            &json!({}),
+            &auth,
+            retention,
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("supported"),
+            "retention {retention}: {error}"
+        );
+    }
 }
 
 #[test]
 fn coverage_governed_memory_024_ranked_results_expose_provenance() {
     let auth = authorization();
     let record = governed_record(&auth, now() + Duration::seconds(10));
-    let results = rank_memories(&[1.0], vec![("k".into(), record)], 5);
+    let results = rank_memories(&[1.0], vec![("k".into(), record)], 5, None);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["provenance"]["residency"], "br-south-1");
 }
@@ -371,7 +488,7 @@ fn coverage_governed_memory_024_ranked_results_expose_provenance() {
 #[test]
 fn coverage_governed_memory_025_legacy_results_have_null_provenance() {
     let legacy = json!({"text": "old", "embedding": [1.0], "metadata": {}});
-    let results = rank_memories(&[1.0], vec![("k".into(), legacy)], 5);
+    let results = rank_memories(&[1.0], vec![("k".into(), legacy)], 5, None);
     assert_eq!(results[0]["provenance"], Value::Null);
 }
 
@@ -382,7 +499,7 @@ fn coverage_governed_memory_026_ranked_results_keep_key_text_and_metadata() {
         "embedding": [1.0, 0.0],
         "metadata": {"src": "unit"},
     });
-    let results = rank_memories(&[1.0, 0.0], vec![("key-1".into(), record)], 5);
+    let results = rank_memories(&[1.0, 0.0], vec![("key-1".into(), record)], 5, None);
     assert_eq!(results[0]["key"], "key-1");
     assert_eq!(results[0]["text"], "fact");
     assert_eq!(results[0]["metadata"]["src"], "unit");

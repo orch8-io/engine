@@ -62,7 +62,7 @@ pub(super) async fn list(
     )
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(ClusterNodeRow::into_node).collect())
+    rows.into_iter().map(ClusterNodeRow::into_node).collect()
 }
 
 pub(super) async fn should_drain(

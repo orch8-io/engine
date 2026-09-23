@@ -155,20 +155,14 @@ impl PostgresStorage {
         if keys.is_empty() {
             return Ok(());
         }
-        let mut query =
-            sqlx::QueryBuilder::new("DELETE FROM instance_kv_state WHERE instance_id = ");
-        query.push_bind(instance_id.into_uuid());
-        query.push(" AND key IN (");
-        let mut separated = query.separated(", ");
-        for key in keys {
-            separated.push_bind(key);
-        }
-        separated.push_unseparated(")");
-        query
-            .build()
-            .execute(&self.pool)
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        sqlx::query(
+            "DELETE FROM instance_kv_state WHERE instance_id = $1 AND key = ANY($2::text[])",
+        )
+        .bind(instance_id.into_uuid())
+        .bind(keys)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(())
     }
 
@@ -181,21 +175,16 @@ impl PostgresStorage {
         if keys.is_empty() {
             return Ok(());
         }
-        let mut query =
-            sqlx::QueryBuilder::new("DELETE FROM shared_agent_knowledge WHERE tenant_id = ");
-        query.push_bind(tenant_id);
-        query.push(" AND namespace = ").push_bind(namespace);
-        query.push(" AND key IN (");
-        let mut separated = query.separated(", ");
-        for key in keys {
-            separated.push_bind(key);
-        }
-        separated.push_unseparated(")");
-        query
-            .build()
-            .execute(&self.pool)
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        sqlx::query(
+            "DELETE FROM shared_agent_knowledge
+             WHERE tenant_id = $1 AND namespace = $2 AND key = ANY($3::text[])",
+        )
+        .bind(tenant_id)
+        .bind(namespace)
+        .bind(keys)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(())
     }
 }

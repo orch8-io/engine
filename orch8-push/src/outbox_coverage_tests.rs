@@ -145,7 +145,8 @@ fn coverage_outbox_017_default_limits_are_applied() {
     let worker = PushOutboxWorker::new(Arc::new(NullStore), Arc::new(crate::NoopPushProvider));
     assert_eq!(worker.batch_size, 100);
     assert_eq!(worker.max_attempts, 8);
-    assert_eq!(worker.lease_duration, Duration::seconds(30));
+    assert_eq!(worker.lease_duration, Duration::seconds(90));
+    assert_eq!(worker.provider_timeout, std::time::Duration::from_secs(75));
 }
 
 #[test]
@@ -250,6 +251,8 @@ fn coverage_outbox_024_retry_limit_boundary_is_inclusive_and_preserves_error() {
     );
 }
 
+type ClaimCall = (DateTime<Utc>, DateTime<Utc>, u32);
+
 #[derive(Default)]
 struct DrainRecorder {
     wakes: Mutex<Vec<ClaimedWake>>,
@@ -258,6 +261,7 @@ struct DrainRecorder {
     claimed_now: Mutex<Option<DateTime<Utc>>>,
     claimed_lease_until: Mutex<Option<DateTime<Utc>>>,
     claimed_limit: Mutex<Option<u32>>,
+    claims: Mutex<Vec<ClaimCall>>,
     outcomes: Mutex<Vec<WakeAttemptOutcome>>,
 }
 
@@ -282,6 +286,7 @@ impl PushOutboxStore for DrainRecorder {
         *self.claimed_now.lock().unwrap() = Some(now);
         *self.claimed_lease_until.lock().unwrap() = Some(lease_until);
         *self.claimed_limit.lock().unwrap() = Some(limit);
+        self.claims.lock().unwrap().push((now, lease_until, limit));
         if let Some(error) = self.claim_error.lock().unwrap().take() {
             return Err(error);
         }
@@ -336,12 +341,11 @@ async fn coverage_outbox_025_drain_claims_with_now_lease_and_batch_limit() {
     let worker = PushOutboxWorker::new(store.clone(), provider).with_limits(7, 8);
 
     assert_eq!(worker.drain_once(now()).await.unwrap(), 1);
-    assert_eq!(*store.claimed_now.lock().unwrap(), Some(now()));
-    assert_eq!(
-        *store.claimed_lease_until.lock().unwrap(),
-        Some(now() + Duration::seconds(30))
-    );
-    assert_eq!(*store.claimed_limit.lock().unwrap(), Some(7));
+    let claims = store.claims.lock().unwrap();
+    assert_eq!(claims.len(), 2); // one row, then an empty claim
+    assert!(claims.iter().all(|claim| claim.0 == now()));
+    assert!(claims[0].1 >= now() + Duration::seconds(90));
+    assert!(claims.iter().all(|claim| claim.2 == 1));
 }
 
 #[tokio::test]
@@ -438,14 +442,18 @@ async fn coverage_outbox_030_signed_drain_binds_five_minute_expiry_and_unique_no
     assert_ne!(sent[0].nonce, sent[1].nonce);
     for metadata in sent.iter() {
         assert_eq!(metadata.key_id, "push-k9");
-        assert_eq!(metadata.issued_at, now());
-        assert_eq!(metadata.expires_at, now() + Duration::minutes(5));
+        assert!(metadata.issued_at >= now());
+        assert!(metadata.issued_at < now() + Duration::seconds(1));
+        assert_eq!(
+            metadata.expires_at - metadata.issued_at,
+            Duration::minutes(5)
+        );
         let mut nonces = crate::WakeNonceCache::new(8);
         assert_eq!(
             metadata.verify(
                 "tenant-a",
                 "device-a",
-                now(),
+                metadata.issued_at,
                 &signing_key.verifying_key(),
                 &mut nonces,
             ),
@@ -468,4 +476,53 @@ async fn coverage_outbox_031_drain_stops_at_batch_limit_and_leaves_the_rest() {
     assert_eq!(provider.0.lock().unwrap().len(), 2);
     assert_eq!(store.outcomes.lock().unwrap().len(), 2);
     assert_eq!(store.wakes.lock().unwrap().len(), 1);
+}
+
+struct SlowRecordingProvider;
+
+#[async_trait]
+impl PushProvider for SlowRecordingProvider {
+    async fn send_silent_push(&self, _token: &str, _platform: &str) -> Result<(), PushError> {
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn drain_leases_each_wake_after_the_previous_provider_call() {
+    let store = Arc::new(DrainRecorder {
+        wakes: Mutex::new(vec![claimed(0), claimed(0)]),
+        ..Default::default()
+    });
+    let worker =
+        PushOutboxWorker::new(store.clone(), Arc::new(SlowRecordingProvider)).with_limits(2, 8);
+
+    assert_eq!(worker.drain_once(now()).await.unwrap(), 2);
+    let claims = store.claims.lock().unwrap();
+    assert_eq!(claims.len(), 2);
+    assert_eq!(claims[0].2, 1);
+    assert_eq!(claims[1].2, 1);
+    assert_eq!(claims[0].0, claims[1].0);
+    assert!(claims[1].1 - claims[0].1 >= Duration::milliseconds(25));
+}
+
+#[tokio::test]
+async fn drain_times_out_a_stalled_provider_before_its_lease_expires() {
+    let store = Arc::new(DrainRecorder {
+        wakes: Mutex::new(vec![claimed(0)]),
+        ..Default::default()
+    });
+    let mut worker =
+        PushOutboxWorker::new(store.clone(), Arc::new(SlowRecordingProvider)).with_limits(1, 8);
+    worker.provider_timeout = std::time::Duration::from_millis(1);
+    worker.lease_duration = Duration::seconds(1);
+
+    assert_eq!(worker.drain_once(now()).await.unwrap(), 1);
+    let outcomes = store.outcomes.lock().unwrap();
+    assert!(matches!(
+        outcomes.as_slice(),
+        [WakeAttemptOutcome::Retry { error, .. }] if error == "push provider timed out"
+    ));
+    let claims = store.claims.lock().unwrap();
+    assert!(claims[0].1 - claims[0].0 >= Duration::seconds(1));
 }

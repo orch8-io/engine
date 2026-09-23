@@ -156,6 +156,15 @@ fn build_table(overrides_json: Option<&str>) -> HashMap<String, ModelPrice> {
         match serde_json::from_str::<HashMap<String, ModelPrice>>(json) {
             Ok(overrides) => {
                 for (name, p) in overrides {
+                    if name.trim().is_empty()
+                        || !p.input_per_1m.is_finite()
+                        || !p.output_per_1m.is_finite()
+                        || p.input_per_1m < 0.0
+                        || p.output_per_1m < 0.0
+                    {
+                        tracing::warn!(model = %name, "ignoring invalid model pricing override");
+                        continue;
+                    }
                     table.insert(name.to_lowercase(), p);
                 }
             }
@@ -217,11 +226,14 @@ pub fn price_for_model(model: &str) -> Option<ModelPrice> {
 /// table entry. Returns `None` when the model is unknown. The result is an
 /// **estimate** — list prices only, no caching/batch/tier discounts.
 pub fn estimate_cost_usd(model: &str, input_tokens: i64, output_tokens: i64) -> Option<f64> {
+    if input_tokens < 0 || output_tokens < 0 {
+        return None;
+    }
     let p = price_for_model(model)?;
     #[allow(clippy::cast_precision_loss)]
     let cost = (input_tokens as f64 / 1_000_000.0) * p.input_per_1m
         + (output_tokens as f64 / 1_000_000.0) * p.output_per_1m;
-    Some(cost)
+    cost.is_finite().then_some(cost)
 }
 
 #[cfg(test)]
@@ -336,6 +348,20 @@ mod tests {
         let table = build_table(Some("not json at all"));
         assert_eq!(table.len(), DEFAULT_PRICES.len());
         assert_eq!(lookup(&table, "gpt-4o").unwrap().input_per_1m, 2.50);
+    }
+
+    #[test]
+    fn invalid_override_prices_do_not_poison_cost_estimates() {
+        let table = build_table(Some(
+            r#"{
+                "gpt-4o": {"input_per_1m": -1.0, "output_per_1m": 2.0},
+                "free-model": {"input_per_1m": 0.0, "output_per_1m": 0.0}
+            }"#,
+        ));
+        assert_eq!(lookup(&table, "gpt-4o").unwrap().input_per_1m, 2.50);
+        assert!(lookup(&table, "free-model").is_some());
+        assert_eq!(estimate_cost_usd("gpt-4o", -1, 0), None);
+        assert_eq!(estimate_cost_usd("gpt-4o", 0, -1), None);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { createDefaultLoader, findAction } from "../src/registry.ts";
+import { createDefaultLoader, findAction, findTrigger } from "../src/registry.ts";
 import { PieceExecutionError } from "../src/errors.ts";
 
 // ---------------------------------------------------------------------------
@@ -42,6 +42,18 @@ test("createDefaultLoader with no options works (no allowlist)", () => {
   const loader = createDefaultLoader();
   // Should not throw during creation
   assert.ok(loader);
+});
+
+test("findTrigger preserves the piece binding for framework methods", () => {
+  const trigger = { name: "new-item", run: async () => [] };
+  const piece = {
+    actions: () => ({}),
+    triggers() {
+      assert.equal(this, piece);
+      return { "new-item": trigger };
+    },
+  };
+  assert.equal(findTrigger(piece, "new-item"), trigger);
 });
 
 // ---------------------------------------------------------------------------
@@ -362,21 +374,22 @@ test("findAction() with empty array throws PieceExecutionError", () => {
   );
 });
 
-test("findAction() with null entry in array throws TypeError (no null guard)", () => {
-  // The current implementation does raw.find((a) => a.name === actionName)
-  // which crashes on null entries — this documents the behavior.
+test("findAction() skips null entries in an action array", () => {
   const piece = {
     displayName: "has-null",
     actions: () => [null, { name: "valid_action", run: async () => "ok" }] as any,
   };
+  assert.equal(findAction(piece, "valid_action").name, "valid_action");
+});
 
-  assert.throws(
-    () => findAction(piece, "valid_action"),
-    (err: any) => {
-      assert.ok(err instanceof TypeError);
-      return true;
-    },
-  );
+test("findAction() skips null entries in an action record", () => {
+  const piece = {
+    actions: () => ({
+      missing: null,
+      aliased: { name: "valid_action", run: async () => "ok" },
+    }) as any,
+  };
+  assert.equal(findAction(piece, "valid_action").name, "valid_action");
 });
 
 // ---------------------------------------------------------------------------

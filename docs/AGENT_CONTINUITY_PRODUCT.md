@@ -56,6 +56,11 @@ orch8 portable compile-policy \
   'classification=restricted;runtime_kinds=mobile;min_trust=attested;human_ui=true'
 ```
 
+A policy must contain at least one declaration. Omitted allow-lists impose no
+restriction, but explicitly empty lists (such as `regions=`) and blank list
+items are rejected. Use `classification=internal` to spell out the default
+internal policy without additional placement restrictions.
+
 Inspect a deployable trust-boundary profile:
 
 ```bash

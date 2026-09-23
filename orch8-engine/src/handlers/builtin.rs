@@ -73,6 +73,9 @@ fn ipv4_is_blocked(v4: std::net::Ipv4Addr) -> bool {
 
 /// `true` if an IPv6 literal is a private/internal target.
 fn ipv6_is_blocked(v6: std::net::Ipv6Addr) -> bool {
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return ipv4_is_blocked(v4);
+    }
     v6.is_loopback()              // ::1
         || v6.is_unspecified()
         || v6.is_unicast_link_local() // fe80::/10
@@ -165,16 +168,20 @@ impl reqwest::dns::Resolve for SsrfGuardResolver {
 /// hop to a non-http(s) scheme or to a private/loopback/link-local IP literal.
 ///
 /// DNS resolution can't run in this sync context, so hostname redirect targets
-/// that *resolve* to private IPs are not caught here — they remain bounded by
-/// the hop cap and the initial [`is_url_safe`] check. The common metadata /
-/// direct-internal-IP redirect vector is closed.
+/// that *resolve* to private IPs are not caught here. The shared HTTP client's
+/// [`SsrfGuardResolver`] filters those addresses before connecting; this guard
+/// handles direct-internal-IP redirects, including IPv4-mapped IPv6 literals.
 pub(crate) fn redirect_target_allowed(next: &url::Url) -> bool {
-    if internal_urls_allowed() {
-        return true;
-    }
+    redirect_target_allowed_with_internal_urls(next, internal_urls_allowed())
+}
+
+fn redirect_target_allowed_with_internal_urls(next: &url::Url, allow_internal: bool) -> bool {
     match next.scheme() {
         "http" | "https" => {}
         _ => return false,
+    }
+    if allow_internal {
+        return true;
     }
     match next.host() {
         Some(url::Host::Ipv4(v4)) => !ipv4_is_blocked(v4),
@@ -985,9 +992,33 @@ mod tests {
         assert!(!allow("http://192.168.1.1/")); // private
         assert!(!allow("http://[::1]/")); // ipv6 loopback
         assert!(!allow("http://[fc00::1]/")); // ipv6 ULA
+        assert!(!allow("http://[::ffff:127.0.0.1]/")); // ipv4-mapped loopback
+        assert!(!allow("http://[::ffff:169.254.169.254]/")); // mapped metadata
+        assert!(allow("http://[::ffff:93.184.216.34]/")); // mapped public IP
         // Non-http(s) schemes are blocked (file://, gopher://, etc.).
         assert!(!allow("file:///etc/passwd"));
         assert!(!allow("gopher://10.0.0.1/"));
+    }
+
+    #[test]
+    fn internal_url_opt_in_does_not_allow_non_http_redirects() {
+        let allow = |u: &str| {
+            redirect_target_allowed_with_internal_urls(&url::Url::parse(u).unwrap(), true)
+        };
+        assert!(allow("http://127.0.0.1/"));
+        assert!(allow("https://[::1]/"));
+        assert!(!allow("file:///etc/passwd"));
+        assert!(!allow("gopher://127.0.0.1/"));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_addresses_use_ipv4_ssrf_rules() {
+        let blocked: std::net::SocketAddr = "[::ffff:127.0.0.1]:80".parse().unwrap();
+        let metadata: std::net::SocketAddr = "[::ffff:169.254.169.254]:80".parse().unwrap();
+        let public: std::net::SocketAddr = "[::ffff:93.184.216.34]:80".parse().unwrap();
+        assert!(socket_addr_is_blocked(&blocked));
+        assert!(socket_addr_is_blocked(&metadata));
+        assert!(!socket_addr_is_blocked(&public));
     }
 
     #[tokio::test]

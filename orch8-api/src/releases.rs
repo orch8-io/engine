@@ -111,7 +111,12 @@ pub(crate) async fn create_release(
 
     let now = Utc::now();
     let release = WorkflowRelease {
-        id: Uuid::now_v7(),
+        // Cohort assignment hashes the release ID together with the cohort
+        // key. UUIDv7 IDs created close together share a long timestamp
+        // prefix, which weakens separation with the legacy FNV hash. A
+        // random release ID improves new-release independence without
+        // reshuffling cohorts for already-persisted releases.
+        id: Uuid::new_v4(),
         tenant_id: tenant_id.clone(),
         namespace: baseline.namespace.clone(),
         sequence_name: baseline.name.clone(),

@@ -1759,6 +1759,14 @@ impl crate::WorkerStore for SqliteStorage {
         queue_dispatch::upsert(self, config).await
     }
 
+    async fn set_queue_dispatch(
+        &self,
+        config: &orch8_types::queue_dispatch::QueueDispatchConfig,
+        preserve_secret: bool,
+    ) -> Result<orch8_types::queue_dispatch::QueueDispatchConfig, StorageError> {
+        queue_dispatch::set(self, config, preserve_secret).await
+    }
+
     async fn get_queue_dispatch(
         &self,
         tenant_id: &str,
@@ -3040,6 +3048,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn usage_events_reject_negative_counts_before_insertion() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let mut event = crate::UsageEvent {
+            tenant_id: "tenant".into(),
+            instance_id: None,
+            block_id: None,
+            kind: "llm_tokens".into(),
+            model: "model".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: Utc::now(),
+        };
+        for (input, output) in [(-1, 0), (0, -1), (-1, -1)] {
+            event.input_tokens = input;
+            event.output_tokens = output;
+            assert!(matches!(
+                storage.record_usage_event(&event).await,
+                Err(StorageError::Constraint(_))
+            ));
+        }
+        assert!(
+            storage
+                .query_usage(
+                    "tenant",
+                    event.created_at - chrono::Duration::seconds(1),
+                    event.created_at + chrono::Duration::seconds(1)
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        event.input_tokens = 0;
+        event.output_tokens = 0;
+        storage.record_usage_event(&event).await.unwrap();
+        let totals = storage
+            .query_usage(
+                "tenant",
+                event.created_at - chrono::Duration::seconds(1),
+                event.created_at + chrono::Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!((totals[0].input_tokens, totals[0].output_tokens), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn usage_window_orders_mixed_rfc3339_precisions_at_boundaries() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let timestamp = |value: &str| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        let instants = [
+            ("whole", "2026-09-23T10:00:00Z"),
+            ("before", "2026-09-23T10:00:00.099999Z"),
+            ("start", "2026-09-23T10:00:00.100Z"),
+            ("inside", "2026-09-23T10:00:00.100001Z"),
+            ("last", "2026-09-23T10:00:00.199999Z"),
+            ("end", "2026-09-23T10:00:00.200Z"),
+            ("next", "2026-09-23T10:00:01Z"),
+        ];
+        for (model, at) in instants {
+            storage
+                .record_usage_event(&crate::UsageEvent {
+                    tenant_id: "precision".into(),
+                    instance_id: None,
+                    block_id: None,
+                    kind: "llm_tokens".into(),
+                    model: model.into(),
+                    input_tokens: 1,
+                    output_tokens: 0,
+                    created_at: timestamp(at),
+                })
+                .await
+                .unwrap();
+        }
+        let models = |usage: Vec<crate::UsageAggregate>| {
+            usage.into_iter().map(|row| row.model).collect::<Vec<_>>()
+        };
+        let middle = storage
+            .query_usage(
+                "precision",
+                timestamp("2026-09-23T10:00:00.100Z"),
+                timestamp("2026-09-23T10:00:00.200Z"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models(middle), ["inside", "last", "start"]);
+
+        let first = storage
+            .query_usage(
+                "precision",
+                timestamp("2026-09-23T10:00:00Z"),
+                timestamp("2026-09-23T10:00:00.100Z"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models(first), ["before", "whole"]);
+
+        let after_start = timestamp("2026-09-23T10:00:00.100000001Z");
+        let late = storage
+            .query_usage(
+                "precision",
+                after_start,
+                timestamp("2026-09-23T10:00:00.200Z"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models(late), ["inside", "last"]);
+        let early = storage
+            .query_usage("precision", timestamp("2026-09-23T10:00:00Z"), after_start)
+            .await
+            .unwrap();
+        assert_eq!(models(early), ["before", "start", "whole"]);
+    }
+
+    #[tokio::test]
     async fn sqlite_roundtrip_sequence() {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
@@ -3115,6 +3243,64 @@ mod tests {
         let fetched = storage.get_instance(inst.id).await.unwrap().unwrap();
         assert_eq!(fetched.tenant_id.as_str(), "t1");
         assert_eq!(fetched.priority, Priority::High);
+    }
+
+    #[tokio::test]
+    async fn sqlite_max_concurrency_roundtrips_full_u32_and_rejects_invalid_storage() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = Utc::now();
+        let mut inst = TaskInstance {
+            id: InstanceId::new(),
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId::unchecked("max-concurrency-test"),
+            namespace: Namespace::new("default"),
+            state: InstanceState::Scheduled,
+            next_fire_at: Some(now),
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            concurrency_key: Some("key".into()),
+            max_concurrency: Some(u32::MAX),
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: now,
+            updated_at: now,
+        };
+        storage.create_instance(&inst).await.unwrap();
+        assert_eq!(
+            storage
+                .get_instance(inst.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .max_concurrency,
+            Some(u32::MAX)
+        );
+
+        let second = InstanceId::new();
+        inst.id = second;
+        storage.create_instances_batch(&[inst]).await.unwrap();
+        assert_eq!(
+            storage
+                .get_instance(second)
+                .await
+                .unwrap()
+                .unwrap()
+                .max_concurrency,
+            Some(u32::MAX)
+        );
+
+        sqlx::query("UPDATE task_instances SET max_concurrency = -1 WHERE id = ?")
+            .bind(second.into_uuid().to_string())
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        assert!(
+            matches!(storage.get_instance(second).await, Err(StorageError::Query(message)) if message.contains("max_concurrency"))
+        );
     }
 
     #[tokio::test]

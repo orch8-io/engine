@@ -255,6 +255,35 @@ async fn inspect_instance_encodes_the_historical_block_boundary() {
 }
 
 #[tokio::test]
+async fn inspect_instance_encodes_block_id_as_one_path_segment() {
+    let server = mock_api().await;
+    let instance = Uuid::new_v4();
+
+    inspect_cmd::run(
+        &Client::new(),
+        &server.base,
+        InspectCmd::Template {
+            block: "draft/render?mode=a#frag".into(),
+            instance: Some(instance),
+            at_block: None,
+            sequence_file: None,
+            context: None,
+            outputs: None,
+        },
+        OutputFormat::Json,
+    )
+    .await
+    .unwrap();
+
+    let requests = server.log.snapshot();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].uri,
+        format!("/instances/{instance}/blocks/draft%2Frender%3Fmode=a%23frag/resolved-input")
+    );
+}
+
+#[tokio::test]
 async fn inspect_draft_reads_sequence_and_fixture_files_into_the_request() {
     let server = mock_api().await;
     let mut sequence = NamedTempFile::new().unwrap();

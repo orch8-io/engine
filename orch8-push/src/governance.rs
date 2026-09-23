@@ -25,6 +25,8 @@ pub enum PushGovernanceError {
     InvalidExpiry,
     #[error("wake nonce was already consumed")]
     Replay,
+    #[error("wake replay cache is full; unexpired nonces cannot be evicted")]
+    ReplayCacheFull,
 }
 
 /// A route points only at an encrypted credential record. Request payloads
@@ -224,7 +226,8 @@ impl SignedWakeMetadata {
 }
 
 /// Bounded replay cache. Expired nonces are discarded before every insert;
-/// when full, the earliest-expiring entry is evicted deterministically.
+/// when full, new wakes are rejected rather than forgetting unexpired replay
+/// evidence.
 #[derive(Debug)]
 pub struct WakeNonceCache {
     entries: BTreeMap<Uuid, DateTime<Utc>>,
@@ -250,14 +253,8 @@ impl WakeNonceCache {
         if self.entries.contains_key(&nonce) {
             return Err(PushGovernanceError::Replay);
         }
-        if self.entries.len() >= self.max_entries
-            && let Some(oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, expiry)| **expiry)
-                .map(|(nonce, _)| *nonce)
-        {
-            self.entries.remove(&oldest);
+        if self.entries.len() >= self.max_entries {
+            return Err(PushGovernanceError::ReplayCacheFull);
         }
         self.entries.insert(nonce, expires_at);
         Ok(())

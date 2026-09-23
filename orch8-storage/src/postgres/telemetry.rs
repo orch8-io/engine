@@ -6,6 +6,21 @@ use orch8_types::ids::InstanceId;
 
 use super::PostgresStorage;
 
+/// `PostgreSQL` timestamps have microsecond precision. `SQLx`'s timestamp binding
+/// drops sub-microsecond bits, which would round a half-open usage bound down
+/// and include/exclude a row at the preceding microsecond incorrectly. Both
+/// bounds must be rounded *up* to select exactly the stored microsecond ticks
+/// that satisfy `created_at >= start AND created_at < end`.
+fn ceil_usage_bound_to_microsecond(bound: DateTime<Utc>) -> Result<DateTime<Utc>, StorageError> {
+    let remainder = bound.timestamp_subsec_nanos() % 1_000;
+    if remainder == 0 {
+        return Ok(bound);
+    }
+    bound
+        .checked_add_signed(chrono::Duration::nanoseconds(i64::from(1_000 - remainder)))
+        .ok_or_else(|| StorageError::Constraint("usage window bound is too large".into()))
+}
+
 #[async_trait]
 impl crate::TelemetryStore for PostgresStorage {
     async fn ingest_telemetry_event(
@@ -41,6 +56,7 @@ impl crate::TelemetryStore for PostgresStorage {
     }
 
     async fn record_usage_event(&self, event: &crate::UsageEvent) -> Result<(), StorageError> {
+        crate::validate_usage_event(event)?;
         sqlx::query(
             r"INSERT INTO usage_events
                (tenant_id, instance_id, block_id, kind, model, input_tokens, output_tokens, created_at)
@@ -66,6 +82,8 @@ impl crate::TelemetryStore for PostgresStorage {
         end: DateTime<Utc>,
     ) -> Result<Vec<crate::UsageAggregate>, StorageError> {
         use sqlx::Row;
+        let start = ceil_usage_bound_to_microsecond(start)?;
+        let end = ceil_usage_bound_to_microsecond(end)?;
         // SUM(bigint) is NUMERIC in Postgres — cast back to BIGINT for i64 decode.
         let rows = sqlx::query(
             r"SELECT kind, model,
@@ -268,5 +286,34 @@ impl crate::TelemetryStore for PostgresStorage {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_window_bounds_round_up_to_microsecond_grid() {
+        let timestamp = |value: &str| {
+            DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .with_timezone(&Utc)
+        };
+        for (input, expected) in [
+            ("2026-09-23T10:00:00.100Z", "2026-09-23T10:00:00.100Z"),
+            (
+                "2026-09-23T10:00:00.100000001Z",
+                "2026-09-23T10:00:00.100001Z",
+            ),
+            ("2026-09-23T10:00:00.999999999Z", "2026-09-23T10:00:01Z"),
+            ("1969-12-31T23:59:59.999999999Z", "1970-01-01T00:00:00Z"),
+        ] {
+            assert_eq!(
+                ceil_usage_bound_to_microsecond(timestamp(input)).unwrap(),
+                timestamp(expected),
+                "{input}"
+            );
+        }
     }
 }

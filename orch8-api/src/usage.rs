@@ -19,7 +19,13 @@ use crate::model_pricing;
 
 /// Round a USD amount to 6 decimal places for stable API output.
 fn round6(v: f64) -> f64 {
-    (v * 1_000_000.0).round() / 1_000_000.0
+    if v.abs() > f64::MAX / 1_000_000.0 {
+        // Multiplying would overflow, and six-decimal rounding cannot change
+        // a value this large at f64 precision anyway.
+        v
+    } else {
+        (v * 1_000_000.0).round() / 1_000_000.0
+    }
 }
 
 fn resolve_window(
@@ -96,15 +102,20 @@ pub async fn get_usage(
     // Attach an estimated USD cost to each aggregate (null for unknown
     // models) plus a window-wide total over the known ones. Costs are list
     // prices from the static pricing table — hence `cost_is_estimate`.
-    let mut total_cost_usd = 0.0;
+    let mut total_cost_usd = Some(0.0_f64);
+    let mut total_cost_is_complete = true;
     let usage: Vec<serde_json::Value> = usage
         .into_iter()
         .map(|u| {
             let cost_usd =
-                model_pricing::estimate_cost_usd(&u.model, u.input_tokens, u.output_tokens)
-                    .map(round6);
+                model_pricing::estimate_cost_usd(&u.model, u.input_tokens, u.output_tokens);
             if let Some(c) = cost_usd {
-                total_cost_usd += c;
+                total_cost_usd = total_cost_usd.and_then(|total| {
+                    let next = total + c;
+                    next.is_finite().then_some(next)
+                });
+            } else {
+                total_cost_is_complete = false;
             }
             serde_json::json!({
                 "kind": u.kind,
@@ -112,7 +123,7 @@ pub async fn get_usage(
                 "events": u.events,
                 "input_tokens": u.input_tokens,
                 "output_tokens": u.output_tokens,
-                "cost_usd": cost_usd,
+                "cost_usd": cost_usd.map(round6),
             })
         })
         .collect();
@@ -122,7 +133,8 @@ pub async fn get_usage(
         "start": start,
         "end": end,
         "usage": usage,
-        "total_cost_usd": round6(total_cost_usd),
+        "total_cost_usd": total_cost_usd.map(round6),
+        "total_cost_is_complete": total_cost_is_complete && total_cost_usd.is_some(),
         "cost_is_estimate": true,
     })))
 }
@@ -151,5 +163,10 @@ mod tests {
             resolve_window(Some(end), start),
             Err(ApiError::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn rounding_large_finite_cost_stays_finite() {
+        assert_eq!(round6(f64::MAX).to_bits(), f64::MAX.to_bits());
     }
 }

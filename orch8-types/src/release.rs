@@ -502,11 +502,12 @@ mod tests {
 
     #[test]
     fn different_releases_shuffle_cohorts_independently() {
-        // The same cohort key must not always land on the same side across
-        // releases (no global bias by key).
+        // Fixed, independently random release IDs keep this a deterministic
+        // regression test. Nearby UUIDv7 IDs can be correlated by the legacy
+        // FNV hash, so new releases use UUIDv4 IDs.
         let keys: Vec<String> = (0..100).map(|i| format!("k{i}")).collect();
-        let r1 = Uuid::now_v7();
-        let r2 = Uuid::now_v7();
+        let r1 = Uuid::from_u128(0x550e_8400_e29b_41d4_a716_4466_5544_0000);
+        let r2 = Uuid::from_u128(0xf3cd_8a1a_b5ab_4d6c_a1d9_0233_18b6_6f47);
         let same = keys
             .iter()
             .filter(|k| assign_variant(r1, k, 50) == assign_variant(r2, k, 50))

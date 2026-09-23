@@ -9,6 +9,17 @@ use orch8_types::output::BlockOutput;
 use super::PostgresStorage;
 use super::rows::BlockOutputRow;
 
+fn pg_output_size(size: u32) -> Result<i32, StorageError> {
+    i32::try_from(size).map_err(|_| {
+        StorageError::Constraint("output_size exceeds PostgreSQL integer range".into())
+    })
+}
+
+fn pg_attempt(attempt: u16) -> Result<i16, StorageError> {
+    i16::try_from(attempt)
+        .map_err(|_| StorageError::Constraint("attempt exceeds PostgreSQL smallint range".into()))
+}
+
 /// Append a new `block_outputs` row.
 ///
 /// `block_outputs` is a write-append log: every execution of a block — first
@@ -32,8 +43,8 @@ pub(super) async fn save(
     .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
-    .bind(output.output_size as i32)
-    .bind(output.attempt as i16)
+    .bind(pg_output_size(output.output_size)?)
+    .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
     .execute(&store.pool)
     .await?;
@@ -66,7 +77,7 @@ pub(super) async fn get(
     .bind(block_id.as_str())
     .fetch_optional(&store.pool)
     .await?;
-    Ok(row.map(BlockOutputRow::into_output))
+    row.map(BlockOutputRow::into_output).transpose()
 }
 
 pub(super) async fn get_batch(
@@ -102,7 +113,7 @@ pub(super) async fn get_batch(
             InstanceId::from_uuid(row.instance_id),
             BlockId::new(row.block_id.clone()),
         );
-        map.insert(key, row.into_output());
+        map.insert(key, row.into_output()?);
     }
     Ok(map)
 }
@@ -123,7 +134,7 @@ pub(super) async fn get_all(
     .bind(instance_id.into_uuid())
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(BlockOutputRow::into_output).collect())
+    rows.into_iter().map(BlockOutputRow::into_output).collect()
 }
 
 pub(super) async fn get_after_created_at(
@@ -149,7 +160,7 @@ pub(super) async fn get_after_created_at(
         .fetch_all(&store.pool)
         .await?
     };
-    Ok(rows.into_iter().map(BlockOutputRow::into_output).collect())
+    rows.into_iter().map(BlockOutputRow::into_output).collect()
 }
 
 /// One page of an instance's outputs in execution order. Backs the timeline
@@ -171,7 +182,7 @@ pub(super) async fn get_page(
     .bind(i64::try_from(offset).unwrap_or(i64::MAX))
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(BlockOutputRow::into_output).collect())
+    rows.into_iter().map(BlockOutputRow::into_output).collect()
 }
 
 /// Distinct `block_id`s that have produced at least one output for this
@@ -333,8 +344,8 @@ pub(super) async fn save_output_and_transition(
     .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
-    .bind(output.output_size as i32)
-    .bind(output.attempt as i16)
+    .bind(pg_output_size(output.output_size)?)
+    .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
     .execute(&mut *tx)
     .await?;
@@ -380,8 +391,8 @@ pub(super) async fn save_output_merge_context_and_transition(
     .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
-    .bind(output.output_size as i32)
-    .bind(output.attempt as i16)
+    .bind(pg_output_size(output.output_size)?)
+    .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
     .execute(&mut *tx)
     .await?;
@@ -423,8 +434,8 @@ pub(super) async fn save_output_complete_node_and_transition(
     .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
-    .bind(output.output_size as i32)
-    .bind(output.attempt as i16)
+    .bind(pg_output_size(output.output_size)?)
+    .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
     .execute(&mut *tx)
     .await?;
@@ -484,8 +495,8 @@ pub(super) async fn save_output_complete_node_merge_context_and_transition(
     .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
-    .bind(output.output_size as i32)
-    .bind(output.attempt as i16)
+    .bind(pg_output_size(output.output_size)?)
+    .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
     .execute(&mut *tx)
     .await?;
@@ -545,4 +556,23 @@ pub(super) async fn delete_by_id(store: &PostgresStorage, id: Uuid) -> Result<()
         .execute(&store.pool)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod integer_tests {
+    use super::*;
+
+    #[test]
+    fn output_size_and_attempt_reject_signed_overflow() {
+        assert_eq!(pg_output_size(i32::MAX as u32).unwrap(), i32::MAX);
+        assert_eq!(pg_attempt(i16::MAX as u16).unwrap(), i16::MAX);
+        assert!(matches!(
+            pg_output_size(i32::MAX as u32 + 1),
+            Err(StorageError::Constraint(_))
+        ));
+        assert!(matches!(
+            pg_attempt(i16::MAX as u16 + 1),
+            Err(StorageError::Constraint(_))
+        ));
+    }
 }

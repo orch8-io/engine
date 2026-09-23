@@ -5,19 +5,21 @@
 /// longer string), `None` otherwise.
 pub fn did_you_mean<'a>(input: &str, candidates: &[&'a str]) -> Option<&'a str> {
     let input_lower = input.to_lowercase();
+    let input_chars = input_lower.chars().count();
     candidates
         .iter()
         .map(|c| {
-            let dist = strsim::levenshtein(&input_lower, c);
-            (c, dist)
+            let candidate_lower = c.to_lowercase();
+            let dist = strsim::levenshtein(&input_lower, &candidate_lower);
+            let max_chars = input_chars.max(candidate_lower.chars().count());
+            (c, dist, max_chars)
         })
-        .filter(|(c, dist)| {
-            let max_len = input_lower.len().max(c.len());
+        .filter(|(_, dist, max_chars)| {
             // Only suggest if the distance is within 40% of the longer string.
-            max_len > 0 && *dist <= (max_len * 2 / 5).max(1)
+            *max_chars > 0 && *dist <= (max_chars * 2 / 5).max(1)
         })
-        .min_by_key(|(_, dist)| *dist)
-        .map(|(c, _)| *c)
+        .min_by_key(|(_, dist, _)| *dist)
+        .map(|(c, _, _)| *c)
 }
 
 #[cfg(test)]
@@ -84,5 +86,19 @@ mod tests {
     #[test]
     fn short_input_with_close_match() {
         assert_eq!(did_you_mean("rue", &["run", "red", "blue"]), Some("run"));
+    }
+
+    #[test]
+    fn multibyte_candidates_use_character_not_byte_thresholds() {
+        assert_eq!(did_you_mean("あいうえお", &["かきくけこ"]), None);
+        assert_eq!(
+            did_you_mean("あいうえお", &["あいうえか"]),
+            Some("あいうえか")
+        );
+    }
+
+    #[test]
+    fn candidate_case_is_normalized_without_changing_returned_spelling() {
+        assert_eq!(did_you_mean("café", &["CAFÉ"]), Some("CAFÉ"));
     }
 }

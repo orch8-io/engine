@@ -78,10 +78,6 @@ utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Encryption
-# Pinned to 0.10: 0.11 renames/relocates the AeadCore::generate_nonce /
-# aead::OsRng convenience API used in orch8-types/src/encryption.rs. No
-# advisory forces the move, so we don't take on a crypto-code migration for a
-# version-number bump alone. Revisit together, deliberately, if ever needed.
 aes-gcm = "0.11"
 base64 = "0.23"
 
@@ -92,12 +88,11 @@ url = "2"
 # JSON Schema validation (llm_call `response_schema`). default-features off:
 # the default feature set enables remote `$ref` resolution over HTTP, which
 # is an SSRF hazard for workflow-supplied schemas and drags in extra deps.
-jsonschema = { version = "0.54", default-features = false }
+jsonschema = { version = "0.57", default-features = false }
 
 # Object storage for artifacts — local FS, S3-compatible (R2/MinIO/S3), in-memory (tests)
-# 0.14.0 pins quick-xml 0.40.x, which is affected by RUSTSEC-2026-0194
-# and RUSTSEC-2026-0195. Pin the upstream 0.14.1 fix until it is released.
-object_store = { git = "https://github.com/apache/arrow-rs-object-store.git", rev = "c7316d29face118e7409eead0cda098f38589428", features = ["aws"] }
+# 0.14.2 includes the quick-xml 0.41 fix and a backend HTTP-500 panic fix.
+object_store = { version = "0.14.2", features = ["aws"] }
 futures = "0.3"
 bytes = "1"
 

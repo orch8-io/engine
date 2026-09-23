@@ -1071,8 +1071,8 @@ All blocks are defined in the `blocks` array of a sequence. Blocks can nest arbi
 | `mcp_call` | `url`, `action` ("call"/"list"), `tool_name`, `arguments`, `headers`, `timeout_ms` | _(MCP tool result, or tool list for `"list"`)_ |
 | `agent` | `goal` or `messages`, `system`, `tools`, `tool_dispatch`, `max_iterations` (default 6), `auto_memory`, plus `llm_call` config passthrough | `{ "final": "...", "iterations": N, "stop_reason": "completed"\|"max_iterations", "tool_calls_made": M, "messages": [...] }` |
 | `embed` | `input`, plus embedding config (`model`, `api_key`/`api_key_env`, `base_url`, `timeout_ms`) | `{ "embedding"\|"embeddings", "model", "dimensions" }` |
-| `memory_store` | `text`, optional `embedding`, `key`, `metadata`, `scope` (`instance` default or `tenant`), `namespace`, `retention_secs`, `residency` | `{ "key": "...", "dimensions": N, "scope": "...", "namespace": "...", "residency": "...", "retention_secs": N, "policy_version": N }` |
-| `memory_search` | `query` or `query_embedding`, optional `top_k` (max 100), `scope`, `namespace`, `residency` | `{ "results": [{ key, text, score, metadata, provenance }], "count": N, "scope": "...", "namespace": "...", "expired_deleted": N }` |
+| `memory_store` | `text`, optional `embedding`, `model` (labels a precomputed vector), `key`, `metadata`, `scope` (`instance` default or `tenant`), `namespace`, `retention_secs`, `residency` | `{ "key": "...", "dimensions": N, "scope": "...", "namespace": "...", "residency": "...", "retention_secs": N, "policy_version": N }` |
+| `memory_search` | `query` or `query_embedding`, optional `model` (filters known mismatches), integer `top_k` (1–100, default 5), `scope`, `namespace`, `residency` | `{ "results": [{ key, text, embedding_model, score, metadata, provenance }], "count": N, "scope": "...", "namespace": "...", "expired_deleted": N }` |
 | `memory_delete` | `key`, optional `scope`, `namespace`, `residency` | `{ "key": "...", "deleted": true, "scope": "...", "namespace": "...", "policy_version": N }` |
 | `blob_put` | `text` or `data` (base64), `content_type`, `max_size_bytes` (default 25 MiB) | _(an `ArtifactRef` to pass between steps)_ |
 | `blob_get` | `ref` (ArtifactRef), `encoding` | _(the stored content)_ |
@@ -1094,6 +1094,13 @@ Tenant-scoped memory fails closed unless trusted host code has installed a
 namespace policy. See [Governed durable memory](GOVERNED_MEMORY.md) for the
 authorization, retention, residency, deletion, provenance, and compatibility
 rules.
+
+Embedding requests accept at most 2,048 input strings and 10 MiB of input text
+in total; a single input string cannot exceed 10 MiB. These limits apply to
+`embed` batches and to provider-generated embeddings in memory handlers.
+An explicitly supplied `base_url` must be an HTTP(S) URL without credentials,
+query, or fragment; malformed values are rejected rather than falling back to
+the default provider. `timeout_ms` must be an integer from 1 to 300,000.
 
 ---
 
@@ -1497,6 +1504,9 @@ DELETE /queues/dispatch/{tenant_id}/{queue_name}
 
 `push` requires a non-empty `push_url`. When a `secret` is set, the envelope is HMAC-signed (`X-Orch8-Timestamp` + `X-Orch8-Signature: sha256=…` over `"{ts}.{body}"`) — the same scheme as outbound webhooks. A push failure leaves the task pending; flip the queue back to `poll` to recover.
 
+On an existing config, omitting `secret` preserves it; set `secret` to `null` to remove it. Secrets are never returned by the API. The `created_at` timestamp remains unchanged when a config is updated.
+When storage encryption is enabled, newly written dispatch secrets are encrypted at rest. Existing plaintext rows remain readable through the encrypted storage wrapper and are encrypted when their secret is next replaced.
+
 ---
 
 ## Worker Version Pins
@@ -1604,6 +1614,15 @@ which are summarized rather than repeated field-by-field here:
 - **Bulk reschedule** — `PATCH /instances/bulk/reschedule` (shift `next_fire_at` by `offset_secs`)
 - **Rollback policies** — `/rollback-policies` CRUD
 - **Usage & info** — `GET /usage`, `GET /info` (version + environment label)
+  `GET /usage` rounds each displayed model cost to six decimals but sums the
+  unrounded estimates before rounding `total_cost_usd`. The response sets
+  `total_cost_is_complete` to `false` when any model is unpriced or an estimate
+  cannot be represented; the total then covers only priced rows (or is `null`
+  if the sum overflows). Usage windows are half-open (`start` inclusive, `end`
+  exclusive). PostgreSQL stores timestamps to microsecond precision; query
+  bounds with sub-microsecond fractions are rounded up to the next microsecond
+  when selecting stored events. Events within the same microsecond cannot be
+  distinguished on that backend.
 - **MCP server** — `POST /mcp` (expose the engine itself as an MCP server)
 - **Safe releases** — `/releases` diff, validation, canary gates, decisions, promotion, pause, and rollback
 
@@ -1626,7 +1645,7 @@ All error responses follow this format:
 | `403` | Forbidden (insufficient permissions) |
 | `404` | Resource not found (instance, sequence, cron schedule, worker task) |
 | `409` | Conflict (state transition not allowed, duplicate resource) |
-| `413` | Payload too large (context exceeds `max_context_bytes`) |
+| `413` | Payload too large (instance context or session data exceeds `max_context_bytes`) |
 | `422` | Unprocessable entity (`context.data` fails the sequence's `input_schema`) |
 | `500` | Internal server error |
 | `503` | Service unavailable (storage connection failure) |

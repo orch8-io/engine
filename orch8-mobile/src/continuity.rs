@@ -168,9 +168,7 @@ pub async fn import_capsule(
     let signed: SignedCapsuleManifest = serde_json::from_str(capsule_json)?;
     let declared_bytes = usize::try_from(signed.manifest.payload_artifact.bytes)
         .map_err(|_| invalid("capsule payload size is unsupported"))?;
-    let max_sealed_bytes = orch8_types::continuity::CapsulePayload::MAX_ENCODED_BYTES + 64;
-    let max_base64_bytes = declared_bytes.saturating_add(2) / 3 * 4;
-    if declared_bytes > max_sealed_bytes || payload_base64.len() > max_base64_bytes {
+    if !transport_size_is_valid(declared_bytes, payload_base64.len()) {
         return Err(MobileError::ResourceLimit {
             message: "transported capsule payload exceeds protocol bounds".into(),
         });
@@ -241,6 +239,15 @@ pub async fn import_capsule(
         source_epoch: signed.manifest.epoch.get(),
         state: "paused".into(),
     })
+}
+
+fn transport_size_is_valid(declared_bytes: usize, encoded_bytes: usize) -> bool {
+    let max_sealed_bytes = orch8_types::continuity::CapsulePayload::MAX_ENCODED_BYTES + 64;
+    if declared_bytes > max_sealed_bytes {
+        return false;
+    }
+    let max_base64_bytes = declared_bytes.div_ceil(3) * 4;
+    encoded_bytes <= max_base64_bytes
 }
 
 pub async fn activate_capsule(
@@ -350,6 +357,17 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn transport_size_rejects_huge_declaration_without_overflow() {
+        assert!(!transport_size_is_valid(usize::MAX, 0));
+    }
+
+    #[test]
+    fn transport_size_accepts_exact_base64_bound_and_rejects_excess() {
+        assert!(transport_size_is_valid(4, 8));
+        assert!(!transport_size_is_valid(4, 9));
+    }
 
     struct TestSigner(SigningKey);
 

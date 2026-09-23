@@ -3,6 +3,8 @@ use orch8_types::ids::InstanceId;
 
 use super::SqliteStorage;
 
+const KV_DELETE_CHUNK_SIZE: usize = 500;
+
 impl SqliteStorage {
     pub(crate) async fn set_shared_knowledge_impl(
         &self,
@@ -185,18 +187,29 @@ impl SqliteStorage {
         if keys.is_empty() {
             return Ok(());
         }
-        let mut query =
-            sqlx::QueryBuilder::new("DELETE FROM instance_kv_state WHERE instance_id = ");
-        query.push_bind(instance_id.into_uuid().to_string());
-        query.push(" AND key IN (");
-        let mut separated = query.separated(", ");
-        for key in keys {
-            separated.push_bind(key);
+        let instance_id = instance_id.into_uuid().to_string();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        for chunk in keys.chunks(KV_DELETE_CHUNK_SIZE) {
+            let mut query =
+                sqlx::QueryBuilder::new("DELETE FROM instance_kv_state WHERE instance_id = ");
+            query.push_bind(&instance_id);
+            query.push(" AND key IN (");
+            let mut separated = query.separated(", ");
+            for key in chunk {
+                separated.push_bind(key);
+            }
+            separated.push_unseparated(")");
+            query
+                .build()
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| StorageError::Query(error.to_string()))?;
         }
-        separated.push_unseparated(")");
-        query
-            .build()
-            .execute(&self.pool)
+        tx.commit()
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(())
@@ -211,21 +224,149 @@ impl SqliteStorage {
         if keys.is_empty() {
             return Ok(());
         }
-        let mut query =
-            sqlx::QueryBuilder::new("DELETE FROM shared_agent_knowledge WHERE tenant_id = ");
-        query.push_bind(tenant_id);
-        query.push(" AND namespace = ").push_bind(namespace);
-        query.push(" AND key IN (");
-        let mut separated = query.separated(", ");
-        for key in keys {
-            separated.push_bind(key);
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        for chunk in keys.chunks(KV_DELETE_CHUNK_SIZE) {
+            let mut query =
+                sqlx::QueryBuilder::new("DELETE FROM shared_agent_knowledge WHERE tenant_id = ");
+            query.push_bind(tenant_id);
+            query.push(" AND namespace = ").push_bind(namespace);
+            query.push(" AND key IN (");
+            let mut separated = query.separated(", ");
+            for key in chunk {
+                separated.push_bind(key);
+            }
+            separated.push_unseparated(")");
+            query
+                .build()
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| StorageError::Query(error.to_string()))?;
         }
-        separated.push_unseparated(")");
-        query
-            .build()
-            .execute(&self.pool)
+        tx.commit()
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn oversized_key_list() -> Vec<String> {
+        (0..32_768).map(|index| format!("key-{index}")).collect()
+    }
+
+    #[tokio::test]
+    async fn instance_kv_batch_delete_handles_more_than_sqlite_variable_limit() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let target = InstanceId::new();
+        let other = InstanceId::new();
+        let keys = oversized_key_list();
+        for key in [&keys[0], &keys[32_767]] {
+            storage
+                .set_instance_kv_impl(target, key, &json!(true))
+                .await
+                .unwrap();
+            storage
+                .set_instance_kv_impl(other, key, &json!(true))
+                .await
+                .unwrap();
+        }
+
+        storage
+            .delete_instance_kv_batch_impl(target, &keys)
+            .await
+            .unwrap();
+
+        for key in [&keys[0], &keys[32_767]] {
+            assert_eq!(
+                storage.get_instance_kv_impl(target, key).await.unwrap(),
+                None
+            );
+            assert_eq!(
+                storage.get_instance_kv_impl(other, key).await.unwrap(),
+                Some(json!(true))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_knowledge_batch_delete_handles_more_than_sqlite_variable_limit() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let keys = oversized_key_list();
+        for key in [&keys[0], &keys[32_767]] {
+            storage
+                .set_shared_knowledge_impl("target", "ns", key, &json!(true))
+                .await
+                .unwrap();
+            storage
+                .set_shared_knowledge_impl("other", "ns", key, &json!(true))
+                .await
+                .unwrap();
+        }
+
+        storage
+            .delete_shared_knowledge_batch_impl("target", "ns", &keys)
+            .await
+            .unwrap();
+
+        for key in [&keys[0], &keys[32_767]] {
+            assert_eq!(
+                storage
+                    .get_shared_knowledge_impl("target", "ns", key)
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                storage
+                    .get_shared_knowledge_impl("other", "ns", key)
+                    .await
+                    .unwrap(),
+                Some(json!(true))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn instance_kv_batch_delete_rolls_back_prior_chunks_on_error() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let instance_id = InstanceId::new();
+        let keys: Vec<String> = (0..=KV_DELETE_CHUNK_SIZE)
+            .map(|index| format!("key-{index}"))
+            .collect();
+        for key in [&keys[0], &keys[KV_DELETE_CHUNK_SIZE]] {
+            storage
+                .set_instance_kv_impl(instance_id, key, &json!(true))
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "CREATE TRIGGER fail_late_delete BEFORE DELETE ON instance_kv_state
+             WHEN OLD.key = 'key-500' BEGIN SELECT RAISE(ABORT, 'late failure'); END",
+        )
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        assert!(
+            storage
+                .delete_instance_kv_batch_impl(instance_id, &keys)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            storage
+                .get_instance_kv_impl(instance_id, &keys[0])
+                .await
+                .unwrap(),
+            Some(json!(true))
+        );
     }
 }

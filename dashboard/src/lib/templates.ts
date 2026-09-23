@@ -57,6 +57,8 @@ const DEFAULT_SEQUENCE: Record<string, unknown> = {
 
 /** docs/agent-patterns/react-loop.json */
 const REACT_LOOP_SEQUENCE: Record<string, unknown> = {
+  $schema: "https://orch8.io/contracts/sequence.schema.json",
+  schema_version: 1,
   name: "ReAct Loop Agent",
   description:
     "Observe-Think-Act loop with tool calling. The agent reasons about the task, selects tools, observes results, and iterates until done or max iterations reached.",
@@ -143,6 +145,8 @@ const REACT_LOOP_SEQUENCE: Record<string, unknown> = {
 
 /** docs/agent-patterns/tool-calling-pipeline.json */
 const TOOL_CALLING_PIPELINE_SEQUENCE: Record<string, unknown> = {
+  $schema: "https://orch8.io/contracts/sequence.schema.json",
+  schema_version: 1,
   name: "Tool-Calling Pipeline",
   description:
     "LLM generates a plan, executes tools in sequence, then synthesizes results. Linear pipeline with no looping — suited for structured multi-step tasks.",
@@ -209,6 +213,8 @@ const TOOL_CALLING_PIPELINE_SEQUENCE: Record<string, unknown> = {
 
 /** docs/agent-patterns/guardrail-validation.json */
 const GUARDRAIL_VALIDATION_SEQUENCE: Record<string, unknown> = {
+  $schema: "https://orch8.io/contracts/sequence.schema.json",
+  schema_version: 1,
   name: "Guardrail Validation Pipeline",
   description:
     "Input validation -> LLM generation -> output validation -> human review gate. Ensures AI outputs meet safety and quality standards before delivery.",
@@ -329,6 +335,8 @@ const GUARDRAIL_VALIDATION_SEQUENCE: Record<string, unknown> = {
 
 /** docs/agent-patterns/multi-agent-delegation.json */
 const MULTI_AGENT_DELEGATION_SEQUENCE: Record<string, unknown> = {
+  $schema: "https://orch8.io/contracts/sequence.schema.json",
+  schema_version: 1,
   name: "Multi-Agent Delegation",
   description:
     "Orchestrator agent breaks a task into sub-tasks and delegates each to a specialized child agent instance. Results are collected and synthesized.",

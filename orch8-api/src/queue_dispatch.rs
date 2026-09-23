@@ -6,7 +6,7 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use utoipa::ToSchema;
 
 use orch8_types::ids::TenantId;
@@ -34,8 +34,28 @@ pub(crate) struct SetDispatchRequest {
     #[serde(default)]
     push_url: Option<String>,
     /// Optional HMAC secret for signing pushed envelopes.
-    #[serde(default)]
-    secret: Option<String>,
+    /// Omission keeps the existing secret; explicit null clears it.
+    #[serde(default, deserialize_with = "deserialize_secret_update")]
+    #[schema(value_type = Option<String>)]
+    secret: SecretUpdate,
+}
+
+#[derive(Default)]
+enum SecretUpdate {
+    #[default]
+    Keep,
+    Clear,
+    Set(String),
+}
+
+fn deserialize_secret_update<'de, D>(deserializer: D) -> Result<SecretUpdate, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(|secret| match secret {
+        Some(value) => SecretUpdate::Set(value),
+        None => SecretUpdate::Clear,
+    })
 }
 
 #[derive(Deserialize)]
@@ -70,22 +90,25 @@ pub(crate) async fn set_dispatch(
     }
 
     let now = Utc::now();
+    let preserve_secret = matches!(req.secret, SecretUpdate::Keep);
     let cfg = QueueDispatchConfig {
         tenant_id: tenant_id.as_str().to_string(),
         queue_name: req.queue_name,
         mode: req.mode,
         push_url: req.push_url,
-        secret: req.secret,
+        secret: match req.secret {
+            SecretUpdate::Keep | SecretUpdate::Clear => None,
+            SecretUpdate::Set(value) => Some(value),
+        },
         created_at: now,
         updated_at: now,
     };
-    state
+    let mut out = state
         .storage
-        .upsert_queue_dispatch(&cfg)
+        .set_queue_dispatch(&cfg, preserve_secret)
         .await
         .map_err(|e| ApiError::from_storage(e, "queue_dispatch"))?;
     // Never echo the secret back.
-    let mut out = cfg;
     out.secret = None;
     Ok((StatusCode::OK, Json(out)))
 }

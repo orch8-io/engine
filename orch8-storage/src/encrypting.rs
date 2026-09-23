@@ -1,7 +1,7 @@
 //! Encrypting storage decorator.
 //!
-//! Wraps any `StorageBackend` and transparently encrypts `context.data` on write
-//! and decrypts on read using AES-256-GCM via [`FieldEncryptor`].
+//! Wraps any `StorageBackend` and transparently encrypts sensitive fields on
+//! write and decrypts on read using AES-256-GCM via [`FieldEncryptor`].
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -579,6 +579,27 @@ impl EncryptingStorage {
             serde_json::Value::String(s) => Ok(s),
             _ => Ok(stored.to_string()),
         }
+    }
+
+    fn encrypt_queue_dispatch(
+        &self,
+        config: &orch8_types::queue_dispatch::QueueDispatchConfig,
+    ) -> Result<orch8_types::queue_dispatch::QueueDispatchConfig, StorageError> {
+        let mut encrypted = config.clone();
+        if let Some(secret) = config.secret.as_deref() {
+            encrypted.secret = Some(self.encrypt_string_field(secret)?);
+        }
+        Ok(encrypted)
+    }
+
+    fn decrypt_queue_dispatch(
+        &self,
+        mut config: orch8_types::queue_dispatch::QueueDispatchConfig,
+    ) -> Result<orch8_types::queue_dispatch::QueueDispatchConfig, StorageError> {
+        if let Some(secret) = config.secret.as_deref() {
+            config.secret = Some(self.decrypt_string_field(secret)?);
+        }
+        Ok(config)
     }
 }
 
@@ -1640,8 +1661,22 @@ passthrough_impl! {
     async fn get_worker_version_pin(&self, tenant_id: &str, handler_name: &str) -> Result<Option<orch8_types::worker::WorkerVersionPin>, StorageError>;
     async fn list_worker_version_pins(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::worker::WorkerVersionPin>, StorageError>;
     async fn delete_worker_version_pin(&self, tenant_id: &str, handler_name: &str) -> Result<(), StorageError>;
-    async fn upsert_queue_dispatch(&self, config: &orch8_types::queue_dispatch::QueueDispatchConfig) -> Result<(), StorageError>;
-    async fn get_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
+    async fn upsert_queue_dispatch(&self, config: &orch8_types::queue_dispatch::QueueDispatchConfig) -> Result<(), StorageError> {
+        let encrypted = self.encrypt_queue_dispatch(config)?;
+        self.inner.upsert_queue_dispatch(&encrypted).await
+    }
+    async fn set_queue_dispatch(&self, config: &orch8_types::queue_dispatch::QueueDispatchConfig, preserve_secret: bool) -> Result<orch8_types::queue_dispatch::QueueDispatchConfig, StorageError> {
+        let encrypted = self.encrypt_queue_dispatch(config)?;
+        let stored = self.inner.set_queue_dispatch(&encrypted, preserve_secret).await?;
+        self.decrypt_queue_dispatch(stored)
+    }
+    async fn get_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
+        self.inner
+            .get_queue_dispatch(tenant_id, queue_name)
+            .await?
+            .map(|config| self.decrypt_queue_dispatch(config))
+            .transpose()
+    }
     async fn list_queue_dispatch(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
     async fn delete_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<(), StorageError>;
 
@@ -2344,6 +2379,8 @@ impl orch8_push::PushOutboxStore for EncryptingStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WorkerStore;
+    use orch8_types::queue_dispatch::{DispatchMode, QueueDispatchConfig};
     use serde_json::json;
 
     fn test_encryptor() -> FieldEncryptor {
@@ -2351,6 +2388,79 @@ mod tests {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn queue_dispatch_secret_is_encrypted_at_rest_and_preserved_on_update() {
+        let inner: Arc<dyn crate::StorageBackend> =
+            Arc::new(crate::sqlite::SqliteStorage::in_memory().await.unwrap());
+        let enc = EncryptingStorage::new(Arc::clone(&inner), test_encryptor());
+        let now = Utc::now();
+        let config = QueueDispatchConfig {
+            tenant_id: "tenant-a".into(),
+            queue_name: "jobs".into(),
+            mode: DispatchMode::Push,
+            push_url: Some("https://example.invalid/push".into()),
+            secret: Some("signing-key".into()),
+            created_at: now,
+            updated_at: now,
+        };
+        enc.upsert_queue_dispatch(&config).await.unwrap();
+        let raw = inner
+            .get_queue_dispatch("tenant-a", "jobs")
+            .await
+            .unwrap()
+            .unwrap();
+        let ciphertext = raw.secret.unwrap();
+        assert_ne!(ciphertext, "signing-key");
+        assert!(FieldEncryptor::is_encrypted(&json!(ciphertext.as_str())));
+        assert_eq!(
+            enc.get_queue_dispatch("tenant-a", "jobs")
+                .await
+                .unwrap()
+                .unwrap()
+                .secret
+                .as_deref(),
+            Some("signing-key")
+        );
+
+        let mut update = config.clone();
+        update.secret = None;
+        let returned = enc.set_queue_dispatch(&update, true).await.unwrap();
+        assert_eq!(returned.secret.as_deref(), Some("signing-key"));
+        assert_eq!(
+            inner
+                .get_queue_dispatch("tenant-a", "jobs")
+                .await
+                .unwrap()
+                .unwrap()
+                .secret
+                .as_deref(),
+            Some(ciphertext.as_str())
+        );
+        assert!(
+            enc.set_queue_dispatch(&update, false)
+                .await
+                .unwrap()
+                .secret
+                .is_none()
+        );
+
+        update.secret = Some("replacement".into());
+        assert_eq!(
+            enc.set_queue_dispatch(&update, false)
+                .await
+                .unwrap()
+                .secret
+                .as_deref(),
+            Some("replacement")
+        );
+        let raw = inner
+            .get_queue_dispatch("tenant-a", "jobs")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(FieldEncryptor::is_encrypted(&json!(raw.secret.unwrap())));
     }
 
     #[test]
