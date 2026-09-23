@@ -146,34 +146,37 @@ use super::StepContext;
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .pool_max_idle_per_host(8)
-            .timeout(Duration::from_secs(300))
-            // SSRF: filter DNS at connect time so a rebinding resolver can't
-            // swap a vetted public IP for a private one between the pre-flight
-            // `is_url_safe` check and the actual connection (and so redirects to
-            // hostnames that resolve to private IPs are blocked too).
-            .dns_resolver(std::sync::Arc::new(
-                crate::handlers::builtin::SsrfGuardResolver,
-            ))
-            // The initial URL is validated by `is_url_safe`, but reqwest
-            // follows redirects by default without re-checking. Re-validate
-            // every hop and refuse redirects to internal/metadata IP literals.
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 10 {
-                    return attempt.error("too many redirects");
-                }
-                if crate::handlers::builtin::redirect_target_allowed(attempt.url()) {
-                    attempt.follow()
-                } else {
-                    attempt.error("blocked: redirect targets a private/internal network address")
-                }
-            }))
-            .build()
-            // Fail fast: silently falling back to a bare `reqwest::Client`
-            // would drop the SsrfGuardResolver and the redirect policy above.
-            .expect("failed to build the shared LLM HTTP client with the SSRF guard")
+        // SSRF: the `Untrusted` profile filters DNS at connect time (so a
+        // rebinding resolver can't swap a vetted public IP for a private one
+        // after the pre-flight `is_url_safe` check), re-validates every
+        // redirect hop, and disables proxies (which would resolve the host
+        // themselves and bypass the resolver filter).
+        crate::outbound::build(
+            crate::outbound::builder(crate::outbound::Profile::Untrusted)
+                .pool_max_idle_per_host(8)
+                .timeout(Duration::from_secs(300)),
+        )
     })
+}
+
+/// Maximum non-streaming LLM response body. Provider responses are a few KB
+/// to a few MB; a hostile or misconfigured `base_url` must not be able to
+/// stream an unbounded body into worker memory via `resp.json()`.
+const MAX_LLM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Read and parse a provider JSON response body under
+/// [`MAX_LLM_RESPONSE_BYTES`]. Oversized bodies fail permanently; transport
+/// and parse errors stay retryable (matching the previous `resp.json()`).
+async fn read_json_capped(resp: reqwest::Response) -> Result<Value, StepError> {
+    let bytes = crate::outbound::read_body_capped(resp, MAX_LLM_RESPONSE_BYTES)
+        .await
+        .map_err(|e| match e {
+            crate::outbound::BodyReadError::TooLarge(cap) => {
+                permanent(format!("response body exceeds {cap} bytes"))
+            }
+            crate::outbound::BodyReadError::Io(e) => retryable(format!("response read error: {e}")),
+        })?;
+    serde_json::from_slice(&bytes).map_err(|e| retryable(format!("response parse error: {e}")))
 }
 
 /// Live-delta publisher for a streaming `llm_call` step: forwards incremental

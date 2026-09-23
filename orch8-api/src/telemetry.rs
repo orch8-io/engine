@@ -332,11 +332,14 @@ async fn check_rollback(
         match state.storage.acquire_manifest_lock(tenant_id).await {
             Err(e) => warn!(error = %e, "failed to acquire manifest lock during rollback"),
             Ok(_guard) => {
-                let removed = vec![orch8_publisher::ManifestRemoved {
-                    name: sequence_name.to_string(),
-                    removed_at: chrono::Utc::now(),
-                }];
-                if let Err(e) = publisher.publish_manifest(vec![], removed, vec![]).await {
+                // Read-modify-write: drop only this sequence from the current
+                // manifest. Publishing `vec![]` here would unpublish every
+                // other sequence for the tenant (the publisher refuses when it
+                // does not know the current manifest).
+                if let Err(e) = publisher
+                    .remove_from_manifest(sequence_name, chrono::Utc::now())
+                    .await
+                {
                     warn!(error = %e, "failed to regenerate manifest during rollback");
                 }
                 // `_guard` drops here (success, error, or panic), releasing the lock.

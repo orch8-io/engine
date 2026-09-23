@@ -290,7 +290,12 @@ fn lint_handler_params(
     warnings: &mut Vec<LintWarning>,
 ) {
     match handler {
-        "http_request" | "tool_call" | "mcp_call" => {
+        "http_request" | "tool_call" => {
+            check_required_str(block_id, handler, params, "url", warnings);
+        }
+        // `mcp_call` resolves its endpoint from `url` or a named `server`
+        // (looked up in `config.mcp_servers`) — either one satisfies it.
+        "mcp_call" if params.get("server").is_none() => {
             check_required_str(block_id, handler, params, "url", warnings);
         }
         "llm_call" if params.get("messages").is_none() && params.get("system").is_none() => {
@@ -741,6 +746,22 @@ mod tests {
         let w = lint_sequence(&seq);
         assert_eq!(w.len(), 1);
         assert!(w[0].message.contains("missing required param `url`"));
+    }
+
+    #[test]
+    fn mcp_call_with_server_needs_no_url() {
+        let seq = sample_seq(vec![make_step(
+            "s1",
+            "mcp_call",
+            json!({"server": "github", "action": "list"}),
+        )]);
+        assert!(lint_sequence(&seq).is_empty());
+        let seq = sample_seq(vec![make_step("s1", "mcp_call", json!({"action": "list"}))]);
+        assert!(
+            lint_sequence(&seq)[0]
+                .message
+                .contains("missing required param `url`")
+        );
     }
 
     #[test]

@@ -85,23 +85,9 @@ pub fn init_outbox(storage: Arc<dyn StorageBackend>, config: WebhookConfig) {
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .pool_max_idle_per_host(4)
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 10 {
-                    return attempt.error("too many redirects");
-                }
-                if crate::handlers::builtin::redirect_target_allowed(attempt.url()) {
-                    attempt.follow()
-                } else {
-                    attempt.error("blocked: redirect targets a private/internal network address")
-                }
-            }))
-            .build()
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "failed to build optimized HTTP client, using default");
-                reqwest::Client::new()
-            })
+        crate::outbound::build(
+            crate::outbound::builder(crate::outbound::Profile::Operator).pool_max_idle_per_host(4),
+        )
     })
 }
 

@@ -150,15 +150,13 @@ pub fn content_hash(archive: &PackageArchive) -> Result<String, PackageError> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Build and sign a package.
-///
-/// # Errors
-/// Invalid name/version/files, or serialization failure.
-pub fn build_package(
-    manifest: PackageManifest,
-    files: BTreeMap<String, String>,
-    signing_key: &SigningKey,
-) -> Result<SignedPackage, PackageError> {
+/// Name, version, and file-path invariants every package must satisfy —
+/// checked when building *and* when verifying, since a hand-crafted package
+/// can be validly signed by its own embedded key yet violate them.
+fn validate_archive_contents(
+    manifest: &PackageManifest,
+    files: &BTreeMap<String, String>,
+) -> Result<(), PackageError> {
     validate_package_name(&manifest.name)?;
     parse_version(&manifest.version)?;
     if files.is_empty() {
@@ -179,6 +177,19 @@ pub fn build_package(
             )));
         }
     }
+    Ok(())
+}
+
+/// Build and sign a package.
+///
+/// # Errors
+/// Invalid name/version/files, or serialization failure.
+pub fn build_package(
+    manifest: PackageManifest,
+    files: BTreeMap<String, String>,
+    signing_key: &SigningKey,
+) -> Result<SignedPackage, PackageError> {
+    validate_archive_contents(&manifest, &files)?;
     let archive = PackageArchive {
         format_version: PACKAGE_FORMAT_VERSION,
         manifest,
@@ -206,6 +217,7 @@ pub fn verify_package(pkg: &SignedPackage) -> Result<(), PackageError> {
     if pkg.archive.format_version != PACKAGE_FORMAT_VERSION {
         return Err(PackageError::UnsupportedFormat(pkg.archive.format_version));
     }
+    validate_archive_contents(&pkg.archive.manifest, &pkg.archive.files)?;
     let actual = content_hash(&pkg.archive)?;
     if actual != pkg.content_hash {
         return Err(PackageError::Tampered);
@@ -382,6 +394,30 @@ mod tests {
         f2.insert("README.md".into(), "# Tampered".into());
         let b = build_package(manifest("acme/checkout", "1.0.0"), f2, &k).unwrap();
         assert_ne!(a.content_hash, b.content_hash);
+    }
+
+    #[test]
+    fn self_signed_package_with_traversal_path_is_rejected_on_verify() {
+        // A hand-crafted package, validly signed by its own embedded key,
+        // must still fail the build-time invariants when verified.
+        let k = key();
+        let mut archive = PackageArchive {
+            format_version: PACKAGE_FORMAT_VERSION,
+            manifest: manifest("acme/checkout", "1.0.0"),
+            files: files(),
+        };
+        archive.files.insert("../../etc/evil".into(), "x".into());
+        let hash = content_hash(&archive).unwrap();
+        let pkg = SignedPackage {
+            signature: BASE64.encode(k.sign(hash.as_bytes()).to_bytes()),
+            public_key: BASE64.encode(k.verifying_key().to_bytes()),
+            content_hash: hash,
+            archive,
+        };
+        assert!(matches!(
+            verify_package(&pkg),
+            Err(PackageError::Invalid(_))
+        ));
     }
 
     #[test]

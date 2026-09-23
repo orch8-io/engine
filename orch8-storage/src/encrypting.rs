@@ -2486,6 +2486,20 @@ impl orch8_push::PushOutboxStore for EncryptingStorage {
             .record_command_acks(device_id, command_ids, acked_at)
             .await
     }
+
+    async fn enqueue_collapsible_wake(
+        &self,
+        wake: &orch8_push::CollapsibleWake,
+    ) -> Result<uuid::Uuid, String> {
+        self.inner.enqueue_collapsible_wake(wake).await
+    }
+
+    async fn prune_wakes(
+        &self,
+        created_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, String> {
+        self.inner.prune_wakes(created_before).await
+    }
 }
 
 #[cfg(test)]

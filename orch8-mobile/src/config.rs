@@ -1,5 +1,9 @@
 /// Configuration for the mobile engine, exposed to host apps via `UniFFI`.
-#[derive(Debug, Clone, uniffi::Record)]
+///
+/// `Debug` is implemented by hand: `sync_api_key` is a credential and URLs
+/// may carry signed-URL tokens in their query strings, so neither may reach
+/// logs or crash reports verbatim.
+#[derive(Clone, uniffi::Record)]
 pub struct MobileEngineConfig {
     /// Tick interval in milliseconds for the foreground loop (default: 500).
     pub tick_interval_ms: u64,
@@ -49,6 +53,44 @@ pub struct MobileEngineConfig {
     pub device_id: String,
     /// API key for authenticating sync requests.
     pub sync_api_key: String,
+}
+
+impl std::fmt::Debug for MobileEngineConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = |u: &str| {
+            if u.is_empty() {
+                String::new()
+            } else {
+                orch8_engine::outbound::redact_url(u)
+            }
+        };
+        let secret = |s: &str| if s.is_empty() { "" } else { "[REDACTED]" };
+        f.debug_struct("MobileEngineConfig")
+            .field("tick_interval_ms", &self.tick_interval_ms)
+            .field("max_concurrent_steps", &self.max_concurrent_steps)
+            .field("max_steps_per_instance", &self.max_steps_per_instance)
+            .field("max_concurrent_instances", &self.max_concurrent_instances)
+            .field("max_tick_duration_ms", &self.max_tick_duration_ms)
+            .field(
+                "max_instance_lifetime_secs",
+                &self.max_instance_lifetime_secs,
+            )
+            .field("max_stored_sequences", &self.max_stored_sequences)
+            .field("max_sequence_size_bytes", &self.max_sequence_size_bytes)
+            .field("handler_timeout_ms", &self.handler_timeout_ms)
+            .field("operation_timeout_ms", &self.operation_timeout_ms)
+            .field("telemetry_enabled", &self.telemetry_enabled)
+            .field("telemetry_url", &url(&self.telemetry_url))
+            .field("environment", &self.environment)
+            .field("root_public_key", &self.root_public_key)
+            .field("sdk_version", &self.sdk_version)
+            .field("memory_budget_bytes", &self.memory_budget_bytes)
+            .field("sequences_url", &url(&self.sequences_url))
+            .field("sync_url", &url(&self.sync_url))
+            .field("device_id", &self.device_id)
+            .field("sync_api_key", &secret(&self.sync_api_key))
+            .finish()
+    }
 }
 
 impl Default for MobileEngineConfig {
@@ -156,6 +198,19 @@ mod tests {
             config.validate().is_ok(),
             u64::from(u32::MAX) <= tokio::sync::Semaphore::MAX_PERMITS as u64
         );
+    }
+
+    #[test]
+    fn debug_redacts_api_key_and_url_tokens() {
+        let config = MobileEngineConfig {
+            sync_api_key: "sk_live_SECRET".into(),
+            sequences_url: "https://cdn.example/seq.json?token=SECRET".into(),
+            ..MobileEngineConfig::default()
+        };
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(shown.contains("[REDACTED]"));
+        assert!(shown.contains("https://cdn.example/seq.json"));
     }
 
     #[test]

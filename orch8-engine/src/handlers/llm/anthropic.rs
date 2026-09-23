@@ -9,7 +9,7 @@ use super::common::{
     classify_api_error, classify_reqwest_error, extract_system_message, is_json_object_format,
     merge_json_response_fields, permanent, retryable, safe_truncate,
 };
-use super::sse::{SseParser, next_chunk, stream_idle_timeout};
+use super::sse::{SseParser, charge_stream_bytes, next_chunk, stream_idle_timeout};
 use super::{DeltaSink, anthropic_default_model, http_client};
 
 /// Build the `/messages` request body shared by the streaming and
@@ -96,10 +96,7 @@ pub(super) async fn call_anthropic(
     }
 
     let status = resp.status().as_u16();
-    let resp_body: Value = resp
-        .json()
-        .await
-        .map_err(|e| retryable(format!("response parse error: {e}")))?;
+    let resp_body: Value = super::read_json_capped(resp).await?;
 
     if status >= 400 {
         return Err(classify_api_error(status, &resp_body));
@@ -311,10 +308,7 @@ async fn consume_anthropic_stream(
     let status = resp.status().as_u16();
     if status >= 400 {
         // Error responses are plain JSON, not SSE.
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| retryable(format!("response parse error: {e}")))?;
+        let resp_body: Value = super::read_json_capped(resp).await?;
         return Err(classify_api_error(status, &resp_body));
     }
 
@@ -322,7 +316,9 @@ async fn consume_anthropic_stream(
     let mut parser = SseParser::default();
     let mut acc = AnthropicStreamAcc::default();
 
+    let mut received = 0usize;
     while let Some(chunk) = next_chunk(&mut resp, idle_timeout).await? {
+        charge_stream_bytes(&mut received, chunk.len())?;
         for event in parser.push(&chunk) {
             acc.ingest(&event.data, sink)?;
         }

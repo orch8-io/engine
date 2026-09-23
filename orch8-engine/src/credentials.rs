@@ -66,22 +66,27 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
-/// Shared HTTP client for `OAuth2` refresh calls.
+/// Shared HTTP client for `OAuth2` refresh calls. `TokenEndpoint` profile:
+/// SSRF resolver + no proxy, and never follows redirects (a 307/308 would
+/// re-POST the `refresh_token` to wherever the endpoint points).
 static REFRESH_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "failed to build credentials refresh client, using default");
-            reqwest::Client::new()
-        })
+    crate::outbound::build(
+        crate::outbound::builder(crate::outbound::Profile::TokenEndpoint)
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30)),
+    )
 });
 
 /// How long one node owns a credential's refresh. Must exceed the refresh
 /// client's request timeout (30s) so a slow token endpoint cannot let a
 /// second node start a concurrent refresh with the same refresh token.
 const REFRESH_LEASE: chrono::TimeDelta = chrono::TimeDelta::seconds(120);
+
+/// Cap on a token-endpoint response body.
+const MAX_REFRESH_BODY_BYTES: usize = 64 * 1024;
+/// Cap on the error-response body echoed into the refresh error (the body is
+/// attacker-influenced; echoing it in full turns refresh into an SSRF oracle).
+const MAX_REFRESH_ERROR_BODY_BYTES: usize = 256;
 
 /// Recursively walk `value` and replace every `credentials://<id>[/<key>]`
 /// string with the resolved credential material.
@@ -289,22 +294,31 @@ async fn refresh_credential(
         .form(&params)
         .send()
         .await
-        .map_err(|e| format!("credential '{}': refresh POST failed: {e}", credential.id))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.map_err(|e| {
+        .map_err(|e| {
             format!(
-                "credential '{}': refresh returned {status} and failed to read body: {e}",
+                "credential '{}': refresh POST failed: {}",
+                credential.id,
+                crate::outbound::redact_error(&e)
+            )
+        })?;
+    let status = response.status();
+    let body = crate::outbound::read_body_capped(response, MAX_REFRESH_BODY_BYTES)
+        .await
+        .map_err(|e| {
+            format!(
+                "credential '{}': refresh returned {status} and reading the body failed: {e:?}",
                 credential.id
             )
         })?;
+    if !status.is_success() {
         return Err(format!(
-            "credential '{}': refresh returned {status}: {body}",
-            credential.id
+            "credential '{}': refresh returned {status}: {}",
+            credential.id,
+            crate::outbound::truncate_for_error(&body, MAX_REFRESH_ERROR_BODY_BYTES)
         ));
     }
 
-    let token: TokenResponse = response.json().await.map_err(|e| {
+    let token: TokenResponse = serde_json::from_slice(&body).map_err(|e| {
         format!(
             "credential '{}': malformed refresh response: {e}",
             credential.id

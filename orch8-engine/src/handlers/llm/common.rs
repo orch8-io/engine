@@ -293,9 +293,15 @@ pub(super) fn default_base_url(provider: &str) -> &'static str {
 
 pub(super) fn classify_reqwest_error(e: &reqwest::Error) -> StepError {
     if e.is_timeout() || e.is_connect() {
-        retryable(format!("network error: {e}"))
+        retryable(format!(
+            "network error: {}",
+            crate::outbound::redact_error(e)
+        ))
     } else {
-        permanent(format!("request error: {e}"))
+        permanent(format!(
+            "request error: {}",
+            crate::outbound::redact_error(e)
+        ))
     }
 }
 

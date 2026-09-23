@@ -391,9 +391,15 @@ async fn embed_inputs(params: &Value, inputs: &[String]) -> Result<EmbeddingBatc
         .await
         .map_err(|e| {
             if e.is_timeout() || e.is_connect() {
-                retryable(format!("embed network error: {e}"))
+                retryable(format!(
+                    "embed network error: {}",
+                    crate::outbound::redact_error(&e)
+                ))
             } else {
-                permanent(format!("embed request error: {e}"))
+                permanent(format!(
+                    "embed request error: {}",
+                    crate::outbound::redact_error(&e)
+                ))
             }
         })?;
 
