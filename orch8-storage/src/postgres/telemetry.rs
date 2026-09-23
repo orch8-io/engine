@@ -21,6 +21,14 @@ fn ceil_usage_bound_to_microsecond(bound: DateTime<Utc>) -> Result<DateTime<Utc>
         .ok_or_else(|| StorageError::Constraint("usage window bound is too large".into()))
 }
 
+/// `telemetry_mobile_events.payload` is JSONB but the API hands us the raw
+/// client string; binding it as TEXT fails ("column payload is of type jsonb
+/// but expression is of type text"). Non-JSON payloads are kept as a JSON
+/// string rather than rejected, mirroring SQLite, which stores them verbatim.
+fn payload_json(payload: &str) -> serde_json::Value {
+    serde_json::from_str(payload).unwrap_or_else(|_| serde_json::Value::String(payload.into()))
+}
+
 #[async_trait]
 impl crate::TelemetryStore for PostgresStorage {
     async fn ingest_telemetry_event(
@@ -42,7 +50,7 @@ impl crate::TelemetryStore for PostgresStorage {
             ",
         )
         .bind(event_type)
-        .bind(payload)
+        .bind(payload_json(payload))
         .bind(device_id)
         .bind(os_name)
         .bind(os_version)
@@ -143,7 +151,7 @@ impl crate::TelemetryStore for PostgresStorage {
             );
             qb.push_values(chunk, |mut b, event| {
                 b.push_bind(&event.event_type);
-                b.push_bind(&event.payload);
+                b.push_bind(payload_json(&event.payload));
                 b.push_bind(&event.device_id);
                 b.push_bind(&event.os_name);
                 b.push_bind(&event.os_version);

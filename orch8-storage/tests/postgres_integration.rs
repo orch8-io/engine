@@ -1416,3 +1416,99 @@ async fn duplicate_collapsible_wake_preserves_pending_replacement_postgres() {
     );
     pool.close().await;
 }
+
+/// STO-N2: migration 037 created `enabled`/`alert_sent` as INTEGER and the
+/// rate columns as REAL while the storage layer decodes bool/f64, so every
+/// rollback-policy/history read failed on Postgres. Round-trips both tables.
+#[tokio::test]
+async fn postgres_rollback_policy_and_history_roundtrip() {
+    let storage = require_postgres!();
+    let tenant = format!("rollback-{}", Uuid::new_v4());
+    storage
+        .create_rollback_policy(&tenant, "seq-a", 0.125, 300, Some(10), Some(5), None)
+        .await
+        .unwrap();
+    // Upsert path (`enabled = TRUE` on conflict) must also bind correctly.
+    storage
+        .create_rollback_policy(&tenant, "seq-a", 0.25, 600, None, None, Some("https://x"))
+        .await
+        .unwrap();
+    let policy = storage
+        .get_rollback_policy(&tenant, "seq-a")
+        .await
+        .unwrap()
+        .expect("policy");
+    assert!(policy.enabled);
+    assert!((policy.error_rate_threshold - 0.25).abs() < f64::EPSILON);
+    assert_eq!(policy.time_window_secs, 600);
+    assert_eq!(policy.webhook_url.as_deref(), Some("https://x"));
+    let listed = storage
+        .list_rollback_policies(Some(&tenant), 10)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+
+    storage
+        .record_rollback(&tenant, "seq-a", 0.5, 0.25, "threshold_breach")
+        .await
+        .unwrap();
+    let history = storage
+        .list_rollback_history(Some(&tenant), Some("seq-a"), 10)
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert!((history[0].error_rate - 0.5).abs() < f64::EPSILON);
+    assert!((history[0].threshold - 0.25).abs() < f64::EPSILON);
+    assert!(!history[0].alert_sent);
+}
+
+/// STO-N10: error reports are written to `telemetry_mobile_errors`; the
+/// rollback error rate must count them (SQLite stores them as
+/// `InstanceFailed` telemetry events and counts them).
+#[tokio::test]
+async fn postgres_error_rate_counts_error_reports() {
+    let storage = require_postgres!();
+    let tenant = format!("error-rate-{}", Uuid::new_v4());
+    assert_eq!(
+        storage.query_error_rate(&tenant, "seq", 3600).await.unwrap(),
+        None
+    );
+    for _ in 0..2 {
+        storage
+            .ingest_telemetry_error(
+                "RuntimeError",
+                "boom",
+                None,
+                "d1",
+                "iOS",
+                "17",
+                "1.0",
+                "0.1",
+                &tenant,
+                Some("i1"),
+                Some("seq"),
+            )
+            .await
+            .unwrap();
+    }
+    storage
+        .ingest_telemetry_event(
+            "InstanceCompleted",
+            &serde_json::json!({"sequence_name": "seq"}).to_string(),
+            "d1",
+            "iOS",
+            "17",
+            "1.0",
+            "0.1",
+            &tenant,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let rate = storage
+        .query_error_rate(&tenant, "seq", 3600)
+        .await
+        .unwrap()
+        .expect("rate");
+    assert!((rate - 2.0 / 3.0).abs() < 1e-9, "rate = {rate}");
+}
