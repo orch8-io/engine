@@ -144,7 +144,7 @@ pub(crate) fn race_outcome(semantics: &RaceSemantics, children: &[&ExecutionNode
 ///
 /// Each direct child is tagged with `branch_index` by
 /// `evaluator::build_nodes`. On every tick this handler:
-///   1. Decides the race via [`race_outcome`] (whole-branch granularity).
+///   1. Decides the race via `race_outcome` (whole-branch granularity).
 ///   2. If decided, cancels every non-terminal node and settles the race.
 ///   3. Otherwise, a branch whose node Failed/Cancelled is dead: its
 ///      remaining nodes are cancelled so the race can still settle

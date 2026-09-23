@@ -35,7 +35,7 @@
 //! the stale token until it actually expires.
 //!
 //! Every engine node runs this loop, so each refresh first claims a short
-//! lease on the credential row ([`REFRESH_LEASE`]) and re-reads it; only
+//! lease on the credential row (`REFRESH_LEASE`) and re-reads it; only
 //! the claimer calls the token endpoint. The new tokens are written with a
 //! compare-and-swap on `updated_at`, re-applied onto the latest row if a
 //! concurrent API edit landed in between — a rotated refresh token is never

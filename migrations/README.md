@@ -39,9 +39,12 @@ binaries run against the *new* schema. A migration must therefore:
   a column the previous release still reads;
 - avoid table rewrites (`ALTER COLUMN ... TYPE` between incompatible types,
   volatile defaults) on hot tables such as `task_instances`, which hold an
-  ACCESS EXCLUSIVE lock for the duration of the rewrite. Build large indexes
-  on hot tables in their own migration file whose first line is
-  `-- no-transaction`, using `CREATE INDEX CONCURRENTLY IF NOT EXISTS`.
+  ACCESS EXCLUSIVE lock for the duration of the rewrite. Do NOT use
+  `CREATE INDEX CONCURRENTLY` in a migration: it waits for every open
+  transaction, including other nodes blocked on sqlx's migration advisory
+  lock, so simultaneous migrators deadlock. Use a plain
+  `CREATE INDEX IF NOT EXISTS` and document the equivalent `CONCURRENTLY`
+  statement operators can run online before upgrading (see 084).
 
 If a change cannot meet this (e.g. a real type widening), it needs an
 expand/contract sequence across releases (add a new column, dual-write,

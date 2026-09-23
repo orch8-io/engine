@@ -52,7 +52,7 @@
 //! (`trigger_poll_state.lease_owner` / `lease_until`) makes exactly one node
 //! poll a given trigger at a time; the holder renews it on every poll and a
 //! crashed holder's lease expires after its poll interval plus
-//! [`POLL_LEASE_MARGIN`].
+//! `POLL_LEASE_MARGIN`.
 
 use std::env;
 use std::sync::Arc;

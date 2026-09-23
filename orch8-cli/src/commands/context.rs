@@ -107,7 +107,7 @@ pub fn resolve(path: &Path, explicit: Option<&str>) -> Result<Option<FleetContex
     Ok(resolve_named(path, explicit)?.map(|(_, context)| context))
 }
 
-/// [`resolve`] plus the resolved context's name.
+/// `resolve` plus the resolved context's name.
 pub fn resolve_named(
     path: &Path,
     explicit: Option<&str>,
