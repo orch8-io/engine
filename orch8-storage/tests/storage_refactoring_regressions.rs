@@ -550,7 +550,7 @@ async fn rollback_history_triggered_at_survives_read_not_replaced_with_now() {
 }
 
 /// Sequence delete must not orphan per-instance history that has no FK
-/// cascade on SQLite (`step_logs`, `audit_log`, `usage_events`) nor the
+/// cascade on `SQLite` (`step_logs`, `audit_log`, `usage_events`) nor the
 /// parent-scoped `emit_event_dedupe` rows; instance purge must also drop the
 /// dedupe rows.
 #[tokio::test]

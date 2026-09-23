@@ -1463,7 +1463,7 @@ async fn postgres_rollback_policy_and_history_roundtrip() {
 }
 
 /// STO-N10: error reports are written to `telemetry_mobile_errors`; the
-/// rollback error rate must count them (SQLite stores them as
+/// rollback error rate must count them (`SQLite` stores them as
 /// `InstanceFailed` telemetry events and counts them).
 #[tokio::test]
 async fn postgres_error_rate_counts_error_reports() {
@@ -1778,7 +1778,7 @@ async fn postgres_metadata_merge_and_filter_semantics() {
 }
 
 /// Same-`created_at` outputs must resolve deterministically by `id`
-/// (UUIDv7, insertion order) in every reader, and a fork copy must preserve
+/// (`UUIDv7`, insertion order) in every reader, and a fork copy must preserve
 /// that order instead of minting random v4 ids.
 #[tokio::test]
 async fn postgres_block_output_ties_break_by_id_and_copy_preserves_order() {

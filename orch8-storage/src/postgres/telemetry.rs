@@ -24,7 +24,7 @@ fn ceil_usage_bound_to_microsecond(bound: DateTime<Utc>) -> Result<DateTime<Utc>
 /// `telemetry_mobile_events.payload` is JSONB but the API hands us the raw
 /// client string; binding it as TEXT fails ("column payload is of type jsonb
 /// but expression is of type text"). Non-JSON payloads are kept as a JSON
-/// string rather than rejected, mirroring SQLite, which stores them verbatim.
+/// string rather than rejected, mirroring `SQLite`, which stores them verbatim.
 fn payload_json(payload: &str) -> serde_json::Value {
     serde_json::from_str(payload).unwrap_or_else(|_| serde_json::Value::String(payload.into()))
 }

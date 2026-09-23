@@ -688,7 +688,7 @@ async fn enforce_concurrency_limits(
     }
 
     // Sort by key first, then by original index to preserve priority order.
-    key_instances.sort_unstable_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
+    key_instances.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
 
     // Batch count running instances for all concurrency keys in a single query.
     let mut keys: Vec<(&str, &str)> = key_instances.iter().map(|(k, _)| *k).collect();
