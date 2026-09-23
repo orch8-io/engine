@@ -186,7 +186,28 @@ pub async fn import_capsule(
         "destination instance id",
     )?);
     let trusted_keys = [trusted_root_key.to_owned()];
-    let tenant_id = signed.manifest.tenant_id.clone();
+    // Validate against this runtime's own identity, not the capsule's claims:
+    // passing `signed.manifest.tenant_id` / `.epoch` back as the expected
+    // values made both checks tautological.
+    let tenant_id = crate::mobile_tenant_id();
+    if signed.manifest.tenant_id != tenant_id {
+        return Err(invalid("capsule belongs to a different tenant"));
+    }
+    // Epoch: a capsule older than the locally recorded ownership epoch for
+    // this continuity is a stale replay. (Equal epochs are the idempotent
+    // redelivery path, verified in full below.)
+    let expected_epoch = match storage
+        .get_continuity_execution(&tenant_id, signed.manifest.continuity_id)
+        .await?
+    {
+        Some(existing) if signed.manifest.epoch.get() < existing.epoch.get() => {
+            return Err(invalid(
+                "capsule epoch is older than the local ownership epoch",
+            ));
+        }
+        Some(existing) if signed.manifest.epoch.get() == existing.epoch.get() => existing.epoch,
+        _ => signed.manifest.epoch,
+    };
     let (instance, _) = orch8_engine::capsule::verify_and_import_paused_capsule_bytes(
         storage,
         &signed,
@@ -195,7 +216,7 @@ pub async fn import_capsule(
             tenant_id: &tenant_id,
             destination_runtime_id: runtime_id,
             destination_instance_id: Some(instance_id),
-            expected_epoch: signed.manifest.epoch,
+            expected_epoch,
             trusted_public_keys: &trusted_keys,
             now: Utc::now(),
         },
@@ -351,7 +372,7 @@ mod tests {
     use orch8_types::continuity::{
         CapsuleRequirements, ContinuityId, ExecutionEpoch, OwnershipState,
     };
-    use orch8_types::ids::{Namespace, SequenceId, TenantId};
+    use orch8_types::ids::{Namespace, SequenceId};
     use orch8_types::instance::{Priority, TaskInstance};
     use orch8_types::sequence::SequenceDefinition;
     use serde_json::json;
@@ -396,7 +417,7 @@ mod tests {
             .await
             .unwrap()
             .with_artifact_store(Arc::new(ObjectArtifactStore::memory()));
-        let tenant_id = TenantId::new("mobile-continuity").unwrap();
+        let tenant_id = crate::mobile_tenant_id();
         let sequence: SequenceDefinition = serde_json::from_value(json!({
             "id": SequenceId::new(),
             "tenant_id": tenant_id,
