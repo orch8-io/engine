@@ -480,6 +480,7 @@ async fn grpc_runtime_session_persists_capabilities_streams_commands_and_drains(
     let command = WorkerCommand {
         id: uuid::Uuid::now_v7(),
         worker_id: "runtime-worker".into(),
+        tenant_id: "test".into(),
         command: WorkerCommandKind::Place,
         payload: serde_json::json!({"instance_id": "instance-1", "target": "edge"}),
         created_at: chrono::Utc::now(),

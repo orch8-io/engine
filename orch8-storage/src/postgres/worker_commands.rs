@@ -11,6 +11,7 @@ fn row_to_command(row: &sqlx::postgres::PgRow) -> Result<WorkerCommand, StorageE
     Ok(WorkerCommand {
         id: row.get("id"),
         worker_id: row.get("worker_id"),
+        tenant_id: row.get("tenant_id"),
         command: command_str
             .parse()
             .map_err(|e: String| StorageError::Query(e))?,
@@ -24,14 +25,15 @@ pub(super) async fn enqueue(
     cmd: &WorkerCommand,
 ) -> Result<(), StorageError> {
     sqlx::query(
-        r"INSERT INTO worker_commands (id, worker_id, command, payload, created_at)
-          VALUES ($1,$2,$3,$4,$5)",
+        r"INSERT INTO worker_commands (id, worker_id, command, payload, created_at, tenant_id)
+          VALUES ($1,$2,$3,$4,$5,$6)",
     )
     .bind(cmd.id)
     .bind(&cmd.worker_id)
     .bind(cmd.command.to_string())
     .bind(&cmd.payload)
     .bind(cmd.created_at)
+    .bind(&cmd.tenant_id)
     .execute(&store.pool)
     .await?;
     Ok(())
@@ -42,7 +44,7 @@ pub(super) async fn list(
     worker_id: &str,
 ) -> Result<Vec<WorkerCommand>, StorageError> {
     let rows = sqlx::query(
-        r"SELECT id, worker_id, command, payload, created_at
+        r"SELECT id, worker_id, tenant_id, command, payload, created_at
           FROM worker_commands WHERE worker_id = $1 ORDER BY created_at ASC",
     )
     .bind(worker_id)
