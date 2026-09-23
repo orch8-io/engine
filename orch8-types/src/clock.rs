@@ -71,12 +71,22 @@ impl ManualClock {
     }
 
     /// Move the clock forward (or backward, for negative durations) by `delta`.
+    ///
+    /// Saturates at the representable `DateTime` range instead of panicking
+    /// on overflow (L3), so a test advancing by `Duration::MAX` pins the
+    /// clock at the far future rather than aborting.
     pub fn advance(&self, delta: Duration) {
         let mut now = self
             .now
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *now += delta;
+        *now = now
+            .checked_add_signed(delta)
+            .unwrap_or(if delta < Duration::zero() {
+                DateTime::<Utc>::MIN_UTC
+            } else {
+                DateTime::<Utc>::MAX_UTC
+            });
     }
 
     /// Jump the clock to an absolute instant.
@@ -148,6 +158,16 @@ impl fmt::Debug for SharedClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_clock_advance_saturates_instead_of_panicking() {
+        let clock = ManualClock::new(Utc::now());
+        clock.advance(Duration::MAX);
+        assert_eq!(clock.now(), DateTime::<Utc>::MAX_UTC);
+        clock.set(Utc::now());
+        clock.advance(Duration::MIN);
+        assert_eq!(clock.now(), DateTime::<Utc>::MIN_UTC);
+    }
 
     #[test]
     fn system_clock_tracks_real_time() {
