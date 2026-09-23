@@ -221,6 +221,9 @@ fn lint_node(block: &BlockDefinition, warnings: &mut Vec<LintWarning>) {
 }
 
 fn lint_step(s: &StepDef, warnings: &mut Vec<LintWarning>) {
+    if let Some(ref when) = s.when {
+        lint_expression(s.id.as_str(), "when", when, warnings);
+    }
     if BUILTIN_HANDLER_NAMES.contains(&s.handler.as_str()) {
         lint_handler_params(s.id.as_str(), &s.handler, &s.params, warnings);
     }
@@ -441,6 +444,39 @@ fn lint_expression(block_id: &str, field: &str, expr: &str, warnings: &mut Vec<L
             block_id: block_id.into(),
             message: format!("{field}: expression parse error — {}", e.message),
         });
+    }
+    lint_hyphenated_refs(block_id, field, expr, warnings);
+}
+
+/// Expressions tokenize `-` as subtraction, so `outputs.fetch-user.ok` in a
+/// condition silently evaluates `outputs.fetch - user.ok` (→ null/falsy)
+/// instead of reading block `fetch-user`. Templates (`{{ … }}` in params)
+/// resolve dotted paths and are unaffected — only expression fields
+/// (conditions, `break_on`, `when`) are checked.
+fn lint_hyphenated_refs(block_id: &str, field: &str, expr: &str, warnings: &mut Vec<LintWarning>) {
+    for prefix in ["steps.", "outputs."] {
+        let mut search = expr;
+        while let Some(pos) = search.find(prefix) {
+            let after = &search[pos + prefix.len()..];
+            let ref_id = extract_identifier(after);
+            if ref_id.contains('-') {
+                warnings.push(LintWarning {
+                    block_id: block_id.into(),
+                    message: format!(
+                        "{field}: `{prefix}{ref_id}` contains `-`, which expressions parse as \
+                         subtraction — the block output is never read. Rename the block id \
+                         (e.g. `{}`)",
+                        ref_id.replace('-', "_")
+                    ),
+                });
+            }
+            let advance = if ref_id.is_empty() {
+                after.chars().next().map_or(0, char::len_utf8)
+            } else {
+                ref_id.len()
+            };
+            search = &after[advance..];
+        }
     }
 }
 
@@ -949,6 +985,57 @@ mod tests {
         let w = lint_sequence(&seq);
         assert!(!w.is_empty());
         assert!(w[0].message.contains("expression parse error"));
+    }
+
+    #[test]
+    fn hyphenated_output_ref_in_condition_warned() {
+        let seq = sample_seq(vec![
+            make_step("fetch-user", "noop", json!({})),
+            BlockDefinition::Router(Box::new(orch8_types::sequence::RouterDef {
+                id: BlockId::new("route"),
+                routes: vec![orch8_types::sequence::Route {
+                    condition: "outputs.fetch-user.ok == true".into(),
+                    blocks: vec![make_step("a", "noop", json!({}))],
+                }],
+                default: None,
+            })),
+        ]);
+        let warnings = lint_sequence(&seq);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.block_id == "route" && w.message.contains("parse as subtraction")),
+            "expected hyphenated-ref warning, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn hyphenated_ref_in_step_template_param_not_warned() {
+        // Templates resolve dotted paths, so hyphens are fine there.
+        let seq = sample_seq(vec![
+            make_step("fetch-user", "noop", json!({})),
+            make_step("next", "noop", json!({ "v": "{{outputs.fetch-user.ok}}" })),
+        ]);
+        let warnings = lint_sequence(&seq);
+        assert!(
+            !warnings.iter().any(|w| w.message.contains("subtraction")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_format_date_spec_in_condition_does_not_panic_lint() {
+        let seq = sample_seq(vec![BlockDefinition::Router(Box::new(
+            orch8_types::sequence::RouterDef {
+                id: BlockId::new("route"),
+                routes: vec![orch8_types::sequence::Route {
+                    condition: "format_date('2026-01-15T10:30:00+00:00', '%Q') == 'x'".into(),
+                    blocks: vec![make_step("a", "noop", json!({}))],
+                }],
+                default: None,
+            },
+        ))]);
+        let _ = lint_sequence(&seq);
     }
 
     #[test]
