@@ -261,9 +261,15 @@ pub(super) fn resolve_base_url(params: &Value, provider: &str) -> String {
 
 pub(super) fn classify_reqwest_error(e: &reqwest::Error) -> StepError {
     if e.is_timeout() || e.is_connect() {
-        retryable(format!("network error: {e}"))
+        retryable(format!(
+            "network error: {}",
+            crate::outbound::redact_error(e)
+        ))
     } else {
-        permanent(format!("request error: {e}"))
+        permanent(format!(
+            "request error: {}",
+            crate::outbound::redact_error(e)
+        ))
     }
 }
 
