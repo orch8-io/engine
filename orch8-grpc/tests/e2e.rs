@@ -724,12 +724,7 @@ async fn grpc_worker_stream_closes_on_shutdown_and_health_tracks_readiness() {
 
     shutdown.cancel();
     let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match inbound.message().await {
-                Ok(Some(_)) => {}
-                Ok(None) | Err(_) => break,
-            }
-        }
+        while let Ok(Some(_)) = inbound.message().await {}
     })
     .await;
     assert!(drained.is_ok(), "worker stream must close on shutdown");

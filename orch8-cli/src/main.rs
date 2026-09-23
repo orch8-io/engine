@@ -374,6 +374,30 @@ pub async fn print_response(resp: reqwest::Response, format: OutputFormat) -> Re
     Ok(())
 }
 
+/// Resolve the active fleet context (if any), apply it under the explicit
+/// flags, and tell the user on stderr which context is in effect.
+fn select_context(
+    cli: &mut Cli,
+    matches: &clap::ArgMatches,
+    contexts_path: &std::path::Path,
+) -> Result<()> {
+    if let Some((name, context)) =
+        commands::context::resolve_named(contexts_path, cli.context.as_deref())?
+    {
+        let context_explicit = cli.context.is_some();
+        let overridden = apply_context(cli, matches, context, context_explicit);
+        if overridden.is_empty() {
+            eprintln!("Using fleet context '{name}'");
+        } else {
+            eprintln!(
+                "Using fleet context '{name}' (overridden: {})",
+                overridden.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Fill connection settings from a saved fleet context without clobbering
 /// values the user set explicitly. Precedence per field:
 /// command-line flag > explicit `--context` > environment variable >
@@ -566,20 +590,7 @@ async fn main() -> Result<()> {
         return commands::context::run(&contexts_path, cmd);
     }
 
-    if let Some((name, context)) =
-        commands::context::resolve_named(&contexts_path, cli.context.as_deref())?
-    {
-        let context_explicit = cli.context.is_some();
-        let overridden = apply_context(&mut cli, &matches, context, context_explicit);
-        if overridden.is_empty() {
-            eprintln!("Using fleet context '{name}'");
-        } else {
-            eprintln!(
-                "Using fleet context '{name}' (overridden: {})",
-                overridden.join(", ")
-            );
-        }
-    }
+    select_context(&mut cli, &matches, &contexts_path)?;
 
     // Handle migrate before building the HTTP client — it does not need one.
     if let Commands::Migrate { database_url } = cli.command {
