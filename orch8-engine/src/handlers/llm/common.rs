@@ -530,7 +530,7 @@ mod tests {
     #[serial(llm_common_env)]
     fn resolve_api_key_from_explicit_env_var_param() {
         // A legitimate (non-engine) provider key var name passes the guard.
-        let var = "MY_TEST_LLM_API_KEY_EXPLICIT";
+        let var = "MY_TEST_LLM_EXPLICIT_API_KEY";
         #[allow(unsafe_code)]
         // SAFETY: serialized via #[serial(llm_common_env)].
         unsafe {
