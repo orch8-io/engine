@@ -447,7 +447,10 @@ impl EncryptingStorage {
     }
 
     fn decrypt_instance(&self, instance: &mut TaskInstance) -> Result<(), StorageError> {
-        if FieldEncryptor::is_encrypted(&instance.context.data) {
+        // Under `require_aad()` plaintext `context.data` at rest is rejected
+        // (M1), so the decryptor must see it; otherwise plaintext passes
+        // through without a clone.
+        if self.encryptor.requires_aad() || FieldEncryptor::is_encrypted(&instance.context.data) {
             let aad = Self::instance_aad(instance.id);
             instance.context.data = self
                 .encryptor

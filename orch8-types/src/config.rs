@@ -115,8 +115,19 @@ impl Drop for SecretString {
     }
 }
 
+/// Cadence (seconds) at which each engine node refreshes its cluster
+/// heartbeat. `engine.node_reaper_stale_secs` must exceed it, otherwise
+/// live nodes are reaped between two heartbeats.
+pub const NODE_HEARTBEAT_INTERVAL_SECS: u64 = 10;
+
 /// Top-level configuration. Layered: TOML file -> env vars -> CLI flags.
+///
+/// Every config section uses `deny_unknown_fields` (M3): a typo such as
+/// `encryption-key` for `encryption_key` used to be ignored silently, which
+/// meant "no encryption at rest" without any startup error. Documented
+/// aliases (e.g. `api.rate_limit_rps`) remain accepted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EngineConfig {
     #[serde(default)]
     pub node: NodeConfig,
@@ -148,6 +159,7 @@ pub enum NodeRole {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     #[serde(default)]
     pub role: NodeRole,
@@ -191,6 +203,7 @@ pub enum ArtifactBackend {
 /// In-memory storage is deliberately not a configurable backend: losing
 /// artifacts on restart would silently break the engine's durability contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactConfig {
     #[serde(default = "default_artifact_backend")]
     pub backend: String,
@@ -256,6 +269,7 @@ fn default_artifact_path() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     /// Storage backend: "postgres" (default) or "sqlite".
     #[serde(default = "default_backend")]
@@ -344,6 +358,7 @@ impl ExternalizationMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SchedulerConfig {
     #[serde(default = "default_tick_interval_ms")]
     pub tick_interval_ms: u64,
@@ -504,6 +519,7 @@ const fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebhookConfig {
     #[serde(default)]
     pub urls: Vec<String>,
@@ -563,6 +579,7 @@ const fn default_stale_threshold() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApiConfig {
     #[serde(default = "default_grpc_addr")]
     pub grpc_addr: String,
@@ -646,6 +663,7 @@ fn default_http_addr() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -670,6 +688,7 @@ fn default_log_level() -> String {
 /// when it is empty (the default) the server behaves exactly as before: no
 /// OpenTelemetry layer is installed and there is no runtime cost.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     /// OTLP collector endpoint, e.g. `"http://localhost:4317"` (Langfuse,
     /// Datadog Agent, Grafana Alloy, otel-collector…). Empty = export disabled.
@@ -792,6 +811,25 @@ impl EngineConfig {
             if seconds == 0 {
                 errors.push(format!("engine.{name} must be > 0"));
             }
+        }
+        // Lease / timeout durations where 0 is unsafe (M4): a 0s worker
+        // lease makes every claimed task immediately "stale" so the reaper
+        // hands it to another worker while the first is still running
+        // (double execution); a 0s node stale window marks every live node
+        // dead; a 0s webhook timeout fails every delivery.
+        //
+        // Worker heartbeats are derived as `max(stale / 4, 1)` seconds, so
+        // the lease must be at least 2s to exceed one heartbeat interval.
+        if self.engine.worker_reaper_stale_secs < 2 {
+            errors.push("engine.worker_reaper_stale_secs must be >= 2".into());
+        }
+        if self.engine.node_reaper_stale_secs <= NODE_HEARTBEAT_INTERVAL_SECS {
+            errors.push(format!(
+                "engine.node_reaper_stale_secs must be greater than the node heartbeat interval ({NODE_HEARTBEAT_INTERVAL_SECS}s)"
+            ));
+        }
+        if self.engine.webhooks.timeout_secs == 0 {
+            errors.push("engine.webhooks.timeout_secs must be > 0".into());
         }
         if self.engine.stale_instance_threshold_secs > 0 && self.engine.tick_interval_ms > 0 {
             match self.engine.stale_instance_threshold_secs.checked_mul(1000) {
@@ -1047,6 +1085,105 @@ mod tests {
         assert!(ExternalizationMode::AlwaysOutputs.always_externalize_outputs());
         assert!(!ExternalizationMode::Never.always_externalize_outputs());
         assert!(!ExternalizationMode::Threshold { bytes: 1024 }.always_externalize_outputs());
+    }
+
+    #[test]
+    fn unknown_config_keys_are_rejected() {
+        // M3: `encryption-key` (dash) used to be silently ignored, leaving
+        // encryption at rest disabled with no startup error.
+        for value in [
+            serde_json::json!({"engine": {"encryption-key": "00"}}),
+            serde_json::json!({"engnie": {}}),
+            serde_json::json!({"database": {"urll": "x"}}),
+            serde_json::json!({"api": {"api-key": "k"}}),
+            serde_json::json!({"engine": {"webhooks": {"timeout": 5}}}),
+            serde_json::json!({"node": {"rol": "control"}}),
+            serde_json::json!({"logging": {"lvl": "info"}}),
+            serde_json::json!({"telemetry": {"endpoint": "x"}}),
+            serde_json::json!({"artifacts": {"bucket_name": "x"}}),
+        ] {
+            let err = serde_json::from_value::<EngineConfig>(value.clone()).unwrap_err();
+            assert!(err.to_string().contains("unknown field"), "{value}: {err}");
+        }
+        // Documented alias still works.
+        let cfg: EngineConfig =
+            serde_json::from_value(serde_json::json!({"api": {"rate_limit_rps": 7}})).unwrap();
+        assert_eq!(cfg.api.max_concurrent_requests, 7);
+    }
+
+    #[test]
+    fn validate_rejects_unsafe_zero_leases_and_timeouts() {
+        for (value, needle) in [
+            (
+                serde_json::json!({"engine": {"worker_reaper_stale_secs": 0}}),
+                "worker_reaper_stale_secs",
+            ),
+            (
+                serde_json::json!({"engine": {"worker_reaper_stale_secs": 1}}),
+                "worker_reaper_stale_secs",
+            ),
+            (
+                serde_json::json!({"engine": {"node_reaper_stale_secs": 0}}),
+                "node_reaper_stale_secs",
+            ),
+            (
+                serde_json::json!({"engine": {"node_reaper_stale_secs": 10}}),
+                "node_reaper_stale_secs",
+            ),
+            (
+                serde_json::json!({"engine": {"webhooks": {"timeout_secs": 0}}}),
+                "webhooks.timeout_secs",
+            ),
+        ] {
+            let cfg: EngineConfig = serde_json::from_value(value.clone()).unwrap();
+            let errs = cfg.validate().unwrap_err();
+            assert!(errs.iter().any(|e| e.contains(needle)), "{value}: {errs:?}");
+        }
+        // The e2e harness runs with a 2s worker lease.
+        let cfg: EngineConfig = serde_json::from_value(
+            serde_json::json!({"engine": {"worker_reaper_stale_secs": 2, "node_reaper_stale_secs": 11}}),
+        )
+        .unwrap();
+        assert!(cfg.validate().is_ok());
+    }
+
+    /// Every `toml` fenced snippet in the config docs must still parse now that
+    /// unknown keys are rejected.
+    #[test]
+    fn documented_toml_snippets_parse() {
+        for (name, doc) in [
+            (
+                "CONFIGURATION.md",
+                include_str!("../../docs/CONFIGURATION.md"),
+            ),
+            ("NODE_ROLES.md", include_str!("../../docs/NODE_ROLES.md")),
+            (
+                "EXTERNALIZATION.md",
+                include_str!("../../docs/EXTERNALIZATION.md"),
+            ),
+            (
+                "GRPC_WORKER_STREAM.md",
+                include_str!("../../docs/GRPC_WORKER_STREAM.md"),
+            ),
+        ] {
+            let mut rest = doc;
+            while let Some(start) = rest.find("```toml") {
+                let body = &rest[start + 7..];
+                let end = body.find("```").expect("unterminated fence");
+                let snippet = &body[..end];
+                // Some snippets list alternative configs back to back
+                // (repeating `[engine]`); parse those alternative by
+                // alternative.
+                if toml::from_str::<EngineConfig>(snippet).is_err() {
+                    for alternative in snippet.split("\n\n") {
+                        if let Err(error) = toml::from_str::<EngineConfig>(alternative) {
+                            panic!("{name}: snippet failed to parse: {error}\n{alternative}");
+                        }
+                    }
+                }
+                rest = &body[end + 3..];
+            }
+        }
     }
 
     #[test]

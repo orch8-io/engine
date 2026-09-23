@@ -740,3 +740,112 @@ async fn manual_ticks_are_rejected_after_shutdown() {
     assert!(matches!(error, orch8::Error::Engine(error)
         if matches!(*error, orch8_engine::error::EngineError::ShuttingDown)));
 }
+
+/// M6: two engines for different tenants sharing one store must not see or
+/// touch each other's sequences and instances through the facade.
+#[tokio::test]
+async fn facade_is_tenant_scoped_on_shared_storage() {
+    let path = std::env::temp_dir().join(format!("orch8-tenant-{}.db", uuid::Uuid::now_v7()));
+    let build = |tenant: &'static str| {
+        let path = path.clone();
+        async move {
+            Engine::builder()
+                .storage(Storage::sqlite(&path))
+                .tenant(tenant)
+                .build()
+                .await
+                .expect("engine builds")
+        }
+    };
+    let alpha = build("alpha").await;
+    let beta = build("beta").await;
+
+    // A definition that claims another tenant is stored under the engine's.
+    let mut seq = two_step_sequence("scoped", "noop");
+    seq.tenant_id = orch8::TenantId::unchecked("beta");
+    let seq_id = alpha.upsert_sequence(seq).await.expect("upsert");
+    assert!(matches!(
+        beta.create_instance(seq_id, CreateInstanceOptions::default())
+            .await,
+        Err(orch8::Error::NotFound(_))
+    ));
+
+    let id = alpha
+        .create_instance(seq_id, CreateInstanceOptions::default())
+        .await
+        .expect("create");
+    assert!(matches!(
+        beta.get_instance(id).await,
+        Err(orch8::Error::NotFound(_))
+    ));
+    assert!(matches!(
+        beta.block_outputs(id).await,
+        Err(orch8::Error::NotFound(_))
+    ));
+    assert!(matches!(
+        beta.send_signal(id, SignalType::Cancel, serde_json::json!({}))
+            .await,
+        Err(orch8::Error::NotFound(_))
+    ));
+    let foreign_filter = orch8::InstanceFilter {
+        tenant_id: Some(orch8::TenantId::unchecked("alpha")),
+        ..Default::default()
+    };
+    assert!(
+        beta.list_instances(&foreign_filter)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        alpha.list_instances(&foreign_filter).await.unwrap().len(),
+        1
+    );
+    // The cancel attempt from beta did not reach alpha's instance.
+    assert_eq!(
+        alpha.get_instance(id).await.unwrap().state,
+        InstanceState::Scheduled
+    );
+
+    alpha.shutdown().await;
+    beta.shutdown().await;
+    let _ = std::fs::remove_file(&path);
+}
+
+/// M7: an import whose continuity identity conflicts must be rejected before
+/// any instance is persisted. Importing a capsule back into its *source*
+/// store conflicts with the source's own `Owned` continuity record.
+#[tokio::test]
+async fn conflicting_capsule_import_persists_nothing() {
+    let (source, _destination, source_instance) = portable_fixture().await;
+    let (capsule, destination_runtime, encryptor) =
+        export_test_capsule(&source, source_instance).await;
+    let trusted_keys = [capsule.signed_manifest.public_key.clone()];
+    let before = source
+        .list_instances(&orch8::InstanceFilter::default())
+        .await
+        .unwrap()
+        .len();
+    let result = source
+        .import_portable_capsule(
+            &capsule,
+            destination_runtime,
+            None,
+            &trusted_keys,
+            &encryptor,
+        )
+        .await;
+    assert!(
+        matches!(&result, Err(orch8::Error::Config(message)) if message.contains("conflicts")),
+        "{result:?}"
+    );
+    let after = source
+        .list_instances(&orch8::InstanceFilter::default())
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(
+        before, after,
+        "conflicting import must not persist an instance"
+    );
+}
