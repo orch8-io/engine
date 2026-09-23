@@ -411,7 +411,7 @@ fn mk_instance(tenant: &str, seq_id: SequenceId, concurrency_key: Option<&str>) 
 }
 
 #[tokio::test]
-async fn postgres_max_concurrency_roundtrips_full_u32_and_rejects_invalid_storage() {
+async fn postgres_max_concurrency_saturates_and_rejects_invalid_storage() {
     let storage = require_postgres!();
     let tenant = format!("max-concurrency-{}", Uuid::new_v4());
     let sequence_id = SequenceId::new();
@@ -429,7 +429,7 @@ async fn postgres_max_concurrency_roundtrips_full_u32_and_rejects_invalid_storag
             .unwrap()
             .unwrap()
             .max_concurrency,
-        Some(u32::MAX)
+        Some(i32::MAX.unsigned_abs())
     );
 
     inst.id = InstanceId::new();
@@ -444,7 +444,7 @@ async fn postgres_max_concurrency_roundtrips_full_u32_and_rejects_invalid_storag
             .unwrap()
             .unwrap()
             .max_concurrency,
-        Some(u32::MAX)
+        Some(i32::MAX.unsigned_abs())
     );
 
     sqlx::query("UPDATE task_instances SET max_concurrency = -1 WHERE id = $1")
@@ -1511,4 +1511,41 @@ async fn postgres_error_rate_counts_error_reports() {
         .unwrap()
         .expect("rate");
     assert!((rate - 2.0 / 3.0).abs() < 1e-9, "rate = {rate}");
+}
+
+/// STO-N3: concurrent admitted creates through `EncryptingStorage` must be
+/// serialized by the inner backend's tenant lock (the trait default is a
+/// racy count-then-insert that admits several under contention).
+#[tokio::test]
+async fn postgres_encrypting_admitted_create_is_atomic() {
+    let storage = require_postgres!();
+    let tenant = format!("admitted-{}", Uuid::new_v4());
+    let sequence_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, sequence_id))
+        .await
+        .unwrap();
+    let inner: Arc<dyn orch8_storage::StorageBackend> = Arc::new(storage);
+    let encrypting = Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
+        inner,
+        orch8_types::encryption::FieldEncryptor::from_hex_key(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap(),
+    ));
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let encrypting = Arc::clone(&encrypting);
+        let inst = mk_instance(&tenant, sequence_id, None);
+        handles.push(tokio::spawn(async move {
+            encrypting.create_instance_admitted(&inst, 1).await
+        }));
+    }
+    let mut admitted = 0;
+    for handle in handles {
+        if handle.await.unwrap().is_ok() {
+            admitted += 1;
+        }
+    }
+    assert_eq!(admitted, 1);
 }

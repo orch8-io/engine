@@ -64,7 +64,7 @@ pub(super) fn bind_instance_insert<'q>(
         .bind(&inst.metadata)
         .bind(context_json)
         .bind(&inst.concurrency_key)
-        .bind(inst.max_concurrency.map(i64::from))
+        .bind(super::rows::max_concurrency_bind(inst.max_concurrency))
         .bind(&inst.idempotency_key)
         .bind(inst.session_id)
         .bind(
@@ -201,7 +201,7 @@ async fn insert_batch_tx(
                     .push_bind(&inst.metadata)
                     .push_bind(context)
                     .push_bind(&inst.concurrency_key)
-                    .push_bind(inst.max_concurrency.map(i64::from))
+                    .push_bind(super::rows::max_concurrency_bind(inst.max_concurrency))
                     .push_bind(&inst.idempotency_key)
                     .push_bind(inst.session_id)
                     .push_bind(
@@ -836,7 +836,7 @@ pub(super) async fn create_batch_externalized(
                 .push_bind(&inst.metadata)
                 .push_bind(context)
                 .push_bind(&inst.concurrency_key)
-                .push_bind(inst.max_concurrency.map(i64::from))
+                .push_bind(super::rows::max_concurrency_bind(inst.max_concurrency))
                 .push_bind(&inst.idempotency_key)
                 .push_bind(inst.session_id)
                 .push_bind(
