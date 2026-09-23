@@ -2519,17 +2519,25 @@ pub trait ResourceStore: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Retrieve an externalized payload by `ref_key`.
+    /// Retrieve an externalized payload by `ref_key`, **owned by
+    /// `instance_id`**. A row whose owner differs is reported as absent:
+    /// markers are plain JSON that can be forged into context/outputs, so the
+    /// owner check is what keeps one instance (or tenant) from reading
+    /// another's payload by naming its `ref_key`.
     async fn get_externalized_state(
         &self,
+        instance_id: InstanceId,
         ref_key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError>;
 
     /// Retrieve multiple externalized payloads in one round-trip.
     ///
-    /// Returns a map keyed by `ref_key`; absent entries mean the key did not
-    /// exist in `externalized_state` (missing keys are **not** errors -- the
-    /// scheduler's preload path treats them as "nothing to hydrate").
+    /// Each request is an `(owner instance, ref_key)` pair; the result is
+    /// keyed the same way and only contains rows actually owned by the
+    /// requested instance (see [`Self::get_externalized_state`]). Absent
+    /// entries mean the key did not exist for that owner (missing keys are
+    /// **not** errors -- the scheduler's preload path treats them as
+    /// "nothing to hydrate").
     ///
     /// The default impl just loops over [`Self::get_externalized_state`] so
     /// less-hot backends (memory/test) compile without extra work. Production
@@ -2537,12 +2545,12 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// Postgres, `IN (?,?,...)` on `SQLite`) to amortize round-trip cost.
     async fn batch_get_externalized_state(
         &self,
-        ref_keys: &[String],
-    ) -> Result<HashMap<String, serde_json::Value>, StorageError> {
-        let mut out = HashMap::with_capacity(ref_keys.len());
-        for key in ref_keys {
-            if let Some(v) = self.get_externalized_state(key).await? {
-                out.insert(key.clone(), v);
+        refs: &[(InstanceId, String)],
+    ) -> Result<HashMap<(InstanceId, String), serde_json::Value>, StorageError> {
+        let mut out = HashMap::with_capacity(refs.len());
+        for (instance_id, key) in refs {
+            if let Some(v) = self.get_externalized_state(*instance_id, key).await? {
+                out.insert((*instance_id, key.clone()), v);
             }
         }
         Ok(out)

@@ -969,12 +969,27 @@ async fn batch_save_externalized_state_mixed_sizes_does_not_hit_sql_syntax_error
         .expect("batch_save_externalized_state must not hit a SQL syntax error");
 
     let fetched = s
-        .batch_get_externalized_state(&[small_key.clone(), large_key.clone()])
+        .batch_get_externalized_state(&[(inst.id, small_key.clone()), (inst.id, large_key.clone())])
         .await
         .unwrap();
     assert_eq!(fetched.len(), 2);
-    assert_eq!(fetched[&small_key], entries[0].1);
-    assert_eq!(fetched[&large_key], entries[1].1);
+    assert_eq!(fetched[&(inst.id, small_key.clone())], entries[0].1);
+    assert_eq!(fetched[&(inst.id, large_key.clone())], entries[1].1);
+
+    // STO-N1: another instance naming these refs gets nothing.
+    let other = orch8_types::ids::InstanceId::new();
+    assert!(
+        s.get_externalized_state(other, &small_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        s.batch_get_externalized_state(&[(other, large_key.clone())])
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Regression test for H2 (`STORAGE_REFACTORING_2026-07.md`): Postgres's

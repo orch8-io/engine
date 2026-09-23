@@ -2182,9 +2182,10 @@ passthrough_impl! {
     }
     async fn get_externalized_state(
         &self,
+        instance_id: InstanceId,
         ref_key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
-        match self.inner.get_externalized_state(ref_key).await? {
+        match self.inner.get_externalized_state(instance_id, ref_key).await? {
             Some(v) => Ok(Some(self.decrypt_json_value(&v)?)),
             None => Ok(None),
         }
@@ -2205,9 +2206,10 @@ passthrough_impl! {
     }
     async fn batch_get_externalized_state(
         &self,
-        ref_keys: &[String],
-    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
-        let raw = self.inner.batch_get_externalized_state(ref_keys).await?;
+        refs: &[(InstanceId, String)],
+    ) -> Result<std::collections::HashMap<(InstanceId, String), serde_json::Value>, StorageError>
+    {
+        let raw = self.inner.batch_get_externalized_state(refs).await?;
         raw.into_iter()
             .map(|(k, v)| self.decrypt_json_value(&v).map(|dv| (k, dv)))
             .collect()

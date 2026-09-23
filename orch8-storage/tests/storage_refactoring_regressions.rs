@@ -327,7 +327,11 @@ async fn save_externalized_state_preserves_created_at_on_resave() {
     );
 
     // The payload itself must still update.
-    let payload = s.get_externalized_state(&ref_key).await.unwrap().unwrap();
+    let payload = s
+        .get_externalized_state(inst.id, &ref_key)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(payload, json!({"v": 2}));
 }
 
@@ -369,7 +373,11 @@ async fn save_externalized_state_preserves_created_at_on_resave_large_payload() 
         "re-saving a compressed externalized_state row must preserve the original created_at"
     );
 
-    let payload = s.get_externalized_state(&ref_key).await.unwrap().unwrap();
+    let payload = s
+        .get_externalized_state(inst.id, &ref_key)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(payload, big2);
 }
 

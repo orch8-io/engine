@@ -36,9 +36,13 @@ pub async fn execute_router(
     let ctx_for_conditions: Cow<'_, orch8_types::context::ExecutionContext> =
         if is_marker_present(&instance.context) {
             Cow::Owned(
-                externalized::resolve_context_markers(storage, instance.context.clone())
-                    .await
-                    .map_err(EngineError::Storage)?,
+                externalized::resolve_context_markers(
+                    storage,
+                    instance.id,
+                    instance.context.clone(),
+                )
+                .await
+                .map_err(EngineError::Storage)?,
             )
         } else {
             Cow::Borrowed(&instance.context)
@@ -282,7 +286,7 @@ mod tests {
 
         // After inflation, the first route matches.
         assert!(is_marker_present(&ctx));
-        let inflated = externalized::resolve_context_markers(&storage, ctx)
+        let inflated = externalized::resolve_context_markers(&storage, instance_id, ctx)
             .await
             .unwrap();
         assert_eq!(inflated.data["status"], json!("active"));
@@ -929,7 +933,7 @@ mod tests {
             }),
             ..ExecutionContext::default()
         };
-        let resolved = externalized::resolve_context_markers(&storage, ctx)
+        let resolved = externalized::resolve_context_markers(&storage, InstanceId::new(), ctx)
             .await
             .unwrap();
         // Marker is still present because payload was never written.

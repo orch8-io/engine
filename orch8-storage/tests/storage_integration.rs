@@ -1688,11 +1688,20 @@ async fn externalized_state_crud() {
         .await
         .unwrap();
 
-    let fetched = s.get_externalized_state(&ref_key).await.unwrap().unwrap();
+    let fetched = s
+        .get_externalized_state(inst_id, &ref_key)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched, payload);
 
     s.delete_externalized_state(&ref_key).await.unwrap();
-    assert!(s.get_externalized_state(&ref_key).await.unwrap().is_none());
+    assert!(
+        s.get_externalized_state(inst_id, &ref_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1712,18 +1721,50 @@ async fn batch_get_externalized_state_fetches_multiple_keys() {
         .await
         .unwrap();
 
-    let keys = vec![
-        "batch_small".to_string(),
-        "batch_big".to_string(),
-        "batch_missing".to_string(),
-    ];
+    let key = |k: &str| (inst_id, k.to_string());
+    let keys = vec![key("batch_small"), key("batch_big"), key("batch_missing")];
     let map = s.batch_get_externalized_state(&keys).await.unwrap();
 
     // Missing keys are absent (not errors, not Some(Null)).
     assert_eq!(map.len(), 2);
-    assert_eq!(map.get("batch_small"), Some(&small));
-    assert_eq!(map.get("batch_big"), Some(&big));
-    assert!(!map.contains_key("batch_missing"));
+    assert_eq!(map.get(&key("batch_small")), Some(&small));
+    assert_eq!(map.get(&key("batch_big")), Some(&big));
+    assert!(!map.contains_key(&key("batch_missing")));
+}
+
+/// STO-N1: a ref is only readable by its owning instance — a forged marker
+/// naming another instance's `ref_key` must resolve to nothing, on both the
+/// single and the batched path.
+#[tokio::test]
+async fn externalized_state_is_scoped_to_owner_instance() {
+    let s = store().await;
+    let owner = InstanceId::new();
+    let other = InstanceId::new();
+    seed_instance(&s, owner).await;
+    seed_instance(&s, other).await;
+    let ref_key = format!("{owner}:ctx:data:secret");
+    let payload = json!({"secret": "victim"});
+    s.save_externalized_state(owner, &ref_key, &payload)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        s.get_externalized_state(owner, &ref_key).await.unwrap(),
+        Some(payload.clone())
+    );
+    assert!(
+        s.get_externalized_state(other, &ref_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let map = s
+        .batch_get_externalized_state(&[(other, ref_key.clone()), (owner, ref_key.clone())])
+        .await
+        .unwrap();
+    assert_eq!(map.len(), 1);
+    assert_eq!(map.get(&(owner, ref_key.clone())), Some(&payload));
+    assert!(!map.contains_key(&(other, ref_key)));
 }
 
 #[tokio::test]
@@ -1739,13 +1780,19 @@ async fn batch_get_externalized_state_chunks_more_than_sqlite_bind_limit() {
         .unwrap();
 
     let mut keys = Vec::with_capacity(33_002);
-    keys.push("first".to_string());
-    keys.extend((0..33_000).map(|index| format!("missing-{index}")));
-    keys.push("last".to_string());
+    keys.push((inst_id, "first".to_string()));
+    keys.extend((0..33_000).map(|index| (inst_id, format!("missing-{index}"))));
+    keys.push((inst_id, "last".to_string()));
     let found = s.batch_get_externalized_state(&keys).await.unwrap();
     assert_eq!(found.len(), 2);
-    assert_eq!(found["first"], json!({"position": 0}));
-    assert_eq!(found["last"], json!({"position": 1}));
+    assert_eq!(
+        found[&(inst_id, "first".to_string())],
+        json!({"position": 0})
+    );
+    assert_eq!(
+        found[&(inst_id, "last".to_string())],
+        json!({"position": 1})
+    );
 }
 
 #[tokio::test]
@@ -1772,7 +1819,7 @@ async fn batch_save_externalized_state_persists_all_entries() {
 
     // Every entry should be readable in both feature configurations.
     for (key, expected) in &entries {
-        let got = s.get_externalized_state(key).await.unwrap();
+        let got = s.get_externalized_state(inst_id, key).await.unwrap();
         assert_eq!(got.as_ref(), Some(expected), "key {key} mismatch");
     }
     let codec: Option<String> =
@@ -1820,7 +1867,7 @@ async fn batch_save_externalized_state_upserts_existing_keys() {
     .unwrap();
 
     assert_eq!(
-        s.get_externalized_state("bs_up").await.unwrap(),
+        s.get_externalized_state(inst_id, "bs_up").await.unwrap(),
         Some(json!({"v": 2}))
     );
 }
@@ -1837,7 +1884,9 @@ async fn externalized_state_roundtrip_across_compression_threshold() {
         .await
         .unwrap();
     assert_eq!(
-        s.get_externalized_state("ext_small").await.unwrap(),
+        s.get_externalized_state(inst_id, "ext_small")
+            .await
+            .unwrap(),
         Some(small)
     );
 
@@ -1847,7 +1896,7 @@ async fn externalized_state_roundtrip_across_compression_threshold() {
         .await
         .unwrap();
     assert_eq!(
-        s.get_externalized_state("ext_big").await.unwrap(),
+        s.get_externalized_state(inst_id, "ext_big").await.unwrap(),
         Some(big)
     );
     let codec: Option<String> =
@@ -1873,7 +1922,12 @@ async fn externalized_state_rejects_payload_above_reader_limit() {
             .await,
         Err(StorageError::Constraint(_))
     ));
-    assert!(s.get_externalized_state("too_big").await.unwrap().is_none());
+    assert!(
+        s.get_externalized_state(inst_id, "too_big")
+            .await
+            .unwrap()
+            .is_none()
+    );
     let batch = vec![
         ("would_be_written".to_string(), json!({"ok": true})),
         ("too_big_batch".to_string(), oversized),
@@ -1883,7 +1937,7 @@ async fn externalized_state_rejects_payload_above_reader_limit() {
         Err(StorageError::Constraint(_))
     ));
     assert!(
-        s.get_externalized_state("would_be_written")
+        s.get_externalized_state(inst_id, "would_be_written")
             .await
             .unwrap()
             .is_none()
@@ -3391,7 +3445,7 @@ async fn update_instance_context_externalized_swaps_markers_and_persists_refs() 
         .as_str()
         .unwrap()
         .to_string();
-    let fetched = s.get_externalized_state(&ref_key).await.unwrap();
+    let fetched = s.get_externalized_state(inst.id, &ref_key).await.unwrap();
     assert_eq!(fetched, Some(big_payload));
 }
 
@@ -3448,7 +3502,7 @@ async fn create_instance_externalized_swaps_markers_and_persists_refs() {
         .as_str()
         .unwrap()
         .to_string();
-    let fetched = s.get_externalized_state(&ref_key).await.unwrap();
+    let fetched = s.get_externalized_state(inst.id, &ref_key).await.unwrap();
     assert_eq!(fetched, Some(big_payload));
 }
 
@@ -3507,7 +3561,7 @@ async fn create_instances_batch_externalized_externalizes_each_instance_independ
             "ref_key {ref_key:?} must be scoped to instance {}",
             inst.id.into_uuid()
         );
-        let fetched = s.get_externalized_state(&ref_key).await.unwrap();
+        let fetched = s.get_externalized_state(inst.id, &ref_key).await.unwrap();
         assert_eq!(fetched.as_ref(), Some(expected_blob));
     }
 }
