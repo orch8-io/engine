@@ -4,6 +4,7 @@ pub mod compression;
 pub mod conformance;
 pub mod encrypting;
 pub mod externalizing;
+pub mod lifecycle;
 pub mod postgres;
 pub mod sqlite;
 pub mod tenant_partition;

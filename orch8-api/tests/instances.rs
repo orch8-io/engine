@@ -806,3 +806,70 @@ async fn get_children_unknown_parent_returns_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+/// API-N4: a bulk state flip must honour the state machine — Completed
+/// instances are not re-queued by an unfiltered bulk `scheduled`, and an
+/// explicit illegal source state is rejected.
+#[tokio::test]
+async fn bulk_update_state_skips_illegal_source_states() {
+    use orch8_types::ids::InstanceId;
+    use orch8_types::instance::InstanceState;
+
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let body = json!({
+            "sequence_id": seq_id, "tenant_id": "t1", "namespace": "ns1",
+            "context": { "data": {}, "config": {}, "audit": [] }
+        });
+        let resp = client
+            .post(format!("{}/instances", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let created: serde_json::Value = resp.json().await.unwrap();
+        ids.push(InstanceId::from_uuid(
+            created["id"].as_str().unwrap().parse().unwrap(),
+        ));
+    }
+    srv.storage
+        .update_instance_state(ids[0], InstanceState::Completed, None)
+        .await
+        .unwrap();
+    srv.storage
+        .update_instance_state(ids[1], InstanceState::Paused, None)
+        .await
+        .unwrap();
+
+    let resp = client
+        .patch(format!("{}/instances/bulk/state", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "filter": { "tenant_id": "t1" }, "state": "scheduled" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let out: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(out["count"], 1, "only the paused instance is rescheduled");
+    let completed = srv.storage.get_instance(ids[0]).await.unwrap().unwrap();
+    assert_eq!(completed.state, InstanceState::Completed);
+    let paused = srv.storage.get_instance(ids[1]).await.unwrap().unwrap();
+    assert_eq!(paused.state, InstanceState::Scheduled);
+
+    let resp = client
+        .patch(format!("{}/instances/bulk/state", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "filter": { "tenant_id": "t1", "states": ["completed"] },
+            "state": "scheduled"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
