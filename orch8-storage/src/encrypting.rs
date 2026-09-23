@@ -1822,6 +1822,7 @@ passthrough_impl! {
     async fn claim_webhook_nonce(&self, slug: &str, nonce: &str, expires_at: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
     async fn get_trigger_poll_state(&self, slug: &str) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError>;
     async fn upsert_trigger_poll_state(&self, state: &orch8_types::trigger::TriggerPollState) -> Result<(), StorageError>;
+    async fn try_acquire_trigger_poll_lease(&self, slug: &str, owner: &str, now: chrono::DateTime<chrono::Utc>, lease_until: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
 
     // --- Credentials (with encryption) ---
     async fn create_credential(
@@ -1863,6 +1864,19 @@ passthrough_impl! {
         let encrypted = self.encrypt_credential(credential)?;
         self.inner.update_credential(&encrypted).await
     }
+
+    async fn update_credential_cas(
+        &self,
+        credential: &orch8_types::credential::CredentialDef,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_credential(credential)?;
+        self.inner
+            .update_credential_cas(&encrypted, expected_updated_at)
+            .await
+    }
+
+    async fn claim_credential_refresh(&self, id: &str, now: chrono::DateTime<chrono::Utc>, lease_until: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
 
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError>;
 

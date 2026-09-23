@@ -1416,3 +1416,197 @@ async fn duplicate_collapsible_wake_preserves_pending_replacement_postgres() {
     );
     pool.close().await;
 }
+
+// ===========================================================================
+// Review 2026-09: leases for cron claims, trigger polls, credential refresh
+// ===========================================================================
+
+#[tokio::test]
+async fn cron_failed_fire_is_reclaimable_after_lease_postgres() {
+    use orch8_types::cron::CronSchedule;
+    let storage = require_postgres!();
+    let tenant = format!("cron-lease-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let schedule = CronSchedule {
+        id: Uuid::now_v7(),
+        tenant_id: TenantId::unchecked(&tenant),
+        namespace: Namespace::new("default"),
+        sequence_id: seq_id,
+        cron_expr: "0 * * * * * *".into(),
+        timezone: "UTC".into(),
+        enabled: true,
+        metadata: serde_json::json!({}),
+        overlap_policy: orch8_types::cron::OverlapPolicy::default(),
+        skipped_fires: 0,
+        last_skipped_at: None,
+        last_triggered_at: None,
+        next_fire_at: Some(now - chrono::Duration::seconds(5)),
+        created_at: now,
+        updated_at: now,
+    };
+    storage.create_cron_schedule(&schedule).await.unwrap();
+    let mine = |v: Vec<CronSchedule>| v.iter().any(|c| c.id == schedule.id);
+
+    assert!(mine(storage.claim_due_cron_schedules(now).await.unwrap()));
+    assert!(!mine(storage.claim_due_cron_schedules(now).await.unwrap()));
+    let later = now + chrono::Duration::minutes(10);
+    assert!(
+        mine(storage.claim_due_cron_schedules(later).await.unwrap()),
+        "failed fire must be re-claimable after the lease"
+    );
+    storage.delete_cron_schedule(schedule.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn trigger_poll_lease_excludes_other_owner_postgres() {
+    let storage = require_postgres!();
+    let slug = format!("poll-lease-{}", Uuid::new_v4());
+    let now = Utc::now();
+    storage
+        .create_trigger(&orch8_types::trigger::TriggerDef {
+            slug: slug.clone(),
+            sequence_name: "s".into(),
+            version: None,
+            tenant_id: TenantId::unchecked("poll-lease"),
+            namespace: "default".into(),
+            enabled: true,
+            secret: None,
+            trigger_type: orch8_types::trigger::TriggerType::ActivepiecesPoll,
+            config: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let until = now + chrono::Duration::minutes(2);
+    assert!(
+        storage
+            .try_acquire_trigger_poll_lease(&slug, "a", now, until)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .try_acquire_trigger_poll_lease(&slug, "b", now, until)
+            .await
+            .unwrap()
+    );
+    assert!(
+        storage
+            .try_acquire_trigger_poll_lease(&slug, "a", now, until)
+            .await
+            .unwrap()
+    );
+    let after = until + chrono::Duration::seconds(1);
+    assert!(
+        storage
+            .try_acquire_trigger_poll_lease(&slug, "b", after, after + chrono::Duration::minutes(1))
+            .await
+            .unwrap()
+    );
+    storage.delete_trigger(&slug).await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_refresh_claim_and_cas_update_postgres() {
+    use orch8_types::config::SecretString;
+    use orch8_types::credential::{CredentialDef, CredentialKind};
+    let storage = require_postgres!();
+    let id = format!("cred-cas-{}", Uuid::new_v4());
+    let now = Utc::now();
+    storage
+        .create_credential(&CredentialDef {
+            id: id.clone(),
+            tenant_id: String::new(),
+            name: id.clone(),
+            kind: CredentialKind::Oauth2,
+            value: SecretString::new("{}".into()),
+            expires_at: Some(now),
+            refresh_url: Some("https://example.invalid".into()),
+            refresh_token: Some(SecretString::new("rt1".into())),
+            enabled: true,
+            description: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let lease = now + chrono::Duration::minutes(2);
+    assert!(
+        storage
+            .claim_credential_refresh(&id, now, lease)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .claim_credential_refresh(&id, now, lease)
+            .await
+            .unwrap()
+    );
+
+    let read = storage.get_credential(None, &id).await.unwrap().unwrap();
+    let mut rotated = read.clone();
+    rotated.refresh_token = Some(SecretString::new("rt2".into()));
+    assert!(
+        storage
+            .update_credential_cas(&rotated, read.updated_at)
+            .await
+            .unwrap()
+    );
+    let mut stale = read.clone();
+    stale.description = Some("stale".into());
+    assert!(
+        !storage
+            .update_credential_cas(&stale, read.updated_at)
+            .await
+            .unwrap()
+    );
+    let stored = storage.get_credential(None, &id).await.unwrap().unwrap();
+    assert_eq!(stored.refresh_token.unwrap().expose(), "rt2");
+    storage.delete_credential(&id).await.unwrap();
+}
+
+#[tokio::test]
+async fn signal_sweep_skips_scheduled_instance_without_control_signal_postgres() {
+    use orch8_storage::SignalStore;
+    use orch8_types::signal::{Signal, SignalType};
+    let storage = require_postgres!();
+    let tenant = format!("sig-sweep-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let inst = mk_instance(&tenant, seq_id, None);
+    storage.create_instance(&inst).await.unwrap();
+    let mk = |st| Signal {
+        id: Uuid::now_v7(),
+        instance_id: inst.id,
+        signal_type: st,
+        payload: serde_json::json!({}),
+        delivered: false,
+        created_at: Utc::now(),
+        delivered_at: None,
+    };
+    storage
+        .enqueue_signal(&mk(SignalType::Custom("human_input:later".into())))
+        .await
+        .unwrap();
+    let listed = |v: Vec<(InstanceId, InstanceState)>| v.iter().any(|(id, _)| *id == inst.id);
+    assert!(!listed(
+        storage.get_signalled_instance_ids(10_000).await.unwrap()
+    ));
+    storage
+        .enqueue_signal(&mk(SignalType::Cancel))
+        .await
+        .unwrap();
+    assert!(listed(
+        storage.get_signalled_instance_ids(10_000).await.unwrap()
+    ));
+}

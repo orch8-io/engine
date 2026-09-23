@@ -45,8 +45,13 @@ use orch8_types::signal::Signal;
 use orch8_types::trigger::{TriggerDef, TriggerPollState};
 use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 
+/// How long a `claim_due_cron_schedules` claim is held before the schedule
+/// becomes claimable again. Advancing the fire times releases it early; the
+/// lease only matters when the claimer fails or crashes mid-fire.
+pub(crate) const CRON_CLAIM_LEASE_SECS: i64 = 300;
+
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 82;
+pub const STORAGE_SCHEMA_VERSION: u32 = 92;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -1320,8 +1325,10 @@ pub trait SignalStore: Send + Sync + 'static {
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
 
     /// Return `(instance_id, current_state)` pairs for instances in a
-    /// non-running state (`paused`, `waiting`, `scheduled`) that have
-    /// undelivered signals.
+    /// non-running state that have undelivered signals: `paused`/`waiting`
+    /// instances with any pending signal, and `scheduled` instances only
+    /// when a control signal (`pause`/`cancel`) is pending — other signals
+    /// on a parked instance are consumed at its natural claim.
     ///
     /// The scheduler calls this on each tick so that resume/cancel signals
     /// queued against paused or waiting instances are processed promptly
@@ -1789,6 +1796,11 @@ pub trait SchedulingStore: Send + Sync + 'static {
     /// recent due window. The `next_fire_at` is then advanced past `now` so
     /// no backfill of missed windows occurs. This prevents burst-spawning
     /// hundreds of instances after a prolonged outage.
+    ///
+    /// The claim is a lease: it lasts `CRON_CLAIM_LEASE_SECS` unless
+    /// `update_cron_fire_times` / `record_cron_skip` release it earlier, so a
+    /// fire that fails or crashes mid-way is retried instead of disabling the
+    /// schedule. Callers must make firing idempotent per `next_fire_at`.
     async fn claim_due_cron_schedules(
         &self,
         now: DateTime<Utc>,
@@ -1954,8 +1966,22 @@ pub trait AdminStore: Send + Sync + 'static {
     ) -> Result<Option<TriggerPollState>, StorageError>;
 
     /// Insert or replace the poll cursor/state for a polling trigger.
+    /// Leaves the poll lease columns untouched.
     async fn upsert_trigger_poll_state(&self, state: &TriggerPollState)
     -> Result<(), StorageError>;
+
+    /// Acquire or renew the per-trigger poll lease for `owner` until
+    /// `lease_until`. Succeeds (returns `true`) when no lease is held, the
+    /// held lease expired before `now`, or `owner` already holds it; returns
+    /// `false` when another owner holds a live lease. Creates the poll-state
+    /// row if absent (the trigger row must exist).
+    async fn try_acquire_trigger_poll_lease(
+        &self,
+        slug: &str,
+        owner: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError>;
 
     // === Credentials ===
 
@@ -1984,6 +2010,28 @@ pub trait AdminStore: Send + Sync + 'static {
         &self,
         credential: &orch8_types::credential::CredentialDef,
     ) -> Result<(), StorageError>;
+
+    /// Compare-and-swap update: write every column of `credential` only if
+    /// the stored row's `updated_at` still equals `expected_updated_at`.
+    /// Returns `false` (nothing written) when a concurrent writer got there
+    /// first, so a stale read-modify-write can never overwrite a freshly
+    /// rotated token.
+    async fn update_credential_cas(
+        &self,
+        credential: &orch8_types::credential::CredentialDef,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError>;
+
+    /// Claim the `OAuth2` refresh of credential `id` until `lease_until`:
+    /// succeeds only when no other refresh lease is live at `now`. Does not
+    /// touch `updated_at`, so the claimer's later
+    /// [`Self::update_credential_cas`] still matches its read.
+    async fn claim_credential_refresh(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError>;
 
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError>;
 

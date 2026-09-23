@@ -5091,3 +5091,150 @@ async fn claim_due_cron_schedules_is_capped_per_tick() {
     let second = s.claim_due_cron_schedules(now).await.unwrap();
     assert_eq!(second.len(), 5, "stragglers are claimed on the next tick");
 }
+
+// ===========================================================================
+// Review 2026-09: leases for cron claims, trigger polls, credential refresh
+// ===========================================================================
+
+/// A claim whose fire fails before `update_cron_fire_times` must become
+/// claimable again once its lease lapses (it used to be disabled forever).
+#[tokio::test]
+async fn cron_failed_fire_is_reclaimable_after_lease() {
+    let s = store().await;
+    let seq = make_sequence("t_cron_lease");
+    s.create_sequence(&seq).await.unwrap();
+    let now = Utc::now();
+    let schedule = CronSchedule {
+        id: Uuid::now_v7(),
+        tenant_id: TenantId::unchecked("t_cron_lease"),
+        namespace: Namespace::new("default"),
+        sequence_id: seq.id,
+        cron_expr: "0 * * * * * *".into(),
+        timezone: "UTC".into(),
+        enabled: true,
+        metadata: json!({}),
+        overlap_policy: orch8_types::cron::OverlapPolicy::default(),
+        skipped_fires: 0,
+        last_skipped_at: None,
+        last_triggered_at: None,
+        next_fire_at: Some(now - Duration::seconds(5)),
+        created_at: now,
+        updated_at: now,
+    };
+    s.create_cron_schedule(&schedule).await.unwrap();
+
+    assert_eq!(s.claim_due_cron_schedules(now).await.unwrap().len(), 1);
+    // Lease live: no double claim.
+    assert!(s.claim_due_cron_schedules(now).await.unwrap().is_empty());
+    // The fire "crashed" (no update_cron_fire_times). After the lease:
+    let later = now + Duration::minutes(10);
+    let reclaimed = s.claim_due_cron_schedules(later).await.unwrap();
+    assert_eq!(reclaimed.len(), 1, "failed fire must be retried");
+    // Same next_fire_at → same idempotency key on the engine side.
+    assert_eq!(
+        reclaimed[0].next_fire_at.map(|t| t.timestamp()),
+        schedule.next_fire_at.map(|t| t.timestamp())
+    );
+
+    // Advancing the fire times releases the lease immediately.
+    s.update_cron_fire_times(schedule.id, later, later - Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(s.claim_due_cron_schedules(later).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn trigger_poll_lease_excludes_other_owner_until_expiry() {
+    let s = store().await;
+    let now = Utc::now();
+    let until = now + Duration::minutes(2);
+    assert!(
+        s.try_acquire_trigger_poll_lease("slug", "a", now, until)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s.try_acquire_trigger_poll_lease("slug", "b", now, until)
+            .await
+            .unwrap()
+    );
+    assert!(
+        s.try_acquire_trigger_poll_lease("slug", "a", now, until)
+            .await
+            .unwrap(),
+        "holder renews"
+    );
+    let after = until + Duration::seconds(1);
+    assert!(
+        s.try_acquire_trigger_poll_lease("slug", "b", after, after + Duration::minutes(2))
+            .await
+            .unwrap(),
+        "expired lease is taken over"
+    );
+    // Cursor writes don't disturb the lease.
+    s.upsert_trigger_poll_state(&orch8_types::trigger::TriggerPollState::empty("slug"))
+        .await
+        .unwrap();
+    assert!(
+        !s.try_acquire_trigger_poll_lease("slug", "a", after, after)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn credential_refresh_claim_and_cas_update() {
+    use orch8_types::config::SecretString;
+    use orch8_types::credential::{CredentialDef, CredentialKind};
+    let s = store().await;
+    let now = Utc::now();
+    s.create_credential(&CredentialDef {
+        id: "c1".into(),
+        tenant_id: String::new(),
+        name: "c1".into(),
+        kind: CredentialKind::Oauth2,
+        value: SecretString::new("{}".into()),
+        expires_at: Some(now),
+        refresh_url: Some("https://example.invalid".into()),
+        refresh_token: Some(SecretString::new("rt1".into())),
+        enabled: true,
+        description: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+
+    let lease = now + Duration::minutes(2);
+    assert!(s.claim_credential_refresh("c1", now, lease).await.unwrap());
+    assert!(!s.claim_credential_refresh("c1", now, lease).await.unwrap());
+    assert!(
+        s.claim_credential_refresh(
+            "c1",
+            lease + Duration::seconds(1),
+            lease + Duration::minutes(3)
+        )
+        .await
+        .unwrap()
+    );
+
+    let read = s.get_credential(None, "c1").await.unwrap().unwrap();
+    let mut rotated = read.clone();
+    rotated.refresh_token = Some(SecretString::new("rt2".into()));
+    assert!(
+        s.update_credential_cas(&rotated, read.updated_at)
+            .await
+            .unwrap()
+    );
+    let mut stale = read.clone();
+    stale.description = Some("stale".into());
+    assert!(
+        !s.update_credential_cas(&stale, read.updated_at)
+            .await
+            .unwrap(),
+        "stale write must lose"
+    );
+    let stored = s.get_credential(None, "c1").await.unwrap().unwrap();
+    assert_eq!(stored.refresh_token.unwrap().expose(), "rt2");
+    assert!(stored.updated_at > read.updated_at);
+}

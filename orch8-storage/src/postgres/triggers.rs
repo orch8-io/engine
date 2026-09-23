@@ -222,6 +222,32 @@ pub(super) async fn upsert_poll_state(
     Ok(())
 }
 
+pub(super) async fn try_acquire_poll_lease(
+    store: &PostgresStorage,
+    slug: &str,
+    owner: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    lease_until: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        r"INSERT INTO trigger_poll_state (slug, lease_owner, lease_until, updated_at)
+          VALUES ($1, $2, $3, NOW())
+          ON CONFLICT (slug) DO UPDATE SET
+            lease_owner = EXCLUDED.lease_owner,
+            lease_until = EXCLUDED.lease_until
+          WHERE trigger_poll_state.lease_until IS NULL
+             OR trigger_poll_state.lease_until < $4
+             OR trigger_poll_state.lease_owner = EXCLUDED.lease_owner",
+    )
+    .bind(slug)
+    .bind(owner)
+    .bind(lease_until)
+    .bind(now)
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 #[derive(sqlx::FromRow)]
 struct PollStateRow {
     slug: String,

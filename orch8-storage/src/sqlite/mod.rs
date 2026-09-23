@@ -2042,6 +2042,16 @@ impl crate::AdminStore for SqliteStorage {
         triggers::upsert_poll_state(self, state).await
     }
 
+    async fn try_acquire_trigger_poll_lease(
+        &self,
+        slug: &str,
+        owner: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        triggers::try_acquire_poll_lease(self, slug, owner, now, lease_until).await
+    }
+
     // === Credentials ===
 
     async fn create_credential(
@@ -2072,6 +2082,23 @@ impl crate::AdminStore for SqliteStorage {
         credential: &orch8_types::credential::CredentialDef,
     ) -> Result<(), StorageError> {
         credentials::update(self, credential).await
+    }
+
+    async fn update_credential_cas(
+        &self,
+        credential: &orch8_types::credential::CredentialDef,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        credentials::update_cas(self, credential, expected_updated_at).await
+    }
+
+    async fn claim_credential_refresh(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        credentials::claim_refresh(self, id, now, lease_until).await
     }
 
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError> {
