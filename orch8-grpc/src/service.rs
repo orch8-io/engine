@@ -728,6 +728,17 @@ fn from_json_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, Status> {
         .map_err(|e| Status::invalid_argument(format!("invalid JSON payload: {e}")))
 }
 
+/// Bulk mutations must be tenant-scoped (same contract as HTTP
+/// `/instances/bulk/*`): an empty filter would otherwise touch every tenant.
+fn require_bulk_tenant(filter: &orch8_types::filter::InstanceFilter) -> Result<(), Status> {
+    if filter.tenant_id.is_none() {
+        return Err(Status::invalid_argument(
+            "bulk operations require a tenant_id",
+        ));
+    }
+    Ok(())
+}
+
 fn storage_err(e: orch8_types::error::StorageError) -> Status {
     use orch8_types::error::StorageError;
     match e {
@@ -1398,29 +1409,20 @@ impl Orch8Service for Orch8GrpcService {
             )));
         }
 
-        self.storage
-            .delete_execution_tree(id)
+        // CAS-claimed retry shared with the HTTP/MCP/batch paths: a racing
+        // retry loses the `Failed → Paused` claim instead of wiping the tree
+        // of the run the winner just started.
+        match orch8_storage::lifecycle::retry_failed_instance(self.storage.as_ref(), id)
             .await
-            .map_err(storage_err)?;
-        self.storage
-            .delete_sentinel_block_outputs(id)
-            .await
-            .map_err(storage_err)?;
-        // Reset the run identity and step counters so the new run's
-        // outputs/events aren't correlated to the failed run (mirrors the
-        // HTTP retry path's `reset_instance_run`).
-        self.storage
-            .reset_instance_run(id, &Uuid::now_v7().to_string())
-            .await
-            .map_err(storage_err)?;
-        self.storage
-            .update_instance_state(
-                id,
-                orch8_types::instance::InstanceState::Scheduled,
-                Some(chrono::Utc::now()),
-            )
-            .await
-            .map_err(storage_err)?;
+            .map_err(storage_err)?
+        {
+            orch8_storage::lifecycle::RetryOutcome::Retried => {}
+            _ => {
+                return Err(Status::aborted(
+                    "instance state changed concurrently during retry",
+                ));
+            }
+        }
 
         let inst = self
             .storage
@@ -1443,9 +1445,16 @@ impl Orch8Service for Orch8GrpcService {
         if let Some(caller) = crate::auth::caller_tenant(&req) {
             filter.tenant_id = Some(caller.clone());
         }
+        // Mirror HTTP bulk: an unscoped bulk mutation would touch every
+        // tenant's instances.
+        require_bulk_tenant(&filter)?;
         let new_state: orch8_types::instance::InstanceState =
             InstanceState::from_str(&req.get_ref().new_state)
                 .map_err(|e| Status::invalid_argument(e))?;
+        filter.states = Some(
+            orch8_storage::lifecycle::bulk_transition_sources(new_state, filter.states.as_deref())
+                .map_err(Status::invalid_argument)?,
+        );
         let updated = self
             .storage
             .bulk_update_state(&filter, new_state)
@@ -1463,6 +1472,7 @@ impl Orch8Service for Orch8GrpcService {
         if let Some(caller) = crate::auth::caller_tenant(&req) {
             filter.tenant_id = Some(caller.clone());
         }
+        require_bulk_tenant(&filter)?;
         let offset_secs = req.get_ref().offset_secs;
         let updated = self
             .storage
