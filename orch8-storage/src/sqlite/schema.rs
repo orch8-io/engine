@@ -99,7 +99,10 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
     next_fire_at TEXT,
     last_triggered_at TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- Claim lease: set by claim_due_cron_schedules, cleared when the fire
+    -- times advance; an expired lease makes the schedule claimable again.
+    claimed_until TEXT
 );
 
 CREATE TABLE IF NOT EXISTS worker_tasks (
@@ -298,7 +301,10 @@ CREATE TABLE IF NOT EXISTS trigger_poll_state (
     last_poll_at TEXT,
     last_error TEXT,
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- Per-trigger poll lease (one polling node at a time).
+    lease_owner TEXT,
+    lease_until TEXT
 );
 
 CREATE TABLE IF NOT EXISTS credentials (
@@ -313,7 +319,9 @@ CREATE TABLE IF NOT EXISTS credentials (
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     description TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- OAuth2 refresh lease (one refreshing node at a time).
+    refresh_claimed_until TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_credentials_tenant ON credentials(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_credentials_expires ON credentials(expires_at);
@@ -1109,4 +1117,4 @@ CREATE INDEX IF NOT EXISTS idx_tenant_storage_placements_backend
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 43;
+pub(super) const SCHEMA_VERSION: i64 = 44;

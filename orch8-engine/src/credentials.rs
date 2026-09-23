@@ -33,6 +33,16 @@
 //! credential is updated in place; on failure a warning is logged and the
 //! credential is left alone — steps referencing it will still attempt to use
 //! the stale token until it actually expires.
+//!
+//! Every engine node runs this loop, so each refresh first claims a short
+//! lease on the credential row ([`REFRESH_LEASE`]) and re-reads it; only
+//! the claimer calls the token endpoint. The new tokens are written with a
+//! compare-and-swap on `updated_at`, re-applied onto the latest row if a
+//! concurrent API edit landed in between — a rotated refresh token is never
+//! overwritten by a stale read-modify-write. Residual risk: a crash between
+//! the provider rotating the token and the CAS write still loses the new
+//! token (inherent to rotating refresh tokens without provider-side
+//! idempotency).
 
 use std::sync::Arc;
 
@@ -67,6 +77,11 @@ static REFRESH_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLoc
             reqwest::Client::new()
         })
 });
+
+/// How long one node owns a credential's refresh. Must exceed the refresh
+/// client's request timeout (30s) so a slow token endpoint cannot let a
+/// second node start a concurrent refresh with the same refresh token.
+const REFRESH_LEASE: chrono::TimeDelta = chrono::TimeDelta::seconds(120);
 
 /// Recursively walk `value` and replace every `credentials://<id>[/<key>]`
 /// string with the resolved credential material.
@@ -183,7 +198,10 @@ pub async fn run_refresh_loop(
                     Ok(due) => {
                         debug!(count = due.len(), "refreshing oauth2 credentials");
                         for credential in due {
-                            if let Err(e) = refresh_credential(storage.as_ref(), credential).await {
+                            if let Err(e) =
+                                refresh_due_credential(storage.as_ref(), &credential, refresh_ahead)
+                                    .await
+                            {
                                 warn!(error = %e, "credential refresh failed");
                             }
                         }
@@ -195,12 +213,48 @@ pub async fn run_refresh_loop(
     }
 }
 
+/// Claim, re-read, and refresh one credential listed as due. Returns
+/// `Ok(false)` when another node holds the refresh lease or the credential
+/// is no longer due (someone refreshed it since the listing).
+async fn refresh_due_credential(
+    storage: &dyn StorageBackend,
+    listed: &CredentialDef,
+    refresh_ahead: std::time::Duration,
+) -> Result<bool, String> {
+    let now = chrono::Utc::now();
+    let lease_until = now.checked_add_signed(REFRESH_LEASE).unwrap_or(now);
+    let claimed = storage
+        .claim_credential_refresh(&listed.id, now, lease_until)
+        .await
+        .map_err(|e| format!("credential '{}': refresh claim failed: {e}", listed.id))?;
+    if !claimed {
+        debug!(credential_id = %listed.id, "refresh lease held by another node, skipping");
+        return Ok(false);
+    }
+    // Re-read under the lease: the listing may predate another node's
+    // refresh, whose rotated refresh token must be the one we send.
+    let Some(fresh) = storage
+        .get_credential(None, &listed.id)
+        .await
+        .map_err(|e| format!("credential '{}': re-read failed: {e}", listed.id))?
+    else {
+        return Ok(false);
+    };
+    let cutoff =
+        now + chrono::Duration::from_std(refresh_ahead).unwrap_or(chrono::Duration::seconds(300));
+    if !fresh.enabled || fresh.expires_at.is_none_or(|t| t > cutoff) {
+        return Ok(false);
+    }
+    refresh_credential(storage, fresh).await?;
+    Ok(true)
+}
+
 /// Refresh a single `OAuth2` credential by `POST`ing to its `refresh_url`.
 /// The expected response shape is the standard RFC 6749 token response:
 /// `{access_token, expires_in, refresh_token?}`.
 async fn refresh_credential(
     storage: &dyn StorageBackend,
-    mut credential: CredentialDef,
+    credential: CredentialDef,
 ) -> Result<(), String> {
     if !matches!(credential.kind, CredentialKind::Oauth2) {
         return Err(format!(
@@ -257,9 +311,14 @@ async fn refresh_credential(
         )
     })?;
 
-    // Merge the new access_token into the stored value JSON object so downstream
-    // consumers still see the same shape (access_token, plus whatever else was
-    // stored — userinfo, scope, etc.).
+    persist_refreshed_tokens(storage, &credential, &token).await?;
+    Ok(())
+}
+
+/// Apply a token response onto `credential` in place: merge `access_token`
+/// (and a rotated `refresh_token`) into the stored value JSON so downstream
+/// consumers still see the same shape, and advance `expires_at`.
+fn apply_token_response(credential: &mut CredentialDef, token: &TokenResponse) {
     let mut value_json: serde_json::Value =
         serde_json::from_str(credential.value.expose()).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = value_json.as_object_mut() {
@@ -278,8 +337,8 @@ async fn refresh_credential(
         value_json = serde_json::json!({ "access_token": token.access_token });
     }
     credential.value = SecretString::new(value_json.to_string());
-    if let Some(rt) = token.refresh_token {
-        credential.refresh_token = Some(SecretString::new(rt));
+    if let Some(ref rt) = token.refresh_token {
+        credential.refresh_token = Some(SecretString::new(rt.clone()));
     }
     if let Some(expires_in) = token.expires_in {
         // `DateTime + Duration` panics on overflow, and `expires_in` comes
@@ -289,21 +348,62 @@ async fn refresh_credential(
             .and_then(|delta| chrono::Utc::now().checked_add_signed(delta))
             .or(credential.expires_at);
     }
-    credential.updated_at = chrono::Utc::now();
+}
 
-    storage.update_credential(&credential).await.map_err(|e| {
-        format!(
-            "credential '{}': persisting refresh failed: {e}",
-            credential.id
-        )
-    })?;
-
-    info!(
-        credential_id = %credential.id,
-        expires_at = ?credential.expires_at,
-        "oauth2 credential refreshed"
-    );
-    Ok(())
+/// Persist refreshed tokens with a CAS on `updated_at`. If a concurrent
+/// writer (typically an API PATCH) changed the row since `read` was loaded,
+/// re-apply only the token fields onto the latest row and CAS once more —
+/// the provider has already rotated, so these tokens are the live ones and
+/// must not be dropped, while the concurrent edit's other fields survive.
+async fn persist_refreshed_tokens(
+    storage: &dyn StorageBackend,
+    read: &CredentialDef,
+    token: &TokenResponse,
+) -> Result<(), String> {
+    let mut updated = read.clone();
+    apply_token_response(&mut updated, token);
+    let persisted = |e| format!("credential '{}': persisting refresh failed: {e}", read.id);
+    if storage
+        .update_credential_cas(&updated, read.updated_at)
+        .await
+        .map_err(persisted)?
+    {
+        info!(
+            credential_id = %read.id,
+            expires_at = ?updated.expires_at,
+            "oauth2 credential refreshed"
+        );
+        return Ok(());
+    }
+    let Some(latest) = storage
+        .get_credential(None, &read.id)
+        .await
+        .map_err(persisted)?
+    else {
+        return Err(format!(
+            "credential '{}': deleted during refresh; new tokens discarded",
+            read.id
+        ));
+    };
+    let mut merged = latest.clone();
+    apply_token_response(&mut merged, token);
+    if storage
+        .update_credential_cas(&merged, latest.updated_at)
+        .await
+        .map_err(persisted)?
+    {
+        info!(
+            credential_id = %read.id,
+            expires_at = ?merged.expires_at,
+            "oauth2 credential refreshed (merged onto concurrent update)"
+        );
+        Ok(())
+    } else {
+        Err(format!(
+            "credential '{}': persisting refresh lost two CAS races; new tokens discarded",
+            read.id
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -690,5 +790,101 @@ mod tests {
         )
         .await
         .expect("cancelled refresh loop should stop promptly");
+    }
+
+    fn due_oauth(id: &str) -> CredentialDef {
+        let mut c = credential(id, CredentialKind::Oauth2);
+        c.refresh_url = Some("https://token.example.invalid/oauth".into());
+        c.refresh_token = Some(SecretString::new("rt-1".into()));
+        c.expires_at = Some(chrono::Utc::now());
+        c
+    }
+
+    /// Only the lease holder refreshes: with another node's lease live, the
+    /// refresh is skipped before any network access.
+    #[tokio::test]
+    async fn refresh_skips_when_another_node_holds_the_lease() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let cred = due_oauth("oa");
+        storage.create_credential(&cred).await.unwrap();
+        let now = chrono::Utc::now();
+        assert!(
+            storage
+                .claim_credential_refresh("oa", now, now + REFRESH_LEASE)
+                .await
+                .unwrap(),
+            "first claim wins"
+        );
+        let refreshed =
+            refresh_due_credential(&storage, &cred, std::time::Duration::from_secs(300))
+                .await
+                .expect("a held lease is a skip, not an error");
+        assert!(!refreshed);
+    }
+
+    /// A concurrent API edit between the refresh read and the token write
+    /// must neither be clobbered nor clobber the freshly rotated tokens.
+    #[tokio::test]
+    async fn persist_refresh_merges_tokens_onto_concurrent_update() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        storage.create_credential(&due_oauth("oa")).await.unwrap();
+        let read = storage.get_credential(None, "oa").await.unwrap().unwrap();
+
+        // Concurrent PATCH lands first.
+        let mut patched = read.clone();
+        patched.description = Some("edited".into());
+        assert!(
+            storage
+                .update_credential_cas(&patched, read.updated_at)
+                .await
+                .unwrap()
+        );
+
+        let token = TokenResponse {
+            access_token: "at-2".into(),
+            refresh_token: Some("rt-2".into()),
+            expires_in: Some(3600),
+        };
+        persist_refreshed_tokens(&storage, &read, &token)
+            .await
+            .unwrap();
+
+        let stored = storage.get_credential(None, "oa").await.unwrap().unwrap();
+        assert_eq!(stored.description.as_deref(), Some("edited"));
+        assert_eq!(stored.refresh_token.as_ref().unwrap().expose(), "rt-2");
+        let value: Value = serde_json::from_str(stored.value.expose()).unwrap();
+        assert_eq!(value["access_token"], "at-2");
+    }
+
+    /// A stale full-row write (the old PATCH behavior) must be rejected.
+    #[tokio::test]
+    async fn update_credential_cas_rejects_stale_write() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        storage.create_credential(&due_oauth("oa")).await.unwrap();
+        let read = storage.get_credential(None, "oa").await.unwrap().unwrap();
+        let mut first = read.clone();
+        first.refresh_token = Some(SecretString::new("rotated".into()));
+        assert!(
+            storage
+                .update_credential_cas(&first, read.updated_at)
+                .await
+                .unwrap()
+        );
+        let mut stale = read.clone();
+        stale.description = Some("stale".into());
+        assert!(
+            !storage
+                .update_credential_cas(&stale, read.updated_at)
+                .await
+                .unwrap()
+        );
+        let stored = storage.get_credential(None, "oa").await.unwrap().unwrap();
+        assert_eq!(stored.refresh_token.as_ref().unwrap().expose(), "rotated");
     }
 }

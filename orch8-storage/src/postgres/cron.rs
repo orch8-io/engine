@@ -117,14 +117,23 @@ pub(super) async fn claim_due(
     // `LIMIT 100` caps one tick's claim: after a long outage an unbounded
     // claim would burst-spawn every due schedule at once. Stragglers are
     // picked up on subsequent ticks.
+    //
+    // The claim is a lease (`claimed_until`), not a permanent mark: advancing
+    // the fire times (`update_fire_times` / `record_skip`) clears it, and if
+    // the claimer fails or crashes before that, the lease expires and the
+    // schedule is re-claimed. The old `last_triggered_at = now` mark gated on
+    // `last_triggered_at < next_fire_at` disabled the schedule forever on
+    // any failure in between. Re-fires are deduped by the instance
+    // idempotency key `cron:<id>:<next_fire_at>`.
+    let lease_until = now + chrono::Duration::seconds(super::super::CRON_CLAIM_LEASE_SECS);
     let rows = sqlx::query_as::<_, CronRow>(
         r"UPDATE cron_schedules
-          SET last_triggered_at = $1, updated_at = NOW()
+          SET claimed_until = $2, updated_at = NOW()
           WHERE id IN (
               SELECT id FROM cron_schedules
               WHERE enabled = TRUE
                 AND next_fire_at <= $1
-                AND (last_triggered_at IS NULL OR last_triggered_at < next_fire_at)
+                AND (claimed_until IS NULL OR claimed_until < $1)
               ORDER BY next_fire_at
               LIMIT 100
               FOR UPDATE SKIP LOCKED
@@ -134,6 +143,7 @@ pub(super) async fn claim_due(
                  last_triggered_at, next_fire_at, created_at, updated_at",
     )
     .bind(now)
+    .bind(lease_until)
     .fetch_all(&store.pool)
     .await?;
     Ok(rows.into_iter().map(CronRow::into_schedule).collect())
@@ -146,7 +156,7 @@ pub(super) async fn update_fire_times(
     next_fire_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
     sqlx::query(
-        "UPDATE cron_schedules SET last_triggered_at=$2, next_fire_at=$3, updated_at=NOW() WHERE id=$1",
+        "UPDATE cron_schedules SET last_triggered_at=$2, next_fire_at=$3, claimed_until=NULL, updated_at=NOW() WHERE id=$1",
     )
     .bind(id)
     .bind(last_triggered_at)
@@ -171,6 +181,7 @@ pub(super) async fn record_skip(
               last_skipped_at = $2,
               last_triggered_at = $2,
               next_fire_at = $3,
+              claimed_until = NULL,
               updated_at = NOW()
           WHERE id = $1",
     )

@@ -1442,3 +1442,64 @@ fn instance_heartbeat_cadence_precedes_short_and_default_stale_windows() {
     assert_eq!(instance_heartbeat_interval(300), Duration::from_secs(100));
     assert!(!instance_heartbeat_interval(0).is_zero());
 }
+
+/// ENG-R-N5: the deadline sweep runs on every node. When another node has
+/// already moved the instance (lost CAS), the escalation handler and breach
+/// output must NOT run again — side effects only follow a won CAS.
+#[tokio::test]
+async fn deadline_breach_lost_cas_skips_escalation_side_effects() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance_id = InstanceId::new();
+    // Another node already failed it.
+    seed_instance_in_state(storage.as_ref(), instance_id, None, InstanceState::Failed).await;
+    let mut instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    // Snapshot as the sweep saw it: still Waiting, started long ago.
+    instance.state = InstanceState::Waiting;
+    instance.context.runtime.started_at = Some(Utc::now() - chrono::Duration::hours(1));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in = Arc::clone(&calls);
+    let mut registry = HandlerRegistry::new();
+    registry.register("escalate", move |_ctx| {
+        let calls = Arc::clone(&calls_in);
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({}))
+        }
+    });
+
+    let mut step_def = mk_step_def("s", "noop", serde_json::json!({}));
+    step_def.deadline = Some(Duration::from_secs(1));
+    step_def.on_deadline_breach = Some(orch8_types::sequence::EscalationDef {
+        handler: "escalate".into(),
+        params: serde_json::json!({}),
+    });
+
+    let handled = handle_deadline_breach(
+        &storage,
+        &registry,
+        &instance,
+        &step_def,
+        None,
+        InstanceState::Waiting,
+        &SharedClock::default(),
+    )
+    .await
+    .expect("lost CAS is not an error");
+    assert!(handled, "caller must stop processing the instance");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "escalation must not re-run"
+    );
+    assert!(
+        storage
+            .get_block_output(instance_id, &BlockId::new("s"))
+            .await
+            .unwrap()
+            .is_none(),
+        "no duplicate breach output"
+    );
+}
