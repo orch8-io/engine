@@ -613,6 +613,7 @@ pub async fn get_instance_logs(
 pub async fn list_instances(
     State(state): State<AppState>,
     tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
+    admin_ctx: crate::auth::OptionalAdmin,
     Query(q): Query<ListQuery>,
     Query(raw): Query<std::collections::HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -620,6 +621,7 @@ pub async fn list_instances(
     let tenant_id = if let Some(axum::Extension(ctx)) = &tenant_ctx {
         Some(ctx.tenant_id.clone())
     } else {
+        crate::api_keys::require_admin(&admin_ctx)?;
         q.tenant_id.map(TenantId::unchecked)
     };
 
