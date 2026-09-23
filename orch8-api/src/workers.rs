@@ -998,44 +998,78 @@ pub(crate) async fn complete_task(
         &format!("worker_task {task_id}"),
     )?;
     let claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
-    if pre_task.state != WorkerTaskState::Claimed
-        || pre_task.worker_id.as_deref() != Some(claim.worker_id.as_str())
-        || pre_task.claim_epoch != claim.claim_epoch
-    {
+    let same_lease = pre_task.worker_id.as_deref() == Some(claim.worker_id.as_str())
+        && pre_task.claim_epoch == claim.claim_epoch;
+    // Idempotent retry: the task row is marked completed BEFORE the output
+    // save + instance transition below (separate writes). If the process
+    // died in between, the instance sat in Waiting forever and the worker's
+    // retry got a 409. A retry by the SAME lease holder of an already
+    // completed task now re-runs only the (guarded) transition half.
+    let completion_retry = pre_task.state == WorkerTaskState::Completed && same_lease;
+    if !completion_retry && (pre_task.state != WorkerTaskState::Claimed || !same_lease) {
         record_stale_rejection(&state, task_id, &claim, "complete rejected: lease changed").await;
         return Err(ApiError::Conflict("worker task lease changed".into()));
     }
+    // The committed output wins on a retry (the worker may resend a
+    // regenerated payload); a first completion uses the request's.
+    let mut req = req;
+    if completion_retry && let Some(stored) = pre_task.output.clone() {
+        req.output = stored;
+    }
+
+    // Enforce `max_context_bytes` on the post-merge context BEFORE anything
+    // is committed. Every other context writer (create, patch, fork) checks
+    // it; the worker merge bypassed it, so one oversized worker output could
+    // grow `context.data` without bound.
+    if let Some(obj) = req.output.as_object() {
+        let mut projected = inst.context.clone();
+        if !projected.data.is_object() {
+            projected.data = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let Some(data_obj) = projected.data.as_object_mut() {
+            for (k, v) in obj {
+                data_obj.insert(k.clone(), v.clone());
+            }
+        }
+        projected.check_size(state.max_context_bytes)?;
+    }
+
     let tenant_id = inst.tenant_id.clone();
     let tenant_for_cb = Some(inst.tenant_id);
 
-    orch8_engine::effect_guard::commit_external_worker_effect(
-        state.storage.as_ref(),
-        &tenant_id,
-        &pre_task,
-        &req.output,
-    )
-    .await
-    .map_err(|error| ApiError::Conflict(error.to_string()))?;
-
-    let updated = state
-        .storage
-        .complete_worker_task(task_id, &claim, &req.output)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-
-    if !updated {
-        record_stale_rejection(
-            &state,
-            task_id,
-            &claim,
-            "complete rejected: lease changed during commit",
+    if !completion_retry {
+        orch8_engine::effect_guard::commit_external_worker_effect(
+            state.storage.as_ref(),
+            &tenant_id,
+            &pre_task,
+            &req.output,
         )
-        .await;
-        return Err(ApiError::Conflict("worker task lease changed".into()));
+        .await
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+
+        let updated = state
+            .storage
+            .complete_worker_task(task_id, &claim, &req.output)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+
+        if !updated {
+            record_stale_rejection(
+                &state,
+                task_id,
+                &claim,
+                "complete rejected: lease changed during commit",
+            )
+            .await;
+            return Err(ApiError::Conflict("worker task lease changed".into()));
+        }
     }
 
-    // Persist any worker-reported logs for this step.
-    persist_reported_logs(&state, pre_task.instance_id, &pre_task.block_id, &req.logs).await;
+    // Persist any worker-reported logs for this step (once — a completion
+    // retry already persisted them on the first attempt).
+    if !completion_retry {
+        persist_reported_logs(&state, pre_task.instance_id, &pre_task.block_id, &req.logs).await;
+    }
 
     let task = state
         .storage
@@ -1116,6 +1150,34 @@ pub(crate) async fn complete_task(
     let node = tree.iter().find(|n| {
         n.block_id == task_block_id && matches!(n.state, NodeState::Running | NodeState::Waiting)
     });
+
+    // On a completion retry, only finish a transition that demonstrably did
+    // not happen yet: the step's node is still live (tree path), or — flat
+    // path, no tree — the instance is still Waiting on this very step.
+    // Otherwise the first attempt already transitioned; re-running the
+    // non-atomic fallback would save a duplicate output and re-schedule.
+    if completion_retry {
+        let pending = if tree.is_empty() {
+            instance.state == InstanceState::Waiting
+                && instance
+                    .context
+                    .runtime
+                    .current_step
+                    .as_ref()
+                    .is_none_or(|step| *step == task_block_id)
+        } else {
+            node.is_some()
+        };
+        if !pending {
+            return Ok(StatusCode::OK);
+        }
+        tracing::info!(
+            task_id = %task_id,
+            instance_id = %task.instance_id,
+            block_id = %task_block_id,
+            "worker completion retry: task already completed, finishing the instance transition"
+        );
+    }
 
     let cas_err = if let Some(node) = node {
         let result = if merged_context {
