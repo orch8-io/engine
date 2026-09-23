@@ -129,6 +129,12 @@ pub(super) async fn check_budget(
 /// executes instead of being re-deferred.
 const DELAY_UNTIL_PREFIX: &str = "_delay_until:";
 
+/// Instance-metadata key holding `block_id`'s delay marker. A JSON `null`
+/// value means "no marker" (how composite iteration resets clear it).
+pub(crate) fn delay_marker_key(block_id: &orch8_types::ids::BlockId) -> String {
+    format!("{DELAY_UNTIL_PREFIX}{}", block_id.as_str())
+}
+
 /// Resolve the step's `delay` into a deferral target, or `None` when the
 /// step may run now.
 ///
@@ -152,7 +158,7 @@ async fn step_delay_until(
     };
 
     let now = clock.now();
-    let marker_key = format!("{DELAY_UNTIL_PREFIX}{}", step_def.id.as_str());
+    let marker_key = delay_marker_key(&step_def.id);
     // Read the durable marker, not just the claim-time snapshot: a parallel
     // sibling on the tree path may have written it after this claim.
     let recorded = |meta: &serde_json::Value| {

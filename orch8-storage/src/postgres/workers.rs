@@ -113,6 +113,7 @@ pub(super) async fn claim(
           WHERE id IN (
               SELECT id FROM worker_tasks
               WHERE handler_name = $1 AND state = 'pending' AND requirements = '{}'::jsonb
+                AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))
               ORDER BY created_at
               LIMIT $3
               FOR UPDATE SKIP LOCKED
@@ -173,6 +174,7 @@ pub(super) async fn claim_for_tenant(
                 AND wt.state = 'pending'
                 AND wt.requirements = '{}'::jsonb
                 AND ti.tenant_id = $4
+                AND ti.state NOT IN ('completed', 'failed', 'cancelled')
               ORDER BY wt.created_at
               LIMIT $3
               FOR UPDATE OF wt SKIP LOCKED
@@ -248,6 +250,10 @@ pub(super) async fn claim_matching(
             .push(" WHERE wt.handler_name = ")
             .push_bind(handler_name);
         query.push(" AND wt.state = 'pending'");
+        // Never hand out work for an instance that already finished or was
+        // cancelled (its tasks are purged on cancel, but a racing dispatch
+        // or an older row may remain).
+        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))");
         if let Some(queue) = queue_name {
             query.push(" AND wt.queue_name = ").push_bind(queue);
         }

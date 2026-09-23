@@ -2742,3 +2742,57 @@ async fn waiting_deadline_sweep_skips_completed_steps() {
         "completed step's deadline must not fail the instance"
     );
 }
+
+/// When a root node fails, the evaluator cancels every live node; the
+/// external-worker tasks of those nodes must be purged too.
+#[tokio::test]
+async fn root_failure_purges_worker_tasks_of_cancelled_nodes() {
+    let storage = storage().await;
+    let sequence = mk_sequence(vec![BlockDefinition::Parallel(Box::new(ParallelDef {
+        id: BlockId::new("parallel"),
+        branches: vec![
+            vec![mk_step("remote_a", "some_external_worker_handler")],
+            vec![mk_step("remote_b", "some_external_worker_handler")],
+        ],
+    }))]);
+    storage.create_sequence(&sequence).await.unwrap();
+    let instance = mk_instance(sequence.id);
+    storage.create_instance(&instance).await.unwrap();
+    let handlers = Arc::new(registry());
+    let list = || async {
+        storage
+            .list_worker_tasks(
+                &orch8_types::worker_filter::WorkerTaskFilter::default(),
+                &orch8_types::filter::Pagination::default(),
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.instance_id == instance.id)
+            .count()
+    };
+    for _ in 0..4 {
+        tick(&storage, &handlers).await;
+    }
+    assert!(list().await > 0, "external steps dispatched worker tasks");
+
+    // The root fails (e.g. an operator/deadline path) while both external
+    // steps are still live.
+    let tree = storage.get_execution_tree(instance.id).await.unwrap();
+    let root = tree.iter().find(|n| n.parent_id.is_none()).unwrap();
+    storage
+        .update_node_state(root.id, NodeState::Failed)
+        .await
+        .unwrap();
+    storage
+        .update_instance_state(instance.id, InstanceState::Scheduled, Some(Utc::now()))
+        .await
+        .unwrap();
+    tick(&storage, &handlers).await;
+
+    assert_eq!(
+        list().await,
+        0,
+        "cancelled nodes' worker tasks must be purged"
+    );
+}

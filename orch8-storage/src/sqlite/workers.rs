@@ -122,7 +122,9 @@ pub(super) async fn claim(
     let mut conn = begin_immediate(&storage.pool).await?;
 
     let select_res = sqlx::query(
-        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND requirements='{}' ORDER BY created_at ASC LIMIT ?2",
+        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND requirements='{}' \
+         AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) \
+         ORDER BY created_at ASC LIMIT ?2",
     )
     .bind(handler_name)
     .bind(limit as i64)
@@ -200,6 +202,7 @@ pub(super) async fn claim_for_tenant(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
          WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.requirements='{}' AND ti.tenant_id=?3
+           AND ti.state NOT IN ('completed', 'failed', 'cancelled')
          ORDER BY wt.created_at ASC
          LIMIT ?2",
     )
@@ -293,6 +296,8 @@ pub(super) async fn claim_matching(
             .push(" WHERE wt.handler_name=")
             .push_bind(handler_name);
         query.push(" AND wt.state='pending'");
+        // See the Postgres twin: no work for terminal/cancelled instances.
+        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))");
         if let Some(queue) = queue_name {
             query.push(" AND wt.queue_name=").push_bind(queue);
         }

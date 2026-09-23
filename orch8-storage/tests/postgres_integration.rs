@@ -2052,3 +2052,57 @@ async fn signal_sweep_skips_scheduled_instance_without_control_signal_postgres()
         storage.get_signalled_instance_ids(10_000).await.unwrap()
     ));
 }
+
+#[tokio::test]
+async fn worker_claims_skip_tasks_of_terminal_instances_postgres() {
+    let storage = require_postgres!();
+    let tenant = format!("claim-term-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let mut dead = mk_instance(&tenant, seq_id, None);
+    dead.state = InstanceState::Cancelled;
+    storage.create_instance(&dead).await.unwrap();
+    let handler = format!("h-{}", Uuid::new_v4());
+    let task = WorkerTask {
+        id: Uuid::now_v7(),
+        instance_id: dead.id,
+        block_id: BlockId::new("s1"),
+        handler_name: handler.clone(),
+        queue_name: None,
+        requirements: CapsuleRequirements::default(),
+        params: serde_json::json!({}),
+        context: serde_json::json!({}),
+        attempt: 0,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        claim_epoch: 0,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+    storage.create_worker_task(&task).await.unwrap();
+    assert!(
+        storage
+            .claim_worker_tasks(&handler, "w", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        storage
+            .claim_worker_tasks_for_tenant(&handler, "w", &TenantId::unchecked(&tenant), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

@@ -30,7 +30,8 @@ mod step_exec;
 mod tests;
 
 pub(crate) use step_exec::{
-    HUMAN_GATE_MARKER, clamped_fire_at, park_tree_instance_until, step_preamble_deferral,
+    HUMAN_GATE_MARKER, clamped_fire_at, delay_marker_key, park_tree_instance_until,
+    step_preamble_deferral,
 };
 pub use step_exec::{check_human_input, check_human_input_at};
 
@@ -504,8 +505,13 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             // soon as `process_instance` returns, below.
             let heartbeat_storage = Arc::clone(&storage);
             let heartbeat_stop = CancellationToken::new();
+            // Set by the heartbeat task once the lease is presumed lost; the
+            // flat step loop checks it between steps (its only safe
+            // cancellation point) and stops starting new work.
+            let lease_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let heartbeat_handle = {
                 let heartbeat_stop = heartbeat_stop.clone();
+                let lease_lost = Arc::clone(&lease_lost);
                 // Tick at a fraction of the reaper's own staleness window so
                 // several heartbeats land comfortably before this instance
                 // could ever look stale.
@@ -526,10 +532,11 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                                         // staleness window, so this many misses in a row
                                         // means the lease has (almost certainly) lapsed
                                         // and another node may re-dispatch the step.
-                                        // The step itself is not aborted: the step path
-                                        // has no safe cancellation point, and dropping it
-                                        // mid-write is worse than the overlap.
+                                        // The in-flight step is not aborted (dropping it
+                                        // mid-write is worse than the overlap), but no
+                                        // further step is started — see `lease_lost`.
                                         if consecutive_failures == HEARTBEAT_LEASE_LOST_AFTER {
+                                            lease_lost.store(true, std::sync::atomic::Ordering::Release);
                                             error!(
                                                 instance_id = %instance_id,
                                                 error = %e,
@@ -555,6 +562,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             // `clock` is moved into the inner task below; keep a handle in the
             // outer task for the transient-error reschedule fire time.
             let clock_outer = clock.clone();
+            let lease_lost_inner = Arc::clone(&lease_lost);
             let result = tokio::spawn(async move {
                 let ctx = InstanceRunCtx {
                     storage: &s2,
@@ -565,6 +573,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     max_steps_per_instance,
                     cancel: &cancel,
                     clock: &clock,
+                    lease_lost: &lease_lost_inner,
                 };
                 process_instance(&ctx, instance, data).await
             })
@@ -1919,6 +1928,9 @@ struct InstanceRunCtx<'a> {
     pub max_steps_per_instance: u32,
     pub cancel: &'a CancellationToken,
     pub clock: &'a SharedClock,
+    /// Set once the instance's lease heartbeat has failed
+    /// [`HEARTBEAT_LEASE_LOST_AFTER`] times in a row (ENG-R-N8).
+    pub lease_lost: &'a std::sync::atomic::AtomicBool,
 }
 
 /// Process a single claimed instance: execute ALL pending steps in one go.
@@ -2256,6 +2268,31 @@ async fn execute_step_loop(
             } else {
                 continue;
             }
+        }
+
+        // Lease presumed lost (heartbeats failing): another node may already
+        // have re-dispatched this instance, so do not start another step.
+        // Hand the instance back (best-effort — if storage is what's down,
+        // the stale-instance reaper recovers it).
+        if ctx.lease_lost.load(std::sync::atomic::Ordering::Acquire) {
+            warn!(
+                instance_id = %instance_id,
+                block_id = %step_def.id,
+                "instance lease presumed lost; not starting further steps"
+            );
+            if let Err(e) = ctx
+                .storage
+                .conditional_update_instance_state(
+                    instance_id,
+                    InstanceState::Running,
+                    InstanceState::Scheduled,
+                    Some(ctx.clock.now()),
+                )
+                .await
+            {
+                warn!(instance_id = %instance_id, error = %e, "failed to release instance after lease loss");
+            }
+            return Ok(false);
         }
 
         // Interceptor: before_step

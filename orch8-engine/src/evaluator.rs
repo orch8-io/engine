@@ -522,6 +522,34 @@ pub async fn evaluate_with_clock(
                     storage
                         .update_nodes_state(&non_terminal_ids, NodeState::Cancelled)
                         .await?;
+                    // Their external-worker tasks must not stay claimable
+                    // for an instance that is about to go terminal.
+                    let step_block_ids: Vec<String> = ctx
+                        .tree
+                        .iter()
+                        .filter(|n| {
+                            n.block_type == BlockType::Step
+                                && matches!(
+                                    n.state,
+                                    NodeState::Pending | NodeState::Running | NodeState::Waiting
+                                )
+                        })
+                        .map(|n| n.block_id.as_str().to_owned())
+                        .collect();
+                    if !step_block_ids.is_empty()
+                        && let Err(e) = storage
+                            .cancel_worker_tasks_for_blocks(
+                                instance_id.into_uuid(),
+                                &step_block_ids,
+                            )
+                            .await
+                    {
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "evaluate: failed to purge worker tasks of cancelled nodes"
+                        );
+                    }
                 }
             }
             return Ok(outcome);
@@ -1475,6 +1503,20 @@ pub async fn reset_subtree_to_pending(
                 storage.delete_block_output_by_id(latest.id).await?;
             }
         }
+
+        // A step `delay` marker is final once written (so early wakes can't
+        // restart it); clear it per iteration so every iteration of a
+        // delayed loop-body step waits again instead of only the first.
+        let mut cleared = serde_json::Map::new();
+        for block_id in &step_block_ids {
+            cleared.insert(
+                crate::scheduler::delay_marker_key(block_id),
+                serde_json::Value::Null,
+            );
+        }
+        storage
+            .merge_instance_metadata(instance_id, &serde_json::Value::Object(cleared))
+            .await?;
     }
 
     let all_block_ids: Vec<_> = descendants

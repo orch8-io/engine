@@ -5493,3 +5493,53 @@ async fn credential_refresh_claim_and_cas_update() {
     assert_eq!(stored.refresh_token.unwrap().expose(), "rt2");
     assert!(stored.updated_at > read.updated_at);
 }
+
+/// Worker claims must never hand out tasks of a terminal/cancelled
+/// instance, on any claim path.
+#[tokio::test]
+async fn worker_claims_skip_tasks_of_terminal_instances() {
+    let s = store().await;
+    let live = make_instance_in_state("t_claim_term", InstanceState::Waiting);
+    let dead = make_instance_in_state("t_claim_term", InstanceState::Cancelled);
+    s.create_instance(&live).await.unwrap();
+    s.create_instance(&dead).await.unwrap();
+    for inst in [&live, &dead] {
+        let mut task = distributed_task(inst.id, "s1", "eu", None, Utc::now());
+        task.requirements = CapsuleRequirements::default();
+        s.create_worker_task(&task).await.unwrap();
+    }
+    let tenant = TenantId::unchecked("t_claim_term");
+
+    let plain = s.claim_worker_tasks("render", "w1", 10).await.unwrap();
+    assert_eq!(plain.len(), 1);
+    assert_eq!(plain[0].instance_id, live.id);
+
+    // Reset and try the tenant + matching paths.
+    let t = &plain[0];
+    s.delete_worker_task(t.id).await.unwrap();
+    let mut again = distributed_task(live.id, "s2", "eu", None, Utc::now());
+    again.requirements = CapsuleRequirements::default();
+    s.create_worker_task(&again).await.unwrap();
+    let tenant_claim = s
+        .claim_worker_tasks_for_tenant("render", "w1", &tenant, 10)
+        .await
+        .unwrap();
+    assert_eq!(tenant_claim.len(), 1);
+    assert_eq!(tenant_claim[0].instance_id, live.id);
+
+    let matching = s
+        .claim_worker_tasks_matching(
+            "render",
+            "w1",
+            None,
+            None,
+            &distributed_runtime(Utc::now(), "eu"),
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matching.iter().all(|t| t.instance_id != dead.id),
+        "cancelled instance's task must not be claimable"
+    );
+}
