@@ -1470,7 +1470,10 @@ async fn postgres_error_rate_counts_error_reports() {
     let storage = require_postgres!();
     let tenant = format!("error-rate-{}", Uuid::new_v4());
     assert_eq!(
-        storage.query_error_rate(&tenant, "seq", 3600).await.unwrap(),
+        storage
+            .query_error_rate(&tenant, "seq", 3600)
+            .await
+            .unwrap(),
         None
     );
     for _ in 0..2 {
@@ -1559,8 +1562,14 @@ async fn postgres_concurrency_key_is_tenant_scoped() {
     let tenant_b = format!("ck-b-{}", Uuid::new_v4());
     let seq_a = SequenceId::new();
     let seq_b = SequenceId::new();
-    storage.create_sequence(&mk_sequence(&tenant_a, seq_a)).await.unwrap();
-    storage.create_sequence(&mk_sequence(&tenant_b, seq_b)).await.unwrap();
+    storage
+        .create_sequence(&mk_sequence(&tenant_a, seq_a))
+        .await
+        .unwrap();
+    storage
+        .create_sequence(&mk_sequence(&tenant_b, seq_b))
+        .await
+        .unwrap();
     let mut a = mk_instance(&tenant_a, seq_a, Some(&key));
     a.state = InstanceState::Running;
     storage.create_instance(&a).await.unwrap();
@@ -1615,7 +1624,10 @@ async fn postgres_reaper_reclaims_null_heartbeat_by_claimed_at() {
         created_at: Utc::now(),
     };
     s.create_worker_task(&task).await.unwrap();
-    assert_eq!(s.claim_worker_tasks(&handler, "w", 1).await.unwrap().len(), 1);
+    assert_eq!(
+        s.claim_worker_tasks(&handler, "w", 1).await.unwrap().len(),
+        1
+    );
     sqlx::query(
         "UPDATE worker_tasks SET heartbeat_at = NULL, claimed_at = NOW() - INTERVAL '1 hour' WHERE id = $1",
     )
@@ -1665,20 +1677,37 @@ async fn postgres_webhook_outbox_fail_and_complete_are_fenced_on_claim() {
             .await
             .unwrap()
     );
-    assert!(!s.complete_webhook_outbox_claim(entry.id, stale_claim).await.unwrap());
+    assert!(
+        !s.complete_webhook_outbox_claim(entry.id, stale_claim)
+            .await
+            .unwrap()
+    );
     assert_eq!(
-        s.get_webhook_outbox(entry.id).await.unwrap().unwrap().attempts,
+        s.get_webhook_outbox(entry.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .attempts,
         0
     );
     // Nanosecond-precision caller timestamp still matches the stored
     // microsecond value.
-    assert!(s.complete_webhook_outbox_claim(entry.id, fresh_claim).await.unwrap());
+    assert!(
+        s.complete_webhook_outbox_claim(entry.id, fresh_claim)
+            .await
+            .unwrap()
+    );
     assert!(s.get_webhook_outbox(entry.id).await.unwrap().is_none());
 }
 
 /// M2/M3: metadata merge is shallow and the metadata filter follows Postgres
 /// `@>` containment (type-aware scalars, nested objects, arrays).
-async fn assert_metadata_semantics(s: &dyn orch8_storage::StorageBackend, tenant: &str, seq_id: SequenceId, inst: TaskInstance) {
+async fn assert_metadata_semantics(
+    s: &dyn orch8_storage::StorageBackend,
+    tenant: &str,
+    seq_id: SequenceId,
+    inst: TaskInstance,
+) {
     use orch8_types::filter::{InstanceFilter, Pagination};
     let mut inst = inst;
     inst.metadata = serde_json::json!({
@@ -1746,4 +1775,71 @@ async fn postgres_metadata_merge_and_filter_semantics() {
         .unwrap();
     let inst = mk_instance(&tenant, seq_id, None);
     assert_metadata_semantics(&storage, &tenant, seq_id, inst).await;
+}
+
+/// Same-`created_at` outputs must resolve deterministically by `id`
+/// (UUIDv7, insertion order) in every reader, and a fork copy must preserve
+/// that order instead of minting random v4 ids.
+#[tokio::test]
+async fn postgres_block_output_ties_break_by_id_and_copy_preserves_order() {
+    use orch8_types::output::BlockOutput;
+    let s = require_postgres!();
+    let tenant = format!("t-out-tie-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let src = mk_instance(&tenant, seq_id, None);
+    let dst = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&src).await.unwrap();
+    s.create_instance(&dst).await.unwrap();
+    let block = BlockId::new("b");
+    let at = Utc::now();
+    for attempt in 1..=5u16 {
+        s.save_block_output(&BlockOutput {
+            id: Uuid::now_v7(),
+            instance_id: src.id,
+            block_id: block.clone(),
+            output: serde_json::json!({"attempt": attempt}),
+            output_ref: None,
+            output_size: 2,
+            attempt,
+            created_at: at,
+        })
+        .await
+        .unwrap();
+    }
+    let latest = s
+        .get_block_outputs_batch(&[(src.id, &block)])
+        .await
+        .unwrap();
+    assert_eq!(latest[&(src.id, block.clone())].attempt, 5);
+    let after: Vec<u16> = s
+        .get_outputs_after_created_at(src.id, None)
+        .await
+        .unwrap()
+        .iter()
+        .map(|o| o.attempt)
+        .collect();
+    assert_eq!(after, vec![1, 2, 3, 4, 5]);
+
+    assert_eq!(
+        s.copy_block_outputs(src.id, dst.id, std::slice::from_ref(&block))
+            .await
+            .unwrap(),
+        5
+    );
+    let copied: Vec<u16> = s
+        .get_all_outputs(dst.id)
+        .await
+        .unwrap()
+        .iter()
+        .map(|o| o.attempt)
+        .collect();
+    assert_eq!(copied, vec![1, 2, 3, 4, 5]);
+    let latest = s
+        .get_block_outputs_batch(&[(dst.id, &block)])
+        .await
+        .unwrap();
+    assert_eq!(latest[&(dst.id, block)].attempt, 5);
 }
