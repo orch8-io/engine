@@ -350,8 +350,11 @@ pub async fn print_response(resp: reqwest::Response, format: OutputFormat) -> Re
     let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
 
     if status.is_success() {
-        match (format, render_json_table(&body)) {
-            (OutputFormat::Table, Some(table)) => print!("{table}"),
+        // Tables only for interactive terminals: `table` is the default, and
+        // scripts piping output (e.g. into `jq`) have always received JSON.
+        let interactive = std::io::IsTerminal::is_terminal(&std::io::stdout());
+        match (format, interactive, render_json_table(&body)) {
+            (OutputFormat::Table, true, Some(table)) => print!("{table}"),
             _ => println!("{}", serde_json::to_string_pretty(&body)?),
         }
     } else {

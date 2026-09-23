@@ -204,6 +204,45 @@ pub(crate) async fn enqueue_durable(
     }
 }
 
+/// Record a failed attempt, fenced on this node's claim so a row that was
+/// recovered and re-claimed elsewhere is not clobbered by a late result.
+async fn fail_claimed(
+    storage: &dyn StorageBackend,
+    entry: &WebhookOutboxEntry,
+    reason: &str,
+    retry_at: Option<chrono::DateTime<Utc>>,
+) -> Result<(), orch8_types::error::StorageError> {
+    let Some(claimed_at) = entry.claimed_at else {
+        return storage
+            .fail_webhook_outbox_attempt(entry.id, reason, retry_at)
+            .await;
+    };
+    if !storage
+        .fail_webhook_outbox_attempt_fenced(entry.id, claimed_at, reason, retry_at)
+        .await?
+    {
+        warn!(outbox_id = %entry.id, "webhook outbox claim lost before recording failure");
+    }
+    Ok(())
+}
+
+/// Remove a delivered row, fenced on this node's claim.
+async fn complete_claimed(
+    storage: &dyn StorageBackend,
+    entry: &WebhookOutboxEntry,
+) -> Result<(), orch8_types::error::StorageError> {
+    let Some(claimed_at) = entry.claimed_at else {
+        return storage.delete_webhook_outbox(entry.id).await;
+    };
+    if !storage
+        .complete_webhook_outbox_claim(entry.id, claimed_at)
+        .await?
+    {
+        warn!(outbox_id = %entry.id, "webhook outbox claim lost before completion");
+    }
+    Ok(())
+}
+
 async fn deliver_claimed(
     storage: &dyn StorageBackend,
     config: &WebhookConfig,
@@ -214,10 +253,7 @@ async fn deliver_claimed(
         Ok(event) => event,
         Err(error) => {
             let message = format!("invalid durable webhook payload: {error}");
-            if let Err(storage_error) = storage
-                .fail_webhook_outbox_attempt(entry.id, &message, None)
-                .await
-            {
+            if let Err(storage_error) = fail_claimed(storage, entry, &message, None).await {
                 warn!(error = %storage_error, outbox_id = %entry.id, "failed to park invalid webhook payload");
             }
             return;
@@ -229,10 +265,7 @@ async fn deliver_claimed(
         Ok(body) => body,
         Err(error) => {
             let message = format!("serialize: {error}");
-            if let Err(storage_error) = storage
-                .fail_webhook_outbox_attempt(entry.id, &message, None)
-                .await
-            {
+            if let Err(storage_error) = fail_claimed(storage, entry, &message, None).await {
                 warn!(error = %storage_error, outbox_id = %entry.id, "failed to park unserializable webhook");
             }
             return;
@@ -256,7 +289,7 @@ async fn deliver_claimed(
     .await;
     let (reason, retry_at) = match outcome {
         SendOutcome::Delivered => {
-            if let Err(error) = storage.delete_webhook_outbox(entry.id).await {
+            if let Err(error) = complete_claimed(storage, entry).await {
                 warn!(%error, outbox_id = %entry.id, "delivered webhook but failed to remove outbox row");
             }
             return;
@@ -274,10 +307,7 @@ async fn deliver_claimed(
     if retry_at.is_none() {
         metrics::inc(metrics::WEBHOOKS_FAILED);
     }
-    if let Err(error) = storage
-        .fail_webhook_outbox_attempt(entry.id, &reason, retry_at)
-        .await
-    {
+    if let Err(error) = fail_claimed(storage, entry, &reason, retry_at).await {
         warn!(%error, outbox_id = %entry.id, "failed to reschedule durable webhook");
     } else if retry_at.is_none() {
         metrics::inc(metrics::WEBHOOKS_PARKED);
