@@ -307,7 +307,7 @@ Repeat while a condition is true.
   "condition": "context.data.done != true",
   "max_iterations": 10,
   "body": [
-    { "type": "step", "id": "think", "handler": "llm_call", "params": { "provider": "openai", "model": "gpt-4o-mini" } },
+    { "type": "step", "id": "think", "handler": "llm_call", "params": { "provider": "openai", "model": "gpt-5.6-luna" } },
     { "type": "step", "id": "act", "handler": "tool_call", "params": {} }
   ]
 }

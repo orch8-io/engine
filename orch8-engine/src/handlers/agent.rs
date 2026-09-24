@@ -42,7 +42,7 @@
 //! | `max_iterations` | u64 | `6` | Hard cap on reason→act cycles (clamped to `MAX_ITERATIONS_CEILING`). |
 //! | `tool_dispatch` | object | — | How to execute tool calls (see below). Required if `tools` is set. |
 //! | `auto_memory` | object | — | Recall before / store after via the memory handlers. `{ recall_k?, store_outcome?, base_url?, api_key?, api_key_env?, model? }`. |
-//! | `provider` / `providers` / `model` / `api_key` / `api_key_env` / `base_url` / `temperature` / `max_tokens` | — | Forwarded verbatim to `llm_call`. |
+//! | `provider` / `providers` / `model` / `api_key` / `api_key_env` / `base_url` / `temperature` / `max_tokens` / `reasoning_effort` / `effort` / `thinking` / `output_config` / `fallbacks` / `parallel_tool_calls` | — | Forwarded verbatim to `llm_call`. |
 //!
 //! `tool_dispatch` is `{ "type": "http", "url": ..., "headers": {...} }` (each
 //! tool call becomes a `tool_call`) or `{ "type": "mcp", "url"|"server": ..., "headers": {...} }`
@@ -85,6 +85,12 @@ const LLM_PASSTHROUGH_KEYS: &[&str] = &[
     "max_tokens",
     "total_timeout_secs",
     "per_provider_timeout_secs",
+    "reasoning_effort",
+    "effort",
+    "thinking",
+    "output_config",
+    "fallbacks",
+    "parallel_tool_calls",
 ];
 
 /// A tool call the model requested, normalized from the `llm_call` output.

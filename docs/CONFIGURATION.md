@@ -212,8 +212,7 @@ mount a config file for those settings.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ORCH8_LLM_DEFAULT_MODEL_OPENAI` | `gpt-4o` | Default model for the `llm_call` handler when provider is OpenAI-compatible and no `model` param is set |
-| `ORCH8_LLM_DEFAULT_MODEL_ANTHROPIC` | `claude-sonnet-4-6` | Default model for the `llm_call` handler when provider is `anthropic` and no `model` param is set |
+| `ORCH8_LLM_DEFAULT_MODEL_<PROVIDER>` | per provider (below) | Default model for `llm_call` / `agent` when no `model` param is set, e.g. `ORCH8_LLM_DEFAULT_MODEL_MISTRAL`. Unknown (custom) provider names also honour `ORCH8_LLM_DEFAULT_MODEL_OPENAI`. Built-in defaults: `openai` `gpt-6-astra`, `anthropic` `claude-opus-5`, `gemini` `gemini-3.8-flash`, `mistral` `mistral-medium-latest`, `deepseek` `deepseek-v4-pro`, `qwen` `qwen3.7-max`, `groq` `openai/gpt-oss-120b`, `perplexity` `sonar-pro`; `together` / `openrouter` require an explicit `model` |
 | `ORCH8_MODEL_PRICING` | — | JSON map of model-prefix pricing overrides used by `GET /usage`, e.g. `{"model":{"input_per_1m":1.0,"output_per_1m":2.0}}`. Estimates only; read once on first use. |
 | `ORCH8_ACTIVEPIECES_URL` | `http://127.0.0.1:50052/execute` | Activepieces sidecar action endpoint used by `ap://` handlers and polling triggers. |
 | `ORCH8_ALLOW_INTERNAL_URLS` | `false` | Allows built-in outbound HTTP/tool handlers to target loopback or private addresses. Dangerous SSRF opt-out; use only for isolated local testing. |
