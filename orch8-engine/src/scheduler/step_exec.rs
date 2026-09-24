@@ -378,17 +378,23 @@ async fn accept_human_input(
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
     value: String,
+    evidence: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<(), EngineError> {
     let store_key = human_def
         .store_as
         .clone()
         .unwrap_or_else(|| step_def.id.as_str().to_owned());
-    let output_json = serde_json::json!({
+    let mut output_json = serde_json::json!({
         "value": value.clone(),
         // Marks this row as a gate acceptance rather than a completed
         // handler output — see HUMAN_GATE_MARKER.
         HUMAN_GATE_MARKER: true,
     });
+    // Decision evidence (who/what decided, with what confidence) rides on
+    // the acceptance row so the audit trail survives with the output.
+    if let (Some(extra), Some(obj)) = (evidence, output_json.as_object_mut()) {
+        obj.extend(extra);
+    }
 
     let output = orch8_types::output::BlockOutput {
         id: uuid::Uuid::now_v7(),
@@ -407,6 +413,224 @@ async fn accept_human_input(
         .merge_context_data(instance.id, &store_key, &serde_json::Value::String(value))
         .await?;
     Ok(())
+}
+
+/// Instance-metadata key holding a gate's deferred model prediction. A JSON
+/// `null` value means "not consulted" (composite iteration resets clear it).
+pub(crate) fn auto_decide_marker_key(block_id: &orch8_types::ids::BlockId) -> String {
+    format!("_auto_decide:{}", block_id.as_str())
+}
+
+/// The prediction recorded when the model was consulted but not confident
+/// enough, if any.
+fn deferred_prediction(
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+) -> Option<serde_json::Value> {
+    instance
+        .metadata
+        .get(auto_decide_marker_key(&step_def.id))
+        .filter(|v| v.is_object())
+        .cloned()
+}
+
+/// Free text carried by a human-input signal that is not a valid choice:
+/// an explicit `text`/`comment` field, or a `value` that isn't a choice id.
+fn reply_text(payload: &serde_json::Value) -> Option<&str> {
+    ["text", "comment", "value"]
+        .iter()
+        .find_map(|k| payload.get(*k).and_then(|v| v.as_str()))
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// Endpoint for a gate's `auto_decide`, with any `credentials://` reference
+/// in `api_key` resolved in the instance's tenant scope.
+async fn auto_decide_endpoint(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    auto: &orch8_types::sequence::AutoDecideDef,
+) -> Result<crate::handlers::jev::JevEndpoint, orch8_types::error::StepError> {
+    let mut api_key = auto.api_key.clone().map(serde_json::Value::String);
+    if let Some(key) = api_key.as_mut() {
+        crate::credentials::resolve_in_value(storage, instance.tenant_id.as_str(), key).await?;
+    }
+    Ok(crate::handlers::jev::JevEndpoint {
+        base_url: auto.base_url.clone(),
+        api_key: api_key.and_then(|v| v.as_str().map(str::to_owned)),
+        model: auto.model.clone(),
+        timeout_ms: None,
+    })
+}
+
+/// Choice criteria for a gate: every effective choice value → its label.
+fn gate_criteria(
+    human_def: &orch8_types::sequence::HumanInputDef,
+) -> serde_json::Map<String, serde_json::Value> {
+    human_def
+        .effective_choices()
+        .into_iter()
+        .map(|c| (c.value, serde_json::Value::String(c.label)))
+        .collect()
+}
+
+fn gate_instructions<'a>(
+    human_def: &'a orch8_types::sequence::HumanInputDef,
+    auto: &'a orch8_types::sequence::AutoDecideDef,
+) -> &'a str {
+    auto.instructions
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| Some(human_def.prompt.as_str()).filter(|s| !s.trim().is_empty()))
+        .unwrap_or("Which option should be chosen for this request?")
+}
+
+/// Ask the model to decide the gate. Returns `true` when it accepted the
+/// gate; `false` when the step must park for a human (low confidence, a
+/// prediction already recorded on an earlier entry, or the model being
+/// unavailable — the gate always fails safe to a human).
+async fn auto_decide_gate(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    human_def: &orch8_types::sequence::HumanInputDef,
+    auto: &orch8_types::sequence::AutoDecideDef,
+) -> Result<bool, EngineError> {
+    // Consulted before and deferred: the human decides; don't re-ask (and
+    // re-bill) on every wake of the parked step.
+    if deferred_prediction(instance, step_def).is_some() {
+        return Ok(false);
+    }
+    let state = match &step_def.context_access {
+        Some(access) => instance.context.filtered(access).data,
+        None => instance.context.data.clone(),
+    };
+    let decision = match auto_decide_endpoint(storage, instance, auto).await {
+        Ok(endpoint) => {
+            crate::handlers::jev::decide_choice(
+                &endpoint,
+                &state,
+                gate_instructions(human_def, auto),
+                gate_criteria(human_def),
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    let decision = match decision {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                instance_id = %instance.id,
+                block_id = %step_def.id,
+                error = %e,
+                "auto_decide: decision model unavailable; deferring to a human"
+            );
+            crate::metrics::inc_with(crate::metrics::AUTO_DECIDE, &[("outcome", "error")]);
+            return Ok(false);
+        }
+    };
+    let valid = human_def
+        .effective_choices()
+        .iter()
+        .any(|c| c.value == decision.choice);
+    let prediction = serde_json::json!({
+        "choice": decision.choice,
+        "confidence": decision.confidence,
+        "probabilities": decision.probabilities,
+        "model": decision.model,
+        "threshold": auto.threshold,
+    });
+    if valid && decision.confidence >= auto.threshold {
+        let mut evidence = serde_json::Map::new();
+        evidence.insert("_decided_by".into(), serde_json::json!("jev"));
+        evidence.insert("_auto_decide".into(), prediction);
+        accept_human_input(
+            storage,
+            instance,
+            step_def,
+            human_def,
+            decision.choice,
+            Some(evidence),
+        )
+        .await?;
+        crate::metrics::inc_with(crate::metrics::AUTO_DECIDE, &[("outcome", "accepted")]);
+        debug!(
+            instance_id = %instance.id,
+            block_id = %step_def.id,
+            confidence = decision.confidence,
+            "auto_decide: gate decided by model"
+        );
+        return Ok(true);
+    }
+    storage
+        .merge_instance_metadata(
+            instance.id,
+            &serde_json::json!({ auto_decide_marker_key(&step_def.id): prediction }),
+        )
+        .await?;
+    crate::metrics::inc_with(crate::metrics::AUTO_DECIDE, &[("outcome", "deferred")]);
+    debug!(
+        instance_id = %instance.id,
+        block_id = %step_def.id,
+        confidence = decision.confidence,
+        threshold = auto.threshold,
+        "auto_decide: below threshold; deferring to a human"
+    );
+    Ok(false)
+}
+
+/// Map a free-text reply onto one of the gate's choices. `None` when the
+/// model is unavailable or not confident enough (the reply is then rejected
+/// as before).
+async fn interpret_reply(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    human_def: &orch8_types::sequence::HumanInputDef,
+    auto: &orch8_types::sequence::AutoDecideDef,
+    text: &str,
+) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {
+    let endpoint = auto_decide_endpoint(storage, instance, auto).await.ok()?;
+    let state = serde_json::json!({"question": human_def.prompt, "reply": text});
+    let decision = match crate::handlers::jev::decide_choice(
+        &endpoint,
+        &state,
+        "Which option does the `reply` choose in answer to `question`?",
+        gate_criteria(human_def),
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                instance_id = %instance.id,
+                block_id = %step_def.id,
+                error = %e,
+                "auto_decide: could not interpret free-text reply"
+            );
+            return None;
+        }
+    };
+    let valid = human_def
+        .effective_choices()
+        .iter()
+        .any(|c| c.value == decision.choice);
+    if !valid || decision.confidence < auto.threshold {
+        return None;
+    }
+    let mut evidence = serde_json::Map::new();
+    evidence.insert("_decided_by".into(), serde_json::json!("human_reply"));
+    evidence.insert(
+        "_auto_decide".into(),
+        serde_json::json!({
+            "reply": text,
+            "choice": decision.choice,
+            "confidence": decision.confidence,
+            "probabilities": decision.probabilities,
+            "model": decision.model,
+        }),
+    );
+    Some((decision.choice, evidence))
 }
 
 /// [`check_human_input_at`] evaluated at the real current time. Kept as the
@@ -449,7 +673,7 @@ pub async fn check_human_input_at(
             choice = %value,
             "dry-run: auto-approving human gate with default choice"
         );
-        accept_human_input(storage, instance, step_def, human_def, value).await?;
+        accept_human_input(storage, instance, step_def, human_def, value, None).await?;
         return Ok(false); // Continue execution
     }
 
@@ -475,6 +699,33 @@ pub async fn check_human_input_at(
             let Some(value) =
                 candidate.filter(|v| effective_choices.iter().any(|c| c.value == **v))
             else {
+                // A free-text reply ("sure, go ahead") can still be mapped
+                // onto a choice when the gate opted into auto_decide.
+                if let Some(auto) = human_def
+                    .auto_decide
+                    .as_ref()
+                    .filter(|a| a.interpret_replies)
+                    && let Some(text) = reply_text(&signal.payload)
+                    && let Some((value, evidence)) =
+                        interpret_reply(storage, instance, step_def, human_def, auto, text).await
+                {
+                    accept_human_input(
+                        storage,
+                        instance,
+                        step_def,
+                        human_def,
+                        value,
+                        Some(evidence),
+                    )
+                    .await?;
+                    storage.mark_signal_delivered(signal.id).await?;
+                    debug!(
+                        instance_id = %instance.id,
+                        block_id = %step_def.id,
+                        "human input: free-text reply interpreted and accepted"
+                    );
+                    return Ok(false);
+                }
                 warn!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,
@@ -486,8 +737,29 @@ pub async fn check_human_input_at(
                 continue;
             };
 
-            // Valid input — canonical output shape and context merge.
-            accept_human_input(storage, instance, step_def, human_def, value.to_string()).await?;
+            // Valid input — canonical output shape and context merge. When
+            // the model was consulted first and deferred, record its
+            // prediction next to the human answer: a labelled example for
+            // threshold tuning.
+            let evidence = deferred_prediction(instance, step_def).map(|pred| {
+                let agreed = pred.get("choice").and_then(|c| c.as_str()) == Some(value);
+                let mut m = serde_json::Map::new();
+                m.insert("_decided_by".into(), serde_json::json!("human"));
+                m.insert(
+                    "_auto_decide".into(),
+                    serde_json::json!({"prediction": pred, "agreed": agreed}),
+                );
+                m
+            });
+            accept_human_input(
+                storage,
+                instance,
+                step_def,
+                human_def,
+                value.to_string(),
+                evidence,
+            )
+            .await?;
             storage.mark_signal_delivered(signal.id).await?;
             debug!(
                 instance_id = %instance.id,
@@ -518,6 +790,14 @@ pub async fn check_human_input_at(
             block_id = %step_def.id,
             "human input: previous acceptance recovered from outputs, gate satisfied"
         );
+        return Ok(false); // Continue execution
+    }
+
+    // Confidence-gated automation: consult the decision model once per gate
+    // entry. Confident → accept now; otherwise park for a human as usual.
+    if let Some(auto) = &human_def.auto_decide
+        && auto_decide_gate(storage, instance, step_def, human_def, auto).await?
+    {
         return Ok(false); // Continue execution
     }
 

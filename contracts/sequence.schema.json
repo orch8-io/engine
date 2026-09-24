@@ -153,6 +153,49 @@
         }
       }
     },
+    "AutoDecideDef": {
+      "type": "object",
+      "description": "`wait_for_input.auto_decide`: let a calibrated decision model answer a\nhuman gate when it is confident enough.",
+      "properties": {
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "API key (literal or `credentials://` reference). When omitted the\noperator's `TYPESAFE_API_KEY` is used — only for the default endpoint."
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Endpoint override; requires an explicit `api_key`."
+        },
+        "instructions": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Question put to the model; defaults to the gate's `prompt`."
+        },
+        "interpret_replies": {
+          "type": "boolean",
+          "description": "Map a free-text human reply (`{\"text\": \"sure, go ahead\"}`) onto one of\nthe gate's choices instead of rejecting it as an invalid value."
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Model id; defaults to `jev-latest`."
+        },
+        "threshold": {
+          "type": "number",
+          "format": "double",
+          "description": "Minimum model confidence in `[0, 1]` to accept without a human."
+        }
+      }
+    },
     "BlockDefinition": {
       "oneOf": [
         {
@@ -395,7 +438,7 @@
           "description": "Saga: sequential steps with compensating actions, rolled back in\nreverse order if any step's action fails."
         }
       ],
-      "description": "A block is either a leaf (step) or a composite (parallel, race, etc.).\n\nThis recursive enum IS the workflow DSL.\nEach variant wraps its definition in `Box<T>` so the enum itself stays a\nsingle word. `StepDef` is large (14 fields with many `Option<...>`), and\nwithout boxing every `BlockDefinition` — even `SubSequence`, which is small\n— paid the full size. `Box<T>` is transparent to both `serde` (the default\nimpl delegates to the inner type so wire format is unchanged) and `utoipa`\n(which forwards `ToSchema` through `Box<T>`), so this is an internal\nrepresentation change only."
+      "description": "A block is either a leaf (step) or a composite (parallel, race, etc.).\n\nThis recursive enum IS the workflow DSL.\nEach variant wraps its definition in `Box<T>` so the enum carries a pointer\nplus its variant tag. `StepDef` is large, with many `Option<...>` fields, and\nwithout boxing every `BlockDefinition` — even `SubSequence`, which is small\n— paid the full size. `Box<T>` is transparent to both `serde` (the default\nimpl delegates to the inner type so wire format is unchanged) and `utoipa`\n(which forwards `ToSchema` through `Box<T>`), so this is an internal\nrepresentation change only."
     },
     "BlockId": {
       "type": "string"
@@ -574,6 +617,17 @@
         "allow_comment": {
           "type": "boolean",
           "description": "When true, the reviewer can attach a free-text comment to their decision."
+        },
+        "auto_decide": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/AutoDecideDef",
+              "description": "Confidence-gated automation: ask the Jev decision model to answer the\ngate first. At or above `threshold` confidence the gate is accepted\nwithout a human (the decision, confidence and probabilities are kept\non the gate's output as evidence); below it — or when the model is\nunavailable — the step parks for a human exactly as without this\nsetting.\nBoxed: most gates don't set it, and `HumanInputDef` rides inside\nevery `StepDef` (and so inside large async state machines)."
+            }
+          ]
         },
         "choices": {
           "type": [

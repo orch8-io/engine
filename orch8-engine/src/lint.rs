@@ -304,6 +304,23 @@ fn lint_handler_params(
                 message: "llm_call: requires at least `messages` or `system` param".into(),
             });
         }
+        // Only literal question maps can be checked here; templated ones
+        // are validated at dispatch.
+        "jev" => {
+            if let Some(questions) = params.get("questions").filter(|q| q.is_object()) {
+                if let Err(e) = crate::handlers::jev::validate_questions(questions) {
+                    warnings.push(LintWarning {
+                        block_id: block_id.into(),
+                        message: format!("jev: {e}"),
+                    });
+                }
+            } else if params.get("questions").is_none() {
+                warnings.push(LintWarning {
+                    block_id: block_id.into(),
+                    message: "jev: requires a `questions` param".into(),
+                });
+            }
+        }
         "agent" if params.get("goal").is_none() && params.get("messages").is_none() => {
             warnings.push(LintWarning {
                 block_id: block_id.into(),

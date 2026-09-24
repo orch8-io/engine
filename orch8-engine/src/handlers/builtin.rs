@@ -314,6 +314,7 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
         super::wait_for_event::handle_wait_for_event,
     );
     registry.register("blob_get", super::blob::handle_blob_get);
+    registry.register("jev", super::jev::handle_jev);
 }
 
 /// No-op handler. Always succeeds with an empty result.

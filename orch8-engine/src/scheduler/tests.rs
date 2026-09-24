@@ -1085,6 +1085,7 @@ async fn wait_for_input_baseline_survives_reentry() {
         choices: None,
         store_as: None,
         allow_comment: false,
+        auto_decide: None,
     });
 
     let registry = HandlerRegistry::new();
@@ -1604,4 +1605,362 @@ async fn subtree_reset_clears_step_delay_markers() {
         inst.metadata.get(&key).and_then(|v| v.as_str()).is_none(),
         "delay marker must be cleared for the next iteration"
     );
+}
+
+// ------------------------------------------------------------------
+// Jev decisions: confidence-gated human gates + decision-driven routing
+// ------------------------------------------------------------------
+
+fn gate_step(base_url: &str, threshold: f64) -> StepDef {
+    let mut step = mk_step_def("approve", "noop", serde_json::json!({}));
+    step.wait_for_input = Some(orch8_types::sequence::HumanInputDef {
+        prompt: "Refund this order?".into(),
+        timeout: None,
+        escalation_handler: None,
+        choices: Some(vec![
+            orch8_types::sequence::HumanChoice {
+                label: "Approve".into(),
+                value: "approve".into(),
+            },
+            orch8_types::sequence::HumanChoice {
+                label: "Reject".into(),
+                value: "reject".into(),
+            },
+        ]),
+        store_as: Some("decision".into()),
+        allow_comment: false,
+        auto_decide: Some(Box::new(orch8_types::sequence::AutoDecideDef {
+            threshold,
+            instructions: None,
+            model: None,
+            api_key: Some("test-key".into()),
+            base_url: Some(base_url.into()),
+            interpret_replies: true,
+        })),
+    });
+    step
+}
+
+async fn gate_instance(storage: &dyn StorageBackend) -> TaskInstance {
+    let id = InstanceId::new();
+    seed_instance_with_context(
+        storage,
+        id,
+        ExecutionContext {
+            data: serde_json::json!({"order": {"amount": 12, "reason": "damaged"}}),
+            ..Default::default()
+        },
+    )
+    .await;
+    storage.get_instance(id).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn auto_decide_accepts_gate_when_confident() {
+    use crate::handlers::jev::tests::{choice_response, mock_jev};
+    let (base, seen, _) = mock_jev(200, choice_response("approve", 0.97)).await;
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance = gate_instance(storage.as_ref()).await;
+    let step = gate_step(&base, 0.9);
+    let human = step.wait_for_input.clone().unwrap();
+
+    let deferred = check_human_input_at(storage.as_ref(), &instance, &step, &human, Utc::now())
+        .await
+        .unwrap();
+    assert!(!deferred, "confident model decision must not park the step");
+
+    let out = storage
+        .get_block_output(instance.id, &BlockId::new("approve"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.output["value"], "approve");
+    assert_eq!(out.output["_decided_by"], "jev");
+    assert_eq!(out.output["_auto_decide"]["confidence"], 0.97);
+    let stored = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(stored.context.data["decision"], "approve");
+
+    // The gate choices become the Choice criteria; the instance data is the state.
+    let sent = seen.lock().await;
+    let q = &sent[0]["questions"]["decision"];
+    assert_eq!(q["type"], "choice");
+    assert_eq!(q["criteria"]["approve"], "Approve");
+    assert_eq!(q["instructions"], "Refund this order?");
+    assert_eq!(sent[0]["state"]["order"]["reason"], "damaged");
+}
+
+#[tokio::test]
+async fn auto_decide_below_threshold_parks_once_and_labels_the_human_answer() {
+    use crate::handlers::jev::tests::{choice_response, mock_jev};
+    let (base, _, hits) = mock_jev(200, choice_response("approve", 0.55)).await;
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance = gate_instance(storage.as_ref()).await;
+    let step = gate_step(&base, 0.9);
+    let human = step.wait_for_input.clone().unwrap();
+
+    assert!(
+        check_human_input_at(storage.as_ref(), &instance, &step, &human, Utc::now())
+            .await
+            .unwrap(),
+        "low confidence must park for a human"
+    );
+    // A later wake must not re-ask the model.
+    let instance = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert!(
+        check_human_input_at(storage.as_ref(), &instance, &step, &human, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // The human disagrees; the acceptance row keeps the model's prediction.
+    storage
+        .enqueue_signal(&Signal {
+            id: Uuid::now_v7(),
+            instance_id: instance.id,
+            signal_type: SignalType::Custom("human_input:approve".into()),
+            payload: serde_json::json!({"value": "reject"}),
+            delivered: false,
+            created_at: Utc::now(),
+            delivered_at: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !check_human_input_at(storage.as_ref(), &instance, &step, &human, Utc::now())
+            .await
+            .unwrap()
+    );
+    let out = storage
+        .get_block_output(instance.id, &BlockId::new("approve"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.output["value"], "reject");
+    assert_eq!(out.output["_decided_by"], "human");
+    assert_eq!(
+        out.output["_auto_decide"]["prediction"]["choice"],
+        "approve"
+    );
+    assert_eq!(out.output["_auto_decide"]["agreed"], false);
+}
+
+#[tokio::test]
+async fn auto_decide_fails_safe_to_a_human_when_the_model_is_down() {
+    use crate::handlers::jev::tests::mock_jev;
+    let (base, _, _) = mock_jev(529, serde_json::json!({"error": "overloaded"})).await;
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance = gate_instance(storage.as_ref()).await;
+    let step = gate_step(&base, 0.9);
+    let human = step.wait_for_input.clone().unwrap();
+
+    assert!(
+        check_human_input_at(storage.as_ref(), &instance, &step, &human, Utc::now())
+            .await
+            .unwrap(),
+        "an unavailable model must never block or auto-decide the gate"
+    );
+    assert!(
+        storage
+            .get_block_output(instance.id, &BlockId::new("approve"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn free_text_reply_is_interpreted_onto_a_choice() {
+    use crate::handlers::jev::tests::{choice_response, mock_jev};
+    let (base, seen, _) = mock_jev(200, choice_response("approve", 0.95)).await;
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance = gate_instance(storage.as_ref()).await;
+    // Mark the model as already consulted so only the reply path calls it.
+    storage
+        .merge_instance_metadata(
+            instance.id,
+            &serde_json::json!({ super::step_exec::auto_decide_marker_key(&BlockId::new("approve")):
+                {"choice": "reject", "confidence": 0.4} }),
+        )
+        .await
+        .unwrap();
+    let instance = storage.get_instance(instance.id).await.unwrap().unwrap();
+    storage
+        .enqueue_signal(&Signal {
+            id: Uuid::now_v7(),
+            instance_id: instance.id,
+            signal_type: SignalType::Custom("human_input:approve".into()),
+            payload: serde_json::json!({"text": "yeah sure, refund them"}),
+            delivered: false,
+            created_at: Utc::now(),
+            delivered_at: None,
+        })
+        .await
+        .unwrap();
+    let step = gate_step(&base, 0.9);
+    let human = step.wait_for_input.clone().unwrap();
+
+    assert!(
+        !check_human_input_at(storage.as_ref(), &instance, &step, &human, Utc::now())
+            .await
+            .unwrap()
+    );
+    let out = storage
+        .get_block_output(instance.id, &BlockId::new("approve"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.output["value"], "approve");
+    assert_eq!(out.output["_decided_by"], "human_reply");
+    assert_eq!(
+        seen.lock().await[0]["state"]["reply"],
+        "yeah sure, refund them"
+    );
+}
+
+/// Decision-driven control flow: a `jev` step's typed answer drives a
+/// router branch and a `when` guard, and its choice can template another
+/// step's params (e.g. an `llm_call` model).
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn jev_step_output_drives_router_and_when_guard() {
+    use crate::handlers::jev::tests::mock_jev;
+    let (base, _, _) = mock_jev(
+        200,
+        serde_json::json!({
+            "model": "jev-1.13.0",
+            "answers": {
+                "team": {"type": "choice", "choice": "billing",
+                         "probabilities": {"billing": 0.9, "technical": 0.1}, "confidence": 0.86},
+                "urgent": {"type": "noul", "noul": 0.2}
+            },
+            "usage": {"input_tokens": 30, "output_tokens": 10}
+        }),
+    )
+    .await;
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+
+    let triage = mk_step_def(
+        "triage",
+        "jev",
+        serde_json::json!({
+            "base_url": base,
+            "api_key": "test-key",
+            "state": "{{context.data.ticket}}",
+            "questions": {
+                "team": {"type": "choice", "instructions": "Which team?",
+                         "criteria": {"billing": "Payments", "technical": "Bugs"}},
+                "urgent": {"type": "noul", "instructions": "Is this urgent?"}
+            }
+        }),
+    );
+    let mut page = mk_step_def("page_oncall", "noop", serde_json::json!({}));
+    page.when = Some("outputs.triage.answers.urgent.noul >= 0.5".into());
+    let billing = mk_step_def(
+        "billing",
+        "transform",
+        serde_json::json!({"output": {"model": "{{outputs.triage.answers.team.choice}}"}}),
+    );
+    let technical = mk_step_def("technical", "noop", serde_json::json!({}));
+    let router = BlockDefinition::Router(Box::new(orch8_types::sequence::RouterDef {
+        id: BlockId::new("route"),
+        routes: vec![orch8_types::sequence::Route {
+            condition: "outputs.triage.answers.team.choice == \"billing\" && outputs.triage.answers.team.confidence >= 0.8".into(),
+            blocks: vec![BlockDefinition::Step(Box::new(billing))],
+        }],
+        default: Some(vec![BlockDefinition::Step(Box::new(technical))]),
+    }));
+    let seq = mk_sequence(vec![
+        BlockDefinition::Step(Box::new(triage)),
+        BlockDefinition::Step(Box::new(page)),
+        router,
+    ]);
+    storage.create_sequence(&seq).await.unwrap();
+    let now = Utc::now();
+    let instance = TaskInstance {
+        id: InstanceId::new(),
+        sequence_id: seq.id,
+        tenant_id: TenantId::unchecked("t"),
+        namespace: Namespace::new("ns"),
+        state: InstanceState::Scheduled,
+        next_fire_at: Some(now),
+        priority: Priority::Normal,
+        timezone: "UTC".into(),
+        metadata: serde_json::json!({}),
+        context: ExecutionContext {
+            data: serde_json::json!({"ticket": "My payouts have been failing for 3 days"}),
+            ..Default::default()
+        },
+        concurrency_key: None,
+        max_concurrency: None,
+        idempotency_key: None,
+        session_id: None,
+        parent_instance_id: None,
+        budget: None,
+        created_at: now,
+        updated_at: now,
+    };
+    storage.create_instance(&instance).await.unwrap();
+
+    let mut registry = HandlerRegistry::new();
+    crate::handlers::builtin::register_builtins(&mut registry);
+    let registry = Arc::new(registry);
+    let config = orch8_types::config::SchedulerConfig::default();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+    let cache = Arc::new(crate::sequence_cache::SequenceCache::new(
+        16,
+        Duration::from_secs(60),
+    ));
+    let cancel = CancellationToken::new();
+    for _ in 0..8 {
+        tick_once(&storage, &registry, &semaphore, &config, &cache, &cancel)
+            .await
+            .unwrap();
+        let state = storage
+            .get_instance(instance.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state;
+        if state.is_terminal() {
+            break;
+        }
+        // Keep re-arming in case a pass parked the instance briefly.
+        let _ = storage
+            .conditional_update_instance_state(
+                instance.id,
+                InstanceState::Scheduled,
+                InstanceState::Scheduled,
+                Some(Utc::now()),
+            )
+            .await;
+    }
+    let done = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(done.state, InstanceState::Completed);
+
+    let tree = storage.get_execution_tree(instance.id).await.unwrap();
+    let state_of = |b: &str| {
+        tree.iter()
+            .find(|n| n.block_id.as_str() == b)
+            .map(|n| n.state)
+    };
+    assert_eq!(
+        state_of("billing"),
+        Some(orch8_types::execution::NodeState::Completed)
+    );
+    assert_ne!(
+        state_of("technical"),
+        Some(orch8_types::execution::NodeState::Completed)
+    );
+    assert_eq!(
+        state_of("page_oncall"),
+        Some(orch8_types::execution::NodeState::Skipped),
+        "low urgency must skip the on-call page"
+    );
+    let billing_out = storage
+        .get_block_output(instance.id, &BlockId::new("billing"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(billing_out.output["output"]["model"], "billing");
 }

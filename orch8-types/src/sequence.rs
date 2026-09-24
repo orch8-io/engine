@@ -528,6 +528,13 @@ const SEQUENCE_FIELD_NAMES: &[&str] = &[
     "choices",
     "store_as",
     "allow_comment",
+    "auto_decide",
+    "threshold",
+    "instructions",
+    "model",
+    "api_key",
+    "base_url",
+    "interpret_replies",
     "label",
     "value",
     "non_retryable_codes",
@@ -1008,6 +1015,69 @@ pub struct HumanInputDef {
     /// When true, the reviewer can attach a free-text comment to their decision.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_comment: bool,
+    /// Confidence-gated automation: ask the Jev decision model to answer the
+    /// gate first. At or above `threshold` confidence the gate is accepted
+    /// without a human (the decision, confidence and probabilities are kept
+    /// on the gate's output as evidence); below it — or when the model is
+    /// unavailable — the step parks for a human exactly as without this
+    /// setting.
+    /// Boxed: most gates don't set it, and `HumanInputDef` rides inside
+    /// every `StepDef` (and so inside large async state machines).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_decide: Option<Box<AutoDecideDef>>,
+}
+
+/// Default confidence required before a gate is decided without a human.
+pub const DEFAULT_AUTO_DECIDE_THRESHOLD: f64 = 0.9;
+
+const fn default_auto_decide_threshold() -> f64 {
+    DEFAULT_AUTO_DECIDE_THRESHOLD
+}
+
+/// `wait_for_input.auto_decide`: let a calibrated decision model answer a
+/// human gate when it is confident enough.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct AutoDecideDef {
+    /// Minimum model confidence in `[0, 1]` to accept without a human.
+    #[serde(default = "default_auto_decide_threshold")]
+    pub threshold: f64,
+    /// Question put to the model; defaults to the gate's `prompt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Model id; defaults to `jev-latest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// API key (literal or `credentials://` reference). When omitted the
+    /// operator's `TYPESAFE_API_KEY` is used — only for the default endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Endpoint override; requires an explicit `api_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Map a free-text human reply (`{"text": "sure, go ahead"}`) onto one of
+    /// the gate's choices instead of rejecting it as an invalid value.
+    #[serde(default = "crate::serde_defaults::yes")]
+    pub interpret_replies: bool,
+}
+
+impl AutoDecideDef {
+    /// Structural validation.
+    ///
+    /// # Errors
+    /// Returns a message when `threshold` is outside `[0, 1]` or a custom
+    /// `base_url` is set without an explicit `api_key`.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(0.0..=1.0).contains(&self.threshold) {
+            return Err(format!(
+                "auto_decide.threshold must be within [0, 1], got {}",
+                self.threshold
+            ));
+        }
+        if self.base_url.is_some() && self.api_key.is_none() {
+            return Err("auto_decide.base_url requires an explicit api_key".into());
+        }
+        Ok(())
+    }
 }
 
 impl HumanInputDef {
@@ -1039,6 +1109,9 @@ impl HumanInputDef {
             && s.is_empty()
         {
             return Err("human_review: `store_as` must be non-empty".into());
+        }
+        if let Some(auto) = &self.auto_decide {
+            auto.validate().map_err(|e| format!("human_review: {e}"))?;
         }
         Ok(())
     }
@@ -1309,6 +1382,7 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "blob_put",
     "blob_get",
     "wait_for_event",
+    "jev",
 ];
 
 impl SequenceDefinition {
@@ -2385,6 +2459,45 @@ mod tests {
     }
 
     #[test]
+    fn auto_decide_defaults_validation_and_strict_typos() {
+        let def: HumanInputDef = serde_json::from_value(serde_json::json!({
+            "prompt": "ok?", "auto_decide": {}
+        }))
+        .unwrap();
+        let auto = def.auto_decide.clone().unwrap();
+        assert!((auto.threshold - DEFAULT_AUTO_DECIDE_THRESHOLD).abs() < f64::EPSILON);
+        assert!(auto.interpret_replies);
+        assert!(def.validate().is_ok());
+
+        let mut bad = def.clone();
+        bad.auto_decide = Some(Box::new(AutoDecideDef {
+            threshold: 1.5,
+            ..(*auto).clone()
+        }));
+        assert!(bad.validate().is_err());
+        bad.auto_decide = Some(Box::new(AutoDecideDef {
+            base_url: Some("https://proxy.example".into()),
+            ..*auto
+        }));
+        assert!(bad.validate().is_err(), "custom endpoint needs its own key");
+
+        let value = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "tenant_id": "tenant",
+            "namespace": "default",
+            "name": "typo",
+            "version": 1,
+            "blocks": [{
+                "type": "step", "id": "gate", "handler": "noop",
+                "wait_for_input": {"prompt": "ok?", "auto_decide": {"threshhold": 0.8}}
+            }],
+            "created_at": "2026-09-01T00:00:00Z"
+        });
+        let error = deserialize_sequence_strict(&value).unwrap_err();
+        assert!(error.to_string().contains("threshhold"), "{error}");
+    }
+
+    #[test]
     fn strict_sequence_decode_reports_nested_type_error_path() {
         let value = serde_json::json!({
             "id": uuid::Uuid::nil(),
@@ -2980,6 +3093,7 @@ mod tests {
             choices: Some(vec![]),
             store_as: None,
             allow_comment: false,
+            auto_decide: None,
         };
         let step_with_bad = BlockDefinition::Step(Box::new(StepDef {
             id: BlockId::new("review"),
@@ -3019,6 +3133,7 @@ mod tests {
             choices: Some(vec![]),
             store_as: None,
             allow_comment: false,
+            auto_decide: None,
         };
         assert!(d.validate().is_err());
     }
@@ -3041,6 +3156,7 @@ mod tests {
             ]),
             store_as: None,
             allow_comment: false,
+            auto_decide: None,
         };
         assert!(d.validate().is_err());
     }
@@ -3054,6 +3170,7 @@ mod tests {
             choices: None,
             store_as: Some(String::new()),
             allow_comment: false,
+            auto_decide: None,
         };
         assert!(d.validate().is_err());
     }
@@ -3076,6 +3193,7 @@ mod tests {
             ]),
             store_as: Some("decision".into()),
             allow_comment: false,
+            auto_decide: None,
         };
         assert!(d.validate().is_ok());
     }
@@ -3089,6 +3207,7 @@ mod tests {
             choices: None,
             store_as: None,
             allow_comment: false,
+            auto_decide: None,
         };
         assert!(d.validate().is_ok());
     }
@@ -3102,6 +3221,7 @@ mod tests {
             choices: None,
             store_as: None,
             allow_comment: false,
+            auto_decide: None,
         };
         let c = d.effective_choices();
         assert_eq!(c.len(), 2);
@@ -3123,6 +3243,7 @@ mod tests {
             }]),
             store_as: None,
             allow_comment: false,
+            auto_decide: None,
         };
         let c = d.effective_choices();
         assert_eq!(c.len(), 1);

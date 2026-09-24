@@ -1513,6 +1513,12 @@ pub async fn reset_subtree_to_pending(
                 crate::scheduler::delay_marker_key(block_id),
                 serde_json::Value::Null,
             );
+            // Same for a gate's deferred auto_decide prediction: the next
+            // iteration's gate must consult the model afresh.
+            cleared.insert(
+                crate::scheduler::auto_decide_marker_key(block_id),
+                serde_json::Value::Null,
+            );
         }
         storage
             .merge_instance_metadata(instance_id, &serde_json::Value::Object(cleared))

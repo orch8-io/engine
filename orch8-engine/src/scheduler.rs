@@ -30,8 +30,8 @@ mod step_exec;
 mod tests;
 
 pub(crate) use step_exec::{
-    HUMAN_GATE_MARKER, clamped_fire_at, delay_marker_key, park_tree_instance_until,
-    step_preamble_deferral,
+    HUMAN_GATE_MARKER, auto_decide_marker_key, clamped_fire_at, delay_marker_key,
+    park_tree_instance_until, step_preamble_deferral,
 };
 pub use step_exec::{check_human_input, check_human_input_at};
 
