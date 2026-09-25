@@ -1351,6 +1351,36 @@ pub fn any_completed(nodes: &[&ExecutionNode]) -> bool {
     nodes.iter().any(|n| n.state == NodeState::Completed)
 }
 
+/// Check if all children of a node are in a terminal state directly from the tree slice.
+/// ⚡ Bolt: This avoids collecting intermediate `Vec`s of children when we only need a boolean.
+pub fn all_children_terminal(
+    tree: &[ExecutionNode],
+    parent_id: ExecutionNodeId,
+    branch_index: Option<i16>,
+) -> bool {
+    tree.iter()
+        .filter(|n| {
+            n.parent_id == Some(parent_id)
+                && (branch_index.is_none() || n.branch_index == branch_index)
+        })
+        .all(|n| n.state.is_terminal())
+}
+
+/// Check if any child of a node failed directly from the tree slice.
+/// ⚡ Bolt: This avoids collecting intermediate `Vec`s of children when we only need a boolean.
+pub fn any_child_failed(
+    tree: &[ExecutionNode],
+    parent_id: ExecutionNodeId,
+    branch_index: Option<i16>,
+) -> bool {
+    tree.iter()
+        .filter(|n| {
+            n.parent_id == Some(parent_id)
+                && (branch_index.is_none() || n.branch_index == branch_index)
+        })
+        .any(|n| n.state == NodeState::Failed)
+}
+
 /// Check if all nodes completed successfully.
 pub fn all_completed(nodes: &[&ExecutionNode]) -> bool {
     nodes.iter().all(|n| n.state == NodeState::Completed)
