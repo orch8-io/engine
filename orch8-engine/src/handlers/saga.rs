@@ -42,12 +42,12 @@ pub async fn execute_saga(
     // Phase 1: run actions sequentially, step 0 first.
     let mut failed_step: Option<usize> = None;
     for i in 0..n {
-        let action_children = evaluator::children_of(tree, node.id, action_branch(i));
-        if !evaluator::all_terminal(&action_children) {
+        if !evaluator::all_children_terminal(tree, node.id, action_branch(i)) {
+            let action_children = evaluator::children_of(tree, node.id, action_branch(i));
             evaluator::activate_first_pending_child(storage, &action_children).await?;
             return Ok(true);
         }
-        if evaluator::any_failed(&action_children) {
+        if evaluator::any_child_failed(tree, node.id, action_branch(i)) {
             failed_step = Some(i);
             break;
         }
@@ -94,12 +94,12 @@ pub async fn execute_saga(
         if saga_def.steps[i].compensation.is_none() {
             continue;
         }
-        let comp_children = evaluator::children_of(tree, node.id, compensation_branch(i));
-        if !evaluator::all_terminal(&comp_children) {
+        if !evaluator::all_children_terminal(tree, node.id, compensation_branch(i)) {
+            let comp_children = evaluator::children_of(tree, node.id, compensation_branch(i));
             evaluator::activate_first_pending_child(storage, &comp_children).await?;
             return Ok(true);
         }
-        if evaluator::any_failed(&comp_children) {
+        if evaluator::any_child_failed(tree, node.id, compensation_branch(i)) {
             warn!(
                 instance_id = %instance.id,
                 block_id = %saga_def.id,

@@ -17,3 +17,6 @@
 ## 2025-11-06 - [Replace HashMap with Vec in DeadlineOutputs]
 **Learning:** In the `prefetch_deadline_outputs` phase of the scheduler (`orch8-engine/src/scheduler.rs`), building a `HashMap` of references incurred unnecessary hashing and allocation overhead on every tick.
 **Action:** When creating a lookup table from a batch of pre-fetched results on a hot path, replace the `HashMap` with a flat `Vec` initialized with `Vec::with_capacity()`, sort it by a composite key, and use `.binary_search_by()` for O(log N) zero-allocation lookups.
+## 2025-11-06 - [Avoid intermediate Vec allocations for tree state checks]
+**Learning:** In the `execute_saga` and similar node evaluation functions in `orch8-engine`, evaluating tree state previously involved extracting children references via `children_of` into a new `Vec`, then calling `all_terminal` or `any_failed` on that `Vec`. This causes unnecessary heap allocations in hot evaluation loops just to evaluate a boolean condition.
+**Action:** When checking child node states in `orch8-engine` hot paths, avoid collecting node references via `children_of` followed by `all_terminal` or `any_failed`. Instead, use the allocation-free helper functions `all_children_terminal` and `any_child_failed` directly on the `tree` slice.
