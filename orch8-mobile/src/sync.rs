@@ -185,6 +185,41 @@ pub struct SyncResult {
     pub signature_failures: u32,
 }
 
+/// Detached-signature URL for a sequence URL: swap a trailing `.json` path
+/// extension for `.sig` (or append `.sig`). Only the path changes, so a
+/// hostname or query string containing `.json` is left alone.
+fn signature_url(sequence_url: &reqwest::Url) -> reqwest::Url {
+    let mut sig = sequence_url.clone();
+    let path = sequence_url.path();
+    let sig_path = path
+        .strip_suffix(".json")
+        .map_or_else(|| format!("{path}.sig"), |stem| format!("{stem}.sig"));
+    sig.set_path(&sig_path);
+    sig
+}
+
+/// Decode a base64 Ed25519 detached signature.
+fn decode_signature(sig_b64: &str) -> Result<Signature, String> {
+    let bytes = BASE64
+        .decode(sig_b64.trim())
+        .map_err(|e| format!("signature decode failed: {e}"))?;
+    let bytes: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| "signature wrong length".to_string())?;
+    Ok(Signature::from_bytes(&bytes))
+}
+
+/// Decode a base64 Ed25519 verifying key.
+fn decode_verifying_key(key_b64: &str) -> Result<VerifyingKey, String> {
+    let bytes = BASE64
+        .decode(key_b64)
+        .map_err(|e| format!("key decode failed: {e}"))?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "key invalid length".to_string())?;
+    VerifyingKey::from_bytes(&bytes).map_err(|e| format!("key invalid: {e}"))
+}
+
 /// Auth configuration for sync requests.
 pub enum SyncAuth {
     /// Token provided via callback interface.
@@ -201,6 +236,9 @@ pub struct SyncOrchestrator {
     http: OnceLock<reqwest::Client>,
     sdk_version: String,
     max_stored_sequences: u32,
+    /// Test-only escape hatch: loopback `http://` mock servers. Production
+    /// always requires public `https://` sequence/signature URLs.
+    allow_insecure_urls: bool,
 }
 
 impl SyncOrchestrator {
@@ -218,7 +256,37 @@ impl SyncOrchestrator {
             http: OnceLock::new(),
             sdk_version,
             max_stored_sequences,
+            allow_insecure_urls: false,
         }
+    }
+
+    /// Allow `http://` loopback sequence URLs (unit tests with mock servers).
+    #[cfg(test)]
+    pub(crate) fn with_insecure_urls_for_tests(mut self) -> Self {
+        self.allow_insecure_urls = true;
+        self
+    }
+
+    /// Resolve a manifest entry URL against the manifest URL. The publisher
+    /// emits relative URLs (`sequences/foo/1.json`); absolute URLs pass
+    /// through `Url::join` unchanged. The result must be a public HTTPS URL.
+    fn resolve_entry_url(
+        &self,
+        manifest_url: &str,
+        entry_url: &str,
+    ) -> Result<reqwest::Url, MobileError> {
+        let base = reqwest::Url::parse(manifest_url).map_err(|e| MobileError::InvalidInput {
+            message: format!("invalid manifest URL: {e}"),
+        })?;
+        let url = base
+            .join(entry_url)
+            .map_err(|e| MobileError::InvalidInput {
+                message: format!("invalid sequence URL {entry_url:?}: {e}"),
+            })?;
+        if !self.allow_insecure_urls {
+            crate::validate_https_url(url.as_str())?;
+        }
+        Ok(url)
     }
 
     fn http_client(&self) -> &reqwest::Client {
@@ -348,6 +416,7 @@ impl SyncOrchestrator {
         // 5. Download and verify each sequence.
         let (added, updated, skipped, sig_failures) = self
             .download_and_verify_sequences(
+                manifest_url,
                 &manifest,
                 auth,
                 registered_handlers,
@@ -494,6 +563,7 @@ impl SyncOrchestrator {
     #[allow(clippy::too_many_lines)]
     async fn download_and_verify_sequences(
         &self,
+        manifest_url: &str,
         manifest: &Manifest,
         auth: &SyncAuth,
         registered_handlers: &HashSet<String>,
@@ -546,7 +616,15 @@ impl SyncOrchestrator {
                 continue;
             }
 
-            let seq_json = match self.download_sequence(&entry.url, auth).await {
+            let seq_url = match self.resolve_entry_url(manifest_url, &entry.url) {
+                Ok(url) => url,
+                Err(e) => {
+                    warn!(name = %entry.name, error = %e, "unusable sequence URL — skipping");
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let seq_json = match self.download_sequence(seq_url.as_str(), auth).await {
                 Ok(json) => json,
                 Err(e) => {
                     warn!(name = %entry.name, error = %e, "failed to download sequence");
@@ -577,21 +655,16 @@ impl SyncOrchestrator {
                         message: e.to_string(),
                     })?;
                 if let Some(cached_b64) = cached {
-                    let bytes =
-                        BASE64
-                            .decode(&cached_b64)
-                            .map_err(|e| SyncError::SignatureInvalid {
-                                message: format!("cached key decode failed: {e}"),
-                            })?;
-                    let pk = VerifyingKey::from_bytes(&bytes.try_into().map_err(|_| {
-                        SyncError::SignatureInvalid {
-                            message: "cached key invalid length".to_string(),
+                    // A corrupt cached key only disqualifies entries signed
+                    // with it; it must not abort the whole sync.
+                    match decode_verifying_key(&cached_b64) {
+                        Ok(pk) => {
+                            trusted_keys.insert(entry.signing_key_id.clone(), pk);
                         }
-                    })?)
-                    .map_err(|e| SyncError::SignatureInvalid {
-                        message: format!("cached key invalid: {e}"),
-                    })?;
-                    trusted_keys.insert(entry.signing_key_id.clone(), pk);
+                        Err(message) => {
+                            warn!(key_id = %entry.signing_key_id, %message, "cached signing key unusable");
+                        }
+                    }
                 }
             }
 
@@ -601,32 +674,22 @@ impl SyncOrchestrator {
                 continue;
             };
 
-            let sig_url = entry.url.replace(".json", ".sig");
-            match self.download_sequence(&sig_url, auth).await {
-                Ok(sig_b64) => {
-                    let sig_bytes =
-                        BASE64
-                            .decode(sig_b64.trim())
-                            .map_err(|e| SyncError::SignatureInvalid {
-                                message: format!("sequence signature decode failed: {e}"),
-                            })?;
-                    let sig: Signature =
-                        Signature::from_bytes(&sig_bytes.try_into().map_err(|_| {
-                            SyncError::SignatureInvalid {
-                                message: "sequence signature wrong length".to_string(),
-                            }
-                        })?);
-                    if let Err(e) = signing_pk.verify(seq_json.as_bytes(), &sig) {
-                        warn!(name = %entry.name, error = %e, "sequence signature verification failed — skipping");
-                        sig_failures += 1;
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    warn!(name = %entry.name, error = %e, "failed to download sequence signature — skipping");
-                    sig_failures += 1;
-                    continue;
-                }
+            // MOB-N3: every per-entry signature failure (download, decode,
+            // length, verify) counts and skips just this entry — a single
+            // malformed `.sig` must not abort the sync for every sequence.
+            let sig_url = signature_url(&seq_url);
+            let verified = match self.download_sequence(sig_url.as_str(), auth).await {
+                Ok(sig_b64) => decode_signature(&sig_b64).and_then(|sig| {
+                    signing_pk
+                        .verify(seq_json.as_bytes(), &sig)
+                        .map_err(|e| format!("verification failed: {e}"))
+                }),
+                Err(e) => Err(format!("download failed: {e}")),
+            };
+            if let Err(message) = verified {
+                warn!(name = %entry.name, %message, "sequence signature invalid — skipping");
+                sig_failures += 1;
+                continue;
             }
 
             // H-14: a single poison manifest entry (passes hash + signature
@@ -1529,7 +1592,8 @@ mod tests {
             },
             "0.4.0".to_string(),
             50,
-        );
+        )
+        .with_insecure_urls_for_tests();
 
         // Local copy already at version 2.
         let mut existing = make_test_sequence("seq-a", Utc::now());
@@ -1571,6 +1635,7 @@ mod tests {
         let mut trusted_keys = HashMap::new();
         let (added, updated, skipped, sig_failures) = orch
             .download_and_verify_sequences(
+                "http://127.0.0.1/manifest",
                 &manifest,
                 &SyncAuth::UrlToken,
                 &HashSet::new(),
@@ -1609,7 +1674,8 @@ mod tests {
             },
             "0.4.0".to_string(),
             50,
-        );
+        )
+        .with_insecure_urls_for_tests();
 
         // Local copy is behind the manifest's version.
         let mut existing = make_test_sequence("seq-a", Utc::now());
@@ -1655,6 +1721,7 @@ mod tests {
         let mut trusted_keys = HashMap::new();
         let (_added, _updated, skipped, _sig_failures) = orch
             .download_and_verify_sequences(
+                "http://127.0.0.1/manifest",
                 &manifest,
                 &SyncAuth::UrlToken,
                 &HashSet::new(),
@@ -1682,6 +1749,152 @@ mod tests {
     /// must not abort the whole sync. Every other entry in the same manifest
     /// must still be processed (previously a bare `?` on the JSON parse
     /// propagated an error out of the whole loop).
+    #[test]
+    fn signature_url_only_rewrites_path_extension() {
+        let url = reqwest::Url::parse("https://cdn.json.example/a.json/seq.json?x=.json").unwrap();
+        assert_eq!(
+            signature_url(&url).as_str(),
+            "https://cdn.json.example/a.json/seq.sig?x=.json"
+        );
+        let url = reqwest::Url::parse("https://cdn.example/seq").unwrap();
+        assert_eq!(signature_url(&url).as_str(), "https://cdn.example/seq.sig");
+    }
+
+    #[tokio::test]
+    async fn resolve_entry_url_joins_relative_and_enforces_https() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let orch = SyncOrchestrator::new(
+            Arc::new(MobileStorage::new(sqlite.clone())),
+            sqlite,
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        );
+        let base = "https://cdn.example/t/manifest.json";
+        assert_eq!(
+            orch.resolve_entry_url(base, "sequences/a/1.json")
+                .unwrap()
+                .as_str(),
+            "https://cdn.example/t/sequences/a/1.json"
+        );
+        assert!(
+            orch.resolve_entry_url(base, "http://cdn.example/a.json")
+                .is_err()
+        );
+        assert!(
+            orch.resolve_entry_url(base, "https://127.0.0.1/a.json")
+                .is_err()
+        );
+    }
+
+    /// MOB-N3 + MOB-N4: a malformed `.sig` counts as one signature failure
+    /// (the rest of the manifest still syncs), and relative entry URLs are
+    /// resolved against the manifest URL.
+    #[tokio::test]
+    async fn malformed_signature_skips_entry_and_relative_urls_resolve() {
+        use ed25519_dalek::Signer;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let orch = SyncOrchestrator::new(
+            Arc::new(MobileStorage::new(sqlite.clone())),
+            sqlite,
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        )
+        .with_insecure_urls_for_tests();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let bad_seq = make_test_sequence("seq-bad", Utc::now());
+        let bad_json = serde_json::to_vec(&bad_seq).unwrap();
+        let good_seq = make_test_sequence("seq-good", Utc::now());
+        let good_json = serde_json::to_vec(&good_seq).unwrap();
+        let good_sig = signing_key.sign(&good_json);
+        let (bad_body, good_body) = (bad_json.clone(), good_json.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let paths = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&paths);
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 4096];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string();
+                seen.lock().unwrap().push(path.clone());
+                let body: Vec<u8> = match path.as_str() {
+                    "/m/bad.json" => bad_body.clone(),
+                    "/m/bad.sig" => b"%%% not base64 %%%".to_vec(),
+                    "/m/good.json" => good_body.clone(),
+                    _ => BASE64.encode(good_sig.to_bytes()).into_bytes(),
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+            }
+        });
+
+        let entry = |name: &str, url: &str, json: &[u8]| ManifestSequenceEntry {
+            name: name.to_string(),
+            version: 1,
+            url: url.to_string(),
+            signing_key_id: "k1".to_string(),
+            sha256: to_hex(&Sha256::digest(json)),
+            required_handlers: vec![],
+            min_sdk_version: "0.0.0".to_string(),
+        };
+        let manifest = Manifest {
+            signing_keys: vec![],
+            sequences: vec![
+                entry("seq-bad", "bad.json", &bad_json),
+                entry("seq-good", "good.json", &good_json),
+            ],
+            removed: vec![],
+            manifest_version: 1,
+            generated_at: Utc::now(),
+        };
+        let mut trusted_keys = HashMap::new();
+        trusted_keys.insert("k1".to_string(), signing_key.verifying_key());
+
+        let (added, _, skipped, sig_failures) = orch
+            .download_and_verify_sequences(
+                &format!("http://127.0.0.1:{port}/m/manifest.json"),
+                &manifest,
+                &SyncAuth::UrlToken,
+                &HashSet::new(),
+                &HashMap::new(),
+                &mut trusted_keys,
+            )
+            .await
+            .expect("a malformed .sig must not abort the sync");
+        server.await.unwrap();
+        assert_eq!(sig_failures, 1);
+        assert_eq!(added, 1);
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            *paths.lock().unwrap(),
+            vec!["/m/bad.json", "/m/bad.sig", "/m/good.json", "/m/good.sig"]
+        );
+    }
+
     #[tokio::test]
     #[allow(
         clippy::too_many_lines,
@@ -1703,7 +1916,8 @@ mod tests {
             },
             "0.4.0".to_string(),
             50,
-        );
+        )
+        .with_insecure_urls_for_tests();
 
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let verifying_key = signing_key.verifying_key();
@@ -1790,6 +2004,7 @@ mod tests {
 
         let (added, updated, skipped, sig_failures) = orch
             .download_and_verify_sequences(
+                "http://127.0.0.1/manifest",
                 &manifest,
                 &SyncAuth::UrlToken,
                 &HashSet::new(),

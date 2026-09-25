@@ -21,6 +21,7 @@
 //!   will retry (and surface the error in its own context).
 
 use orch8_storage::StorageBackend;
+use orch8_types::ids::InstanceId;
 use orch8_types::instance::TaskInstance;
 
 use crate::externalized::extract_ref_key;
@@ -48,12 +49,16 @@ pub async fn preload_externalized_markers(
     // (fan-in pattern) is fetched once.
     // Upper-bound capacity: every instance could have every top-level field as a
     // ref key. In practice ref keys are sparse, so this is a generous reserve.
-    let mut ref_keys: Vec<String> = Vec::with_capacity(instances.len() * 4);
+    //
+    // Each ref is requested together with the instance whose context holds
+    // it; storage only resolves refs that instance owns, so a forged marker
+    // pointing at another instance's payload stays un-hydrated.
+    let mut ref_keys: Vec<(InstanceId, String)> = Vec::with_capacity(instances.len() * 4);
     for inst in instances.iter() {
         if let Some(obj) = inst.context.data.as_object() {
             for value in obj.values() {
                 if let Some(k) = extract_ref_key(value) {
-                    ref_keys.push(k.to_string());
+                    ref_keys.push((inst.id, k.to_string()));
                 }
             }
         }
@@ -103,6 +108,7 @@ pub async fn preload_externalized_markers(
     //     this relative to REFS_HYDRATED; useful for measuring work done).
     let mut slots_hydrated: u64 = 0;
     for inst in instances.iter_mut() {
+        let inst_id = inst.id;
         let Some(obj) = inst.context.data.as_object_mut() else {
             continue;
         };
@@ -114,7 +120,7 @@ pub async fn preload_externalized_markers(
             // so the mutation below cannot accidentally grow a dependency
             // on `extract_ref_key`'s return lifetime.
             let payload = extract_ref_key(value)
-                .and_then(|k| resolved.get(k))
+                .and_then(|k| resolved.get(&(inst_id, k.to_string())))
                 .cloned();
             if let Some(payload) = payload {
                 *value = payload;
@@ -241,31 +247,32 @@ mod tests {
         preload_externalized_markers(&storage, &mut batch).await;
     }
 
+    /// STO-N1: a marker is plain JSON, so another instance (e.g. via a forged
+    /// worker output merged into context) can name the owner's `ref_key`.
+    /// Only the owner may hydrate it.
     #[tokio::test]
-    async fn preload_dedupes_shared_refs_across_instances() {
-        // Fan-in pattern: two instances reference the same externalized
-        // payload. The batch fetch should still hydrate both.
+    async fn preload_does_not_hydrate_foreign_refs() {
         let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
             .await
             .unwrap();
-        let shared_ref = "shared:ctx:data:payload";
-        let shared_payload = json!({ "shared": true });
         let owner = InstanceId::new();
         seed_instance(&storage, owner).await;
+        let ref_k = format!("{}:ctx:data:secret", owner.into_uuid());
+        let payload = json!({ "secret": true });
         storage
-            .save_externalized_state(owner, shared_ref, &shared_payload)
+            .save_externalized_state(owner, &ref_k, &payload)
             .await
             .unwrap();
 
-        let mut batch = vec![
-            mk_instance(json!({ "x": marker(shared_ref) })),
-            mk_instance(json!({ "x": marker(shared_ref) })),
-        ];
+        let mut owner_inst = mk_instance(json!({ "x": marker(&ref_k) }));
+        owner_inst.id = owner;
+        let forger = mk_instance(json!({ "x": marker(&ref_k) }));
+        let mut batch = vec![owner_inst, forger];
 
         preload_externalized_markers(&storage, &mut batch).await;
 
-        assert_eq!(batch[0].context.data["x"], shared_payload);
-        assert_eq!(batch[1].context.data["x"], shared_payload);
+        assert_eq!(batch[0].context.data["x"], payload);
+        assert_eq!(batch[1].context.data["x"], marker(&ref_k));
     }
 
     #[tokio::test]

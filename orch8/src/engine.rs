@@ -77,6 +77,17 @@ struct Inner {
     tick_task: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// L1: dropping the last `Engine` handle without calling
+/// [`Engine::shutdown`] used to leave the spawned tick loop running forever
+/// on the host runtime (it owns its own clones of storage and handlers).
+/// Cancelling here stops it; in-flight steps are not awaited -- call
+/// `shutdown` for a graceful drain.
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 /// An embedded Orch8 engine. Cheap to clone (all state is behind an `Arc`),
 /// so it can be shared across tasks — e.g. stored in an axum router's state.
 ///
@@ -195,14 +206,31 @@ impl Engine {
         Ok(result)
     }
 
+    /// Load an instance only if it belongs to this engine's tenant (M6).
+    /// A foreign-tenant instance is reported as `NotFound`, never leaked.
+    /// Every id-addressed facade call goes through this helper.
+    async fn scoped_instance(&self, id: InstanceId) -> Result<TaskInstance, Error> {
+        self.inner
+            .storage
+            .get_instance(id)
+            .await?
+            .filter(|instance| instance.tenant_id == self.inner.tenant)
+            .ok_or_else(|| Error::NotFound(format!("instance {id}")))
+    }
+
     /// Register a sequence definition (idempotently).
+    ///
+    /// The sequence is always stored under this engine's tenant: its
+    /// `tenant_id` is overwritten with [`Self::tenant`] (M6), so an embedder
+    /// cannot write into, or collide with, another tenant's sequences.
     ///
     /// The definition is validated, then stored. If a sequence with the same
     /// `(tenant_id, namespace, name, version)` already exists, the existing
     /// definition is left untouched and its id is returned — published
     /// versions are immutable so running instances stay pinned to the
     /// definition they started with. Publish changes by bumping `version`.
-    pub async fn upsert_sequence(&self, seq: SequenceDefinition) -> Result<SequenceId, Error> {
+    pub async fn upsert_sequence(&self, mut seq: SequenceDefinition) -> Result<SequenceId, Error> {
+        seq.tenant_id = self.inner.tenant.clone();
         seq.validate()
             .map_err(|e| Error::InvalidSequence(e.to_string()))?;
         if let Some(existing) = self
@@ -251,10 +279,12 @@ impl Engine {
 
         // Resolve the sequence up-front so a missing id surfaces as NotFound
         // rather than a foreign-key violation from the storage layer.
+        // A sequence owned by another tenant is reported as missing (M6).
         self.inner
             .storage
             .get_sequence(sequence_id)
             .await?
+            .filter(|sequence| sequence.tenant_id == self.inner.tenant)
             .ok_or_else(|| Error::NotFound(format!("sequence {}", sequence_id.into_uuid())))?;
 
         // Normalize an empty key to `None`: the unique index on
@@ -326,6 +356,7 @@ impl Engine {
         &self,
         id: InstanceId,
     ) -> Result<Vec<orch8_types::output::BlockOutput>, Error> {
+        self.scoped_instance(id).await?;
         Ok(self.inner.storage.get_all_outputs(id).await?)
     }
 
@@ -338,10 +369,7 @@ impl Engine {
     pub async fn effect_receipts(&self, id: InstanceId) -> Result<Vec<EffectReceipt>, Error> {
         // Resolve through the tenant-scoped instance API first so an unknown
         // ID is distinguishable from a known instance with no effects.
-        let instance = self.get_instance(id).await?;
-        if instance.tenant_id != self.inner.tenant {
-            return Err(Error::NotFound(format!("instance {id}")));
-        }
+        self.scoped_instance(id).await?;
         Ok(self
             .inner
             .storage
@@ -360,24 +388,27 @@ impl Engine {
     }
 
     /// Fetch the current snapshot of an instance (state, context, timestamps).
+    /// Instances of other tenants are reported as [`Error::NotFound`].
     pub async fn get_instance(&self, id: InstanceId) -> Result<TaskInstance, Error> {
-        self.inner
-            .storage
-            .get_instance(id)
-            .await?
-            .ok_or_else(|| Error::NotFound(format!("instance {id}")))
+        self.scoped_instance(id).await
     }
 
     /// List instances matching `filter` (most recently updated first,
     /// at most 100 rows). Use [`InstanceFilter::default`] to list everything.
+    /// Always restricted to this engine's tenant: `filter.tenant_id` is
+    /// overridden (M6).
     pub async fn list_instances(
         &self,
         filter: &InstanceFilter,
     ) -> Result<Vec<TaskInstance>, Error> {
+        let filter = InstanceFilter {
+            tenant_id: Some(self.inner.tenant.clone()),
+            ..filter.clone()
+        };
         let instances = self
             .inner
             .storage
-            .list_instances(filter, &Pagination::default().capped())
+            .list_instances(&filter, &Pagination::default().capped())
             .await?;
         Ok(instances)
     }
@@ -419,6 +450,7 @@ impl Engine {
         signal_type: SignalType,
         payload: serde_json::Value,
     ) -> Result<(), Error> {
+        self.scoped_instance(id).await?;
         let signal = Signal {
             id: uuid::Uuid::now_v7(),
             instance_id: id,
@@ -472,5 +504,48 @@ impl Engine {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L1: dropping the last handle cancels the background tick loop.
+    #[tokio::test]
+    async fn dropping_last_handle_cancels_tick_loop() {
+        let storage = crate::Storage::sqlite_in_memory().connect().await.unwrap();
+        let engine = Engine::from_parts(
+            storage,
+            HandlerRegistry::new(),
+            SchedulerConfig::default(),
+            TenantId::unchecked("default"),
+        );
+        engine.start();
+        let token = engine.inner.cancel.clone();
+        let task = engine
+            .inner
+            .tick_task
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(JoinHandle::abort_handle)
+            .unwrap();
+        let clone = engine.clone();
+        drop(engine);
+        assert!(
+            !token.is_cancelled(),
+            "a live clone keeps the engine running"
+        );
+        drop(clone);
+        assert!(token.is_cancelled());
+        // The loop observes the cancellation and exits on its own.
+        for _ in 0..200 {
+            if task.is_finished() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("tick loop kept running after the engine was dropped");
     }
 }

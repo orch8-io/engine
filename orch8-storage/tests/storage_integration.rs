@@ -1688,11 +1688,20 @@ async fn externalized_state_crud() {
         .await
         .unwrap();
 
-    let fetched = s.get_externalized_state(&ref_key).await.unwrap().unwrap();
+    let fetched = s
+        .get_externalized_state(inst_id, &ref_key)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched, payload);
 
     s.delete_externalized_state(&ref_key).await.unwrap();
-    assert!(s.get_externalized_state(&ref_key).await.unwrap().is_none());
+    assert!(
+        s.get_externalized_state(inst_id, &ref_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1712,18 +1721,50 @@ async fn batch_get_externalized_state_fetches_multiple_keys() {
         .await
         .unwrap();
 
-    let keys = vec![
-        "batch_small".to_string(),
-        "batch_big".to_string(),
-        "batch_missing".to_string(),
-    ];
+    let key = |k: &str| (inst_id, k.to_string());
+    let keys = vec![key("batch_small"), key("batch_big"), key("batch_missing")];
     let map = s.batch_get_externalized_state(&keys).await.unwrap();
 
     // Missing keys are absent (not errors, not Some(Null)).
     assert_eq!(map.len(), 2);
-    assert_eq!(map.get("batch_small"), Some(&small));
-    assert_eq!(map.get("batch_big"), Some(&big));
-    assert!(!map.contains_key("batch_missing"));
+    assert_eq!(map.get(&key("batch_small")), Some(&small));
+    assert_eq!(map.get(&key("batch_big")), Some(&big));
+    assert!(!map.contains_key(&key("batch_missing")));
+}
+
+/// STO-N1: a ref is only readable by its owning instance — a forged marker
+/// naming another instance's `ref_key` must resolve to nothing, on both the
+/// single and the batched path.
+#[tokio::test]
+async fn externalized_state_is_scoped_to_owner_instance() {
+    let s = store().await;
+    let owner = InstanceId::new();
+    let other = InstanceId::new();
+    seed_instance(&s, owner).await;
+    seed_instance(&s, other).await;
+    let ref_key = format!("{owner}:ctx:data:secret");
+    let payload = json!({"secret": "victim"});
+    s.save_externalized_state(owner, &ref_key, &payload)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        s.get_externalized_state(owner, &ref_key).await.unwrap(),
+        Some(payload.clone())
+    );
+    assert!(
+        s.get_externalized_state(other, &ref_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let map = s
+        .batch_get_externalized_state(&[(other, ref_key.clone()), (owner, ref_key.clone())])
+        .await
+        .unwrap();
+    assert_eq!(map.len(), 1);
+    assert_eq!(map.get(&(owner, ref_key.clone())), Some(&payload));
+    assert!(!map.contains_key(&(other, ref_key)));
 }
 
 #[tokio::test]
@@ -1739,13 +1780,19 @@ async fn batch_get_externalized_state_chunks_more_than_sqlite_bind_limit() {
         .unwrap();
 
     let mut keys = Vec::with_capacity(33_002);
-    keys.push("first".to_string());
-    keys.extend((0..33_000).map(|index| format!("missing-{index}")));
-    keys.push("last".to_string());
+    keys.push((inst_id, "first".to_string()));
+    keys.extend((0..33_000).map(|index| (inst_id, format!("missing-{index}"))));
+    keys.push((inst_id, "last".to_string()));
     let found = s.batch_get_externalized_state(&keys).await.unwrap();
     assert_eq!(found.len(), 2);
-    assert_eq!(found["first"], json!({"position": 0}));
-    assert_eq!(found["last"], json!({"position": 1}));
+    assert_eq!(
+        found[&(inst_id, "first".to_string())],
+        json!({"position": 0})
+    );
+    assert_eq!(
+        found[&(inst_id, "last".to_string())],
+        json!({"position": 1})
+    );
 }
 
 #[tokio::test]
@@ -1772,7 +1819,7 @@ async fn batch_save_externalized_state_persists_all_entries() {
 
     // Every entry should be readable in both feature configurations.
     for (key, expected) in &entries {
-        let got = s.get_externalized_state(key).await.unwrap();
+        let got = s.get_externalized_state(inst_id, key).await.unwrap();
         assert_eq!(got.as_ref(), Some(expected), "key {key} mismatch");
     }
     let codec: Option<String> =
@@ -1820,7 +1867,7 @@ async fn batch_save_externalized_state_upserts_existing_keys() {
     .unwrap();
 
     assert_eq!(
-        s.get_externalized_state("bs_up").await.unwrap(),
+        s.get_externalized_state(inst_id, "bs_up").await.unwrap(),
         Some(json!({"v": 2}))
     );
 }
@@ -1837,7 +1884,9 @@ async fn externalized_state_roundtrip_across_compression_threshold() {
         .await
         .unwrap();
     assert_eq!(
-        s.get_externalized_state("ext_small").await.unwrap(),
+        s.get_externalized_state(inst_id, "ext_small")
+            .await
+            .unwrap(),
         Some(small)
     );
 
@@ -1847,7 +1896,7 @@ async fn externalized_state_roundtrip_across_compression_threshold() {
         .await
         .unwrap();
     assert_eq!(
-        s.get_externalized_state("ext_big").await.unwrap(),
+        s.get_externalized_state(inst_id, "ext_big").await.unwrap(),
         Some(big)
     );
     let codec: Option<String> =
@@ -1873,7 +1922,12 @@ async fn externalized_state_rejects_payload_above_reader_limit() {
             .await,
         Err(StorageError::Constraint(_))
     ));
-    assert!(s.get_externalized_state("too_big").await.unwrap().is_none());
+    assert!(
+        s.get_externalized_state(inst_id, "too_big")
+            .await
+            .unwrap()
+            .is_none()
+    );
     let batch = vec![
         ("would_be_written".to_string(), json!({"ok": true})),
         ("too_big_batch".to_string(), oversized),
@@ -1883,7 +1937,7 @@ async fn externalized_state_rejects_payload_above_reader_limit() {
         Err(StorageError::Constraint(_))
     ));
     assert!(
-        s.get_externalized_state("would_be_written")
+        s.get_externalized_state(inst_id, "would_be_written")
             .await
             .unwrap()
             .is_none()
@@ -2657,8 +2711,18 @@ async fn concurrency_control() {
         s.create_instance(&inst).await.unwrap();
     }
 
-    let count = s.count_running_by_concurrency_key(conc_key).await.unwrap();
+    let count = s
+        .count_running_by_concurrency_key("t1", conc_key)
+        .await
+        .unwrap();
     assert_eq!(count, 3);
+    // Concurrency keys are tenant-scoped (STO-N5).
+    assert_eq!(
+        s.count_running_by_concurrency_key("t2", conc_key)
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -2752,6 +2816,17 @@ async fn bulk_reschedule() {
     // Shift forward by 3600 seconds (1 hour).
     let shifted = s.bulk_reschedule(&filter, 3600).await.unwrap();
     assert_eq!(shifted, 5);
+
+    // M1: the shifted rows must actually be in the future -- the old
+    // `datetime()` rewrite stored a space-separated timestamp that sorted
+    // before every RFC 3339 `now`, so they were claimed immediately.
+    let claimed = s.claim_due_instances(Utc::now(), 10, 0).await.unwrap();
+    assert!(claimed.is_empty(), "rescheduled rows must not fire yet");
+    let later = s
+        .claim_due_instances(now + chrono::Duration::seconds(3601), 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(later.len(), 5);
 }
 
 #[tokio::test]
@@ -3391,7 +3466,7 @@ async fn update_instance_context_externalized_swaps_markers_and_persists_refs() 
         .as_str()
         .unwrap()
         .to_string();
-    let fetched = s.get_externalized_state(&ref_key).await.unwrap();
+    let fetched = s.get_externalized_state(inst.id, &ref_key).await.unwrap();
     assert_eq!(fetched, Some(big_payload));
 }
 
@@ -3448,7 +3523,7 @@ async fn create_instance_externalized_swaps_markers_and_persists_refs() {
         .as_str()
         .unwrap()
         .to_string();
-    let fetched = s.get_externalized_state(&ref_key).await.unwrap();
+    let fetched = s.get_externalized_state(inst.id, &ref_key).await.unwrap();
     assert_eq!(fetched, Some(big_payload));
 }
 
@@ -3507,7 +3582,7 @@ async fn create_instances_batch_externalized_externalizes_each_instance_independ
             "ref_key {ref_key:?} must be scoped to instance {}",
             inst.id.into_uuid()
         );
-        let fetched = s.get_externalized_state(&ref_key).await.unwrap();
+        let fetched = s.get_externalized_state(inst.id, &ref_key).await.unwrap();
         assert_eq!(fetched.as_ref(), Some(expected_blob));
     }
 }
@@ -3896,12 +3971,15 @@ async fn count_running_by_concurrency_key_accurate() {
         s.create_instance(&inst).await.unwrap();
     }
 
-    let count = s.count_running_by_concurrency_key(key).await.unwrap();
+    let count = s
+        .count_running_by_concurrency_key("t_cc", key)
+        .await
+        .unwrap();
     assert_eq!(count, 2);
 
     // An unrelated key returns 0.
     assert_eq!(
-        s.count_running_by_concurrency_key("does-not-exist")
+        s.count_running_by_concurrency_key("t_cc", "does-not-exist")
             .await
             .unwrap(),
         0
@@ -3960,7 +4038,7 @@ async fn concurrency_count_empty_for_unused_key() {
 
     // Querying any key returns 0 because none of these rows set it.
     assert_eq!(
-        s.count_running_by_concurrency_key("anything")
+        s.count_running_by_concurrency_key("t_nokey", "anything")
             .await
             .unwrap(),
         0
@@ -4017,7 +4095,10 @@ async fn concurrent_claims_with_same_key_are_serialized() {
         h.await.unwrap();
     }
 
-    let count = s.count_running_by_concurrency_key(key).await.unwrap();
+    let count = s
+        .count_running_by_concurrency_key("t_race", key)
+        .await
+        .unwrap();
     assert_eq!(count, 8, "each parallel claim contributed exactly once");
 }
 
@@ -5090,4 +5171,375 @@ async fn claim_due_cron_schedules_is_capped_per_tick() {
 
     let second = s.claim_due_cron_schedules(now).await.unwrap();
     assert_eq!(second.len(), 5, "stragglers are claimed on the next tick");
+}
+
+/// STO-N5: a tenant saturating a `concurrency_key` must not block another
+/// tenant that happens to use the same key string.
+#[tokio::test]
+async fn claim_concurrency_key_is_tenant_scoped() {
+    let s = store().await;
+    let seq_a = make_sequence("t_ck_a");
+    let seq_b = make_sequence("t_ck_b");
+    s.create_sequence(&seq_a).await.unwrap();
+    s.create_sequence(&seq_b).await.unwrap();
+
+    let mut running = make_instance("t_ck_a", seq_a.id);
+    running.state = InstanceState::Running;
+    running.concurrency_key = Some("shared".into());
+    running.max_concurrency = Some(1);
+    s.create_instance(&running).await.unwrap();
+
+    let mut other = make_instance("t_ck_b", seq_b.id);
+    other.state = InstanceState::Scheduled;
+    other.next_fire_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    other.concurrency_key = Some("shared".into());
+    other.max_concurrency = Some(1);
+    s.create_instance(&other).await.unwrap();
+
+    let claimed = s.claim_due_instances(Utc::now(), 10, 0).await.unwrap();
+    assert!(claimed.iter().any(|i| i.id == other.id));
+    assert_eq!(s.concurrency_position(other.id, "shared").await.unwrap(), 1);
+}
+
+/// M5: a dispatcher whose outbox claim went stale (and was recovered +
+/// re-claimed by another node) must not be able to fail or delete the row.
+#[tokio::test]
+async fn webhook_outbox_fail_and_complete_are_fenced_on_claim() {
+    use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
+    let s = store().await;
+    let entry = WebhookOutboxEntry {
+        id: uuid::Uuid::now_v7(),
+        url: "https://hooks.example.com/x".into(),
+        event_type: "instance.completed".into(),
+        instance_id: None,
+        payload: serde_json::json!({}),
+        attempts: 0,
+        last_error: None,
+        created_at: Utc::now(),
+        delivery_id: Some(uuid::Uuid::now_v7()),
+        status: WebhookOutboxStatus::Pending,
+        next_attempt_at: None,
+        claimed_at: None,
+    };
+    s.park_webhook(&entry).await.unwrap();
+    let stale_claim = Utc::now() - chrono::Duration::seconds(60);
+    assert!(
+        s.claim_webhook_outbox_row(entry.id, stale_claim)
+            .await
+            .unwrap()
+    );
+    assert_eq!(s.recover_stale_webhook_claims(Utc::now()).await.unwrap(), 1);
+    let fresh_claim = Utc::now();
+    assert!(
+        s.claim_webhook_outbox_row(entry.id, fresh_claim)
+            .await
+            .unwrap()
+    );
+
+    assert!(
+        !s.fail_webhook_outbox_attempt_fenced(entry.id, stale_claim, "late", None)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s.complete_webhook_outbox_claim(entry.id, stale_claim)
+            .await
+            .unwrap()
+    );
+    let row = s.get_webhook_outbox(entry.id).await.unwrap().unwrap();
+    assert_eq!(row.status, WebhookOutboxStatus::InFlight);
+    assert_eq!(row.attempts, 0);
+
+    assert!(
+        s.fail_webhook_outbox_attempt_fenced(
+            entry.id,
+            fresh_claim,
+            "boom",
+            Some(Utc::now() + chrono::Duration::seconds(5))
+        )
+        .await
+        .unwrap()
+    );
+    let row = s.get_webhook_outbox(entry.id).await.unwrap().unwrap();
+    assert_eq!(row.status, WebhookOutboxStatus::Pending);
+    assert_eq!(row.attempts, 1);
+
+    let reclaim = Utc::now();
+    assert!(s.claim_webhook_outbox_row(entry.id, reclaim).await.unwrap());
+    assert!(
+        s.complete_webhook_outbox_claim(entry.id, reclaim)
+            .await
+            .unwrap()
+    );
+    assert!(s.get_webhook_outbox(entry.id).await.unwrap().is_none());
+}
+
+/// M2/M3: metadata merge is shallow and the metadata filter follows Postgres
+/// `@>` containment (type-aware scalars, nested objects, arrays).
+async fn assert_metadata_semantics(
+    s: &dyn orch8_storage::StorageBackend,
+    tenant: &str,
+    seq_id: SequenceId,
+    inst: TaskInstance,
+) {
+    use orch8_types::filter::{InstanceFilter, Pagination};
+    let mut inst = inst;
+    inst.metadata = serde_json::json!({
+        "flag": true,
+        "n": 1,
+        "s": "1",
+        "nested": {"a": 1, "b": {"c": "x"}},
+        "tags": ["red", "blue", {"k": 2}],
+        "keep": "me"
+    });
+    inst.sequence_id = seq_id;
+    s.create_instance(&inst).await.unwrap();
+
+    let matches = |filter: serde_json::Value| {
+        let f = InstanceFilter {
+            tenant_id: Some(TenantId::unchecked(tenant)),
+            metadata_filter: Some(filter),
+            ..InstanceFilter::default()
+        };
+        async move {
+            s.list_instances(&f, &Pagination::default())
+                .await
+                .unwrap()
+                .len()
+                == 1
+        }
+    };
+    assert!(matches(serde_json::json!({"flag": true})).await);
+    assert!(!matches(serde_json::json!({"flag": 1})).await);
+    assert!(matches(serde_json::json!({"n": 1})).await);
+    assert!(!matches(serde_json::json!({"n": "1"})).await);
+    assert!(matches(serde_json::json!({"s": "1"})).await);
+    assert!(!matches(serde_json::json!({"s": 1})).await);
+    assert!(matches(serde_json::json!({"nested": {"b": {"c": "x"}}})).await);
+    assert!(!matches(serde_json::json!({"nested": {"b": {"c": "y"}}})).await);
+    assert!(matches(serde_json::json!({"tags": ["blue"]})).await);
+    assert!(matches(serde_json::json!({"tags": [{"k": 2}, "red"]})).await);
+    assert!(!matches(serde_json::json!({"tags": ["green"]})).await);
+    assert!(matches(serde_json::json!({})).await);
+    assert!(!matches(serde_json::json!(["x"])).await);
+
+    // Shallow merge: `nested` is replaced wholesale, `null` is stored.
+    s.merge_instance_metadata(
+        inst.id,
+        &serde_json::json!({"nested": {"z": 1}, "keep": null, "new": 2}),
+    )
+    .await
+    .unwrap();
+    let got = s.get_instance(inst.id).await.unwrap().unwrap().metadata;
+    assert_eq!(got["nested"], serde_json::json!({"z": 1}));
+    assert_eq!(got["keep"], serde_json::Value::Null);
+    assert!(got.as_object().unwrap().contains_key("keep"));
+    assert_eq!(got["new"], serde_json::json!(2));
+    assert_eq!(got["flag"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn sqlite_metadata_merge_and_filter_match_postgres_semantics() {
+    let s = store().await;
+    let seq = make_sequence("t_meta");
+    s.create_sequence(&seq).await.unwrap();
+    let inst = make_instance("t_meta", seq.id);
+    assert_metadata_semantics(&s, "t_meta", seq.id, inst).await;
+}
+
+// ===========================================================================
+// Review 2026-09: leases for cron claims, trigger polls, credential refresh
+// ===========================================================================
+
+/// A claim whose fire fails before `update_cron_fire_times` must become
+/// claimable again once its lease lapses (it used to be disabled forever).
+#[tokio::test]
+async fn cron_failed_fire_is_reclaimable_after_lease() {
+    let s = store().await;
+    let seq = make_sequence("t_cron_lease");
+    s.create_sequence(&seq).await.unwrap();
+    let now = Utc::now();
+    let schedule = CronSchedule {
+        id: Uuid::now_v7(),
+        tenant_id: TenantId::unchecked("t_cron_lease"),
+        namespace: Namespace::new("default"),
+        sequence_id: seq.id,
+        cron_expr: "0 * * * * * *".into(),
+        timezone: "UTC".into(),
+        enabled: true,
+        metadata: json!({}),
+        overlap_policy: orch8_types::cron::OverlapPolicy::default(),
+        skipped_fires: 0,
+        last_skipped_at: None,
+        last_triggered_at: None,
+        next_fire_at: Some(now - Duration::seconds(5)),
+        created_at: now,
+        updated_at: now,
+    };
+    s.create_cron_schedule(&schedule).await.unwrap();
+
+    assert_eq!(s.claim_due_cron_schedules(now).await.unwrap().len(), 1);
+    // Lease live: no double claim.
+    assert!(s.claim_due_cron_schedules(now).await.unwrap().is_empty());
+    // The fire "crashed" (no update_cron_fire_times). After the lease:
+    let later = now + Duration::minutes(10);
+    let reclaimed = s.claim_due_cron_schedules(later).await.unwrap();
+    assert_eq!(reclaimed.len(), 1, "failed fire must be retried");
+    // Same next_fire_at → same idempotency key on the engine side.
+    assert_eq!(
+        reclaimed[0].next_fire_at.map(|t| t.timestamp()),
+        schedule.next_fire_at.map(|t| t.timestamp())
+    );
+
+    // Advancing the fire times releases the lease immediately.
+    s.update_cron_fire_times(schedule.id, later, later - Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(s.claim_due_cron_schedules(later).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn trigger_poll_lease_excludes_other_owner_until_expiry() {
+    let s = store().await;
+    let now = Utc::now();
+    let until = now + Duration::minutes(2);
+    assert!(
+        s.try_acquire_trigger_poll_lease("slug", "a", now, until)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s.try_acquire_trigger_poll_lease("slug", "b", now, until)
+            .await
+            .unwrap()
+    );
+    assert!(
+        s.try_acquire_trigger_poll_lease("slug", "a", now, until)
+            .await
+            .unwrap(),
+        "holder renews"
+    );
+    let after = until + Duration::seconds(1);
+    assert!(
+        s.try_acquire_trigger_poll_lease("slug", "b", after, after + Duration::minutes(2))
+            .await
+            .unwrap(),
+        "expired lease is taken over"
+    );
+    // Cursor writes don't disturb the lease.
+    s.upsert_trigger_poll_state(&orch8_types::trigger::TriggerPollState::empty("slug"))
+        .await
+        .unwrap();
+    assert!(
+        !s.try_acquire_trigger_poll_lease("slug", "a", after, after)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn credential_refresh_claim_and_cas_update() {
+    use orch8_types::config::SecretString;
+    use orch8_types::credential::{CredentialDef, CredentialKind};
+    let s = store().await;
+    let now = Utc::now();
+    s.create_credential(&CredentialDef {
+        id: "c1".into(),
+        tenant_id: String::new(),
+        name: "c1".into(),
+        kind: CredentialKind::Oauth2,
+        value: SecretString::new("{}".into()),
+        expires_at: Some(now),
+        refresh_url: Some("https://example.invalid".into()),
+        refresh_token: Some(SecretString::new("rt1".into())),
+        enabled: true,
+        description: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+
+    let lease = now + Duration::minutes(2);
+    assert!(s.claim_credential_refresh("c1", now, lease).await.unwrap());
+    assert!(!s.claim_credential_refresh("c1", now, lease).await.unwrap());
+    assert!(
+        s.claim_credential_refresh(
+            "c1",
+            lease + Duration::seconds(1),
+            lease + Duration::minutes(3)
+        )
+        .await
+        .unwrap()
+    );
+
+    let read = s.get_credential(None, "c1").await.unwrap().unwrap();
+    let mut rotated = read.clone();
+    rotated.refresh_token = Some(SecretString::new("rt2".into()));
+    assert!(
+        s.update_credential_cas(&rotated, read.updated_at)
+            .await
+            .unwrap()
+    );
+    let mut stale = read.clone();
+    stale.description = Some("stale".into());
+    assert!(
+        !s.update_credential_cas(&stale, read.updated_at)
+            .await
+            .unwrap(),
+        "stale write must lose"
+    );
+    let stored = s.get_credential(None, "c1").await.unwrap().unwrap();
+    assert_eq!(stored.refresh_token.unwrap().expose(), "rt2");
+    assert!(stored.updated_at > read.updated_at);
+}
+
+/// Worker claims must never hand out tasks of a terminal/cancelled
+/// instance, on any claim path.
+#[tokio::test]
+async fn worker_claims_skip_tasks_of_terminal_instances() {
+    let s = store().await;
+    let live = make_instance_in_state("t_claim_term", InstanceState::Waiting);
+    let dead = make_instance_in_state("t_claim_term", InstanceState::Cancelled);
+    s.create_instance(&live).await.unwrap();
+    s.create_instance(&dead).await.unwrap();
+    for inst in [&live, &dead] {
+        let mut task = distributed_task(inst.id, "s1", "eu", None, Utc::now());
+        task.requirements = CapsuleRequirements::default();
+        s.create_worker_task(&task).await.unwrap();
+    }
+    let tenant = TenantId::unchecked("t_claim_term");
+
+    let plain = s.claim_worker_tasks("render", "w1", 10).await.unwrap();
+    assert_eq!(plain.len(), 1);
+    assert_eq!(plain[0].instance_id, live.id);
+
+    // Reset and try the tenant + matching paths.
+    let t = &plain[0];
+    s.delete_worker_task(t.id).await.unwrap();
+    let mut again = distributed_task(live.id, "s2", "eu", None, Utc::now());
+    again.requirements = CapsuleRequirements::default();
+    s.create_worker_task(&again).await.unwrap();
+    let tenant_claim = s
+        .claim_worker_tasks_for_tenant("render", "w1", &tenant, 10)
+        .await
+        .unwrap();
+    assert_eq!(tenant_claim.len(), 1);
+    assert_eq!(tenant_claim[0].instance_id, live.id);
+
+    let matching = s
+        .claim_worker_tasks_matching(
+            "render",
+            "w1",
+            None,
+            None,
+            &distributed_runtime(Utc::now(), "eu"),
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matching.iter().all(|t| t.instance_id != dead.id),
+        "cancelled instance's task must not be claimable"
+    );
 }

@@ -207,6 +207,25 @@ pub async fn ensure_execution_tree(
     let mut nodes = Vec::with_capacity(blocks.len() * 2);
     build_nodes(instance.id, None, None, blocks, &mut nodes);
 
+    // An instance can switch from the flat path to the tree path mid-run
+    // (e.g. a `self_modify` step injects a composite). Root-level steps the
+    // flat path already completed must start Completed, or the evaluator
+    // re-dispatches them — re-running their side effects, or tripping the
+    // effect guard on the committed receipt.
+    let completed = storage.get_completed_block_ids(instance.id).await?;
+    if !completed.is_empty() {
+        let now = chrono::Utc::now();
+        for node in &mut nodes {
+            if node.parent_id.is_none()
+                && node.block_type == BlockType::Step
+                && completed.contains(&node.block_id)
+            {
+                node.state = NodeState::Completed;
+                node.completed_at = Some(now);
+            }
+        }
+    }
+
     if !nodes.is_empty() {
         storage.create_execution_nodes_batch(&nodes).await?;
         debug!(
@@ -503,6 +522,34 @@ pub async fn evaluate_with_clock(
                     storage
                         .update_nodes_state(&non_terminal_ids, NodeState::Cancelled)
                         .await?;
+                    // Their external-worker tasks must not stay claimable
+                    // for an instance that is about to go terminal.
+                    let step_block_ids: Vec<String> = ctx
+                        .tree
+                        .iter()
+                        .filter(|n| {
+                            n.block_type == BlockType::Step
+                                && matches!(
+                                    n.state,
+                                    NodeState::Pending | NodeState::Running | NodeState::Waiting
+                                )
+                        })
+                        .map(|n| n.block_id.as_str().to_owned())
+                        .collect();
+                    if !step_block_ids.is_empty()
+                        && let Err(e) = storage
+                            .cancel_worker_tasks_for_blocks(
+                                instance_id.into_uuid(),
+                                &step_block_ids,
+                            )
+                            .await
+                    {
+                        warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "evaluate: failed to purge worker tasks of cancelled nodes"
+                        );
+                    }
                 }
             }
             return Ok(outcome);
@@ -1139,18 +1186,41 @@ fn has_race_ancestor_with_matching_sibling(
     false
 }
 
-/// Check if a node is inside a Race composite that already has a winner
-/// (another branch's direct child is Completed). If so, this node's
-/// branch lost and should not be dispatched.
+/// Check if a node is inside a Race composite that is already decided (a
+/// whole branch won, or the race can no longer be won). If so, this node's
+/// branch lost and must not be dispatched.
+///
+/// Uses [`crate::handlers::race::race_outcome`] — the exact decision the race
+/// handler applies — so the guard never declares a winner the handler would
+/// not (e.g. only the first block of a multi-block branch completed).
 fn is_inside_decided_race(
     tree: &[ExecutionNode],
     block_map: &[(&BlockId, &BlockDefinition)],
     node: &ExecutionNode,
     node_index: &NodeIndex<'_>,
 ) -> bool {
-    has_race_ancestor_with_matching_sibling(tree, block_map, node, node_index, |c| {
-        matches!(c.state, NodeState::Completed)
-    })
+    let mut child = node;
+    while let Some(parent_id) = child.parent_id {
+        let Some(parent) = get_node(node_index, parent_id) else {
+            return false;
+        };
+        if let Ok(BlockDefinition::Race(race_def)) = block_map
+            .binary_search_by_key(&&parent.block_id, |(id, _)| *id)
+            .map(|idx| block_map[idx].1)
+        {
+            if parent.state.is_terminal() {
+                return true;
+            }
+            let race_children = children_of(tree, parent_id, None);
+            if crate::handlers::race::race_outcome(&race_def.semantics, &race_children)
+                != crate::handlers::race::RaceOutcome::Undecided
+            {
+                return true;
+            }
+        }
+        child = parent;
+    }
+    false
 }
 
 /// Check if a step node is inside a Race and a sibling branch contains a
@@ -1359,9 +1429,13 @@ pub async fn cancel_subtree(
 
 /// Reset every strict descendant of `root_id` for another composite iteration.
 ///
-/// User-visible step outputs remain append-only. Internal composite markers,
+/// User-visible step outputs remain append-only. Internal composite markers
+/// (iteration counters, router decisions), per-step attempt bookkeeping,
 /// effect receipts, and stale external-worker tasks are removed so a nested
-/// loop or `for_each` cannot inherit execution state from its prior iteration.
+/// composite cannot inherit execution state from its prior iteration.
+///
+/// Idempotent: re-running it on an already-reset subtree is a no-op apart
+/// from repeating the deletes.
 pub async fn reset_subtree_to_pending(
     storage: &dyn StorageBackend,
     tree: &[ExecutionNode],
@@ -1386,9 +1460,17 @@ pub async fn reset_subtree_to_pending(
         .update_nodes_state(&node_ids, NodeState::Pending)
         .await?;
 
+    // Composite bookkeeping markers: loop/for_each iteration counters and
+    // the router's memoized branch decision. Each new iteration must start
+    // (and decide) afresh.
     let composite_block_ids: Vec<_> = descendants
         .iter()
-        .filter(|(_, kind, _)| matches!(kind, BlockType::Loop | BlockType::ForEach))
+        .filter(|(_, kind, _)| {
+            matches!(
+                kind,
+                BlockType::Loop | BlockType::ForEach | BlockType::Router
+            )
+        })
         .map(|(_, _, block_id)| block_id.clone())
         .collect();
     if !composite_block_ids.is_empty() {
@@ -1405,6 +1487,41 @@ pub async fn reset_subtree_to_pending(
     if !step_block_ids.is_empty() {
         storage
             .delete_effect_receipts_for_blocks(tenant_id, instance_id, &step_block_ids)
+            .await?;
+
+        // Per-step attempt bookkeeping (`__retry__` markers, crash
+        // sentinels) at the head of a step's output history belongs to the
+        // finished iteration: left in place, the next iteration's first run
+        // would inherit that iteration's retry count (`compute_attempt`
+        // reads the latest row). Only trailing bookkeeping rows are removed;
+        // real step outputs stay append-only.
+        for block_id in &step_block_ids {
+            while let Some(latest) = storage.get_block_output(instance_id, block_id).await? {
+                if !crate::handlers::param_resolve::is_attempt_bookkeeping(&latest) {
+                    break;
+                }
+                storage.delete_block_output_by_id(latest.id).await?;
+            }
+        }
+
+        // A step `delay` marker is final once written (so early wakes can't
+        // restart it); clear it per iteration so every iteration of a
+        // delayed loop-body step waits again instead of only the first.
+        let mut cleared = serde_json::Map::new();
+        for block_id in &step_block_ids {
+            cleared.insert(
+                crate::scheduler::delay_marker_key(block_id),
+                serde_json::Value::Null,
+            );
+            // Same for a gate's deferred auto_decide prediction: the next
+            // iteration's gate must consult the model afresh.
+            cleared.insert(
+                crate::scheduler::auto_decide_marker_key(block_id),
+                serde_json::Value::Null,
+            );
+        }
+        storage
+            .merge_instance_metadata(instance_id, &serde_json::Value::Object(cleared))
             .await?;
     }
 
@@ -1513,32 +1630,147 @@ pub async fn activate_pending_children(
     Ok(())
 }
 
+/// Progress of an ordered (sequential) child list after one cursor step.
+///
+/// Shared by every composite whose body is a sequence (`try_catch` phases,
+/// `loop`/`for_each` bodies, `router`/`ab_split` branches,
+/// `cancellation_scope`, `parallel` branches) so fail-fast semantics live in
+/// exactly one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeqProgress {
+    /// The next `Pending` child was just activated.
+    Advanced,
+    /// The cursor child is still `Running`/`Waiting`.
+    Blocked,
+    /// A child `Failed`. Later children were not — and must not be — started.
+    Failed,
+    /// A child was `Cancelled`. Later children were not started.
+    Cancelled,
+    /// Every child is `Completed` or `Skipped` (vacuously true when empty).
+    Done,
+}
+
+impl SeqProgress {
+    /// The sequence can make no further progress on its own.
+    pub const fn is_settled(self) -> bool {
+        matches!(self, Self::Failed | Self::Cancelled | Self::Done)
+    }
+
+    /// The sequence stopped on a `Failed` or `Cancelled` child.
+    pub const fn is_stopped(self) -> bool {
+        matches!(self, Self::Failed | Self::Cancelled)
+    }
+}
+
+/// Pure cursor scan: where does the ordered `children` list stand?
+///
+/// Returns the cursor child to activate (if it is `Pending`) together with
+/// the progress it implies. `Skipped` children (a `when` guard that did not
+/// match) are passed over like `Completed` ones; `Failed`/`Cancelled` stop
+/// the sequence.
+pub fn sequence_cursor<'a>(
+    children: &[&'a ExecutionNode],
+) -> (SeqProgress, Option<&'a ExecutionNode>) {
+    for child in children {
+        match child.state {
+            NodeState::Completed | NodeState::Skipped => {}
+            NodeState::Failed => return (SeqProgress::Failed, None),
+            NodeState::Cancelled => return (SeqProgress::Cancelled, None),
+            NodeState::Pending => return (SeqProgress::Advanced, Some(child)),
+            // Running / Waiting (and any future live state) block the cursor.
+            _ => return (SeqProgress::Blocked, None),
+        }
+    }
+    (SeqProgress::Done, None)
+}
+
+/// Advance a sequential body by one cursor step: activate the first `Pending`
+/// child unless a predecessor is still live, failed, or was cancelled.
+///
+/// A failed child stops the sequence (fail-fast) — its successors stay
+/// `Pending` and the owning composite decides what happens next (fail,
+/// go to `catch`, advance the loop under `continue_on_error`, ...).
+pub async fn advance_sequence(
+    storage: &dyn StorageBackend,
+    children: &[&ExecutionNode],
+) -> Result<SeqProgress, EngineError> {
+    let (progress, cursor) = sequence_cursor(children);
+    if let Some(cursor) = cursor {
+        storage
+            .update_node_state(cursor.id, NodeState::Running)
+            .await?;
+    }
+    Ok(progress)
+}
+
 /// Activate only the first `Pending` child (sequential cursor semantics).
 ///
-/// Used by composites whose body is an ordered sequence: `router` branches,
-/// `try_catch` phases, `loop` bodies, and `for_each` bodies. Activating every
-/// pending child at once would turn sequential execution into parallel fan-out.
+/// Alias of [`advance_sequence`], kept for existing callers.
 pub async fn activate_first_pending_child(
     storage: &dyn StorageBackend,
     children: &[&ExecutionNode],
+) -> Result<SeqProgress, EngineError> {
+    advance_sequence(storage, children).await
+}
+
+/// Settle every non-terminal strict descendant of `root_id`: `Pending` nodes
+/// (never started) become `Skipped`, `Running`/`Waiting` nodes become
+/// `Cancelled` and any worker tasks they own are cancelled. Terminal nodes
+/// are left untouched.
+///
+/// Called whenever a composite reaches a terminal state so no orphaned live
+/// node (and no external worker task) outlives its parent.
+pub async fn settle_live_descendants(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    tree: &[ExecutionNode],
+    root_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
-    for child in children {
-        match child.state {
-            NodeState::Completed
-            | NodeState::Skipped
-            | NodeState::Failed
-            | NodeState::Cancelled => {}
-            NodeState::Pending => {
-                storage
-                    .update_node_state(child.id, NodeState::Running)
-                    .await?;
-                return Ok(());
-            }
-            NodeState::Running | NodeState::Waiting | _ => {
-                return Ok(());
+    let mut to_skip: Vec<ExecutionNodeId> = Vec::new();
+    let mut to_cancel: Vec<ExecutionNodeId> = Vec::new();
+    let mut live_block_ids: Vec<String> = Vec::new();
+    let mut frontier = vec![root_id];
+    while let Some(parent) = frontier.pop() {
+        for n in tree.iter().filter(|n| n.parent_id == Some(parent)) {
+            frontier.push(n.id);
+            match n.state {
+                NodeState::Pending => to_skip.push(n.id),
+                NodeState::Running | NodeState::Waiting => {
+                    to_cancel.push(n.id);
+                    live_block_ids.push(n.block_id.as_str().to_owned());
+                }
+                _ => {}
             }
         }
     }
+    if !to_skip.is_empty() {
+        storage
+            .update_nodes_state(&to_skip, NodeState::Skipped)
+            .await?;
+    }
+    if !to_cancel.is_empty() {
+        storage
+            .update_nodes_state(&to_cancel, NodeState::Cancelled)
+            .await?;
+        storage
+            .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &live_block_ids)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Transition a composite to its terminal `state` (`Completed`/`Failed`)
+/// after settling its live descendants (see [`settle_live_descendants`]).
+pub async fn settle_composite(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    tree: &[ExecutionNode],
+    node_id: ExecutionNodeId,
+    state: NodeState,
+) -> Result<(), EngineError> {
+    settle_live_descendants(storage, instance_id, tree, node_id).await?;
+    debug!(node_id = %node_id, state = %state, "composite settled");
+    storage.update_node_state(node_id, state).await?;
     Ok(())
 }
 

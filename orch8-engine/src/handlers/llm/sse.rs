@@ -29,9 +29,16 @@ pub(super) struct SseEvent {
 
 /// Incremental SSE parser. Feed raw body chunks with [`SseParser::push`];
 /// completed events are returned as they terminate.
+///
+/// `scan_from` remembers how far the unterminated tail has already been
+/// scanned for a boundary, so a large event trickling in over many small
+/// chunks is scanned once overall instead of once per chunk (O(n²)). The
+/// buffer's size is bounded by the caller's total stream budget
+/// ([`charge_stream_bytes`]).
 #[derive(Default)]
 pub(super) struct SseParser {
     buf: Vec<u8>,
+    scan_from: usize,
 }
 
 impl SseParser {
@@ -39,20 +46,44 @@ impl SseParser {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
         self.buf.extend_from_slice(chunk);
         let mut events = Vec::new();
-        while let Some((end, sep_len)) = find_event_boundary(&self.buf) {
-            let raw: Vec<u8> = self.buf.drain(..end + sep_len).collect();
-            if let Some(event) = parse_event(&raw[..end]) {
+        let mut consumed = 0;
+        let mut from = self.scan_from;
+        while let Some((end, sep_len)) = find_event_boundary(&self.buf, from) {
+            if let Some(event) = parse_event(&self.buf[consumed..end]) {
                 events.push(event);
             }
+            consumed = end + sep_len;
+            from = consumed;
         }
+        // One drain per chunk (not per event) keeps many-events-per-chunk linear.
+        self.buf.drain(..consumed);
+        // A separator is at most 3 bytes (`\n\r\n`), so the last two bytes may
+        // still begin one once more data arrives; everything before is final.
+        self.scan_from = self.buf.len().saturating_sub(2);
         events
     }
 }
 
-/// Locate the first blank-line event terminator: `\n\n` or `\n\r\n`.
-/// Returns `(payload_end, separator_len)`.
-fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
-    let mut i = 0;
+/// Maximum bytes accepted from one provider stream. Bounds the SSE buffer and
+/// the accumulated content/tool-call arguments (both are <= bytes received).
+pub(super) const MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
+
+/// Add `chunk_len` to the running stream total, failing permanently once the
+/// stream exceeds [`MAX_STREAM_BYTES`].
+pub(super) fn charge_stream_bytes(received: &mut usize, chunk_len: usize) -> Result<(), StepError> {
+    *received = received.saturating_add(chunk_len);
+    if *received > MAX_STREAM_BYTES {
+        return Err(super::common::permanent(format!(
+            "provider stream exceeded {MAX_STREAM_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Locate the first blank-line event terminator at or after `from`:
+/// `\n\n` or `\n\r\n`. Returns `(payload_end, separator_len)`.
+fn find_event_boundary(buf: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut i = from;
     while i + 1 < buf.len() {
         if buf[i] == b'\n' {
             if buf[i + 1] == b'\n' {
@@ -193,6 +224,43 @@ mod tests {
         let (a, b) = payload.split_at(8); // splits the two-byte 'é'
         assert!(p.push(a).is_empty());
         assert_eq!(p.push(b), vec![ev(None, "caf\u{e9}")]);
+    }
+
+    #[test]
+    fn crlf_boundary_split_across_chunks_is_found() {
+        // The resumed scan must re-examine the tail bytes: `\n` | `\r\n`.
+        let mut p = SseParser::default();
+        assert!(p.push(b"data: x\r\n").is_empty());
+        assert_eq!(p.push(b"\r\n"), vec![ev(None, "x")]);
+        let mut p = SseParser::default();
+        assert!(p.push(b"data: y\n").is_empty());
+        assert!(p.push(b"\r").is_empty());
+        assert_eq!(p.push(b"\n"), vec![ev(None, "y")]);
+    }
+
+    #[test]
+    fn trickled_large_event_is_scanned_incrementally() {
+        let mut p = SseParser::default();
+        p.push(b"data: ");
+        for _ in 0..10_000 {
+            assert!(p.push(b"aaaa").is_empty());
+            // Scan position advances with the buffer instead of restarting.
+            assert_eq!(p.scan_from, p.buf.len() - 2);
+        }
+        let events = p.push(b"\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data.len(), 40_000);
+        assert!(p.buf.is_empty());
+    }
+
+    #[test]
+    fn stream_budget_rejects_oversized_stream() {
+        let mut received = 0;
+        assert!(charge_stream_bytes(&mut received, MAX_STREAM_BYTES).is_ok());
+        assert!(matches!(
+            charge_stream_bytes(&mut received, 1),
+            Err(StepError::Permanent { .. })
+        ));
     }
 
     #[test]

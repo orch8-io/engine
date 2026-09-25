@@ -113,6 +113,7 @@ pub(super) async fn claim(
           WHERE id IN (
               SELECT id FROM worker_tasks
               WHERE handler_name = $1 AND state = 'pending' AND requirements = '{}'::jsonb
+                AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))
               ORDER BY created_at
               LIMIT $3
               FOR UPDATE SKIP LOCKED
@@ -173,6 +174,7 @@ pub(super) async fn claim_for_tenant(
                 AND wt.state = 'pending'
                 AND wt.requirements = '{}'::jsonb
                 AND ti.tenant_id = $4
+                AND ti.state NOT IN ('completed', 'failed', 'cancelled')
               ORDER BY wt.created_at
               LIMIT $3
               FOR UPDATE OF wt SKIP LOCKED
@@ -209,6 +211,9 @@ pub(super) async fn claim_for_tenant(
     Ok(tasks)
 }
 
+/// Upper bound on pending rows one `claim_matching` poll inspects.
+const CLAIM_MATCHING_MAX_SCAN: usize = 4096;
+
 pub(super) async fn claim_matching(
     store: &PostgresStorage,
     handler_name: &str,
@@ -221,17 +226,22 @@ pub(super) async fn claim_matching(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut tx = store.pool.begin().await?;
     let now = chrono::Utc::now();
-    let mut ids = Vec::with_capacity(limit as usize);
+    // Phase 1: scan pending candidates WITHOUT row locks, filtering on the
+    // capability requirements in Rust. Locking during the scan (the old
+    // shape) held FOR UPDATE on every scanned row -- including the ones
+    // rejected in Rust -- until commit, so one worker with narrow
+    // capabilities blocked (SKIP LOCKED: hid) the whole backlog from every
+    // other worker. The scan is capped so a deep backlog of unsatisfiable
+    // tasks can't turn one poll into a full-table walk. Over-collect a
+    // little so rows lost to concurrent claimers can be backfilled.
+    let want = (limit as usize).saturating_mul(2);
+    let mut ids: Vec<Uuid> = Vec::with_capacity(want);
     let mut cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)> = None;
-    while ids.len() < limit as usize {
+    let mut scanned = 0usize;
+    while ids.len() < want && scanned < CLAIM_MATCHING_MAX_SCAN {
         let mut query = sqlx::QueryBuilder::<Postgres>::new(
-            "SELECT wt.id, wt.instance_id, wt.block_id, wt.handler_name, wt.queue_name, \
-             wt.requirements, wt.params, wt.context, wt.attempt, wt.timeout_ms, wt.state, \
-             wt.worker_id, wt.claimed_at, wt.heartbeat_at, wt.claim_epoch, \
-             wt.resume_checkpoint, wt.checkpoint_seq, wt.completed_at, wt.output, \
-             wt.error_message, wt.error_retryable, wt.created_at FROM worker_tasks wt",
+            "SELECT wt.id, wt.created_at, wt.requirements FROM worker_tasks wt",
         );
         if tenant_id.is_some() {
             query.push(" JOIN task_instances ti ON ti.id = wt.instance_id");
@@ -240,6 +250,10 @@ pub(super) async fn claim_matching(
             .push(" WHERE wt.handler_name = ")
             .push_bind(handler_name);
         query.push(" AND wt.state = 'pending'");
+        // Never hand out work for an instance that already finished or was
+        // cancelled (its tasks are purged on cancel, but a racing dispatch
+        // or an older row may remain).
+        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))");
         if let Some(queue) = queue_name {
             query.push(" AND wt.queue_name = ").push_bind(queue);
         }
@@ -256,35 +270,41 @@ pub(super) async fn claim_matching(
                 .push_bind(id)
                 .push(")");
         }
-        query.push(" ORDER BY wt.created_at, wt.id LIMIT 256 FOR UPDATE OF wt SKIP LOCKED");
-        let candidates = query
-            .build_query_as::<WorkerTaskRow>()
-            .fetch_all(&mut *tx)
-            .await?;
-        if candidates.is_empty() {
+        query.push(" ORDER BY wt.created_at, wt.id LIMIT 256");
+        let page: Vec<(Uuid, chrono::DateTime<chrono::Utc>, serde_json::Value)> =
+            query.build_query_as().fetch_all(&store.pool).await?;
+        let Some(&(last_id, last_created_at, _)) = page.last() else {
             break;
+        };
+        scanned += page.len();
+        cursor = Some((last_created_at, last_id));
+        for (id, _, requirements) in page {
+            if ids.len() >= want {
+                break;
+            }
+            let requirements: orch8_types::continuity::CapsuleRequirements =
+                serde_json::from_value(requirements).map_err(StorageError::Serialization)?;
+            if requirements.is_satisfied_by(capabilities, now) {
+                ids.push(id);
+            }
         }
-        let tasks = candidates
-            .into_iter()
-            .map(WorkerTaskRow::into_task)
-            .collect::<Result<Vec<_>, _>>()?;
-        cursor = tasks.last().map(|task| (task.created_at, task.id));
-        ids.extend(
-            tasks
-                .into_iter()
-                .filter(|task| task.requirements.is_satisfied_by(capabilities, now))
-                .take(limit as usize - ids.len())
-                .map(|task| task.id),
-        );
     }
     if ids.is_empty() {
-        tx.commit().await?;
         return Ok(Vec::new());
     }
+    // Phase 2: lock only the chosen rows (re-checking `pending`, since the
+    // scan was unlocked) and claim at most `limit` of them, oldest first.
+    let mut tx = store.pool.begin().await?;
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"UPDATE worker_tasks SET state='claimed', worker_id=$1, claimed_at=NOW(),
              heartbeat_at=NOW(), claim_epoch=claim_epoch+1
-           WHERE id = ANY($2)
+           WHERE id IN (
+             SELECT id FROM worker_tasks
+             WHERE id = ANY($2) AND state = 'pending'
+             ORDER BY created_at, id
+             LIMIT $3
+             FOR UPDATE SKIP LOCKED
+           )
            RETURNING id, instance_id, block_id, handler_name, queue_name, requirements,
              params, context, attempt, timeout_ms, state, worker_id, claimed_at,
              heartbeat_at, claim_epoch, resume_checkpoint, checkpoint_seq, completed_at,
@@ -292,6 +312,7 @@ pub(super) async fn claim_matching(
     )
     .bind(worker_id)
     .bind(&ids)
+    .bind(i64::from(limit))
     .fetch_all(&mut *tx)
     .await?;
     let tasks = rows
@@ -504,8 +525,14 @@ pub(super) async fn reap_stale(
         r"WITH stale AS (
               SELECT id, claim_epoch, worker_id FROM worker_tasks
               WHERE state = 'claimed'
-                AND heartbeat_at < NOW() - make_interval(secs => $1::double precision)
-              ORDER BY heartbeat_at ASC
+                -- A claimed row with no heartbeat yet ages from its claim
+                -- time (a row with neither is reclaimable at once); a bare
+                -- `heartbeat_at < cutoff` never matched NULL, so such rows
+                -- were stranded forever on PG while SQLite reclaimed them.
+                AND (COALESCE(heartbeat_at, claimed_at) IS NULL
+                     OR COALESCE(heartbeat_at, claimed_at)
+                        < NOW() - make_interval(secs => $1::double precision))
+              ORDER BY COALESCE(heartbeat_at, claimed_at) ASC NULLS FIRST
               LIMIT $2
               FOR UPDATE SKIP LOCKED
           )

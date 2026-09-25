@@ -376,6 +376,12 @@ pub struct WorkerCommand {
     pub id: uuid::Uuid,
     /// The worker this command targets.
     pub worker_id: String,
+    /// Tenant that owns the target worker. A tenant-scoped worker session
+    /// only receives (and can only ack) commands of its own tenant, since
+    /// `worker_id` is client-chosen. Empty = deliverable only to unscoped
+    /// (root / insecure-mode) sessions.
+    #[serde(default)]
+    pub tenant_id: String,
     /// `drain` (stop claiming new tasks, finish in-flight), `reload`
     /// (re-read config / re-register handlers), `ping` (liveness probe), or
     /// `place` (accept a placement payload for runtime-local execution).

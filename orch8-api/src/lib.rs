@@ -35,6 +35,7 @@ pub mod rollback;
 pub mod security;
 pub mod sequences;
 pub mod sessions;
+pub mod stream_limits;
 pub mod streaming;
 pub mod telemetry;
 pub mod test_harness;

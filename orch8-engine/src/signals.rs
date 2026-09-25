@@ -181,6 +181,10 @@ async fn process_signals_inner(
                 )
                 .await?;
                 storage.mark_signal_delivered(signal.id).await?;
+                // Pending/claimed worker tasks of the now-cancelled instance
+                // would otherwise stay claimable and keep running external
+                // side effects for a workflow that no longer exists.
+                purge_live_worker_tasks(storage, instance_id).await;
                 return Ok(true);
             }
             SignalAction::UpdateContext(ctx) => {
@@ -374,9 +378,73 @@ async fn cancel_scoped(
         storage
             .update_nodes_state(&cancellable_node_ids, NodeState::Cancelled)
             .await?;
+        // Cancelled step nodes must not leave their external-worker tasks
+        // claimable. Non-cancellable nodes (scopes, finally branches) are
+        // untouched, so their in-flight work still completes.
+        cancellable_node_ids.sort_unstable();
+        let step_block_ids: Vec<String> = tree
+            .iter()
+            .filter(|n| {
+                n.block_type == BlockType::Step && cancellable_node_ids.binary_search(&n.id).is_ok()
+            })
+            .map(|n| n.block_id.as_str().to_owned())
+            .collect();
+        if !step_block_ids.is_empty()
+            && let Err(e) = storage
+                .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &step_block_ids)
+                .await
+        {
+            warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "scoped cancel: failed to purge worker tasks of cancelled nodes"
+            );
+        }
     }
 
     Ok(has_non_cancellable_active)
+}
+
+/// Remove the pending/claimed worker tasks of a just-cancelled instance:
+/// those of its still-active step nodes (tree path), or of the step it is
+/// parked on (flat path, no tree). Completed task rows of finished steps
+/// are kept for history. Best-effort — the cancel itself already committed.
+async fn purge_live_worker_tasks(storage: &dyn StorageBackend, instance_id: InstanceId) {
+    let block_ids: Vec<String> = match storage.get_execution_tree(instance_id).await {
+        Ok(tree) if !tree.is_empty() => tree
+            .iter()
+            .filter(|n| {
+                n.block_type == orch8_types::execution::BlockType::Step
+                    && matches!(
+                        n.state,
+                        NodeState::Pending | NodeState::Running | NodeState::Waiting
+                    )
+            })
+            .map(|n| n.block_id.as_str().to_owned())
+            .collect(),
+        Ok(_) => match storage.get_instance(instance_id).await {
+            Ok(Some(inst)) => inst
+                .context
+                .runtime
+                .current_step
+                .map(|step| vec![step.as_str().to_owned()])
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        },
+        Err(e) => {
+            warn!(instance_id = %instance_id, error = %e, "cancel: failed to load tree for worker-task purge");
+            Vec::new()
+        }
+    };
+    if block_ids.is_empty() {
+        return;
+    }
+    if let Err(e) = storage
+        .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &block_ids)
+        .await
+    {
+        warn!(instance_id = %instance_id, error = %e, "cancel: failed to purge worker tasks");
+    }
 }
 
 /// Check if `node` is inside the `finally` branch (`branch_index` == 2) of a
@@ -508,6 +576,65 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Cancelling an instance must not leave its external-worker task
+    /// claimable (flat path: the task belongs to the step it is parked on).
+    #[tokio::test]
+    async fn cancel_purges_live_worker_task_of_parked_step() {
+        use orch8_storage::WorkerStore;
+        use orch8_types::worker::{WorkerTask, WorkerTaskState};
+
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let mut inst = mk_instance_with_state(InstanceState::Waiting);
+        inst.context.runtime.current_step = Some(orch8_types::ids::BlockId::new("s1"));
+        storage.create_instance(&inst).await.unwrap();
+        let task = WorkerTask {
+            id: uuid::Uuid::now_v7(),
+            instance_id: inst.id,
+            block_id: orch8_types::ids::BlockId::new("s1"),
+            handler_name: "ext".into(),
+            queue_name: None,
+            requirements: orch8_types::continuity::CapsuleRequirements::default(),
+            params: json!({}),
+            context: json!({}),
+            attempt: 0,
+            timeout_ms: None,
+            state: WorkerTaskState::Pending,
+            worker_id: None,
+            claimed_at: None,
+            heartbeat_at: None,
+            claim_epoch: 0,
+            resume_checkpoint: None,
+            checkpoint_seq: 0,
+            completed_at: None,
+            output: None,
+            error_message: None,
+            error_retryable: None,
+            created_at: Utc::now(),
+        };
+        storage.create_worker_task(&task).await.unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let aborted =
+            process_signals_prefetched(&storage, inst.id, InstanceState::Waiting, vec![sig], None)
+                .await
+                .unwrap();
+        assert!(aborted);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Cancelled);
+        assert!(
+            storage.get_worker_task(task.id).await.unwrap().is_none(),
+            "cancelled instance's worker task must not stay claimable"
+        );
+        assert!(
+            storage
+                .claim_worker_tasks("ext", "w", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

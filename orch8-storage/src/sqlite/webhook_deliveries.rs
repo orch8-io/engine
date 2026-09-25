@@ -78,7 +78,7 @@ pub(super) async fn list_deliveries(
     limit: u32,
 ) -> Result<Vec<WebhookDeliverySummary>, StorageError> {
     let rows = sqlx::query(
-        "SELECT
+        "SELECT * FROM (SELECT
             a.delivery_id AS delivery_id,
             MIN(a.url) AS url,
             MIN(a.event_type) AS event_type,
@@ -95,13 +95,18 @@ pub(super) async fn list_deliveries(
             AND (?2 IS NULL OR a.event_type = ?2)
           GROUP BY a.delivery_id
           HAVING (?3 IS NULL OR MAX(a.success) = ?3)
-          ORDER BY MAX(a.attempted_at) DESC
+          ) d
+          -- Filter on the final attempt's class *before* LIMIT (see the
+          -- Postgres twin).
+          WHERE (?5 IS NULL OR d.last_error_class = ?5)
+          ORDER BY d.last_attempt_at DESC, d.delivery_id DESC
           LIMIT ?4",
     )
     .bind(&filter.url)
     .bind(&filter.event_type)
     .bind(filter.delivered.map(i64::from))
     .bind(i64::from(limit))
+    .bind(class_to_str(filter.error_class))
     .fetch_all(&storage.pool)
     .await?;
 
@@ -119,11 +124,6 @@ pub(super) async fn list_deliveries(
             last_attempt_at: parse_ts(row.get::<&str, _>("last_attempt_at"))?,
             last_error_class: class_from_str(row.get::<Option<&str>, _>("last_error_class")),
         };
-        if let Some(want) = filter.error_class
-            && summary.last_error_class != Some(want)
-        {
-            continue;
-        }
         out.push(summary);
     }
     Ok(out)

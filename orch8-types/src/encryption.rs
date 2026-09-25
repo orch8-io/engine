@@ -120,6 +120,13 @@ impl FieldEncryptor {
         self
     }
 
+    /// True when built with [`Self::require_aad`]: AAD-bound fields must be
+    /// `enc:v2:` and plaintext / legacy v1 is rejected on decrypt.
+    #[must_use]
+    pub fn requires_aad(&self) -> bool {
+        !self.allow_legacy_unbound
+    }
+
     /// Number of AEAD seal operations performed with the primary key so far
     /// (shared across all clones of this encryptor). Exposed so a caller can
     /// surface it as a metric; the budget warning is also logged internally
@@ -249,22 +256,25 @@ impl FieldEncryptor {
     /// opportunistically-encrypted fields like `context.data` that must stay
     /// readable if they predate encryption being enabled.
     ///
-    /// Unlike [`Self::decrypt_value`], a value with no `"enc:v1:"`/`"enc:v2:"`
-    /// prefix is treated as an error rather than passed through unchanged.
-    /// For an always-encrypted field, unprefixed data at rest means the write
-    /// path failed to encrypt it -- silently accepting it as "already
-    /// plaintext" would mask that bug indefinitely instead of surfacing it.
+    /// Unlike [`Self::decrypt_value_with_aad`], a value with no
+    /// `"enc:v1:"`/`"enc:v2:"` prefix is treated as an error rather than
+    /// passed through unchanged. For an always-encrypted field, unprefixed
+    /// data at rest means the write path failed to encrypt it (or someone
+    /// with database access injected it) -- silently accepting it as
+    /// "already plaintext" would mask that indefinitely.
+    ///
+    /// `"enc:v2:"` payloads are opened with `aad`; legacy `"enc:v1:"`
+    /// payloads (which carry no AAD) are accepted only while legacy unbound
+    /// ciphertext is allowed (see [`Self::require_aad`]).
     pub fn decrypt_value_strict(
         &self,
         value: &serde_json::Value,
+        aad: &[u8],
     ) -> Result<serde_json::Value, EncryptionError> {
-        let serde_json::Value::String(s) = value else {
-            return Err(EncryptionError::NotEncrypted);
-        };
-        if !s.starts_with(ENC_PREFIX) && !s.starts_with(ENC_PREFIX_V2) {
+        if !Self::is_encrypted(value) {
             return Err(EncryptionError::NotEncrypted);
         }
-        self.decrypt_value(value)
+        self.decrypt_encrypted_with_aad(value, aad)
     }
 
     /// Encrypt a JSON value with associated data binding the ciphertext to
@@ -303,20 +313,41 @@ impl FieldEncryptor {
     /// Decrypt a value produced by [`Self::encrypt_value_with_aad`] (or, for
     /// backward compatibility, a legacy `"enc:v1:"` value with no AAD).
     /// `aad` must exactly match what was passed to `encrypt_value_with_aad`.
+    ///
+    /// Unencrypted values pass through unchanged -- unless this encryptor
+    /// was built with [`Self::require_aad`], in which case the field is
+    /// treated as always-encrypted and plaintext is rejected exactly like
+    /// [`Self::decrypt_value_strict`] (M1): once every protected row is
+    /// v2, unprefixed plaintext at rest is a write-path bug or tampering.
     pub fn decrypt_value_with_aad(
         &self,
         value: &serde_json::Value,
         aad: &[u8],
     ) -> Result<serde_json::Value, EncryptionError> {
-        let serde_json::Value::String(s) = value else {
+        if !self.allow_legacy_unbound {
+            return self.decrypt_value_strict(value, aad);
+        }
+        if !Self::is_encrypted(value) {
             return Ok(value.clone());
+        }
+        self.decrypt_encrypted_with_aad(value, aad)
+    }
+
+    /// Shared v1/v2 decrypt for a value already known to carry an `enc:`
+    /// prefix.
+    fn decrypt_encrypted_with_aad(
+        &self,
+        value: &serde_json::Value,
+        aad: &[u8],
+    ) -> Result<serde_json::Value, EncryptionError> {
+        let serde_json::Value::String(s) = value else {
+            return Err(EncryptionError::NotEncrypted);
         };
         let Some(encoded) = s.strip_prefix(ENC_PREFIX_V2) else {
-            if s.starts_with(ENC_PREFIX) && !self.allow_legacy_unbound {
+            if !self.allow_legacy_unbound {
                 return Err(EncryptionError::DecryptFailed);
             }
-            // Not v2 -- fall back to the plain (no-AAD) path, which also
-            // handles the "not encrypted at all" passthrough case.
+            // Legacy v1 -- the plain (no-AAD) path.
             return self.decrypt_value(value);
         };
 
@@ -854,7 +885,7 @@ mod tests {
         let enc = FieldEncryptor::from_bytes(&test_key());
         let original = serde_json::json!({"secret": "sauce"});
         let encrypted = enc.encrypt_value(&original).unwrap();
-        let decrypted = enc.decrypt_value_strict(&encrypted).unwrap();
+        let decrypted = enc.decrypt_value_strict(&encrypted, b"").unwrap();
         assert_eq!(original, decrypted);
     }
 
@@ -867,7 +898,7 @@ mod tests {
         let enc = FieldEncryptor::from_bytes(&test_key());
         let plain = serde_json::json!("not-encrypted-at-all");
         assert!(matches!(
-            enc.decrypt_value_strict(&plain),
+            enc.decrypt_value_strict(&plain, b""),
             Err(EncryptionError::NotEncrypted)
         ));
     }
@@ -877,26 +908,65 @@ mod tests {
         let enc = FieldEncryptor::from_bytes(&test_key());
         let obj = serde_json::json!({"already": "an object"});
         assert!(matches!(
-            enc.decrypt_value_strict(&obj),
+            enc.decrypt_value_strict(&obj, b""),
             Err(EncryptionError::NotEncrypted)
         ));
     }
 
-    /// A v2 (AAD-bound) payload is still "encrypted", just via the wrong
-    /// entry point -- `decrypt_value_strict` should surface the same
-    /// `DecryptFailed` that plain `decrypt_value` gives for v2, not
-    /// `NotEncrypted` (which would incorrectly suggest the data was never
-    /// encrypted at all).
+    /// M2: `decrypt_value_strict` used to delegate to `decrypt_value`,
+    /// which rejects every v2 payload -- so it could never open the
+    /// AAD-bound format it claimed to support. It must round-trip v2 with
+    /// the right AAD and fail with the wrong one.
     #[test]
-    fn decrypt_value_strict_rejects_v2_payload_as_decrypt_failed_not_not_encrypted() {
+    fn decrypt_value_strict_decrypts_v2_with_matching_aad() {
         let enc = FieldEncryptor::from_bytes(&test_key());
         let encrypted = enc
             .encrypt_value_with_aad(&serde_json::json!("x"), b"aad")
             .unwrap();
+        assert_eq!(
+            enc.decrypt_value_strict(&encrypted, b"aad").unwrap(),
+            serde_json::json!("x")
+        );
         assert!(matches!(
-            enc.decrypt_value_strict(&encrypted),
+            enc.decrypt_value_strict(&encrypted, b"other"),
             Err(EncryptionError::DecryptFailed)
         ));
+    }
+
+    /// M1: `require_aad()` must also reject unprefixed plaintext in
+    /// AAD-bound fields -- otherwise anyone able to write a row can bypass
+    /// both confidentiality and the AAD row binding by storing plaintext.
+    #[test]
+    fn require_aad_rejects_plaintext_in_aad_bound_fields() {
+        let lenient = FieldEncryptor::from_bytes(&test_key());
+        let strict = FieldEncryptor::from_bytes(&test_key()).require_aad();
+        for plain in [
+            serde_json::json!({"injected": true}),
+            serde_json::json!("plain string"),
+        ] {
+            assert_eq!(lenient.decrypt_value_with_aad(&plain, b"i").unwrap(), plain);
+            assert!(matches!(
+                strict.decrypt_value_with_aad(&plain, b"i"),
+                Err(EncryptionError::NotEncrypted)
+            ));
+        }
+        let v2 = strict
+            .encrypt_value_with_aad(&serde_json::json!({"ok": 1}), b"i")
+            .unwrap();
+        assert_eq!(
+            strict.decrypt_value_with_aad(&v2, b"i").unwrap(),
+            serde_json::json!({"ok": 1})
+        );
+    }
+
+    /// Strict mode also refuses legacy v1 in the strict entry point.
+    #[test]
+    fn decrypt_value_strict_rejects_v1_when_aad_required() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let v1 = enc.encrypt_value(&serde_json::json!("x")).unwrap();
+        assert!(enc.decrypt_value_strict(&v1, b"").is_ok());
+        let strict = enc.require_aad();
+        assert!(strict.decrypt_value_strict(&v1, b"").is_err());
     }
 
     #[test]

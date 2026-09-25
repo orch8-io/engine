@@ -79,6 +79,7 @@ async fn create_plugin(
             "source must not exceed 2048 characters".into(),
         ));
     }
+    validate_source(&body.plugin_type, &body.source)?;
 
     let tenant_id = crate::auth::enforce_tenant_create(
         &tenant_ctx,
@@ -105,6 +106,30 @@ async fn create_plugin(
         .map_err(|e| ApiError::from_storage(e, "plugin"))?;
 
     Ok((StatusCode::CREATED, Json(plugin)))
+}
+
+/// Reject WASM sources that can never be a legitimate module file.
+///
+/// Defense in depth only — the engine re-validates at load time (regular
+/// file, `\0asm` magic, size cap, optional `ORCH8_WASM_PLUGIN_DIR` pin), which
+/// is the real boundary since the filesystem can change after registration.
+fn validate_source(plugin_type: &PluginType, source: &str) -> Result<(), ApiError> {
+    if *plugin_type != PluginType::Wasm {
+        return Ok(());
+    }
+    let bad = source.chars().any(char::is_control)
+        || std::path::Path::new(source)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        || ["/proc", "/sys", "/dev"]
+            .iter()
+            .any(|p| source == *p || source.starts_with(&format!("{p}/")));
+    if bad {
+        return Err(ApiError::InvalidArgument(
+            "wasm plugin source must be a plain filesystem path to a WASM module".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn list_plugins(
@@ -165,6 +190,12 @@ async fn update_plugin(
     )?;
 
     if let Some(source) = body.source {
+        if source.is_empty() || source.len() > 2048 {
+            return Err(ApiError::InvalidArgument(
+                "source must be 1-2048 characters".into(),
+            ));
+        }
+        validate_source(&plugin.plugin_type, &source)?;
         plugin.source = source;
     }
     if let Some(enabled) = body.enabled {
@@ -214,4 +245,27 @@ async fn delete_plugin(
         .map_err(|e| ApiError::from_storage(e, "plugin"))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasm_source_rejects_traversal_pseudo_fs_and_control_chars() {
+        for bad in [
+            "/proc/self/environ",
+            "/dev/zero",
+            "/sys/kernel/x",
+            "plugins/../../etc/passwd",
+            "a\0b.wasm",
+            "a\nb.wasm",
+        ] {
+            assert!(validate_source(&PluginType::Wasm, bad).is_err(), "{bad}");
+        }
+        assert!(validate_source(&PluginType::Wasm, "/opt/plugins/a.wasm").is_ok());
+        assert!(validate_source(&PluginType::Wasm, "/procedures/a.wasm").is_ok());
+        // gRPC sources are endpoints, not paths.
+        assert!(validate_source(&PluginType::Grpc, "host:50051/Svc.M").is_ok());
+    }
 }

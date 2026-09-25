@@ -301,6 +301,23 @@ async fn handle_sync(
     }))
 }
 
+/// Persist a server→device command together with its push wake. Wakes are
+/// enqueued even while the Noop provider is active: they drain once a real
+/// provider is configured, and the outbox worker's retention sweep prunes
+/// stale undelivered rows so the table stays bounded either way.
+async fn enqueue_command(
+    state: &AppState,
+    command: &MobileCommand,
+    tenant_id: &str,
+) -> Result<(), ApiError> {
+    state
+        .storage
+        .create_mobile_command_with_wake(command, tenant_id, chrono::Utc::now())
+        .await
+        .map(|_| ())
+        .map_err(|e| ApiError::from_storage(e, "mobile_commands"))
+}
+
 // ---------------------------------------------------------------------------
 // POST /mobile/devices/register
 // ---------------------------------------------------------------------------
@@ -580,11 +597,7 @@ async fn resolve_approval(
         acked_at: None,
     };
 
-    state
-        .storage
-        .create_mobile_command_with_wake(&command, &approval.tenant_id, chrono::Utc::now())
-        .await
-        .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
+    enqueue_command(&state, &command, &approval.tenant_id).await?;
 
     debug!(approval_id = %id, device_id = %approval.device_id, "approval resolved");
     Ok(StatusCode::OK)
@@ -676,11 +689,7 @@ async fn create_command(
         acked_at: None,
     };
 
-    state
-        .storage
-        .create_mobile_command_with_wake(&command, &device.tenant_id, chrono::Utc::now())
-        .await
-        .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
+    enqueue_command(&state, &command, &device.tenant_id).await?;
 
     Ok(StatusCode::CREATED)
 }

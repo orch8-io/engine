@@ -309,7 +309,39 @@ fn write_table_separator(output: &mut String, widths: &[usize]) {
     write_table_row(output, cells.iter().map(String::as_str), widths);
 }
 
-pub async fn print_response(resp: reqwest::Response, _format: OutputFormat) -> Result<()> {
+/// Render a JSON response as a table for `-o table`: an array of objects
+/// becomes one row per element (columns from the first element's keys), an
+/// object becomes `field`/`value` rows. Nested values are shown as compact
+/// JSON. Returns `None` for shapes a table can't represent (scalars, empty
+/// or non-object arrays), which fall back to pretty JSON.
+fn render_json_table(body: &Value) -> Option<String> {
+    let cell = |v: Option<&Value>| match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Null) | None => "-".into(),
+        Some(other) => other.to_string(),
+    };
+    match body {
+        Value::Array(items) => {
+            let first = items.first()?.as_object()?;
+            let headers: Vec<&str> = first.keys().map(String::as_str).collect();
+            let rows: Vec<Vec<String>> = items
+                .iter()
+                .map(|item| headers.iter().map(|h| cell(item.get(*h))).collect())
+                .collect();
+            Some(format_table(&headers, &rows))
+        }
+        Value::Object(map) if !map.is_empty() => {
+            let rows: Vec<Vec<String>> = map
+                .iter()
+                .map(|(key, value)| vec![key.clone(), cell(Some(value))])
+                .collect();
+            Some(format_table(&["field", "value"], &rows))
+        }
+        _ => None,
+    }
+}
+
+pub async fn print_response(resp: reqwest::Response, format: OutputFormat) -> Result<()> {
     let status = resp.status();
     let text = resp
         .text()
@@ -318,7 +350,13 @@ pub async fn print_response(resp: reqwest::Response, _format: OutputFormat) -> R
     let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
 
     if status.is_success() {
-        println!("{}", serde_json::to_string_pretty(&body)?);
+        // Tables only for interactive terminals: `table` is the default, and
+        // scripts piping output (e.g. into `jq`) have always received JSON.
+        let interactive = std::io::IsTerminal::is_terminal(&std::io::stdout());
+        match (format, interactive, render_json_table(&body)) {
+            (OutputFormat::Table, true, Some(table)) => print!("{table}"),
+            _ => println!("{}", serde_json::to_string_pretty(&body)?),
+        }
     } else {
         let message = body
             .pointer("/error/message")
@@ -337,6 +375,67 @@ pub async fn print_response(resp: reqwest::Response, _format: OutputFormat) -> R
         anyhow::bail!("{status}: {message}{hint}");
     }
     Ok(())
+}
+
+/// Resolve the active fleet context (if any), apply it under the explicit
+/// flags, and tell the user on stderr which context is in effect.
+fn select_context(
+    cli: &mut Cli,
+    matches: &clap::ArgMatches,
+    contexts_path: &std::path::Path,
+) -> Result<()> {
+    if let Some((name, context)) =
+        commands::context::resolve_named(contexts_path, cli.context.as_deref())?
+    {
+        let context_explicit = cli.context.is_some();
+        let overridden = apply_context(cli, matches, context, context_explicit);
+        if overridden.is_empty() {
+            eprintln!("Using fleet context '{name}'");
+        } else {
+            eprintln!(
+                "Using fleet context '{name}' (overridden: {})",
+                overridden.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Fill connection settings from a saved fleet context without clobbering
+/// values the user set explicitly. Precedence per field:
+/// command-line flag > explicit `--context` > environment variable >
+/// implicitly selected context > built-in default.
+///
+/// Returns the names of the flags that kept the user's value.
+fn apply_context(
+    cli: &mut Cli,
+    matches: &clap::ArgMatches,
+    context: commands::context::FleetContext,
+    context_explicit: bool,
+) -> Vec<&'static str> {
+    use clap::parser::ValueSource;
+    let keep_user_value = |id: &str| match matches.value_source(id) {
+        Some(ValueSource::CommandLine) => true,
+        Some(ValueSource::EnvVariable) => !context_explicit,
+        _ => false,
+    };
+    let mut overridden = Vec::new();
+    if keep_user_value("url") {
+        overridden.push("--url");
+    } else {
+        cli.url = context.url;
+    }
+    if keep_user_value("tenant_id") {
+        overridden.push("--tenant-id");
+    } else {
+        cli.tenant_id = Some(context.tenant_id);
+    }
+    if keep_user_value("api_key") {
+        overridden.push("--api-key");
+    } else {
+        cli.api_key = Some(context.api_key);
+    }
+    overridden
 }
 
 /// Build the shared reqwest client, stamping `x-api-key` and `x-tenant-id`
@@ -363,9 +462,33 @@ fn build_client(api_key: Option<&str>, tenant_id: Option<&str>) -> Result<Client
         .build()?)
 }
 
+/// Client for third-party endpoints (package registries, template catalogs,
+/// piece sidecars). These are a separate trust boundary: it never carries the
+/// engine's `x-api-key` / `x-tenant-id` headers, and it has timeouts so a
+/// stalled registry can't hang the CLI forever.
+pub(crate) fn external_client() -> Result<Client> {
+    Ok(Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .build()?)
+}
+
 /// Atomically replace `path` with `contents`: write to a temp file in the
-/// same directory, fsync, then rename so a crash never leaves a torn file.
+/// same directory, fsync, rename, then fsync the directory so a crash never
+/// leaves a torn file or loses the rename.
+///
+/// For non-secret output: a new file gets `0644`, an existing file keeps its
+/// mode. Use [`atomic_write_private`] for credentials.
 pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    atomic_write_with_mode(path, contents, false)
+}
+
+/// [`atomic_write`] for files holding secrets: always `0600` on unix.
+pub(crate) fn atomic_write_private(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    atomic_write_with_mode(path, contents, true)
+}
+
+fn atomic_write_with_mode(path: &std::path::Path, contents: &[u8], private: bool) -> Result<()> {
     use std::io::Write as _;
 
     let parent = path
@@ -375,10 +498,31 @@ pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()
     let mut file = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create temporary file beside {}", path.display()))?;
     file.write_all(contents)?;
+    // NamedTempFile is created 0600; widen it for ordinary output so
+    // scaffolds and exports stay readable like any other generated file.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = if private {
+            0o600
+        } else {
+            std::fs::metadata(path).map_or(0o644, |meta| meta.permissions().mode() & 0o777)
+        };
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = private;
     file.as_file().sync_all()?;
     file.persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("atomically replace {}", path.display()))?;
+    // Persist the directory entry itself; best-effort where directories
+    // can't be opened for sync (non-unix).
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("fsync directory {}", parent.display()))?;
     Ok(())
 }
 
@@ -408,7 +552,9 @@ pub(crate) fn confirm_destructive(prompt: &str) -> Result<()> {
 async fn main() -> Result<()> {
     use std::io::IsTerminal as _;
 
-    let mut cli = Cli::parse();
+    let matches = <Cli as clap::CommandFactory>::command().get_matches();
+    let mut cli =
+        <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     ASSUME_YES.store(cli.yes, std::sync::atomic::Ordering::Relaxed);
     let format = cli.output;
     if std::env::var_os("NO_COLOR").is_some()
@@ -447,11 +593,7 @@ async fn main() -> Result<()> {
         return commands::context::run(&contexts_path, cmd);
     }
 
-    if let Some(context) = commands::context::resolve(&contexts_path, cli.context.as_deref())? {
-        cli.url = context.url;
-        cli.tenant_id = Some(context.tenant_id);
-        cli.api_key = Some(context.api_key);
-    }
+    select_context(&mut cli, &matches, &contexts_path)?;
 
     // Handle migrate before building the HTTP client — it does not need one.
     if let Commands::Migrate { database_url } = cli.command {
@@ -639,6 +781,68 @@ mod tests {
             format_table(&["id", "name"], &rows),
             "id    name\n----  ----\na     long\nwide  b   \n"
         );
+    }
+
+    #[test]
+    fn saved_context_does_not_override_explicit_flags() {
+        use clap::{CommandFactory as _, FromArgMatches as _};
+        let context = || commands::context::FleetContext {
+            url: "https://ctx.example".into(),
+            tenant_id: "ctx-tenant".into(),
+            api_key: "ctx-key".into(),
+        };
+        // Global flags given after the subcommand still count as explicit.
+        let matches = Cli::command()
+            .try_get_matches_from(["orch8", "health", "--url", "https://flag.example"])
+            .unwrap();
+        let mut cli = Cli::from_arg_matches(&matches).unwrap();
+        let overridden = apply_context(&mut cli, &matches, context(), false);
+        assert_eq!(cli.url, "https://flag.example");
+        assert_eq!(cli.tenant_id.as_deref(), Some("ctx-tenant"));
+        assert_eq!(cli.api_key.as_deref(), Some("ctx-key"));
+        assert_eq!(overridden, ["--url"]);
+
+        // Nothing explicit: the context fills everything (incl. the default URL).
+        let matches = Cli::command()
+            .try_get_matches_from(["orch8", "health"])
+            .unwrap();
+        let mut cli = Cli::from_arg_matches(&matches).unwrap();
+        if std::env::var_os("ORCH8_URL").is_none() {
+            assert!(apply_context(&mut cli, &matches, context(), true).is_empty());
+            assert_eq!(cli.url, "https://ctx.example");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_modes_distinguish_secrets_from_scaffolds() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let public = dir.path().join("types.ts");
+        atomic_write(&public, b"x").unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&public), 0o644);
+        // Existing modes are preserved on replace.
+        std::fs::set_permissions(&public, std::fs::Permissions::from_mode(0o640)).unwrap();
+        atomic_write(&public, b"y").unwrap();
+        assert_eq!(mode(&public), 0o640);
+        let secret = dir.path().join("contexts.json");
+        atomic_write_private(&secret, b"{}").unwrap();
+        assert_eq!(mode(&secret), 0o600);
+    }
+
+    #[test]
+    fn table_output_renders_objects_and_arrays() {
+        let arr = serde_json::json!([{"id": "a", "state": "running"}, {"id": "b", "n": 1}]);
+        assert_eq!(
+            render_json_table(&arr).unwrap(),
+            "id  state  \n--  -------\na   running\nb   -      \n"
+        );
+        let obj = serde_json::json!({"id": "x", "tags": ["t"]});
+        let table = render_json_table(&obj).unwrap();
+        assert!(table.contains("tags   [\"t\"]"), "{table}");
+        assert!(render_json_table(&serde_json::json!("ok")).is_none());
+        assert!(render_json_table(&serde_json::json!([])).is_none());
     }
 
     #[test]

@@ -31,6 +31,10 @@ static WEBHOOK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 const DEFAULT_WEBHOOK_CONCURRENCY: usize = 64;
 
+/// Header carrying the delivery's stable id (the same value on every retry
+/// of one outbox row) for receiver-side deduplication.
+pub const DELIVERY_ID_HEADER: &str = "X-Orch8-Delivery-Id";
+
 fn webhook_semaphore() -> &'static Arc<Semaphore> {
     WEBHOOK_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(DEFAULT_WEBHOOK_CONCURRENCY)))
 }
@@ -81,23 +85,9 @@ pub fn init_outbox(storage: Arc<dyn StorageBackend>, config: WebhookConfig) {
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .pool_max_idle_per_host(4)
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 10 {
-                    return attempt.error("too many redirects");
-                }
-                if crate::handlers::builtin::redirect_target_allowed(attempt.url()) {
-                    attempt.follow()
-                } else {
-                    attempt.error("blocked: redirect targets a private/internal network address")
-                }
-            }))
-            .build()
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "failed to build optimized HTTP client, using default");
-                reqwest::Client::new()
-            })
+        crate::outbound::build(
+            crate::outbound::builder(crate::outbound::Profile::Operator).pool_max_idle_per_host(4),
+        )
     })
 }
 
@@ -198,6 +188,61 @@ pub(crate) fn pending_entries(
         .collect()
 }
 
+/// Queue `event` on the durable outbox (one `pending` row per configured
+/// URL) for [`run_outbox_loop`] to deliver. Never blocks on network I/O or
+/// the dispatch semaphore, so it is safe on the scheduler tick path.
+/// Best-effort: a storage error is logged, not propagated.
+pub(crate) async fn enqueue_durable(
+    storage: &dyn StorageBackend,
+    config: &WebhookConfig,
+    event: &WebhookEvent,
+) {
+    for entry in pending_entries(config, event) {
+        if let Err(error) = storage.park_webhook(&entry).await {
+            warn!(%error, url = %entry.url, event_type = %event.event_type, "failed to enqueue durable webhook");
+        }
+    }
+}
+
+/// Record a failed attempt, fenced on this node's claim so a row that was
+/// recovered and re-claimed elsewhere is not clobbered by a late result.
+async fn fail_claimed(
+    storage: &dyn StorageBackend,
+    entry: &WebhookOutboxEntry,
+    reason: &str,
+    retry_at: Option<chrono::DateTime<Utc>>,
+) -> Result<(), orch8_types::error::StorageError> {
+    let Some(claimed_at) = entry.claimed_at else {
+        return storage
+            .fail_webhook_outbox_attempt(entry.id, reason, retry_at)
+            .await;
+    };
+    if !storage
+        .fail_webhook_outbox_attempt_fenced(entry.id, claimed_at, reason, retry_at)
+        .await?
+    {
+        warn!(outbox_id = %entry.id, "webhook outbox claim lost before recording failure");
+    }
+    Ok(())
+}
+
+/// Remove a delivered row, fenced on this node's claim.
+async fn complete_claimed(
+    storage: &dyn StorageBackend,
+    entry: &WebhookOutboxEntry,
+) -> Result<(), orch8_types::error::StorageError> {
+    let Some(claimed_at) = entry.claimed_at else {
+        return storage.delete_webhook_outbox(entry.id).await;
+    };
+    if !storage
+        .complete_webhook_outbox_claim(entry.id, claimed_at)
+        .await?
+    {
+        warn!(outbox_id = %entry.id, "webhook outbox claim lost before completion");
+    }
+    Ok(())
+}
+
 async fn deliver_claimed(
     storage: &dyn StorageBackend,
     config: &WebhookConfig,
@@ -208,10 +253,7 @@ async fn deliver_claimed(
         Ok(event) => event,
         Err(error) => {
             let message = format!("invalid durable webhook payload: {error}");
-            if let Err(storage_error) = storage
-                .fail_webhook_outbox_attempt(entry.id, &message, None)
-                .await
-            {
+            if let Err(storage_error) = fail_claimed(storage, entry, &message, None).await {
                 warn!(error = %storage_error, outbox_id = %entry.id, "failed to park invalid webhook payload");
             }
             return;
@@ -219,37 +261,56 @@ async fn deliver_claimed(
     };
     let delivery_id = entry.delivery_id.unwrap_or_else(uuid::Uuid::now_v7);
     let secret = config.secret.as_ref().map(|s| s.expose().to_string());
-    match try_send(
+    let body = match serde_json::to_vec(&event) {
+        Ok(body) => body,
+        Err(error) => {
+            let message = format!("serialize: {error}");
+            if let Err(storage_error) = fail_claimed(storage, entry, &message, None).await {
+                warn!(error = %storage_error, outbox_id = %entry.id, "failed to park unserializable webhook");
+            }
+            return;
+        }
+    };
+    // ONE attempt per claim. The retry schedule lives in the row
+    // (`attempts`, `next_attempt_at`) instead of in-task sleeps, so a slow or
+    // failing endpoint never pins a dispatch slot and a claim lease through
+    // its whole backoff series (head-of-line blocking, ENG-R-N7).
+    let prior_attempts = u32::try_from(entry.attempts).unwrap_or(0);
+    let attempt_number = entry.attempts.saturating_add(1);
+    let outcome = send_once(
         delivery_id,
         &entry.url,
         &event,
+        &body,
         Duration::from_secs(config.timeout_secs),
-        config.max_retries,
         secret.as_deref(),
-        cancel,
+        attempt_number,
     )
-    .await
-    {
-        Ok(()) => {
-            if let Err(error) = storage.delete_webhook_outbox(entry.id).await {
+    .await;
+    let (reason, retry_at) = match outcome {
+        SendOutcome::Delivered => {
+            if let Err(error) = complete_claimed(storage, entry).await {
                 warn!(%error, outbox_id = %entry.id, "delivered webhook but failed to remove outbox row");
             }
+            return;
         }
-        Err(reason) => {
-            // Shutdown is not delivery exhaustion. Return the row to pending
-            // so the next engine process retries it automatically instead of
-            // stranding it in the operator-only parked queue.
-            let retry_at = cancel.is_cancelled().then(Utc::now);
-            metrics::inc(metrics::WEBHOOKS_FAILED);
-            if let Err(error) = storage
-                .fail_webhook_outbox_attempt(entry.id, &reason, retry_at)
-                .await
-            {
-                warn!(%error, outbox_id = %entry.id, "failed to reschedule durable webhook");
-            } else if retry_at.is_none() {
-                metrics::inc(metrics::WEBHOOKS_PARKED);
-            }
+        SendOutcome::Terminal(reason) => (reason, None),
+        // Shutdown is not delivery exhaustion: retry on the next process.
+        SendOutcome::Transient(reason) if cancel.is_cancelled() => (reason, Some(Utc::now())),
+        SendOutcome::Transient(reason) if prior_attempts >= config.max_retries => (reason, None),
+        SendOutcome::Transient(reason) => {
+            let backoff = chrono::Duration::from_std(backoff_duration(prior_attempts))
+                .unwrap_or(chrono::Duration::days(1));
+            (reason, Utc::now().checked_add_signed(backoff))
         }
+    };
+    if retry_at.is_none() {
+        metrics::inc(metrics::WEBHOOKS_FAILED);
+    }
+    if let Err(error) = fail_claimed(storage, entry, &reason, retry_at).await {
+        warn!(%error, outbox_id = %entry.id, "failed to reschedule durable webhook");
+    } else if retry_at.is_none() {
+        metrics::inc(metrics::WEBHOOKS_PARKED);
     }
 }
 
@@ -261,15 +322,21 @@ pub async fn run_outbox_loop(
     config: WebhookConfig,
     cancel: CancellationToken,
 ) {
-    let stale_after = max_retry_pass_duration(&config).saturating_add(Duration::from_secs(300));
+    let stale_after = claim_lease(&config);
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Deliveries outlive the tick that claimed them: the loop only tops the
+    // in-flight set up to the concurrency cap, so one slow endpoint delays
+    // its own row, not the next batch (previously the loop awaited the whole
+    // claimed batch before claiming again).
+    let mut in_flight = tokio::task::JoinSet::new();
 
     loop {
         tokio::select! {
             () = cancel.cancelled() => break,
             _ = ticker.tick() => {}
         }
+        while in_flight.try_join_next().is_some() {}
 
         // `from_std` rejects durations beyond chrono's range (absurd config),
         // and subtracting even an in-range huge lease from `now()` can
@@ -284,11 +351,12 @@ pub async fn run_outbox_loop(
             warn!(%error, "failed to recover stale webhook outbox claims");
         }
 
+        let capacity = DEFAULT_WEBHOOK_CONCURRENCY.saturating_sub(in_flight.len());
+        if capacity == 0 {
+            continue;
+        }
         let claimed = match storage
-            .claim_due_webhook_outbox(
-                Utc::now(),
-                u32::try_from(DEFAULT_WEBHOOK_CONCURRENCY).unwrap_or(u32::MAX),
-            )
+            .claim_due_webhook_outbox(Utc::now(), u32::try_from(capacity).unwrap_or(u32::MAX))
             .await
         {
             Ok(rows) => rows,
@@ -297,33 +365,26 @@ pub async fn run_outbox_loop(
                 continue;
             }
         };
-        let mut deliveries = tokio::task::JoinSet::new();
         for entry in claimed {
             let storage = Arc::clone(&storage);
             let config = config.clone();
             let cancel = cancel.clone();
-            deliveries.spawn(async move {
+            in_flight.spawn(async move {
                 deliver_claimed(storage.as_ref(), &config, &entry, &cancel).await;
             });
         }
-        while deliveries.join_next().await.is_some() {}
     }
+    // Let in-flight single attempts finish (each is bounded by the request
+    // timeout) so their rows are resolved rather than left for stale
+    // recovery.
+    while in_flight.join_next().await.is_some() {}
 }
 
-/// Upper bound for one `try_send` pass: every request timeout plus every
-/// exponential-backoff sleep. Used as the outbox claim lease so another node
-/// cannot reclaim a row while its current dispatcher is legitimately sleeping
-/// between retries.
-fn max_retry_pass_duration(config: &WebhookConfig) -> Duration {
-    let request_count = u64::from(config.max_retries).saturating_add(1);
-    let mut total = Duration::from_secs(config.timeout_secs.saturating_mul(request_count));
-    for attempt in 0..config.max_retries {
-        total = total.saturating_add(backoff_duration(attempt));
-        if total == Duration::MAX {
-            break;
-        }
-    }
-    total
+/// Claim lease for one durable delivery: a single request timeout plus a
+/// generous margin. Another node may reclaim the row only after this, so it
+/// must cover the one attempt `deliver_claimed` makes per claim.
+fn claim_lease(config: &WebhookConfig) -> Duration {
+    Duration::from_secs(config.timeout_secs).saturating_add(Duration::from_secs(300))
 }
 
 /// Record one delivery attempt (best-effort — inspector data must never
@@ -380,11 +441,86 @@ const fn is_terminal_status(status: u16) -> bool {
     status >= 400 && status < 500 && status != 408 && status != 429
 }
 
-/// One full retry pass. Returns `Ok(())` on a 2xx/3xx, or `Err(last_error)`
-/// after exhausting `max_retries`, on a terminal 4xx status, or on shutdown.
-/// Does NOT park — callers decide what to do with a failure. Every attempt is
-/// recorded (bounded, redacted metadata) under `delivery_id` for the delivery
-/// inspector.
+/// Result of a single delivery attempt.
+enum SendOutcome {
+    /// 2xx/3xx.
+    Delivered,
+    /// Retrying can never succeed (terminal 4xx).
+    Terminal(String),
+    /// Transport error, 408/429, or 5xx — retry later.
+    Transient(String),
+}
+
+/// One delivery attempt, recorded (bounded, redacted metadata) under
+/// `delivery_id` for the delivery inspector.
+async fn send_once(
+    delivery_id: uuid::Uuid,
+    url: &str,
+    event: &WebhookEvent,
+    body: &[u8],
+    timeout: Duration,
+    secret: Option<&str>,
+    attempt_number: i32,
+) -> SendOutcome {
+    let signed = secret.is_some();
+    let started = std::time::Instant::now();
+    match send_request(url, body, timeout, secret, delivery_id).await {
+        Ok(status) if status < 400 => {
+            record_attempt(
+                delivery_id,
+                url,
+                event,
+                attempt_number,
+                started,
+                Ok(status),
+                signed,
+            )
+            .await;
+            metrics::inc(metrics::WEBHOOKS_SENT);
+            debug!(url = %url, event_type = %event.event_type, "webhook delivered");
+            SendOutcome::Delivered
+        }
+        Ok(status) => {
+            record_attempt(
+                delivery_id,
+                url,
+                event,
+                attempt_number,
+                started,
+                Ok(status),
+                signed,
+            )
+            .await;
+            if is_terminal_status(status) {
+                warn!(url = %url, status, attempt_number, "webhook returned terminal client error status — not retrying");
+                SendOutcome::Terminal(format!("http {status}"))
+            } else {
+                warn!(url = %url, status, attempt_number, "webhook returned error status");
+                SendOutcome::Transient(format!("http {status}"))
+            }
+        }
+        Err(e) => {
+            record_attempt(
+                delivery_id,
+                url,
+                event,
+                attempt_number,
+                started,
+                Err(e.as_str()),
+                signed,
+            )
+            .await;
+            warn!(url = %url, error = %e, attempt_number, "webhook request failed");
+            SendOutcome::Transient(e)
+        }
+    }
+}
+
+/// One full in-memory retry pass (used by the non-durable [`emit`] path and
+/// operator redelivery; the durable outbox makes one attempt per claim).
+/// Returns `Ok(())` on a 2xx/3xx, or `Err(last_error)` after exhausting
+/// `max_retries`, on a terminal 4xx status, or on shutdown. Does NOT park —
+/// callers decide what to do with a failure.
 async fn try_send(
     delivery_id: uuid::Uuid,
     url: &str,
@@ -395,60 +531,24 @@ async fn try_send(
     cancel: &CancellationToken,
 ) -> Result<(), String> {
     let body = serde_json::to_vec(event).map_err(|e| format!("serialize: {e}"))?;
-    let signed = secret.is_some();
 
     let mut last_error = String::from("no attempts made");
     for attempt in 0..=max_retries {
         let attempt_number = i32::try_from(attempt.saturating_add(1)).unwrap_or(i32::MAX);
-        let started = std::time::Instant::now();
-        match send_request(url, &body, timeout, secret).await {
-            Ok(status) if status < 400 => {
-                record_attempt(
-                    delivery_id,
-                    url,
-                    event,
-                    attempt_number,
-                    started,
-                    Ok(status),
-                    signed,
-                )
-                .await;
-                metrics::inc(metrics::WEBHOOKS_SENT);
-                debug!(url = %url, event_type = %event.event_type, "webhook delivered");
-                return Ok(());
-            }
-            Ok(status) => {
-                record_attempt(
-                    delivery_id,
-                    url,
-                    event,
-                    attempt_number,
-                    started,
-                    Ok(status),
-                    signed,
-                )
-                .await;
-                last_error = format!("http {status}");
-                if is_terminal_status(status) {
-                    warn!(url = %url, status, attempt, "webhook returned terminal client error status — not retrying");
-                    return Err(last_error);
-                }
-                warn!(url = %url, status, attempt, "webhook returned error status");
-            }
-            Err(e) => {
-                record_attempt(
-                    delivery_id,
-                    url,
-                    event,
-                    attempt_number,
-                    started,
-                    Err(e.as_str()),
-                    signed,
-                )
-                .await;
-                warn!(url = %url, error = %e, attempt, "webhook request failed");
-                last_error = e;
-            }
+        match send_once(
+            delivery_id,
+            url,
+            event,
+            &body,
+            timeout,
+            secret,
+            attempt_number,
+        )
+        .await
+        {
+            SendOutcome::Delivered => return Ok(()),
+            SendOutcome::Terminal(reason) => return Err(reason),
+            SendOutcome::Transient(reason) => last_error = reason,
         }
 
         if attempt < max_retries {
@@ -571,10 +671,14 @@ async fn send_request(
     body: &[u8],
     timeout: Duration,
     secret: Option<&str>,
+    delivery_id: uuid::Uuid,
 ) -> Result<u16, String> {
+    // Stable across every retry of one delivery, so receivers can dedupe
+    // the at-least-once redeliveries the outbox makes.
     let mut req = http_client()
         .post(url)
         .header("Content-Type", "application/json")
+        .header(DELIVERY_ID_HEADER, delivery_id.to_string())
         .timeout(timeout);
 
     if let Some(secret) = secret {
@@ -786,18 +890,16 @@ mod tests {
     }
 
     #[test]
-    fn outbox_claim_lease_covers_request_time_and_all_backoffs() {
+    fn outbox_claim_lease_covers_one_request_plus_margin() {
         let config = WebhookConfig {
             urls: vec![],
             timeout_secs: 10,
             max_retries: 10,
             secret: None,
         };
-        // 11 requests * 10s + sleeps 0.5+1+...+256s = 621.5s.
-        assert_eq!(
-            max_retry_pass_duration(&config),
-            Duration::from_millis(621_500)
-        );
+        // One attempt per claim: 10s request + 300s margin, independent of
+        // `max_retries` (backoffs are persisted, not slept through).
+        assert_eq!(claim_lease(&config), Duration::from_secs(310));
     }
 
     #[tokio::test]
@@ -1034,6 +1136,88 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// ENG-R-N7: a failing endpoint gets ONE attempt per claim; the retry
+    /// is persisted as `next_attempt_at` (no in-task backoff sleeps holding
+    /// the slot), and the stable delivery id is sent for receiver dedupe.
+    #[tokio::test]
+    async fn durable_delivery_makes_one_attempt_and_persists_backoff() {
+        let (url, counter, bodies) = start_mock_server(|_| 500).await;
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let event = instance_event(
+            "instance.completed",
+            InstanceId::new(),
+            serde_json::json!({}),
+        );
+        let entry = pending_test_entry(url, serde_json::to_value(event).unwrap());
+        storage.park_webhook(&entry).await.unwrap();
+        let claimed = storage
+            .claim_due_webhook_outbox(Utc::now(), 1)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let config = WebhookConfig {
+            urls: vec![],
+            timeout_secs: 2,
+            max_retries: 5,
+            secret: None,
+        };
+
+        let started = std::time::Instant::now();
+        deliver_claimed(&storage, &config, &claimed, &CancellationToken::new()).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "must not sleep through backoffs"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "one attempt per claim");
+
+        let row = storage.get_webhook_outbox(entry.id).await.unwrap().unwrap();
+        assert_eq!(row.status, WebhookOutboxStatus::Pending);
+        assert_eq!(row.attempts, 1);
+        assert!(row.next_attempt_at.is_some_and(|t| t > Utc::now()));
+
+        let raw = String::from_utf8(bodies.lock().await[0].clone()).unwrap();
+        assert_eq!(
+            header_value(&raw, DELIVERY_ID_HEADER),
+            entry.delivery_id.map(|id| id.to_string())
+        );
+    }
+
+    /// Once `max_retries` attempts have failed, the row parks.
+    #[tokio::test]
+    async fn durable_delivery_parks_after_max_retries() {
+        let (url, _, _) = start_mock_server(|_| 503).await;
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let event = instance_event(
+            "instance.completed",
+            InstanceId::new(),
+            serde_json::json!({}),
+        );
+        let mut entry = pending_test_entry(url, serde_json::to_value(event).unwrap());
+        entry.attempts = 2;
+        storage.park_webhook(&entry).await.unwrap();
+        let claimed = storage
+            .claim_due_webhook_outbox(Utc::now(), 1)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let config = WebhookConfig {
+            urls: vec![],
+            timeout_secs: 2,
+            max_retries: 2,
+            secret: None,
+        };
+        deliver_claimed(&storage, &config, &claimed, &CancellationToken::new()).await;
+        let row = storage.get_webhook_outbox(entry.id).await.unwrap().unwrap();
+        assert_eq!(row.status, WebhookOutboxStatus::Parked);
+        assert_eq!(row.attempts, 3);
     }
 
     #[tokio::test]
