@@ -1443,11 +1443,22 @@ pub async fn reset_subtree_to_pending(
     instance_id: InstanceId,
     root_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
+    // A parent -> children index makes the BFS O(n) instead of O(n²).
+    let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = tree
+        .iter()
+        .filter_map(|n| n.parent_id.map(|p| (p, n)))
+        .collect();
+    children_of.sort_unstable_by_key(|&(p, _)| p);
+
     let mut frontier = vec![root_id];
-    let mut descendants: Vec<(ExecutionNodeId, BlockType, BlockId)> = Vec::new();
+    let mut descendants: Vec<&ExecutionNode> = Vec::new();
     while let Some(parent) = frontier.pop() {
-        for node in tree.iter().filter(|node| node.parent_id == Some(parent)) {
-            descendants.push((node.id, node.block_type, node.block_id.clone()));
+        let start = children_of.partition_point(|&(p, _)| p < parent);
+        for &(p, node) in children_of.iter().skip(start) {
+            if p != parent {
+                break;
+            }
+            descendants.push(node);
             frontier.push(node.id);
         }
     }
@@ -1455,7 +1466,7 @@ pub async fn reset_subtree_to_pending(
         return Ok(());
     }
 
-    let node_ids: Vec<_> = descendants.iter().map(|(id, _, _)| *id).collect();
+    let node_ids: Vec<_> = descendants.iter().map(|n| n.id).collect();
     storage
         .update_nodes_state(&node_ids, NodeState::Pending)
         .await?;
@@ -1465,13 +1476,13 @@ pub async fn reset_subtree_to_pending(
     // (and decide) afresh.
     let composite_block_ids: Vec<_> = descendants
         .iter()
-        .filter(|(_, kind, _)| {
+        .filter(|n| {
             matches!(
-                kind,
+                n.block_type,
                 BlockType::Loop | BlockType::ForEach | BlockType::Router
             )
         })
-        .map(|(_, _, block_id)| block_id.clone())
+        .map(|n| n.block_id.clone())
         .collect();
     if !composite_block_ids.is_empty() {
         storage
@@ -1481,8 +1492,8 @@ pub async fn reset_subtree_to_pending(
 
     let step_block_ids: Vec<_> = descendants
         .iter()
-        .filter(|(_, kind, _)| *kind == BlockType::Step)
-        .map(|(_, _, block_id)| block_id.clone())
+        .filter(|n| n.block_type == BlockType::Step)
+        .map(|n| n.block_id.clone())
         .collect();
     if !step_block_ids.is_empty() {
         storage
@@ -1527,7 +1538,7 @@ pub async fn reset_subtree_to_pending(
 
     let all_block_ids: Vec<_> = descendants
         .iter()
-        .map(|(_, _, block_id)| block_id.as_str().to_owned())
+        .map(|n| n.block_id.as_str().to_owned())
         .collect();
     storage
         .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &all_block_ids)
