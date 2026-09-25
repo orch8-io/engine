@@ -769,11 +769,11 @@ fn headers_name_sensitive_by_fragment() {
 }
 
 #[test]
-fn headers_x_auth_passes_through() {
-    // "x-auth" is neither an exact key ("auth" must match the whole name)
-    // nor contains any fragment — it passes through un-redacted. Encode.
+fn headers_x_auth_is_redacted() {
+    // "x-auth" ends in the "-auth" fragment (`*_auth` / `*-auth` names
+    // such as basic_auth, proxy-auth carry credentials), so it is redacted.
     let out = policy().redact_headers(vec![("X-Auth", "v")]);
-    assert_eq!(out[0].1, "v");
+    assert_eq!(out[0].1, REDACTED);
 }
 
 #[test]
@@ -1044,15 +1044,15 @@ fn excerpt_invalid_json_scans_whitespace_tokens() {
 }
 
 #[test]
-fn excerpt_text_bearer_split_across_tokens_leaks_nothing_but_word() {
-    // "Bearer abc" tokenizes to ["Bearer", "abc"]: neither token matches
-    // the "Bearer " (with space) prefix, so plain-text bearer values are
-    // NOT caught by the token scan. Encode this real limitation.
+fn excerpt_text_bearer_split_across_tokens_redacts_credential() {
+    // "Bearer abc" tokenizes to ["Bearer", "abc"]; the scan redacts the
+    // token following a standalone `Bearer` scheme word (TYP-H2 -- this
+    // used to leak because the "Bearer " prefix never matched a token).
     let p = policy();
     let out = p.safe_excerpt("auth used Bearer abc123 today");
     assert!(out.contains("Bearer"));
-    assert!(out.contains("abc123"));
-    assert!(!out.contains(REDACTED));
+    assert!(!out.contains("abc123"), "{out}");
+    assert!(out.contains("today"));
 }
 
 #[test]

@@ -99,7 +99,7 @@ pub(super) async fn get_batch(
             b.id, b.instance_id, b.block_id, b.output, b.output_ref, b.output_size, b.attempt, b.created_at
         FROM block_outputs b
         JOIN pairs p ON b.instance_id = p.instance_id AND b.block_id = p.block_id
-        ORDER BY b.instance_id, b.block_id, b.created_at DESC
+        ORDER BY b.instance_id, b.block_id, b.created_at DESC, b.id DESC
         ",
     )
     .bind(&instance_ids)
@@ -145,7 +145,7 @@ pub(super) async fn get_after_created_at(
     let rows = if let Some(after) = after {
         sqlx::query_as::<_, BlockOutputRow>(
             r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
-               FROM block_outputs WHERE instance_id = $1 AND created_at >= $2 ORDER BY created_at",
+               FROM block_outputs WHERE instance_id = $1 AND created_at >= $2 ORDER BY created_at, id",
         )
         .bind(instance_id.into_uuid())
         .bind(after)
@@ -154,7 +154,7 @@ pub(super) async fn get_after_created_at(
     } else {
         sqlx::query_as::<_, BlockOutputRow>(
             r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
-               FROM block_outputs WHERE instance_id = $1 ORDER BY created_at",
+               FROM block_outputs WHERE instance_id = $1 ORDER BY created_at, id",
         )
         .bind(instance_id.into_uuid())
         .fetch_all(&store.pool)
@@ -293,19 +293,40 @@ pub(super) async fn copy_for_blocks(
         return Ok(0);
     }
     let ids: Vec<&str> = block_ids.iter().map(orch8_types::BlockId::as_str).collect();
+    // Readers order by `(created_at, id)` and treat the last row per block as
+    // the winner, relying on UUIDv7 ids being time-ordered. `gen_random_uuid()`
+    // (v4) scrambled that tiebreak for same-`created_at` rows in the copy, so
+    // mint fresh v7 ids in Rust, in source order (the generator is monotonic
+    // within the process), and map old -> new in one INSERT ... SELECT.
+    let mut tx = store.pool.begin().await?;
+    let src_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r"SELECT id FROM block_outputs
+          WHERE instance_id = $1 AND block_id = ANY($2) AND output_ref IS NULL
+          ORDER BY created_at, id",
+    )
+    .bind(src.into_uuid())
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    if src_ids.is_empty() {
+        return Ok(0);
+    }
+    let new_ids: Vec<uuid::Uuid> = src_ids.iter().map(|_| uuid::Uuid::now_v7()).collect();
     let result = sqlx::query(
         r"
         INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
-        SELECT gen_random_uuid(), $2, block_id, output, output_ref, output_size, attempt, created_at
-        FROM block_outputs
-        WHERE instance_id = $1 AND block_id = ANY($3) AND output_ref IS NULL
+        SELECT m.new_id, $2, b.block_id, b.output, b.output_ref, b.output_size, b.attempt, b.created_at
+        FROM UNNEST($3::uuid[], $4::uuid[]) AS m(old_id, new_id)
+        JOIN block_outputs b ON b.instance_id = $1 AND b.id = m.old_id
         ",
     )
     .bind(src.into_uuid())
     .bind(dst.into_uuid())
-    .bind(&ids)
-    .execute(&store.pool)
+    .bind(&src_ids)
+    .bind(&new_ids)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 

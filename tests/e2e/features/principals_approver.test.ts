@@ -124,6 +124,18 @@ describe("Principals — approver capability", () => {
     } as object);
   });
 
+  it("denies non-human_input signals on a real instance with 403", async () => {
+    const id = await plantWaitingInstance();
+    for (const signal of ["cancel", "pause", "update_context"]) {
+      await assert.rejects(approver.sendSignal(id, signal as any), {
+        status: 403,
+      } as object);
+    }
+    await assert.rejects(approver.sendCustomSignal(id, "anything", {}), {
+      status: 403,
+    } as object);
+  });
+
   it("denies reading the very instance it may approve (GET is outside the family)", async () => {
     const id = await plantWaitingInstance();
     await assert.rejects(approver.getInstance(id), {

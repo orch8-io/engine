@@ -27,6 +27,7 @@ pub mod lint;
 pub mod memory_governance;
 pub mod metrics;
 pub mod optimizer;
+pub mod outbound;
 pub mod placement;
 pub mod preflight;
 pub mod preload;

@@ -129,35 +129,52 @@ pub(super) async fn check_budget(
 /// executes instead of being re-deferred.
 const DELAY_UNTIL_PREFIX: &str = "_delay_until:";
 
-/// Check if the step has a delay and defer if so. Returns `true` if deferred.
+/// Instance-metadata key holding `block_id`'s delay marker. A JSON `null`
+/// value means "no marker" (how composite iteration resets clear it).
+pub(crate) fn delay_marker_key(block_id: &orch8_types::ids::BlockId) -> String {
+    format!("{DELAY_UNTIL_PREFIX}{}", block_id.as_str())
+}
+
+/// Resolve the step's `delay` into a deferral target, or `None` when the
+/// step may run now.
 ///
 /// The deferral target is recorded in instance metadata
-/// (`"_delay_until:<block_id>": <rfc3339>`). On a later claim, if the
-/// scheduler clock has reached that instant the delay is considered served
-/// and the step proceeds to execution; otherwise the deferral is recomputed
-/// from the current clock (preserving the historical "delay re-applies while
-/// pending" behavior). Without the marker a duration-based delay would
-/// re-defer on every claim and the block could never run.
-pub(super) async fn check_step_delay(
+/// (`"_delay_until:<block_id>": <rfc3339>`) the first time the step is
+/// reached and is **final**: an early wake (a signal sweep re-arm, an
+/// operator reschedule, a parallel sibling's retry) re-defers to the
+/// recorded instant instead of restarting the delay from the current
+/// clock. Recomputing on every claim turned "early approval + `delay: 24h`"
+/// into a livelock where the delay restarted each tick (ENG-R-N1). Once the
+/// clock reaches the recorded instant the delay is served and stays served,
+/// so retries of the step do not re-delay.
+async fn step_delay_until(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
-) -> Result<bool, EngineError> {
+) -> Result<Option<DateTime<Utc>>, EngineError> {
     let Some(delay) = &step_def.delay else {
-        return Ok(false);
+        return Ok(None);
     };
 
     let now = clock.now();
-    let marker_key = format!("{DELAY_UNTIL_PREFIX}{}", step_def.id.as_str());
-    let served = instance
-        .metadata
-        .get(&marker_key)
-        .and_then(|v| v.as_str())
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .is_some_and(|until| now >= until.with_timezone(&Utc));
-    if served {
-        return Ok(false);
+    let marker_key = delay_marker_key(&step_def.id);
+    // Read the durable marker, not just the claim-time snapshot: a parallel
+    // sibling on the tree path may have written it after this claim.
+    let recorded = |meta: &serde_json::Value| {
+        meta.get(&marker_key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|until| until.with_timezone(&Utc))
+    };
+    let mut until = recorded(&instance.metadata);
+    if until.is_none()
+        && let Some(fresh) = storage.get_instance(instance.id).await?
+    {
+        until = recorded(&fresh.metadata);
+    }
+    if let Some(until) = until {
+        return Ok((now < until).then_some(until));
     }
 
     let fire_at = crate::scheduling::delay::calculate_next_fire_at(
@@ -173,71 +190,29 @@ pub(super) async fn check_step_delay(
             &serde_json::json!({ marker_key: fire_at.to_rfc3339() }),
         )
         .await?;
-
-    crate::lifecycle::transition_instance(
-        storage,
-        instance.id,
-        Some(&instance.tenant_id),
-        InstanceState::Running,
-        InstanceState::Scheduled,
-        Some(fire_at),
-    )
-    .await?;
-
-    debug!(
-        instance_id = %instance.id,
-        block_id = %step_def.id,
-        fire_at = %fire_at,
-        "step delayed, re-scheduling instance"
-    );
-    Ok(true)
+    Ok(Some(fire_at))
 }
 
-/// Check if the step has a send window and defer if outside it. Returns `true` if deferred.
-pub(super) async fn check_send_window(
+/// Next opening of the step's `send_window`, or `None` when inside it (or
+/// when the step has no window).
+fn send_window_opens_at(
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    clock: &SharedClock,
+) -> Option<DateTime<Utc>> {
+    let window = step_def.send_window.as_ref()?;
+    crate::scheduling::send_window::check_window(clock.now(), window, &instance.timezone)
+}
+
+/// `retry_after` when the step's `rate_limit_key` is exhausted, else `None`.
+async fn rate_limit_retry_at(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
-) -> Result<bool, EngineError> {
-    let Some(window) = &step_def.send_window else {
-        return Ok(false);
-    };
-
-    let Some(next_open) =
-        crate::scheduling::send_window::check_window(clock.now(), window, &instance.timezone)
-    else {
-        return Ok(false); // Inside window
-    };
-
-    crate::lifecycle::transition_instance(
-        storage,
-        instance.id,
-        Some(&instance.tenant_id),
-        InstanceState::Running,
-        InstanceState::Scheduled,
-        Some(next_open),
-    )
-    .await?;
-
-    debug!(
-        instance_id = %instance.id,
-        block_id = %step_def.id,
-        next_open = %next_open,
-        "step outside send window, deferring"
-    );
-    Ok(true)
-}
-
-/// Check rate limit for this step. Returns `true` if rate-limited and deferred.
-pub(super) async fn check_step_rate_limit(
-    storage: &dyn StorageBackend,
-    instance: &orch8_types::instance::TaskInstance,
-    step_def: &orch8_types::sequence::StepDef,
-    clock: &SharedClock,
-) -> Result<bool, EngineError> {
+) -> Result<Option<DateTime<Utc>>, EngineError> {
     let Some(key) = &step_def.rate_limit_key else {
-        return Ok(false);
+        return Ok(None);
     };
 
     let resource_key = orch8_types::ids::ResourceKey::new(key.clone());
@@ -253,21 +228,134 @@ pub(super) async fn check_step_rate_limit(
             retry_after = %retry_after,
             "rate limit exceeded, deferring instance"
         );
-
         crate::metrics::inc(crate::metrics::RATE_LIMITS_EXCEEDED);
+        return Ok(Some(retry_after));
+    }
+    Ok(None)
+}
 
-        crate::lifecycle::transition_instance(
-            storage,
-            instance.id,
-            Some(&instance.tenant_id),
+/// Shared step preamble for the flat and tree dispatch paths: `delay`, then
+/// `send_window`, then `rate_limit_key` (in that order — a rate-limit token
+/// is only consumed once the step is otherwise allowed to run). Returns the
+/// instant the instance must be parked until, or `None` to proceed.
+///
+/// Pure with respect to instance state: callers own the Running → Scheduled
+/// transition (the flat path via `transition_instance`, the tree path via
+/// [`park_tree_instance_until`], which tolerates a parallel sibling having
+/// already parked the instance).
+pub(crate) async fn step_preamble_deferral(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    clock: &SharedClock,
+) -> Result<Option<DateTime<Utc>>, EngineError> {
+    if let Some(fire_at) = step_delay_until(storage, instance, step_def, clock).await? {
+        debug!(
+            instance_id = %instance.id,
+            block_id = %step_def.id,
+            fire_at = %fire_at,
+            "step delayed, re-scheduling instance"
+        );
+        return Ok(Some(fire_at));
+    }
+    if let Some(next_open) = send_window_opens_at(instance, step_def, clock) {
+        debug!(
+            instance_id = %instance.id,
+            block_id = %step_def.id,
+            next_open = %next_open,
+            "step outside send window, deferring"
+        );
+        return Ok(Some(next_open));
+    }
+    rate_limit_retry_at(storage, instance, step_def, clock).await
+}
+
+/// Tree-path counterpart of the flat path's Running → Scheduled deferral.
+///
+/// Up to two parallel leaves are dispatched concurrently, so the sibling may
+/// already have parked the instance; a strict `transition_instance` would
+/// then error and abort the tick. Instead: CAS Running → Scheduled, and if
+/// that loses because the instance is already Scheduled for a *later*
+/// instant, pull its fire time in to ours (an early wake is harmless — the
+/// sibling's own preamble re-defers it to its final marker).
+pub(crate) async fn park_tree_instance_until(
+    storage: &dyn StorageBackend,
+    instance_id: orch8_types::ids::InstanceId,
+    fire_at: DateTime<Utc>,
+) -> Result<(), EngineError> {
+    if storage
+        .conditional_update_instance_state(
+            instance_id,
             InstanceState::Running,
             InstanceState::Scheduled,
-            Some(retry_after),
+            Some(fire_at),
         )
-        .await?;
-        return Ok(true);
+        .await?
+    {
+        return Ok(());
     }
-    Ok(false)
+    if let Some(current) = storage.get_instance(instance_id).await?
+        && current.state == InstanceState::Scheduled
+        && current.next_fire_at.is_none_or(|t| t > fire_at)
+    {
+        storage
+            .conditional_update_instance_state(
+                instance_id,
+                InstanceState::Scheduled,
+                InstanceState::Scheduled,
+                Some(fire_at),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Park a Running flat-path instance until `fire_at`.
+async fn defer_flat_instance(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    fire_at: DateTime<Utc>,
+) -> Result<(), EngineError> {
+    crate::lifecycle::transition_instance(
+        storage,
+        instance.id,
+        Some(&instance.tenant_id),
+        InstanceState::Running,
+        InstanceState::Scheduled,
+        Some(fire_at),
+    )
+    .await
+}
+
+/// Check if the step has a delay and defer if so. Returns `true` if deferred.
+/// See [`step_delay_until`] for the marker semantics.
+#[cfg(test)]
+pub(super) async fn check_step_delay(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    clock: &SharedClock,
+) -> Result<bool, EngineError> {
+    let Some(fire_at) = step_delay_until(storage, instance, step_def, clock).await? else {
+        return Ok(false);
+    };
+    defer_flat_instance(storage, instance, fire_at).await?;
+    Ok(true)
+}
+
+/// Check rate limit for this step. Returns `true` if rate-limited and deferred.
+#[cfg(test)]
+pub(super) async fn check_step_rate_limit(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    clock: &SharedClock,
+) -> Result<bool, EngineError> {
+    let Some(retry_after) = rate_limit_retry_at(storage, instance, step_def, clock).await? else {
+        return Ok(false);
+    };
+    defer_flat_instance(storage, instance, retry_after).await?;
+    Ok(true)
 }
 
 /// Check if a human-in-the-loop step has received its input signal.
@@ -290,17 +378,23 @@ async fn accept_human_input(
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
     value: String,
+    evidence: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<(), EngineError> {
     let store_key = human_def
         .store_as
         .clone()
         .unwrap_or_else(|| step_def.id.as_str().to_owned());
-    let output_json = serde_json::json!({
+    let mut output_json = serde_json::json!({
         "value": value.clone(),
         // Marks this row as a gate acceptance rather than a completed
         // handler output — see HUMAN_GATE_MARKER.
         HUMAN_GATE_MARKER: true,
     });
+    // Decision evidence (who/what decided, with what confidence) rides on
+    // the acceptance row so the audit trail survives with the output.
+    if let (Some(extra), Some(obj)) = (evidence, output_json.as_object_mut()) {
+        obj.extend(extra);
+    }
 
     let output = orch8_types::output::BlockOutput {
         id: uuid::Uuid::now_v7(),
@@ -319,6 +413,224 @@ async fn accept_human_input(
         .merge_context_data(instance.id, &store_key, &serde_json::Value::String(value))
         .await?;
     Ok(())
+}
+
+/// Instance-metadata key holding a gate's deferred model prediction. A JSON
+/// `null` value means "not consulted" (composite iteration resets clear it).
+pub(crate) fn auto_decide_marker_key(block_id: &orch8_types::ids::BlockId) -> String {
+    format!("_auto_decide:{}", block_id.as_str())
+}
+
+/// The prediction recorded when the model was consulted but not confident
+/// enough, if any.
+fn deferred_prediction(
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+) -> Option<serde_json::Value> {
+    instance
+        .metadata
+        .get(auto_decide_marker_key(&step_def.id))
+        .filter(|v| v.is_object())
+        .cloned()
+}
+
+/// Free text carried by a human-input signal that is not a valid choice:
+/// an explicit `text`/`comment` field, or a `value` that isn't a choice id.
+fn reply_text(payload: &serde_json::Value) -> Option<&str> {
+    ["text", "comment", "value"]
+        .iter()
+        .find_map(|k| payload.get(*k).and_then(|v| v.as_str()))
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// Endpoint for a gate's `auto_decide`, with any `credentials://` reference
+/// in `api_key` resolved in the instance's tenant scope.
+async fn auto_decide_endpoint(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    auto: &orch8_types::sequence::AutoDecideDef,
+) -> Result<crate::handlers::jev::JevEndpoint, orch8_types::error::StepError> {
+    let mut api_key = auto.api_key.clone().map(serde_json::Value::String);
+    if let Some(key) = api_key.as_mut() {
+        crate::credentials::resolve_in_value(storage, instance.tenant_id.as_str(), key).await?;
+    }
+    Ok(crate::handlers::jev::JevEndpoint {
+        base_url: auto.base_url.clone(),
+        api_key: api_key.and_then(|v| v.as_str().map(str::to_owned)),
+        model: auto.model.clone(),
+        timeout_ms: None,
+    })
+}
+
+/// Choice criteria for a gate: every effective choice value → its label.
+fn gate_criteria(
+    human_def: &orch8_types::sequence::HumanInputDef,
+) -> serde_json::Map<String, serde_json::Value> {
+    human_def
+        .effective_choices()
+        .into_iter()
+        .map(|c| (c.value, serde_json::Value::String(c.label)))
+        .collect()
+}
+
+fn gate_instructions<'a>(
+    human_def: &'a orch8_types::sequence::HumanInputDef,
+    auto: &'a orch8_types::sequence::AutoDecideDef,
+) -> &'a str {
+    auto.instructions
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| Some(human_def.prompt.as_str()).filter(|s| !s.trim().is_empty()))
+        .unwrap_or("Which option should be chosen for this request?")
+}
+
+/// Ask the model to decide the gate. Returns `true` when it accepted the
+/// gate; `false` when the step must park for a human (low confidence, a
+/// prediction already recorded on an earlier entry, or the model being
+/// unavailable — the gate always fails safe to a human).
+async fn auto_decide_gate(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    human_def: &orch8_types::sequence::HumanInputDef,
+    auto: &orch8_types::sequence::AutoDecideDef,
+) -> Result<bool, EngineError> {
+    // Consulted before and deferred: the human decides; don't re-ask (and
+    // re-bill) on every wake of the parked step.
+    if deferred_prediction(instance, step_def).is_some() {
+        return Ok(false);
+    }
+    let state = match &step_def.context_access {
+        Some(access) => instance.context.filtered(access).data,
+        None => instance.context.data.clone(),
+    };
+    let decision = match auto_decide_endpoint(storage, instance, auto).await {
+        Ok(endpoint) => {
+            crate::handlers::jev::decide_choice(
+                &endpoint,
+                &state,
+                gate_instructions(human_def, auto),
+                gate_criteria(human_def),
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    let decision = match decision {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                instance_id = %instance.id,
+                block_id = %step_def.id,
+                error = %e,
+                "auto_decide: decision model unavailable; deferring to a human"
+            );
+            crate::metrics::inc_with(crate::metrics::AUTO_DECIDE, &[("outcome", "error")]);
+            return Ok(false);
+        }
+    };
+    let valid = human_def
+        .effective_choices()
+        .iter()
+        .any(|c| c.value == decision.choice);
+    let prediction = serde_json::json!({
+        "choice": decision.choice,
+        "confidence": decision.confidence,
+        "probabilities": decision.probabilities,
+        "model": decision.model,
+        "threshold": auto.threshold,
+    });
+    if valid && decision.confidence >= auto.threshold {
+        let mut evidence = serde_json::Map::new();
+        evidence.insert("_decided_by".into(), serde_json::json!("jev"));
+        evidence.insert("_auto_decide".into(), prediction);
+        accept_human_input(
+            storage,
+            instance,
+            step_def,
+            human_def,
+            decision.choice,
+            Some(evidence),
+        )
+        .await?;
+        crate::metrics::inc_with(crate::metrics::AUTO_DECIDE, &[("outcome", "accepted")]);
+        debug!(
+            instance_id = %instance.id,
+            block_id = %step_def.id,
+            confidence = decision.confidence,
+            "auto_decide: gate decided by model"
+        );
+        return Ok(true);
+    }
+    storage
+        .merge_instance_metadata(
+            instance.id,
+            &serde_json::json!({ auto_decide_marker_key(&step_def.id): prediction }),
+        )
+        .await?;
+    crate::metrics::inc_with(crate::metrics::AUTO_DECIDE, &[("outcome", "deferred")]);
+    debug!(
+        instance_id = %instance.id,
+        block_id = %step_def.id,
+        confidence = decision.confidence,
+        threshold = auto.threshold,
+        "auto_decide: below threshold; deferring to a human"
+    );
+    Ok(false)
+}
+
+/// Map a free-text reply onto one of the gate's choices. `None` when the
+/// model is unavailable or not confident enough (the reply is then rejected
+/// as before).
+async fn interpret_reply(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    human_def: &orch8_types::sequence::HumanInputDef,
+    auto: &orch8_types::sequence::AutoDecideDef,
+    text: &str,
+) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {
+    let endpoint = auto_decide_endpoint(storage, instance, auto).await.ok()?;
+    let state = serde_json::json!({"question": human_def.prompt, "reply": text});
+    let decision = match crate::handlers::jev::decide_choice(
+        &endpoint,
+        &state,
+        "Which option does the `reply` choose in answer to `question`?",
+        gate_criteria(human_def),
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                instance_id = %instance.id,
+                block_id = %step_def.id,
+                error = %e,
+                "auto_decide: could not interpret free-text reply"
+            );
+            return None;
+        }
+    };
+    let valid = human_def
+        .effective_choices()
+        .iter()
+        .any(|c| c.value == decision.choice);
+    if !valid || decision.confidence < auto.threshold {
+        return None;
+    }
+    let mut evidence = serde_json::Map::new();
+    evidence.insert("_decided_by".into(), serde_json::json!("human_reply"));
+    evidence.insert(
+        "_auto_decide".into(),
+        serde_json::json!({
+            "reply": text,
+            "choice": decision.choice,
+            "confidence": decision.confidence,
+            "probabilities": decision.probabilities,
+            "model": decision.model,
+        }),
+    );
+    Some((decision.choice, evidence))
 }
 
 /// [`check_human_input_at`] evaluated at the real current time. Kept as the
@@ -361,7 +673,7 @@ pub async fn check_human_input_at(
             choice = %value,
             "dry-run: auto-approving human gate with default choice"
         );
-        accept_human_input(storage, instance, step_def, human_def, value).await?;
+        accept_human_input(storage, instance, step_def, human_def, value, None).await?;
         return Ok(false); // Continue execution
     }
 
@@ -387,6 +699,33 @@ pub async fn check_human_input_at(
             let Some(value) =
                 candidate.filter(|v| effective_choices.iter().any(|c| c.value == **v))
             else {
+                // A free-text reply ("sure, go ahead") can still be mapped
+                // onto a choice when the gate opted into auto_decide.
+                if let Some(auto) = human_def
+                    .auto_decide
+                    .as_ref()
+                    .filter(|a| a.interpret_replies)
+                    && let Some(text) = reply_text(&signal.payload)
+                    && let Some((value, evidence)) =
+                        interpret_reply(storage, instance, step_def, human_def, auto, text).await
+                {
+                    accept_human_input(
+                        storage,
+                        instance,
+                        step_def,
+                        human_def,
+                        value,
+                        Some(evidence),
+                    )
+                    .await?;
+                    storage.mark_signal_delivered(signal.id).await?;
+                    debug!(
+                        instance_id = %instance.id,
+                        block_id = %step_def.id,
+                        "human input: free-text reply interpreted and accepted"
+                    );
+                    return Ok(false);
+                }
                 warn!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,
@@ -398,8 +737,29 @@ pub async fn check_human_input_at(
                 continue;
             };
 
-            // Valid input — canonical output shape and context merge.
-            accept_human_input(storage, instance, step_def, human_def, value.to_string()).await?;
+            // Valid input — canonical output shape and context merge. When
+            // the model was consulted first and deferred, record its
+            // prediction next to the human answer: a labelled example for
+            // threshold tuning.
+            let evidence = deferred_prediction(instance, step_def).map(|pred| {
+                let agreed = pred.get("choice").and_then(|c| c.as_str()) == Some(value);
+                let mut m = serde_json::Map::new();
+                m.insert("_decided_by".into(), serde_json::json!("human"));
+                m.insert(
+                    "_auto_decide".into(),
+                    serde_json::json!({"prediction": pred, "agreed": agreed}),
+                );
+                m
+            });
+            accept_human_input(
+                storage,
+                instance,
+                step_def,
+                human_def,
+                value.to_string(),
+                evidence,
+            )
+            .await?;
             storage.mark_signal_delivered(signal.id).await?;
             debug!(
                 instance_id = %instance.id,
@@ -430,6 +790,14 @@ pub async fn check_human_input_at(
             block_id = %step_def.id,
             "human input: previous acceptance recovered from outputs, gate satisfied"
         );
+        return Ok(false); // Continue execution
+    }
+
+    // Confidence-gated automation: consult the decision model once per gate
+    // entry. Confident → accept now; otherwise park for a human as usual.
+    if let Some(auto) = &human_def.auto_decide
+        && auto_decide_gate(storage, instance, step_def, human_def, auto).await?
+    {
         return Ok(false); // Continue execution
     }
 
@@ -654,15 +1022,12 @@ pub(super) async fn execute_step_block(
         }
     }
 
-    if check_step_delay(storage.as_ref(), instance, step_def, clock).await? {
-        return Ok(StepOutcome::Deferred);
-    }
-
-    if check_send_window(storage.as_ref(), instance, step_def, clock).await? {
-        return Ok(StepOutcome::Deferred);
-    }
-
-    if check_step_rate_limit(storage.as_ref(), instance, step_def, clock).await? {
+    // Shared preamble (delay → send_window → rate limit), also run by the
+    // tree path in `step_block::execute_step_node_with_clock`.
+    if let Some(fire_at) =
+        step_preamble_deferral(storage.as_ref(), instance, step_def, clock).await?
+    {
+        defer_flat_instance(storage.as_ref(), instance, fire_at).await?;
         return Ok(StepOutcome::Deferred);
     }
 
@@ -685,9 +1050,48 @@ pub(super) async fn execute_step_block(
             let expected_updated_at = inst.updated_at;
             inst.context.runtime.current_step = Some(step_def.id.clone());
             inst.context.runtime.current_step_started_at = Some(step_started);
-            storage
+            // A lost CAS (a concurrent context merge, heartbeat, or signal
+            // bumped `updated_at`) used to be dropped silently, leaving
+            // `current_step` pointing at the previous step — the approvals
+            // API and wait_for_input timeouts then keyed off the wrong step.
+            // Retry once against a fresh read, mirroring the tree path.
+            if !storage
                 .update_instance_context_cas(instance_id, &inst.context, expected_updated_at)
-                .await?;
+                .await?
+            {
+                let landed = match storage.get_instance(instance_id).await? {
+                    Some(mut fresh)
+                        if fresh.context.runtime.current_step.as_ref() != Some(&step_def.id) =>
+                    {
+                        let expected_updated_at = fresh.updated_at;
+                        fresh.context.runtime.current_step = Some(step_def.id.clone());
+                        fresh.context.runtime.current_step_started_at = Some(step_started);
+                        storage
+                            .update_instance_context_cas(
+                                instance_id,
+                                &fresh.context,
+                                expected_updated_at,
+                            )
+                            .await?
+                    }
+                    Some(fresh) => {
+                        // A concurrent writer already stamped this step:
+                        // adopt its baseline.
+                        if let Some(t) = fresh.context.runtime.current_step_started_at {
+                            step_started = t;
+                        }
+                        true
+                    }
+                    None => true,
+                };
+                if !landed {
+                    warn!(
+                        instance_id = %instance_id,
+                        block_id = %step_def.id,
+                        "lost CAS race stamping current_step twice; proceeding without the stamp"
+                    );
+                }
+            }
         }
     }
 
@@ -828,7 +1232,10 @@ pub(super) async fn execute_step_block(
     // completed-block set (so the step is NOT skipped), `compute_attempt`
     // resumes the same attempt, and the memoization guard in
     // `execute_step_dry` refuses to serve it as a cached result — so the
-    // handler re-runs (at-least-once, same as the tree path). The real
+    // step is re-dispatched. Handlers with external side effects are then
+    // gated by the `EffectGuard` receipt (at-most-once: an ambiguous prior
+    // dispatch blocks automatic re-execution until resolved); side-effect-
+    // free handlers simply re-run. Same contract as the tree path. The real
     // output is appended as a new row afterwards; `get_block_output`
     // (most-recent) will return the real one.
     let sentinel = orch8_types::output::BlockOutput {

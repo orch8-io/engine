@@ -14,6 +14,7 @@ fn row_to_command(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerCommand, Storag
         id: Uuid::parse_str(row.get::<&str, _>("id"))
             .map_err(|e| StorageError::Query(e.to_string()))?,
         worker_id: row.get("worker_id"),
+        tenant_id: row.get("tenant_id"),
         command: command_str
             .parse()
             .map_err(|e: String| StorageError::Query(e))?,
@@ -28,13 +29,14 @@ pub(super) async fn enqueue(
 ) -> Result<(), StorageError> {
     let payload = serde_json::to_string(&cmd.payload)?;
     sqlx::query(
-        "INSERT INTO worker_commands (id, worker_id, command, payload, created_at) VALUES (?1,?2,?3,?4,?5)",
+        "INSERT INTO worker_commands (id, worker_id, command, payload, created_at, tenant_id) VALUES (?1,?2,?3,?4,?5,?6)",
     )
     .bind(cmd.id.to_string())
     .bind(&cmd.worker_id)
     .bind(cmd.command.to_string())
     .bind(&payload)
     .bind(ts(cmd.created_at))
+    .bind(&cmd.tenant_id)
     .execute(&storage.pool)
     .await?;
     Ok(())
@@ -45,7 +47,7 @@ pub(super) async fn list(
     worker_id: &str,
 ) -> Result<Vec<WorkerCommand>, StorageError> {
     let rows = sqlx::query(
-        "SELECT id, worker_id, command, payload, created_at FROM worker_commands WHERE worker_id = ?1 ORDER BY created_at ASC",
+        "SELECT id, worker_id, tenant_id, command, payload, created_at FROM worker_commands WHERE worker_id = ?1 ORDER BY created_at ASC",
     )
     .bind(worker_id)
     .fetch_all(&storage.pool)

@@ -180,29 +180,53 @@ pub(crate) fn spawn(
     tokio::spawn(async move {
         let mut backoff = 1u64;
         while !shutdown.is_cancelled() {
+            let started = tokio::time::Instant::now();
             match run_session(&config, &shutdown).await {
                 Ok(()) => break,
                 Err(error) => {
+                    backoff = next_backoff(backoff, started.elapsed());
                     tracing::warn!(%error, retry_secs = backoff, "managed control session disconnected");
                     tokio::select! {
                         () = shutdown.cancelled() => break,
                         () = tokio::time::sleep(Duration::from_secs(backoff)) => {}
                     }
-                    backoff = (backoff * 2).min(30);
+                    backoff = (backoff * 2).min(MAX_BACKOFF_SECS);
                 }
             }
         }
     })
 }
 
+const MAX_BACKOFF_SECS: u64 = 30;
+/// A session that stayed up at least this long counts as healthy: the next
+/// disconnect is a fresh incident and reconnects fast again instead of
+/// inheriting the backoff accumulated by earlier, unrelated failures.
+const HEALTHY_SESSION: Duration = Duration::from_secs(60);
+
+/// Backoff (seconds) to wait after a session that lasted `session_len`.
+fn next_backoff(current: u64, session_len: Duration) -> u64 {
+    if session_len >= HEALTHY_SESSION {
+        1
+    } else {
+        current
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_resets_after_healthy_session() {
+        assert_eq!(next_backoff(30, HEALTHY_SESSION), 1);
+        assert_eq!(next_backoff(16, Duration::from_secs(2)), 16);
+    }
 
     fn command(kind: WorkerCommandKind) -> WorkerCommand {
         WorkerCommand {
             id: uuid::Uuid::new_v4(),
             worker_id: "edge-1".into(),
+            tenant_id: String::new(),
             command: kind,
             payload: serde_json::Value::Null,
             created_at: chrono::Utc::now(),

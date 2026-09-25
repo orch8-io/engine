@@ -1,7 +1,7 @@
 //! Built-in `llm_call` handler — universal LLM integration.
 //!
 //! Supports all major providers through two API formats:
-//! - **OpenAI-compatible**: `OpenAI`, `Deepseek`, `Qwen`, `Perplexity`, `Gemini`, `Groq`, `Together`, `Mistral`
+//! - **OpenAI-compatible**: `OpenAI`, `Mistral`, `Gemini`, `Deepseek`, `Qwen`, `Groq`, `Perplexity`, `Together`, `OpenRouter`
 //! - **Anthropic**: Claude (uses the `Messages` API)
 //!
 //! ## Params
@@ -17,7 +17,10 @@
 //! | `messages` | array | `[]` | Chat messages (`{role, content}`); `content` is a string or an array of content blocks (see Multimodal content) |
 //! | `system` | string | — | System prompt (Anthropic shorthand) |
 //! | `temperature` | number | — | Sampling temperature |
-//! | `max_tokens` | number | `4096` | Max output tokens |
+//! | `max_tokens` | number | `16000` Anthropic / provider default elsewhere | Max output tokens |
+//! | `reasoning_effort` | string | — | `OpenAI`-compatible reasoning level (`low`…`xhigh`) |
+//! | `effort` | string | — | Anthropic `output_config.effort` (`low`…`max`) |
+//! | `thinking` | object | — | Anthropic thinking config (e.g. `{"type": "adaptive"}`) |
 //! | `tools` | array | — | Tool/function definitions |
 //! | `tool_choice` | string/object | — | Tool selection strategy |
 //! | `total_timeout_secs` | number | `120` | Cumulative timeout across all failover attempts (0 disables) |
@@ -97,10 +100,42 @@
 //! When no `model` is specified in step params, the handler reads from these
 //! env vars (checked once at first use):
 //!
-//! | Env var | Applies to | Fallback |
-//! |---------|-----------|----------|
-//! | `ORCH8_LLM_DEFAULT_MODEL_OPENAI` | All `OpenAI`-compatible providers | `gpt-4o` |
-//! | `ORCH8_LLM_DEFAULT_MODEL_ANTHROPIC` | `Anthropic` | `claude-sonnet-4-6` |
+//! `ORCH8_LLM_DEFAULT_MODEL_<PROVIDER>` (e.g. `..._MISTRAL`) overrides the
+//! built-in default for that provider; unknown (custom) provider names also
+//! honour `ORCH8_LLM_DEFAULT_MODEL_OPENAI`.
+//!
+//! | Provider | Built-in default |
+//! |----------|------------------|
+//! | `openai` (and unknown names) | `gpt-6-astra` |
+//! | `anthropic` | `claude-opus-5` |
+//! | `gemini` | `gemini-3.8-flash` |
+//! | `mistral` | `mistral-medium-latest` (Mistral Medium 3.5) |
+//! | `deepseek` | `deepseek-v4-pro` |
+//! | `qwen` | `qwen3.7-max` |
+//! | `groq` | `openai/gpt-oss-120b` |
+//! | `perplexity` | `sonar-pro` |
+//! | `together`, `openrouter` | none — `model` is required |
+//!
+//! ## Provider API differences handled here
+//!
+//! - `openai`: `max_tokens` is sent as `max_completion_tokens` (the only
+//!   output cap the GPT-5/6 reasoning models accept); sampling params are
+//!   dropped (with a warning) for reasoning models, which reject them.
+//! - `mistral`: `seed` is sent as `random_seed`; `safe_prompt`,
+//!   `prompt_mode` pass through; no `stream_options` (usage arrives in the
+//!   final chunk anyway).
+//! - All `OpenAI`-compatible providers: `reasoning_effort`,
+//!   `parallel_tool_calls` pass through.
+//! - `anthropic`: `effort` → `output_config.effort`; `thinking` /
+//!   `output_config` pass through; sampling params are dropped for models
+//!   that reject them (Opus 4.7+, Sonnet 5, Fable); `OpenAI`-shaped
+//!   `tools` / `tool_choice` / tool-call conversations (as produced by the
+//!   `agent` handler) are translated to Messages API blocks, and the raw
+//!   response blocks are kept on `message.anthropic_content` so thinking
+//!   blocks round-trip unchanged in tool loops; a `refusal` stop is a
+//!   permanent error. On `claude-opus-5` / `claude-fable-5-1` at the default
+//!   endpoint, server-side refusal fallbacks (`fallbacks: "default"`) are on
+//!   unless the step sets `fallbacks: false`.
 
 mod anthropic;
 pub(crate) mod common;
@@ -114,22 +149,84 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-/// Default model for the OpenAI-compatible provider. Override at runtime
-/// with `ORCH8_LLM_DEFAULT_MODEL_OPENAI`.
-pub(crate) fn openai_default_model() -> &'static str {
-    static MODEL: OnceLock<String> = OnceLock::new();
-    MODEL.get_or_init(|| {
-        std::env::var("ORCH8_LLM_DEFAULT_MODEL_OPENAI").unwrap_or_else(|_| "gpt-4o".to_string())
-    })
+/// Built-in default model per provider (current flagships as of 2026-09).
+/// `None` for aggregators that host many vendors' models (`together`,
+/// `openrouter`): a `model` param is required there, since no single default
+/// is meaningful. Unknown provider names speak the `OpenAI` protocol and get
+/// the `OpenAI` default.
+pub(crate) fn builtin_default_model(provider: &str) -> Option<&'static str> {
+    match provider {
+        "anthropic" => Some("claude-opus-5"),
+        "gemini" => Some("gemini-3.8-flash"),
+        "mistral" => Some("mistral-medium-latest"),
+        "deepseek" => Some("deepseek-v4-pro"),
+        "qwen" => Some("qwen3.7-max"),
+        "groq" => Some("openai/gpt-oss-120b"),
+        "perplexity" => Some("sonar-pro"),
+        "together" | "openrouter" => None,
+        _ => Some("gpt-6-astra"),
+    }
 }
 
-/// Default model for the Anthropic provider. Override at runtime
-/// with `ORCH8_LLM_DEFAULT_MODEL_ANTHROPIC`.
-pub(crate) fn anthropic_default_model() -> &'static str {
-    static MODEL: OnceLock<String> = OnceLock::new();
-    MODEL.get_or_init(|| {
-        std::env::var("ORCH8_LLM_DEFAULT_MODEL_ANTHROPIC")
-            .unwrap_or_else(|_| "claude-sonnet-4-6".to_string())
+/// Env var overriding a provider's default model:
+/// `ORCH8_LLM_DEFAULT_MODEL_<PROVIDER>` (uppercased, non-alphanumerics → `_`).
+pub(crate) fn default_model_env_var(provider: &str) -> String {
+    let suffix: String = provider
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("ORCH8_LLM_DEFAULT_MODEL_{suffix}")
+}
+
+/// Default model for `provider` when a step sets no `model`: the
+/// provider-specific env override, then (for providers without a built-in
+/// entry of their own) the legacy `ORCH8_LLM_DEFAULT_MODEL_OPENAI`, then the
+/// built-in default.
+pub(crate) fn default_model(provider: &str) -> Option<String> {
+    let from_env = |var: &str| std::env::var(var).ok().filter(|v| !v.trim().is_empty());
+    if let Some(model) = from_env(&default_model_env_var(provider)) {
+        return Some(model);
+    }
+    let known = matches!(
+        provider,
+        "openai"
+            | "anthropic"
+            | "gemini"
+            | "mistral"
+            | "deepseek"
+            | "qwen"
+            | "groq"
+            | "perplexity"
+            | "together"
+            | "openrouter"
+    );
+    if !known && let Some(model) = from_env("ORCH8_LLM_DEFAULT_MODEL_OPENAI") {
+        return Some(model);
+    }
+    builtin_default_model(provider).map(str::to_owned)
+}
+
+/// The model a call uses: the step's `model` param, else [`default_model`].
+pub(crate) fn resolve_model(params: &Value, provider: &str) -> Result<String, StepError> {
+    if let Some(model) = params
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.trim().is_empty())
+    {
+        return Ok(model.to_owned());
+    }
+    default_model(provider).ok_or_else(|| {
+        permanent(format!(
+            "provider '{provider}' hosts many vendors' models; set the `model` param \
+             (or {})",
+            default_model_env_var(provider)
+        ))
     })
 }
 use tracing::warn;
@@ -146,34 +243,37 @@ use super::StepContext;
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .pool_max_idle_per_host(8)
-            .timeout(Duration::from_secs(300))
-            // SSRF: filter DNS at connect time so a rebinding resolver can't
-            // swap a vetted public IP for a private one between the pre-flight
-            // `is_url_safe` check and the actual connection (and so redirects to
-            // hostnames that resolve to private IPs are blocked too).
-            .dns_resolver(std::sync::Arc::new(
-                crate::handlers::builtin::SsrfGuardResolver,
-            ))
-            // The initial URL is validated by `is_url_safe`, but reqwest
-            // follows redirects by default without re-checking. Re-validate
-            // every hop and refuse redirects to internal/metadata IP literals.
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 10 {
-                    return attempt.error("too many redirects");
-                }
-                if crate::handlers::builtin::redirect_target_allowed(attempt.url()) {
-                    attempt.follow()
-                } else {
-                    attempt.error("blocked: redirect targets a private/internal network address")
-                }
-            }))
-            .build()
-            // Fail fast: silently falling back to a bare `reqwest::Client`
-            // would drop the SsrfGuardResolver and the redirect policy above.
-            .expect("failed to build the shared LLM HTTP client with the SSRF guard")
+        // SSRF: the `Untrusted` profile filters DNS at connect time (so a
+        // rebinding resolver can't swap a vetted public IP for a private one
+        // after the pre-flight `is_url_safe` check), re-validates every
+        // redirect hop, and disables proxies (which would resolve the host
+        // themselves and bypass the resolver filter).
+        crate::outbound::build(
+            crate::outbound::builder(crate::outbound::Profile::Untrusted)
+                .pool_max_idle_per_host(8)
+                .timeout(Duration::from_secs(300)),
+        )
     })
+}
+
+/// Maximum non-streaming LLM response body. Provider responses are a few KB
+/// to a few MB; a hostile or misconfigured `base_url` must not be able to
+/// stream an unbounded body into worker memory via `resp.json()`.
+const MAX_LLM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Read and parse a provider JSON response body under
+/// [`MAX_LLM_RESPONSE_BYTES`]. Oversized bodies fail permanently; transport
+/// and parse errors stay retryable (matching the previous `resp.json()`).
+async fn read_json_capped(resp: reqwest::Response) -> Result<Value, StepError> {
+    let bytes = crate::outbound::read_body_capped(resp, MAX_LLM_RESPONSE_BYTES)
+        .await
+        .map_err(|e| match e {
+            crate::outbound::BodyReadError::TooLarge(cap) => {
+                permanent(format!("response body exceeds {cap} bytes"))
+            }
+            crate::outbound::BodyReadError::Io(e) => retryable(format!("response read error: {e}")),
+        })?;
+    serde_json::from_slice(&bytes).map_err(|e| retryable(format!("response parse error: {e}")))
 }
 
 /// Live-delta publisher for a streaming `llm_call` step: forwards incremental
@@ -187,6 +287,14 @@ pub(crate) struct DeltaSink {
 }
 
 impl DeltaSink {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            instance_id: orch8_types::ids::InstanceId::new(),
+            block_id: "test".into(),
+        }
+    }
+
     /// Publish one text delta for this step.
     fn publish(&self, delta: &str) {
         let bus = crate::stream_bus::stream_bus();
@@ -311,7 +419,7 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
             .await?
         }
     };
-    emit_gen_ai_telemetry(&ctx.params, &provider, format, &out);
+    emit_gen_ai_telemetry(&ctx.params, &provider, &out);
     // Capture token usage for cost aggregation (best-effort — never fails the call).
     record_llm_usage(&ctx, &out).await;
     Ok(out)
@@ -329,15 +437,9 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
 /// - `gen_ai.response.model` — model reported by the provider response, when present.
 /// - `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` — token usage
 ///   as reported by the provider (0 when absent).
-fn emit_gen_ai_telemetry(params: &Value, provider: &str, format: ProviderFormat, out: &Value) {
-    let request_model =
-        params
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| match format {
-                ProviderFormat::Anthropic => anthropic_default_model(),
-                ProviderFormat::OpenAiCompat => openai_default_model(),
-            });
+fn emit_gen_ai_telemetry(params: &Value, provider: &str, out: &Value) {
+    let request_model = resolve_model(params, provider).unwrap_or_default();
+    let request_model = request_model.as_str();
     let response_model = out
         .get("model")
         .and_then(Value::as_str)
@@ -680,7 +782,7 @@ async fn failover_inner(
 
         match result {
             Ok(mut output) => {
-                emit_gen_ai_telemetry(&merged, provider_name, format, &output);
+                emit_gen_ai_telemetry(&merged, provider_name, &output);
                 if let Some(obj) = output.as_object_mut() {
                     obj.insert("tried".into(), json!(tried));
                 }
@@ -749,6 +851,43 @@ mod tests {
                 "{name} should fall back to the OpenAI-compatible format"
             );
         }
+    }
+
+    #[test]
+    fn every_provider_has_a_current_default_or_requires_a_model() {
+        assert_eq!(builtin_default_model("anthropic"), Some("claude-opus-5"));
+        assert_eq!(builtin_default_model("openai"), Some("gpt-6-astra"));
+        assert_eq!(
+            builtin_default_model("mistral"),
+            Some("mistral-medium-latest")
+        );
+        assert_eq!(builtin_default_model("my-vllm"), Some("gpt-6-astra"));
+        assert_eq!(builtin_default_model("openrouter"), None);
+        assert_eq!(
+            default_model_env_var("mistral"),
+            "ORCH8_LLM_DEFAULT_MODEL_MISTRAL"
+        );
+        assert_eq!(
+            default_model_env_var("my-vllm"),
+            "ORCH8_LLM_DEFAULT_MODEL_MY_VLLM"
+        );
+        // The OpenAI default must never leak to another vendor's endpoint.
+        assert_ne!(
+            builtin_default_model("mistral"),
+            builtin_default_model("openai")
+        );
+    }
+
+    #[test]
+    fn resolve_model_prefers_param_and_requires_one_for_aggregators() {
+        assert_eq!(
+            resolve_model(&json!({"model": "mistral-small-4"}), "mistral").unwrap(),
+            "mistral-small-4"
+        );
+        assert!(matches!(
+            resolve_model(&json!({}), "together"),
+            Err(StepError::Permanent { .. })
+        ));
     }
 
     #[test]

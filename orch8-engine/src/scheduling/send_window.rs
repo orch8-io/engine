@@ -41,50 +41,58 @@ pub fn check_window(
     Some(next_window_open(local, window))
 }
 
-/// Calculate the next time the send window opens.
+/// Calculate the next time the send window opens: `start_hour` local on the
+/// first allowed day (today included) whose opening is still ahead of now.
+///
+/// Wall-clock targets are resolved through [`resolve_local`], so an opening
+/// that falls in a DST gap (e.g. 02:00 on a spring-forward day) maps to the
+/// first valid instant after the gap. The previous `with_hour` chain fell
+/// back to *now* when the target didn't exist, so the step was re-queued
+/// every tick for the length of the gap day.
 fn next_window_open(local: chrono::DateTime<chrono_tz::Tz>, window: &SendWindow) -> DateTime<Utc> {
-    let mut candidate = local;
+    let tz = local.timezone();
+    let start = chrono::NaiveTime::from_hms_opt(u32::from(window.start_hour), 0, 0)
+        .unwrap_or(chrono::NaiveTime::MIN);
+    let mut date = local.date_naive();
 
     // Try up to 8 days ahead (handles full week + 1).
     for _ in 0..8 {
         #[allow(clippy::cast_possible_truncation)]
-        let weekday_num = candidate.weekday().num_days_from_monday() as u8;
+        let weekday_num = date.weekday().num_days_from_monday() as u8;
         let day_ok = window.days.is_empty() || window.days.contains(&weekday_num);
-        #[allow(clippy::cast_possible_truncation)]
-        let hour = candidate.hour() as u8;
-
-        if day_ok && hour < window.start_hour {
-            // Same day, advance to start_hour.
-            let target = candidate
-                .with_hour(u32::from(window.start_hour))
-                .unwrap_or(candidate)
-                .with_minute(0)
-                .unwrap_or(candidate)
-                .with_second(0)
-                .unwrap_or(candidate);
-            return target.with_timezone(&Utc);
+        if day_ok {
+            let open = resolve_local(tz, date.and_time(start));
+            if open > local {
+                return open.with_timezone(&Utc);
+            }
         }
-        // If we're past end_hour on a valid day, fall through to next day.
-
-        // Advance to start of next day.
-        candidate = (candidate + Duration::days(1))
-            .with_hour(0)
-            .unwrap_or(candidate)
-            .with_minute(0)
-            .unwrap_or(candidate)
-            .with_second(0)
-            .unwrap_or(candidate);
+        let Some(next) = date.succ_opt() else { break };
+        date = next;
     }
 
-    // Fallback: return start_hour tomorrow (shouldn't reach here).
-    (local + Duration::days(1))
-        .with_hour(u32::from(window.start_hour))
-        .unwrap_or(local)
-        .with_minute(0)
-        .unwrap_or(local)
-        .with_second(0)
-        .unwrap_or(local)
-        .with_timezone(&Utc)
+    // Fallback: start_hour tomorrow (shouldn't reach here).
+    let tomorrow = local.date_naive().succ_opt().unwrap_or(local.date_naive());
+    resolve_local(tz, tomorrow.and_time(start)).with_timezone(&Utc)
+}
+
+/// Map a local wall-clock time to an instant: the earlier instant when it is
+/// ambiguous (fall-back overlap), the first valid instant after the gap when
+/// it does not exist (spring-forward).
+fn resolve_local(
+    tz: chrono_tz::Tz,
+    naive: chrono::NaiveDateTime,
+) -> chrono::DateTime<chrono_tz::Tz> {
+    use chrono::{LocalResult, TimeZone};
+    let mut probe = naive;
+    // Real-world gaps are at most a couple of hours; step in 15-minute
+    // increments (every zone's offset is a multiple of 15 minutes).
+    for _ in 0..=16 {
+        match tz.from_local_datetime(&probe) {
+            LocalResult::Single(t) | LocalResult::Ambiguous(t, _) => return t,
+            LocalResult::None => probe += Duration::minutes(15),
+        }
+    }
+    tz.from_utc_datetime(&naive)
 }
 
 #[cfg(test)]
@@ -285,5 +293,23 @@ mod tests {
         assert_eq!(local.weekday(), chrono::Weekday::Wed);
         assert_eq!(local.day(), 17);
         assert_eq!(local.hour(), 9);
+    }
+
+    /// A window opening inside a DST gap must resolve to the first valid
+    /// instant after the gap — not to "now" (which re-queued the step every
+    /// tick for the whole gap day).
+    #[test]
+    fn opening_in_dst_gap_resolves_after_the_gap() {
+        let window = SendWindow {
+            start_hour: 2,
+            end_hour: 5,
+            days: vec![],
+        };
+        // 2024-03-10 01:30 America/New_York (EST, UTC-5) = 06:30Z; clocks
+        // jump 02:00 -> 03:00 EDT (UTC-4), so 02:00 does not exist.
+        let now = make_utc(2024, 3, 10, 6, 30);
+        let next = check_window(now, &window, "America/New_York").unwrap();
+        assert!(next > now, "must not re-queue at now");
+        assert_eq!(next, make_utc(2024, 3, 10, 7, 0), "03:00 EDT");
     }
 }

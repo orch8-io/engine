@@ -327,6 +327,41 @@ pub async fn create_trigger_instance(
     Ok(instance.id)
 }
 
+/// [`create_trigger_instance`] with a caller-supplied, deterministic
+/// idempotency key (tenant-scoped unique in storage). Returns `Ok(None)`
+/// when an instance with that key already exists — a re-delivered event
+/// (poll batch retried after a mid-batch failure, or polled by a second
+/// node) is then a no-op instead of a duplicate run.
+pub(crate) async fn create_trigger_instance_idempotent(
+    storage: &dyn StorageBackend,
+    trigger: &TriggerDef,
+    data: serde_json::Value,
+    event_meta: serde_json::Value,
+    idempotency_key: String,
+) -> Result<Option<InstanceId>, crate::error::EngineError> {
+    let sequence = resolve_trigger_sequence(storage, trigger).await?;
+    let mut instance = build_trigger_instance(trigger, sequence.id, data, event_meta, None);
+    instance.idempotency_key = Some(idempotency_key);
+    match storage.create_instance(&instance).await {
+        Ok(()) => {
+            info!(
+                instance_id = %instance.id,
+                trigger = %trigger.slug,
+                "trigger created instance"
+            );
+            Ok(Some(instance.id))
+        }
+        Err(orch8_types::error::StorageError::Conflict(_)) => {
+            debug!(
+                trigger = %trigger.slug,
+                "trigger event already delivered (idempotency key exists), skipping"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 // ─── NATS Trigger ────────────────────────────────────────────────────────────
 
 #[cfg(feature = "nats")]
@@ -364,9 +399,17 @@ async fn run_nats_listener(
         crate::error::EngineError::InvalidConfig(format!("NATS connect failed: {e}"))
     })?;
 
-    let mut subscriber = client.subscribe(subject.clone()).await.map_err(|e| {
-        crate::error::EngineError::InvalidConfig(format!("NATS subscribe failed: {e}"))
-    })?;
+    // Queue-group subscription: every engine node runs this listener, and a
+    // plain `subscribe` delivered each message to ALL of them — one instance
+    // per node per message. NATS load-balances a queue group, so exactly one
+    // subscribed node receives each message.
+    let queue_group = format!("orch8-trigger-{}", trigger.slug);
+    let mut subscriber = client
+        .queue_subscribe(subject.clone(), queue_group)
+        .await
+        .map_err(|e| {
+            crate::error::EngineError::InvalidConfig(format!("NATS subscribe failed: {e}"))
+        })?;
 
     info!(
         slug = %trigger.slug,

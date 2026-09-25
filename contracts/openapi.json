@@ -1725,6 +1725,26 @@
               "format": "int32",
               "minimum": 0
             }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Rows to skip",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "paged",
+            "in": "query",
+            "description": "Return items, offset and has_more metadata instead of an array",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -1733,10 +1753,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/EventEnvelope"
-                  }
+                  "$ref": "#/components/schemas/EventListResponse"
                 }
               }
             }
@@ -2750,6 +2767,53 @@
         }
       }
     },
+    "/instances/{id}/context/data": {
+      "patch": {
+        "tags": [
+          "instances"
+        ],
+        "operationId": "patch_context_data",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchContextDataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Data patch applied without replacing other context sections"
+          },
+          "400": {
+            "description": "Existing data is not an object"
+          },
+          "404": {
+            "description": "Instance not found"
+          },
+          "409": {
+            "description": "Concurrent context updates; retry the request"
+          },
+          "413": {
+            "description": "Merged context exceeds its size limit"
+          }
+        }
+      }
+    },
     "/instances/{id}/diagnosis": {
       "get": {
         "tags": [
@@ -3183,6 +3247,9 @@
           },
           "404": {
             "description": "Instance not found"
+          },
+          "409": {
+            "description": "Instance state changed concurrently"
           }
         }
       }
@@ -3270,6 +3337,9 @@
           },
           "404": {
             "description": "Instance not found"
+          },
+          "409": {
+            "description": "Instance state changed concurrently"
           }
         }
       }
@@ -3313,6 +3383,9 @@
           },
           "404": {
             "description": "Instance not found"
+          },
+          "429": {
+            "description": "Per-tenant concurrent stream limit reached"
           },
           "503": {
             "description": "Too many concurrent streams"
@@ -5393,6 +5466,46 @@
         }
       }
     },
+    "/triggers/{slug}/target": {
+      "patch": {
+        "tags": [
+          "triggers"
+        ],
+        "operationId": "retarget_trigger",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Trigger slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetargetTriggerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Trigger target updated; credentials and settings preserved"
+          },
+          "404": {
+            "description": "Trigger or sequence not found"
+          },
+          "409": {
+            "description": "Trigger changed concurrently or sequence name/version is ambiguous"
+          }
+        }
+      }
+    },
     "/usage": {
       "get": {
         "tags": [
@@ -6628,6 +6741,49 @@
           }
         }
       },
+      "AutoDecideDef": {
+        "type": "object",
+        "description": "`wait_for_input.auto_decide`: let a calibrated decision model answer a\nhuman gate when it is confident enough.",
+        "properties": {
+          "api_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "API key (literal or `credentials://` reference). When omitted the\noperator's `TYPESAFE_API_KEY` is used — only for the default endpoint."
+          },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Endpoint override; requires an explicit `api_key`."
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Question put to the model; defaults to the gate's `prompt`."
+          },
+          "interpret_replies": {
+            "type": "boolean",
+            "description": "Map a free-text human reply (`{\"text\": \"sure, go ahead\"}`) onto one of\nthe gate's choices instead of rejecting it as an invalid value."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model id; defaults to `jev-latest`."
+          },
+          "threshold": {
+            "type": "number",
+            "format": "double",
+            "description": "Minimum model confidence in `[0, 1]` to accept without a human."
+          }
+        }
+      },
       "BatchAction": {
         "type": "string",
         "description": "The operation a batch action applies to every matched instance.",
@@ -6998,7 +7154,7 @@
             "description": "Saga: sequential steps with compensating actions, rolled back in\nreverse order if any step's action fails."
           }
         ],
-        "description": "A block is either a leaf (step) or a composite (parallel, race, etc.).\n\nThis recursive enum IS the workflow DSL.\nEach variant wraps its definition in `Box<T>` so the enum itself stays a\nsingle word. `StepDef` is large (14 fields with many `Option<...>`), and\nwithout boxing every `BlockDefinition` — even `SubSequence`, which is small\n— paid the full size. `Box<T>` is transparent to both `serde` (the default\nimpl delegates to the inner type so wire format is unchanged) and `utoipa`\n(which forwards `ToSchema` through `Box<T>`), so this is an internal\nrepresentation change only."
+        "description": "A block is either a leaf (step) or a composite (parallel, race, etc.).\n\nThis recursive enum IS the workflow DSL.\nEach variant wraps its definition in `Box<T>` so the enum carries a pointer\nplus its variant tag. `StepDef` is large, with many `Option<...>` fields, and\nwithout boxing every `BlockDefinition` — even `SubSequence`, which is small\n— paid the full size. `Box<T>` is transparent to both `serde` (the default\nimpl delegates to the inner type so wire format is unchanged) and `utoipa`\n(which forwards `ToSchema` through `Box<T>`), so this is an internal\nrepresentation change only."
       },
       "BlockId": {
         "type": "string"
@@ -7094,7 +7250,7 @@
           "router",
           "try_catch",
           "sub_sequence",
-          "a_b_split",
+          "ab_split",
           "cancellation_scope",
           "saga"
         ]
@@ -8890,6 +9046,10 @@
             "description": "`drain`, `reload`, `ping`, or `place`."
           },
           "payload": {},
+          "tenant_id": {
+            "type": "string",
+            "description": "Tenant owning the target worker. Tenant-scoped (per-tenant key) worker\nstreams only receive commands of their own tenant; leave empty to\naddress workers connected with the root key."
+          },
           "worker_id": {
             "type": "string"
           }
@@ -9005,6 +9165,40 @@
             "type": "string"
           }
         }
+      },
+      "EventListResponse": {
+        "oneOf": [
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventEnvelope"
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "items",
+              "offset",
+              "has_more"
+            ],
+            "properties": {
+              "has_more": {
+                "type": "boolean"
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EventEnvelope"
+                }
+              },
+              "offset": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          }
+        ]
       },
       "EventStatus": {
         "type": "string",
@@ -9751,14 +9945,15 @@
               "null"
             ],
             "format": "double",
-            "description": "`None` while either variant lacks `min_sample` observations."
+            "description": "Observed baseline rate, or `None` when it has no observations.\nA populated rate does not imply that `min_sample` has been reached."
           },
           "candidate_rate": {
             "type": [
               "number",
               "null"
             ],
-            "format": "double"
+            "format": "double",
+            "description": "Observed candidate rate, or `None` when it has no observations."
           },
           "gate": {
             "$ref": "#/components/schemas/ReleaseGate"
@@ -9956,6 +10151,17 @@
           "allow_comment": {
             "type": "boolean",
             "description": "When true, the reviewer can attach a free-text comment to their decision."
+          },
+          "auto_decide": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AutoDecideDef",
+                "description": "Confidence-gated automation: ask the Jev decision model to answer the\ngate first. At or above `threshold` confidence the gate is accepted\nwithout a human (the decision, confidence and probabilities are kept\non the gate's output as evidence); below it — or when the model is\nunavailable — the step parks for a human exactly as without this\nsetting.\nBoxed: most gates don't set it, and `HumanInputDef` rides inside\nevery `StepDef` (and so inside large async state machines)."
+              }
+            ]
           },
           "choices": {
             "type": [
@@ -10543,6 +10749,30 @@
             "$ref": "#/components/schemas/BlockId"
           }
         }
+      },
+      "PatchContextDataRequest": {
+        "type": "object",
+        "required": [
+          "patch"
+        ],
+        "properties": {
+          "patch": {
+            "type": "object",
+            "description": "Shallow merge into context.data; omitted keys and all other sections remain unchanged.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "remove_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Remove these data keys before applying the patch; other sections remain intact."
+          }
+        },
+        "additionalProperties": false
       },
       "PolicyOutcome": {
         "type": "string",
@@ -11596,6 +11826,23 @@
           }
         }
       },
+      "RetargetTriggerRequest": {
+        "type": "object",
+        "required": [
+          "sequence_id",
+          "expected_updated_at"
+        ],
+        "properties": {
+          "expected_updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sequence_id": {
+            "$ref": "#/components/schemas/SequenceId"
+          }
+        },
+        "additionalProperties": false
+      },
       "RetryPolicy": {
         "type": "object",
         "required": [
@@ -12291,7 +12538,7 @@
               "string",
               "null"
             ],
-            "description": "Optional HMAC secret for signing pushed envelopes."
+            "description": "Optional HMAC secret for signing pushed envelopes.\nOmission keeps the existing secret; explicit null clears it."
           },
           "tenant_id": {
             "type": "string"
@@ -13730,6 +13977,10 @@
           },
           "payload": {
             "description": "Optional command parameters (e.g. a drain deadline)."
+          },
+          "tenant_id": {
+            "type": "string",
+            "description": "Tenant that owns the target worker. A tenant-scoped worker session\nonly receives (and can only ack) commands of its own tenant, since\n`worker_id` is client-chosen. Empty = deliverable only to unscoped\n(root / insecure-mode) sessions."
           },
           "worker_id": {
             "type": "string",

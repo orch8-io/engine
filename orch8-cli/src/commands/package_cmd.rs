@@ -211,7 +211,7 @@ async fn load_registry_state(
     tenant: &str,
     namespace: &str,
 ) -> Result<(RegistryIndex, TransparencyLedger)> {
-    let client = Client::new();
+    let client = crate::external_client()?;
     let response = client.get(format!("{root}/index.json")).send().await?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok((
@@ -247,7 +247,7 @@ async fn load_registry_state(
 async fn verified_registry(base: &str) -> Result<RegistryIndex> {
     // Hosted registries are a separate trust boundary and must never receive
     // the engine client's default x-api-key or tenant headers.
-    let client = Client::new();
+    let client = crate::external_client()?;
     let base = base.trim_end_matches('/');
     let index: RegistryIndex = client
         .get(format!("{base}/index.json"))
@@ -319,7 +319,11 @@ async fn download_registry_package(mut url: reqwest::Url, path: &Path) -> Result
         bail!("registry package URL must not contain credentials");
     }
     url.set_fragment(None);
-    let mut response = Client::new().get(url).send().await?.error_for_status()?;
+    let mut response = crate::external_client()?
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?;
     if response
         .content_length()
         .is_some_and(|length| length > MAX_PACKAGE_BYTES)

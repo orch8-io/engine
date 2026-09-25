@@ -412,27 +412,150 @@ pub(super) fn apply_filter_sql<'q>(
         }
         separated.push_unseparated(")");
     }
-    if let Some(serde_json::Value::Object(map)) = &filter.metadata_filter {
-        // SQLite fallback for the Postgres `metadata @> {...}` containment
-        // filter: one `json_extract` text-equality per top-level key. The path
-        // is built with `'$."' || ? || '"'` so the bound key is treated as a
-        // literal (quoted) member — matching Postgres's top-level containment
-        // semantics even when the key itself contains dots. CAST(... AS TEXT)
-        // normalizes numeric/string JSON scalars to text for comparison.
-        for (key, value) in map {
-            let needle = match value {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            qb.push(" AND CAST(json_extract(metadata, '$.\"' || ");
-            qb.push_bind(key.as_str());
-            qb.push(" || '\"') AS TEXT) = ");
-            qb.push_bind(needle);
+    if let Some(needle) = &filter.metadata_filter {
+        // SQLite emulation of Postgres `metadata @> filter` (JSONB
+        // containment): type-aware scalar equality (`true` != `1` != `"1"`),
+        // recursive object containment, and array containment (every filter
+        // element contained in some target element). A non-object filter can
+        // never be contained in the (object) metadata column, as on Postgres.
+        if needle.is_object() {
+            let mut aliases = 0u32;
+            push_json_contains(qb, "metadata", &mut Vec::new(), needle, &mut aliases);
+        } else {
+            qb.push(" AND 0");
         }
     }
     if let Some(ref p) = filter.priority {
         qb.push(" AND priority=");
         qb.push_bind(*p as i16);
+    }
+}
+
+/// Push `'$."k1"."k2"...'` as a SQL string expression with each key bound
+/// (so keys are literals, even when they contain dots).
+fn push_json_path<'q>(qb: &mut sqlx::QueryBuilder<'q, sqlx::Sqlite>, path: &[&'q str]) {
+    qb.push("('$'");
+    for key in path {
+        qb.push(" || '.\"' || ");
+        qb.push_bind(*key);
+        qb.push(" || '\"'");
+    }
+    qb.push(")");
+}
+
+/// Scalar leaf of [`push_json_contains`]: `type_sql` / `value_sql` push the
+/// SQL expressions yielding the target's `json_type` and SQL value.
+fn push_json_scalar_eq<'q>(
+    qb: &mut sqlx::QueryBuilder<'q, sqlx::Sqlite>,
+    needle: &'q serde_json::Value,
+    type_sql: &dyn Fn(&mut sqlx::QueryBuilder<'q, sqlx::Sqlite>),
+    value_sql: &dyn Fn(&mut sqlx::QueryBuilder<'q, sqlx::Sqlite>),
+) {
+    use serde_json::Value;
+    qb.push(" AND ");
+    type_sql(qb);
+    match needle {
+        Value::Null => {
+            qb.push(" = 'null'");
+        }
+        Value::Bool(true) => {
+            qb.push(" = 'true'");
+        }
+        Value::Bool(false) => {
+            qb.push(" = 'false'");
+        }
+        Value::String(text) => {
+            qb.push(" = 'text' AND ");
+            value_sql(qb);
+            qb.push(" = ");
+            qb.push_bind(text.as_str());
+        }
+        Value::Number(number) => {
+            qb.push(" IN ('integer', 'real') AND ");
+            value_sql(qb);
+            qb.push(" = ");
+            if let Some(int) = number.as_i64() {
+                qb.push_bind(int);
+            } else {
+                qb.push_bind(number.as_f64().unwrap_or(f64::NAN));
+            }
+        }
+        Value::Array(_) | Value::Object(_) => unreachable!("containers handled by caller"),
+    }
+}
+
+/// Append ` AND <src at path contains needle>` (Postgres `@>` semantics).
+fn push_json_contains<'q>(
+    qb: &mut sqlx::QueryBuilder<'q, sqlx::Sqlite>,
+    src: &str,
+    path: &mut Vec<&'q str>,
+    needle: &'q serde_json::Value,
+    aliases: &mut u32,
+) {
+    use serde_json::Value;
+    match needle {
+        Value::Object(map) => {
+            qb.push(format!(" AND json_type({src}, "));
+            push_json_path(qb, path);
+            qb.push(") = 'object'");
+            for (key, value) in map {
+                path.push(key.as_str());
+                push_json_contains(qb, src, path, value, aliases);
+                path.pop();
+            }
+        }
+        Value::Array(items) => {
+            qb.push(format!(" AND json_type({src}, "));
+            push_json_path(qb, path);
+            qb.push(") = 'array'");
+            for item in items {
+                *aliases += 1;
+                let alias = format!("je{aliases}");
+                qb.push(format!(" AND EXISTS (SELECT 1 FROM json_each({src}, "));
+                push_json_path(qb, path);
+                qb.push(format!(") {alias} WHERE 1"));
+                if item.is_object() || item.is_array() {
+                    // Container element: `value` is its JSON text. Scalar
+                    // siblings are re-quoted so every row stays valid JSON
+                    // (SQLite does not guarantee AND short-circuiting).
+                    let element = format!(
+                        "(CASE WHEN {alias}.type IN ('object', 'array') \
+                         THEN {alias}.value ELSE json_quote({alias}.value) END)"
+                    );
+                    push_json_contains(qb, &element, &mut Vec::new(), item, aliases);
+                } else {
+                    let (type_col, atom_col) = (format!("{alias}.type"), format!("{alias}.atom"));
+                    push_json_scalar_eq(
+                        qb,
+                        item,
+                        &|qb| {
+                            qb.push(type_col.clone());
+                        },
+                        &|qb| {
+                            qb.push(atom_col.clone());
+                        },
+                    );
+                }
+                qb.push(")");
+            }
+        }
+        scalar => {
+            let path_snapshot = path.clone();
+            push_json_scalar_eq(
+                qb,
+                scalar,
+                &|qb| {
+                    qb.push(format!("json_type({src}, "));
+                    push_json_path(qb, &path_snapshot);
+                    qb.push(")");
+                },
+                &|qb| {
+                    qb.push(format!("json_extract({src}, "));
+                    push_json_path(qb, &path_snapshot);
+                    qb.push(")");
+                },
+            );
+        }
     }
 }
 

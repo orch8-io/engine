@@ -314,8 +314,8 @@ async fn claim_due_inner(
             ORDER BY task_instances.priority DESC, task_instances.next_fire_at ASC",
         )
         .bind(now_s)
-        .bind(limit as i64)
-        .bind(max_per_tenant as i64)
+        .bind(i64::from(limit))
+        .bind(i64::from(max_per_tenant))
         .bind(overselect)
         .fetch_all(&mut *conn)
         .await?
@@ -325,7 +325,7 @@ async fn claim_due_inner(
             "SELECT * FROM task_instances WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2"
         )
         .bind(now_s)
-        .bind(limit as i64)
+        .bind(i64::from(limit))
         .fetch_all(&mut *conn)
         .await
         ?
@@ -366,11 +366,16 @@ async fn filter_by_concurrency(
     conn: &mut sqlx::SqliteConnection,
     candidates: Vec<TaskInstance>,
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    // Group candidates by concurrency_key.
-    let mut keyed: HashMap<&str, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
+    // Group candidates by (tenant_id, concurrency_key): keys are
+    // tenant-scoped, so two tenants that pick the same key string must not
+    // share (or starve each other of) slots.
+    let mut keyed: HashMap<(&str, &str), Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
         if let (Some(key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
-            keyed.entry(key.as_str()).or_default().push(idx);
+            keyed
+                .entry((inst.tenant_id.as_str(), key.as_str()))
+                .or_default()
+                .push(idx);
         }
     }
 
@@ -378,28 +383,39 @@ async fn filter_by_concurrency(
         return Ok(candidates);
     }
 
-    // Single batched COUNT query for all concurrency keys.
+    // Single batched COUNT query for all (tenant, key) pairs. The candidate
+    // batch is bounded by the claim limit, so the bind count stays small.
     let mut qb = sqlx::QueryBuilder::new(
-        "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances WHERE state='running' AND concurrency_key IN (",
+        "SELECT tenant_id, concurrency_key, COUNT(*) as cnt FROM task_instances WHERE state='running' AND (",
     );
-    let mut separated = qb.separated(",");
-    for key in keyed.keys() {
-        separated.push_bind(key);
+    for (i, (tenant, key)) in keyed.keys().enumerate() {
+        if i > 0 {
+            qb.push(" OR ");
+        }
+        qb.push("(tenant_id=");
+        qb.push_bind(*tenant);
+        qb.push(" AND concurrency_key=");
+        qb.push_bind(*key);
+        qb.push(")");
     }
-    separated.push_unseparated(") GROUP BY concurrency_key");
+    qb.push(") GROUP BY tenant_id, concurrency_key");
 
     let rows = qb.build().fetch_all(&mut *conn).await?;
-    let mut running_counts: HashMap<String, i64> = HashMap::new();
+    let mut running_counts: HashMap<(String, String), i64> = HashMap::new();
     for row in rows {
+        let tenant: String = row.get("tenant_id");
         let key: String = row.get("concurrency_key");
         let cnt: i64 = row.get("cnt");
-        running_counts.insert(key, cnt);
+        running_counts.insert((tenant, key), cnt);
     }
 
     let mut excluded = Vec::new();
-    for (key, indices) in &keyed {
+    for (&(tenant, key), indices) in &keyed {
         let max = candidates[indices[0]].max_concurrency.unwrap_or(u32::MAX);
-        let already_running = running_counts.get(*key).copied().unwrap_or(0);
+        let already_running = running_counts
+            .get(&(tenant.to_owned(), key.to_owned()))
+            .copied()
+            .unwrap_or(0);
 
         let slots = (i64::from(max) - already_running).max(0) as usize;
         if slots < indices.len() {
@@ -901,16 +917,43 @@ pub(super) async fn merge_metadata(
     id: InstanceId,
     patch: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    sqlx::query(
-        "UPDATE task_instances \
-         SET metadata = json_patch(coalesce(metadata, '{}'), ?2), updated_at = ?3 \
-         WHERE id = ?1",
-    )
-    .bind(id.to_string())
-    .bind(serde_json::to_string(patch)?)
-    .bind(ts(Utc::now()))
-    .execute(&storage.pool)
-    .await?;
+    // Shallow merge, matching Postgres `metadata || patch` and the trait
+    // contract: top-level keys in `patch` replace existing ones wholesale
+    // (a nested object is NOT merged into, and a `null` value is stored as
+    // `null` rather than deleting the key). `json_patch` implements RFC 7396
+    // (recursive merge, null deletes), which diverged on both points.
+    let serde_json::Value::Object(patch) = patch else {
+        return Err(StorageError::Query(
+            "merge_instance_metadata: patch must be a JSON object".into(),
+        ));
+    };
+    let mut tx = super::helpers::begin_immediate(&storage.pool).await?;
+    let current: Option<Option<String>> =
+        sqlx::query_scalar("SELECT metadata FROM task_instances WHERE id = ?1")
+            .bind(id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(current) = current else {
+        return Ok(());
+    };
+    let mut merged = match current
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .transpose()?
+    {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    for (key, value) in patch {
+        merged.insert(key.clone(), value.clone());
+    }
+    sqlx::query("UPDATE task_instances SET metadata = ?2, updated_at = ?3 WHERE id = ?1")
+        .bind(id.to_string())
+        .bind(serde_json::to_string(&merged)?)
+        .bind(ts(Utc::now()))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -929,7 +972,7 @@ pub(super) async fn list(
     }
     qb.push_bind(i64::from(pagination.limit.min(1000)));
     qb.push(" OFFSET ");
-    qb.push_bind(pagination.offset as i64);
+    qb.push_bind(i64::try_from(pagination.offset).unwrap_or(i64::MAX));
 
     let rows = qb.build().fetch_all(&storage.pool).await?;
     rows.iter().map(row_to_instance).collect()
@@ -1017,23 +1060,52 @@ pub(super) async fn bulk_reschedule(
     filter: &InstanceFilter,
     offset_secs: i64,
 ) -> Result<u64, StorageError> {
-    let mut qb =
-        sqlx::QueryBuilder::new("UPDATE task_instances SET next_fire_at=datetime(next_fire_at, ");
-
     // Validate the numeric range to prevent overflow/unreasonable values.
     if offset_secs.abs() > BULK_RESCHEDULE_MAX_OFFSET_SECS {
         return Err(StorageError::Query(format!(
             "bulk_reschedule offset too large: {offset_secs}"
         )));
     }
-    qb.push_bind(format!("{offset_secs:+} seconds"));
-    qb.push("), updated_at=");
-    qb.push_bind(ts(Utc::now()));
-    qb.push(" WHERE state='scheduled'");
-    apply_filter_sql(&mut qb, filter);
+    let offset = chrono::Duration::seconds(offset_secs);
 
-    let result = qb.build().execute(&storage.pool).await?;
-    Ok(result.rows_affected())
+    // Shift in Rust and write back with `ts()`. SQLite's `datetime(x, '+N
+    // seconds')` returns `YYYY-MM-DD HH:MM:SS` (space separator), which
+    // sorts *before* every RFC 3339 `YYYY-MM-DDTHH:...` value the claim
+    // query compares against -- so every rescheduled instance fired
+    // immediately regardless of the offset.
+    let mut tx = super::helpers::begin_immediate(&storage.pool).await?;
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, next_fire_at FROM task_instances WHERE state='scheduled'",
+    );
+    apply_filter_sql(&mut qb, filter);
+    let rows = qb.build().fetch_all(&mut *tx).await?;
+    let now = ts(Utc::now());
+    let mut updated = 0u64;
+    for row in &rows {
+        let id: String = row.get("id");
+        // NULL (fire now) stays NULL, matching Postgres `NULL + interval`.
+        let shifted = row
+            .get::<Option<String>, _>("next_fire_at")
+            .map(|raw| {
+                super::helpers::parse_ts(&raw)?
+                    .checked_add_signed(offset)
+                    .map(ts)
+                    .ok_or_else(|| {
+                        StorageError::Query("bulk_reschedule: timestamp overflow".into())
+                    })
+            })
+            .transpose()?;
+        updated +=
+            sqlx::query("UPDATE task_instances SET next_fire_at=?1, updated_at=?2 WHERE id=?3")
+                .bind(shifted)
+                .bind(&now)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(updated)
 }
 
 /// Terminal instances older than `cutoff` not yet artifact-swept. See
@@ -1105,6 +1177,7 @@ pub(super) async fn delete_terminal_instances(
         "usage_events",
         "instance_kv_state",
         "injected_blocks",
+        "emit_event_dedupe",
     ] {
         let sql = match table {
             "step_logs" => "DELETE FROM step_logs WHERE instance_id IN (",
@@ -1112,6 +1185,11 @@ pub(super) async fn delete_terminal_instances(
             "usage_events" => "DELETE FROM usage_events WHERE instance_id IN (",
             "instance_kv_state" => "DELETE FROM instance_kv_state WHERE instance_id IN (",
             "injected_blocks" => "DELETE FROM injected_blocks WHERE instance_id IN (",
+            // Parent-scoped dedupe rows of a purged parent can never match
+            // again (no FK, TTL sweep only).
+            "emit_event_dedupe" => {
+                "DELETE FROM emit_event_dedupe WHERE scope_kind = 'parent' AND scope_value IN ("
+            }
             _ => unreachable!(),
         };
         let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(sql);

@@ -71,7 +71,11 @@ ineligible for placement through the existing placement engine.
 
 The stream also consumes the durable worker-command queue. Pending `drain`,
 `reload`, `ping`, and `place` commands are sent after the hello frame and again
-on heartbeats until `WorkerCommandAck` removes the exact command. A `place`
+on heartbeats until `WorkerCommandAck` removes the exact command. Commands
+carry the owning `tenant_id` (set when enqueuing via `POST /workers/commands`):
+a tenant-scoped session only receives and can only ack commands of its own
+tenant, while commands with an empty `tenant_id` reach only unscoped (root)
+sessions. A `place`
 payload carries the operator-authored placement instruction without inventing
 a second persistence path. Once either the runtime advertises `draining` or a
 pending drain command is observed, the session finishes existing in-flight

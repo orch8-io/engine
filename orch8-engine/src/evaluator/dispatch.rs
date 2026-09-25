@@ -23,6 +23,72 @@ const SUB_SEQUENCE_DEPTH_KEY: &str = "_sub_sequence_depth";
 /// signal until the database fills up.
 const MAX_SUB_SEQUENCE_DEPTH: u64 = 16;
 
+/// Metadata key identifying which activation of the parent's `SubSequence`
+/// node spawned a child (see [`sub_sequence_activation_key`]).
+const PARENT_ACTIVATION_KEY: &str = "_parent_activation";
+
+/// Identity of one activation of a `SubSequence` node: its execution-node id
+/// plus the current iteration of every enclosing `loop` / `for_each`
+/// (innermost first). Node ids are stable across iterations — a loop resets
+/// its body in place — so the iteration counters are what distinguish
+/// iteration N's child from iteration N+1's.
+async fn sub_sequence_activation_key(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    node: &ExecutionNode,
+    tree: &[ExecutionNode],
+) -> Result<String, EngineError> {
+    use orch8_types::execution::BlockType;
+
+    let mut key = node.id.to_string();
+    let mut parent_id = node.parent_id;
+    while let Some(pid) = parent_id {
+        let Some(parent) = tree.iter().find(|n| n.id == pid) else {
+            break;
+        };
+        let counter_field = match parent.block_type {
+            BlockType::Loop => Some("_iterations"),
+            BlockType::ForEach => Some("_index"),
+            _ => None,
+        };
+        if let Some(field) = counter_field {
+            let iteration = storage
+                .get_block_output(instance.id, &parent.block_id)
+                .await?
+                .and_then(|o| o.output.get(field).and_then(serde_json::Value::as_u64))
+                .unwrap_or(0);
+            key.push('/');
+            key.push_str(parent.block_id.as_str());
+            key.push(':');
+            key.push_str(&iteration.to_string());
+        }
+        parent_id = parent.parent_id;
+    }
+    Ok(key)
+}
+
+/// Find the child spawned by this activation. Children created before
+/// activation keys existed carry only `_parent_block_id`; they are matched by
+/// block id so in-flight instances keep working across an upgrade.
+fn find_activation_child<'c>(
+    children: &'c [TaskInstance],
+    block_id: &str,
+    activation: &str,
+) -> Option<&'c TaskInstance> {
+    let meta_str = |c: &'c TaskInstance, key: &str| -> Option<&'c str> {
+        c.metadata.get(key).and_then(serde_json::Value::as_str)
+    };
+    children
+        .iter()
+        .find(|c| meta_str(c, PARENT_ACTIVATION_KEY) == Some(activation))
+        .or_else(|| {
+            children.iter().find(|c| {
+                c.metadata.get(PARENT_ACTIVATION_KEY).is_none()
+                    && meta_str(c, "_parent_block_id") == Some(block_id)
+            })
+        })
+}
+
 /// Build a spawned child's [`ExecutionContext`](orch8_types::context::ExecutionContext)
 /// from its parent, seeded with the child's `input` and inheriting execution-mode
 /// invariants from the parent.
@@ -219,11 +285,14 @@ pub(super) async fn dispatch_block(
         BlockDefinition::SubSequence(ss_def) => {
             // Sub-sequence: create a child instance and wait for it to complete.
             // Check if child already exists for this block.
+            // Key the child by this *activation* of the node, not just its
+            // block id: inside a loop / for_each the same node runs once per
+            // iteration and each iteration must spawn (and wait on) its own
+            // child rather than reuse iteration 1's completed one.
+            let activation =
+                sub_sequence_activation_key(storage.as_ref(), instance, node, tree).await?;
             let children = storage.get_child_instances(instance.id).await?;
-            let existing_child = children.iter().find(|c| {
-                c.metadata.get("_parent_block_id").and_then(|v| v.as_str())
-                    == Some(ss_def.id.as_str())
-            });
+            let existing_child = find_activation_child(&children, ss_def.id.as_str(), &activation);
 
             if let Some(child) = existing_child {
                 // Child exists — check if it's done.
@@ -294,8 +363,34 @@ pub(super) async fn dispatch_block(
                         details: None,
                     })?;
 
+                // Resolve `{{…}}` templates in `input` exactly like step params
+                // (context + prior outputs), so each activation passes its own
+                // values — e.g. the current for_each item.
+                let input = match crate::handlers::param_resolve::resolve_templates_in_params(
+                    storage.as_ref(),
+                    instance,
+                    &instance.context,
+                    &ss_def.input,
+                    outputs,
+                )
+                .await
+                {
+                    Ok(input) => input,
+                    Err(e @ EngineError::Storage(_)) => return Err(e),
+                    Err(e) => {
+                        tracing::error!(
+                            instance_id = %instance.id,
+                            block_id = %ss_def.id,
+                            error = %e,
+                            "failed to resolve sub-sequence input templates"
+                        );
+                        fail_node(storage.as_ref(), node.id).await?;
+                        return Ok(true);
+                    }
+                };
+
                 let now = clock.now();
-                let child_context = child_context_from(&instance.context, ss_def.input.clone());
+                let child_context = child_context_from(&instance.context, input);
 
                 let child = orch8_types::instance::TaskInstance {
                     id: orch8_types::ids::InstanceId::new(),
@@ -308,6 +403,7 @@ pub(super) async fn dispatch_block(
                     timezone: instance.timezone.clone(),
                     metadata: serde_json::json!({
                         "_parent_block_id": ss_def.id.as_str(),
+                        PARENT_ACTIVATION_KEY: activation,
                         SUB_SEQUENCE_DEPTH_KEY: child_depth,
                     }),
                     context: child_context,
@@ -336,7 +432,8 @@ pub(super) async fn dispatch_block(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SUB_SEQUENCE_DEPTH, SUB_SEQUENCE_DEPTH_KEY, child_context_from, next_sub_sequence_depth,
+        MAX_SUB_SEQUENCE_DEPTH, PARENT_ACTIVATION_KEY, SUB_SEQUENCE_DEPTH_KEY, child_context_from,
+        find_activation_child, next_sub_sequence_depth, sub_sequence_activation_key,
     };
     use orch8_types::context::ExecutionContext;
     use serde_json::json;
@@ -382,6 +479,100 @@ mod tests {
         assert!(
             depth > MAX_SUB_SEQUENCE_DEPTH,
             "depth {depth} should exceed the cap of {MAX_SUB_SEQUENCE_DEPTH}"
+        );
+    }
+
+    fn instance_with_metadata(metadata: serde_json::Value) -> orch8_types::instance::TaskInstance {
+        let now = chrono::Utc::now();
+        orch8_types::instance::TaskInstance {
+            id: orch8_types::ids::InstanceId::new(),
+            sequence_id: orch8_types::ids::SequenceId::new(),
+            tenant_id: orch8_types::ids::TenantId::unchecked("t"),
+            namespace: orch8_types::ids::Namespace::new("ns"),
+            state: orch8_types::instance::InstanceState::Running,
+            next_fire_at: None,
+            priority: orch8_types::instance::Priority::Normal,
+            timezone: "UTC".into(),
+            metadata,
+            context: ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// ENG-C-N4: a `SubSequence` inside a loop gets a distinct activation
+    /// key per iteration, so iteration 2 never reuses iteration 1's child.
+    #[tokio::test]
+    async fn activation_key_changes_per_enclosing_iteration() {
+        use orch8_storage::{InstanceStore, OutputStore, sqlite::SqliteStorage};
+        use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
+        use orch8_types::ids::{BlockId, ExecutionNodeId};
+
+        let s = SqliteStorage::in_memory().await.unwrap();
+        let parent = instance_with_metadata(json!({}));
+        s.create_instance(&parent).await.unwrap();
+        let node = |block: &str, bt, parent_id| ExecutionNode {
+            id: ExecutionNodeId::new(),
+            instance_id: parent.id,
+            block_id: BlockId::new(block),
+            parent_id,
+            block_type: bt,
+            branch_index: None,
+            state: NodeState::Running,
+            started_at: None,
+            completed_at: None,
+        };
+        let lp = node("lp", BlockType::Loop, None);
+        let ss = node("ss", BlockType::SubSequence, Some(lp.id));
+        let tree = vec![lp.clone(), ss.clone()];
+        let marker = |n: u64| orch8_types::output::BlockOutput {
+            id: uuid::Uuid::now_v7(),
+            instance_id: parent.id,
+            block_id: BlockId::new("lp"),
+            output: json!({ "_iterations": n }),
+            output_ref: None,
+            output_size: 0,
+            attempt: 0,
+            created_at: chrono::Utc::now(),
+        };
+
+        s.save_block_output(&marker(0)).await.unwrap();
+        let k0 = sub_sequence_activation_key(&s, &parent, &ss, &tree)
+            .await
+            .unwrap();
+        s.save_block_output(&marker(1)).await.unwrap();
+        let k1 = sub_sequence_activation_key(&s, &parent, &ss, &tree)
+            .await
+            .unwrap();
+        assert_ne!(k0, k1);
+        assert!(k0.starts_with(&ss.id.to_string()));
+
+        let child0 = instance_with_metadata(json!({
+            "_parent_block_id": "ss",
+            PARENT_ACTIVATION_KEY: k0,
+        }));
+        let children = vec![child0.clone()];
+        assert_eq!(
+            find_activation_child(&children, "ss", &k0).map(|c| c.id),
+            Some(child0.id)
+        );
+        assert!(
+            find_activation_child(&children, "ss", &k1).is_none(),
+            "iteration 2 must spawn its own child"
+        );
+
+        // Children spawned before activation keys existed still match.
+        let legacy = instance_with_metadata(json!({ "_parent_block_id": "ss" }));
+        let children = vec![legacy.clone()];
+        assert_eq!(
+            find_activation_child(&children, "ss", &k1).map(|c| c.id),
+            Some(legacy.id)
         );
     }
 }

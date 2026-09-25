@@ -692,38 +692,15 @@ async fn verify_sample(
 /// `POST /instances/{id}/retry`: wipe the stale tree and sentinel
 /// outputs, then reschedule.
 async fn retry_one(state: &AppState, id: InstanceId) -> Result<(), ApiError> {
-    let instance = state
-        .storage
-        .get_instance(id)
+    match orch8_storage::lifecycle::retry_failed_instance(state.storage.as_ref(), id)
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
-        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    if instance.state != InstanceState::Failed {
-        return Err(ApiError::InvalidArgument(format!(
+    {
+        orch8_storage::lifecycle::RetryOutcome::Retried => Ok(()),
+        _ => Err(ApiError::InvalidArgument(format!(
             "instance {id} is no longer failed"
-        )));
+        ))),
     }
-    state
-        .storage
-        .delete_execution_tree(id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
-    state
-        .storage
-        .delete_sentinel_block_outputs(id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
-    state
-        .storage
-        .reset_instance_run(id, &Uuid::now_v7().to_string())
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?;
-    state
-        .storage
-        .update_instance_state(id, InstanceState::Scheduled, Some(Utc::now()))
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?;
-    Ok(())
 }
 
 #[cfg(test)]

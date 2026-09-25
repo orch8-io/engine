@@ -158,6 +158,12 @@ impl Engine {
             return Err(Error::NotFound("capsule tenant".into()));
         }
         let manifest = &capsule.signed_manifest.manifest;
+        // M7: reject identity conflicts *before* the import persists a
+        // paused instance -- there is no instance delete API, so a conflict
+        // detected afterwards used to leave an orphaned instance behind.
+        // The post-import check below still catches a concurrent racer.
+        self.check_import_identity(manifest, destination_instance_id)
+            .await?;
         let (instance, _) = orch8_engine::capsule::verify_and_import_paused_capsule_bytes(
             self.storage_backend().as_ref(),
             &capsule.signed_manifest,
@@ -195,6 +201,46 @@ impl Engine {
             .save_capsule_manifest(&capsule.signed_manifest.manifest)
             .await?;
         Ok(instance)
+    }
+
+    /// Pre-import conflict check: any continuity already recorded for this
+    /// capsule's continuity id (or for the requested destination instance)
+    /// must be the `Transferring` record a previous import of the same
+    /// capsule would have written; anything else can never pass the
+    /// post-import identity check.
+    async fn check_import_identity(
+        &self,
+        manifest: &orch8_types::continuity::CapsuleManifest,
+        destination_instance_id: Option<InstanceId>,
+    ) -> Result<(), Error> {
+        let conflict = || {
+            Error::Config("imported capsule conflicts with an existing continuity identity".into())
+        };
+        let tenant = self.tenant_id();
+        if let Some(existing) = self
+            .storage_backend()
+            .get_continuity_execution(tenant, manifest.continuity_id)
+            .await?
+        {
+            let matches_pending = &existing.tenant_id == tenant
+                && existing.owner_runtime_id == manifest.source_runtime_id
+                && existing.epoch == manifest.epoch
+                && existing.state == OwnershipState::Transferring
+                && destination_instance_id.is_none_or(|id| existing.current_instance_id == id);
+            if !matches_pending {
+                return Err(conflict());
+            }
+        }
+        if let Some(id) = destination_instance_id
+            && let Some(existing) = self
+                .storage_backend()
+                .get_continuity_execution_by_instance(tenant, id)
+                .await?
+            && existing.continuity_id != manifest.continuity_id
+        {
+            return Err(conflict());
+        }
+        Ok(())
     }
 
     fn require_local_tenant(&self, instance: &TaskInstance) -> Result<(), Error> {
