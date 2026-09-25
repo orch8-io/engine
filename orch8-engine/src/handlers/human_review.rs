@@ -74,7 +74,6 @@ pub async fn handle_human_review(ctx: StepContext) -> Result<Value, StepError> {
                 choices: None,
                 store_as: None,
                 allow_comment: false,
-                auto_decide: None,
             }
             .effective_choices()
         },
@@ -218,7 +217,6 @@ mod tests {
             choices: None,
             store_as: None,
             allow_comment: false,
-            auto_decide: None,
         };
         let ctx = StepContext {
             instance_id: InstanceId::new(),
@@ -259,7 +257,6 @@ mod tests {
             ]),
             store_as: None,
             allow_comment: false,
-            auto_decide: None,
         };
         let ctx = StepContext {
             instance_id: InstanceId::new(),

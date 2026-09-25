@@ -5,7 +5,7 @@ use clap::Args;
 use reqwest::Client;
 use serde_json::{Map, Value, json};
 
-use crate::atomic_write_private;
+use crate::atomic_write;
 
 #[derive(Debug, Args)]
 pub struct SupportBundleCmd {
@@ -155,7 +155,7 @@ pub async fn run(client: &Client, base: &str, command: SupportBundleCmd) -> Resu
         "exclusions": ["secrets", "credentials", "contexts", "payloads", "params", "outputs"]
     });
     let bytes = serde_json::to_vec_pretty(&bundle)?;
-    atomic_write_private(&command.output, &bytes)?;
+    atomic_write(&command.output, &bytes)?;
     println!(
         "Wrote redacted support bundle to {}",
         command.output.display()

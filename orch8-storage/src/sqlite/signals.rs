@@ -175,20 +175,16 @@ pub(super) async fn get_signalled_instance_ids(
     limit: u32,
 ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
     let rows: Vec<(String, String)> = sqlx::query_as(
-        r#"
+        r"
         SELECT ti.id, ti.state
         FROM task_instances ti
         INNER JOIN signal_inbox si ON si.instance_id = ti.id
-        WHERE si.delivered = 0
-          AND (ti.state IN ('paused', 'waiting')
-               -- See the Postgres twin: scheduled rows only for control
-               -- signals (ENG-R-N1). SQLite stores `signal_type` as its
-               -- serde JSON encoding, hence the quoted literals.
-               OR (ti.state = 'scheduled' AND si.signal_type IN ('"pause"', '"cancel"')))
+        WHERE ti.state IN ('paused', 'waiting', 'scheduled')
+          AND si.delivered = 0
         GROUP BY ti.id, ti.state
         ORDER BY MIN(si.created_at) ASC
         LIMIT ?1
-        "#,
+        ",
     )
     .bind(i64::from(limit))
     .fetch_all(&storage.pool)

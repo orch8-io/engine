@@ -4,7 +4,6 @@ pub mod compression;
 pub mod conformance;
 pub mod encrypting;
 pub mod externalizing;
-pub mod lifecycle;
 pub mod postgres;
 pub mod sqlite;
 pub mod tenant_partition;
@@ -46,13 +45,8 @@ use orch8_types::signal::Signal;
 use orch8_types::trigger::{TriggerDef, TriggerPollState};
 use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 
-/// How long a `claim_due_cron_schedules` claim is held before the schedule
-/// becomes claimable again. Advancing the fire times releases it early; the
-/// lease only matters when the claimer fails or crashes mid-fire.
-pub(crate) const CRON_CLAIM_LEASE_SECS: i64 = 300;
-
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 88;
+pub const STORAGE_SCHEMA_VERSION: u32 = 82;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -726,34 +720,28 @@ pub trait InstanceStore: Send + Sync + 'static {
 
     // === Concurrency ===
 
-    /// Count running instances of `tenant_id` with the given concurrency key.
-    /// Concurrency keys are tenant-scoped: two tenants using the same key
-    /// string never share slots.
+    /// Count running instances with the given concurrency key.
     ///
-    /// Default delegates to [`Self::count_running_by_concurrency_keys`].
+    /// Default delegates to [] with a single key.
     async fn count_running_by_concurrency_key(
         &self,
-        tenant_id: &str,
         concurrency_key: &str,
     ) -> Result<i64, StorageError> {
         let mut map = self
-            .count_running_by_concurrency_keys(&[(tenant_id, concurrency_key)])
+            .count_running_by_concurrency_keys(&[concurrency_key])
             .await?;
-        Ok(map
-            .remove(&(tenant_id.to_owned(), concurrency_key.to_owned()))
-            .unwrap_or(0))
+        Ok(map.remove(concurrency_key).unwrap_or(0))
     }
 
-    /// Batch count running instances for multiple `(tenant_id,
-    /// concurrency_key)` pairs. Returns a map from pair to count; pairs with
-    /// no running instance are absent.
+    /// Batch count running instances for multiple concurrency keys.
+    /// Returns a map from key to count.
     async fn count_running_by_concurrency_keys(
         &self,
-        keys: &[(&str, &str)],
-    ) -> Result<HashMap<(String, String), i64>, StorageError>;
+        concurrency_keys: &[&str],
+    ) -> Result<HashMap<String, i64>, StorageError>;
 
     /// Returns the 1-based position of an instance among running instances
-    /// of the same tenant with the same concurrency key, ordered by ID.
+    /// with the same concurrency key, ordered by ID.
     /// Used to deterministically pick which instances proceed vs. defer.
     async fn concurrency_position(
         &self,
@@ -1332,10 +1320,8 @@ pub trait SignalStore: Send + Sync + 'static {
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
 
     /// Return `(instance_id, current_state)` pairs for instances in a
-    /// non-running state that have undelivered signals: `paused`/`waiting`
-    /// instances with any pending signal, and `scheduled` instances only
-    /// when a control signal (`pause`/`cancel`) is pending — other signals
-    /// on a parked instance are consumed at its natural claim.
+    /// non-running state (`paused`, `waiting`, `scheduled`) that have
+    /// undelivered signals.
     ///
     /// The scheduler calls this on each tick so that resume/cancel signals
     /// queued against paused or waiting instances are processed promptly
@@ -1612,32 +1598,6 @@ pub trait WorkerStore: Send + Sync + 'static {
         next_attempt_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
-    /// Fenced [`Self::fail_webhook_outbox_attempt`] for dispatchers: applies
-    /// only while the row is still `in_flight` under the claim stamped
-    /// `claimed_at` (the value returned by [`Self::claim_due_webhook_outbox`]
-    /// or passed to [`Self::claim_webhook_outbox_row`]). A dispatcher whose
-    /// claim went stale and was recovered/reclaimed by another node gets
-    /// `false` and must not touch the row, instead of clobbering the new
-    /// owner's attempt count / schedule.
-    async fn fail_webhook_outbox_attempt_fenced(
-        &self,
-        id: Uuid,
-        claimed_at: DateTime<Utc>,
-        last_error: &str,
-        next_attempt_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, StorageError>;
-
-    /// Fenced delete of a delivered row: removes it only while it is still
-    /// `in_flight` under the claim stamped `claimed_at` (see
-    /// [`Self::fail_webhook_outbox_attempt_fenced`]). Returns whether the row
-    /// was deleted. [`Self::delete_webhook_outbox`] stays unfenced for the
-    /// admin discard/redeliver paths.
-    async fn complete_webhook_outbox_claim(
-        &self,
-        id: Uuid,
-        claimed_at: DateTime<Utc>,
-    ) -> Result<bool, StorageError>;
-
     /// Reset `in_flight` rows whose claim predates `stale_before` back to
     /// `pending` — crash recovery for a dispatcher that died mid-dispatch.
     /// Returns the number of rows recovered.
@@ -1829,11 +1789,6 @@ pub trait SchedulingStore: Send + Sync + 'static {
     /// recent due window. The `next_fire_at` is then advanced past `now` so
     /// no backfill of missed windows occurs. This prevents burst-spawning
     /// hundreds of instances after a prolonged outage.
-    ///
-    /// The claim is a lease: it lasts `CRON_CLAIM_LEASE_SECS` unless
-    /// `update_cron_fire_times` / `record_cron_skip` release it earlier, so a
-    /// fire that fails or crashes mid-way is retried instead of disabling the
-    /// schedule. Callers must make firing idempotent per `next_fire_at`.
     async fn claim_due_cron_schedules(
         &self,
         now: DateTime<Utc>,
@@ -1999,22 +1954,8 @@ pub trait AdminStore: Send + Sync + 'static {
     ) -> Result<Option<TriggerPollState>, StorageError>;
 
     /// Insert or replace the poll cursor/state for a polling trigger.
-    /// Leaves the poll lease columns untouched.
     async fn upsert_trigger_poll_state(&self, state: &TriggerPollState)
     -> Result<(), StorageError>;
-
-    /// Acquire or renew the per-trigger poll lease for `owner` until
-    /// `lease_until`. Succeeds (returns `true`) when no lease is held, the
-    /// held lease expired before `now`, or `owner` already holds it; returns
-    /// `false` when another owner holds a live lease. Creates the poll-state
-    /// row if absent (the trigger row must exist).
-    async fn try_acquire_trigger_poll_lease(
-        &self,
-        slug: &str,
-        owner: &str,
-        now: chrono::DateTime<chrono::Utc>,
-        lease_until: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool, StorageError>;
 
     // === Credentials ===
 
@@ -2043,28 +1984,6 @@ pub trait AdminStore: Send + Sync + 'static {
         &self,
         credential: &orch8_types::credential::CredentialDef,
     ) -> Result<(), StorageError>;
-
-    /// Compare-and-swap update: write every column of `credential` only if
-    /// the stored row's `updated_at` still equals `expected_updated_at`.
-    /// Returns `false` (nothing written) when a concurrent writer got there
-    /// first, so a stale read-modify-write can never overwrite a freshly
-    /// rotated token.
-    async fn update_credential_cas(
-        &self,
-        credential: &orch8_types::credential::CredentialDef,
-        expected_updated_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool, StorageError>;
-
-    /// Claim the `OAuth2` refresh of credential `id` until `lease_until`:
-    /// succeeds only when no other refresh lease is live at `now`. Does not
-    /// touch `updated_at`, so the claimer's later
-    /// [`Self::update_credential_cas`] still matches its read.
-    async fn claim_credential_refresh(
-        &self,
-        id: &str,
-        now: chrono::DateTime<chrono::Utc>,
-        lease_until: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool, StorageError>;
 
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError>;
 
@@ -2600,25 +2519,17 @@ pub trait ResourceStore: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Retrieve an externalized payload by `ref_key`, **owned by
-    /// `instance_id`**. A row whose owner differs is reported as absent:
-    /// markers are plain JSON that can be forged into context/outputs, so the
-    /// owner check is what keeps one instance (or tenant) from reading
-    /// another's payload by naming its `ref_key`.
+    /// Retrieve an externalized payload by `ref_key`.
     async fn get_externalized_state(
         &self,
-        instance_id: InstanceId,
         ref_key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError>;
 
     /// Retrieve multiple externalized payloads in one round-trip.
     ///
-    /// Each request is an `(owner instance, ref_key)` pair; the result is
-    /// keyed the same way and only contains rows actually owned by the
-    /// requested instance (see [`Self::get_externalized_state`]). Absent
-    /// entries mean the key did not exist for that owner (missing keys are
-    /// **not** errors -- the scheduler's preload path treats them as
-    /// "nothing to hydrate").
+    /// Returns a map keyed by `ref_key`; absent entries mean the key did not
+    /// exist in `externalized_state` (missing keys are **not** errors -- the
+    /// scheduler's preload path treats them as "nothing to hydrate").
     ///
     /// The default impl just loops over [`Self::get_externalized_state`] so
     /// less-hot backends (memory/test) compile without extra work. Production
@@ -2626,12 +2537,12 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// Postgres, `IN (?,?,...)` on `SQLite`) to amortize round-trip cost.
     async fn batch_get_externalized_state(
         &self,
-        refs: &[(InstanceId, String)],
-    ) -> Result<HashMap<(InstanceId, String), serde_json::Value>, StorageError> {
-        let mut out = HashMap::with_capacity(refs.len());
-        for (instance_id, key) in refs {
-            if let Some(v) = self.get_externalized_state(*instance_id, key).await? {
-                out.insert((*instance_id, key.clone()), v);
+        ref_keys: &[String],
+    ) -> Result<HashMap<String, serde_json::Value>, StorageError> {
+        let mut out = HashMap::with_capacity(ref_keys.len());
+        for key in ref_keys {
+            if let Some(v) = self.get_externalized_state(key).await? {
+                out.insert(key.clone(), v);
             }
         }
         Ok(out)

@@ -74,7 +74,7 @@ pub(super) async fn list_deliveries(
     // Aggregate per delivery; the final attempt's error class comes from a
     // lateral-style correlated subquery on the max attempt_number.
     let rows = sqlx::query(
-        r"SELECT * FROM (SELECT
+        r"SELECT
             a.delivery_id,
             MIN(a.url) AS url,
             MIN(a.event_type) AS event_type,
@@ -91,19 +91,13 @@ pub(super) async fn list_deliveries(
             AND ($2::text IS NULL OR a.event_type = $2)
           GROUP BY a.delivery_id
           HAVING ($3::bool IS NULL OR BOOL_OR(a.success) = $3)
-          ) d
-          -- Filter on the final attempt's class *before* LIMIT, so a page
-          -- is never short (or empty) just because recent deliveries had a
-          -- different class.
-          WHERE ($5::text IS NULL OR d.last_error_class = $5)
-          ORDER BY d.last_attempt_at DESC, d.delivery_id DESC
+          ORDER BY MAX(a.attempted_at) DESC
           LIMIT $4",
     )
     .bind(&filter.url)
     .bind(&filter.event_type)
     .bind(filter.delivered)
     .bind(i64::from(limit))
-    .bind(class_to_str(filter.error_class))
     .fetch_all(&store.pool)
     .await?;
 
@@ -120,6 +114,12 @@ pub(super) async fn list_deliveries(
             last_attempt_at: row.get("last_attempt_at"),
             last_error_class: class_from_str(row.get::<Option<&str>, _>("last_error_class")),
         };
+        // error_class filtering happens on the final attempt's class.
+        if let Some(want) = filter.error_class
+            && summary.last_error_class != Some(want)
+        {
+            continue;
+        }
         out.push(summary);
     }
     Ok(out)

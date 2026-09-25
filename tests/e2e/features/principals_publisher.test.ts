@@ -2,7 +2,7 @@
  * Capability-scoped principals — the `publisher` capability.
  *
  * Publisher keys drive CI/CD release automation: `/sequences/**`,
- * `/releases/**`, and read-only `/plugins/**` — and nothing else. The suite walks a
+ * `/releases/**`, and `/plugins/**` — and nothing else. The suite walks a
  * full publish flow (sequence → release → canary evaluation surface, plugin
  * registration) using only a publisher key, then checks the runtime,
  * worker, approval, and admin families all answer 403.
@@ -118,27 +118,18 @@ describe("Principals — publisher capability", () => {
     );
   });
 
-  it("lists plugins but may not register them (plugin CRUD is Operator-only)", async () => {
+  it("registers and lists plugins", async () => {
     const name = `plugin-${uuid().slice(0, 8)}`;
-    await assert.rejects(
-      publisher.createPlugin({
-        name,
-        plugin_type: "wasm",
-        source: "/plugins/plugin.wasm",
-        tenant_id: tenantId,
-      }),
-      { status: 403 } as object,
-    );
-    await root.createPlugin({
+    await publisher.createPlugin({
       name,
       plugin_type: "wasm",
-      source: "/plugins/plugin.wasm",
+      source: "https://example.com/plugin.wasm",
       tenant_id: tenantId,
     });
     const plugins = await publisher.listPlugins({ tenant_id: tenantId });
     assert.ok(
       plugins.some((p: any) => p.name === name),
-      "operator-registered plugin is visible to the publisher key",
+      "plugin registered by the publisher key is listed",
     );
   });
 

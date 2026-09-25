@@ -129,7 +129,7 @@ async fn template_json(
 pub async fn run(cmd: TemplatesCmd) -> Result<()> {
     // Catalogs are a separate trust boundary: never send the engine client's
     // default x-api-key or tenant headers to them.
-    let client = crate::external_client()?;
+    let client = reqwest::Client::new();
     match cmd {
         TemplatesCmd::List { catalog_url } => {
             let mut rows: Vec<Vec<String>> = templates::TEMPLATES

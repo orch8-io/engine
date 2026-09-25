@@ -124,56 +124,6 @@ pub(super) async fn update(
     Ok(())
 }
 
-pub(super) async fn update_cas(
-    store: &PostgresStorage,
-    credential: &CredentialDef,
-    expected_updated_at: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, StorageError> {
-    let result = sqlx::query(
-        r"UPDATE credentials SET tenant_id=$2, name=$3, kind=$4, value=$5,
-          expires_at=$6, refresh_url=$7, refresh_token=$8, enabled=$9, description=$10,
-          updated_at=GREATEST(NOW(), $11 + INTERVAL '1 microsecond')
-          WHERE id=$1 AND updated_at=$11",
-    )
-    .bind(&credential.id)
-    .bind(&credential.tenant_id)
-    .bind(&credential.name)
-    .bind(credential.kind.to_string())
-    .bind(credential.value.expose().to_string())
-    .bind(credential.expires_at)
-    .bind(&credential.refresh_url)
-    .bind(
-        credential
-            .refresh_token
-            .as_ref()
-            .map(|s| s.expose().to_string()),
-    )
-    .bind(credential.enabled)
-    .bind(&credential.description)
-    .bind(expected_updated_at)
-    .execute(&store.pool)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
-pub(super) async fn claim_refresh(
-    store: &PostgresStorage,
-    id: &str,
-    now: chrono::DateTime<chrono::Utc>,
-    lease_until: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, StorageError> {
-    let result = sqlx::query(
-        r"UPDATE credentials SET refresh_claimed_until = $2
-          WHERE id = $1 AND (refresh_claimed_until IS NULL OR refresh_claimed_until < $3)",
-    )
-    .bind(id)
-    .bind(lease_until)
-    .bind(now)
-    .execute(&store.pool)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
 pub(super) async fn delete(store: &PostgresStorage, id: &str) -> Result<(), StorageError> {
     sqlx::query("DELETE FROM credentials WHERE id = $1")
         .bind(id)

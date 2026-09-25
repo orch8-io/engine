@@ -2,9 +2,7 @@
 //!
 //! Boots a lightweight local server with `SQLite` file-backed storage, the full
 //! REST API, and (when a built dashboard is available) the embedded dashboard
-//! SPA. Intended for local development only — runs without auth (insecure):
-//! loopback-bound, every request is treated as admin, and CORS only admits
-//! the local dashboard origins.
+//! SPA. Intended for local development only — runs without auth (insecure).
 
 use std::sync::Arc;
 
@@ -87,20 +85,9 @@ impl DevServer {
         };
 
         let cb_routes = orch8_api::circuit_breakers::routes().with_state(app_state.clone());
-        // Same auth wiring as `orch8-server --insecure` / the test harness:
-        // no root key ⇒ every request is marked admin (so operator endpoints
-        // work locally), and `X-Tenant-Id` is parsed but not required.
-        let storage_for_auth = storage.clone();
         let app = build_router(app_state.clone())
             .nest(orch8_api::API_V1_PREFIX, cb_routes.clone())
             .merge(cb_routes)
-            .layer(axum::middleware::from_fn(move |req, next| {
-                let storage = storage_for_auth.clone();
-                async move { orch8_api::auth::api_key_middleware(storage, None, req, next).await }
-            }))
-            .layer(axum::middleware::from_fn(|req, next| async move {
-                orch8_api::auth::tenant_middleware(false, req, next).await
-            }))
             .merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()))
             .merge(orch8_api::health::routes().with_state(app_state))
             .layer(axum::middleware::from_fn(
@@ -108,7 +95,7 @@ impl DevServer {
             ))
             .layer(
                 CorsLayer::new()
-                    .allow_origin(AllowOrigin::list(dev_cors_origins(port)))
+                    .allow_origin(AllowOrigin::any())
                     .allow_methods(tower_http::cors::Any)
                     .allow_headers(tower_http::cors::Any),
             )
@@ -154,27 +141,6 @@ impl DevServer {
             _http_handle: http_handle,
         })
     }
-}
-
-/// Vite's default dev-server port, used when iterating on the dashboard
-/// against a running `orch8 dev --server`.
-const DASHBOARD_DEV_PORT: u16 = 5173;
-
-/// Browser origins allowed to call the unauthenticated dev API: the embedded
-/// dashboard served by this server and the dashboard's Vite dev server.
-/// `AllowOrigin::any()` would let any website the developer visits drive
-/// the (admin-privileged) local API from their browser.
-fn dev_cors_origins(port: u16) -> Vec<axum::http::HeaderValue> {
-    [port, DASHBOARD_DEV_PORT]
-        .into_iter()
-        .flat_map(|p| {
-            [
-                format!("http://localhost:{p}"),
-                format!("http://127.0.0.1:{p}"),
-            ]
-        })
-        .filter_map(|o| axum::http::HeaderValue::from_str(&o).ok())
-        .collect()
 }
 
 // -- Dashboard SPA serving ---------------------------------------------------
@@ -234,45 +200,5 @@ mod tests {
             .await
             .expect("dropping the server must signal shutdown")
             .expect("background task should finish normally");
-    }
-
-    #[tokio::test]
-    async fn dev_server_grants_admin_and_restricts_cors() {
-        let port = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("dev.db");
-        let server = DevServer::start(port, db.to_str().unwrap()).await.unwrap();
-        let client = reqwest::Client::new();
-
-        // Admin-only endpoint (unscoped DLQ listing) must work locally.
-        let resp = client
-            .get(format!("http://127.0.0.1:{port}/api/v1/instances/dlq"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-        let cors = |origin: &'static str| {
-            client
-                .get(format!("http://127.0.0.1:{port}/api/v1/instances/dlq"))
-                .header("Origin", origin)
-                .send()
-        };
-        let evil = cors("https://evil.example").await.unwrap();
-        assert!(
-            evil.headers().get("access-control-allow-origin").is_none(),
-            "foreign origins must not be allowed"
-        );
-        let own = cors("http://localhost:5173").await.unwrap();
-        assert_eq!(
-            own.headers()
-                .get("access-control-allow-origin")
-                .and_then(|v| v.to_str().ok()),
-            Some("http://localhost:5173")
-        );
-        drop(server);
     }
 }

@@ -598,17 +598,16 @@ impl crate::InstanceStore for PostgresStorage {
 
     async fn count_running_by_concurrency_key(
         &self,
-        tenant_id: &str,
         concurrency_key: &str,
     ) -> Result<i64, StorageError> {
-        misc::count_running_by_concurrency_key(self, tenant_id, concurrency_key).await
+        misc::count_running_by_concurrency_key(self, concurrency_key).await
     }
 
     async fn count_running_by_concurrency_keys(
         &self,
-        keys: &[(&str, &str)],
-    ) -> Result<std::collections::HashMap<(String, String), i64>, StorageError> {
-        misc::count_running_by_concurrency_keys(self, keys).await
+        concurrency_keys: &[&str],
+    ) -> Result<std::collections::HashMap<String, i64>, StorageError> {
+        misc::count_running_by_concurrency_keys(self, concurrency_keys).await
     }
 
     async fn concurrency_position(
@@ -1319,24 +1318,6 @@ impl crate::WorkerStore for PostgresStorage {
         webhook_outbox::fail_attempt(self, id, last_error, next_attempt_at).await
     }
 
-    async fn fail_webhook_outbox_attempt_fenced(
-        &self,
-        id: Uuid,
-        claimed_at: DateTime<Utc>,
-        last_error: &str,
-        next_attempt_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, StorageError> {
-        webhook_outbox::fail_attempt_fenced(self, id, claimed_at, last_error, next_attempt_at).await
-    }
-
-    async fn complete_webhook_outbox_claim(
-        &self,
-        id: Uuid,
-        claimed_at: DateTime<Utc>,
-    ) -> Result<bool, StorageError> {
-        webhook_outbox::complete_claim(self, id, claimed_at).await
-    }
-
     async fn recover_stale_webhook_claims(
         &self,
         stale_before: DateTime<Utc>,
@@ -1727,16 +1708,6 @@ impl crate::AdminStore for PostgresStorage {
         triggers::upsert_poll_state(self, state).await
     }
 
-    async fn try_acquire_trigger_poll_lease(
-        &self,
-        slug: &str,
-        owner: &str,
-        now: chrono::DateTime<chrono::Utc>,
-        lease_until: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool, StorageError> {
-        triggers::try_acquire_poll_lease(self, slug, owner, now, lease_until).await
-    }
-
     async fn create_credential(
         &self,
         credential: &orch8_types::credential::CredentialDef,
@@ -1765,23 +1736,6 @@ impl crate::AdminStore for PostgresStorage {
         credential: &orch8_types::credential::CredentialDef,
     ) -> Result<(), StorageError> {
         credentials::update(self, credential).await
-    }
-
-    async fn update_credential_cas(
-        &self,
-        credential: &orch8_types::credential::CredentialDef,
-        expected_updated_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool, StorageError> {
-        credentials::update_cas(self, credential, expected_updated_at).await
-    }
-
-    async fn claim_credential_refresh(
-        &self,
-        id: &str,
-        now: chrono::DateTime<chrono::Utc>,
-        lease_until: chrono::DateTime<chrono::Utc>,
-    ) -> Result<bool, StorageError> {
-        credentials::claim_refresh(self, id, now, lease_until).await
     }
 
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError> {
@@ -2189,18 +2143,16 @@ impl crate::ResourceStore for PostgresStorage {
 
     async fn get_externalized_state(
         &self,
-        instance_id: InstanceId,
         ref_key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
-        externalized::get(self, instance_id, ref_key).await
+        externalized::get(self, ref_key).await
     }
 
     async fn batch_get_externalized_state(
         &self,
-        refs: &[(InstanceId, String)],
-    ) -> Result<std::collections::HashMap<(InstanceId, String), serde_json::Value>, StorageError>
-    {
-        externalized::batch_get(self, refs).await
+        ref_keys: &[String],
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
+        externalized::batch_get(self, ref_keys).await
     }
 
     async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError> {

@@ -10,7 +10,7 @@
       "handler": "llm_call",
       "params": {
         "provider": "openai",
-        "model": "gpt-6-astra",
+        "model": "gpt-4o",
         "system": "Given the user's request, create an execution plan. Return JSON: {\"steps\": [{\"tool\": \"name\", \"input\": {...}}, ...]}",
         "messages": [
           {
@@ -50,7 +50,7 @@
       "handler": "llm_call",
       "params": {
         "provider": "openai",
-        "model": "gpt-6-astra",
+        "model": "gpt-4o",
         "system": "Synthesize the results of all tool executions into a final response.",
         "messages": [
           {

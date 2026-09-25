@@ -1,9 +1,9 @@
 use tracing::{debug, warn};
 
 use orch8_storage::StorageBackend;
+use orch8_types::execution::ExecutionNode;
 #[cfg(test)]
-use orch8_types::execution::BlockType;
-use orch8_types::execution::{ExecutionNode, NodeState};
+use orch8_types::execution::{BlockType, NodeState};
 #[cfg(test)]
 use orch8_types::ids::{BlockId, ExecutionNodeId};
 use orch8_types::instance::{InstanceState, TaskInstance};
@@ -11,7 +11,7 @@ use orch8_types::output::BlockOutput;
 use orch8_types::sequence::LoopDef;
 
 use crate::error::EngineError;
-use crate::evaluator::{self, SeqProgress};
+use crate::evaluator;
 use crate::handlers::HandlerRegistry;
 
 /// Absolute upper bound on loop iterations.
@@ -28,15 +28,6 @@ use crate::handlers::HandlerRegistry;
 /// production. See `docs/plans/workflow-validation-infinite-loops.md`.
 pub const LOOP_ABSOLUTE_MAX: u32 = 1_000_000;
 
-/// Upper bound on `poll_interval` (one year). Larger values are clamped so
-/// the reschedule timestamp can never overflow `DateTime<Utc>`.
-const MAX_POLL_INTERVAL_SECS: u64 = 365 * 24 * 60 * 60;
-
-/// Marker field set while an iteration advance is in flight: the incremented
-/// counter is durable but the body reset may not have finished. See
-/// [`advance_iteration`].
-const RESET_PENDING_KEY: &str = "_reset_pending";
-
 /// Execute a loop block: repeatedly execute the body while `condition`
 /// evaluates truthy, up to the lesser of `loop_def.max_iterations` and
 /// [`LOOP_ABSOLUTE_MAX`].
@@ -49,18 +40,14 @@ const RESET_PENDING_KEY: &str = "_reset_pending";
 /// the highest `created_at`).
 ///
 /// On each tick the handler:
-///   1. Reads the current iteration counter from its marker output (and
-///      finishes an interrupted iteration advance, if any).
+///   1. Reads the current iteration counter from its marker output.
 ///   2. Trips the hard cap (completes the node) if the counter has reached
 ///      the effective max.
-///   3. At an iteration boundary only (every body child still `Pending`),
-///      evaluates `condition`; if falsy, completes normally. The condition
-///      is never re-evaluated mid-iteration.
-///   4. Advances the body's sequential cursor. A failed body block stops
-///      the iteration: the loop fails, or — with `continue_on_error` —
-///      advances to the next iteration.
-///   5. When the iteration settles, checks `break_on`, then durably
-///      advances the counter and resets the body subtree to `Pending`.
+///   3. Evaluates `condition`; if falsy, completes normally.
+///   4. Activates any `Pending` body children to `Running`.
+///   5. If all body children are terminal, either fails the loop (on child
+///      failure) or resets the body subtree to `Pending` and then persists
+///      the incremented counter, so the next tick re-executes the body.
 ///
 /// Returns `Ok(true)` to indicate more work; the scheduler will re-dispatch.
 #[allow(clippy::too_many_lines)]
@@ -115,26 +102,14 @@ pub(crate) async fn execute_loop_with_clock(
 
     // Recover the current iteration counter from the loop's own BlockOutput
     // marker. First entry into the handler: no output yet → iteration = 0.
-    let marker = storage.get_block_output(instance.id, &loop_def.id).await?;
-    let marker_output = marker.as_ref().map(|o| &o.output);
-    let iteration: u32 = marker_output
-        .and_then(|o| o.get("_iterations"))
+    let iteration: u32 = storage
+        .get_block_output(instance.id, &loop_def.id)
+        .await?
+        .as_ref()
+        .and_then(|o| o.output.get("_iterations"))
         .and_then(serde_json::Value::as_u64)
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(0);
-
-    // Crash recovery: a previous tick durably advanced the counter but may
-    // have died before (or while) resetting the body. Finish the reset now —
-    // it is idempotent — and clear the flag. The body cannot have run in
-    // between: every node is still terminal (or already Pending).
-    if marker_output
-        .and_then(|o| o.get(RESET_PENDING_KEY))
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
-        finish_iteration_reset(storage, instance, node, loop_def, tree, iteration).await?;
-        return Ok(true);
-    }
 
     // Hard cap: checked BEFORE condition evaluation so a perpetually-truthy
     // condition cannot keep the loop alive past the cap.
@@ -147,28 +122,20 @@ pub(crate) async fn execute_loop_with_clock(
             absolute_max = LOOP_ABSOLUTE_MAX,
             "loop reached iteration cap; completing"
         );
-        evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Completed)
-            .await?;
+        evaluator::complete_node(storage, node.id).await?;
         return Ok(true);
     }
 
-    let children = evaluator::children_of(tree, node.id, None);
+    // Condition evaluation. The loop's own outputs are not exposed to its
+    // condition expression — the condition reads from instance context.
     let empty_outputs = serde_json::Value::Object(serde_json::Map::new());
-
-    // Condition evaluation happens ONLY at an iteration boundary (no body
-    // block started yet). Re-evaluating mid-iteration would complete the
-    // loop while body steps are still Running. The loop's own outputs are
-    // not exposed to its condition expression — it reads instance context.
-    let at_iteration_start = children.iter().all(|c| c.state == NodeState::Pending);
-    if at_iteration_start
-        && !crate::expression::evaluate_condition(
-            &loop_def.condition,
-            &instance.context,
-            &empty_outputs,
-        )
-    {
-        evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Completed)
-            .await?;
+    let condition_truthy = crate::expression::evaluate_condition(
+        &loop_def.condition,
+        &instance.context,
+        &empty_outputs,
+    );
+    if !condition_truthy {
+        evaluator::complete_node(storage, node.id).await?;
         debug!(
             instance_id = %instance.id,
             block_id = %loop_def.id,
@@ -178,192 +145,146 @@ pub(crate) async fn execute_loop_with_clock(
         return Ok(true);
     }
 
-    // Sequential cursor with fail-fast: a failed body block stops the
-    // iteration instead of letting its successors run.
-    match evaluator::advance_sequence(storage, &children).await? {
-        SeqProgress::Advanced | SeqProgress::Blocked => return Ok(true),
-        SeqProgress::Failed | SeqProgress::Cancelled => {
-            if !loop_def.continue_on_error {
-                evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Failed)
-                    .await?;
+    let children = evaluator::children_of(tree, node.id, None);
+
+    // Start-of-iteration: activate the first Pending body child so the next
+    // evaluator tick will run it. Sequential cursor semantics — we must not
+    // fan-out all pending blocks in the loop body.
+    evaluator::activate_first_pending_child(storage, &children).await?;
+
+    // End-of-iteration: if every body child is terminal, either fail (on
+    // any child failure) or advance the counter and reset for the next
+    // iteration. Without this reset the handler would re-observe
+    // `all_terminal` on every subsequent tick and spin forever.
+    if !children.is_empty() && evaluator::all_terminal(&children) {
+        if evaluator::any_failed(&children) {
+            if loop_def.continue_on_error {
+                debug!(
+                    instance_id = %instance.id,
+                    block_id = %loop_def.id,
+                    iteration,
+                    "loop body failed but continue_on_error=true; advancing"
+                );
+            } else {
+                evaluator::fail_node(storage, node.id).await?;
                 return Ok(true);
             }
+        }
+
+        // break_on: evaluate after body completion; exit loop on match.
+        if let Some(ref break_expr) = loop_def.break_on
+            && crate::expression::evaluate_condition(break_expr, &instance.context, &empty_outputs)
+        {
             debug!(
                 instance_id = %instance.id,
                 block_id = %loop_def.id,
                 iteration,
-                "loop body failed but continue_on_error=true; advancing"
+                "loop break_on condition met; completing"
             );
+            evaluator::complete_node(storage, node.id).await?;
+            return Ok(true);
         }
-        SeqProgress::Done => {}
-    }
 
-    // break_on: evaluate after body completion; exit loop on match.
-    if let Some(ref break_expr) = loop_def.break_on
-        && crate::expression::evaluate_condition(break_expr, &instance.context, &empty_outputs)
-    {
+        let next_iteration = iteration.saturating_add(1);
+        let marker = BlockOutput {
+            id: uuid::Uuid::now_v7(),
+            instance_id: instance.id,
+            block_id: loop_def.id.clone(),
+            output: serde_json::json!({ "_iterations": next_iteration }),
+            output_ref: None,
+            output_size: 0,
+            attempt: u16::try_from(next_iteration).unwrap_or(u16::MAX),
+            created_at: chrono::Utc::now(),
+        };
+        // Reset the entire body subtree (direct children plus every
+        // descendant) back to Pending BEFORE persisting the advanced
+        // marker. If the reset failed after the marker was saved, the next
+        // tick would observe the terminal children from the previous
+        // iteration against the already-incremented counter and count a
+        // phantom iteration whose body never ran. With reset-first, a
+        // failure leaves counter and subtree consistent: the next tick
+        // re-enters this branch and retries the reset, which is safe
+        // because the reset is idempotent (see
+        // `l6_reset_subtree_is_idempotent`). Skipped on the final
+        // iteration — the body is left terminal so the evaluator can close
+        // out cleanly on the next tick (the top-of-function guard fires on
+        // `iteration >= effective_max`).
+        if next_iteration < effective_max {
+            evaluator::reset_subtree_to_pending(
+                storage,
+                tree,
+                &instance.tenant_id,
+                instance.id,
+                node.id,
+            )
+            .await?;
+        }
+
+        storage.save_block_output(&marker).await?;
+
+        // Compact old body-step outputs once the retained window is exceeded.
+        if let Some(retain) = loop_def.retain_iterations {
+            match crate::evaluator::compact_iteration_outputs(
+                storage,
+                instance.id,
+                &loop_def.body,
+                retain,
+            )
+            .await
+            {
+                Ok(n) if n > 0 => crate::metrics::inc_by(crate::metrics::LOOP_OUTPUTS_COMPACTED, n),
+                Ok(_) => {}
+                Err(e) => warn!(
+                    instance_id = %instance.id,
+                    block_id = %loop_def.id,
+                    error = %e,
+                    "loop output compaction failed (continuing)"
+                ),
+            }
+        }
+
         debug!(
             instance_id = %instance.id,
             block_id = %loop_def.id,
-            iteration,
-            "loop break_on condition met; completing"
+            iteration = next_iteration,
+            "loop iteration completed"
         );
-        evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Completed)
-            .await?;
-        return Ok(true);
-    }
 
-    let next_iteration = iteration.saturating_add(1);
-    if next_iteration < effective_max {
-        advance_iteration(storage, instance, node, loop_def, tree, next_iteration).await?;
-    } else {
-        // Cap reached after this iteration: persist the final count and leave
-        // the body terminal; the top-of-function guard completes the node on
-        // the next tick.
-        storage
-            .save_block_output(&iteration_marker(instance, loop_def, next_iteration, false))
-            .await?;
-    }
-
-    // Compact old body-step outputs once the retained window is exceeded.
-    if let Some(retain) = loop_def.retain_iterations {
-        match crate::evaluator::compact_iteration_outputs(
-            storage,
-            instance.id,
-            &loop_def.body,
-            retain,
-        )
-        .await
-        {
-            Ok(n) if n > 0 => crate::metrics::inc_by(crate::metrics::LOOP_OUTPUTS_COMPACTED, n),
-            Ok(_) => {}
-            Err(e) => warn!(
-                instance_id = %instance.id,
-                block_id = %loop_def.id,
-                error = %e,
-                "loop output compaction failed (continuing)"
-            ),
+        // Cap reached after this iteration: nothing left to schedule; the
+        // top-of-function guard will complete the node on the next tick.
+        if next_iteration >= effective_max {
+            return Ok(true);
         }
-    }
 
-    debug!(
-        instance_id = %instance.id,
-        block_id = %loop_def.id,
-        iteration = next_iteration,
-        "loop iteration completed"
-    );
-
-    if next_iteration >= effective_max {
-        return Ok(true);
-    }
-
-    // poll_interval: defer re-execution by setting next_fire_at.
-    // Use CAS (conditional_update_instance_state) so that a Cancel
-    // signal processed between this write and the next evaluator tick
-    // is not silently overwritten. The instance is Running when the
-    // loop handler executes; if a cancel has already transitioned it
-    // to Cancelled, the CAS returns false and the write is safely
-    // skipped.
-    if let Some(interval_secs) = loop_def.poll_interval {
-        let next_fire = poll_fire_at(clock.now(), interval_secs);
-        let transitioned = storage
-            .conditional_update_instance_state(
-                instance.id,
-                InstanceState::Running,
-                InstanceState::Scheduled,
-                Some(next_fire),
-            )
-            .await?;
-        if !transitioned {
-            debug!(
-                instance_id = %instance.id,
-                block_id = %loop_def.id,
-                "CAS for poll_interval reschedule failed — instance state changed concurrently"
-            );
+        // poll_interval: defer re-execution by setting next_fire_at.
+        // Use CAS (conditional_update_instance_state) so that a Cancel
+        // signal processed between this write and the next evaluator tick
+        // is not silently overwritten. The instance is Running when the
+        // loop handler executes; if a cancel has already transitioned it
+        // to Cancelled, the CAS returns false and the write is safely
+        // skipped.
+        if let Some(interval_secs) = loop_def.poll_interval {
+            let next_fire =
+                clock.now() + chrono::Duration::seconds(i64::try_from(interval_secs).unwrap_or(5));
+            let transitioned = storage
+                .conditional_update_instance_state(
+                    instance.id,
+                    InstanceState::Running,
+                    InstanceState::Scheduled,
+                    Some(next_fire),
+                )
+                .await?;
+            if !transitioned {
+                debug!(
+                    instance_id = %instance.id,
+                    block_id = %loop_def.id,
+                    "CAS for poll_interval reschedule failed — instance state changed concurrently"
+                );
+            }
         }
     }
 
     Ok(true)
-}
-
-/// `now + interval_secs`, with the interval clamped to
-/// [`MAX_POLL_INTERVAL_SECS`] so an absurd author-supplied value can never
-/// overflow (and panic) the timestamp arithmetic.
-fn poll_fire_at(
-    now: chrono::DateTime<chrono::Utc>,
-    interval_secs: u64,
-) -> chrono::DateTime<chrono::Utc> {
-    let secs = i64::try_from(interval_secs.min(MAX_POLL_INTERVAL_SECS)).unwrap_or(0);
-    now.checked_add_signed(chrono::Duration::seconds(secs))
-        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
-}
-
-fn iteration_marker(
-    instance: &TaskInstance,
-    loop_def: &LoopDef,
-    iterations: u32,
-    reset_pending: bool,
-) -> BlockOutput {
-    let output = if reset_pending {
-        serde_json::json!({ "_iterations": iterations, RESET_PENDING_KEY: true })
-    } else {
-        serde_json::json!({ "_iterations": iterations })
-    };
-    BlockOutput {
-        id: uuid::Uuid::now_v7(),
-        instance_id: instance.id,
-        block_id: loop_def.id.clone(),
-        output,
-        output_ref: None,
-        output_size: 0,
-        attempt: u16::try_from(iterations).unwrap_or(u16::MAX),
-        created_at: chrono::Utc::now(),
-    }
-}
-
-/// Durably advance the loop to `next_iteration` and reset its body.
-///
-/// The reset deletes the body's effect receipts, so it must never run
-/// before the advanced counter is durable: were the process to crash in
-/// between, the next tick would re-run the SAME iteration with its
-/// idempotency records gone (double side effects). Order instead:
-///   1. persist the advanced counter flagged `_reset_pending`,
-///   2. reset the body subtree (idempotent),
-///   3. persist the counter again without the flag.
-///
-/// A crash after (1) is finished by the top-of-handler recovery branch; a
-/// crash before (1) leaves counter and terminal body consistent, so the
-/// next tick simply redoes the advance. No iteration is ever lost or run
-/// twice.
-async fn advance_iteration(
-    storage: &dyn StorageBackend,
-    instance: &TaskInstance,
-    node: &ExecutionNode,
-    loop_def: &LoopDef,
-    tree: &[ExecutionNode],
-    next_iteration: u32,
-) -> Result<(), EngineError> {
-    storage
-        .save_block_output(&iteration_marker(instance, loop_def, next_iteration, true))
-        .await?;
-    finish_iteration_reset(storage, instance, node, loop_def, tree, next_iteration).await
-}
-
-/// Steps 2 and 3 of [`advance_iteration`].
-async fn finish_iteration_reset(
-    storage: &dyn StorageBackend,
-    instance: &TaskInstance,
-    node: &ExecutionNode,
-    loop_def: &LoopDef,
-    tree: &[ExecutionNode],
-    iteration: u32,
-) -> Result<(), EngineError> {
-    evaluator::reset_subtree_to_pending(storage, tree, &instance.tenant_id, instance.id, node.id)
-        .await?;
-    storage
-        .save_block_output(&iteration_marker(instance, loop_def, iteration, false))
-        .await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1107,211 +1028,5 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-    }
-
-    fn body_step(id: &str) -> orch8_types::sequence::BlockDefinition {
-        orch8_types::sequence::BlockDefinition::Step(Box::new(orch8_types::sequence::StepDef {
-            id: BlockId::new(id),
-            handler: "noop".into(),
-            params: json!({}),
-            delay: None,
-            retry: None,
-            timeout: None,
-            rate_limit_key: None,
-            send_window: None,
-            context_access: None,
-            cancellable: true,
-            wait_for_input: None,
-            queue_name: None,
-            deadline: None,
-            on_deadline_breach: None,
-            fallback_handler: None,
-            cache_key: None,
-            output_schema: None,
-            when: None,
-            compensation: None,
-        }))
-    }
-
-    fn two_step_loop(condition: &str, continue_on_error: bool) -> LoopDef {
-        LoopDef {
-            id: BlockId::new("lp"),
-            condition: condition.into(),
-            body: vec![body_step("a"), body_step("b")],
-            max_iterations: 5,
-            break_on: None,
-            continue_on_error,
-            poll_interval: None,
-            retain_iterations: None,
-        }
-    }
-
-    /// Seed `lp` (Running) with body `[a, b]` in the given states and run one
-    /// loop tick. Returns the storage and the post-tick tree.
-    async fn run_two_step_loop(
-        loop_def: &LoopDef,
-        ctx: serde_json::Value,
-        a: NodeState,
-        b: NodeState,
-        marker: Option<serde_json::Value>,
-    ) -> (SqliteStorage, InstanceId, Vec<ExecutionNode>) {
-        let s = SqliteStorage::in_memory().await.unwrap();
-        let inst_id = InstanceId::new();
-        seed_instance(&s, inst_id).await;
-        let inst = mk_instance_for(inst_id, ctx);
-        let mut lp = mk_node(inst_id, "lp", BlockType::Loop, None);
-        lp.state = NodeState::Running;
-        let mut na = mk_node(inst_id, "a", BlockType::Step, Some(lp.id));
-        na.state = a;
-        let mut nb = mk_node(inst_id, "b", BlockType::Step, Some(lp.id));
-        nb.state = b;
-        s.create_execution_nodes_batch(&[lp.clone(), na, nb])
-            .await
-            .unwrap();
-        if let Some(output) = marker {
-            let mut m = mk_marker(inst_id, "lp", 0);
-            m.output = output;
-            s.save_block_output(&m).await.unwrap();
-        }
-        let tree = s.get_execution_tree(inst_id).await.unwrap();
-        execute_loop(&s, &HandlerRegistry::new(), &inst, &lp, loop_def, &tree)
-            .await
-            .unwrap();
-        let after = s.get_execution_tree(inst_id).await.unwrap();
-        (s, inst_id, after)
-    }
-
-    fn state_of(tree: &[ExecutionNode], block: &str) -> NodeState {
-        tree.iter()
-            .find(|n| n.block_id.as_str() == block)
-            .unwrap()
-            .state
-    }
-
-    /// ENG-C-N3: the condition is evaluated only at an iteration boundary. A
-    /// condition that turns false mid-iteration must not complete the loop
-    /// while body steps are still running.
-    #[tokio::test]
-    async fn condition_not_evaluated_mid_iteration() {
-        let loop_def = two_step_loop("keep_going", false);
-        let (_s, _id, after) = run_two_step_loop(
-            &loop_def,
-            json!({ "keep_going": false }),
-            NodeState::Completed,
-            NodeState::Running,
-            Some(json!({ "_iterations": 0 })),
-        )
-        .await;
-        assert_eq!(state_of(&after, "lp"), NodeState::Running);
-        assert_eq!(state_of(&after, "b"), NodeState::Running);
-    }
-
-    /// At the boundary a false condition completes the loop and the
-    /// never-started body is settled (no orphaned Pending nodes).
-    #[tokio::test]
-    async fn condition_false_at_boundary_completes_and_settles_body() {
-        let loop_def = two_step_loop("keep_going", false);
-        let (_s, _id, after) = run_two_step_loop(
-            &loop_def,
-            json!({ "keep_going": false }),
-            NodeState::Pending,
-            NodeState::Pending,
-            None,
-        )
-        .await;
-        assert_eq!(state_of(&after, "lp"), NodeState::Completed);
-        assert_eq!(state_of(&after, "a"), NodeState::Skipped);
-        assert_eq!(state_of(&after, "b"), NodeState::Skipped);
-    }
-
-    /// Run-past-failure: a failed body step stops the iteration — its
-    /// successor never starts — and fails the loop.
-    #[tokio::test]
-    async fn failed_body_step_stops_iteration_and_fails_loop() {
-        let loop_def = two_step_loop("true", false);
-        let (_s, _id, after) = run_two_step_loop(
-            &loop_def,
-            json!({}),
-            NodeState::Failed,
-            NodeState::Pending,
-            None,
-        )
-        .await;
-        assert_eq!(state_of(&after, "lp"), NodeState::Failed);
-        assert_eq!(
-            state_of(&after, "b"),
-            NodeState::Skipped,
-            "successor of a failed step must never run"
-        );
-    }
-
-    /// `continue_on_error` skips the rest of the failed iteration and
-    /// advances to the next one.
-    #[tokio::test]
-    async fn continue_on_error_advances_without_running_rest_of_iteration() {
-        let loop_def = two_step_loop("true", true);
-        let (s, inst_id, after) = run_two_step_loop(
-            &loop_def,
-            json!({}),
-            NodeState::Failed,
-            NodeState::Pending,
-            None,
-        )
-        .await;
-        assert_eq!(state_of(&after, "lp"), NodeState::Running);
-        assert_eq!(state_of(&after, "a"), NodeState::Pending);
-        assert_eq!(state_of(&after, "b"), NodeState::Pending);
-        let marker = s
-            .get_block_output(inst_id, &BlockId::new("lp"))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(marker.output, json!({ "_iterations": 1 }));
-    }
-
-    /// ENG-C-N5: the advanced counter is written BEFORE the body reset
-    /// (flagged `_reset_pending`). A crash between the two leaves the flag;
-    /// the next tick must finish the reset without re-running or counting
-    /// the iteration again.
-    #[tokio::test]
-    async fn interrupted_iteration_advance_is_finished_not_rerun() {
-        let loop_def = two_step_loop("true", false);
-        // Body still terminal from the finished iteration (reset never ran).
-        let (s, inst_id, after) = run_two_step_loop(
-            &loop_def,
-            json!({}),
-            NodeState::Completed,
-            NodeState::Completed,
-            Some(json!({ "_iterations": 2, "_reset_pending": true })),
-        )
-        .await;
-        assert_eq!(state_of(&after, "lp"), NodeState::Running);
-        assert_eq!(state_of(&after, "a"), NodeState::Pending);
-        assert_eq!(state_of(&after, "b"), NodeState::Pending);
-        let marker = s
-            .get_block_output(inst_id, &BlockId::new("lp"))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            marker.output,
-            json!({ "_iterations": 2 }),
-            "counter must not advance twice; flag cleared"
-        );
-    }
-
-    /// ENG-C-N6: an absurd `poll_interval` must not overflow the timestamp.
-    #[test]
-    fn poll_fire_at_clamps_instead_of_overflowing() {
-        let now = chrono::Utc::now();
-        let fire = poll_fire_at(now, u64::MAX);
-        assert!(fire > now);
-        assert!(fire <= now + chrono::Duration::days(366));
-        let near_max = chrono::DateTime::<chrono::Utc>::MAX_UTC - chrono::Duration::seconds(5);
-        assert_eq!(
-            poll_fire_at(near_max, 3600),
-            chrono::DateTime::<chrono::Utc>::MAX_UTC
-        );
-        assert_eq!(poll_fire_at(now, 5), now + chrono::Duration::seconds(5));
     }
 }

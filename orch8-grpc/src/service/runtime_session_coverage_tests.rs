@@ -388,7 +388,6 @@ fn command(worker_id: &str, kind: WorkerCommandKind) -> WorkerCommand {
     WorkerCommand {
         id: Uuid::now_v7(),
         worker_id: worker_id.into(),
-        tenant_id: "test".into(),
         command: kind,
         payload: serde_json::json!({"reason": "test"}),
         created_at: chrono::Utc::now(),
@@ -414,7 +413,7 @@ async fn coverage_runtime_031_no_commands_reports_no_drain() {
     let (service, _storage) = service_and_storage().await;
     let (sender, mut receiver) = command_channel();
     let drain = service
-        .send_worker_commands("worker-a", Some(&test_tenant()), &sender)
+        .send_worker_commands("worker-a", &sender)
         .await
         .unwrap();
     assert!(!drain);
@@ -430,7 +429,7 @@ async fn coverage_runtime_032_drain_command_requests_draining() {
         .unwrap();
     let (sender, _receiver) = command_channel();
     let drain = service
-        .send_worker_commands("worker-a", Some(&test_tenant()), &sender)
+        .send_worker_commands("worker-a", &sender)
         .await
         .unwrap();
     assert!(drain);
@@ -445,7 +444,7 @@ async fn coverage_runtime_033_ping_command_does_not_request_draining() {
         .unwrap();
     let (sender, _receiver) = command_channel();
     let drain = service
-        .send_worker_commands("worker-a", Some(&test_tenant()), &sender)
+        .send_worker_commands("worker-a", &sender)
         .await
         .unwrap();
     assert!(!drain);
@@ -460,7 +459,7 @@ async fn coverage_runtime_034_all_pending_commands_are_streamed_in_order() {
     storage.enqueue_worker_command(&second).await.unwrap();
     let (sender, mut receiver) = command_channel();
     let drain = service
-        .send_worker_commands("worker-a", Some(&test_tenant()), &sender)
+        .send_worker_commands("worker-a", &sender)
         .await
         .unwrap();
     assert!(!drain);
@@ -480,7 +479,7 @@ async fn coverage_runtime_035_command_json_round_trips_all_fields() {
     storage.enqueue_worker_command(&original).await.unwrap();
     let (sender, mut receiver) = command_channel();
     service
-        .send_worker_commands("worker-a", Some(&test_tenant()), &sender)
+        .send_worker_commands("worker-a", &sender)
         .await
         .unwrap();
     let streamed = streamed_command(receiver.try_recv().unwrap());
@@ -499,7 +498,7 @@ async fn coverage_runtime_036_commands_for_other_workers_are_not_streamed() {
         .unwrap();
     let (sender, mut receiver) = command_channel();
     let drain = service
-        .send_worker_commands("worker-a", Some(&test_tenant()), &sender)
+        .send_worker_commands("worker-a", &sender)
         .await
         .unwrap();
     assert!(!drain);
@@ -512,7 +511,7 @@ async fn coverage_runtime_037_acknowledgement_removes_the_matching_command() {
     let target = command("worker-a", WorkerCommandKind::Ping);
     storage.enqueue_worker_command(&target).await.unwrap();
     service
-        .acknowledge_worker_command("worker-a", Some(&test_tenant()), target.id)
+        .acknowledge_worker_command("worker-a", target.id)
         .await
         .unwrap();
     assert!(
@@ -530,7 +529,7 @@ async fn coverage_runtime_038_acknowledgement_of_unknown_command_is_a_noop() {
     let surviving = command("worker-a", WorkerCommandKind::Ping);
     storage.enqueue_worker_command(&surviving).await.unwrap();
     service
-        .acknowledge_worker_command("worker-a", Some(&test_tenant()), Uuid::now_v7())
+        .acknowledge_worker_command("worker-a", Uuid::now_v7())
         .await
         .unwrap();
     let remaining = storage.list_worker_commands("worker-a").await.unwrap();
@@ -546,7 +545,7 @@ async fn coverage_runtime_039_acknowledgement_leaves_sibling_commands_intact() {
     storage.enqueue_worker_command(&target).await.unwrap();
     storage.enqueue_worker_command(&surviving).await.unwrap();
     service
-        .acknowledge_worker_command("worker-a", Some(&test_tenant()), target.id)
+        .acknowledge_worker_command("worker-a", target.id)
         .await
         .unwrap();
     let remaining = storage.list_worker_commands("worker-a").await.unwrap();
@@ -561,56 +560,11 @@ async fn coverage_runtime_040_acknowledgement_is_scoped_to_the_command_owner() {
     let foreign = command("worker-b", WorkerCommandKind::Ping);
     storage.enqueue_worker_command(&foreign).await.unwrap();
     service
-        .acknowledge_worker_command("worker-a", Some(&test_tenant()), foreign.id)
+        .acknowledge_worker_command("worker-a", foreign.id)
         .await
         .unwrap();
     let remaining = storage.list_worker_commands("worker-b").await.unwrap();
     assert_eq!(remaining.len(), 1);
-}
-
-/// GRPC-H1: `worker_id` is client-chosen, so a tenant session that names a
-/// foreign tenant's worker must neither receive nor ack its commands.
-#[tokio::test]
-async fn worker_commands_are_tenant_scoped() {
-    let (service, storage) = service_and_storage().await;
-    let mut foreign = command("worker-a", WorkerCommandKind::Drain);
-    foreign.tenant_id = "other".into();
-    storage.enqueue_worker_command(&foreign).await.unwrap();
-
-    let (sender, mut receiver) = command_channel();
-    let drain = service
-        .send_worker_commands("worker-a", Some(&test_tenant()), &sender)
-        .await
-        .unwrap();
-    assert!(!drain);
-    assert!(receiver.try_recv().is_err());
-    service
-        .acknowledge_worker_command("worker-a", Some(&test_tenant()), foreign.id)
-        .await
-        .unwrap();
-    assert_eq!(
-        storage
-            .list_worker_commands("worker-a")
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-
-    // The owning tenant (and an unscoped root session) still see it.
-    let other = TenantId::unchecked("other");
-    assert!(
-        service
-            .send_worker_commands("worker-a", Some(&other), &sender)
-            .await
-            .unwrap()
-    );
-    assert!(
-        service
-            .send_worker_commands("worker-a", None, &sender)
-            .await
-            .unwrap()
-    );
 }
 
 // --- session serialization determinism ---
@@ -706,7 +660,7 @@ async fn coverage_runtime_048_oversized_command_is_resource_exhausted() {
     storage.enqueue_worker_command(&oversized).await.unwrap();
     let (sender, _receiver) = command_channel();
     let status = service
-        .send_worker_commands("worker-a", Some(&test_tenant()), &sender)
+        .send_worker_commands("worker-a", &sender)
         .await
         .unwrap_err();
     assert_eq!(status.code(), tonic::Code::ResourceExhausted);

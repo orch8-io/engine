@@ -16,7 +16,7 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
         fs::create_dir_all(base).context("failed to create directory")?;
     }
 
-    write_scaffolds(base, template)?;
+    let secrets = write_scaffolds(base, template)?;
 
     println!("Initialized Orch8 project in {dir}/");
     println!();
@@ -41,22 +41,20 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
     println!("  docker compose up -d");
     println!();
     println!("Then create the example sequence:");
-    println!("{}", sequence_apply_command());
+    println!("{}", sequence_apply_command(&secrets.api_key));
 
     Ok(())
 }
 
-/// Quick-start command. The API key goes through `ORCH8_API_KEY` (read from
-/// the generated config) rather than a `--api-key` flag, so the secret isn't
-/// printed to the terminal or saved in shell history.
-fn sequence_apply_command() -> String {
-    concat!(
-        "  export ORCH8_API_KEY=\"$(sed -n 's/^api_key = \"\\(.*\\)\"$/\\1/p' orch8.toml)\"\n",
-        "  orch8 sequence apply sequence.json --url http://localhost:8080/api/v1 ",
-        "\\\n",
-        "    --tenant-id demo",
+fn sequence_apply_command(api_key: &str) -> String {
+    format!(
+        concat!(
+            "  orch8 sequence apply sequence.json --url http://localhost:8080/api/v1 ",
+            "\\\n",
+            "    --api-key {api_key} --tenant-id demo",
+        ),
+        api_key = api_key,
     )
-    .to_owned()
 }
 
 /// Generate a 32-byte random token rendered as hex so the scaffold ships
@@ -149,7 +147,11 @@ volumes:
   pgdata:
 "#;
 
-fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<()> {
+struct ScaffoldSecrets {
+    api_key: String,
+}
+
+fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<ScaffoldSecrets> {
     let api_key = generate_secret_hex();
     let encryption_key = generate_secret_hex();
     #[allow(clippy::literal_string_with_formatting_args)]
@@ -170,7 +172,7 @@ fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<()> {
         .replace("{api_key}", &api_key)
         .replace("{encryption_key}", &encryption_key);
     write_if_absent(&base.join("docker-compose.yml"), &compose)?;
-    Ok(())
+    Ok(ScaffoldSecrets { api_key })
 }
 
 fn write_if_absent(path: &Path, content: &str) -> Result<()> {
@@ -339,16 +341,9 @@ mod tests {
 
     #[test]
     fn quick_start_continuation_has_no_literal_patch_marker() {
-        let command = sequence_apply_command();
-        assert!(command.contains("\\\n    --tenant-id demo"));
+        let command = sequence_apply_command("secret");
+        assert!(command.contains("\\\n    --api-key secret"));
         assert!(!command.contains("\n+"));
-    }
-
-    #[test]
-    fn quick_start_never_passes_the_api_key_as_a_flag() {
-        let command = sequence_apply_command();
-        assert!(!command.contains("--api-key"), "{command}");
-        assert!(command.contains("ORCH8_API_KEY"));
     }
 }
 

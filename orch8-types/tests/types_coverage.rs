@@ -153,7 +153,6 @@ fn seq_16_human_input_effective_choices_without_user_choices() {
         choices: None,
         store_as: None,
         allow_comment: false,
-        auto_decide: None,
     };
     let choices = hid.effective_choices();
     assert_eq!(choices.len(), 2);
@@ -183,7 +182,6 @@ fn seq_17_human_input_effective_choices_with_user_choices() {
         ]),
         store_as: Some("decision".into()),
         allow_comment: true,
-        auto_decide: None,
     };
     let choices = hid.effective_choices();
     assert_eq!(choices.len(), 3);

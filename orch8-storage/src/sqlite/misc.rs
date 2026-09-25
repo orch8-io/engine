@@ -30,14 +30,11 @@ pub(super) async fn find_by_idempotency_key(
 
 pub(super) async fn count_running_by_concurrency_key(
     storage: &SqliteStorage,
-    tenant_id: &str,
     concurrency_key: &str,
 ) -> Result<i64, StorageError> {
     let row = sqlx::query(
-        "SELECT COUNT(*) as cnt FROM task_instances \
-         WHERE tenant_id=?1 AND concurrency_key=?2 AND state='running'",
+        "SELECT COUNT(*) as cnt FROM task_instances WHERE concurrency_key=?1 AND state='running'",
     )
-    .bind(tenant_id)
     .bind(concurrency_key)
     .fetch_one(&storage.pool)
     .await?;
@@ -46,34 +43,25 @@ pub(super) async fn count_running_by_concurrency_key(
 
 pub(super) async fn count_running_by_concurrency_keys(
     storage: &SqliteStorage,
-    keys: &[(&str, &str)],
-) -> Result<std::collections::HashMap<(String, String), i64>, StorageError> {
-    if keys.is_empty() {
+    concurrency_keys: &[&str],
+) -> Result<std::collections::HashMap<String, i64>, StorageError> {
+    if concurrency_keys.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-    let mut map = std::collections::HashMap::with_capacity(keys.len());
-    // 2 binds per pair; stay well under SQLite's bind-parameter limit.
-    for chunk in keys.chunks(400) {
-        let mut qb = sqlx::QueryBuilder::new(
-            "SELECT tenant_id, concurrency_key, COUNT(*) as cnt FROM task_instances \
-             WHERE state='running' AND (",
-        );
-        for (i, (tenant, key)) in chunk.iter().enumerate() {
-            if i > 0 {
-                qb.push(" OR ");
-            }
-            qb.push("(tenant_id=");
-            qb.push_bind(*tenant);
-            qb.push(" AND concurrency_key=");
-            qb.push_bind(*key);
-            qb.push(")");
-        }
-        qb.push(") GROUP BY tenant_id, concurrency_key");
-        for row in qb.build().fetch_all(&storage.pool).await? {
-            let tenant: String = row.get("tenant_id");
-            let key: String = row.get("concurrency_key");
-            map.insert((tenant, key), row.get::<i64, _>("cnt"));
-        }
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances WHERE concurrency_key IN (",
+    );
+    let mut separated = qb.separated(",");
+    for key in concurrency_keys {
+        separated.push_bind(key);
+    }
+    separated.push_unseparated(") AND state='running' GROUP BY concurrency_key");
+    let rows = qb.build().fetch_all(&storage.pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let key: String = row.get("concurrency_key");
+        let cnt: i64 = row.get("cnt");
+        map.insert(key, cnt);
     }
     Ok(map)
 }
@@ -94,7 +82,6 @@ pub(super) async fn concurrency_position(
     let row: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM task_instances
          WHERE concurrency_key = ?1 AND state = 'running'
-           AND tenant_id = (SELECT tenant_id FROM task_instances WHERE id = ?2)
            AND (created_at < (SELECT created_at FROM task_instances WHERE id = ?2)
                 OR (created_at = (SELECT created_at FROM task_instances WHERE id = ?2)
                     AND id <= ?2))",

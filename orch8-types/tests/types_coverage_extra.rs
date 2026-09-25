@@ -127,7 +127,6 @@ fn full_step(id: &str) -> StepDef {
             ]),
             store_as: Some("review_decision".into()),
             allow_comment: true,
-            auto_decide: None,
         }),
         queue_name: Some("priority-queue".into()),
         deadline: Some(Duration::from_secs(7200)),
@@ -261,7 +260,6 @@ fn seq_16_human_input_with_all_fields() {
         ]),
         store_as: Some("contract_decision".into()),
         allow_comment: true,
-        auto_decide: None,
     };
     assert!(hid.validate().is_ok());
     let choices = hid.effective_choices();
@@ -278,7 +276,6 @@ fn seq_17_human_input_timeout_serde() {
         choices: None,
         store_as: None,
         allow_comment: false,
-        auto_decide: None,
     };
     let json = serde_json::to_string(&hid).unwrap();
     let back: HumanInputDef = serde_json::from_str(&json).unwrap();
@@ -294,7 +291,6 @@ fn seq_18_human_input_escalation_handler_stored() {
         choices: None,
         store_as: None,
         allow_comment: false,
-        auto_decide: None,
     };
     let json = serde_json::to_string(&hid).unwrap();
     let back: HumanInputDef = serde_json::from_str(&json).unwrap();
@@ -310,7 +306,6 @@ fn seq_19_human_input_allow_comment_serialized() {
         choices: None,
         store_as: None,
         allow_comment: true,
-        auto_decide: None,
     };
     let json = serde_json::to_string(&hid).unwrap();
     assert!(json.contains("allow_comment"));
@@ -327,7 +322,6 @@ fn seq_20_human_input_allow_comment_false_not_serialized() {
         choices: None,
         store_as: None,
         allow_comment: false,
-        auto_decide: None,
     };
     let json = serde_json::to_string(&hid).unwrap();
     // skip_serializing_if = "std::ops::Not::not" skips when false

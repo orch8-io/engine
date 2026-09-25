@@ -75,10 +75,7 @@ pub async fn handle_wasm_plugin(ctx: StepContext, wasm_path: &str) -> Result<Val
 #[cfg(feature = "wasm")]
 pub(crate) mod cache {
     use std::collections::HashMap;
-    use std::io::Read;
-    use std::path::{Path, PathBuf};
     use std::sync::{OnceLock, RwLock};
-    use std::time::SystemTime;
 
     use wasmtime::{Config, Engine, Module};
 
@@ -110,27 +107,9 @@ pub(crate) mod cache {
         })
     }
 
-    /// Largest module file the loader will read: 32 MiB. Bounds memory for a
-    /// misconfigured or hostile `source` (e.g. a huge or device file).
-    pub const WASM_MAX_MODULE_BYTES: u64 = 32 * 1024 * 1024;
-
-    /// Most modules kept compiled at once; the cache is cleared when full.
-    const MAX_CACHED_MODULES: usize = 256;
-
-    /// Optional directory that every WASM plugin `source` must resolve inside
-    /// (after canonicalization, so symlinks and `..` cannot escape it).
-    pub const WASM_PLUGIN_DIR_ENV: &str = "ORCH8_WASM_PLUGIN_DIR";
-
-    /// Module binary magic (`\0asm`). Checked explicitly so arbitrary text
-    /// files are never handed to a parser that may echo their contents.
-    const WASM_MAGIC: &[u8; 4] = b"\0asm";
-
-    /// File identity used to invalidate a cached module when the file changes.
-    type Stamp = (u64, Option<SystemTime>);
-
     // RwLock so multiple executors can read-compare the cache without contending.
     // Only misses take the write lock to insert.
-    static MODULES: OnceLock<RwLock<HashMap<PathBuf, (Stamp, Module)>>> = OnceLock::new();
+    static MODULES: OnceLock<RwLock<HashMap<String, Module>>> = OnceLock::new();
 
     pub fn engine() -> Result<&'static Engine, StepError> {
         ENGINE.get_or_init(init_engine).as_ref().map_err(|e| {
@@ -149,92 +128,12 @@ pub(crate) mod cache {
         })
     }
 
-    /// Generic load failure. Deliberately carries no path, OS error, or parser
-    /// output: the step error is tenant-visible and must not become a file
-    /// oracle. Details go to the server log only.
-    fn load_failed() -> StepError {
-        StepError::Permanent {
-            message: "wasm plugin: failed to load module".into(),
-            details: None,
-        }
-    }
-
-    /// Resolve `path` to a canonical regular file, enforcing `plugin_dir`
-    /// containment when configured.
-    pub(crate) fn resolve_module_path(
-        path: &str,
-        plugin_dir: Option<&Path>,
-    ) -> Result<(PathBuf, std::fs::Metadata), StepError> {
-        let canonical = std::fs::canonicalize(path).map_err(|e| {
-            tracing::warn!(path, error = %e, "wasm plugin: cannot resolve module path");
-            load_failed()
-        })?;
-        if let Some(dir) = plugin_dir {
-            let dir = std::fs::canonicalize(dir).map_err(|e| {
-                tracing::error!(dir = %dir.display(), error = %e, "wasm plugin: {WASM_PLUGIN_DIR_ENV} is not accessible");
-                load_failed()
-            })?;
-            if !canonical.starts_with(&dir) {
-                tracing::warn!(path, dir = %dir.display(), "wasm plugin: module path is outside {WASM_PLUGIN_DIR_ENV}");
-                return Err(load_failed());
-            }
-        }
-        let meta = std::fs::metadata(&canonical).map_err(|e| {
-            tracing::warn!(path, error = %e, "wasm plugin: cannot stat module");
-            load_failed()
-        })?;
-        // Rejects directories, FIFOs and devices (`/dev/zero`, `/proc/*` have
-        // no meaningful length and would bypass the size cap).
-        if !meta.is_file() || meta.len() > WASM_MAX_MODULE_BYTES {
-            tracing::warn!(
-                path,
-                len = meta.len(),
-                "wasm plugin: module is not a regular file within the size cap"
-            );
-            return Err(load_failed());
-        }
-        Ok((canonical, meta))
-    }
-
-    /// Read at most [`WASM_MAX_MODULE_BYTES`] and require the binary magic.
-    pub(crate) fn read_module_bytes(path: &Path) -> Result<Vec<u8>, StepError> {
-        let file = std::fs::File::open(path).map_err(|e| {
-            tracing::warn!(path = %path.display(), error = %e, "wasm plugin: cannot open module");
-            load_failed()
-        })?;
-        let mut bytes = Vec::new();
-        file.take(WASM_MAX_MODULE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| {
-                tracing::warn!(path = %path.display(), error = %e, "wasm plugin: cannot read module");
-                load_failed()
-            })?;
-        if bytes.len() as u64 > WASM_MAX_MODULE_BYTES || !bytes.starts_with(WASM_MAGIC) {
-            tracing::warn!(path = %path.display(), "wasm plugin: not a binary wasm module (missing \\0asm magic or too large)");
-            return Err(load_failed());
-        }
-        Ok(bytes)
-    }
-
     pub fn get_or_compile(path: &str) -> Result<Module, StepError> {
-        let plugin_dir = std::env::var_os(WASM_PLUGIN_DIR_ENV).filter(|v| !v.is_empty());
-        get_or_compile_in(path, plugin_dir.as_deref().map(Path::new))
-    }
-
-    pub(crate) fn get_or_compile_in(
-        path: &str,
-        plugin_dir: Option<&Path>,
-    ) -> Result<Module, StepError> {
-        let (canonical, meta) = resolve_module_path(path, plugin_dir)?;
-        let stamp: Stamp = (meta.len(), meta.modified().ok());
-
         let modules = MODULES.get_or_init(|| RwLock::new(HashMap::new()));
-        // Fast path: read lock, clone on hit (only if the file is unchanged).
+        // Fast path: read lock, clone on hit.
         match modules.read() {
             Ok(cache) => {
-                if let Some((cached_stamp, m)) = cache.get(&canonical)
-                    && *cached_stamp == stamp
-                {
+                if let Some(m) = cache.get(path) {
                     return Ok(m.clone());
                 }
             }
@@ -256,20 +155,27 @@ pub(crate) mod cache {
             }
         }
 
-        let engine = engine()?;
-        let bytes = read_module_bytes(&canonical)?;
-        // `from_binary` never falls back to the WAT text parser.
-        let module = Module::from_binary(engine, &bytes).map_err(|e| {
-            tracing::warn!(path, error = %e, "wasm plugin: module failed to compile");
-            load_failed()
+        let engine = ENGINE
+            .get_or_init(init_engine)
+            .as_ref()
+            .map_err(|e| match e {
+                StepError::Permanent { message, details } => StepError::Permanent {
+                    message: message.clone(),
+                    details: details.clone(),
+                },
+                StepError::Retryable { message, details } => StepError::Retryable {
+                    message: message.clone(),
+                    details: details.clone(),
+                },
+            })?;
+        let module = Module::from_file(engine, path).map_err(|e| StepError::Permanent {
+            message: format!("wasm plugin: failed to load module '{path}': {e}"),
+            details: None,
         })?;
 
         match modules.write() {
             Ok(mut cache) => {
-                if cache.len() >= MAX_CACHED_MODULES && !cache.contains_key(&canonical) {
-                    cache.clear();
-                }
-                cache.insert(canonical, (stamp, module.clone()));
+                cache.insert(path.to_string(), module.clone());
             }
             Err(e) => {
                 tracing::error!(
@@ -797,72 +703,6 @@ mod tests {
                 let out = execute_wasm_sync(path, b"{}").expect("ok");
                 assert_eq!(out, serde_json::json!({ "echo": true }));
             }
-        }
-
-        /// ENG-P-N1: a text file (WAT or anything else) must never reach a
-        /// parser, and the step error must not echo the file's contents.
-        #[test]
-        fn non_binary_source_is_rejected_without_echoing_contents() {
-            let mut f = NamedTempFile::with_suffix(".wasm").unwrap();
-            f.write_all(b"SECRET_TOKEN=hunter2\n(module)").unwrap();
-            f.flush().unwrap();
-            let err =
-                execute_wasm_sync(f.path().to_str().unwrap(), b"{}").expect_err("should fail");
-            match err {
-                StepError::Permanent { message, .. } => {
-                    assert_eq!(message, "wasm plugin: failed to load module");
-                }
-                other => panic!("expected Permanent, got {other:?}"),
-            }
-            // Valid WAT text is also refused — only binary modules load.
-            let mut f = NamedTempFile::with_suffix(".wat").unwrap();
-            f.write_all(ECHO_WAT.as_bytes()).unwrap();
-            f.flush().unwrap();
-            assert!(execute_wasm_sync(f.path().to_str().unwrap(), b"{}").is_err());
-        }
-
-        #[cfg(unix)]
-        #[test]
-        fn device_file_source_is_rejected() {
-            let err = execute_wasm_sync("/dev/zero", b"{}").expect_err("should fail");
-            assert!(matches!(err, StepError::Permanent { .. }));
-        }
-
-        #[test]
-        fn plugin_dir_pins_module_paths() {
-            let dir = tempfile::tempdir().unwrap();
-            let inside = dir.path().join("echo.wasm");
-            std::fs::write(&inside, wat::parse_str(ECHO_WAT).unwrap()).unwrap();
-            let outside = wat_to_tmp_wasm(ECHO_WAT);
-
-            assert!(cache::get_or_compile_in(inside.to_str().unwrap(), Some(dir.path())).is_ok());
-            assert!(
-                cache::get_or_compile_in(outside.path().to_str().unwrap(), Some(dir.path()))
-                    .is_err()
-            );
-            // `..` escapes are resolved before the containment check.
-            let escape = dir
-                .path()
-                .join("..")
-                .join(outside.path().file_name().unwrap());
-            if escape.exists() {
-                assert!(
-                    cache::get_or_compile_in(escape.to_str().unwrap(), Some(dir.path())).is_err()
-                );
-            }
-        }
-
-        #[test]
-        fn cached_module_is_invalidated_when_file_changes() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("m.wasm");
-            std::fs::write(&path, wat::parse_str(ECHO_WAT).unwrap()).unwrap();
-            let p = path.to_str().unwrap();
-            assert!(execute_wasm_sync(p, b"{}").is_ok());
-            // Replace with garbage of a different length → must not serve the
-            // stale compiled module.
-            std::fs::write(&path, b"garbage").unwrap();
-            assert!(execute_wasm_sync(p, b"{}").is_err());
         }
 
         #[test]

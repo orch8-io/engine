@@ -56,38 +56,6 @@ fn classify_apns_status(status: reqwest::StatusCode) -> ApnsOutcome {
     }
 }
 
-/// Whether an APNs error body names a token-level rejection
-/// (`{"reason":"BadDeviceToken"}` etc.).
-fn reason_is_invalid_token(body: &str) -> bool {
-    #[derive(serde::Deserialize)]
-    struct ApnsErrorBody {
-        reason: Option<String>,
-    }
-    serde_json::from_str::<ApnsErrorBody>(body)
-        .ok()
-        .and_then(|b| b.reason)
-        .is_some_and(|reason| {
-            matches!(
-                reason.as_str(),
-                "BadDeviceToken" | "DeviceTokenNotForTopic" | "Unregistered"
-            )
-        })
-}
-
-/// Read at most a few KB of an error response body (APNs error bodies are a
-/// tiny JSON object; a misbehaving endpoint must not stream unbounded data).
-async fn read_error_body(mut resp: reqwest::Response) -> String {
-    const MAX: usize = 4 * 1024;
-    let mut buf = Vec::new();
-    while let Ok(Some(chunk)) = resp.chunk().await {
-        buf.extend_from_slice(&chunk[..chunk.len().min(MAX - buf.len())]);
-        if buf.len() >= MAX {
-            break;
-        }
-    }
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
 #[derive(serde::Serialize)]
 struct Claims {
     iss: String,
@@ -172,7 +140,6 @@ impl ApnsProvider {
 }
 
 impl ApnsProvider {
-    #[allow(clippy::too_many_lines)]
     async fn send(
         &self,
         token: &str,
@@ -260,16 +227,7 @@ impl ApnsProvider {
                     tokio::time::sleep(retry_backoff(attempt)).await;
                 }
                 outcome @ (ApnsOutcome::Retryable | ApnsOutcome::Permanent) => {
-                    let body = read_error_body(resp).await;
-                    // MOB-N12: APNs reports dead/mismatched tokens as 400
-                    // with a `reason`, not only as 410 — quarantine those.
-                    if status.as_u16() == 400 && reason_is_invalid_token(&body) {
-                        warn!(
-                            token = crate::safe_prefix(token, 8),
-                            "APNs rejected device token (400)"
-                        );
-                        return Err(PushError::InvalidToken);
-                    }
+                    let body = resp.text().await.unwrap_or_default();
                     let preview = if body.len() > MAX_ERROR_BODY_LEN {
                         format!(
                             "{}… (truncated)",
@@ -381,16 +339,6 @@ kHmPRiazukxPLb6ilpRAewjW8nihRANCAATDskChT+Altkm9X7MI69T3IUmrQU0L
             classify_apns_status(StatusCode::TOO_MANY_REQUESTS),
             ApnsOutcome::Retryable
         );
-    }
-
-    #[test]
-    fn apns_400_token_reasons_are_invalid_token() {
-        assert!(reason_is_invalid_token(r#"{"reason":"BadDeviceToken"}"#));
-        assert!(reason_is_invalid_token(
-            r#"{"reason":"DeviceTokenNotForTopic"}"#
-        ));
-        assert!(!reason_is_invalid_token(r#"{"reason":"BadTopic"}"#));
-        assert!(!reason_is_invalid_token("not json"));
     }
 
     /// Other 4xx (malformed request, unknown topic, etc.) are permanent —

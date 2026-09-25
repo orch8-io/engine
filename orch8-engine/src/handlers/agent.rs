@@ -15,15 +15,11 @@
 //!
 //! ## Durability
 //!
-//! After every tool call the loop checkpoints its progress (conversation +
-//! iteration counter) to the instance KV, keyed by block id. If the step
-//! crashes or is retried, the loop **resumes after the last completed tool
-//! call** rather than re-running (and re-paying for) earlier turns or
-//! re-executing side-effecting tools — only the in-flight call is redone.
-//!
-//! Only tools declared in `tools` are dispatched (a model naming anything else
-//! gets an error observation), at most `MAX_TOOL_CALLS_PER_TURN` per turn, and
-//! each observation is truncated to `MAX_OBSERVATION_BYTES`. (Per-iteration engine-level
+//! After every completed iteration the loop checkpoints its progress
+//! (conversation + iteration counter) to the instance KV, keyed by block id.
+//! If the step crashes or is retried, the loop **resumes from the last
+//! completed iteration** rather than re-running (and re-paying for) earlier
+//! turns — only the in-flight iteration is redone. (Per-iteration engine-level
 //! retry/circuit-breaker — i.e. desugaring into one durable step per turn — is
 //! the block-level follow-on.) The checkpoint is deleted once the loop
 //! reaches a terminal outcome (`"completed"` or `"max_iterations"`), so an
@@ -42,7 +38,7 @@
 //! | `max_iterations` | u64 | `6` | Hard cap on reason→act cycles (clamped to `MAX_ITERATIONS_CEILING`). |
 //! | `tool_dispatch` | object | — | How to execute tool calls (see below). Required if `tools` is set. |
 //! | `auto_memory` | object | — | Recall before / store after via the memory handlers. `{ recall_k?, store_outcome?, base_url?, api_key?, api_key_env?, model? }`. |
-//! | `provider` / `providers` / `model` / `api_key` / `api_key_env` / `base_url` / `temperature` / `max_tokens` / `reasoning_effort` / `effort` / `thinking` / `output_config` / `fallbacks` / `parallel_tool_calls` | — | Forwarded verbatim to `llm_call`. |
+//! | `provider` / `providers` / `model` / `api_key` / `api_key_env` / `base_url` / `temperature` / `max_tokens` | — | Forwarded verbatim to `llm_call`. |
 //!
 //! `tool_dispatch` is `{ "type": "http", "url": ..., "headers": {...} }` (each
 //! tool call becomes a `tool_call`) or `{ "type": "mcp", "url"|"server": ..., "headers": {...} }`
@@ -66,12 +62,6 @@ const DEFAULT_MAX_ITERATIONS: u64 = 6;
 /// agent must not spin forever inside a single step.
 const MAX_ITERATIONS_CEILING: u64 = 50;
 
-/// Maximum tool calls dispatched from one model turn; extra calls get an
-/// error observation instead of running.
-const MAX_TOOL_CALLS_PER_TURN: usize = 16;
-/// Maximum bytes of one tool observation fed back into the conversation.
-const MAX_OBSERVATION_BYTES: usize = 64 * 1024;
-
 /// LLM-config keys forwarded verbatim from the agent params into each
 /// `llm_call`. `messages`, `system`, and `tools` are handled separately.
 const LLM_PASSTHROUGH_KEYS: &[&str] = &[
@@ -85,12 +75,6 @@ const LLM_PASSTHROUGH_KEYS: &[&str] = &[
     "max_tokens",
     "total_timeout_secs",
     "per_provider_timeout_secs",
-    "reasoning_effort",
-    "effort",
-    "thinking",
-    "output_config",
-    "fallbacks",
-    "parallel_tool_calls",
 ];
 
 /// A tool call the model requested, normalized from the `llm_call` output.
@@ -252,84 +236,45 @@ where
     CL: Fn() -> CLFut,
     CLFut: std::future::Future<Output = ()>,
 {
-    let checkpoint = load_checkpoint().await;
-    let resumed = checkpoint
-        .as_ref()
-        .and_then(|cp| cp.get("messages"))
-        .is_some_and(Value::is_array);
     let (mut messages, start_iteration, mut tool_calls_made) =
-        restore_checkpoint(checkpoint, agent_params);
-    let declared = declared_tool_names(agent_params);
-    // A mid-turn checkpoint (saved after each tool call) leaves the last
-    // assistant message's remaining calls unanswered: finish those before
-    // asking the model again, so completed calls are never re-dispatched.
-    let mut pending = resumed
-        .then(|| pending_tool_calls(&messages))
-        .filter(|(_, calls)| !calls.is_empty());
+        restore_checkpoint(load_checkpoint().await, agent_params);
 
     for iteration in start_iteration..max_iterations {
-        let (calls, answered) = if let Some(resume) = pending.take() {
-            (resume.1, resume.0)
-        } else {
-            let llm_params = build_llm_params(agent_params, &messages);
-            let output = call_llm(llm_params).await?;
+        let llm_params = build_llm_params(agent_params, &messages);
+        let output = call_llm(llm_params).await?;
 
-            let assistant = assistant_message(&output);
-            messages.push(assistant.clone());
+        let assistant = assistant_message(&output);
+        messages.push(assistant.clone());
 
-            let calls = extract_tool_calls(&assistant);
-            if calls.is_empty() {
-                debug!(
-                    iteration,
-                    "agent: model produced no tool calls — completing"
-                );
-                clear_checkpoint().await;
-                return Ok(result(
-                    final_text(&assistant),
-                    iteration + 1,
-                    "completed",
-                    tool_calls_made,
-                    messages,
-                ));
-            }
-            (calls, 0)
-        };
+        let calls = extract_tool_calls(&assistant);
+        if calls.is_empty() {
+            debug!(
+                iteration,
+                "agent: model produced no tool calls — completing"
+            );
+            clear_checkpoint().await;
+            return Ok(result(
+                final_text(&assistant),
+                iteration + 1,
+                "completed",
+                tool_calls_made,
+                messages,
+            ));
+        }
 
-        let total = calls.len();
-        for (offset, call) in calls.into_iter().enumerate() {
-            let position = answered + offset;
-            let observation = if position >= MAX_TOOL_CALLS_PER_TURN {
-                // Every call id still needs a tool message (providers reject
-                // unanswered calls), but excess calls are not dispatched.
-                json!({ "error": format!(
-                    "tool call not executed: more than {MAX_TOOL_CALLS_PER_TURN} tool calls in one turn"
-                ) })
-            } else if !declared.iter().any(|n| n == &call.name) {
-                // The model (or a hostile provider) may name any tool; only
-                // the declared tool set may reach the dispatch target.
-                json!({ "error": format!("tool {:?} is not declared in `tools`", call.name) })
-            } else {
-                tool_calls_made += 1;
-                match dispatch_tool(call.clone()).await {
-                    Ok(v) => v,
-                    // A tool error becomes an observation so the model can react
-                    // and self-correct rather than failing the whole agent.
-                    Err(e) => json!({ "error": step_error_message(&e) }),
-                }
+        for call in calls {
+            tool_calls_made += 1;
+            let observation = match dispatch_tool(call.clone()).await {
+                Ok(v) => v,
+                // A tool error becomes an observation so the model can react
+                // and self-correct rather than failing the whole agent.
+                Err(e) => json!({ "error": step_error_message(&e) }),
             };
             messages.push(tool_result_message(&call.id, &observation));
-
-            // Checkpoint after every tool call (tool calls have side effects):
-            // a crash mid-turn resumes with the remaining calls instead of
-            // re-running the ones already done. The last call of the turn
-            // advances the iteration counter.
-            let next_iteration = if offset + 1 == total {
-                iteration + 1
-            } else {
-                iteration
-            };
-            save_checkpoint(make_checkpoint(&messages, next_iteration, tool_calls_made)).await;
         }
+
+        // Iteration fully done → checkpoint so a retry resumes after it.
+        save_checkpoint(make_checkpoint(&messages, iteration + 1, tool_calls_made)).await;
     }
 
     debug!(max_iterations, "agent: iteration budget exhausted");
@@ -341,49 +286,6 @@ where
         tool_calls_made,
         messages,
     ))
-}
-
-/// Tool calls of the last assistant message that have no `role:"tool"` answer
-/// yet, as `(answered_count, remaining_calls)`. Answers are matched by
-/// position (results are appended in call order), which also works for
-/// providers that omit call ids. Empty when the turn is complete.
-fn pending_tool_calls(messages: &[Value]) -> (usize, Vec<ToolCall>) {
-    let Some(idx) = messages
-        .iter()
-        .rposition(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
-    else {
-        return (0, Vec::new());
-    };
-    let answered = messages[idx + 1..]
-        .iter()
-        .filter(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
-        .count();
-    let calls = extract_tool_calls(&messages[idx]);
-    if answered >= calls.len() {
-        return (0, Vec::new());
-    }
-    (answered, calls.into_iter().skip(answered).collect())
-}
-
-/// Names of the tools declared in `tools` (`OpenAI` `{function:{name}}` or
-/// bare `{name}` entries). Tool calls naming anything else are refused.
-fn declared_tool_names(agent_params: &Value) -> Vec<String> {
-    agent_params
-        .get("tools")
-        .and_then(Value::as_array)
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|t| {
-                    t.get("function")
-                        .and_then(|f| f.get("name"))
-                        .or_else(|| t.get("name"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Serialize loop progress into a checkpoint value.
@@ -715,24 +617,11 @@ fn build_tool_dispatch(
 }
 
 /// Build the `role:"tool"` observation message for the conversation.
-///
-/// The serialized observation is truncated to [`MAX_OBSERVATION_BYTES`] so a
-/// huge tool response can't balloon the conversation (and every later LLM
-/// request plus the checkpoint) without bound.
 fn tool_result_message(tool_call_id: &str, observation: &Value) -> Value {
-    let mut content = serde_json::to_string(observation).unwrap_or_else(|_| "null".into());
-    if content.len() > MAX_OBSERVATION_BYTES {
-        let mut cut = MAX_OBSERVATION_BYTES;
-        while !content.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        content.truncate(cut);
-        content.push_str("…[truncated]");
-    }
     json!({
         "role": "tool",
         "tool_call_id": tool_call_id,
-        "content": content,
+        "content": serde_json::to_string(observation).unwrap_or_else(|_| "null".into()),
     })
 }
 
@@ -780,17 +669,6 @@ fn step_error_message(e: &StepError) -> String {
 mod tests {
     use super::*;
     use std::cell::RefCell;
-
-    /// Tool schema declaring every tool name the loop tests dispatch.
-    pub(super) fn test_tools() -> Value {
-        let names = ["get_weather", "spin", "flaky", "t1", "t2", "t", "do_it"];
-        Value::Array(
-            names
-                .iter()
-                .map(|n| json!({ "type": "function", "function": { "name": n } }))
-                .collect(),
-        )
-    }
 
     fn assistant_text(text: &str) -> Value {
         json!({ "message": { "role": "assistant", "content": text } })
@@ -1033,7 +911,6 @@ mod tests {
         let out = run_loop_no_cp(
             &json!({
                 "goal": "weather?",
-                "tools": test_tools(),
                 "tool_dispatch": { "type": "http", "url": "https://x.example" }
             }),
             6,
@@ -1080,7 +957,6 @@ mod tests {
         let out = run_loop_no_cp(
             &json!({
                 "goal": "loop",
-                "tools": test_tools(),
                 "tool_dispatch": { "type": "http", "url": "https://x.example" }
             }),
             3,
@@ -1101,7 +977,6 @@ mod tests {
         let out = run_loop_no_cp(
             &json!({
                 "goal": "x",
-                "tools": test_tools(),
                 "tool_dispatch": { "type": "http", "url": "https://x.example" }
             }),
             6,
@@ -1166,7 +1041,6 @@ mod tests {
         let out = run_loop_no_cp(
             &json!({
                 "goal": "x",
-                "tools": test_tools(),
                 "tool_dispatch": { "type": "http", "url": "https://x.example" }
             }),
             6,
@@ -1296,7 +1170,6 @@ mod tests {
         let out = super::run_agent_loop(
             &json!({
                 "goal": "x",
-                "tools": test_tools(),
                 "tool_dispatch": { "type": "http", "url": "https://x.example" }
             }),
             2,
@@ -1365,7 +1238,6 @@ mod tests {
         let out = super::run_agent_loop(
             &json!({
                 "goal": "x",
-                "tools": test_tools(),
                 "tool_dispatch": { "type": "http", "url": "https://x.example" }
             }),
             6,
@@ -1400,196 +1272,6 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0]["iteration"], 1);
         assert_eq!(recorded[0]["tool_calls_made"], 1);
-    }
-
-    #[tokio::test]
-    async fn undeclared_tool_is_not_dispatched() {
-        // ENG-P-N8: a model naming a tool outside `tools` gets an error
-        // observation; the dispatch target never sees the call.
-        let step = RefCell::new(0u32);
-        let dispatched = RefCell::new(Vec::<String>::new());
-        let out = run_loop_no_cp(
-            &json!({
-                "goal": "x",
-                "tools": [{ "type": "function", "function": { "name": "safe" } }],
-                "tool_dispatch": { "type": "http", "url": "https://x.example" }
-            }),
-            6,
-            |_p| {
-                let n = {
-                    let mut s = step.borrow_mut();
-                    let cur = *s;
-                    *s += 1;
-                    cur
-                };
-                async move {
-                    if n == 0 {
-                        Ok(assistant_tool_call("tc", "delete_everything", "{}"))
-                    } else {
-                        Ok(assistant_text("ok"))
-                    }
-                }
-            },
-            |c| {
-                dispatched.borrow_mut().push(c.name.clone());
-                async { Ok(json!({})) }
-            },
-        )
-        .await
-        .unwrap();
-        assert!(dispatched.borrow().is_empty());
-        assert_eq!(out["tool_calls_made"], 0);
-        assert!(
-            out["messages"][2]["content"]
-                .as_str()
-                .unwrap()
-                .contains("not declared")
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_calls_per_turn_are_capped() {
-        let step = RefCell::new(0u32);
-        let count = RefCell::new(0usize);
-        let many: Vec<Value> = (0..MAX_TOOL_CALLS_PER_TURN + 4)
-            .map(|i| json!({ "id": format!("c{i}"), "type": "function", "function": { "name": "t", "arguments": "{}" } }))
-            .collect();
-        let out = run_loop_no_cp(
-            &json!({
-                "goal": "x",
-                "tools": test_tools(),
-                "tool_dispatch": { "type": "http", "url": "https://x.example" }
-            }),
-            6,
-            |_p| {
-                let n = {
-                    let mut s = step.borrow_mut();
-                    let cur = *s;
-                    *s += 1;
-                    cur
-                };
-                let many = many.clone();
-                async move {
-                    if n == 0 {
-                        Ok(json!({ "message": { "role": "assistant", "content": null, "tool_calls": many } }))
-                    } else {
-                        Ok(assistant_text("done"))
-                    }
-                }
-            },
-            |_c| {
-                *count.borrow_mut() += 1;
-                async { Ok(json!({})) }
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(*count.borrow(), MAX_TOOL_CALLS_PER_TURN);
-        // Every call id still got a tool message.
-        let tool_msgs = out["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|m| m["role"] == "tool")
-            .count();
-        assert_eq!(tool_msgs, MAX_TOOL_CALLS_PER_TURN + 4);
-    }
-
-    #[test]
-    fn oversized_observation_is_truncated() {
-        let big = json!({ "blob": "x".repeat(MAX_OBSERVATION_BYTES * 2) });
-        let msg = tool_result_message("id", &big);
-        let content = msg["content"].as_str().unwrap();
-        assert!(content.len() <= MAX_OBSERVATION_BYTES + "…[truncated]".len());
-        assert!(content.ends_with("…[truncated]"));
-    }
-
-    #[tokio::test]
-    async fn resume_mid_turn_skips_completed_tool_calls() {
-        // ENG-P-N9: checkpoint saved after call `a` of a two-call turn; the
-        // resumed loop dispatches only `b`, then asks the model again.
-        let cp = json!({
-            "messages": [
-                { "role": "user", "content": "x" },
-                { "role": "assistant", "content": null, "tool_calls": [
-                    { "id": "a", "type": "function", "function": { "name": "t1", "arguments": "{}" } },
-                    { "id": "b", "type": "function", "function": { "name": "t2", "arguments": "{}" } }
-                ]},
-                { "role": "tool", "tool_call_id": "a", "content": "{}" }
-            ],
-            "iteration": 0,
-            "tool_calls_made": 1
-        });
-        let dispatched = RefCell::new(Vec::<String>::new());
-        let llm_calls = RefCell::new(0u32);
-        let out = super::run_agent_loop(
-            &json!({ "goal": "x", "tools": test_tools() }),
-            6,
-            |_p| {
-                *llm_calls.borrow_mut() += 1;
-                async { Ok(assistant_text("finished")) }
-            },
-            |c| {
-                dispatched.borrow_mut().push(c.name.clone());
-                async { Ok(json!({ "ok": true })) }
-            },
-            move || {
-                let c = cp.clone();
-                async move { Some(c) }
-            },
-            |_cp: Value| async {},
-            || async {},
-        )
-        .await
-        .unwrap();
-        assert_eq!(*dispatched.borrow(), vec!["t2".to_string()]);
-        assert_eq!(*llm_calls.borrow(), 1);
-        assert_eq!(out["tool_calls_made"], 2);
-        assert_eq!(out["iterations"], 2);
-    }
-
-    #[tokio::test]
-    async fn checkpoint_saved_after_each_tool_call() {
-        let saved = RefCell::new(Vec::<Value>::new());
-        let step = RefCell::new(0u32);
-        super::run_agent_loop(
-            &json!({ "goal": "x", "tools": test_tools(),
-                     "tool_dispatch": { "type": "http", "url": "https://x.example" } }),
-            6,
-            |_p| {
-                let n = {
-                    let mut s = step.borrow_mut();
-                    let cur = *s;
-                    *s += 1;
-                    cur
-                };
-                async move {
-                    if n == 0 {
-                        Ok(json!({ "message": { "role": "assistant", "content": null, "tool_calls": [
-                            { "id": "a", "type": "function", "function": { "name": "t1", "arguments": "{}" } },
-                            { "id": "b", "type": "function", "function": { "name": "t2", "arguments": "{}" } }
-                        ]}}))
-                    } else {
-                        Ok(assistant_text("done"))
-                    }
-                }
-            },
-            |_c| async { Ok(json!({})) },
-            || async { Option::<Value>::None },
-            |cp: Value| {
-                saved.borrow_mut().push(cp);
-                async {}
-            },
-            || async {},
-        )
-        .await
-        .unwrap();
-        let recorded = saved.borrow();
-        assert_eq!(recorded.len(), 2);
-        assert_eq!(recorded[0]["iteration"], 0);
-        assert_eq!(recorded[0]["tool_calls_made"], 1);
-        assert_eq!(recorded[1]["iteration"], 1);
-        assert_eq!(recorded[1]["tool_calls_made"], 2);
     }
 
     // ---- tool auto-discovery ----------------------------------------------
@@ -1873,7 +1555,6 @@ mod net_tests {
         let (ctx, storage, iid) = mk_ctx(json!({
             "provider": "openai", "base_url": url.clone(), "api_key": "k", "model": "m",
             "goal": "go",
-            "tools": super::tests::test_tools(),
             "tool_dispatch": { "type": "http", "url": format!("{url}/tool") }
         }))
         .await;

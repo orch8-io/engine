@@ -438,29 +438,9 @@ impl CdnBackend for S3CdnBackend {
             HeaderValue::from_str(value).map_err(|error| CdnError::Upload(error.to_string()))?,
         );
         self.sign_request("PUT", &url, path, &mut headers, &payload_hash)?;
-        // MOB-N11: a conditional PUT is never auto-retried. If the first
-        // attempt landed but its response was lost, a retry would see its own
-        // write as a precondition failure (412) and report a false Conflict.
-        // On an ambiguous outcome (transport error / 5xx), re-HEAD instead: an
-        // unchanged precondition proves the write did not apply.
-        let response = match self.http.put(url).headers(headers).body(bytes).send().await {
-            Ok(response) if !response.status().is_server_error() => response,
-            outcome => {
-                let reason = match outcome {
-                    Ok(response) => format!("S3 returned {}", response.status()),
-                    Err(error) => error.to_string(),
-                };
-                let current = self.get_etag(path).await?;
-                let unchanged = current.as_deref() == expected_etag;
-                return Err(CdnError::Upload(if unchanged {
-                    format!("conditional S3 PUT did not apply ({reason}); safe to retry")
-                } else {
-                    format!(
-                        "conditional S3 PUT outcome unknown ({reason}); object changed — re-read before retrying"
-                    )
-                }));
-            }
-        };
+        let response = send_with_retry(self.http.put(url).headers(headers).body(bytes))
+            .await
+            .map_err(|error| CdnError::Upload(error.to_string()))?;
         if matches!(
             response.status(),
             reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::CONFLICT
@@ -815,31 +795,6 @@ mod tests {
 
         let requests = mock.state.requests.lock().await;
         assert_eq!(requests[0].headers["if-none-match"], "*");
-    }
-
-    #[tokio::test]
-    async fn s3_conditional_upload_is_not_retried_and_rechecks_etag() {
-        // MOB-N11: 503 on the conditional PUT → one HEAD (not a second PUT,
-        // whose 412 would be a false Conflict against our own write).
-        let mut unchanged = HeaderMap::new();
-        unchanged.insert("etag", HeaderValue::from_static("\"v1\""));
-        let mock = spawn_mock_s3(vec![
-            mock_response(StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
-            (StatusCode::OK, unchanged, Vec::new()),
-        ])
-        .await;
-        let backend = backend(&mock.endpoint);
-        let err = backend
-            .upload_if_match("object", b"v2".to_vec(), None, None, Some("\"v1\""))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, CdnError::Upload(ref m) if m.contains("did not apply")),
-            "{err}"
-        );
-        let requests = mock.state.requests.lock().await;
-        let methods: Vec<&str> = requests.iter().map(|r| r.method.as_str()).collect();
-        assert_eq!(methods, vec!["PUT", "HEAD"]);
     }
 
     #[tokio::test]

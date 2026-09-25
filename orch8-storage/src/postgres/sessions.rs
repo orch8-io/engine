@@ -93,7 +93,7 @@ pub(super) async fn list_instances(
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
                   session_id, parent_instance_id, budget, created_at, updated_at
-           FROM task_instances WHERE session_id = $1 ORDER BY created_at, id",
+           FROM task_instances WHERE session_id = $1 ORDER BY created_at",
     )
     .bind(session_id)
     .fetch_all(&store.pool)

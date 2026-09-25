@@ -17,18 +17,6 @@ pub struct SequencePublisher {
     tenant_id: String,
     signing_key_id: String,
     min_sdk_version: String,
-    /// Contents of the last manifest this publisher uploaded, so a removal
-    /// can be a read-modify-write of the current manifest instead of
-    /// publishing a replacement that silently drops every other sequence.
-    last_manifest: std::sync::Mutex<Option<PublishedManifest>>,
-}
-
-/// Inputs of the last successfully published manifest.
-#[derive(Clone)]
-struct PublishedManifest {
-    sequences: Vec<ManifestSequence>,
-    removed: Vec<crate::manifest::ManifestRemoved>,
-    other_keys: Vec<ManifestSigningKey>,
 }
 
 fn validate_tenant_id(tenant_id: &str) -> Result<(), PublishError> {
@@ -57,7 +45,6 @@ impl SequencePublisher {
             tenant_id,
             signing_key_id,
             min_sdk_version: env!("CARGO_PKG_VERSION").to_string(),
-            last_manifest: std::sync::Mutex::new(None),
         })
     }
 
@@ -164,11 +151,6 @@ impl SequencePublisher {
             }
         }
 
-        let published = PublishedManifest {
-            sequences: sequences.clone(),
-            removed: removed.clone(),
-            other_keys: other_keys.clone(),
-        };
         let signed = self
             .manifest_gen
             .generate(sequences, removed, other_keys)
@@ -188,54 +170,8 @@ impl SequencePublisher {
             .await
             .map_err(PublishError::Cdn)?;
 
-        *self
-            .last_manifest
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(published);
         info!(tenant = %self.tenant_id, "published manifest");
         Ok(())
-    }
-
-    /// Seed the manifest-version floor from the currently published manifest
-    /// (see [`ManifestGenerator::observe_published_version`]).
-    pub fn observe_published_version(&self, version: i64) {
-        self.manifest_gen.observe_published_version(version);
-    }
-
-    /// Remove `name` from the current manifest (read-modify-write) and
-    /// republish, recording it under `removed`. Every other sequence stays
-    /// published. Refuses when this publisher has not published a manifest
-    /// yet — republishing from nothing would unpublish every sequence.
-    pub async fn remove_from_manifest(
-        &self,
-        name: &str,
-        removed_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), PublishError> {
-        let current = self
-            .last_manifest
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .ok_or_else(|| {
-                PublishError::Config(
-                    "current manifest unknown to this publisher; refusing to publish a \
-                     manifest that would drop every sequence"
-                        .into(),
-                )
-            })?;
-        let sequences = current
-            .sequences
-            .into_iter()
-            .filter(|s| s.name != name)
-            .collect();
-        let mut removed = current.removed;
-        removed.retain(|r| r.name != name);
-        removed.push(crate::manifest::ManifestRemoved {
-            name: name.to_string(),
-            removed_at,
-        });
-        self.publish_manifest(sequences, removed, current.other_keys)
-            .await
     }
 }
 
@@ -428,43 +364,6 @@ mod tests {
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
         );
-    }
-
-    fn entry(name: &str) -> ManifestSequence {
-        ManifestSequence {
-            name: name.to_string(),
-            version: 1,
-            url: format!("/tenant1/sequences/{name}.json"),
-            signing_key_id: "key1".to_string(),
-            sha256: "00".to_string(),
-            required_handlers: vec![],
-            min_sdk_version: "0.0.0".to_string(),
-        }
-    }
-
-    #[tokio::test]
-    async fn remove_from_manifest_keeps_other_sequences() {
-        let (publisher, _key) = setup();
-        // Nothing published yet → refuse rather than publish an empty manifest.
-        assert!(matches!(
-            publisher
-                .remove_from_manifest("a", chrono::Utc::now())
-                .await,
-            Err(PublishError::Config(_))
-        ));
-        publisher
-            .publish_manifest(vec![entry("a"), entry("b")], vec![], vec![])
-            .await
-            .unwrap();
-        publisher
-            .remove_from_manifest("a", chrono::Utc::now())
-            .await
-            .unwrap();
-        let current = publisher.last_manifest.lock().unwrap().clone().unwrap();
-        let names: Vec<&str> = current.sequences.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["b"]);
-        assert_eq!(current.removed.len(), 1);
-        assert_eq!(current.removed[0].name, "a");
     }
 
     #[tokio::test]

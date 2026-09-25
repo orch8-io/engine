@@ -165,13 +165,8 @@ pub(super) async fn get_signalled_instance_ids(
         SELECT ti.id, ti.state
         FROM task_instances ti
         INNER JOIN signal_inbox si ON si.instance_id = ti.id
-        WHERE si.delivered = FALSE
-          AND (ti.state IN ('paused', 'waiting')
-               -- Scheduled instances are only woken early for control
-               -- signals; anything else waits for the natural claim, so a
-               -- parked instance with an early human_input signal does not
-               -- hog the sweep batch (ENG-R-N1).
-               OR (ti.state = 'scheduled' AND si.signal_type IN ('pause', 'cancel')))
+        WHERE ti.state IN ('paused', 'waiting', 'scheduled')
+          AND si.delivered = FALSE
         GROUP BY ti.id, ti.state
         ORDER BY MIN(si.created_at) ASC
         LIMIT $1

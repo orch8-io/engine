@@ -195,33 +195,19 @@ fn capabilities_allow(
         ApiCapability::Operator => true,
         ApiCapability::Worker => path.starts_with("/workers") || path == "/handlers",
         ApiCapability::Device => path.starts_with("/mobile"),
-        // Publisher manages definitions, never live instances or host-side
-        // resources: plugin registration points the engine at an arbitrary
-        // server-side module/endpoint, so it is Operator-only (read stays
-        // open), and `migrate-instance` rewrites a running instance.
         ApiCapability::Publisher => {
             path.starts_with("/releases")
-                || (path.starts_with("/plugins") && is_read_method(method))
-                || (path.starts_with("/sequences")
-                    && path.trim_end_matches('/') != "/sequences/migrate-instance")
+                || path.starts_with("/plugins")
+                || path.starts_with("/sequences")
         }
         ApiCapability::Approver => {
             path.starts_with("/approvals")
                 || (path.starts_with("/instances/") && path.ends_with("/signals"))
         }
-        ApiCapability::Auditor => is_read_method(method),
+        ApiCapability::Auditor => {
+            method == axum::http::Method::GET || method == axum::http::Method::HEAD
+        }
     })
-}
-
-fn is_read_method(method: &axum::http::Method) -> bool {
-    method == axum::http::Method::GET || method == axum::http::Method::HEAD
-}
-
-/// Whether the authenticated principal (if any) holds full `Operator` rights.
-/// Root/admin and `--insecure` requests carry no [`PrincipalContext`] and are
-/// treated as unrestricted.
-pub fn principal_is_operator(principal: Option<&PrincipalContext>) -> bool {
-    principal.is_none_or(|p| p.capabilities.contains(&ApiCapability::Operator))
 }
 
 /// Tenant isolation middleware.

@@ -111,45 +111,6 @@ impl SequenceRow {
     }
 }
 
-/// An integer column that may be stored as `INT4` or `INT8`.
-///
-/// `task_instances.max_concurrency` is `INTEGER` on every released schema.
-/// An unreleased migration briefly widened it to `BIGINT` (dropped again:
-/// the rewrite took an ACCESS EXCLUSIVE lock on the hottest table and broke
-/// rolling deploys, since the old fleet decodes `i32`). Databases that
-/// applied it keep the wide column, so decode either width.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct PgAnyInt(pub i64);
-
-impl sqlx::Type<sqlx::Postgres> for PgAnyInt {
-    fn type_info() -> sqlx::postgres::PgTypeInfo {
-        <i32 as sqlx::Type<sqlx::Postgres>>::type_info()
-    }
-
-    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
-        <i32 as sqlx::Type<sqlx::Postgres>>::compatible(ty)
-            || <i64 as sqlx::Type<sqlx::Postgres>>::compatible(ty)
-    }
-}
-
-impl<'r> sqlx::Decode<'r, sqlx::Postgres> for PgAnyInt {
-    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
-        use sqlx::ValueRef;
-        if <i32 as sqlx::Type<sqlx::Postgres>>::compatible(&value.type_info()) {
-            <i32 as sqlx::Decode<sqlx::Postgres>>::decode(value).map(|v| Self(i64::from(v)))
-        } else {
-            <i64 as sqlx::Decode<sqlx::Postgres>>::decode(value).map(Self)
-        }
-    }
-}
-
-/// Bind value for `task_instances.max_concurrency` (`INTEGER`). A limit above
-/// `i32::MAX` is indistinguishable from "unlimited", so it saturates instead
-/// of wrapping negative (the old `as i32` cast).
-pub(super) fn max_concurrency_bind(v: Option<u32>) -> Option<i32> {
-    v.map(|v| i32::try_from(v).unwrap_or(i32::MAX))
-}
-
 #[derive(sqlx::FromRow)]
 pub(super) struct InstanceRow {
     pub id: Uuid,
@@ -163,7 +124,7 @@ pub(super) struct InstanceRow {
     pub metadata: serde_json::Value,
     pub context: serde_json::Value,
     pub concurrency_key: Option<String>,
-    pub max_concurrency: Option<PgAnyInt>,
+    pub max_concurrency: Option<i64>,
     pub idempotency_key: Option<String>,
     pub session_id: Option<Uuid>,
     pub parent_instance_id: Option<Uuid>,
@@ -193,7 +154,7 @@ impl InstanceRow {
             concurrency_key: self.concurrency_key,
             max_concurrency: self
                 .max_concurrency
-                .map(|PgAnyInt(v)| {
+                .map(|v| {
                     u32::try_from(v).map_err(|_| {
                         StorageError::Query(format!("invalid max_concurrency value: {v}"))
                     })
@@ -622,29 +583,5 @@ mod integer_tests {
             row.into_output(),
             Err(StorageError::Constraint(_))
         ));
-    }
-
-    #[test]
-    fn max_concurrency_bind_saturates_instead_of_wrapping() {
-        assert_eq!(max_concurrency_bind(None), None);
-        assert_eq!(max_concurrency_bind(Some(7)), Some(7));
-        assert_eq!(max_concurrency_bind(Some(u32::MAX)), Some(i32::MAX));
-    }
-
-    /// STO-N7: `max_concurrency` must decode from both `INTEGER` (released
-    /// schema) and `BIGINT` (databases that applied the dropped widening).
-    #[tokio::test]
-    async fn pg_any_int_decodes_int4_and_int8() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!("skipping: DATABASE_URL not set");
-            return;
-        };
-        let pool = sqlx::PgPool::connect(&url).await.unwrap();
-        let (a, b, c): (PgAnyInt, PgAnyInt, Option<PgAnyInt>) =
-            sqlx::query_as("SELECT 5::int4, 4294967295::int8, NULL::int4")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!((a.0, b.0, c.map(|v| v.0)), (5, 4_294_967_295, None));
     }
 }

@@ -666,7 +666,6 @@ pub async fn list_instances(
         (status = 200, description = "State updated"),
         (status = 400, description = "Invalid state transition"),
         (status = 404, description = "Instance not found"),
-        (status = 409, description = "Instance state changed concurrently"),
     )
 )]
 pub async fn update_state(
@@ -697,20 +696,11 @@ pub async fn update_state(
         )));
     }
 
-    // CAS on the state we validated against: an unconditional write here
-    // would let a transition validated against a stale read land on top of
-    // a concurrent engine transition (e.g. resurrect a just-Completed run).
-    let changed = state
+    state
         .storage
-        .conditional_update_instance_state(instance_id, instance.state, req.state, req.next_fire_at)
+        .update_instance_state(instance_id, req.state, req.next_fire_at)
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
-    if !changed {
-        return Err(ApiError::Conflict(format!(
-            "instance {id} changed state concurrently (was {}); re-read and retry",
-            instance.state
-        )));
-    }
 
     // If this instance is a SubSequence child and the external transition
     // drove it to a terminal state, wake the parent so its SubSequence node
@@ -726,12 +716,7 @@ pub async fn update_state(
         && parent.state == InstanceState::Waiting
         && let Err(e) = state
             .storage
-            .conditional_update_instance_state(
-                parent_id,
-                InstanceState::Waiting,
-                InstanceState::Scheduled,
-                Some(Utc::now()),
-            )
+            .update_instance_state(parent_id, InstanceState::Scheduled, Some(Utc::now()))
             .await
     {
         tracing::warn!(
@@ -791,7 +776,6 @@ pub async fn update_context(
         (status = 200, description = "Instance retried", body = serde_json::Value),
         (status = 400, description = "Instance is not in failed state"),
         (status = 404, description = "Instance not found"),
-        (status = 409, description = "Instance state changed concurrently"),
     )
 )]
 pub async fn retry_instance(
@@ -821,25 +805,37 @@ pub async fn retry_instance(
         )));
     }
 
-    // CAS-claimed retry (Failed → Paused → reset → Scheduled) so a concurrent
-    // retry can never wipe the execution tree of the run another retry just
-    // started. Shared with batch/DLQ/diagnosis/gRPC retry paths.
-    match orch8_storage::lifecycle::retry_failed_instance(state.storage.as_ref(), instance_id)
+    // Delete the stale execution tree so the evaluator rebuilds it from
+    // scratch. Without this, the old Failed/Running nodes would cause the
+    // retried instance to immediately re-fail or get stuck.
+    state
+        .storage
+        .delete_execution_tree(instance_id)
         .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?
-    {
-        orch8_storage::lifecycle::RetryOutcome::Retried => {}
-        orch8_storage::lifecycle::RetryOutcome::NotFailed => {
-            return Err(ApiError::Conflict(format!(
-                "instance {id} is no longer failed (concurrent transition)"
-            )));
-        }
-        orch8_storage::lifecycle::RetryOutcome::Superseded => {
-            return Err(ApiError::Conflict(format!(
-                "instance {id} was transitioned by another request during retry"
-            )));
-        }
-    }
+        .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
+
+    // Clear only sentinel outputs (in-progress markers from permanently
+    // failed steps) so those steps can re-execute on retry. Real outputs
+    // from successfully completed steps are preserved — the fast path's
+    // `completed_blocks` check will skip them, preventing double execution
+    // of side-effectful handlers (email, HTTP POST, etc.).
+    state
+        .storage
+        .delete_sentinel_block_outputs(instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
+
+    state
+        .storage
+        .reset_instance_run(instance_id, &Uuid::now_v7().to_string())
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?;
+
+    state
+        .storage
+        .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?;
 
     Ok((
         StatusCode::OK,

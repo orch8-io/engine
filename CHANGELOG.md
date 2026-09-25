@@ -7,26 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
-
-- **WASM plugin loading** only accepts binary modules (`\0asm` magic, 32 MiB cap,
-  regular files); WAT text, devices and `/proc` paths are refused and load
-  errors no longer echo paths or file contents. `ORCH8_WASM_PLUGIN_DIR` pins
-  plugin sources to one directory. Plugin lookup is tenant-scoped.
-- **Capabilities**: plugin create/update/delete and
-  `POST /sequences/migrate-instance` now require `operator` (publisher keys keep
-  plugin reads); `approver` keys may only send `human_input:` signals.
-- **LLM keys**: env-sourced provider keys (`api_key_env` or the provider
-  default) are only sent to the provider's default `base_url`; a custom
-  `base_url` needs an explicit `api_key`. `api_key_env` must name a
-  `[A-Z0-9_]+_API_KEY` variable (breaking for names like `MY_OPENAI_KEY`).
-- **Externalized state** lookups are scoped to the owning instance, so forged
-  `{"_externalized":true,"_ref":…}` markers cannot read another instance's
-  payload. `StorageBackend::get_externalized_state` /
-  `batch_get_externalized_state` now take the owner instance id.
-- **Worker commands** carry a `tenant_id`; tenant-scoped gRPC worker streams
-  only receive and ack their own tenant's commands (migration 088).
-
 ### Added
 
 - **1.0 authoring and distribution surface**: published versioned OpenAPI and

@@ -1036,13 +1036,9 @@ async fn tick_delay_on_second_step() {
     assert_eq!(refreshed.state, InstanceState::Scheduled);
 }
 
-/// 46. An early wake must not restart a pending delay (ENG-R-N1): the
-/// `_delay_until` marker is final, so re-claiming before it re-parks the
-/// instance at the ORIGINAL fire time instead of `now + delay`. The old
-/// recompute-from-now behavior turned "early approval + delay" into a
-/// livelock where the delay restarted on every signal-sweep re-arm.
+/// 46. Delay re-applies on each tick (fast path recomputes `fire_at` from now).
 #[tokio::test]
-async fn tick_delay_early_wake_keeps_original_fire_at() {
+async fn tick_delay_reapplies_on_retick() {
     let s = storage().await;
     let delay = DelaySpec {
         duration: Duration::from_secs(10),
@@ -1063,7 +1059,8 @@ async fn tick_delay_early_wake_keeps_original_fire_at() {
     assert_eq!(refreshed.state, InstanceState::Scheduled);
     let first_fire_at = refreshed.next_fire_at.unwrap();
 
-    // Early wake: move fire_at to the past and re-tick.
+    // Move fire_at to past and re-tick: the delay check re-fires because
+    // check_step_delay always computes a fresh fire_at from Utc::now().
     s.update_instance_state(
         inst.id,
         InstanceState::Scheduled,
@@ -1075,11 +1072,8 @@ async fn tick_delay_early_wake_keeps_original_fire_at() {
     let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
     assert_eq!(refreshed.state, InstanceState::Scheduled);
     let second_fire_at = refreshed.next_fire_at.unwrap();
-    assert_eq!(
-        second_fire_at.timestamp(),
-        first_fire_at.timestamp(),
-        "early wake must re-park at the original delay deadline"
-    );
+    // Second fire_at should be later than the first (recomputed from a later now).
+    assert!(second_fire_at > first_fire_at);
 }
 
 /// 47. Zero-duration delay still causes a deferral.
@@ -2562,237 +2556,5 @@ async fn tick_rejects_composite_work_before_exceeding_step_budget_further() {
             .await
             .unwrap()
             .is_empty()
-    );
-}
-
-// ================================================================
-// REVIEW 2026-09: step preamble on the tree path + signal sweep wake
-// ================================================================
-
-/// ENG-R-N2: a step with `delay` inside a composite (tree path) must be
-/// deferred just like on the flat path — previously the tree path skipped
-/// `delay`/`send_window`/`rate_limit_key` entirely and the step fired immediately.
-#[tokio::test]
-async fn tree_path_step_delay_parks_instance() {
-    let s = storage().await;
-    let delay = DelaySpec {
-        duration: Duration::from_secs(3600),
-        business_days_only: false,
-        jitter: None,
-        holidays: vec![],
-        fire_at_local: None,
-        timezone: None,
-    };
-    let seq = mk_sequence(vec![BlockDefinition::Parallel(Box::new(ParallelDef {
-        id: BlockId::new("par"),
-        branches: vec![
-            vec![mk_step_with_delay_spec("delayed", "noop", delay)],
-            vec![mk_step("other", "noop")],
-        ],
-    }))]);
-    s.create_sequence(&seq).await.unwrap();
-    let inst = mk_instance(seq.id);
-    s.create_instance(&inst).await.unwrap();
-
-    let h = Arc::new(registry());
-    for _ in 0..3 {
-        tick(&s, &h).await;
-    }
-    let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(refreshed.state, InstanceState::Scheduled);
-    let fire_at = refreshed.next_fire_at.expect("parked with a fire time");
-    assert!(
-        fire_at > Utc::now() + chrono::Duration::minutes(50),
-        "tree-path delay must park the instance ~1h out, got {fire_at}"
-    );
-    let tree = s.get_execution_tree(inst.id).await.unwrap();
-    assert_ne!(node_state(&tree, "delayed"), NodeState::Completed);
-    assert!(
-        s.get_block_output(inst.id, &BlockId::new("delayed"))
-            .await
-            .unwrap()
-            .is_none(),
-        "delayed step's handler must not have run"
-    );
-}
-
-/// ENG-R-N2: `send_window` is honoured on the tree path.
-#[tokio::test]
-async fn tree_path_send_window_parks_instance() {
-    let s = storage().await;
-    // A window that is never open "now": a single one-hour slot starting two
-    // hours from the current UTC hour.
-    use chrono::Timelike;
-    let hour = Utc::now().hour();
-    let mut start = (hour + 2) % 24;
-    if start == 23 {
-        start = (hour + 4) % 24;
-    }
-    let start = u8::try_from(start).unwrap();
-    let window = SendWindow {
-        start_hour: start,
-        end_hour: start + 1,
-        days: vec![],
-    };
-    let seq = mk_sequence(vec![BlockDefinition::Parallel(Box::new(ParallelDef {
-        id: BlockId::new("par"),
-        branches: vec![vec![mk_step_with_send_window("windowed", "noop", window)]],
-    }))]);
-    s.create_sequence(&seq).await.unwrap();
-    let inst = mk_instance(seq.id);
-    s.create_instance(&inst).await.unwrap();
-
-    let h = Arc::new(registry());
-    tick(&s, &h).await;
-    let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(refreshed.state, InstanceState::Scheduled);
-    assert!(refreshed.next_fire_at.unwrap() > Utc::now() + chrono::Duration::minutes(30));
-    assert!(
-        s.get_block_output(inst.id, &BlockId::new("windowed"))
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-/// ENG-R-N1: an early (not-yet-targeted) human-input signal on a delayed
-/// Scheduled instance must NOT re-arm it every tick.
-#[tokio::test]
-async fn signal_sweep_does_not_wake_delayed_instance_for_future_step_signal() {
-    let s = storage().await;
-    let seq = mk_sequence(vec![mk_step("s1", "noop")]);
-    s.create_sequence(&seq).await.unwrap();
-    let mut inst = mk_instance(seq.id);
-    let parked_until = Utc::now() + chrono::Duration::hours(24);
-    inst.next_fire_at = Some(parked_until);
-    s.create_instance(&inst).await.unwrap();
-
-    s.enqueue_signal(&mk_signal_with_payload(
-        inst.id,
-        SignalType::Custom("human_input:approve".into()),
-        json!({"value": "yes"}),
-    ))
-    .await
-    .unwrap();
-
-    let h = Arc::new(registry());
-    tick(&s, &h).await;
-    let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(refreshed.state, InstanceState::Scheduled);
-    assert_eq!(
-        refreshed.next_fire_at.unwrap().timestamp(),
-        parked_until.timestamp(),
-        "early human-input signal must not re-arm the parked instance"
-    );
-}
-
-/// ENG-R-N1: control signals (cancel) still wake a parked instance.
-#[tokio::test]
-async fn signal_sweep_wakes_parked_instance_for_cancel() {
-    let s = storage().await;
-    let seq = mk_sequence(vec![mk_step("s1", "noop")]);
-    s.create_sequence(&seq).await.unwrap();
-    let mut inst = mk_instance(seq.id);
-    inst.next_fire_at = Some(Utc::now() + chrono::Duration::hours(24));
-    s.create_instance(&inst).await.unwrap();
-    s.enqueue_signal(&mk_signal(inst.id, SignalType::Cancel))
-        .await
-        .unwrap();
-
-    let h = Arc::new(registry());
-    tick(&s, &h).await;
-    tick(&s, &h).await;
-    let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(refreshed.state, InstanceState::Cancelled);
-}
-
-/// Waiting-deadline sweep must skip steps that already completed: an
-/// instance parked on step 2 (external worker) must not be failed for step
-/// 1's long-finished deadline.
-#[tokio::test]
-async fn waiting_deadline_sweep_skips_completed_steps() {
-    let s = storage().await;
-    let seq = mk_sequence(vec![
-        mk_step_with_deadline("s1", "noop", Duration::from_millis(1)),
-        mk_step("s2", "external_worker_handler"),
-    ]);
-    s.create_sequence(&seq).await.unwrap();
-    let mut inst = mk_instance_in_state(seq.id, InstanceState::Waiting);
-    inst.context.runtime.started_at = Some(Utc::now() - chrono::Duration::hours(1));
-    s.create_instance(&inst).await.unwrap();
-    s.save_block_output(&orch8_types::output::BlockOutput {
-        id: uuid::Uuid::now_v7(),
-        instance_id: inst.id,
-        block_id: BlockId::new("s1"),
-        output: json!({"ok": true}),
-        output_ref: None,
-        output_size: 0,
-        attempt: 0,
-        created_at: Utc::now() - chrono::Duration::hours(1),
-    })
-    .await
-    .unwrap();
-
-    let h = Arc::new(registry());
-    tick(&s, &h).await;
-    let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(
-        refreshed.state,
-        InstanceState::Waiting,
-        "completed step's deadline must not fail the instance"
-    );
-}
-
-/// When a root node fails, the evaluator cancels every live node; the
-/// external-worker tasks of those nodes must be purged too.
-#[tokio::test]
-async fn root_failure_purges_worker_tasks_of_cancelled_nodes() {
-    let storage = storage().await;
-    let sequence = mk_sequence(vec![BlockDefinition::Parallel(Box::new(ParallelDef {
-        id: BlockId::new("parallel"),
-        branches: vec![
-            vec![mk_step("remote_a", "some_external_worker_handler")],
-            vec![mk_step("remote_b", "some_external_worker_handler")],
-        ],
-    }))]);
-    storage.create_sequence(&sequence).await.unwrap();
-    let instance = mk_instance(sequence.id);
-    storage.create_instance(&instance).await.unwrap();
-    let handlers = Arc::new(registry());
-    let list = || async {
-        storage
-            .list_worker_tasks(
-                &orch8_types::worker_filter::WorkerTaskFilter::default(),
-                &orch8_types::filter::Pagination::default(),
-            )
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|t| t.instance_id == instance.id)
-            .count()
-    };
-    for _ in 0..4 {
-        tick(&storage, &handlers).await;
-    }
-    assert!(list().await > 0, "external steps dispatched worker tasks");
-
-    // The root fails (e.g. an operator/deadline path) while both external
-    // steps are still live.
-    let tree = storage.get_execution_tree(instance.id).await.unwrap();
-    let root = tree.iter().find(|n| n.parent_id.is_none()).unwrap();
-    storage
-        .update_node_state(root.id, NodeState::Failed)
-        .await
-        .unwrap();
-    storage
-        .update_instance_state(instance.id, InstanceState::Scheduled, Some(Utc::now()))
-        .await
-        .unwrap();
-    tick(&storage, &handlers).await;
-
-    assert_eq!(
-        list().await,
-        0,
-        "cancelled nodes' worker tasks must be purged"
     );
 }

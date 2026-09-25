@@ -204,12 +204,6 @@ async fn delete_on(conn: &mut sqlx::SqliteConnection, id: SequenceId) -> Result<
         "DELETE FROM externalized_state WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
         "DELETE FROM instance_kv_state WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
         "DELETE FROM injected_blocks WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
-        // No FK/cascade on SQLite for these; same set as
-        // `delete_terminal_instances`.
-        "DELETE FROM step_logs WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
-        "DELETE FROM audit_log WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
-        "DELETE FROM usage_events WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
-        "DELETE FROM emit_event_dedupe WHERE scope_kind = 'parent' AND scope_value IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
     ] {
         sqlx::query(sql).bind(&id_str).execute(&mut *conn).await?;
     }

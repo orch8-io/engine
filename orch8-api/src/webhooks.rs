@@ -65,17 +65,7 @@ const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024; // 1 MB
 const SIGNATURE_PREFIX: &str = "v1=";
 const MIN_NONCE_LEN: usize = 16;
 const MAX_NONCE_LEN: usize = 128;
-/// Pre-verification ceiling per `(peer, slug)`. Every request counts here
-/// (the signature can't be checked before the trigger lookup), so it is set
-/// well above any legitimate sender's rate: it only bounds the storage load
-/// an unauthenticated flood can cause, and junk traffic has to be an order of
-/// magnitude louder than before to crowd out a signed sender behind the same
-/// peer address (e.g. a shared egress proxy).
-const MAX_WEBHOOKS_PER_SECOND: u64 = 3_000;
-/// Tight per-`(peer, slug)` budget for requests that *fail* verification.
-/// Only failures are counted, so a correctly-signed sender never consumes
-/// it; once exhausted, further failures get 429 instead of 401.
-const MAX_FAILED_WEBHOOKS_PER_SECOND: u64 = 300;
+const MAX_WEBHOOKS_PER_SECOND: u64 = 300;
 
 static WEBHOOK_RATE_COUNTERS: LazyLock<Cache<String, Arc<AtomicU64>>> = LazyLock::new(|| {
     Cache::builder()
@@ -84,44 +74,19 @@ static WEBHOOK_RATE_COUNTERS: LazyLock<Cache<String, Arc<AtomicU64>>> = LazyLock
         .build()
 });
 
-static WEBHOOK_FAILURE_COUNTERS: LazyLock<Cache<String, Arc<AtomicU64>>> = LazyLock::new(|| {
-    Cache::builder()
-        .max_capacity(100_000)
-        .time_to_live(Duration::from_secs(1))
-        .build()
-});
-
-fn rate_key(peer: Option<SocketAddr>, slug: &str) -> String {
+fn check_rate_limit(peer: Option<SocketAddr>, slug: &str) -> Result<(), ApiError> {
     let peer = peer.map_or_else(|| "unknown".to_owned(), |address| address.ip().to_string());
-    format!("{peer}:{slug}")
-}
-
-fn bump(counters: &Cache<String, Arc<AtomicU64>>, key: String) -> u64 {
-    counters
+    let key = format!("{peer}:{slug}");
+    let counter = WEBHOOK_RATE_COUNTERS
         .entry(key)
         .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-        .into_value()
-        .fetch_add(1, Ordering::Relaxed)
-}
-
-fn check_rate_limit(peer: Option<SocketAddr>, slug: &str) -> Result<(), ApiError> {
-    if bump(&WEBHOOK_RATE_COUNTERS, rate_key(peer, slug)) >= MAX_WEBHOOKS_PER_SECOND {
+        .into_value();
+    if counter.fetch_add(1, Ordering::Relaxed) >= MAX_WEBHOOKS_PER_SECOND {
         return Err(ApiError::RateLimited(
             "public webhook request rate exceeded".into(),
         ));
     }
     Ok(())
-}
-
-/// Count a request that failed authentication (unknown slug, bad/missing
-/// signature, stale timestamp, nonce reuse) and map it to the response:
-/// the original error while under budget, 429 once the peer has exceeded
-/// its failure budget.
-fn record_auth_failure(peer: Option<SocketAddr>, slug: &str, error: ApiError) -> ApiError {
-    if bump(&WEBHOOK_FAILURE_COUNTERS, rate_key(peer, slug)) >= MAX_FAILED_WEBHOOKS_PER_SECOND {
-        return ApiError::RateLimited("public webhook failure rate exceeded".into());
-    }
-    error
 }
 
 /// Verify `v1=base64url(HMAC-SHA256(secret, timestamp.nonce.body))`.
@@ -182,30 +147,15 @@ pub(crate) async fn public_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
-    let peer = peer.ok().map(|ConnectInfo(address)| address);
-    check_rate_limit(peer, &slug)?;
-    match accept_webhook(&state, &slug, &headers, &body).await {
-        Err(error @ (ApiError::Unauthorized | ApiError::NotFound(_))) => {
-            Err(record_auth_failure(peer, &slug, error))
-        }
-        other => other,
-    }
-}
+    check_rate_limit(peer.ok().map(|ConnectInfo(address)| address), &slug)?;
 
-/// Verify and ingest one webhook delivery (everything after rate limiting).
-async fn accept_webhook(
-    state: &AppState,
-    slug: &str,
-    headers: &HeaderMap,
-    body: &Bytes,
-) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     // Unscoped: this is the public, unauthenticated webhook endpoint --
     // resolving *which* tenant owns `slug` is this lookup's job, since the
     // caller has no tenant context to scope by. The request signature and
     // trigger-type checks below are the real authorization boundary here.
     let trigger = state
         .storage
-        .get_trigger(None, slug)
+        .get_trigger(None, &slug)
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("webhook '{slug}'")))?;
@@ -286,7 +236,7 @@ async fn accept_webhook(
         secret.expose().as_bytes(),
         timestamp,
         nonce,
-        body,
+        &body,
     ) {
         return Err(ApiError::Unauthorized);
     }
@@ -295,7 +245,7 @@ async fn accept_webhook(
         chrono::Utc::now() + chrono::Duration::seconds(REPLAY_WINDOW_SECS + MAX_FUTURE_SKEW_SECS);
     let claimed = state
         .storage
-        .claim_webhook_nonce(slug, nonce, expires_at)
+        .claim_webhook_nonce(&slug, nonce, expires_at)
         .await
         .map_err(|error| ApiError::from_storage(error, "webhook nonce"))?;
     if !claimed {
@@ -303,7 +253,7 @@ async fn accept_webhook(
         return Err(ApiError::Unauthorized);
     }
 
-    let body: serde_json::Value = serde_json::from_slice(body)
+    let body: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|error| ApiError::InvalidArgument(format!("invalid webhook JSON: {error}")))?;
 
     let meta = serde_json::json!({
@@ -331,9 +281,8 @@ async fn accept_webhook(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FAILED_WEBHOOKS_PER_SECOND, MAX_FUTURE_SKEW_SECS, MAX_WEBHOOKS_PER_SECOND,
-        REPLAY_WINDOW_SECS, check_rate_limit, record_auth_failure, timestamp_within_window,
-        verify_signature,
+        MAX_FUTURE_SKEW_SECS, MAX_WEBHOOKS_PER_SECOND, REPLAY_WINDOW_SECS, check_rate_limit,
+        timestamp_within_window, verify_signature,
     };
     use base64::Engine as _;
     use hmac::{Hmac, KeyInit, Mac};
@@ -408,21 +357,5 @@ mod tests {
             check_rate_limit(None, slug),
             Err(crate::error::ApiError::RateLimited(_))
         ));
-    }
-
-    #[test]
-    fn failed_verifications_do_not_consume_the_signed_sender_budget() {
-        let slug = "failure-budget-unit-test";
-        // A flood of failures well past the failure budget...
-        for i in 0..(MAX_FAILED_WEBHOOKS_PER_SECOND + 10) {
-            let mapped = record_auth_failure(None, slug, crate::error::ApiError::Unauthorized);
-            if i < MAX_FAILED_WEBHOOKS_PER_SECOND {
-                assert!(matches!(mapped, crate::error::ApiError::Unauthorized));
-            } else {
-                assert!(matches!(mapped, crate::error::ApiError::RateLimited(_)));
-            }
-        }
-        // ...leaves the pre-verification bucket open for signed senders.
-        assert!(check_rate_limit(None, slug).is_ok());
     }
 }

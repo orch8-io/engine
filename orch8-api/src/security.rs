@@ -56,7 +56,37 @@ pub fn validate_public_url(url: &str) -> Result<(), ApiUrlValidationError> {
 }
 
 fn is_non_public_ip(ip: IpAddr) -> bool {
-    orch8_types::net::is_non_public_ip(ip)
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // 100.64.0.0/10 CGNAT space is not publicly routable.
+                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64
+                // 192.0.0.0/24 contains IANA reserved addresses including
+                // 192.0.0.170/171 (NAT64/DNS64 well-known prefixes).
+                || v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0
+        }
+        IpAddr::V6(v6) => {
+            // IPv4-mapped IPv6 (`::ffff:a.b.c.d`) must pass the same checks
+            // as the literal V4 form — otherwise `::ffff:127.0.0.1` or
+            // `::ffff:a9fe:a9fe` (169.254.169.254) bypass the guard.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_non_public_ip(IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Unique local addresses (fc00::/7).
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // Link-local unicast (fe80::/10).
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -160,26 +190,6 @@ mod tests {
     fn allows_public_ipv6_literal() {
         // Cloudflare DNS — a public global-unicast V6 literal must pass.
         assert!(validate_public_url("https://[2606:4700:4700::1111]/hook").is_ok());
-    }
-
-    #[test]
-    fn rejects_transition_forms_embedding_private_v4() {
-        for url in [
-            "http://[64:ff9b::a9fe:a9fe]/",
-            "http://[2002:7f00:1::1]/",
-            "http://[::127.0.0.1]/",
-            "http://198.18.0.1/",
-            "http://0.0.0.0/",
-            "http://240.0.0.1/",
-        ] {
-            assert!(
-                matches!(
-                    validate_public_url(url),
-                    Err(ApiUrlValidationError::InternalAddress(_))
-                ),
-                "{url} must be rejected"
-            );
-        }
     }
 
     #[test]

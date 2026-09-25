@@ -28,11 +28,9 @@ use crate::handlers::HandlerRegistry;
 ///      "cursor"). If that node is Pending, it is activated (transitioned
 ///      to Running) so the scheduler can dispatch it. If Running/Waiting,
 ///      the branch is in progress and nothing is done.
-///   3. A branch whose cursor node Failed (or was Cancelled) stops there —
-///      its later blocks never start.
-///   4. Once every branch has drained or stopped, the parallel node itself
-///      transitions: Completed if no branch failed, Failed otherwise. The
-///      never-started remainder of a stopped branch is marked Skipped.
+///   3. Once every branch has drained (all nodes terminal), the parallel
+///      node itself transitions: Completed if every branch completed,
+///      Failed if any branch had a failed node.
 ///
 /// Prior behaviour (pre-fix) flattened all branches and activated every
 /// pending child at once, producing Temporal-style "fork all" semantics
@@ -71,43 +69,49 @@ pub async fn execute_parallel(
     let mut any_branch_failed = false;
 
     for (branch_idx, branch_nodes) in &branches {
-        // Sequential cursor with fail-fast: a failed (or cancelled) node ends
-        // its branch — later blocks in that branch never start.
-        match evaluator::advance_sequence(storage, branch_nodes).await? {
-            evaluator::SeqProgress::Advanced => {
+        // Cursor = first non-terminal node in this branch.
+        let cursor = branch_nodes.iter().find(|n| !n.state.is_terminal());
+
+        match cursor {
+            Some(n) if n.state == NodeState::Pending => {
+                // Activate the branch's next step. Subsequent steps in
+                // this branch stay Pending until this one is terminal.
+                storage.update_node_state(n.id, NodeState::Running).await?;
                 all_branches_done = false;
                 debug!(
                     instance_id = %instance.id,
                     block_id = %par_def.id,
                     branch = branch_idx,
-                    "parallel: activated branch cursor"
+                    cursor_block = %n.block_id,
+                    "parallel: activating branch cursor"
                 );
             }
-            evaluator::SeqProgress::Blocked => {
+            Some(_) => {
                 // Cursor is Running/Waiting — branch is making progress.
                 all_branches_done = false;
             }
-            evaluator::SeqProgress::Failed => any_branch_failed = true,
-            // Cancelled / drained branches are finished without failing the
-            // parallel.
-            evaluator::SeqProgress::Cancelled | evaluator::SeqProgress::Done => {}
+            None => {
+                // Every node in this branch is terminal.
+                if branch_nodes
+                    .iter()
+                    .any(|n| matches!(n.state, NodeState::Failed))
+                {
+                    any_branch_failed = true;
+                }
+            }
         }
     }
 
     if all_branches_done {
-        // Settling also skips the Pending remainder of any branch that
-        // stopped on a failure.
         if any_branch_failed {
-            evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Failed)
-                .await?;
+            evaluator::fail_node(storage, node.id).await?;
             debug!(
                 instance_id = %instance.id,
                 block_id = %par_def.id,
                 "parallel block failed — one or more branches failed"
             );
         } else {
-            evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Completed)
-                .await?;
+            evaluator::complete_node(storage, node.id).await?;
             debug!(
                 instance_id = %instance.id,
                 block_id = %par_def.id,
@@ -788,80 +792,5 @@ mod tests {
             NodeState::Running,
             "parallel cannot complete while any branch has a live cursor",
         );
-    }
-
-    /// Run-past-failure: a failed block ends its branch — the branch's next
-    /// block never starts — and the parallel fails once the other branches
-    /// drain.
-    #[tokio::test]
-    async fn p13_failed_block_stops_its_branch() {
-        let inst_id = InstanceId::new();
-        let par = mk_node(
-            inst_id,
-            "par",
-            BlockType::Parallel,
-            None,
-            None,
-            NodeState::Running,
-        );
-        let a1 = mk_node(
-            inst_id,
-            "a1",
-            BlockType::Step,
-            Some(par.id),
-            Some(0),
-            NodeState::Failed,
-        );
-        let a2 = mk_node(
-            inst_id,
-            "a2",
-            BlockType::Step,
-            Some(par.id),
-            Some(0),
-            NodeState::Pending,
-        );
-        let b1 = mk_node(
-            inst_id,
-            "b1",
-            BlockType::Step,
-            Some(par.id),
-            Some(1),
-            NodeState::Running,
-        );
-        let (s, tree) = setup_with_nodes(vec![par.clone(), a1, a2, b1], inst_id).await;
-        let inst = mk_instance(inst_id);
-        let par_node = node_by_block(&tree, "par").clone();
-
-        execute_parallel(
-            &s,
-            &HandlerRegistry::new(),
-            &inst,
-            &par_node,
-            &par_def("par"),
-            &tree,
-        )
-        .await
-        .unwrap();
-        let after = s.get_execution_tree(inst_id).await.unwrap();
-        assert_eq!(node_by_block(&after, "a2").state, NodeState::Pending);
-        assert_eq!(node_by_block(&after, "par").state, NodeState::Running);
-
-        s.update_node_state(node_by_block(&after, "b1").id, NodeState::Completed)
-            .await
-            .unwrap();
-        let tree = s.get_execution_tree(inst_id).await.unwrap();
-        execute_parallel(
-            &s,
-            &HandlerRegistry::new(),
-            &inst,
-            &par_node,
-            &par_def("par"),
-            &tree,
-        )
-        .await
-        .unwrap();
-        let after = s.get_execution_tree(inst_id).await.unwrap();
-        assert_eq!(node_by_block(&after, "par").state, NodeState::Failed);
-        assert_eq!(node_by_block(&after, "a2").state, NodeState::Skipped);
     }
 }

@@ -29,10 +29,7 @@ mod step_exec;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use step_exec::{
-    HUMAN_GATE_MARKER, auto_decide_marker_key, clamped_fire_at, delay_marker_key,
-    park_tree_instance_until, step_preamble_deferral,
-};
+pub(crate) use step_exec::clamped_fire_at;
 pub use step_exec::{check_human_input, check_human_input_at};
 
 /// Result of a single tick execution, suitable for mobile/embedded callers
@@ -334,10 +331,6 @@ pub async fn run_tick_loop(
     }
 }
 
-/// Consecutive instance-heartbeat failures after which the lease is treated
-/// as lost (the heartbeat ticks at a third of the staleness window).
-const HEARTBEAT_LEASE_LOST_AFTER: u32 = 3;
-
 /// Preserve subsecond cadence for short staleness windows. A zero threshold
 /// has no positive safe heartbeat interval; retain a nonzero fallback cadence
 /// for callers using zero for immediate recovery checks.
@@ -505,13 +498,8 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             // soon as `process_instance` returns, below.
             let heartbeat_storage = Arc::clone(&storage);
             let heartbeat_stop = CancellationToken::new();
-            // Set by the heartbeat task once the lease is presumed lost; the
-            // flat step loop checks it between steps (its only safe
-            // cancellation point) and stops starting new work.
-            let lease_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let heartbeat_handle = {
                 let heartbeat_stop = heartbeat_stop.clone();
-                let lease_lost = Arc::clone(&lease_lost);
                 // Tick at a fraction of the reaper's own staleness window so
                 // several heartbeats land comfortably before this instance
                 // could ever look stale.
@@ -519,34 +507,12 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(heartbeat_interval);
                     ticker.tick().await; // first tick fires immediately; claiming already set updated_at
-                    let mut consecutive_failures: u32 = 0;
                     loop {
                         tokio::select! {
                             () = heartbeat_stop.cancelled() => break,
                             _ = ticker.tick() => {
-                                match heartbeat_storage.heartbeat_instance(instance_id).await {
-                                    Ok(()) => consecutive_failures = 0,
-                                    Err(e) => {
-                                        consecutive_failures = consecutive_failures.saturating_add(1);
-                                        // The interval is a third of the reaper's
-                                        // staleness window, so this many misses in a row
-                                        // means the lease has (almost certainly) lapsed
-                                        // and another node may re-dispatch the step.
-                                        // The in-flight step is not aborted (dropping it
-                                        // mid-write is worse than the overlap), but no
-                                        // further step is started — see `lease_lost`.
-                                        if consecutive_failures == HEARTBEAT_LEASE_LOST_AFTER {
-                                            lease_lost.store(true, std::sync::atomic::Ordering::Release);
-                                            error!(
-                                                instance_id = %instance_id,
-                                                error = %e,
-                                                consecutive_failures,
-                                                "instance heartbeat failing repeatedly — lease likely lost; the step may be re-dispatched by the stale-instance reaper"
-                                            );
-                                        } else {
-                                            warn!(instance_id = %instance_id, error = %e, consecutive_failures, "instance heartbeat failed");
-                                        }
-                                    }
+                                if let Err(e) = heartbeat_storage.heartbeat_instance(instance_id).await {
+                                    warn!(instance_id = %instance_id, error = %e, "instance heartbeat failed");
                                 }
                             }
                         }
@@ -562,7 +528,6 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             // `clock` is moved into the inner task below; keep a handle in the
             // outer task for the transient-error reschedule fire time.
             let clock_outer = clock.clone();
-            let lease_lost_inner = Arc::clone(&lease_lost);
             let result = tokio::spawn(async move {
                 let ctx = InstanceRunCtx {
                     storage: &s2,
@@ -573,7 +538,6 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     max_steps_per_instance,
                     cancel: &cancel,
                     clock: &clock,
-                    lease_lost: &lease_lost_inner,
                 };
                 process_instance(&ctx, instance, data).await
             })
@@ -711,11 +675,10 @@ async fn enforce_concurrency_limits(
     // Collect concurrency keys present in the batch.
     // ⚡ Bolt: Use a flat Vec and `chunk_by` instead of a HashMap to avoid allocation
     // and hashing overhead on the hot scheduling path.
-    // Keys are tenant-scoped: group by (tenant_id, concurrency_key).
-    let mut key_instances: Vec<((&str, &str), usize)> = Vec::with_capacity(instances.len());
+    let mut key_instances: Vec<(&str, usize)> = Vec::with_capacity(instances.len());
     for (idx, inst) in instances.iter().enumerate() {
         if let (Some(key), Some(_max)) = (&inst.concurrency_key, inst.max_concurrency) {
-            key_instances.push(((inst.tenant_id.as_str(), key.as_str()), idx));
+            key_instances.push((key.as_str(), idx));
         }
     }
 
@@ -724,10 +687,10 @@ async fn enforce_concurrency_limits(
     }
 
     // Sort by key first, then by original index to preserve priority order.
-    key_instances.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    key_instances.sort_unstable_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
 
     // Batch count running instances for all concurrency keys in a single query.
-    let mut keys: Vec<(&str, &str)> = key_instances.iter().map(|(k, _)| *k).collect();
+    let mut keys: Vec<&str> = key_instances.iter().map(|(k, _)| *k).collect();
     keys.dedup();
     let running_counts = storage.count_running_by_concurrency_keys(&keys).await?;
 
@@ -743,10 +706,7 @@ async fn enforce_concurrency_limits(
         // DB. This count includes the instances we just claimed (since
         // claim_due_instances already set them to Running). Subtract the batch
         // members to get the pre-existing running count.
-        let total_running = running_counts
-            .get(&(key.0.to_owned(), key.1.to_owned()))
-            .copied()
-            .unwrap_or(0);
+        let total_running = running_counts.get(key).copied().unwrap_or(0);
         #[allow(clippy::cast_possible_wrap)]
         let batch_count = chunk.len() as i64;
         let already_running = total_running - batch_count;
@@ -803,13 +763,6 @@ async fn enforce_concurrency_limits(
     Ok(instances)
 }
 
-/// Signals that justify waking a `Scheduled` instance before its
-/// `next_fire_at` (see [`process_signalled_instances`]).
-fn wakes_scheduled_instance(signal_type: &orch8_types::signal::SignalType) -> bool {
-    use orch8_types::signal::SignalType;
-    matches!(signal_type, SignalType::Pause | SignalType::Cancel)
-}
-
 /// Process signals for instances in paused/waiting state.
 ///
 /// `claim_due_instances` only picks up `scheduled` instances. Signals (resume,
@@ -843,24 +796,11 @@ async fn process_signalled_instances(
             continue;
         }
 
-        // Scheduled instances with a pending *control* signal just need a
-        // wake-up so the normal tick processes it immediately. Skip the full
-        // signal processor to avoid invalid state transitions.
-        //
-        // Only pause/cancel justify cutting a delay, send window, or retry
-        // backoff short. Everything else (update_context, custom signals and
-        // `human_input:<step>` responses for a step not reached yet) is
-        // consumed when the instance next runs naturally — waking for those
-        // re-armed a parked instance on every sweep, which together with a
-        // step delay was a livelock (ENG-R-N1). Storage already filters
-        // these rows; this is the backend-independent guard.
+        // Scheduled instances with pending signals just need a wake-up so the
+        // normal tick picks them up immediately (check_human_input will consume
+        // the signal). Skip the full signal processor to avoid invalid state
+        // transitions.
         if current_state == InstanceState::Scheduled {
-            if !signals
-                .iter()
-                .any(|s| wakes_scheduled_instance(&s.signal_type))
-            {
-                continue;
-            }
             debug!(
                 instance_id = %instance_id,
                 "waking scheduled instance with pending signal"
@@ -1047,31 +987,9 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
         }
         let deadline_outputs = prefetch_deadline_outputs(storage, &deadline_keys).await?;
         let deadline_outputs_ref = DeadlineOutputs::new(&deadline_outputs);
-        // Steps that already completed can no longer breach their deadline
-        // (mirrors `check_fast_path_deadlines`): without this, an instance
-        // Waiting on step 3 was failed for step 1's long-finished deadline.
-        let mut completed = if deadline_keys.is_empty() {
-            HashMap::new()
-        } else {
-            let mut ids: Vec<InstanceId> = deadline_keys.iter().map(|(id, _)| *id).collect();
-            ids.dedup();
-            storage.get_completed_block_ids_batch(&ids).await?
-        };
 
         for (instance, seq) in instance_sequences {
-            let completed_ids = completed.remove(&instance.id).unwrap_or_default();
-            // Per-instance failures (a lost CAS, a transient write error) must
-            // not abort the sweep for every other Waiting instance.
-            if let Err(e) =
-                check_waiting_instance(ctx, instance, &seq, &deadline_outputs_ref, &completed_ids)
-                    .await
-            {
-                warn!(
-                    instance_id = %instance.id,
-                    error = %e,
-                    "waiting-deadline sweep: instance check failed; continuing sweep"
-                );
-            }
+            check_waiting_instance(ctx, instance, &seq, &deadline_outputs_ref).await?;
         }
 
         // A short page means we reached the end of the Waiting set; otherwise
@@ -1093,11 +1011,10 @@ async fn check_waiting_instance(
     instance: &orch8_types::instance::TaskInstance,
     seq: &SequenceDefinition,
     deadline_outputs_ref: &DeadlineOutputs<'_>,
-    completed_block_ids: &[BlockId],
 ) -> Result<(), EngineError> {
     for block in &seq.blocks {
         if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
-            if step_def.deadline.is_some() && !completed_block_ids.contains(&step_def.id) {
+            if step_def.deadline.is_some() {
                 let prev = deadline_outputs_ref.get(&instance.id, &step_def.id);
                 if check_step_deadline_waiting(
                     ctx.storage,
@@ -1258,7 +1175,6 @@ async fn dispatch_cleanup_step(
     } else if plugin_kind == Some(crate::handlers::PluginKind::Grpc) {
         let Some(endpoint) = crate::handlers::step_dispatch::resolve_plugin_source(
             storage.as_ref(),
-            &instance.tenant_id,
             &step.handler,
             orch8_types::plugin::PluginType::Grpc,
         )
@@ -1281,7 +1197,6 @@ async fn dispatch_cleanup_step(
     {
         let Some(wasm_path) = crate::handlers::step_dispatch::resolve_plugin_source(
             storage.as_ref(),
-            &instance.tenant_id,
             plugin_name,
             orch8_types::plugin::PluginType::Wasm,
         )
@@ -1393,6 +1308,7 @@ struct SlaSweepContext<'a> {
     pub storage: &'a Arc<dyn StorageBackend>,
     pub sequence_cache: &'a SequenceCache,
     pub webhook_config: &'a WebhookConfig,
+    pub cancel: &'a CancellationToken,
 }
 
 /// A pending SLA alert: which instance, what kind, the sentinel block id used
@@ -1459,9 +1375,7 @@ async fn process_sla_breaches(
     storage: &Arc<dyn StorageBackend>,
     sequence_cache: &SequenceCache,
     webhook_config: &WebhookConfig,
-    // Unused since alerts go through the durable outbox (no in-line
-    // delivery to cancel); kept so the sweep's call shape stays uniform.
-    _cancel: &CancellationToken,
+    cancel: &CancellationToken,
     batch_size: u32,
     clock: &SharedClock,
     cursor: &mut SlaSweepCursor,
@@ -1473,6 +1387,7 @@ async fn process_sla_breaches(
         storage,
         sequence_cache,
         webhook_config,
+        cancel,
     };
 
     // Idle skip: the last full rotation found no SLA-bearing sequence, so
@@ -1671,11 +1586,7 @@ async fn emit_sla_alerts(
                 "tenant_id": c.tenant_id.as_str(),
             }),
         );
-        // Durable, non-blocking enqueue: `emit` awaited a 64-permit
-        // semaphore inline on the tick loop, so a slow webhook receiver
-        // stalled scheduling engine-wide (ENG-R-N6). The outbox loop owns
-        // delivery and retries.
-        crate::webhooks::enqueue_durable(ctx.storage.as_ref(), ctx.webhook_config, &event).await;
+        crate::webhooks::emit(ctx.webhook_config, &event, ctx.cancel).await;
 
         warn!(
             instance_id = %c.instance_id,
@@ -1721,7 +1632,6 @@ async fn check_step_deadline_waiting(
 /// escalation handler if configured, record a breach output, and fail the
 /// instance. The only difference is the `from_state` passed to
 /// `transition_instance`. This function captures that shared logic.
-#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_deadline_breach(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -1766,34 +1676,6 @@ pub(crate) async fn handle_deadline_breach(
         elapsed_ms = elapsed.num_milliseconds(),
         "SLA deadline breached ({state_label})"
     );
-
-    // CAS the instance to Failed FIRST and run the side effects only if this
-    // node won: the deadline sweep runs on every node, and the escalation
-    // handler / breach output used to fire before the CAS — once per node
-    // per breach (ENG-R-N5). A lost CAS means another writer already moved
-    // the instance (failed it, cancelled it, completed it); either way this
-    // caller must stop, so report "handled".
-    match crate::lifecycle::transition_instance(
-        storage.as_ref(),
-        instance_id,
-        Some(&instance.tenant_id),
-        from_state,
-        InstanceState::Failed,
-        None,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(EngineError::InvalidTransition { .. }) => {
-            debug!(
-                instance_id = %instance_id,
-                block_id = %step_def.id,
-                "SLA breach: instance already moved by a concurrent writer; skipping escalation"
-            );
-            return Ok(true);
-        }
-        Err(e) => return Err(e),
-    }
 
     // Invoke escalation handler if configured.
     if let Some(ref escalation) = step_def.on_deadline_breach
@@ -1849,11 +1731,16 @@ pub(crate) async fn handle_deadline_breach(
         attempt: prev_output.as_ref().map_or(0, |o| o.attempt),
         created_at: Utc::now(),
     };
-    // Best-effort: the instance is already terminal, so a failed marker
-    // write must not surface as a sweep error.
-    if let Err(e) = storage.save_block_output(&breach_output).await {
-        warn!(instance_id = %instance_id, error = %e, "failed to record SLA breach output");
-    }
+    storage.save_block_output(&breach_output).await?;
+    crate::lifecycle::transition_instance(
+        storage.as_ref(),
+        instance_id,
+        Some(&instance.tenant_id),
+        from_state,
+        InstanceState::Failed,
+        None,
+    )
+    .await?;
     crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
 
     // Wake parent: SLA deadline breach → terminal Failed.
@@ -1928,9 +1815,6 @@ struct InstanceRunCtx<'a> {
     pub max_steps_per_instance: u32,
     pub cancel: &'a CancellationToken,
     pub clock: &'a SharedClock,
-    /// Set once the instance's lease heartbeat has failed
-    /// [`HEARTBEAT_LEASE_LOST_AFTER`] times in a row (ENG-R-N8).
-    pub lease_lost: &'a std::sync::atomic::AtomicBool,
 }
 
 /// Process a single claimed instance: execute ALL pending steps in one go.
@@ -2268,31 +2152,6 @@ async fn execute_step_loop(
             } else {
                 continue;
             }
-        }
-
-        // Lease presumed lost (heartbeats failing): another node may already
-        // have re-dispatched this instance, so do not start another step.
-        // Hand the instance back (best-effort — if storage is what's down,
-        // the stale-instance reaper recovers it).
-        if ctx.lease_lost.load(std::sync::atomic::Ordering::Acquire) {
-            warn!(
-                instance_id = %instance_id,
-                block_id = %step_def.id,
-                "instance lease presumed lost; not starting further steps"
-            );
-            if let Err(e) = ctx
-                .storage
-                .conditional_update_instance_state(
-                    instance_id,
-                    InstanceState::Running,
-                    InstanceState::Scheduled,
-                    Some(ctx.clock.now()),
-                )
-                .await
-            {
-                warn!(instance_id = %instance_id, error = %e, "failed to release instance after lease loss");
-            }
-            return Ok(false);
         }
 
         // Interceptor: before_step

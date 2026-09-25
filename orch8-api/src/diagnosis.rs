@@ -180,15 +180,56 @@ async fn resume_paused(state: &AppState, instance_id: InstanceId) -> Result<(), 
 }
 
 async fn retry_failed(state: &AppState, instance_id: InstanceId) -> Result<(), ApiError> {
-    match orch8_storage::lifecycle::retry_failed_instance(state.storage.as_ref(), instance_id)
+    let changed = state
+        .storage
+        .conditional_update_instance_state(
+            instance_id,
+            InstanceState::Failed,
+            InstanceState::Paused,
+            None,
+        )
         .await
-        .map_err(|error| ApiError::from_storage(error, "instance"))?
-    {
-        orch8_storage::lifecycle::RetryOutcome::Retried => Ok(()),
-        _ => Err(ApiError::InvalidArgument(
+        .map_err(|error| ApiError::from_storage(error, "instance"))?;
+    if !changed {
+        return Err(ApiError::InvalidArgument(
             "instance state changed after remediation preview".into(),
-        )),
+        ));
     }
+    let reset = async {
+        state
+            .storage
+            .delete_execution_tree(instance_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "execution_tree"))?;
+        state
+            .storage
+            .delete_sentinel_block_outputs(instance_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "block_outputs"))?;
+        state
+            .storage
+            .reset_instance_run(instance_id, &Uuid::now_v7().to_string())
+            .await
+            .map_err(|error| ApiError::from_storage(error, "instance"))?;
+        state
+            .storage
+            .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+            .await
+            .map_err(|error| ApiError::from_storage(error, "instance"))
+    }
+    .await;
+    if reset.is_err() {
+        let _ = state
+            .storage
+            .conditional_update_instance_state(
+                instance_id,
+                InstanceState::Paused,
+                InstanceState::Failed,
+                None,
+            )
+            .await;
+    }
+    reset
 }
 
 /// Gather every evidence section, degrading to `None` (not failing) when

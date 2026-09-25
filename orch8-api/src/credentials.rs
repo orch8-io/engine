@@ -299,23 +299,13 @@ async fn update_credential(
     if let Some(description) = body.description {
         credential.description = Some(description);
     }
-    // CAS on the `updated_at` we read: the OAuth2 refresh loop rotates
-    // `value`/`refresh_token` in the background, and a blind full-row write
-    // of this (possibly stale) snapshot would put a revoked refresh token
-    // back and kill the credential. A lost race is a 409 — the client
-    // re-reads and retries.
-    let expected_updated_at = credential.updated_at;
-    let written = state
+    credential.updated_at = chrono::Utc::now();
+
+    state
         .storage
-        .update_credential_cas(&credential, expected_updated_at)
+        .update_credential(&credential)
         .await
         .map_err(|e| ApiError::from_storage(e, "credential"))?;
-    if !written {
-        return Err(ApiError::Conflict(format!(
-            "credential '{id}' was modified concurrently (e.g. by an OAuth2 token refresh); re-read and retry"
-        )));
-    }
-    credential.updated_at = chrono::Utc::now();
 
     Ok(Json(CredentialResponse::from(credential)))
 }

@@ -306,17 +306,15 @@ pub async fn complete_external_step_node(
 
 /// Look up a plugin name in the registry and return its source path/endpoint.
 /// Returns `None` if the plugin isn't registered (caller falls back to the raw handler name).
-///
-/// Scoped to the instance's tenant: only that tenant's plugins and shared
-/// (empty-tenant) plugins resolve, so one tenant cannot run another tenant's
-/// registered module/endpoint by naming it.
 pub(crate) async fn resolve_plugin_source(
     storage: &dyn StorageBackend,
-    tenant_id: &orch8_types::ids::TenantId,
     name: &str,
     expected_type: PluginType,
 ) -> Option<String> {
-    let plugin = match storage.get_plugin(Some(tenant_id), name).await {
+    // System-context lookup: resolving a handler name to its plugin source is a
+    // dispatch-time concern and plugin names are a global primary key, so this
+    // is an intentionally unscoped (`None`) lookup per `AdminStore::get_plugin`.
+    let plugin = match storage.get_plugin(None, name).await {
         Ok(Some(p)) => p,
         Ok(None) => return None,
         Err(e) => {
@@ -606,13 +604,7 @@ mod tests {
         };
         s.create_plugin(&plugin).await.unwrap();
 
-        let source = resolve_plugin_source(
-            &s,
-            &TenantId::unchecked("t1"),
-            "my-plugin",
-            PluginType::Wasm,
-        )
-        .await;
+        let source = resolve_plugin_source(&s, "my-plugin", PluginType::Wasm).await;
         assert_eq!(source, Some("/path/to/plugin.wasm".into()));
     }
 
@@ -633,13 +625,7 @@ mod tests {
         };
         s.create_plugin(&plugin).await.unwrap();
 
-        let source = resolve_plugin_source(
-            &s,
-            &TenantId::unchecked("t1"),
-            "disabled-plugin",
-            PluginType::Wasm,
-        )
-        .await;
+        let source = resolve_plugin_source(&s, "disabled-plugin", PluginType::Wasm).await;
         assert_eq!(source, None);
     }
 
@@ -660,56 +646,14 @@ mod tests {
         };
         s.create_plugin(&plugin).await.unwrap();
 
-        let source = resolve_plugin_source(
-            &s,
-            &TenantId::unchecked("t1"),
-            "grpc-plugin",
-            PluginType::Wasm,
-        )
-        .await;
+        let source = resolve_plugin_source(&s, "grpc-plugin", PluginType::Wasm).await;
         assert_eq!(source, None);
-    }
-
-    /// ENG-P-N10: another tenant's plugin must not resolve by name.
-    #[tokio::test]
-    async fn resolve_plugin_source_is_tenant_scoped() {
-        use orch8_types::plugin::PluginDef;
-        let s = mk_storage().await;
-        let plugin = PluginDef {
-            name: "tenant-b-plugin".into(),
-            tenant_id: "tenant-b".into(),
-            plugin_type: PluginType::Wasm,
-            source: "/b/plugin.wasm".into(),
-            config: json!({}),
-            description: None,
-            enabled: true,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        s.create_plugin(&plugin).await.unwrap();
-
-        let tenant_a = TenantId::unchecked("tenant-a");
-        let tenant_b = TenantId::unchecked("tenant-b");
-        assert_eq!(
-            resolve_plugin_source(&s, &tenant_a, "tenant-b-plugin", PluginType::Wasm).await,
-            None
-        );
-        assert_eq!(
-            resolve_plugin_source(&s, &tenant_b, "tenant-b-plugin", PluginType::Wasm).await,
-            Some("/b/plugin.wasm".into())
-        );
     }
 
     #[tokio::test]
     async fn resolve_plugin_source_returns_none_for_unknown_plugin() {
         let s = mk_storage().await;
-        let source = resolve_plugin_source(
-            &s,
-            &TenantId::unchecked("t1"),
-            "nonexistent",
-            PluginType::Wasm,
-        )
-        .await;
+        let source = resolve_plugin_source(&s, "nonexistent", PluginType::Wasm).await;
         assert_eq!(source, None);
     }
 

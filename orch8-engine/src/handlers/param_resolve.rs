@@ -153,39 +153,9 @@ pub(crate) async fn resolve_templates_in_params(
 /// filtered from `build_outputs_shape` so it can never reach `{{ outputs.* }}`.
 pub(crate) const IN_PROGRESS_SENTINEL: &str = "__in_progress__";
 
-/// Is `output` per-attempt bookkeeping (a crash sentinel or a `__retry__`
-/// marker) rather than evidence that an execution finished?
-pub(crate) fn is_attempt_bookkeeping(output: &orch8_types::output::BlockOutput) -> bool {
-    matches!(
-        output.output_ref.as_deref(),
-        Some(IN_PROGRESS_SENTINEL | "__retry__")
-    )
-}
-
-/// Does `output` prove a previous execution of the step *finished
-/// successfully*? A real inline handler output (not a human-gate acceptance)
-/// or an externalized real output does; bookkeeping rows and `__error__`
-/// failure evidence do not.
-fn is_completed_execution(output: &orch8_types::output::BlockOutput) -> bool {
-    match output.output_ref.as_deref() {
-        None => output
-            .output
-            .get(crate::scheduler::HUMAN_GATE_MARKER)
-            .is_none(),
-        Some(IN_PROGRESS_SENTINEL | "__retry__" | "__error__") => false,
-        Some(_) => true,
-    }
-}
-
 /// Compute the attempt number for a step from the latest prior
 /// `BlockOutput` for `(instance_id, block_id)`. Returns `0` when no prior
 /// output exists (first attempt).
-///
-/// Attempts count retries of ONE execution. When the latest row proves an
-/// earlier execution completed (a loop / `for_each` body step on its next
-/// iteration), the step is being executed afresh and starts at attempt `0`
-/// — otherwise every iteration would inherit the previous one's attempt
-/// count and burn through `max_attempts`.
 ///
 /// Shared by both dispatch paths so retry-count semantics — and any
 /// memoisation keyed on `(instance_id, block_id, attempt)` — are identical
@@ -206,12 +176,6 @@ pub(crate) async fn compute_attempt(
         Some(prev) if prev.output_ref.as_deref() == Some(IN_PROGRESS_SENTINEL) => {
             Ok(u32::from(prev.attempt))
         }
-        Some(prev) if is_completed_execution(&prev) => Ok(0),
-        // The persisted attempt is a saturated `u16`: once it pins at
-        // `u16::MAX` the true count is unknown, so report "exhausted" rather
-        // than `u16::MAX + 1` forever — otherwise a policy with
-        // `max_attempts > 65_536` would retry without end.
-        Some(prev) if prev.attempt == u16::MAX => Ok(u32::MAX),
         Some(prev) => Ok(u32::from(prev.attempt) + 1),
         None => Ok(0),
     }
@@ -862,80 +826,5 @@ mod tests {
             .map(|b| b["id"].as_str().unwrap())
             .collect();
         assert_eq!(ids, vec!["keep"]);
-    }
-
-    async fn save_attempt_row(
-        storage: &dyn StorageBackend,
-        id: InstanceId,
-        output: serde_json::Value,
-        output_ref: Option<&str>,
-        attempt: u16,
-    ) {
-        let bo = BlockOutput {
-            id: uuid::Uuid::now_v7(),
-            instance_id: id,
-            block_id: BlockId::new("s"),
-            output,
-            output_ref: output_ref.map(str::to_owned),
-            output_size: 0,
-            attempt,
-            created_at: Utc::now(),
-        };
-        storage.save_block_output(&bo).await.unwrap();
-    }
-
-    /// A completed execution (real output as the latest row) means the step
-    /// is being executed afresh — the next loop iteration starts at attempt
-    /// 0 instead of inheriting the previous iteration's count.
-    #[tokio::test]
-    async fn compute_attempt_resets_after_completed_execution() {
-        let s = mk_storage().await;
-        let id = InstanceId::new();
-        s.create_instance(&mk_instance(id)).await.unwrap();
-        let bid = BlockId::new("s");
-
-        assert_eq!(compute_attempt(&s, id, &bid).await.unwrap(), 0);
-        save_attempt_row(&s, id, json!({"_retry_marker": true}), Some("__retry__"), 0).await;
-        assert_eq!(compute_attempt(&s, id, &bid).await.unwrap(), 1);
-        save_attempt_row(&s, id, json!({"_retry_marker": true}), Some("__retry__"), 1).await;
-        assert_eq!(compute_attempt(&s, id, &bid).await.unwrap(), 2);
-        // Attempt 2 succeeds; the next execution (next iteration) is fresh.
-        save_attempt_row(&s, id, json!({"ok": true}), None, 2).await;
-        assert_eq!(compute_attempt(&s, id, &bid).await.unwrap(), 0);
-    }
-
-    /// Failure evidence and human-gate acceptance are not completions: the
-    /// retry count keeps advancing across them.
-    #[tokio::test]
-    async fn compute_attempt_keeps_counting_across_error_and_gate_rows() {
-        let s = mk_storage().await;
-        let id = InstanceId::new();
-        s.create_instance(&mk_instance(id)).await.unwrap();
-        let bid = BlockId::new("s");
-        save_attempt_row(&s, id, json!({"__error__": true}), Some("__error__"), 3).await;
-        assert_eq!(compute_attempt(&s, id, &bid).await.unwrap(), 4);
-        save_attempt_row(
-            &s,
-            id,
-            json!({"value": "yes", crate::scheduler::HUMAN_GATE_MARKER: true}),
-            None,
-            0,
-        )
-        .await;
-        assert_eq!(compute_attempt(&s, id, &bid).await.unwrap(), 1);
-    }
-
-    /// A saturated `u16` attempt must report "exhausted" instead of pinning
-    /// at `u16::MAX + 1` (infinite retries when `max_attempts > 65_536`).
-    #[tokio::test]
-    async fn compute_attempt_saturated_counter_is_exhausted() {
-        let s = mk_storage().await;
-        let id = InstanceId::new();
-        s.create_instance(&mk_instance(id)).await.unwrap();
-        save_attempt_row(&s, id, json!({}), Some("__retry__"), u16::MAX).await;
-        assert_eq!(
-            compute_attempt(&s, id, &BlockId::new("s")).await.unwrap(),
-            u32::MAX
-        );
     }
 }

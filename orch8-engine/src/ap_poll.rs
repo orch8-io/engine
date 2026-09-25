@@ -40,19 +40,8 @@
 //! A failing poll records `last_error` / increments `consecutive_failures`
 //! on the trigger's [`TriggerPollState`] row and retries on the next
 //! schedule — the listener never exits on poll errors. The cursor is only
-//! advanced after every returned item produced an instance, so the sidecar
-//! re-delivers the whole batch after a partial failure; each item carries a
-//! deterministic idempotency key (`ap:<slug>:<sha256 of the item>`), so the
-//! already-created items of that batch are deduplicated rather than
-//! re-started.
-//!
-//! # Multi-node
-//!
-//! Every engine node runs the trigger loop. A per-trigger lease row
-//! (`trigger_poll_state.lease_owner` / `lease_until`) makes exactly one node
-//! poll a given trigger at a time; the holder renews it on every poll and a
-//! crashed holder's lease expires after its poll interval plus
-//! `POLL_LEASE_MARGIN`.
+//! advanced after every returned item produced an instance, so delivery is
+//! at-least-once: a partial failure re-delivers the whole batch.
 
 use std::env;
 use std::sync::Arc;
@@ -90,13 +79,6 @@ static POLL_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
             reqwest::Client::new()
         })
 });
-
-/// Slack added to a poll lease beyond the poll interval: covers the sidecar
-/// request timeout (75s) so a slow poll cannot lose the lease mid-request.
-const POLL_LEASE_MARGIN: Duration = Duration::from_secs(90);
-
-/// This process's identity as a poll-lease holder (unique per process).
-static POLL_LEASE_OWNER: LazyLock<String> = LazyLock::new(|| uuid::Uuid::now_v7().to_string());
 
 /// Validated view of an `activepieces_poll` trigger's `config` JSON.
 #[derive(Debug, Clone)]
@@ -257,17 +239,6 @@ pub async fn run_ap_poll_listener_with_url(
     );
 
     loop {
-        let delay = next_poll_delay(&config);
-        if !acquire_poll_lease(storage.as_ref(), &trigger.slug, delay).await {
-            tokio::select! {
-                () = cancel.cancelled() => {
-                    info!(slug = %trigger.slug, "activepieces poll listener shutting down");
-                    return;
-                }
-                () = tokio::time::sleep(delay) => {}
-            }
-            continue;
-        }
         match poll_once(storage.as_ref(), &trigger, &config, &url).await {
             Ok(0) => {}
             Ok(n) => {
@@ -284,6 +255,7 @@ pub async fn run_ap_poll_listener_with_url(
             }
         }
 
+        let delay = next_poll_delay(&config);
         tokio::select! {
             () = cancel.cancelled() => {
                 info!(slug = %trigger.slug, "activepieces poll listener shutting down");
@@ -292,55 +264,6 @@ pub async fn run_ap_poll_listener_with_url(
             () = tokio::time::sleep(delay) => {}
         }
     }
-}
-
-/// Acquire (or renew) this node's poll lease for `slug`, held until the
-/// next scheduled poll plus [`POLL_LEASE_MARGIN`]. Returns `false` — skip
-/// this poll — when another node holds a live lease or storage failed
-/// (fail closed: a missed poll is retried next interval, a double poll
-/// would duplicate work).
-async fn acquire_poll_lease(
-    storage: &dyn StorageBackend,
-    slug: &str,
-    next_delay: Duration,
-) -> bool {
-    let now = chrono::Utc::now();
-    let hold = chrono::Duration::from_std(next_delay.saturating_add(POLL_LEASE_MARGIN))
-        .unwrap_or(chrono::Duration::days(1));
-    let lease_until = now.checked_add_signed(hold).unwrap_or(now);
-    match storage
-        .try_acquire_trigger_poll_lease(slug, &POLL_LEASE_OWNER, now, lease_until)
-        .await
-    {
-        Ok(true) => true,
-        Ok(false) => {
-            debug!(
-                slug,
-                "activepieces poll lease held by another node, skipping poll"
-            );
-            false
-        }
-        Err(e) => {
-            warn!(slug, error = %e, "failed to acquire activepieces poll lease, skipping poll");
-            false
-        }
-    }
-}
-
-/// Deterministic per-item idempotency key: the same polled item (a
-/// re-delivered batch, or a lease hand-over mid-batch) maps to the same key.
-fn item_idempotency_key(slug: &str, item: &Value) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(item.to_string().as_bytes());
-    let mut key = String::with_capacity(4 + slug.len() + 64);
-    key.push_str("ap:");
-    key.push_str(slug);
-    key.push(':');
-    for b in digest {
-        use std::fmt::Write as _;
-        let _ = write!(key, "{b:02x}");
-    }
-    key
 }
 
 /// Time until the next poll: cron expression (UTC) if configured, otherwise
@@ -456,12 +379,12 @@ async fn poll_once(
     });
 
     for item in &items {
-        crate::triggers::create_trigger_instance_idempotent(
+        crate::triggers::create_trigger_instance(
             storage,
             trigger,
             item.clone(),
             event_meta.clone(),
-            item_idempotency_key(&trigger.slug, item),
+            None,
         )
         .await
         .map_err(|e| format!("failed to create instance for polled item: {e}"))?;
@@ -816,76 +739,6 @@ mod tests {
         assert!(state.last_error.is_none());
         assert_eq!(state.consecutive_failures, 0);
         assert!(state.last_poll_at.is_some());
-    }
-
-    /// ENG-R-N3: a batch re-delivered by the sidecar (cursor not advanced
-    /// after a mid-batch failure, or a second node polling) must not create
-    /// duplicate instances — each item has a deterministic idempotency key.
-    #[tokio::test]
-    async fn redelivered_batch_does_not_duplicate_instances() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
-        seed(&storage, "seq").await;
-        let trigger = mk_poll_trigger("p", "seq", json!({"piece": "x", "trigger": "t"}));
-        let config = parse_config(&trigger.config).unwrap();
-        let batch = json!({
-            "ok": true,
-            "items": [{"id": "a"}, {"id": "b"}],
-            "state": null,
-        })
-        .to_string();
-        let (url, _, _) = spawn_mock_sidecar(vec![(200, batch.clone()), (200, batch)]).await;
-
-        poll_once(&storage, &trigger, &config, &url).await.unwrap();
-        poll_once(&storage, &trigger, &config, &url).await.unwrap();
-
-        assert_eq!(
-            list_t1_instances(&storage).await.len(),
-            2,
-            "re-delivered items must be deduplicated"
-        );
-    }
-
-    /// ENG-R-N3: only the lease holder polls; a node that cannot acquire the
-    /// per-trigger lease never calls the sidecar.
-    #[tokio::test]
-    async fn listener_skips_poll_while_another_node_holds_the_lease() {
-        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
-        seed(&storage, "seq").await;
-        let now = chrono::Utc::now();
-        assert!(
-            storage
-                .try_acquire_trigger_poll_lease(
-                    "leased",
-                    "other-node",
-                    now,
-                    now + chrono::Duration::hours(1),
-                )
-                .await
-                .unwrap()
-        );
-        let trigger = mk_poll_trigger(
-            "leased",
-            "seq",
-            json!({"piece": "x", "trigger": "t", "interval_secs": 1}),
-        );
-        let (url, _, hits) = spawn_mock_sidecar(vec![(
-            200,
-            json!({"ok": true, "items": [{"n": 1}], "state": null}).to_string(),
-        )])
-        .await;
-
-        let cancel = CancellationToken::new();
-        let handle = tokio::spawn(run_ap_poll_listener_with_url(
-            Arc::clone(&storage) as Arc<dyn StorageBackend>,
-            trigger,
-            url,
-            cancel.clone(),
-        ));
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        cancel.cancel();
-        handle.await.unwrap();
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "non-holder must not poll");
-        assert!(list_t1_instances(&storage).await.is_empty());
     }
 
     #[tokio::test]

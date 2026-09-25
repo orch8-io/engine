@@ -112,7 +112,7 @@ pub(super) async fn list_rollback_policies(
     )> = if let Some(t) = tenant_id {
         sqlx::query_as(
             "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, created_at, updated_at
-             FROM rollback_policies WHERE tenant_id = ? ORDER BY tenant_id, sequence_name LIMIT ?"
+             FROM rollback_policies WHERE tenant_id = ? LIMIT ?"
         )
         .bind(t)
         .bind(limit)
@@ -121,7 +121,7 @@ pub(super) async fn list_rollback_policies(
     } else {
         sqlx::query_as(
             "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, created_at, updated_at
-             FROM rollback_policies ORDER BY tenant_id, sequence_name LIMIT ?"
+             FROM rollback_policies LIMIT ?"
         )
         .bind(limit)
         .fetch_all(&storage.pool)
@@ -243,7 +243,7 @@ pub(super) async fn list_rollback_history(
     if sequence_name.is_some() {
         query.push_str(" AND sequence_name = ?");
     }
-    query.push_str(" ORDER BY triggered_at DESC, id DESC LIMIT ?");
+    query.push_str(" ORDER BY triggered_at DESC LIMIT ?");
 
     let mut q = sqlx::query_as(&query);
     if let Some(t) = tenant_id {

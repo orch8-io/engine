@@ -34,14 +34,11 @@ pub(super) async fn find_by_idempotency_key(
 
 pub(super) async fn count_running_by_concurrency_key(
     store: &PostgresStorage,
-    tenant_id: &str,
     concurrency_key: &str,
 ) -> Result<i64, StorageError> {
     let row: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM task_instances \
-         WHERE tenant_id = $1 AND concurrency_key = $2 AND state = 'running'",
+        "SELECT COUNT(*) FROM task_instances WHERE concurrency_key = $1 AND state = 'running'",
     )
-    .bind(tenant_id)
     .bind(concurrency_key)
     .fetch_one(&store.pool)
     .await?;
@@ -50,26 +47,18 @@ pub(super) async fn count_running_by_concurrency_key(
 
 pub(super) async fn count_running_by_concurrency_keys(
     store: &PostgresStorage,
-    keys: &[(&str, &str)],
-) -> Result<std::collections::HashMap<(String, String), i64>, StorageError> {
-    if keys.is_empty() {
+    concurrency_keys: &[&str],
+) -> Result<std::collections::HashMap<String, i64>, StorageError> {
+    if concurrency_keys.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-    let (tenants, key_names): (Vec<&str>, Vec<&str>) = keys.iter().copied().unzip();
-    let rows: Vec<(String, String, i64)> = sqlx::query_as(
-        "SELECT tenant_id, concurrency_key, COUNT(*) FROM task_instances \
-         WHERE (tenant_id, concurrency_key) IN (SELECT * FROM UNNEST($1::text[], $2::text[])) \
-           AND state = 'running' \
-         GROUP BY tenant_id, concurrency_key",
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT concurrency_key, COUNT(*) FROM task_instances WHERE concurrency_key = ANY($1) AND state = 'running' GROUP BY concurrency_key",
     )
-    .bind(&tenants)
-    .bind(&key_names)
+    .bind(concurrency_keys)
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(tenant, key, count)| ((tenant, key), count))
-        .collect())
+    Ok(rows.into_iter().collect())
 }
 
 pub(super) async fn concurrency_position(
@@ -86,11 +75,11 @@ pub(super) async fn concurrency_position(
     // instance can't sneak ahead of an already-running older one and
     // exceed max_concurrency.
     let row: (i64,) = sqlx::query_as(
-        r"SELECT COUNT(*) FROM task_instances t
-          JOIN task_instances me ON me.id = $2
-          WHERE t.tenant_id = me.tenant_id
-            AND t.concurrency_key = $1 AND t.state = 'running'
-            AND (t.created_at, t.id) <= (me.created_at, me.id)",
+        r"SELECT COUNT(*) FROM task_instances
+          WHERE concurrency_key = $1 AND state = 'running'
+            AND (created_at, id) <= (
+                SELECT created_at, id FROM task_instances WHERE id = $2
+            )",
     )
     .bind(concurrency_key)
     .bind(instance_id.into_uuid())

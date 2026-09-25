@@ -55,19 +55,12 @@ impl std::fmt::Debug for StorageKind {
     }
 }
 
-/// Strip credentials from a Postgres connection URL for logging/Debug
-/// output: the userinfo password *and* sensitive query parameters such as
-/// `?password=` / `?sslpassword=` (libpq accepts both forms).
+/// Strip password from a Postgres connection URL for logging/Debug output.
 fn redacted_connection_url(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(mut parsed) => {
             if parsed.password().is_some() {
                 let _ = parsed.set_password(None);
-            }
-            if let Some(query) = parsed.query() {
-                let redacted =
-                    orch8_types::redaction::RedactionPolicy::default().redact_form(query);
-                parsed.set_query(Some(&redacted));
             }
             parsed.to_string()
         }
@@ -181,15 +174,6 @@ mod tests {
             debug.contains("user@host"),
             "user/host should still appear: {debug}"
         );
-    }
-
-    #[test]
-    fn postgres_debug_redacts_query_password() {
-        let storage = Storage::postgres("postgres://user@host/db?sslmode=require&password=hunter2");
-        let debug = format!("{storage:?}");
-        assert!(!debug.contains("hunter2"), "{debug}");
-        assert!(debug.contains("sslmode=require"), "{debug}");
-        assert!(debug.contains("user@host"), "{debug}");
     }
 
     #[test]

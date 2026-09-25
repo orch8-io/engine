@@ -29,7 +29,7 @@ pub(super) async fn create_rollback_policy(
            cooldown_secs = EXCLUDED.cooldown_secs,
            confirmation_window_secs = EXCLUDED.confirmation_window_secs,
            webhook_url = EXCLUDED.webhook_url,
-           enabled = TRUE,
+           enabled = 1,
            updated_at = NOW()"
     )
     .bind(tenant_id)
@@ -106,7 +106,7 @@ pub(super) async fn list_rollback_policies(
         DateTime<Utc>,
     )> = if let Some(t) = tenant_id {
         sqlx::query_as(
-            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 ORDER BY tenant_id, sequence_name LIMIT $2"
+            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 LIMIT $2"
         )
         .bind(t)
         .bind(i64::from(limit))
@@ -114,7 +114,7 @@ pub(super) async fn list_rollback_policies(
         .await?
     } else {
         sqlx::query_as(
-            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies ORDER BY tenant_id, sequence_name LIMIT $1"
+            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies LIMIT $1"
         )
         .bind(i64::from(limit))
         .fetch_all(&storage.pool)
@@ -195,28 +195,14 @@ pub(super) async fn query_error_rate(
     window_secs: i64,
 ) -> Result<Option<f64>, StorageError> {
     let start = Utc::now() - chrono::Duration::seconds(window_secs);
-    // Error reports (`ingest_telemetry_error`) land in `telemetry_mobile_errors`,
-    // not `telemetry_mobile_events`. Count each one as a failed run, matching
-    // SQLite (which stores them as `InstanceFailed` telemetry events) --
-    // otherwise the error-report endpoint that triggers this check could
-    // never move the rate.
     let row: Option<(i64, i64)> = sqlx::query_as(
-        r"WITH ev AS (
-           SELECT
-             COUNT(*) FILTER (WHERE event_type = 'InstanceFailed') AS failed,
-             COUNT(*) AS total
-           FROM telemetry_mobile_events
-           WHERE tenant_id = $1
-             AND payload->>'sequence_name' = $2
-             AND created_at >= $3
-         ), er AS (
-           SELECT COUNT(*) AS n
-           FROM telemetry_mobile_errors
-           WHERE tenant_id = $1
-             AND sequence_name = $2
-             AND received_at >= $3
-         )
-         SELECT ev.failed + er.n, ev.total + er.n FROM ev, er",
+        r"SELECT
+           COUNT(*) FILTER (WHERE event_type = 'InstanceFailed') as failed,
+           COUNT(*) as total
+         FROM telemetry_mobile_events
+         WHERE tenant_id = $1
+           AND payload->>'sequence_name' = $2
+           AND created_at >= $3",
     )
     .bind(tenant_id)
     .bind(sequence_name)
@@ -252,10 +238,7 @@ pub(super) async fn list_rollback_history(
         let _ = write!(query, " AND sequence_name = ${param_idx}");
         param_idx += 1;
     }
-    let _ = write!(
-        query,
-        " ORDER BY triggered_at DESC, id DESC LIMIT ${param_idx}"
-    );
+    let _ = write!(query, " ORDER BY triggered_at DESC LIMIT ${param_idx}");
 
     let mut q = sqlx::query_as(&query);
     if let Some(t) = tenant_id {

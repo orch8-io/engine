@@ -10,7 +10,7 @@
       "handler": "llm_call",
       "params": {
         "provider": "anthropic",
-        "model": "claude-opus-5",
+        "model": "claude-sonnet-4-20250514",
         "system": "You are an orchestrator agent. Decompose complex tasks into sub-tasks for specialist agents: researcher (web search, data gathering), coder (code generation, debugging), analyst (data analysis, summarization).",
         "messages": [
           {
@@ -65,7 +65,7 @@
       "handler": "llm_call",
       "params": {
         "provider": "anthropic",
-        "model": "claude-opus-5",
+        "model": "claude-sonnet-4-20250514",
         "system": "You are an orchestrator agent. Synthesize results from specialist agents into a coherent final answer.",
         "messages": [
           {

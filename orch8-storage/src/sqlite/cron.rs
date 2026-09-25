@@ -94,21 +94,17 @@ const MAX_CLAIM_PER_TICK: i64 = 100;
 async fn claim_due_inner(
     conn: &mut sqlx::SqliteConnection,
     now_str: &str,
-    lease_until_str: &str,
 ) -> Result<Vec<CronSchedule>, StorageError> {
     // SQLite lacks FOR UPDATE SKIP LOCKED, so claiming runs inside BEGIN
     // IMMEDIATE (see `claim_due` below). One statement: mark the oldest due
     // schedules triggered and return them, instead of the previous
     // SELECT-then-2N-round-trips loop under the write lock.
-    //
-    // Lease, not a permanent mark — see the Postgres twin: a failed/crashed
-    // fire becomes re-claimable once `claimed_until` passes.
     let rows = sqlx::query(
-        "UPDATE cron_schedules SET claimed_until = ?3, updated_at = ?1
+        "UPDATE cron_schedules SET last_triggered_at = ?1, updated_at = ?1
          WHERE id IN (
              SELECT id FROM cron_schedules
              WHERE enabled = 1 AND next_fire_at <= ?1
-               AND (claimed_until IS NULL OR claimed_until < ?1)
+               AND (last_triggered_at IS NULL OR last_triggered_at < next_fire_at)
              ORDER BY next_fire_at
              LIMIT ?2
          )
@@ -116,7 +112,6 @@ async fn claim_due_inner(
     )
     .bind(now_str)
     .bind(MAX_CLAIM_PER_TICK)
-    .bind(lease_until_str)
     .fetch_all(&mut *conn)
     .await?;
 
@@ -128,12 +123,11 @@ pub(super) async fn claim_due(
     now: DateTime<Utc>,
 ) -> Result<Vec<CronSchedule>, StorageError> {
     let now_str = ts(now);
-    let lease_until_str = ts(now + chrono::Duration::seconds(crate::CRON_CLAIM_LEASE_SECS));
 
     // Retain transaction ownership through row decoding: errors and cancelled
     // futures roll back the claim before the connection is reused.
     let mut conn = begin_immediate(&storage.pool).await?;
-    let schedules = claim_due_inner(&mut conn, &now_str, &lease_until_str).await?;
+    let schedules = claim_due_inner(&mut conn, &now_str).await?;
     conn.commit().await?;
     Ok(schedules)
 }
@@ -144,7 +138,7 @@ pub(super) async fn update_fire_times(
     last_triggered_at: DateTime<Utc>,
     next_fire_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
-    sqlx::query("UPDATE cron_schedules SET last_triggered_at=?2, next_fire_at=?3, claimed_until=NULL, updated_at=?4 WHERE id=?1")
+    sqlx::query("UPDATE cron_schedules SET last_triggered_at=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1")
         .bind(id.to_string())
         .bind(ts(last_triggered_at))
         .bind(ts(next_fire_at))
@@ -163,7 +157,7 @@ pub(super) async fn record_skip(
     next_fire_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
     sqlx::query(
-        "UPDATE cron_schedules SET skipped_fires = skipped_fires + 1, last_skipped_at = ?2, last_triggered_at = ?2, next_fire_at = ?3, claimed_until = NULL, updated_at = ?2 WHERE id = ?1",
+        "UPDATE cron_schedules SET skipped_fires = skipped_fires + 1, last_skipped_at = ?2, last_triggered_at = ?2, next_fire_at = ?3, updated_at = ?2 WHERE id = ?1",
     )
     .bind(id.to_string())
     .bind(ts(now))

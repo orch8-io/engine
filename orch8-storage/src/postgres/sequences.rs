@@ -211,11 +211,6 @@ async fn delete_on(conn: &mut sqlx::PgConnection, id: SequenceId) -> Result<(), 
             "worker_tasks",
             "externalized_state",
             "instance_kv_state",
-            // No FK to task_instances (unlike audit_log, which cascades), so
-            // these would be orphaned -- same set `delete_terminal_instances`
-            // cleans explicitly.
-            "step_logs",
-            "usage_events",
         ] {
             let sql = match *table {
                 "block_outputs" => "DELETE FROM block_outputs WHERE instance_id = ANY($1)",
@@ -226,8 +221,6 @@ async fn delete_on(conn: &mut sqlx::PgConnection, id: SequenceId) -> Result<(), 
                     "DELETE FROM externalized_state WHERE instance_id = ANY($1)"
                 }
                 "instance_kv_state" => "DELETE FROM instance_kv_state WHERE instance_id = ANY($1)",
-                "step_logs" => "DELETE FROM step_logs WHERE instance_id = ANY($1)",
-                "usage_events" => "DELETE FROM usage_events WHERE instance_id = ANY($1)",
                 _ => continue,
             };
             sqlx::query(sql)
@@ -235,15 +228,6 @@ async fn delete_on(conn: &mut sqlx::PgConnection, id: SequenceId) -> Result<(), 
                 .execute(&mut *conn)
                 .await?;
         }
-
-        // Dedupe rows scoped to a deleted parent can never match again.
-        sqlx::query(
-            "DELETE FROM emit_event_dedupe \
-             WHERE scope_kind = 'parent' AND scope_value = ANY($1::uuid[]::text[])",
-        )
-        .bind(&instance_ids)
-        .execute(&mut *conn)
-        .await?;
 
         sqlx::query("DELETE FROM task_instances WHERE sequence_id = $1")
             .bind(id.into_uuid())

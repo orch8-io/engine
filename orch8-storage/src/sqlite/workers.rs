@@ -122,9 +122,7 @@ pub(super) async fn claim(
     let mut conn = begin_immediate(&storage.pool).await?;
 
     let select_res = sqlx::query(
-        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND requirements='{}' \
-         AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) \
-         ORDER BY created_at ASC LIMIT ?2",
+        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND requirements='{}' ORDER BY created_at ASC LIMIT ?2",
     )
     .bind(handler_name)
     .bind(limit as i64)
@@ -202,7 +200,6 @@ pub(super) async fn claim_for_tenant(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
          WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.requirements='{}' AND ti.tenant_id=?3
-           AND ti.state NOT IN ('completed', 'failed', 'cancelled')
          ORDER BY wt.created_at ASC
          LIMIT ?2",
     )
@@ -262,9 +259,6 @@ pub(super) async fn claim_for_tenant(
     Ok(tasks)
 }
 
-/// Upper bound on pending rows one `claim_matching` poll inspects.
-const CLAIM_MATCHING_MAX_SCAN: usize = 4096;
-
 pub(super) async fn claim_matching(
     storage: &SqliteStorage,
     handler_name: &str,
@@ -283,11 +277,7 @@ pub(super) async fn claim_matching(
     let now = Utc::now();
     let mut tasks = Vec::with_capacity(limit as usize);
     let mut cursor: Option<(String, String)> = None;
-    // Cap the scan (rows rejected on capability requirements are skipped in
-    // Rust) so a deep backlog of unsatisfiable tasks can't turn one poll into
-    // a full-table walk while holding the write lock. Matches Postgres.
-    let mut scanned = 0usize;
-    while tasks.len() < limit as usize && scanned < CLAIM_MATCHING_MAX_SCAN {
+    while tasks.len() < limit as usize {
         let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT wt.* FROM worker_tasks wt");
         if tenant_id.is_some() {
             query.push(" JOIN task_instances ti ON ti.id=wt.instance_id");
@@ -296,8 +286,6 @@ pub(super) async fn claim_matching(
             .push(" WHERE wt.handler_name=")
             .push_bind(handler_name);
         query.push(" AND wt.state='pending'");
-        // See the Postgres twin: no work for terminal/cancelled instances.
-        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))");
         if let Some(queue) = queue_name {
             query.push(" AND wt.queue_name=").push_bind(queue);
         }
@@ -319,7 +307,6 @@ pub(super) async fn claim_matching(
         if rows.is_empty() {
             break;
         }
-        scanned += rows.len();
         let page = rows
             .iter()
             .map(row_to_worker_task)
@@ -555,7 +542,7 @@ pub(super) async fn reap_stale(
             .unwrap_or_else(|_| chrono::Duration::seconds(300));
     let mut conn = begin_immediate(&storage.pool).await?;
     let rows: Vec<(String, i64, Option<String>)> = sqlx::query_as(
-        "SELECT id,claim_epoch,worker_id FROM worker_tasks WHERE state='claimed' AND (COALESCE(heartbeat_at, claimed_at) IS NULL OR COALESCE(heartbeat_at, claimed_at) < ?1)",
+        "SELECT id,claim_epoch,worker_id FROM worker_tasks WHERE state='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
     )
     .bind(ts(cutoff))
     .fetch_all(&mut *conn)

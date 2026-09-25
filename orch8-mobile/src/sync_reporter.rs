@@ -25,16 +25,6 @@ use crate::storage::{MobileStorage, SyncExecutionStepProjection, SyncInstancePro
 const MIN_SYNC_INTERVAL_SECS: u32 = 5;
 const MAX_SYNC_INTERVAL_SECS: u32 = 3600;
 const COMMAND_PRUNE_INTERVAL: chrono::Duration = chrono::Duration::days(1);
-/// Cap on a sync response body (commands + interval hint).
-const MAX_SYNC_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
-/// A `started` idempotency marker older than this belongs to an execution
-/// that crashed before recording completion; the redelivered command is
-/// re-executed (at-least-once) instead of being silently dropped.
-const STALE_STARTED_MARKER: chrono::Duration = chrono::Duration::minutes(5);
-/// How many times a command whose target does not exist yet (e.g. a
-/// `start_workflow` for a sequence that has not synced) is redelivered
-/// before it is acked as failed instead of retried forever.
-const MAX_NOT_FOUND_REDELIVERIES: u32 = 20;
 
 /// Batched status + approval reporter that syncs with the server on a
 /// configurable wall-clock cadence. Receives commands from the server and executes
@@ -51,8 +41,6 @@ pub(crate) struct SyncReporter {
     clock: SharedClock,
     push_generation: AtomicU64,
     completed_push_generation: AtomicU64,
-    /// Per-command redelivery count for [`CommandOutcome::RetryNotFound`].
-    not_found_redeliveries: StdMutex<HashMap<String, u32>>,
 }
 
 #[derive(serde::Serialize)]
@@ -90,23 +78,9 @@ enum CommandOutcome {
     /// Side effects applied, or the command is permanently invalid (bad
     /// payload, unknown type) — ack it so the server stops redelivering.
     Done,
-    /// Transient failure (storage error, resource limit) — do not ack; the
-    /// server will redeliver and we re-execute.
+    /// Transient failure (storage error, resource limit, sequence not synced
+    /// yet) — do not ack; the server will redeliver and we re-execute.
     Retryable,
-    /// The command's target does not exist locally (yet) — e.g. the sequence
-    /// has not synced. Retried like `Retryable`, but only up to
-    /// `MAX_NOT_FOUND_REDELIVERIES` times, then acked as failed.
-    RetryNotFound,
-}
-
-/// Result of claiming a command's idempotency marker.
-enum MarkerClaim {
-    /// Fresh (or stale-crashed) marker claimed — run the side effects.
-    Execute,
-    /// Side effects already applied — just re-ack.
-    AlreadyDone,
-    /// Another execution is running right now — neither run nor ack.
-    InProgress,
 }
 
 type OutboxEntry = (String, String);
@@ -150,7 +124,6 @@ impl SyncReporter {
             clock,
             push_generation: AtomicU64::new(0),
             completed_push_generation: AtomicU64::new(0),
-            not_found_redeliveries: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -285,17 +258,6 @@ impl SyncReporter {
 
         if let Err(e) = result {
             warn!(error = %e, "failed to create sync_executed_commands table");
-        }
-        // MOB-N7: `started` while side effects run, `done` once they are
-        // applied. Pre-existing rows (written after success) default to done.
-        if let Err(e) = sqlx::query(
-            "ALTER TABLE sync_executed_commands ADD COLUMN status TEXT NOT NULL DEFAULT 'done'",
-        )
-        .execute(&self.pool)
-        .await
-            && !e.to_string().contains("duplicate column")
-        {
-            warn!(error = %e, "failed to add sync_executed_commands.status column");
         }
     }
 
@@ -487,15 +449,7 @@ impl SyncReporter {
             }
         };
 
-        let body =
-            match orch8_engine::outbound::read_body_capped(resp, MAX_SYNC_RESPONSE_BYTES).await {
-                Ok(body) => body,
-                Err(e) => {
-                    warn!(error = ?e, "failed to read sync response");
-                    return false;
-                }
-            };
-        let sync_resp: SyncResponse = match serde_json::from_slice(&body) {
+        let sync_resp: SyncResponse = match resp.json().await {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "failed to parse sync response");
@@ -526,24 +480,21 @@ impl SyncReporter {
             // without this check that redelivery re-runs side effects (e.g.
             // starting a duplicate workflow instance, or double-cancelling)
             // instead of converging as a no-op.
-            //
-            // MOB-N7: the marker is `started` while side effects run and only
-            // becomes `done` afterwards. A crash in between leaves a stale
-            // `started` marker, and the redelivery re-executes (at-least-once)
-            // instead of being dropped as a duplicate (at-most-once loss).
-            let outcome = match self.claim_command_marker(&cmd.id).await {
-                Ok(MarkerClaim::Execute) => {
-                    Some(self.execute_command(cmd, storage, lifecycle).await)
-                }
-                Ok(MarkerClaim::AlreadyDone) => {
+            let insert_result = sqlx::query(
+                "INSERT INTO sync_executed_commands (command_id, executed_at) VALUES (?, ?)",
+            )
+            .bind(&cmd.id)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await;
+
+            let outcome = match insert_result {
+                Ok(_) => Some(self.execute_command(cmd, storage, lifecycle).await),
+                Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
                     debug!(command_id = %cmd.id, "command already executed — skipping duplicate delivery");
                     // Already executed: fall through to re-record the ack so
                     // the server stops redelivering.
                     None
-                }
-                Ok(MarkerClaim::InProgress) => {
-                    debug!(command_id = %cmd.id, "command execution in progress — not acking yet");
-                    continue;
                 }
                 Err(e) => {
                     // Without the idempotency marker, executing is unsafe (a
@@ -552,27 +503,6 @@ impl SyncReporter {
                     warn!(error = %e, command_id = %cmd.id, "failed to record command idempotency marker; skipping execution until redelivery");
                     continue;
                 }
-            };
-
-            let outcome = match outcome {
-                Some(CommandOutcome::RetryNotFound) => {
-                    let attempts = {
-                        let mut counts = self
-                            .not_found_redeliveries
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let n = counts.entry(cmd.id.clone()).or_insert(0);
-                        *n += 1;
-                        *n
-                    };
-                    if attempts >= MAX_NOT_FOUND_REDELIVERIES {
-                        warn!(command_id = %cmd.id, attempts, "command target still missing after max redeliveries — acking as failed");
-                        Some(CommandOutcome::Done)
-                    } else {
-                        Some(CommandOutcome::Retryable)
-                    }
-                }
-                other => other,
             };
 
             if let Some(CommandOutcome::Retryable) = outcome {
@@ -589,21 +519,6 @@ impl SyncReporter {
                     warn!(error = %e, command_id = %cmd.id, "failed to roll back idempotency marker after retryable command failure");
                 }
                 continue;
-            }
-            if outcome.is_some() {
-                self.not_found_redeliveries
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&cmd.id);
-                if let Err(e) = sqlx::query(
-                    "UPDATE sync_executed_commands SET status = 'done' WHERE command_id = ?",
-                )
-                .bind(&cmd.id)
-                .execute(&self.pool)
-                .await
-                {
-                    warn!(error = %e, command_id = %cmd.id, "failed to mark command done");
-                }
             }
 
             if let Err(e) =
@@ -664,44 +579,6 @@ impl SyncReporter {
         commands_received
     }
 
-    /// Claim the durable idempotency marker for `command_id`.
-    async fn claim_command_marker(&self, command_id: &str) -> Result<MarkerClaim, sqlx::Error> {
-        let now = chrono::Utc::now();
-        let inserted = sqlx::query(
-            "INSERT INTO sync_executed_commands (command_id, executed_at, status) VALUES (?, ?, 'started') \
-             ON CONFLICT(command_id) DO NOTHING",
-        )
-        .bind(command_id)
-        .bind(now.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-        if inserted.rows_affected() == 1 {
-            return Ok(MarkerClaim::Execute);
-        }
-        // Take over a stale `started` marker atomically (a crashed run).
-        let reclaimed = sqlx::query(
-            "UPDATE sync_executed_commands SET executed_at = ? \
-             WHERE command_id = ? AND status = 'started' AND executed_at < ?",
-        )
-        .bind(now.to_rfc3339())
-        .bind(command_id)
-        .bind((now - STALE_STARTED_MARKER).to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-        if reclaimed.rows_affected() == 1 {
-            return Ok(MarkerClaim::Execute);
-        }
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM sync_executed_commands WHERE command_id = ?")
-                .bind(command_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(match status.as_deref() {
-            Some("started") => MarkerClaim::InProgress,
-            _ => MarkerClaim::AlreadyDone,
-        })
-    }
-
     #[allow(clippy::too_many_lines)]
     async fn execute_command(
         &self,
@@ -759,9 +636,9 @@ impl SyncReporter {
                         warn!(instance_id = %iid, "invalid UUID in cancel_instance command");
                         return CommandOutcome::Done;
                     };
-                    if let Err(e) =
-                        transition_unless_terminal(storage.as_ref(), id, InstanceState::Cancelled)
-                            .await
+                    if let Err(e) = storage
+                        .update_instance_state(id, InstanceState::Cancelled, None)
+                        .await
                     {
                         warn!(error = %e, "failed to cancel instance from server command");
                         return CommandOutcome::Retryable;
@@ -791,12 +668,6 @@ impl SyncReporter {
                         // Permanently invalid input won't succeed on redelivery.
                         Err(e @ crate::error::MobileError::InvalidInput { .. }) => {
                             warn!(error = %e, sequence_name = %name, "start_workflow command has invalid input — not retrying");
-                        }
-                        // The sequence may simply not have synced yet: retry,
-                        // but only a bounded number of times.
-                        Err(e @ crate::error::MobileError::NotFound { .. }) => {
-                            warn!(error = %e, sequence_name = %name, "start_workflow target sequence not found");
-                            return CommandOutcome::RetryNotFound;
                         }
                         Err(e) => {
                             warn!(error = %e, sequence_name = %name, "failed to start workflow from server command");
@@ -829,30 +700,12 @@ impl SyncReporter {
                         return CommandOutcome::Done;
                     };
 
-                    // MOB-N5: a server command must never overwrite a
-                    // terminal state (e.g. flip Completed to Cancelled/Failed,
-                    // or restart a workflow that already finished).
-                    match storage.get_instance(inst_id).await {
-                        Ok(Some(inst)) if inst.state.is_terminal() => {
-                            debug!(instance_id = %iid, state = %inst.state, "update_sequence: instance is terminal — skipping");
-                            return CommandOutcome::Done;
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            warn!(error = %e, "update_sequence: instance lookup failed");
-                            return CommandOutcome::Retryable;
-                        }
-                    }
-
                     match policy {
                         "restart" => {
                             // Cancel existing, start fresh with same sequence
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
-                                inst_id,
-                                InstanceState::Cancelled,
-                            )
-                            .await
+                            if let Err(e) = storage
+                                .update_instance_state(inst_id, InstanceState::Cancelled, None)
+                                .await
                             {
                                 warn!(error = %e, "update_sequence(restart): cancel failed");
                                 return CommandOutcome::Retryable;
@@ -875,24 +728,18 @@ impl SyncReporter {
                             }
                         }
                         "fail" => {
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
-                                inst_id,
-                                InstanceState::Failed,
-                            )
-                            .await
+                            if let Err(e) = storage
+                                .update_instance_state(inst_id, InstanceState::Failed, None)
+                                .await
                             {
                                 warn!(error = %e, "update_sequence(fail): failed");
                                 return CommandOutcome::Retryable;
                             }
                         }
                         "cancel" => {
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
-                                inst_id,
-                                InstanceState::Cancelled,
-                            )
-                            .await
+                            if let Err(e) = storage
+                                .update_instance_state(inst_id, InstanceState::Cancelled, None)
+                                .await
                             {
                                 warn!(error = %e, "update_sequence(cancel): failed");
                                 return CommandOutcome::Retryable;
@@ -909,12 +756,9 @@ impl SyncReporter {
                             // Cancel old, start new with same sequence; executed steps
                             // will be skipped by the engine if the execution tree
                             // carries forward completed node states.
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
-                                inst_id,
-                                InstanceState::Cancelled,
-                            )
-                            .await
+                            if let Err(e) = storage
+                                .update_instance_state(inst_id, InstanceState::Cancelled, None)
+                                .await
                             {
                                 warn!(error = %e, "update_sequence(skip_executed): cancel failed");
                                 return CommandOutcome::Retryable;
@@ -1016,33 +860,6 @@ impl SyncReporter {
             }
         }
     }
-}
-
-/// Compare-and-set `id` to `target` unless it is already terminal. Returns
-/// `Ok(false)` when the instance is missing or terminal (nothing to do).
-/// Retries a few times if the state moves concurrently between read and CAS.
-async fn transition_unless_terminal(
-    storage: &dyn StorageBackend,
-    id: InstanceId,
-    target: InstanceState,
-) -> Result<bool, orch8_types::error::StorageError> {
-    for _ in 0..3 {
-        let Some(inst) = storage.get_instance(id).await? else {
-            return Ok(false);
-        };
-        if inst.state.is_terminal() {
-            return Ok(false);
-        }
-        if storage
-            .conditional_update_instance_state(id, inst.state, target, None)
-            .await?
-        {
-            return Ok(true);
-        }
-    }
-    Err(orch8_types::error::StorageError::Conflict(format!(
-        "instance {id} state kept changing; transition to {target} not applied"
-    )))
 }
 
 async fn delete_outbox_rows(pool: &SqlitePool, ids: &[i64]) -> Result<(), sqlx::Error> {

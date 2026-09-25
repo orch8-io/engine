@@ -12,7 +12,7 @@ use orch8_types::output::BlockOutput;
 use orch8_types::sequence::ForEachDef;
 
 use crate::error::EngineError;
-use crate::evaluator::{self, SeqProgress};
+use crate::evaluator;
 use crate::handlers::HandlerRegistry;
 use crate::handlers::param_resolve::OutputsSnapshot;
 
@@ -25,10 +25,6 @@ use crate::handlers::param_resolve::OutputsSnapshot;
 /// absurdly large — see `docs/plans/workflow-validation-infinite-loops.md`
 /// for the plan to reject such workflows at submit time.
 pub const FOR_EACH_ABSOLUTE_MAX: u32 = 1_000_000;
-
-/// Marker field set while an iteration advance is in flight: the advanced
-/// index is durable but the body reset may not have finished.
-const RESET_PENDING_KEY: &str = "_reset_pending";
 
 /// Execute a `for_each` block.
 ///
@@ -49,13 +45,12 @@ const RESET_PENDING_KEY: &str = "_reset_pending";
 ///   2. Reads the current iteration index from its marker output.
 ///   3. Trips the cap (completes the node) if the counter has reached the
 ///      effective max.
-///   4. At the start of an iteration (every body child `Pending`), binds
-///      `item_var = items[index]` in the instance context, then advances the
-///      body's sequential cursor one block at a time.
-///   5. A failed body block stops the iteration and fails the `for_each`;
-///      a fully drained body advances the index (durably, before the reset)
-///      and resets the body subtree to `Pending` so the next tick
-///      re-executes it against the next element.
+///   4. If body children are `Pending`, binds `item_var = items[index]` in
+///      the instance context and activates the children to `Running`.
+///   5. If every body child is terminal, either fails the `for_each` (on any
+///      child failure) or increments the index, persists the marker, and
+///      resets the body subtree to `Pending` so the next tick re-executes
+///      it against the next element.
 ///
 /// Returns `Ok(true)` to indicate more work; the scheduler will re-dispatch.
 #[allow(clippy::too_many_lines)]
@@ -110,10 +105,7 @@ pub async fn execute_for_each(
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0);
-        let items_snap = match storage
-            .get_externalized_state(instance.id, &snapshot_ref_key)
-            .await
-        {
+        let items_snap = match storage.get_externalized_state(&snapshot_ref_key).await {
             Ok(Some(val)) => val.as_array().cloned().unwrap_or_default(),
             Ok(None) => {
                 warn!(
@@ -196,53 +188,10 @@ pub async fn execute_for_each(
     let snapshot_len = u32::try_from(snapshot_items.len()).unwrap_or(u32::MAX);
     let user_max = fe_def.max_iterations.min(FOR_EACH_ABSOLUTE_MAX);
     let effective_max = snapshot_len.min(user_max);
-    let marker_for = |index: u32, reset_pending: bool| {
-        let mut output = serde_json::json!({
-            "_index": index,
-            "_total": snapshot_items.len(),
-            "_item_var": fe_def.item_var,
-            "_snapshot_ref": snapshot_ref_key,
-        });
-        if reset_pending {
-            output[RESET_PENDING_KEY] = serde_json::Value::Bool(true);
-        }
-        BlockOutput {
-            id: uuid::Uuid::now_v7(),
-            instance_id: instance.id,
-            block_id: fe_def.id.clone(),
-            output,
-            output_ref: None,
-            output_size: 0,
-            attempt: u16::try_from(index).unwrap_or(u16::MAX),
-            created_at: chrono::Utc::now(),
-        }
-    };
-
-    // Crash recovery: a previous tick durably advanced the index but may
-    // have died before (or while) resetting the body. Finish the idempotent
-    // reset and clear the flag (see the ordering note at the advance below).
-    if prior_marker
-        .as_ref()
-        .and_then(|m| m.output.get(RESET_PENDING_KEY))
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
-        evaluator::reset_subtree_to_pending(
-            storage,
-            tree,
-            &instance.tenant_id,
-            instance.id,
-            node.id,
-        )
-        .await?;
-        storage.save_block_output(&marker_for(index, false)).await?;
-        return Ok(true);
-    }
 
     // Hard cap: completed.
     if index >= effective_max {
-        evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Completed)
-            .await?;
+        evaluator::complete_node(storage, node.id).await?;
 
         // Clean up the item variable from context to prevent data leakage
         // to subsequent steps. The last iteration's item value would
@@ -261,88 +210,97 @@ pub async fn execute_for_each(
 
     let children = evaluator::children_of(tree, node.id, None);
 
-    // Start-of-iteration: while no body block has started yet, bind
-    // `item_var = items[index]` so the body observes this iteration's item.
-    // Gating on "every child Pending" binds exactly once per iteration.
-    if children.iter().all(|c| c.state == NodeState::Pending)
-        && let Some(item) = snapshot_items.get(index as usize)
-    {
-        bind_item_var(storage, instance, &fe_def.item_var, item.clone()).await?;
+    // Start-of-iteration: when the body children are still Pending, bind
+    // `item_var = items[index]` and activate the first one. We gate on "any
+    // child Pending" so the bind happens exactly once per iteration —
+    // subsequent ticks while the body is running observe no Pending children
+    // and skip. Sequential cursor: only the first Pending child should start.
+    let has_pending_child = children.iter().any(|c| c.state == NodeState::Pending);
+    if has_pending_child {
+        if let Some(item) = snapshot_items.get(index as usize) {
+            bind_item_var(storage, instance, &fe_def.item_var, item.clone()).await?;
+        }
+        evaluator::activate_first_pending_child(storage, &children).await?;
     }
 
-    // Sequential cursor with fail-fast: a failed body block stops the
-    // iteration (and fails the for_each) instead of letting successors run.
-    match evaluator::advance_sequence(storage, &children).await? {
-        SeqProgress::Advanced | SeqProgress::Blocked => return Ok(true),
-        SeqProgress::Failed | SeqProgress::Cancelled => {
+    // End-of-iteration: if every body child is terminal, either fail (on
+    // any child failure) or advance the index, save the marker, and reset
+    // the body subtree so the next tick starts the next iteration.
+    if !children.is_empty() && evaluator::all_terminal(&children) {
+        if evaluator::any_failed(&children) {
             // Drop the last iteration's item binding before failing so it
             // does not leak into on_failure handlers and later context
             // readers — the same cleanup the completion path performs.
             // Best-effort and idempotent.
             cleanup_item_var(storage, instance.id, &fe_def.item_var).await;
-            evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Failed)
-                .await?;
+            evaluator::fail_node(storage, node.id).await?;
             return Ok(true);
         }
-        SeqProgress::Done => {}
-    }
 
-    // End-of-iteration: advance the index and reset the body subtree so the
-    // next tick starts the next iteration.
-    //
-    // Ordering (crash safety): the reset deletes the body's effect receipts,
-    // so it must never precede a durable index advance — a crash in between
-    // would re-run this iteration without its idempotency records. Persist
-    // the advanced index flagged `_reset_pending` first, then reset
-    // (idempotent), then clear the flag; an interrupted advance is finished
-    // by the recovery branch above. Skipped at the cap so the body stays
-    // terminal for clean close-out.
-    let next_index = index.saturating_add(1);
-    if next_index < effective_max {
-        storage
-            .save_block_output(&marker_for(next_index, true))
+        let next_index = index.saturating_add(1);
+        let marker = BlockOutput {
+            id: uuid::Uuid::now_v7(),
+            instance_id: instance.id,
+            block_id: fe_def.id.clone(),
+            output: serde_json::json!({
+                "_index": next_index,
+                "_total": snapshot_items.len(),
+                "_item_var": fe_def.item_var,
+                "_snapshot_ref": snapshot_ref_key,
+            }),
+            output_ref: None,
+            output_size: 0,
+            attempt: u16::try_from(next_index).unwrap_or(u16::MAX),
+            created_at: chrono::Utc::now(),
+        };
+        // Reset the body subtree BEFORE persisting the advanced marker: if
+        // the reset fails, the stored counter still matches the still-terminal
+        // body and the next tick retries the idempotent reset instead of
+        // counting a phantom iteration whose body never ran (same ordering
+        // rationale as loop_block). Skipped at the cap so the body stays
+        // terminal for clean close-out.
+        if next_index < effective_max {
+            evaluator::reset_subtree_to_pending(
+                storage,
+                tree,
+                &instance.tenant_id,
+                instance.id,
+                node.id,
+            )
             .await?;
-        evaluator::reset_subtree_to_pending(
-            storage,
-            tree,
-            &instance.tenant_id,
-            instance.id,
-            node.id,
-        )
-        .await?;
-    }
-    storage
-        .save_block_output(&marker_for(next_index, false))
-        .await?;
-
-    // Compact old body-step outputs once the retained window is exceeded.
-    if let Some(retain) = fe_def.retain_iterations {
-        match crate::evaluator::compact_iteration_outputs(
-            storage,
-            instance.id,
-            &fe_def.body,
-            retain,
-        )
-        .await
-        {
-            Ok(n) if n > 0 => crate::metrics::inc_by(crate::metrics::LOOP_OUTPUTS_COMPACTED, n),
-            Ok(_) => {}
-            Err(e) => warn!(
-                instance_id = %instance.id,
-                block_id = %fe_def.id,
-                error = %e,
-                "for_each output compaction failed (continuing)"
-            ),
         }
-    }
 
-    debug!(
-        instance_id = %instance.id,
-        block_id = %fe_def.id,
-        index = next_index,
-        total = snapshot_items.len(),
-        "for_each iteration completed"
-    );
+        storage.save_block_output(&marker).await?;
+
+        // Compact old body-step outputs once the retained window is exceeded.
+        if let Some(retain) = fe_def.retain_iterations {
+            match crate::evaluator::compact_iteration_outputs(
+                storage,
+                instance.id,
+                &fe_def.body,
+                retain,
+            )
+            .await
+            {
+                Ok(n) if n > 0 => crate::metrics::inc_by(crate::metrics::LOOP_OUTPUTS_COMPACTED, n),
+                Ok(_) => {}
+                Err(e) => warn!(
+                    instance_id = %instance.id,
+                    block_id = %fe_def.id,
+                    error = %e,
+                    "for_each output compaction failed (continuing)"
+                ),
+            }
+        }
+
+        debug!(
+            instance_id = %instance.id,
+            block_id = %fe_def.id,
+            index = next_index,
+            total = snapshot_items.len(),
+            "for_each iteration completed"
+        );
+    }
 
     Ok(true)
 }
@@ -1051,74 +1009,5 @@ mod tests {
 
         let updated = s.get_instance(inst_id).await.unwrap().unwrap();
         assert_eq!(updated.context.data["item"], json!("a"));
-    }
-
-    /// Run-past-failure: a failed body block stops the iteration — its
-    /// successor never runs — and fails the `for_each`.
-    #[tokio::test]
-    async fn failed_body_block_stops_iteration_and_fails_for_each() {
-        let s = SqliteStorage::in_memory().await.unwrap();
-        let inst_id = InstanceId::new();
-        seed_instance(&s, inst_id, json!({"items": ["x", "y"]})).await;
-        let inst = mk_instance_for(inst_id, json!({"items": ["x", "y"]}));
-
-        let mut fe = mk_node(inst_id, "fe", BlockType::ForEach, None);
-        fe.state = NodeState::Running;
-        let mut a = mk_node(inst_id, "a", BlockType::Step, Some(fe.id));
-        a.state = NodeState::Failed;
-        let mut b = mk_node(inst_id, "b", BlockType::Step, Some(fe.id));
-        b.state = NodeState::Pending;
-        s.create_execution_nodes_batch(&[fe.clone(), a, b.clone()])
-            .await
-            .unwrap();
-
-        let step = |id: &str| {
-            orch8_types::sequence::BlockDefinition::Step(Box::new(orch8_types::sequence::StepDef {
-                id: BlockId::new(id),
-                handler: "noop".into(),
-                params: json!({}),
-                delay: None,
-                retry: None,
-                timeout: None,
-                rate_limit_key: None,
-                send_window: None,
-                context_access: None,
-                cancellable: true,
-                wait_for_input: None,
-                queue_name: None,
-                deadline: None,
-                on_deadline_breach: None,
-                fallback_handler: None,
-                cache_key: None,
-                output_schema: None,
-                when: None,
-                compensation: None,
-            }))
-        };
-        let fe_def = ForEachDef {
-            id: BlockId::new("fe"),
-            collection: "items".into(),
-            item_var: "item".into(),
-            body: vec![step("a"), step("b")],
-            max_iterations: 10,
-            retain_iterations: None,
-        };
-        let tree = s.get_execution_tree(inst_id).await.unwrap();
-        execute_for_each(
-            &s,
-            &HandlerRegistry::new(),
-            &inst,
-            &fe,
-            &fe_def,
-            &tree,
-            &OutputsSnapshot::new(),
-        )
-        .await
-        .unwrap();
-
-        let after = s.get_execution_tree(inst_id).await.unwrap();
-        let state = |id| after.iter().find(|n| n.id == id).unwrap().state;
-        assert_eq!(state(fe.id), NodeState::Failed);
-        assert_eq!(state(b.id), NodeState::Skipped, "successor must never run");
     }
 }

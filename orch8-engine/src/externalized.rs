@@ -10,7 +10,6 @@
 use orch8_storage::StorageBackend;
 use orch8_types::context::ExecutionContext;
 use orch8_types::error::StorageError;
-use orch8_types::ids::InstanceId;
 use serde_json::Value;
 
 pub const EXTERNALIZED_FLAG: &str = "_externalized";
@@ -54,13 +53,8 @@ pub fn extract_ref_key(v: &Value) -> Option<&str> {
 /// Only top-level keys are scanned — nested objects are not recursed into.
 /// This mirrors the externalizer's write side: `externalize_fields` only
 /// promotes top-level keys, so the resolver only needs to look there.
-///
-/// Markers are plain JSON a client can forge (worker output, context patch),
-/// so resolution is scoped to `instance_id`: a marker naming another
-/// instance's `ref_key` is treated as a broken ref and left in place.
 pub async fn resolve_context_markers(
     storage: &dyn StorageBackend,
-    instance_id: InstanceId,
     mut ctx: ExecutionContext,
 ) -> Result<ExecutionContext, StorageError> {
     let Some(obj) = ctx.data.as_object_mut() else {
@@ -68,7 +62,7 @@ pub async fn resolve_context_markers(
     };
     for (_key, value) in obj.iter_mut() {
         if let Some(ref_key) = extract_ref_key(value)
-            && let Some(resolved) = storage.get_externalized_state(instance_id, ref_key).await?
+            && let Some(resolved) = storage.get_externalized_state(ref_key).await?
         {
             *value = resolved;
         }

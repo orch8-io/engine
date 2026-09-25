@@ -127,61 +127,6 @@ pub(super) async fn update(
     Ok(())
 }
 
-pub(super) async fn update_cas(
-    store: &SqliteStorage,
-    credential: &CredentialDef,
-    expected_updated_at: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, StorageError> {
-    let expires = credential.expires_at.map(|t| t.to_rfc3339());
-    // Strictly advance `updated_at` so the CAS token changes even when two
-    // writes land within the clock's resolution.
-    let now = chrono::Utc::now().max(expected_updated_at + chrono::Duration::microseconds(1));
-    let result = sqlx::query(
-        r"UPDATE credentials SET tenant_id=?2, name=?3, kind=?4, value=?5,
-          expires_at=?6, refresh_url=?7, refresh_token=?8, enabled=?9, description=?10,
-          updated_at=?11
-          WHERE id=?1 AND updated_at=?12",
-    )
-    .bind(&credential.id)
-    .bind(&credential.tenant_id)
-    .bind(&credential.name)
-    .bind(credential.kind.to_string())
-    .bind(credential.value.expose().to_string())
-    .bind(&expires)
-    .bind(&credential.refresh_url)
-    .bind(
-        credential
-            .refresh_token
-            .as_ref()
-            .map(|s| s.expose().to_string()),
-    )
-    .bind(credential.enabled)
-    .bind(&credential.description)
-    .bind(now.to_rfc3339())
-    .bind(expected_updated_at.to_rfc3339())
-    .execute(&store.pool)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
-pub(super) async fn claim_refresh(
-    store: &SqliteStorage,
-    id: &str,
-    now: chrono::DateTime<chrono::Utc>,
-    lease_until: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, StorageError> {
-    let result = sqlx::query(
-        r"UPDATE credentials SET refresh_claimed_until = ?2
-          WHERE id = ?1 AND (refresh_claimed_until IS NULL OR refresh_claimed_until < ?3)",
-    )
-    .bind(id)
-    .bind(lease_until.to_rfc3339())
-    .bind(now.to_rfc3339())
-    .execute(&store.pool)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
 pub(super) async fn delete(store: &SqliteStorage, id: &str) -> Result<(), StorageError> {
     sqlx::query("DELETE FROM credentials WHERE id = ?1")
         .bind(id)

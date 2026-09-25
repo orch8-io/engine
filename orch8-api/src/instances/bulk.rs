@@ -56,15 +56,7 @@ pub async fn bulk_update_state(
         tenant_id: scoped_tenant,
         namespace: req.filter.namespace.map(Namespace::new),
         sequence_id: req.filter.sequence_id.map(SequenceId::from_uuid),
-        // Restrict the UPDATE to legal source states for the target so a
-        // bulk flip can't re-queue Completed/Cancelled instances.
-        states: Some(
-            orch8_storage::lifecycle::bulk_transition_sources(
-                req.state,
-                req.filter.states.as_deref(),
-            )
-            .map_err(ApiError::InvalidArgument)?,
-        ),
+        states: req.filter.states,
         metadata_filter: metadata,
         priority: None,
     };
@@ -264,16 +256,22 @@ async fn apply_batch_action(
             if inst.state != InstanceState::Failed {
                 return Ok(false);
             }
-            // Same CAS-claimed retry as `POST /instances/{id}/retry`: the
-            // listed state may be stale, so the claim decides — a lost race
-            // is a skip, never a wipe of the live run's tree.
-            match orch8_storage::lifecycle::retry_failed_instance(state.storage.as_ref(), inst.id)
-                .await
+            // Mirror the single-instance retry: clear stale tree + sentinel
+            // outputs, reset the run identity (run_id, step counters — a
+            // stale step budget would instantly re-exhaust), then re-schedule.
+            let s = &state.storage;
+            if s.delete_execution_tree(inst.id).await.is_err()
+                || s.delete_sentinel_block_outputs(inst.id).await.is_err()
+                || s.reset_instance_run(inst.id, &Uuid::now_v7().to_string())
+                    .await
+                    .is_err()
+                || s.update_instance_state(inst.id, InstanceState::Scheduled, Some(Utc::now()))
+                    .await
+                    .is_err()
             {
-                Ok(orch8_storage::lifecycle::RetryOutcome::Retried) => Ok(true),
-                Ok(_) => Ok(false),
-                Err(_) => Err(()),
+                return Err(());
             }
+            Ok(true)
         }
         BatchAction::Pause | BatchAction::Resume | BatchAction::Cancel | BatchAction::Signal => {
             let signal_type = match req.action {

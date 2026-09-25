@@ -75,43 +75,25 @@ impl PushOutboxStore for PostgresStorage {
         lease_until: DateTime<Utc>,
         limit: u32,
     ) -> Result<Vec<ClaimedWake>, String> {
-        // One statement: lease the due rows and return the device target
-        // from the same join (no per-row follow-up query, which also looked
-        // the device up without its tenant and panicked on a NULL token).
-        // `FOR UPDATE OF o` locks only outbox rows, not the device rows.
-        let rows = sqlx::query(
-            "WITH due AS (SELECT o.id FROM push_wake_outbox o JOIN mobile_devices d ON d.device_id=o.device_id AND d.tenant_id=o.tenant_id \
-             WHERE d.active=TRUE AND d.push_token IS NOT NULL AND ((o.status='pending' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=$1)) OR (o.status='in_flight' AND o.lease_until<=$1)) \
-             ORDER BY o.created_at LIMIT $3 FOR UPDATE OF o SKIP LOCKED) \
-             UPDATE push_wake_outbox o SET status='in_flight',lease_until=$2 FROM due, mobile_devices d \
-             WHERE o.id=due.id AND d.device_id=o.device_id AND d.tenant_id=o.tenant_id \
-             RETURNING o.id,o.tenant_id,o.device_id,o.command_id,o.attempts,d.push_token,d.platform",
-        )
-        .bind(now)
-        .bind(lease_until)
-        .bind(i64::from(limit))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| error.to_string())?;
+        let rows = sqlx::query("UPDATE push_wake_outbox SET status='in_flight',lease_until=$2 WHERE id IN (SELECT o.id FROM push_wake_outbox o JOIN mobile_devices d ON d.device_id=o.device_id AND d.tenant_id=o.tenant_id WHERE d.active=TRUE AND d.push_token IS NOT NULL AND ((o.status='pending' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=$1)) OR (o.status='in_flight' AND o.lease_until<=$1)) ORDER BY o.created_at LIMIT $3 FOR UPDATE SKIP LOCKED) RETURNING id,tenant_id,device_id,command_id,attempts")
+            .bind(now).bind(lease_until).bind(i64::from(limit)).fetch_all(&self.pool).await.map_err(|error| error.to_string())?;
         let mut wakes = Vec::with_capacity(rows.len());
         for row in rows {
-            let err = |error: sqlx::Error| error.to_string();
-            // A token NULLed concurrently (dead-token cleanup) leaves the row
-            // leased; it is re-evaluated when the lease expires.
-            let Some(push_token) = row
-                .try_get::<Option<String>, _>("push_token")
-                .map_err(err)?
-            else {
-                continue;
-            };
+            let device_id: String = row.get("device_id");
+            let target =
+                sqlx::query("SELECT push_token,platform FROM mobile_devices WHERE device_id=$1")
+                    .bind(&device_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|error| error.to_string())?;
             wakes.push(ClaimedWake {
-                id: row.try_get("id").map_err(err)?,
-                tenant_id: row.try_get("tenant_id").map_err(err)?,
-                device_id: row.try_get("device_id").map_err(err)?,
-                command_id: row.try_get("command_id").map_err(err)?,
-                push_token,
-                platform: row.try_get("platform").map_err(err)?,
-                attempts: u32::try_from(row.try_get::<i32, _>("attempts").map_err(err)?)
+                id: row.get("id"),
+                tenant_id: row.get("tenant_id"),
+                device_id,
+                command_id: row.get("command_id"),
+                push_token: target.get("push_token"),
+                platform: target.get("platform"),
+                attempts: u32::try_from(row.get::<i32, _>("attempts"))
                     .map_err(|error| error.to_string())?,
                 lease_until,
             });
@@ -140,14 +122,11 @@ impl PushOutboxStore for PostgresStorage {
                 ..
             }
         ) {
-            // Only clear the token the provider rejected: the device may have
-            // re-registered a fresh token while this wake was in flight.
             sqlx::query(
-                "UPDATE mobile_devices SET active=FALSE,push_token=NULL WHERE tenant_id=$1 AND device_id=$2 AND push_token=$3",
+                "UPDATE mobile_devices SET active=FALSE,push_token=NULL WHERE tenant_id=$1 AND device_id=$2",
             )
             .bind(&wake.tenant_id)
             .bind(&wake.device_id)
-            .bind(&wake.push_token)
             .execute(&mut *transaction)
             .await
             .map_err(|error| error.to_string())?;
@@ -170,15 +149,6 @@ impl PushOutboxStore for PostgresStorage {
         }
         sqlx::query("UPDATE push_wake_outbox SET command_acked_at=$3 WHERE device_id=$1 AND command_id=ANY($2)")
             .bind(device_id).bind(command_ids).bind(acked_at).execute(&self.pool).await.map(|result| result.rows_affected()).map_err(|error| error.to_string())
-    }
-
-    async fn prune_wakes(&self, created_before: DateTime<Utc>) -> Result<u64, String> {
-        sqlx::query("DELETE FROM push_wake_outbox WHERE created_at<$1 AND status<>'in_flight'")
-            .bind(created_before)
-            .execute(&self.pool)
-            .await
-            .map(|result| result.rows_affected())
-            .map_err(|error| error.to_string())
     }
 }
 

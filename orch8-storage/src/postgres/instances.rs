@@ -64,7 +64,7 @@ pub(super) fn bind_instance_insert<'q>(
         .bind(&inst.metadata)
         .bind(context_json)
         .bind(&inst.concurrency_key)
-        .bind(super::rows::max_concurrency_bind(inst.max_concurrency))
+        .bind(inst.max_concurrency.map(i64::from))
         .bind(&inst.idempotency_key)
         .bind(inst.session_id)
         .bind(
@@ -201,7 +201,7 @@ async fn insert_batch_tx(
                     .push_bind(&inst.metadata)
                     .push_bind(context)
                     .push_bind(&inst.concurrency_key)
-                    .push_bind(super::rows::max_concurrency_bind(inst.max_concurrency))
+                    .push_bind(inst.max_concurrency.map(i64::from))
                     .push_bind(&inst.idempotency_key)
                     .push_bind(inst.session_id)
                     .push_bind(
@@ -377,15 +377,10 @@ async fn filter_by_concurrency_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     candidates: Vec<TaskInstance>,
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    // Concurrency keys are tenant-scoped: two tenants that happen to pick the
-    // same key string must not share (or starve each other of) slots.
-    let mut keyed: HashMap<(&str, &str), Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
+    let mut keyed: HashMap<&str, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
         if let (Some(key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
-            keyed
-                .entry((inst.tenant_id.as_str(), key.as_str()))
-                .or_default()
-                .push(idx);
+            keyed.entry(key.as_str()).or_default().push(idx);
         }
     }
 
@@ -393,62 +388,51 @@ async fn filter_by_concurrency_pg(
         return Ok(candidates);
     }
 
-    // Take a per-(tenant, key) advisory lock (scoped to this transaction;
-    // released automatically on commit/rollback) *before* counting running
-    // instances. Without this, two nodes claiming disjoint scheduled
-    // instances that share a `concurrency_key` can each read the same "N
-    // already running" count inside their own transaction and both admit up
-    // to `max_concurrency` slots' worth, overshooting the cap (e.g. max=5, 3
-    // running, two nodes each see 2 free slots and admit 2 → 7 running).
-    // Keys are locked in sorted order so two transactions contending for an
-    // overlapping key set always acquire locks in the same relative order,
-    // ruling out deadlock.
-    let mut keys: Vec<(&str, &str)> = keyed.keys().copied().collect();
+    // Take a per-key advisory lock (scoped to this transaction; released
+    // automatically on commit/rollback) *before* counting running instances.
+    // Without this, two nodes claiming disjoint scheduled instances that
+    // share a `concurrency_key` can each read the same "N already running"
+    // count inside their own transaction and both admit up to `max_concurrency`
+    // slots' worth, overshooting the cap (e.g. max=5, 3 running, two nodes
+    // each see 2 free slots and admit 2 → 7 running). Keys are locked in
+    // sorted order so two transactions contending for an overlapping key set
+    // always acquire locks in the same relative order, ruling out deadlock.
+    let mut keys: Vec<&str> = keyed.keys().copied().collect();
     keys.sort_unstable();
-    for (tenant, key) in &keys {
+    for key in &keys {
         // hashtextextended: 64-bit key — the 32-bit hashtext() collided often
-        // enough to falsely serialize unrelated concurrency keys. The tenant
-        // is length-prefixed so ("a:b", "c") and ("a", "b:c") differ.
+        // enough to falsely serialize unrelated concurrency keys.
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("{}:{tenant}:{key}", tenant.len()))
+            .bind(*key)
             .execute(&mut **tx)
             .await?;
     }
 
-    // Batch-fetch running counts for all (tenant, key) pairs in a single
-    // query instead of N separate COUNT queries.
-    let (tenants, key_names): (Vec<&str>, Vec<&str>) = keys.iter().copied().unzip();
+    // Batch-fetch running counts for all concurrency keys in a single query
+    // instead of N separate COUNT queries (one per key).
     let rows = sqlx::query(
-        "SELECT tenant_id, concurrency_key, COUNT(*) as cnt FROM task_instances \
-         WHERE (tenant_id, concurrency_key) IN (SELECT * FROM UNNEST($1::text[], $2::text[])) \
-           AND state = 'running' \
-         GROUP BY tenant_id, concurrency_key",
+        "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances \
+         WHERE concurrency_key = ANY($1) AND state = 'running' \
+         GROUP BY concurrency_key",
     )
-    .bind(&tenants)
-    .bind(&key_names)
+    .bind(&keys)
     .fetch_all(&mut **tx)
     .await?;
 
-    let running_counts: HashMap<(String, String), i64> = rows
+    let running_counts: HashMap<String, i64> = rows
         .into_iter()
         .map(|r| {
             (
-                (
-                    r.get::<String, _>("tenant_id"),
-                    r.get::<String, _>("concurrency_key"),
-                ),
+                r.get::<String, _>("concurrency_key"),
                 r.get::<i64, _>("cnt"),
             )
         })
         .collect();
 
     let mut excluded = Vec::new();
-    for (&(tenant, key), indices) in &keyed {
+    for (key, indices) in &keyed {
         let max = candidates[indices[0]].max_concurrency.unwrap_or(u32::MAX);
-        let already_running = running_counts
-            .get(&(tenant.to_owned(), key.to_owned()))
-            .copied()
-            .unwrap_or(0);
+        let already_running = running_counts.get(*key).copied().unwrap_or(0);
 
         #[allow(clippy::cast_possible_truncation)]
         let slots = (i64::from(max) - already_running).max(0) as usize;
@@ -852,7 +836,7 @@ pub(super) async fn create_batch_externalized(
                 .push_bind(&inst.metadata)
                 .push_bind(context)
                 .push_bind(&inst.concurrency_key)
-                .push_bind(super::rows::max_concurrency_bind(inst.max_concurrency))
+                .push_bind(inst.max_concurrency.map(i64::from))
                 .push_bind(&inst.idempotency_key)
                 .push_bind(inst.session_id)
                 .push_bind(
@@ -1224,14 +1208,6 @@ pub(super) async fn delete_terminal_instances(
         };
         sqlx::query(sql).bind(&ids).execute(&mut *tx).await?;
     }
-    // Parent-scoped dedupe rows of a purged parent can never match again.
-    sqlx::query(
-        "DELETE FROM emit_event_dedupe \
-         WHERE scope_kind = 'parent' AND scope_value = ANY($1::uuid[]::text[])",
-    )
-    .bind(&ids)
-    .execute(&mut *tx)
-    .await?;
 
     let result = sqlx::query("DELETE FROM task_instances WHERE id = ANY($1)")
         .bind(&ids)

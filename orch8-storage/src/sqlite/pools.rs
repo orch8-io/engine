@@ -39,7 +39,7 @@ pub(super) async fn list(
     storage: &SqliteStorage,
     tenant_id: &TenantId,
 ) -> Result<Vec<ResourcePool>, StorageError> {
-    let rows = sqlx::query("SELECT * FROM resource_pools WHERE tenant_id=?1 ORDER BY name")
+    let rows = sqlx::query("SELECT * FROM resource_pools WHERE tenant_id=?1")
         .bind(tenant_id.as_str())
         .fetch_all(&storage.pool)
         .await?;
@@ -94,7 +94,7 @@ pub(super) async fn list_resources(
     storage: &SqliteStorage,
     pool_id: Uuid,
 ) -> Result<Vec<PoolResource>, StorageError> {
-    let rows = sqlx::query("SELECT * FROM pool_resources WHERE pool_id=?1 ORDER BY name")
+    let rows = sqlx::query("SELECT * FROM pool_resources WHERE pool_id=?1")
         .bind(pool_id.to_string())
         .fetch_all(&storage.pool)
         .await?;

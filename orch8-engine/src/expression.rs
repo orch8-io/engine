@@ -739,8 +739,7 @@ impl<'a> Parser<'a> {
                 let n = match arg {
                     serde_json::Value::Array(a) => a.len(),
                     serde_json::Value::Object(m) => m.len(),
-                    // Characters, not UTF-8 bytes: `len("é")` is 1.
-                    serde_json::Value::String(s) => s.chars().count(),
+                    serde_json::Value::String(s) => s.len(),
                     _ => 0,
                 };
                 serde_json::json!(n)
@@ -785,17 +784,7 @@ impl<'a> Parser<'a> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("%Y-%m-%d");
                 chrono::DateTime::parse_from_rfc3339(iso).map_or(serde_json::Value::Null, |dt| {
-                    // `DelayedFormat`'s `Display` returns `fmt::Error` for an
-                    // invalid strftime spec (e.g. `%Q`), and `to_string()`
-                    // panics on that. Author-controlled formats (reachable
-                    // even from lint) must degrade to `null` instead.
-                    use std::fmt::Write as _;
-                    let mut out = String::new();
-                    if write!(out, "{}", dt.format(fmt)).is_ok() {
-                        serde_json::Value::String(out)
-                    } else {
-                        serde_json::Value::Null
-                    }
+                    serde_json::json!(dt.format(fmt).to_string())
                 })
             }
             "day_of_week" => {
@@ -2177,22 +2166,6 @@ mod tests {
             &outputs(),
         );
         assert_eq!(result, json!("2026-01-15"));
-    }
-
-    /// Regression: an invalid strftime spec made `to_string()` panic (the
-    /// `Display` impl returns `fmt::Error`). It must evaluate to `null`, and
-    /// linting such an expression must not panic either.
-    #[test]
-    fn eval_format_date_invalid_spec_is_null_not_panic() {
-        let expr = "format_date('2026-01-15T10:30:00+00:00', '%Q')";
-        assert_eq!(evaluate(expr, &ctx(), &outputs()), json!(null));
-        assert!(try_evaluate(expr, &ctx(), &outputs()).is_ok());
-    }
-
-    #[test]
-    fn eval_len_counts_chars_not_bytes() {
-        assert_eq!(evaluate("len('héllo')", &ctx(), &outputs()), json!(5));
-        assert_eq!(evaluate("len('日本')", &ctx(), &outputs()), json!(2));
     }
 
     // --- day_of_week() ---

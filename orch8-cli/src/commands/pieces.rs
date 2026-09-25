@@ -42,7 +42,7 @@ struct Piece {
 pub async fn run(cmd: PiecesCmd) -> Result<()> {
     match cmd {
         PiecesCmd::Search { query, sidecar_url } => {
-            let client = crate::external_client()?;
+            let client = reqwest::Client::new();
             let mut request = client.get(format!("{}/catalog", sidecar_url.trim_end_matches('/')));
             if let Some(query) = query {
                 request = request.query(&[("q", query)]);

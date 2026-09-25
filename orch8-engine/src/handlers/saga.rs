@@ -1,7 +1,7 @@
 use tracing::{debug, warn};
 
 use orch8_storage::StorageBackend;
-use orch8_types::execution::{ExecutionNode, NodeState};
+use orch8_types::execution::ExecutionNode;
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::SagaDef;
 
@@ -54,10 +54,8 @@ pub async fn execute_saga(
     }
 
     let Some(failed_step) = failed_step else {
-        // Every step's action completed — saga succeeds, no compensation
-        // runs. Settling skips the never-needed compensation nodes.
-        evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Completed)
-            .await?;
+        // Every step's action completed — saga succeeds, no compensation runs.
+        evaluator::complete_node(storage, node.id).await?;
         debug!(
             instance_id = %instance.id,
             block_id = %saga_def.id,
@@ -72,23 +70,17 @@ pub async fn execute_saga(
         "source": "saga",
         "block_id": saga_def.id.as_str(),
     });
-    // Inject once: rollback spans many ticks, and re-merging the same value
-    // on each one is a pointless context write (and bumps `updated_at`).
-    // The evaluator refreshes the instance snapshot after every saga
-    // dispatch, so a prior injection is visible here.
-    if instance.context.data.get("_error") != Some(&error_ctx) {
-        storage
-            .merge_context_data(instance.id, "_error", &error_ctx)
-            .await
-            .map_err(|e| {
-                warn!(
-                    instance_id = %instance.id,
-                    error = %e,
-                    "failed to inject error context for saga compensation"
-                );
-                EngineError::from(e)
-            })?;
-    }
+    storage
+        .merge_context_data(instance.id, "_error", &error_ctx)
+        .await
+        .map_err(|e| {
+            warn!(
+                instance_id = %instance.id,
+                error = %e,
+                "failed to inject error context for saga compensation"
+            );
+            EngineError::from(e)
+        })?;
 
     for i in (0..failed_step).rev() {
         if saga_def.steps[i].compensation.is_none() {
@@ -111,8 +103,7 @@ pub async fn execute_saga(
 
     // All compensations attempted (or skipped where none was declared).
     // The saga itself always fails — a rolled-back saga is still a failure.
-    // Settling skips the actions after the failed step (never started).
-    evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Failed).await?;
+    evaluator::fail_node(storage, node.id).await?;
     debug!(
         instance_id = %instance.id,
         block_id = %saga_def.id,

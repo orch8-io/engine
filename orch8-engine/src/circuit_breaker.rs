@@ -26,7 +26,6 @@
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use tokio_util::task::TaskTracker;
@@ -129,39 +128,10 @@ pub fn is_breaker_tracked(handler: &str) -> bool {
     )
 }
 
-/// While `HalfOpen`, callers other than the single probe are deferred this
-/// long before re-checking.
-const HALF_OPEN_RETRY_SECS: u64 = 5;
-
-/// A `HalfOpen` probe that never reports back (lost worker, crashed node)
-/// is considered abandoned after this long, and the next caller probes.
-const PROBE_TIMEOUT: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
-
-/// A persistence write for one breaker, ordered by `seq`.
-enum PersistOp {
-    Upsert(CircuitBreakerState),
-    Delete(TenantId, String),
-}
-
 /// In-memory circuit breaker registry. Each `(tenant, handler)` pair gets its
 /// own breaker; tenants are isolated.
 pub struct CircuitBreakerRegistry {
     breakers: DashMap<Key, CircuitBreakerState>,
-    /// `HalfOpen` breakers whose single probe call is in flight, with the
-    /// time the probe was handed out. Only one caller may probe a recovering
-    /// dependency; everyone else keeps being deferred until the probe's
-    /// success/failure closes or re-opens the breaker.
-    probes: DashMap<Key, chrono::DateTime<Utc>>,
-    /// Monotonic sequence stamped on every persistence write while the
-    /// breaker's shard lock is held, so writes for one key apply in
-    /// transition order even though they run as independent tasks.
-    persist_seq: AtomicU64,
-    /// Per-key "last applied sequence", guarded by an async mutex so the
-    /// storage writes for one key are serialized and a stale write that
-    /// lost the race to a newer one is dropped (an out-of-order
-    /// upsert-after-delete would otherwise revive a closed breaker on the
-    /// next boot).
-    persist_applied: DashMap<Key, Arc<tokio::sync::Mutex<u64>>>,
     default_threshold: u32,
     default_cooldown_secs: u64,
     /// Optional storage backend for persisting `Open` transitions. When `None`
@@ -181,9 +151,6 @@ impl CircuitBreakerRegistry {
     pub fn new(default_threshold: u32, default_cooldown_secs: u64) -> Self {
         Self {
             breakers: DashMap::new(),
-            probes: DashMap::new(),
-            persist_seq: AtomicU64::new(0),
-            persist_applied: DashMap::new(),
             default_threshold,
             default_cooldown_secs,
             storage: None,
@@ -196,7 +163,7 @@ impl CircuitBreakerRegistry {
     /// Callers should invoke this during graceful shutdown *after* all
     /// state-transition sources have stopped producing new writes. Once
     /// closed the tracker rejects new tasks, so this is a one-shot drain;
-    /// subsequent `spawn_persist` calls become no-ops (the
+    /// subsequent `spawn_upsert` / `spawn_delete` calls become no-ops (the
     /// tracker returns early) and only in-memory state remains authoritative
     /// for the brief window before process exit.
     pub async fn flush(&self) {
@@ -253,26 +220,16 @@ impl CircuitBreakerRegistry {
         let search = KeyRef(tenant_id, handler);
         let q: &dyn CircuitKey = &search;
         if let Some(breaker) = self.breakers.get(q)
-            && breaker.state == BreakerState::Closed
+            && matches!(breaker.state, BreakerState::Closed | BreakerState::HalfOpen)
         {
             return Ok(());
         }
 
-        // Mid path: if the breaker is Open/HalfOpen, we acquire a write lock
-        // via get_mut to potentially mutate it, without allocating a new Key
-        // string.
+        // Mid path: if the breaker is Open, we acquire a write lock via get_mut
+        // to potentially mutate it, without allocating a new Key string.
         if let Some(mut breaker) = self.breakers.get_mut(q) {
             return match breaker.state {
-                BreakerState::Closed => Ok(()),
-                // Single probe: only the caller that takes the probe slot
-                // goes through; the rest are deferred briefly.
-                BreakerState::HalfOpen => {
-                    if self.try_take_probe(tenant_id, handler, now) {
-                        Ok(())
-                    } else {
-                        Err(HALF_OPEN_RETRY_SECS)
-                    }
-                }
+                BreakerState::Closed | BreakerState::HalfOpen => Ok(()),
                 BreakerState::Open => {
                     if let Some(opened_at) = breaker.opened_at {
                         #[allow(clippy::cast_sign_loss)]
@@ -282,16 +239,9 @@ impl CircuitBreakerRegistry {
                             // Cooldown elapsed: transitioning to HalfOpen means the
                             // breaker is no longer protecting — remove from
                             // durable store so a crash now doesn't revive it.
-                            let op = PersistOp::Delete(
-                                breaker.tenant_id.clone(),
-                                breaker.handler.clone(),
-                            );
-                            let seq = self.next_persist_seq();
-                            // This caller is the probe.
-                            self.probes
-                                .insert(Key(tenant_id.clone(), handler.to_string()), now);
+                            let snapshot = breaker.clone();
                             drop(breaker);
-                            self.spawn_persist(op, seq);
+                            self.spawn_delete(&snapshot);
                             Ok(())
                         } else {
                             Err(breaker.cooldown_secs - elapsed)
@@ -300,10 +250,9 @@ impl CircuitBreakerRegistry {
                         // No opened_at means it was just set — cooldown starts now
                         breaker.opened_at = Some(now);
                         let cooldown = breaker.cooldown_secs;
-                        let op = PersistOp::Upsert(breaker.clone());
-                        let seq = self.next_persist_seq();
+                        let snapshot = breaker.clone();
                         drop(breaker);
-                        self.spawn_persist(op, seq);
+                        self.spawn_upsert(&snapshot);
                         Err(cooldown)
                     }
                 }
@@ -337,22 +286,18 @@ impl CircuitBreakerRegistry {
             return;
         }
 
-        let mut delete = None;
+        let mut delete_snapshot = None;
         if let Some(mut breaker) = self.breakers.get_mut(q) {
             let was_open = matches!(breaker.state, BreakerState::Open | BreakerState::HalfOpen);
             breaker.failure_count = 0;
             breaker.state = BreakerState::Closed;
             breaker.opened_at = None;
             if was_open {
-                delete = Some((
-                    PersistOp::Delete(breaker.tenant_id.clone(), breaker.handler.clone()),
-                    self.next_persist_seq(),
-                ));
+                delete_snapshot = Some(breaker.clone());
             }
         }
-        self.probes.remove(q);
-        if let Some((op, seq)) = delete {
-            self.spawn_persist(op, seq);
+        if let Some(snap) = delete_snapshot {
+            self.spawn_delete(&snap);
         }
     }
 
@@ -382,8 +327,7 @@ impl CircuitBreakerRegistry {
             {
                 breaker.state = BreakerState::Open;
                 breaker.opened_at = Some(now);
-                tripped_snapshot =
-                    Some((PersistOp::Upsert(breaker.clone()), self.next_persist_seq()));
+                tripped_snapshot = Some(breaker.clone());
             }
         } else {
             let key = Key(tenant_id.clone(), handler.to_string());
@@ -399,16 +343,12 @@ impl CircuitBreakerRegistry {
             {
                 breaker.state = BreakerState::Open;
                 breaker.opened_at = Some(now);
-                tripped_snapshot =
-                    Some((PersistOp::Upsert(breaker.clone()), self.next_persist_seq()));
+                tripped_snapshot = Some(breaker.clone());
             }
         }
 
-        // A failed probe re-opened the breaker (or the breaker was never
-        // probing): either way the probe slot is free again.
-        self.probes.remove(q);
-        if let Some((op, seq)) = tripped_snapshot {
-            self.spawn_persist(op, seq);
+        if let Some(snap) = tripped_snapshot {
+            self.spawn_upsert(&snap);
         }
     }
 
@@ -441,50 +381,17 @@ impl CircuitBreakerRegistry {
     pub fn reset(&self, tenant_id: &TenantId, handler: &str) {
         let search = KeyRef(tenant_id, handler);
         let q: &dyn CircuitKey = &search;
-        let delete = if let Some(mut breaker) = self.breakers.get_mut(q) {
+        let delete_snapshot = if let Some(mut breaker) = self.breakers.get_mut(q) {
             breaker.state = BreakerState::Closed;
             breaker.failure_count = 0;
             breaker.opened_at = None;
-            Some((
-                PersistOp::Delete(breaker.tenant_id.clone(), breaker.handler.clone()),
-                self.next_persist_seq(),
-            ))
+            Some(breaker.clone())
         } else {
             None
         };
-        self.probes.remove(q);
-        if let Some((op, seq)) = delete {
-            self.spawn_persist(op, seq);
+        if let Some(snap) = delete_snapshot {
+            self.spawn_delete(&snap);
         }
-    }
-
-    /// Hand out the single `HalfOpen` probe slot for this key, unless a
-    /// live (non-abandoned) probe already holds it.
-    fn try_take_probe(
-        &self,
-        tenant_id: &TenantId,
-        handler: &str,
-        now: chrono::DateTime<Utc>,
-    ) -> bool {
-        let key = Key(tenant_id.clone(), handler.to_string());
-        match self.probes.entry(key) {
-            dashmap::Entry::Occupied(mut held) => {
-                if now - *held.get() >= PROBE_TIMEOUT {
-                    held.insert(now);
-                    true
-                } else {
-                    false
-                }
-            }
-            dashmap::Entry::Vacant(slot) => {
-                slot.insert(now);
-                true
-            }
-        }
-    }
-
-    fn next_persist_seq(&self) -> u64 {
-        self.persist_seq.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     fn default_breaker(&self, tenant_id: &TenantId, handler: &str) -> CircuitBreakerState {
@@ -499,55 +406,42 @@ impl CircuitBreakerRegistry {
         }
     }
 
-    /// Tracked fire-and-forget persistence write. Silent no-op when no
-    /// storage is wired (tests, non-durable configs). Once the tracker has
-    /// been closed (see [`Self::flush`]) new tasks are rejected, which is
-    /// the intended shutdown semantics.
-    ///
-    /// Writes for one key are serialized through a per-key mutex holding
-    /// the last applied `seq`; a write older than one already applied is
-    /// dropped, so the durable row always reflects the latest transition.
-    fn spawn_persist(&self, op: PersistOp, seq: u64) {
+    /// Tracked fire-and-forget upsert of a breaker snapshot. Silent no-op
+    /// when no storage is wired (tests, non-durable configs). Once the
+    /// tracker has been closed (see [`Self::flush`]) new tasks are rejected,
+    /// which is the intended shutdown semantics.
+    fn spawn_upsert(&self, snapshot: &CircuitBreakerState) {
         let Some(storage) = self.storage.clone() else {
             return;
         };
-        let key = match &op {
-            PersistOp::Upsert(state) => Key(state.tenant_id.clone(), state.handler.clone()),
-            PersistOp::Delete(tenant, handler) => Key(tenant.clone(), handler.clone()),
-        };
-        let slot = Arc::clone(
-            self.persist_applied
-                .entry(key)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(0)))
-                .value(),
-        );
+        let state = snapshot.clone();
         self.tracker.spawn(async move {
-            let mut applied = slot.lock().await;
-            if *applied > seq {
-                return; // a newer transition for this key already landed
+            if let Err(err) = storage.upsert_circuit_breaker(&state).await {
+                tracing::warn!(
+                    tenant_id = %state.tenant_id,
+                    handler = %state.handler,
+                    error = %err,
+                    "failed to persist circuit breaker open state"
+                );
             }
-            *applied = seq;
-            match op {
-                PersistOp::Upsert(state) => {
-                    if let Err(err) = storage.upsert_circuit_breaker(&state).await {
-                        tracing::warn!(
-                            tenant_id = %state.tenant_id,
-                            handler = %state.handler,
-                            error = %err,
-                            "failed to persist circuit breaker open state"
-                        );
-                    }
-                }
-                PersistOp::Delete(tenant, handler) => {
-                    if let Err(err) = storage.delete_circuit_breaker(&tenant, &handler).await {
-                        tracing::warn!(
-                            tenant_id = %tenant,
-                            handler = %handler,
-                            error = %err,
-                            "failed to delete persisted circuit breaker row"
-                        );
-                    }
-                }
+        });
+    }
+
+    /// Tracked fire-and-forget delete of a breaker snapshot's persisted row.
+    fn spawn_delete(&self, snapshot: &CircuitBreakerState) {
+        let Some(storage) = self.storage.clone() else {
+            return;
+        };
+        let tenant = snapshot.tenant_id.clone();
+        let handler = snapshot.handler.clone();
+        self.tracker.spawn(async move {
+            if let Err(err) = storage.delete_circuit_breaker(&tenant, &handler).await {
+                tracing::warn!(
+                    tenant_id = %tenant,
+                    handler = %handler,
+                    error = %err,
+                    "failed to delete persisted circuit breaker row"
+                );
             }
         });
     }
@@ -612,40 +506,6 @@ mod tests {
         assert!(cb.check(&t, "test_handler").is_ok());
         let state = cb.get(&t, "test_handler").unwrap();
         assert_eq!(state.state, BreakerState::HalfOpen);
-    }
-
-    /// ENG-R-N9: `HalfOpen` admits exactly one probe; everyone else is
-    /// deferred until the probe reports back.
-    #[test]
-    fn half_open_admits_a_single_probe() {
-        let cb = CircuitBreakerRegistry::new(1, 0);
-        let t = tid("t");
-        cb.record_failure(&t, "h");
-        assert!(cb.check(&t, "h").is_ok(), "first caller is the probe");
-        assert_eq!(cb.get(&t, "h").unwrap().state, BreakerState::HalfOpen);
-        assert_eq!(cb.check(&t, "h"), Err(HALF_OPEN_RETRY_SECS));
-        assert_eq!(cb.check(&t, "h"), Err(HALF_OPEN_RETRY_SECS));
-
-        cb.record_success(&t, "h");
-        assert!(cb.check(&t, "h").is_ok());
-        assert!(cb.check(&t, "h").is_ok(), "closed again: everyone passes");
-    }
-
-    /// A failed probe re-opens the breaker and frees the probe slot for the
-    /// next cooldown expiry.
-    #[test]
-    fn failed_probe_frees_the_probe_slot() {
-        let cb = CircuitBreakerRegistry::new(1, 0);
-        let t = tid("t");
-        cb.record_failure(&t, "h");
-        assert!(cb.check(&t, "h").is_ok());
-        cb.record_failure(&t, "h");
-        assert_eq!(cb.get(&t, "h").unwrap().state, BreakerState::Open);
-        assert!(
-            cb.check(&t, "h").is_ok(),
-            "zero cooldown: next caller probes"
-        );
-        assert!(cb.check(&t, "h").is_err());
     }
 
     #[test]

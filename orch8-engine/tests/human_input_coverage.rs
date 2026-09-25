@@ -147,7 +147,6 @@ fn advanced_def() -> HumanInputDef {
         ]),
         store_as: Some("decision".into()),
         allow_comment: false,
-        auto_decide: None,
     }
 }
 
@@ -159,7 +158,6 @@ fn default_yes_no_def() -> HumanInputDef {
         choices: None,
         store_as: None,
         allow_comment: false,
-        auto_decide: None,
     }
 }
 
@@ -421,7 +419,6 @@ async fn allow_comment_true_accepts_value_with_extra_comment_field() {
         ]),
         store_as: Some("decision".into()),
         allow_comment: true,
-        auto_decide: None,
     };
     let (storage, instance, step) = setup(mk_step("review_c", def)).await;
     let human_def = step.wait_for_input.clone().unwrap();
@@ -476,7 +473,6 @@ async fn custom_choices_with_no_store_as_uses_block_id_as_key() {
         ]),
         store_as: None,
         allow_comment: false,
-        auto_decide: None,
     };
     let (storage, instance, step) = setup(mk_step("picker", def)).await;
     let human_def = step.wait_for_input.clone().unwrap();

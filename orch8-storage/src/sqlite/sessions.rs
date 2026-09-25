@@ -79,11 +79,10 @@ pub(super) async fn list_instances(
     storage: &SqliteStorage,
     session_id: Uuid,
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    let rows =
-        sqlx::query("SELECT * FROM task_instances WHERE session_id=?1 ORDER BY created_at, id")
-            .bind(session_id.to_string())
-            .fetch_all(&storage.pool)
-            .await?;
+    let rows = sqlx::query("SELECT * FROM task_instances WHERE session_id=?1")
+        .bind(session_id.to_string())
+        .fetch_all(&storage.pool)
+        .await?;
     rows.iter().map(row_to_instance).collect()
 }
 

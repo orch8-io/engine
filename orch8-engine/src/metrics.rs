@@ -21,9 +21,6 @@ pub const CRON_SKIPPED: &str = "orch8_cron_skipped_total";
 /// Alert-only SLA breaches (sequence `max_runtime` / `max_step_runtime`).
 /// Labeled `type=max_runtime|max_step_runtime`.
 pub const SLA_BREACHED: &str = "orch8_sla_breached_total";
-/// `wait_for_input.auto_decide` consultations. Labeled
-/// `outcome=accepted|deferred|error`.
-pub const AUTO_DECIDE: &str = "orch8_auto_decide_total";
 /// Body-step output rows compacted (deleted) by a loop/foreach
 /// `retain_iterations` policy.
 pub const LOOP_OUTPUTS_COMPACTED: &str = "orch8_loop_outputs_compacted_total";

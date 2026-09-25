@@ -391,15 +391,9 @@ async fn embed_inputs(params: &Value, inputs: &[String]) -> Result<EmbeddingBatc
         .await
         .map_err(|e| {
             if e.is_timeout() || e.is_connect() {
-                retryable(format!(
-                    "embed network error: {}",
-                    crate::outbound::redact_error(&e)
-                ))
+                retryable(format!("embed network error: {e}"))
             } else {
-                permanent(format!(
-                    "embed request error: {}",
-                    crate::outbound::redact_error(&e)
-                ))
+                permanent(format!("embed request error: {e}"))
             }
         })?;
 
@@ -507,15 +501,6 @@ fn resolve_api_key(params: &Value) -> Result<String, StepError> {
                 "embed: api_key_env '{env_name}' is not permitted: reading engine \
                  or infrastructure secrets via api_key_env is blocked"
             )));
-        }
-        // An operator-held key only goes to the default embeddings endpoint.
-        if !crate::handlers::llm::common::env_key_allowed_for_base_url(
-            params.get("base_url").and_then(Value::as_str),
-            DEFAULT_EMBED_BASE,
-        ) {
-            return Err(permanent(
-                "embed: a custom base_url requires an explicit `api_key`",
-            ));
         }
         return std::env::var(env_name)
             .ok()
@@ -2605,16 +2590,14 @@ mod net_tests {
     }
 
     #[test]
-    fn resolve_api_key_env_is_restricted() {
-        // Only `*_API_KEY`-shaped names are dereferenceable (ENG-P-N2) …
-        assert!(resolve_api_key(&json!({ "api_key_env": "PATH" })).is_err());
-        // … and never towards a workflow-chosen endpoint.
-        let err = resolve_api_key(&json!({
-            "api_key_env": "OPENAI_API_KEY",
-            "base_url": "https://attacker.example/v1",
-        }))
-        .unwrap_err();
-        assert!(format!("{err:?}").contains("custom base_url"), "{err:?}");
+    fn resolve_api_key_from_env() {
+        // Read an env var that is already present (PATH) rather than mutating
+        // the process environment, which would race other parallel tests.
+        let expected = std::env::var("PATH").expect("PATH is set");
+        assert_eq!(
+            resolve_api_key(&json!({ "api_key_env": "PATH" })).unwrap(),
+            expected
+        );
     }
 
     #[test]

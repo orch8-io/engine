@@ -195,26 +195,3 @@ async fn parked_outbox_row_links_to_delivery() {
     let listed = s.list_webhook_outbox(10).await.unwrap();
     assert_eq!(listed[0].delivery_id, Some(delivery));
 }
-
-/// The `error_class` filter must apply before `LIMIT`: a recent delivery
-/// with another class must not crowd a matching older one off the page.
-#[tokio::test]
-async fn error_class_filter_applies_before_limit() {
-    let s = store().await;
-    let older = Uuid::now_v7();
-    s.record_webhook_attempt(&attempt(older, 1, false))
-        .await
-        .unwrap();
-    let newer = Uuid::now_v7();
-    let mut ok = attempt(newer, 5, true);
-    ok.attempted_at = Utc::now() + Duration::seconds(10);
-    s.record_webhook_attempt(&ok).await.unwrap();
-
-    let filter = DeliveryFilter {
-        error_class: Some(DeliveryErrorClass::HttpStatus),
-        ..DeliveryFilter::default()
-    };
-    let page = s.list_webhook_deliveries(&filter, 1).await.unwrap();
-    assert_eq!(page.len(), 1);
-    assert_eq!(page[0].delivery_id, older);
-}

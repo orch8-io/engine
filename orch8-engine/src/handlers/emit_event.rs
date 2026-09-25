@@ -35,26 +35,6 @@ use super::util::{check_same_tenant, map_storage_err, permanent, require_str};
 /// row or pin the worker serializing it.
 const MAX_EMIT_EVENT_DATA_BYTES: usize = 4 * 1024 * 1024;
 
-/// Metadata key (inside the child's `_trigger_event` meta) recording how many
-/// `emit_event` hops separate an instance from the root that started the chain.
-const EMIT_EVENT_DEPTH_KEY: &str = "_emit_event_depth";
-
-/// Maximum `emit_event` chain depth. A trigger whose sequence emits its own
-/// trigger (directly or via a cycle) would otherwise spawn instances forever;
-/// mirrors the `SubSequence` spawn-depth cap (16).
-const MAX_EMIT_EVENT_DEPTH: u64 = 16;
-
-/// Chain depth of an instance spawned by `emit_event` from a parent with
-/// `parent_metadata` (root/non-emitted parents are depth 0).
-fn next_emit_event_depth(parent_metadata: &Value) -> u64 {
-    parent_metadata
-        .get("_trigger_event")
-        .and_then(|m| m.get(EMIT_EVENT_DEPTH_KEY))
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .saturating_add(1)
-}
-
 /// Lightweight wire-side enum for the `dedupe_scope` param. Kept private so
 /// we parse exactly twice (match on string, then build `DedupeScope` once we
 /// also have the `tenant_id` / `instance_id`).
@@ -153,21 +133,6 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
         ));
     }
 
-    // Chain-depth guard: read the caller's own depth (system-set in its
-    // metadata when it was itself spawned by emit_event) and refuse to go
-    // deeper than the cap. A missing parent row counts as a root.
-    let parent_metadata = storage
-        .get_instance(ctx.instance_id)
-        .await
-        .map_err(|e| map_storage_err(&e))?
-        .map_or(Value::Null, |i| i.metadata);
-    let depth = next_emit_event_depth(&parent_metadata);
-    if depth > MAX_EMIT_EVENT_DEPTH {
-        return Err(permanent(format!(
-            "emit_event chain depth limit ({MAX_EMIT_EVENT_DEPTH}) exceeded — possible trigger cycle"
-        )));
-    }
-
     // Build meta: start from user-provided meta, then overwrite system-set
     // fields so callers can't spoof `source` / `parent_instance_id`.
     let mut meta_obj: Map<String, Value> = match user_meta {
@@ -180,7 +145,6 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
         }
     };
     meta_obj.insert("source".into(), Value::String("emit_event".into()));
-    meta_obj.insert(EMIT_EVENT_DEPTH_KEY.into(), json!(depth));
     meta_obj.insert(
         "parent_instance_id".into(),
         Value::String(ctx.instance_id.into_uuid().to_string()),
@@ -402,52 +366,6 @@ mod tests {
         assert_eq!(event_meta["custom"], json!("value"));
         // Payload preserved.
         assert_eq!(child.context.data, json!({"order_id": 42}));
-    }
-
-    #[tokio::test]
-    async fn emit_event_chain_depth_is_propagated_and_capped() {
-        // ENG-P-N11: each hop records depth+1; a caller already at the cap
-        // cannot spawn another child (trigger cycles terminate).
-        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
-        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
-        seed_sequence(&storage, "T1", "child_seq").await;
-        storage
-            .create_trigger(&mk_trigger("loop", "T1", "child_seq"))
-            .await
-            .unwrap();
-
-        let caller = mk_instance("T1", InstanceState::Running);
-        storage.create_instance(&caller).await.unwrap();
-        let out = handle_emit_event(mk_ctx(
-            &caller,
-            storage_dyn.clone(),
-            // A spoofed depth in user meta is overwritten by the handler.
-            json!({ "trigger_slug": "loop", "meta": { "_emit_event_depth": 0 } }),
-        ))
-        .await
-        .unwrap();
-        let child_id = InstanceId::from_uuid(
-            uuid::Uuid::parse_str(out["instance_id"].as_str().unwrap()).unwrap(),
-        );
-        let child = storage.get_instance(child_id).await.unwrap().unwrap();
-        assert_eq!(
-            child.metadata["_trigger_event"][EMIT_EVENT_DEPTH_KEY],
-            json!(1)
-        );
-
-        let mut deep = mk_instance("T1", InstanceState::Running);
-        deep.metadata = json!({ "_trigger_event": { EMIT_EVENT_DEPTH_KEY: MAX_EMIT_EVENT_DEPTH } });
-        storage.create_instance(&deep).await.unwrap();
-        let err = handle_emit_event(mk_ctx(
-            &deep,
-            storage_dyn,
-            json!({ "trigger_slug": "loop" }),
-        ))
-        .await
-        .unwrap_err();
-        assert!(
-            matches!(err, StepError::Permanent { ref message, .. } if message.contains("depth"))
-        );
     }
 
     #[tokio::test]

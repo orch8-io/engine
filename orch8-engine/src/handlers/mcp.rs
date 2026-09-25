@@ -116,9 +116,7 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
         return Ok(mcp_dry_run_stub(action, tool_name.as_deref(), &url));
     }
 
-    // Clamp to 1..=300000 ms: `0` would fail every request instantly and a
-    // huge value pins a connection (and worker slot) indefinitely.
-    let timeout = crate::outbound::clamp_timeout_ms(
+    let timeout = Duration::from_millis(
         ctx.params
             .get("timeout_ms")
             .and_then(Value::as_u64)
@@ -228,18 +226,12 @@ async fn post_jsonrpc(
     let resp = req.send().await.map_err(|e| {
         if e.is_timeout() || e.is_connect() {
             StepError::Retryable {
-                message: format!(
-                    "mcp_call network error: {}",
-                    crate::outbound::redact_error(&e)
-                ),
+                message: format!("mcp_call network error: {e}"),
                 details: None,
             }
         } else {
             StepError::Permanent {
-                message: format!(
-                    "mcp_call request error: {}",
-                    crate::outbound::redact_error(&e)
-                ),
+                message: format!("mcp_call request error: {e}"),
                 details: None,
             }
         }

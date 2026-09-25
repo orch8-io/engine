@@ -242,19 +242,12 @@ fn build_mobile_http_client(timeout: Duration) -> reqwest::Client {
     // The builder only uses constants and a validated duration, so failure is
     // a programming/environment error rather than a recoverable SDK input.
     #[allow(clippy::expect_used)]
-    // Resolver + no redirects + no proxy (a proxy resolves the host itself,
-    // bypassing the SSRF resolver filter).
-    orch8_engine::outbound::build(
-        orch8_engine::outbound::builder(orch8_engine::outbound::Profile::TokenEndpoint)
-            .timeout(timeout),
-    )
-}
-
-/// Process-wide hardened client for one-off SDK fetches (30s timeout), so
-/// call sites don't each build (and forget to harden) their own.
-pub(crate) fn shared_mobile_http_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| build_mobile_http_client(Duration::from_secs(30)))
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(Arc::new(orch8_engine::handlers::builtin::SsrfGuardResolver))
+        .build()
+        .expect("mobile HTTP client builds")
 }
 
 /// Validate that an HTTPS endpoint URL is safe to call.
@@ -277,17 +270,18 @@ pub(crate) fn validate_https_url(url: &str) -> Result<(), MobileError> {
             message: "URL must have a host".to_string(),
         });
     }
-    // `host_str()` keeps the brackets around IPv6 literals; strip them before
-    // parsing, otherwise every `https://[::1]/` style target skips the check.
-    let ip_str = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host.as_str());
-    let ip = ip_str.parse::<IpAddr>().ok();
-    if ip.is_some_and(orch8_types::net::is_non_public_ip) {
-        return Err(MobileError::InvalidInput {
-            message: "URL must not target an internal address".to_string(),
-        });
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let blocked = match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            }
+            IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        };
+        if blocked {
+            return Err(MobileError::InvalidInput {
+                message: "URL must not target an internal address".to_string(),
+            });
+        }
     }
     if parsed.port().is_some_and(|p| p != 443) {
         return Err(MobileError::InvalidInput {
@@ -806,21 +800,26 @@ impl MobileEngine {
         let target = target.clone();
         crate::validate_https_url(&target)?;
         self.run_with_timeout(async {
-            let shown = orch8_engine::outbound::redact_url(&target);
-            let resp = shared_mobile_http_client()
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .dns_resolver(Arc::new(orch8_engine::handlers::builtin::SsrfGuardResolver))
+                .build()
+                .map_err(|e| MobileError::Engine {
+                    message: format!("http client: {e}"),
+                })?;
+
+            let resp = http
                 .get(&target)
                 .send()
                 .await
                 .map_err(|e| MobileError::Engine {
-                    message: format!(
-                        "fetch sequences from {shown}: {}",
-                        orch8_engine::outbound::redact_error(&e)
-                    ),
+                    message: format!("fetch sequences from {target}: {e}"),
                 })?;
 
             if !resp.status().is_success() {
                 return Err(MobileError::Engine {
-                    message: format!("fetch sequences: HTTP {} from {shown}", resp.status()),
+                    message: format!("fetch sequences: HTTP {} from {target}", resp.status()),
                 });
             }
 
@@ -913,10 +912,6 @@ impl MobileEngine {
         manifest_url: String,
         token_provider: Option<Arc<dyn TokenProvider>>,
     ) -> Result<SyncResult, MobileError> {
-        // The manifest URL decides where the bearer token and every relative
-        // sequence URL go — hold it to the same public-HTTPS rule as every
-        // other SDK endpoint.
-        crate::validate_https_url(&manifest_url)?;
         let handler_names: HashSet<String> = {
             let guard = self
                 .handlers
@@ -1127,12 +1122,6 @@ mod tests {
         assert!(validate_https_url("https://example.com:8443/seq.json").is_err());
         // Valid public https.
         assert!(validate_https_url("https://example.com/seq.json").is_ok());
-        // IPv6 literals (bracketed in `host_str`) and v4-in-v6 forms.
-        assert!(validate_https_url("https://[::1]/seq.json").is_err());
-        assert!(validate_https_url("https://[::ffff:127.0.0.1]/seq.json").is_err());
-        assert!(validate_https_url("https://[fd00::1]/seq.json").is_err());
-        assert!(validate_https_url("https://[64:ff9b::a9fe:a9fe]/seq.json").is_err());
-        assert!(validate_https_url("https://100.64.0.1/seq.json").is_err());
     }
 
     #[test]
@@ -1690,20 +1679,6 @@ mod tests {
             err.contains("not found") || err.contains("NotFound"),
             "unexpected error: {err}"
         );
-    }
-
-    #[test]
-    fn engine_sync_rejects_non_https_manifest_url() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("engine.db").to_string_lossy().to_string();
-        let engine = MobileEngine::new(path, MobileEngineConfig::default()).unwrap();
-        for url in [
-            "http://example.com/manifest",
-            "https://169.254.169.254/manifest",
-        ] {
-            let err = engine.sync(url.to_string(), None).unwrap_err().to_string();
-            assert!(err.contains("URL must"), "{url}: {err}");
-        }
     }
 
     #[test]

@@ -61,16 +61,26 @@ fn flag_is_truthy(v: Option<&str>) -> bool {
 }
 
 /// `true` if an IPv4 literal is a private/internal/metadata target that
-/// outbound requests must never reach. Delegates to the workspace-wide
-/// classifier so engine, API, and mobile guards cannot drift apart.
+/// outbound requests must never reach.
 fn ipv4_is_blocked(v4: std::net::Ipv4Addr) -> bool {
-    orch8_types::net::is_non_public_ipv4(v4)
+    v4.is_loopback()          // 127.0.0.0/8
+        || v4.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+        || v4.is_link_local()     // 169.254.0.0/16 (includes 169.254.169.254 metadata)
+        || v4.is_unspecified()
+        || v4.is_documentation()  // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+        || v4.is_multicast() // 224.0.0.0/4
 }
 
-/// `true` if an IPv6 literal is a private/internal target (including every
-/// v4-in-v6 transition form that embeds a blocked IPv4 address).
+/// `true` if an IPv6 literal is a private/internal target.
 fn ipv6_is_blocked(v6: std::net::Ipv6Addr) -> bool {
-    orch8_types::net::is_non_public_ipv6(v6)
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return ipv4_is_blocked(v4);
+    }
+    v6.is_loopback()              // ::1
+        || v6.is_unspecified()
+        || v6.is_unicast_link_local() // fe80::/10
+        || v6.is_multicast()          // ff00::/8
+        || v6.is_unique_local() // fc00::/7
 }
 
 /// Check whether a resolved `host:port` address is safe to contact
@@ -314,7 +324,6 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
         super::wait_for_event::handle_wait_for_event,
     );
     registry.register("blob_get", super::blob::handle_blob_get);
-    registry.register("jev", super::jev::handle_jev);
 }
 
 /// No-op handler. Always succeeds with an empty result.
@@ -679,9 +688,7 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
 
     let body_str = ctx.params.get("body").and_then(Value::as_str).unwrap_or("");
 
-    // Clamp to 1..=300000 ms: `0` would fail every request instantly and a
-    // huge value pins a connection (and worker slot) indefinitely.
-    let timeout = crate::outbound::clamp_timeout_ms(
+    let timeout = std::time::Duration::from_millis(
         ctx.params
             .get("timeout_ms")
             .and_then(Value::as_u64)
@@ -735,7 +742,7 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
     }
 
     let resp = req.send().await.map_err(|e| StepError::Retryable {
-        message: format!("HTTP request failed: {}", crate::outbound::redact_error(&e)),
+        message: format!("HTTP request failed: {e}"),
         details: None,
     })?;
 

@@ -40,55 +40,10 @@ pub enum ContextCmd {
     Remove { name: String },
 }
 
-/// Pre-XDG location: a credentials file in the current working directory
-/// (easy to commit or leak by running the CLI from a shared checkout).
-pub const LEGACY_PATH: &str = ".orch8-contexts.json";
-
-/// Contexts file location: `$ORCH8_CONTEXTS_FILE`, else
-/// `$XDG_CONFIG_HOME/orch8/contexts.json` (default `~/.config/...`).
-///
-/// For backward compatibility a legacy `./.orch8-contexts.json` is still
-/// used (with a warning) when the XDG file doesn't exist yet.
 #[must_use]
 pub fn default_path() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("ORCH8_CONTEXTS_FILE") {
-        return PathBuf::from(explicit);
-    }
-    let xdg = xdg_path(
-        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    );
-    match xdg {
-        Some(path) if path.exists() => path,
-        Some(path) => {
-            let legacy = PathBuf::from(LEGACY_PATH);
-            if legacy.exists() {
-                eprintln!(
-                    "warning: using legacy contexts file {LEGACY_PATH} in the current directory; \
-                     move it to {} (chmod 600)",
-                    path.display()
-                );
-                legacy
-            } else {
-                path
-            }
-        }
-        None => PathBuf::from(LEGACY_PATH),
-    }
-}
-
-fn xdg_path(
-    xdg_config_home: Option<&std::ffi::OsStr>,
-    home: Option<&std::ffi::OsStr>,
-) -> Option<PathBuf> {
-    let base = xdg_config_home
-        .filter(|dir| !dir.is_empty() && Path::new(dir).is_absolute())
-        .map(PathBuf::from)
-        .or_else(|| {
-            home.filter(|dir| !dir.is_empty())
-                .map(|home| Path::new(home).join(".config"))
-        })?;
-    Some(base.join("orch8").join("contexts.json"))
+    std::env::var_os("ORCH8_CONTEXTS_FILE")
+        .map_or_else(|| PathBuf::from(".orch8-contexts.json"), PathBuf::from)
 }
 
 pub fn load(path: &Path) -> Result<ContextStore> {
@@ -102,16 +57,7 @@ pub fn load(path: &Path) -> Result<ContextStore> {
     Ok(store)
 }
 
-#[cfg(test)]
 pub fn resolve(path: &Path, explicit: Option<&str>) -> Result<Option<FleetContext>> {
-    Ok(resolve_named(path, explicit)?.map(|(_, context)| context))
-}
-
-/// `resolve` plus the resolved context's name.
-pub fn resolve_named(
-    path: &Path,
-    explicit: Option<&str>,
-) -> Result<Option<(String, FleetContext)>> {
     let store = load(path)?;
     let selected = explicit.or(store.selected.as_deref());
     selected
@@ -120,7 +66,6 @@ pub fn resolve_named(
                 .contexts
                 .get(name)
                 .cloned()
-                .map(|context| (name.to_owned(), context))
                 .with_context(|| format!("fleet context '{name}' does not exist"))
         })
         .transpose()
@@ -188,7 +133,7 @@ fn save(path: &Path, store: &ContextStore) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(store)?;
-    crate::atomic_write_private(path, &bytes)?;
+    crate::atomic_write(path, &bytes)?;
     set_secure_permissions(path)?;
     Ok(())
 }
@@ -249,21 +194,6 @@ fn set_secure_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn xdg_path_prefers_xdg_config_home_then_home() {
-        use std::ffi::OsStr;
-        assert_eq!(
-            xdg_path(Some(OsStr::new("/cfg")), Some(OsStr::new("/home/u"))).unwrap(),
-            PathBuf::from("/cfg/orch8/contexts.json")
-        );
-        // Relative XDG_CONFIG_HOME is invalid per spec and ignored.
-        assert_eq!(
-            xdg_path(Some(OsStr::new("rel")), Some(OsStr::new("/home/u"))).unwrap(),
-            PathBuf::from("/home/u/.config/orch8/contexts.json")
-        );
-        assert!(xdg_path(None, None).is_none());
-    }
 
     #[test]
     fn store_round_trip_selects_explicit_context_and_redacts_listing_model() {

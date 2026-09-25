@@ -21,7 +21,7 @@ export const llmChain: Template = {
       params: {
         provider: "openai",
         api_key_env: "OPENAI_API_KEY",
-        model: "gpt-5.6-luna",
+        model: "gpt-4o-mini",
         max_tokens: 256,
         messages: [
           { role: "system", content: "You are a concise assistant." },
@@ -38,7 +38,7 @@ export const llmChain: Template = {
       params: {
         provider: "openai",
         api_key_env: "OPENAI_API_KEY",
-        model: "gpt-5.6-luna",
+        model: "gpt-4o-mini",
         max_tokens: 128,
         messages: [
           { role: "system", content: "Summarize in 5 words." },

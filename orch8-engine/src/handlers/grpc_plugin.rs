@@ -22,26 +22,17 @@ use super::StepContext;
 
 /// Shared HTTP/2 client for all gRPC plugin calls. Reusing the client enables
 /// connection pooling across invocations.
-///
-/// Built on the hardened `Untrusted` outbound profile: the pre-flight
-/// `is_address_safe` check alone is a TOCTOU (reqwest re-resolves at connect
-/// time), so the SSRF resolver, checked redirects, and `no_proxy` apply here
-/// exactly as for `http_request`.
 static GRPC_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    crate::outbound::build(
-        crate::outbound::builder(crate::outbound::Profile::Untrusted)
-            .http2_prior_knowledge()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30)),
-    )
+    reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to build gRPC HTTP client, using default");
+            reqwest::Client::new()
+        })
 });
-
-/// Cap on a plugin response body; a hostile endpoint must not be able to
-/// stream an unbounded body into worker memory.
-const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-
-/// Cap on the response body echoed into error details.
-const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 
 /// Check if a handler name is a gRPC plugin handler.
 ///
@@ -158,43 +149,28 @@ pub async fn handle_grpc_plugin(ctx: StepContext) -> Result<Value, StepError> {
         .send()
         .await
         .map_err(|e| StepError::Retryable {
-            message: format!(
-                "grpc plugin: request failed to {addr}: {}",
-                crate::outbound::redact_error(&e)
-            ),
+            message: format!("grpc plugin: request failed to {addr}: {e}"),
             details: None,
         })?;
 
     let status = response.status().as_u16();
-    let bytes = crate::outbound::read_body_capped(response, MAX_RESPONSE_BYTES)
-        .await
-        .map_err(|e| match e {
-            crate::outbound::BodyReadError::TooLarge(cap) => StepError::Permanent {
-                message: format!("grpc plugin: response body from {url} exceeds {cap} bytes"),
-                details: None,
-            },
-            crate::outbound::BodyReadError::Io(e) => StepError::Retryable {
-                message: format!("grpc plugin: failed to read response body from {url}: {e}"),
-                details: None,
-            },
-        })?;
+    let body = response.text().await.map_err(|e| StepError::Retryable {
+        message: format!("grpc plugin: failed to read response body from {url}: {e}"),
+        details: None,
+    })?;
 
-    if status >= 400 {
-        let body = crate::outbound::truncate_for_error(&bytes, MAX_ERROR_BODY_BYTES);
-        let details = Some(json!({ "status": status, "body": body }));
-        return Err(if status >= 500 {
-            StepError::Retryable {
-                message: format!("grpc plugin: server error {status} from {url}"),
-                details,
-            }
-        } else {
-            StepError::Permanent {
-                message: format!("grpc plugin: client error {status} from {url}"),
-                details,
-            }
+    if status >= 500 {
+        return Err(StepError::Retryable {
+            message: format!("grpc plugin: server error {status} from {url}"),
+            details: Some(json!({ "status": status, "body": body })),
         });
     }
-    let body = String::from_utf8_lossy(&bytes).into_owned();
+    if status >= 400 {
+        return Err(StepError::Permanent {
+            message: format!("grpc plugin: client error {status} from {url}"),
+            details: Some(json!({ "status": status, "body": body })),
+        });
+    }
 
     let output: Value = serde_json::from_str(&body).unwrap_or_else(|e| {
         warn!(error = %e, "grpc plugin: response is not valid JSON, wrapping as string");

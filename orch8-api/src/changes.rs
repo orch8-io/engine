@@ -106,7 +106,10 @@ pub(crate) async fn stream_changes(
         .map(decode_cursor)
         .transpose()?;
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let permit = crate::stream_limits::acquire(&state.stream_limiter, tenant.as_str())
+    let permit = state
+        .stream_limiter
+        .clone()
+        .try_acquire_owned()
         .map_err(|_| ApiError::RateLimited("concurrent change stream limit reached".into()))?;
     let storage = state.storage.clone();
     let shutdown = state.shutdown.clone();

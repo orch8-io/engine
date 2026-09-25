@@ -63,15 +63,13 @@ type ExternalizedRow = (Option<serde_json::Value>, Option<Vec<u8>>, Option<Strin
 
 pub(super) async fn get(
     store: &PostgresStorage,
-    instance_id: InstanceId,
     ref_key: &str,
 ) -> Result<Option<serde_json::Value>, StorageError> {
     let row: Option<ExternalizedRow> = sqlx::query_as(
         "SELECT payload, payload_bytes, compression
-             FROM externalized_state WHERE ref_key = $1 AND instance_id = $2",
+             FROM externalized_state WHERE ref_key = $1",
     )
     .bind(ref_key)
-    .bind(instance_id.into_uuid())
     .fetch_optional(&store.pool)
     .await?;
 
@@ -186,7 +184,6 @@ pub(super) async fn batch_save(
 }
 
 type BatchRow = (
-    Uuid,
     String,
     Option<serde_json::Value>,
     Option<Vec<u8>>,
@@ -198,29 +195,22 @@ type BatchRow = (
 /// result map — callers treat absent entries as "nothing to hydrate".
 pub(super) async fn batch_get(
     store: &PostgresStorage,
-    refs: &[(InstanceId, String)],
-) -> Result<HashMap<(InstanceId, String), serde_json::Value>, StorageError> {
-    if refs.is_empty() {
+    ref_keys: &[String],
+) -> Result<HashMap<String, serde_json::Value>, StorageError> {
+    if ref_keys.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let owners: Vec<Uuid> = refs.iter().map(|(id, _)| id.into_uuid()).collect();
-    let ref_keys: Vec<&str> = refs.iter().map(|(_, key)| key.as_str()).collect();
-    // Match (owner, ref_key) pairs so a forged marker naming another
-    // instance's ref never resolves.
     let rows: Vec<BatchRow> = sqlx::query_as(
-        "SELECT e.instance_id, e.ref_key, e.payload, e.payload_bytes, e.compression
-             FROM externalized_state e
-             JOIN UNNEST($1::uuid[], $2::text[]) AS req(instance_id, ref_key)
-               ON e.instance_id = req.instance_id AND e.ref_key = req.ref_key",
+        "SELECT ref_key, payload, payload_bytes, compression
+             FROM externalized_state WHERE ref_key = ANY($1)",
     )
-    .bind(&owners)
-    .bind(&ref_keys)
+    .bind(ref_keys)
     .fetch_all(&store.pool)
     .await?;
 
     let mut out = HashMap::with_capacity(rows.len());
-    for (instance_id, ref_key, payload, payload_bytes, compression) in rows {
+    for (ref_key, payload, payload_bytes, compression) in rows {
         let value = match compression.as_deref() {
             Some("zstd") => {
                 let bytes = payload_bytes.ok_or_else(|| {
@@ -245,7 +235,7 @@ pub(super) async fn batch_get(
                 )));
             }
         };
-        out.insert((InstanceId::from_uuid(instance_id), ref_key), value);
+        out.insert(ref_key, value);
     }
     Ok(out)
 }

@@ -506,175 +506,184 @@ const SEQUENCE_FIELD_NAMES: &[&str] = &[
     "input",
     "variants",
     "steps",
-    "action",
-    "name",
-    "weight",
-    "duration",
-    "business_days_only",
-    "jitter",
-    "holidays",
-    "fire_at_local",
-    "timezone",
-    "start_hour",
-    "end_hour",
-    "days",
-    "data",
-    "fields",
-    "config",
-    "audit",
-    "runtime",
-    "prompt",
-    "escalation_handler",
-    "choices",
-    "store_as",
-    "allow_comment",
-    "auto_decide",
-    "threshold",
-    "instructions",
-    "model",
-    "api_key",
-    "base_url",
-    "interpret_replies",
-    "label",
-    "value",
-    "non_retryable_codes",
-    "depends_on",
-    "verification",
 ];
 
-fn collect_unknown_block_fields(
-    blocks: &serde_json::Value,
-    path: &str,
-    unknown: &mut Vec<String>,
-    extra: &mut Vec<String>,
-) {
+fn collect_unknown_block_fields(blocks: &serde_json::Value, path: &str, unknown: &mut Vec<String>) {
     let Some(blocks) = blocks.as_array() else {
         return;
     };
     for (index, block) in blocks.iter().enumerate() {
-        collect_unknown_block_field(block, &format!("{path}.{index}"), unknown, extra);
+        collect_unknown_block_field(block, &format!("{path}.{index}"), unknown);
     }
 }
 
-/// Decode `block` as its concrete variant type under `serde_ignored` so every
-/// unknown key in the block *and its nested sub-objects* (`retry`,
-/// `send_window`, `context_access`, `wait_for_input`, routes, variants, saga
-/// steps, ...) is reported. Nested `BlockDefinition`s are internally tagged,
-/// which buffers their content and hides it from `serde_ignored`, so child
-/// blocks are visited by the caller instead. Decode errors are ignored here;
-/// they surface from the main decode with a precise path.
-fn collect_unknown_typed<T>(block: &serde_json::Value, path: &str, unknown: &mut Vec<String>)
-where
-    T: serde::de::DeserializeOwned,
-{
-    let _ = serde_ignored::deserialize::<_, _, T>(block, |ignored| {
-        let ignored = ignored.to_string();
-        // The enum tag is consumed by `BlockDefinition`, not the variant type.
-        if ignored != "type" {
-            unknown.push(format!("{path}.{ignored}"));
-        }
-    });
-}
-
-/// `context_access: {...}` without `data` silently defaults to full data
-/// access. That is the documented legacy default when `context_access` is
-/// omitted entirely, but an explicit restriction object that forgets (or
-/// misspells) `data` is almost certainly a mistake that fails open.
-fn context_access_warning(
-    block: &serde_json::Map<String, serde_json::Value>,
-    path: &str,
-) -> Option<String> {
-    let access = block.get("context_access")?.as_object()?;
-    if access.contains_key("data") {
-        return None;
-    }
-    Some(format!(
-        "{}.context_access has no \"data\" key, so the step can read all of context.data; \
-         set \"data\" explicitly (true, false, \"all\", \"none\", or {{\"fields\": [..]}})",
-        readable_json_path(path)
-    ))
-}
-
-fn collect_unknown_block_field(
-    block: &serde_json::Value,
+fn collect_unknown_object_fields(
+    value: &serde_json::Value,
+    allowed: &[&str],
     path: &str,
     unknown: &mut Vec<String>,
-    extra: &mut Vec<String>,
 ) {
+    if let Some(object) = value.as_object() {
+        for key in object.keys() {
+            if !allowed.contains(&key.as_str()) {
+                unknown.push(format!("{path}.{key}"));
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn collect_unknown_block_field(block: &serde_json::Value, path: &str, unknown: &mut Vec<String>) {
     let Some(object) = block.as_object() else {
         return;
     };
     let Some(block_type) = object.get("type").and_then(serde_json::Value::as_str) else {
         return;
     };
-    match block_type {
-        "step" => {
-            collect_unknown_typed::<StepDef>(block, path, unknown);
-            extra.extend(context_access_warning(object, path));
-        }
-        "parallel" => collect_unknown_typed::<ParallelDef>(block, path, unknown),
-        "race" => collect_unknown_typed::<RaceDef>(block, path, unknown),
-        "loop" => collect_unknown_typed::<LoopDef>(block, path, unknown),
-        "for_each" => collect_unknown_typed::<ForEachDef>(block, path, unknown),
-        "router" => collect_unknown_typed::<RouterDef>(block, path, unknown),
-        "try_catch" => collect_unknown_typed::<TryCatchDef>(block, path, unknown),
-        "sub_sequence" => collect_unknown_typed::<SubSequenceDef>(block, path, unknown),
-        "ab_split" | "a_b_split" => collect_unknown_typed::<ABSplitDef>(block, path, unknown),
-        "cancellation_scope" => {
-            collect_unknown_typed::<CancellationScopeDef>(block, path, unknown);
-        }
-        "saga" => collect_unknown_typed::<SagaDef>(block, path, unknown),
+    let allowed: &[&str] = match block_type {
+        "step" => &[
+            "type",
+            "id",
+            "handler",
+            "params",
+            "delay",
+            "retry",
+            "timeout",
+            "rate_limit_key",
+            "send_window",
+            "context_access",
+            "cancellable",
+            "wait_for_input",
+            "queue_name",
+            "deadline",
+            "on_deadline_breach",
+            "fallback_handler",
+            "cache_key",
+            "output_schema",
+            "when",
+            "compensation",
+        ],
+        "parallel" => &["type", "id", "branches"],
+        "race" => &["type", "id", "branches", "semantics"],
+        "loop" => &[
+            "type",
+            "id",
+            "condition",
+            "body",
+            "max_iterations",
+            "break_on",
+            "continue_on_error",
+            "poll_interval",
+            "retain_iterations",
+        ],
+        "for_each" => &[
+            "type",
+            "id",
+            "collection",
+            "item_var",
+            "body",
+            "max_iterations",
+            "retain_iterations",
+        ],
+        "router" => &["type", "id", "routes", "default"],
+        "try_catch" => &["type", "id", "try_block", "catch_block", "finally_block"],
+        "sub_sequence" => &["type", "id", "sequence_name", "version", "input"],
+        "ab_split" | "a_b_split" => &["type", "id", "variants"],
+        "cancellation_scope" => &["type", "id", "blocks"],
+        "saga" => &["type", "id", "steps"],
         _ => return,
+    };
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            unknown.push(format!("{path}.{key}"));
+        }
     }
 
-    let mut children = |value: Option<&serde_json::Value>, child_path: String| {
-        if let Some(value) = value {
-            collect_unknown_block_fields(value, &child_path, unknown, extra);
-        }
-    };
     match block_type {
         "parallel" | "race" => {
             if let Some(branches) = object.get("branches").and_then(serde_json::Value::as_array) {
                 for (index, branch) in branches.iter().enumerate() {
-                    children(Some(branch), format!("{path}.branches.{index}"));
+                    collect_unknown_block_fields(
+                        branch,
+                        &format!("{path}.branches.{index}"),
+                        unknown,
+                    );
                 }
             }
         }
-        "loop" | "for_each" => children(object.get("body"), format!("{path}.body")),
+        "loop" | "for_each" => {
+            if let Some(body) = object.get("body") {
+                collect_unknown_block_fields(body, &format!("{path}.body"), unknown);
+            }
+        }
         "router" => {
             if let Some(routes) = object.get("routes").and_then(serde_json::Value::as_array) {
                 for (index, route) in routes.iter().enumerate() {
-                    children(route.get("blocks"), format!("{path}.routes.{index}.blocks"));
+                    collect_unknown_object_fields(
+                        route,
+                        &["condition", "blocks"],
+                        &format!("{path}.routes.{index}"),
+                        unknown,
+                    );
+                    if let Some(children) = route.get("blocks") {
+                        collect_unknown_block_fields(
+                            children,
+                            &format!("{path}.routes.{index}.blocks"),
+                            unknown,
+                        );
+                    }
                 }
             }
-            children(object.get("default"), format!("{path}.default"));
+            if let Some(default) = object.get("default") {
+                collect_unknown_block_fields(default, &format!("{path}.default"), unknown);
+            }
         }
         "try_catch" => {
             for field in ["try_block", "catch_block", "finally_block"] {
-                children(object.get(field), format!("{path}.{field}"));
+                if let Some(children) = object.get(field) {
+                    collect_unknown_block_fields(children, &format!("{path}.{field}"), unknown);
+                }
             }
         }
         "ab_split" | "a_b_split" => {
             if let Some(variants) = object.get("variants").and_then(serde_json::Value::as_array) {
                 for (index, variant) in variants.iter().enumerate() {
-                    children(
-                        variant.get("blocks"),
-                        format!("{path}.variants.{index}.blocks"),
+                    collect_unknown_object_fields(
+                        variant,
+                        &["name", "weight", "blocks"],
+                        &format!("{path}.variants.{index}"),
+                        unknown,
                     );
+                    if let Some(children) = variant.get("blocks") {
+                        collect_unknown_block_fields(
+                            children,
+                            &format!("{path}.variants.{index}.blocks"),
+                            unknown,
+                        );
+                    }
                 }
             }
         }
-        "cancellation_scope" => children(object.get("blocks"), format!("{path}.blocks")),
+        "cancellation_scope" => {
+            if let Some(children) = object.get("blocks") {
+                collect_unknown_block_fields(children, &format!("{path}.blocks"), unknown);
+            }
+        }
         "saga" => {
             if let Some(steps) = object.get("steps").and_then(serde_json::Value::as_array) {
                 for (index, step) in steps.iter().enumerate() {
+                    collect_unknown_object_fields(
+                        step,
+                        &["id", "action", "compensation"],
+                        &format!("{path}.steps.{index}"),
+                        unknown,
+                    );
                     for field in ["action", "compensation"] {
                         if let Some(child) = step.get(field) {
                             collect_unknown_block_field(
                                 child,
                                 &format!("{path}.steps.{index}.{field}"),
                                 unknown,
-                                extra,
                             );
                         }
                     }
@@ -870,10 +879,12 @@ pub fn deserialize_sequence_lenient(
     })?;
     let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
     let mut ignored = Vec::new();
-    let mut extra = Vec::new();
-    for field in ["blocks", "on_failure", "on_cancel"] {
+    if let Some(blocks) = value.get("blocks") {
+        collect_unknown_block_fields(blocks, "blocks", &mut ignored);
+    }
+    for field in ["on_failure", "on_cancel"] {
         if let Some(blocks) = value.get(field) {
-            collect_unknown_block_fields(blocks, field, &mut ignored, &mut extra);
+            collect_unknown_block_fields(blocks, field, &mut ignored);
         }
     }
     let parsed = serde_ignored::deserialize(&mut deserializer, |path| {
@@ -886,7 +897,6 @@ pub fn deserialize_sequence_lenient(
         let warnings = ignored
             .iter()
             .map(|path| unknown_field_message(path))
-            .chain(extra)
             .collect();
         Ok((sequence, warnings))
     } else {
@@ -1015,69 +1025,6 @@ pub struct HumanInputDef {
     /// When true, the reviewer can attach a free-text comment to their decision.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_comment: bool,
-    /// Confidence-gated automation: ask the Jev decision model to answer the
-    /// gate first. At or above `threshold` confidence the gate is accepted
-    /// without a human (the decision, confidence and probabilities are kept
-    /// on the gate's output as evidence); below it — or when the model is
-    /// unavailable — the step parks for a human exactly as without this
-    /// setting.
-    /// Boxed: most gates don't set it, and `HumanInputDef` rides inside
-    /// every `StepDef` (and so inside large async state machines).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_decide: Option<Box<AutoDecideDef>>,
-}
-
-/// Default confidence required before a gate is decided without a human.
-pub const DEFAULT_AUTO_DECIDE_THRESHOLD: f64 = 0.9;
-
-const fn default_auto_decide_threshold() -> f64 {
-    DEFAULT_AUTO_DECIDE_THRESHOLD
-}
-
-/// `wait_for_input.auto_decide`: let a calibrated decision model answer a
-/// human gate when it is confident enough.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
-pub struct AutoDecideDef {
-    /// Minimum model confidence in `[0, 1]` to accept without a human.
-    #[serde(default = "default_auto_decide_threshold")]
-    pub threshold: f64,
-    /// Question put to the model; defaults to the gate's `prompt`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    /// Model id; defaults to `jev-latest`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// API key (literal or `credentials://` reference). When omitted the
-    /// operator's `TYPESAFE_API_KEY` is used — only for the default endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Endpoint override; requires an explicit `api_key`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// Map a free-text human reply (`{"text": "sure, go ahead"}`) onto one of
-    /// the gate's choices instead of rejecting it as an invalid value.
-    #[serde(default = "crate::serde_defaults::yes")]
-    pub interpret_replies: bool,
-}
-
-impl AutoDecideDef {
-    /// Structural validation.
-    ///
-    /// # Errors
-    /// Returns a message when `threshold` is outside `[0, 1]` or a custom
-    /// `base_url` is set without an explicit `api_key`.
-    pub fn validate(&self) -> Result<(), String> {
-        if !(0.0..=1.0).contains(&self.threshold) {
-            return Err(format!(
-                "auto_decide.threshold must be within [0, 1], got {}",
-                self.threshold
-            ));
-        }
-        if self.base_url.is_some() && self.api_key.is_none() {
-            return Err("auto_decide.base_url requires an explicit api_key".into());
-        }
-        Ok(())
-    }
 }
 
 impl HumanInputDef {
@@ -1109,9 +1056,6 @@ impl HumanInputDef {
             && s.is_empty()
         {
             return Err("human_review: `store_as` must be non-empty".into());
-        }
-        if let Some(auto) = &self.auto_decide {
-            auto.validate().map_err(|e| format!("human_review: {e}"))?;
         }
         Ok(())
     }
@@ -1382,7 +1326,6 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "blob_put",
     "blob_get",
     "wait_for_event",
-    "jev",
 ];
 
 impl SequenceDefinition {
@@ -1407,16 +1350,6 @@ impl SequenceDefinition {
         let mut seen = std::collections::HashSet::new();
         for block in &self.blocks {
             validate_block(block, &mut seen, 0)?;
-        }
-        // Depth is bounded by `validate_block` above, so this recursion is
-        // safe to run afterwards.
-        for block in self
-            .blocks
-            .iter()
-            .chain(self.on_failure.iter().flatten())
-            .chain(self.on_cancel.iter().flatten())
-        {
-            check_nested_iterations(block, 1)?;
         }
         // `seen` gained exactly one entry per unique block id visited above
         // (duplicates are rejected by `check_id`), so its size is the total
@@ -1655,12 +1588,6 @@ fn validate_step(
         if retry.max_attempts == 0 {
             return Err(block_err(id, "retry.max_attempts must be > 0"));
         }
-        if retry.max_attempts > MAX_RETRY_ATTEMPTS {
-            return Err(block_err(
-                id,
-                format!("retry.max_attempts must not exceed {MAX_RETRY_ATTEMPTS}"),
-            ));
-        }
         if !retry.backoff_multiplier.is_finite() || retry.backoff_multiplier <= 0.0 {
             return Err(block_err(
                 id,
@@ -1738,22 +1665,6 @@ const MAX_BRANCHES: usize = 256;
 /// `u32::MAX` passes validation and the engine happily starts a loop it can
 /// never realistically finish.
 const MAX_ITERATIONS: u32 = 100_000;
-
-/// Maximum `retry.max_attempts`. Each attempt is a durable dispatch plus
-/// backoff timer; beyond this a "retry forever" step is a stuck instance
-/// rather than a recoverable one (use a loop with an explicit condition).
-const MAX_RETRY_ATTEMPTS: u32 = 10_000;
-
-/// Maximum `Loop.poll_interval` in seconds (one year). Larger values are
-/// almost certainly unit mistakes (ms for s) and overflow timer arithmetic.
-const MAX_POLL_INTERVAL_SECS: u64 = 365 * 24 * 60 * 60;
-
-/// Maximum product of `max_iterations` along any chain of nested
-/// `Loop`/`ForEach` blocks. Each level is capped by [`MAX_ITERATIONS`], but
-/// nesting multiplies: three nested 100k loops is 10^15 body executions from
-/// one definition. Two nested loops at the default `max_iterations` (1000)
-/// are 10^6 and pass; deeper nesting must lower the inner bounds.
-const MAX_NESTED_ITERATIONS: u64 = 10_000_000;
 
 /// Maximum total block count across the whole tree (root + nested).
 /// `SequenceDefinition::validate`'s `seen` set already tracks every unique
@@ -1856,61 +1767,6 @@ fn validate_children(
     Ok(())
 }
 
-/// Reject chains of nested loops whose iteration bounds multiply past
-/// [`MAX_NESTED_ITERATIONS`]. `outer` is the product of the enclosing loops'
-/// `max_iterations`.
-fn check_nested_iterations(
-    block: &BlockDefinition,
-    outer: u64,
-) -> Result<(), SequenceValidationError> {
-    let (id, iterations) = match block {
-        BlockDefinition::Loop(l) => (Some(&l.id), u64::from(l.max_iterations)),
-        BlockDefinition::ForEach(fe) => (Some(&fe.id), u64::from(fe.max_iterations)),
-        _ => (None, 1),
-    };
-    let product = outer.saturating_mul(iterations);
-    if let Some(id) = id
-        && product > MAX_NESTED_ITERATIONS
-    {
-        return Err(block_err(
-            id.as_str(),
-            format!(
-                "nested loop iterations multiply to {product}, exceeding the maximum of \
-                 {MAX_NESTED_ITERATIONS}; lower max_iterations on the nested loops"
-            ),
-        ));
-    }
-    let check = |blocks: &[BlockDefinition]| {
-        blocks
-            .iter()
-            .try_for_each(|b| check_nested_iterations(b, product))
-    };
-    match block {
-        BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => Ok(()),
-        BlockDefinition::Parallel(p) => p.branches.iter().try_for_each(|b| check(b)),
-        BlockDefinition::Race(r) => r.branches.iter().try_for_each(|b| check(b)),
-        BlockDefinition::Loop(l) => check(&l.body),
-        BlockDefinition::ForEach(fe) => check(&fe.body),
-        BlockDefinition::Router(r) => {
-            r.routes.iter().try_for_each(|route| check(&route.blocks))?;
-            r.default.as_deref().map_or(Ok(()), check)
-        }
-        BlockDefinition::TryCatch(tc) => {
-            check(&tc.try_block)?;
-            check(&tc.catch_block)?;
-            tc.finally_block.as_deref().map_or(Ok(()), check)
-        }
-        BlockDefinition::ABSplit(ab) => ab.variants.iter().try_for_each(|v| check(&v.blocks)),
-        BlockDefinition::CancellationScope(cs) => check(&cs.blocks),
-        BlockDefinition::Saga(saga) => saga.steps.iter().try_for_each(|step| {
-            check_nested_iterations(&step.action, product)?;
-            step.compensation
-                .as_deref()
-                .map_or(Ok(()), |comp| check_nested_iterations(comp, product))
-        }),
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 fn validate_block(
     block: &BlockDefinition,
@@ -1945,14 +1801,6 @@ fn validate_block(
             }
             if l.max_iterations > MAX_ITERATIONS {
                 return Err(iterations_err(&l.id, "loop"));
-            }
-            if l.poll_interval
-                .is_some_and(|secs| secs > MAX_POLL_INTERVAL_SECS)
-            {
-                return Err(block_err(
-                    l.id.as_str(),
-                    format!("loop poll_interval must not exceed {MAX_POLL_INTERVAL_SECS} seconds"),
-                ));
             }
             validate_children(&l.body, seen, child_depth)
         }
@@ -2111,81 +1959,6 @@ mod tests {
             }));
         }
         inner
-    }
-
-    fn loop_around(id: &str, max_iterations: u32, body: BlockDefinition) -> BlockDefinition {
-        BlockDefinition::Loop(Box::new(LoopDef {
-            id: BlockId::new(id),
-            condition: "true".into(),
-            body: vec![body],
-            max_iterations,
-            break_on: None,
-            continue_on_error: false,
-            poll_interval: None,
-            retain_iterations: None,
-        }))
-    }
-
-    #[test]
-    fn validation_bounds_nested_loop_iteration_product() {
-        // Two nested default-sized loops (10^6) are fine.
-        let ok = loop_around("outer", 1000, loop_around("inner", 1000, nested_loops(0)));
-        seq_with(ok).validate().unwrap();
-        // Three nested 1000-iteration loops (10^9) are not, even though each
-        // level is under MAX_ITERATIONS.
-        let deep = loop_around(
-            "a",
-            1000,
-            loop_around("b", 1000, loop_around("c", 1000, nested_loops(0))),
-        );
-        let err = seq_with(deep).validate().unwrap_err();
-        assert!(err.to_string().contains("nested loop iterations"), "{err}");
-        // The product is tracked through non-loop wrappers too.
-        let wrapped = loop_around(
-            "a",
-            100_000,
-            BlockDefinition::CancellationScope(Box::new(CancellationScopeDef {
-                id: BlockId::new("scope"),
-                blocks: vec![loop_around("b", 1000, nested_loops(0))],
-            })),
-        );
-        assert!(seq_with(wrapped).validate().is_err());
-    }
-
-    #[test]
-    fn validation_caps_loop_poll_interval() {
-        let mut block = loop_around("l", 1, nested_loops(0));
-        if let BlockDefinition::Loop(l) = &mut block {
-            l.poll_interval = Some(MAX_POLL_INTERVAL_SECS + 1);
-        }
-        let err = seq_with(block.clone()).validate().unwrap_err();
-        assert!(err.to_string().contains("poll_interval"), "{err}");
-        if let BlockDefinition::Loop(l) = &mut block {
-            l.poll_interval = Some(60);
-        }
-        seq_with(block).validate().unwrap();
-    }
-
-    #[test]
-    fn validation_caps_retry_max_attempts() {
-        let mut leaf = nested_loops(0);
-        if let BlockDefinition::Step(step) = &mut leaf {
-            step.retry = Some(
-                serde_json::from_value(serde_json::json!({"max_attempts": u32::MAX})).unwrap(),
-            );
-        }
-        let err = seq_with(leaf.clone()).validate().unwrap_err();
-        assert!(
-            err.to_string().contains("max_attempts must not exceed"),
-            "{err}"
-        );
-        if let BlockDefinition::Step(step) = &mut leaf {
-            step.retry = Some(
-                serde_json::from_value(serde_json::json!({"max_attempts": MAX_RETRY_ATTEMPTS}))
-                    .unwrap(),
-            );
-        }
-        seq_with(leaf).validate().unwrap();
     }
 
     fn seq_with(block: BlockDefinition) -> SequenceDefinition {
@@ -2459,45 +2232,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_decide_defaults_validation_and_strict_typos() {
-        let def: HumanInputDef = serde_json::from_value(serde_json::json!({
-            "prompt": "ok?", "auto_decide": {}
-        }))
-        .unwrap();
-        let auto = def.auto_decide.clone().unwrap();
-        assert!((auto.threshold - DEFAULT_AUTO_DECIDE_THRESHOLD).abs() < f64::EPSILON);
-        assert!(auto.interpret_replies);
-        assert!(def.validate().is_ok());
-
-        let mut bad = def.clone();
-        bad.auto_decide = Some(Box::new(AutoDecideDef {
-            threshold: 1.5,
-            ..(*auto).clone()
-        }));
-        assert!(bad.validate().is_err());
-        bad.auto_decide = Some(Box::new(AutoDecideDef {
-            base_url: Some("https://proxy.example".into()),
-            ..*auto
-        }));
-        assert!(bad.validate().is_err(), "custom endpoint needs its own key");
-
-        let value = serde_json::json!({
-            "id": uuid::Uuid::nil(),
-            "tenant_id": "tenant",
-            "namespace": "default",
-            "name": "typo",
-            "version": 1,
-            "blocks": [{
-                "type": "step", "id": "gate", "handler": "noop",
-                "wait_for_input": {"prompt": "ok?", "auto_decide": {"threshhold": 0.8}}
-            }],
-            "created_at": "2026-09-01T00:00:00Z"
-        });
-        let error = deserialize_sequence_strict(&value).unwrap_err();
-        assert!(error.to_string().contains("threshhold"), "{error}");
-    }
-
-    #[test]
     fn strict_sequence_decode_reports_nested_type_error_path() {
         let value = serde_json::json!({
             "id": uuid::Uuid::nil(),
@@ -2585,138 +2319,6 @@ mod tests {
                 && warning.contains("did you mean \"when\"")
         }));
         assert!(deserialize_sequence_strict(&value).is_err());
-    }
-
-    #[allow(clippy::needless_pass_by_value)]
-    fn seq_with_blocks(blocks: serde_json::Value) -> serde_json::Value {
-        serde_json::json!({
-            "id": uuid::Uuid::nil(),
-            "tenant_id": "tenant",
-            "namespace": "default",
-            "name": "nested",
-            "version": 1,
-            "blocks": blocks,
-            "created_at": "2026-09-01T00:00:00Z"
-        })
-    }
-
-    #[test]
-    fn strict_decode_rejects_unknown_key_inside_context_access() {
-        // `dta` typo used to be accepted and default to full data access.
-        let value = seq_with_blocks(serde_json::json!([{
-            "type": "step",
-            "id": "work",
-            "handler": "noop",
-            "context_access": {"dta": {"fields": ["user_id"]}}
-        }]));
-        let error = deserialize_sequence_strict(&value).unwrap_err();
-        assert!(
-            error.to_string().contains("blocks[0].context_access.dta"),
-            "{error}"
-        );
-        assert!(
-            error.to_string().contains("did you mean \"data\""),
-            "{error}"
-        );
-        let (_, warnings) = deserialize_sequence_lenient(&value).unwrap();
-        assert!(warnings.iter().any(|w| w.contains("context_access.dta")));
-        assert!(warnings.iter().any(|w| w.contains("no \"data\" key")));
-    }
-
-    #[test]
-    fn strict_decode_rejects_context_access_without_data() {
-        let value = seq_with_blocks(serde_json::json!([{
-            "type": "step",
-            "id": "work",
-            "handler": "noop",
-            "context_access": {"config": false}
-        }]));
-        let error = deserialize_sequence_strict(&value).unwrap_err();
-        assert!(error.to_string().contains("no \"data\" key"), "{error}");
-        let (sequence, warnings) = deserialize_sequence_lenient(&value).unwrap();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        // Lenient mode keeps the legacy default.
-        let BlockDefinition::Step(step) = &sequence.blocks[0] else {
-            panic!("expected step");
-        };
-        assert_eq!(step.context_access.as_ref().unwrap().data, FieldAccess::ALL);
-
-        let explicit = seq_with_blocks(serde_json::json!([{
-            "type": "step",
-            "id": "work",
-            "handler": "noop",
-            "context_access": {"data": true, "config": false}
-        }]));
-        assert!(deserialize_sequence_strict(&explicit).is_ok());
-    }
-
-    #[test]
-    fn strict_decode_rejects_unknown_keys_in_all_step_sub_objects() {
-        for (field, value, typo_path) in [
-            (
-                "retry",
-                serde_json::json!({"max_attempts": 2, "backof": 1}),
-                "retry.backof",
-            ),
-            (
-                "send_window",
-                serde_json::json!({"start": 9}),
-                "send_window.start",
-            ),
-            (
-                "delay",
-                serde_json::json!({"duration": 10, "jiter": 1}),
-                "delay.jiter",
-            ),
-            (
-                "wait_for_input",
-                serde_json::json!({"promt": "x"}),
-                "wait_for_input.promt",
-            ),
-            (
-                "on_deadline_breach",
-                serde_json::json!({"handler": "h", "parms": {}}),
-                "on_deadline_breach.parms",
-            ),
-            (
-                "compensation",
-                serde_json::json!({"handler": "h", "depend_on": []}),
-                "compensation.depend_on",
-            ),
-        ] {
-            let mut step = serde_json::json!({"type": "step", "id": "s", "handler": "noop"});
-            step[field] = value;
-            // Nest it inside composites to prove recursion still works.
-            let value = seq_with_blocks(serde_json::json!([{
-                "type": "saga",
-                "id": "saga",
-                "steps": [{
-                    "id": "st",
-                    "action": {"type": "loop", "id": "l", "condition": "false", "body": [step]}
-                }]
-            }]));
-            let error = deserialize_sequence_strict(&value).unwrap_err();
-            let expected = format!("blocks[0].steps[0].action.body[0].{typo_path}");
-            assert!(error.to_string().contains(&expected), "{field}: {error}");
-        }
-    }
-
-    #[test]
-    fn strict_decode_accepts_valid_nested_sub_objects() {
-        let value = seq_with_blocks(serde_json::json!([{
-            "type": "step",
-            "id": "work",
-            "handler": "noop",
-            "retry": {"max_attempts": 2, "initial_backoff": 100, "retry_if": "true"},
-            "send_window": {"start_hour": 8, "end_hour": 18, "days": [0, 1]},
-            "context_access": {"data": {"fields": ["a"]}, "config": false},
-            "wait_for_input": {"prompt": "ok?", "choices": [{"label": "Yes", "value": "y"}]}
-        }, {
-            "type": "a_b_split",
-            "id": "ab",
-            "variants": [{"name": "a", "weight": 1, "blocks": []}]
-        }]));
-        deserialize_sequence_strict(&value).unwrap();
     }
 
     #[test]
@@ -3093,7 +2695,6 @@ mod tests {
             choices: Some(vec![]),
             store_as: None,
             allow_comment: false,
-            auto_decide: None,
         };
         let step_with_bad = BlockDefinition::Step(Box::new(StepDef {
             id: BlockId::new("review"),
@@ -3133,7 +2734,6 @@ mod tests {
             choices: Some(vec![]),
             store_as: None,
             allow_comment: false,
-            auto_decide: None,
         };
         assert!(d.validate().is_err());
     }
@@ -3156,7 +2756,6 @@ mod tests {
             ]),
             store_as: None,
             allow_comment: false,
-            auto_decide: None,
         };
         assert!(d.validate().is_err());
     }
@@ -3170,7 +2769,6 @@ mod tests {
             choices: None,
             store_as: Some(String::new()),
             allow_comment: false,
-            auto_decide: None,
         };
         assert!(d.validate().is_err());
     }
@@ -3193,7 +2791,6 @@ mod tests {
             ]),
             store_as: Some("decision".into()),
             allow_comment: false,
-            auto_decide: None,
         };
         assert!(d.validate().is_ok());
     }
@@ -3207,7 +2804,6 @@ mod tests {
             choices: None,
             store_as: None,
             allow_comment: false,
-            auto_decide: None,
         };
         assert!(d.validate().is_ok());
     }
@@ -3221,7 +2817,6 @@ mod tests {
             choices: None,
             store_as: None,
             allow_comment: false,
-            auto_decide: None,
         };
         let c = d.effective_choices();
         assert_eq!(c.len(), 2);
@@ -3243,7 +2838,6 @@ mod tests {
             }]),
             store_as: None,
             allow_comment: false,
-            auto_decide: None,
         };
         let c = d.effective_choices();
         assert_eq!(c.len(), 1);

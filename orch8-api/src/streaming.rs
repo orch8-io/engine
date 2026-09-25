@@ -82,7 +82,6 @@ const fn is_terminal(state: InstanceState) -> bool {
     responses(
         (status = 200, description = "Server-Sent Events stream of instance state/output changes plus live llm_delta events from streaming llm_call steps", content_type = "text/event-stream"),
         (status = 404, description = "Instance not found"),
-        (status = 429, description = "Per-tenant concurrent stream limit reached"),
         (status = 503, description = "Too many concurrent streams"),
     )
 )]
@@ -113,15 +112,12 @@ pub(crate) async fn stream_instance(
     // with 503 instead of silently spawning another polling task. Without
     // this gate a single client could open arbitrarily many streams and
     // exhaust tokio tasks + DB pool connections.
-    // The per-tenant cap keeps one tenant from holding every global slot.
-    let permit = crate::stream_limits::acquire(&state.stream_limiter, instance.tenant_id.as_str())
-        .map_err(|e| match e {
-            crate::stream_limits::StreamLimitError::Global => {
-                ApiError::Unavailable("too many concurrent streaming clients; retry later".into())
-            }
-            crate::stream_limits::StreamLimitError::Tenant => {
-                ApiError::RateLimited("per-tenant concurrent stream limit reached".into())
-            }
+    let permit = state
+        .stream_limiter
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            ApiError::Unavailable("too many concurrent streaming clients; retry later".into())
         })?;
 
     // Perf#2: exponential backoff on consecutive storage errors. The

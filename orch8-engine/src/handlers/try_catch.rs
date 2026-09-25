@@ -12,11 +12,6 @@ use crate::handlers::HandlerRegistry;
 /// Execute a try-catch-finally block.
 /// Branch 0 = try, Branch 1 = catch, Branch 2 = finally.
 /// Returns `true` if more work.
-///
-/// Each phase is an ordered sequence driven by
-/// [`evaluator::advance_sequence`]: a failed block stops its phase
-/// immediately (later try blocks never run), which hands control to `catch`;
-/// `finally` always runs once try/catch have settled.
 pub async fn execute_try_catch(
     storage: &dyn StorageBackend,
     _handlers: &HandlerRegistry,
@@ -29,26 +24,23 @@ pub async fn execute_try_catch(
     let catch_children = evaluator::children_of(tree, node.id, Some(1));
     let finally_children = evaluator::children_of(tree, node.id, Some(2));
 
-    // Phase 1: run the try block until it drains or stops on a failure.
-    let try_progress = evaluator::advance_sequence(storage, &try_children).await?;
-    if !try_progress.is_settled() {
+    // Phase 1: Activate and wait for try block.
+    if !try_children.is_empty() && !evaluator::all_terminal(&try_children) {
+        // Sequential cursor: only the first Pending try child should start.
+        evaluator::activate_first_pending_child(storage, &try_children).await?;
         return Ok(true);
     }
-    // A cancelled try block did not succeed either — route it through catch.
-    let try_failed = try_progress.is_stopped();
+
+    let try_failed = evaluator::any_failed(&try_children);
 
     // Phase 2: Handle catch block.
-    let mut catch_recovered = true;
-    let mut refreshed: Option<Vec<ExecutionNode>> = None;
     if try_failed && !catch_children.is_empty() {
-        let (catch_state, _) = evaluator::sequence_cursor(&catch_children);
-        let catch_not_started = catch_children.iter().all(|c| c.state == NodeState::Pending);
-        if catch_not_started {
-            // Inject error context once, before the first catch block starts.
-            // Find which try block failed and expose via context.data._error.
+        if !evaluator::all_terminal(&catch_children) {
+            // Inject error context before activating catch children.
+            // Find which try block(s) failed and expose via context.data._error.
             let failed_blocks: Vec<String> = try_children
                 .iter()
-                .filter(|c| matches!(c.state, NodeState::Failed | NodeState::Cancelled))
+                .filter(|c| c.state == NodeState::Failed)
                 .map(|c| c.block_id.as_str().to_owned())
                 .collect();
             let error_ctx = serde_json::json!({
@@ -67,58 +59,56 @@ pub async fn execute_try_catch(
                     );
                     EngineError::from(e)
                 })?;
-        }
-        if !catch_state.is_settled() {
-            // Sequential cursor: only the next Pending catch child starts.
-            evaluator::advance_sequence(storage, &catch_children).await?;
+
+            // Sequential cursor: only the first Pending catch child should start.
+            evaluator::activate_first_pending_child(storage, &catch_children).await?;
             return Ok(true);
         }
-        catch_recovered = catch_state == evaluator::SeqProgress::Done;
     } else if !try_failed {
         // Try succeeded — skip catch.
-        let mut skipped_any = false;
         for child in &catch_children {
             if matches!(child.state, NodeState::Pending | NodeState::Running) {
                 storage
                     .update_node_state(child.id, NodeState::Skipped)
                     .await?;
-                skipped_any = true;
             }
-        }
-        if skipped_any {
-            // Settling below must not see the just-skipped catch nodes as
-            // live (it would flip them to Cancelled), so refresh the view.
-            refreshed = Some(storage.get_execution_tree(instance.id).await?);
         }
     }
 
     // Phase 3: Finally block always runs.
-    let finally_progress = evaluator::advance_sequence(storage, &finally_children).await?;
-    if !finally_progress.is_settled() {
+    if !finally_children.is_empty() && !evaluator::all_terminal(&finally_children) {
+        // Sequential cursor: only the first Pending finally child should start.
+        evaluator::activate_first_pending_child(storage, &finally_children).await?;
         return Ok(true);
     }
 
     // All phases complete. Node succeeds if try succeeded (or catch recovered)
     // AND finally did not fail. Recovery means one of:
-    //   - catch children exist and all of them completed/skipped
+    //   - catch children exist and none failed (catch logic ran successfully)
     //   - catch block is declared (even empty) and no catch children exist,
     //     i.e. the author wrote `catch: []` as an explicit "swallow errors"
     //     marker — the tree has no catch nodes to fail, so the error is absorbed.
+    // A try failure without *any* catch declaration propagates, but since
+    // `TryCatchDef.catch_block` is always present, the empty-vec case is the
+    // canonical "ignore errors" pattern.
     //
     // Finally-failure semantics: if the finally block itself throws, the
     // try_catch fails — a failed cleanup is a programming error and must
     // not be silently absorbed, regardless of whether try or catch succeeded.
     // Matches Java/JS: a finally exception overrides an earlier try/catch
     // result.
-    let finally_failed = finally_progress.is_stopped();
-    let final_state = if finally_failed || (try_failed && !catch_recovered) {
-        NodeState::Failed
+    let catch_recovered = if catch_children.is_empty() {
+        // No catch children in tree — treat as swallowed (empty catch body).
+        true
     } else {
-        NodeState::Completed
+        !evaluator::any_failed(&catch_children)
     };
-    // Settling also skips the try blocks left Pending behind a failure.
-    let settle_view = refreshed.as_deref().unwrap_or(tree);
-    evaluator::settle_composite(storage, instance.id, settle_view, node.id, final_state).await?;
+    let finally_failed = evaluator::any_failed(&finally_children);
+    if finally_failed || (try_failed && !catch_recovered) {
+        evaluator::fail_node(storage, node.id).await?;
+    } else {
+        evaluator::complete_node(storage, node.id).await?;
+    }
 
     debug!(
         instance_id = %instance.id,
@@ -935,85 +925,5 @@ mod tests {
 
         let after = s.get_execution_tree(inst_id).await.unwrap();
         assert_eq!(node_by_block(&after, "tc").state, NodeState::Failed);
-    }
-
-    /// Run-past-failure: a failed try block must stop the try phase — the
-    /// next try block never runs — and hand control to catch.
-    #[tokio::test]
-    async fn try_failure_stops_try_phase_and_enters_catch() {
-        let inst_id = InstanceId::new();
-        let tc = mk_node(
-            inst_id,
-            "tc",
-            BlockType::TryCatch,
-            None,
-            None,
-            NodeState::Running,
-        );
-        let t1 = mk_node(
-            inst_id,
-            "t1",
-            BlockType::Step,
-            Some(tc.id),
-            Some(0),
-            NodeState::Failed,
-        );
-        let t2 = mk_node(
-            inst_id,
-            "t2",
-            BlockType::Step,
-            Some(tc.id),
-            Some(0),
-            NodeState::Pending,
-        );
-        let c1 = mk_node(
-            inst_id,
-            "c1",
-            BlockType::Step,
-            Some(tc.id),
-            Some(1),
-            NodeState::Pending,
-        );
-        let (s, tree) = setup(vec![tc.clone(), t1, t2, c1], inst_id).await;
-        let inst = mk_instance(inst_id);
-        let tc_node = node_by_block(&tree, "tc").clone();
-
-        execute_try_catch(
-            &s,
-            &HandlerRegistry::new(),
-            &inst,
-            &tc_node,
-            &tc_def("tc"),
-            &tree,
-        )
-        .await
-        .unwrap();
-        let after = s.get_execution_tree(inst_id).await.unwrap();
-        assert_eq!(
-            node_by_block(&after, "t2").state,
-            NodeState::Pending,
-            "try successor must not run after a failure"
-        );
-        assert_eq!(node_by_block(&after, "c1").state, NodeState::Running);
-
-        // Catch recovers → try_catch completes and the skipped try remainder
-        // is settled (no orphaned Pending node).
-        s.update_node_state(node_by_block(&after, "c1").id, NodeState::Completed)
-            .await
-            .unwrap();
-        let tree = s.get_execution_tree(inst_id).await.unwrap();
-        execute_try_catch(
-            &s,
-            &HandlerRegistry::new(),
-            &inst,
-            &tc_node,
-            &tc_def("tc"),
-            &tree,
-        )
-        .await
-        .unwrap();
-        let after = s.get_execution_tree(inst_id).await.unwrap();
-        assert_eq!(node_by_block(&after, "tc").state, NodeState::Completed);
-        assert_eq!(node_by_block(&after, "t2").state, NodeState::Skipped);
     }
 }

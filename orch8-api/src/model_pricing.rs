@@ -53,7 +53,6 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     // Anthropic
     ("claude-fable-5", price(10.00, 50.00)),
     ("claude-mythos-5", price(10.00, 50.00)),
-    ("claude-opus-5-5", price(4.00, 20.00)),
     ("claude-opus-5", price(5.00, 25.00)),
     ("claude-sonnet-5", price(2.00, 10.00)),
     ("claude-opus-4-8", price(5.00, 25.00)),
@@ -72,7 +71,6 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     ("claude-3-opus", price(15.00, 75.00)),
     // Google
     // Promotional standard pricing through 2026-12-31.
-    ("gemini-3.8-flash", price(0.75, 3.75)),
     ("gemini-3.7-flash", price(0.75, 3.75)),
     ("gemini-3.6-flash", price(0.75, 3.75)),
     ("gemini-3.5-flash", price(1.50, 9.00)),

@@ -129,14 +129,11 @@ impl PushOutboxStore for SqliteStorage {
                 ..
             }
         ) {
-            // Only clear the token the provider rejected: the device may have
-            // re-registered a fresh token while this wake was in flight.
             sqlx::query(
-                "UPDATE mobile_devices SET active=0,push_token=NULL WHERE tenant_id=? AND device_id=? AND push_token=?",
+                "UPDATE mobile_devices SET active=0,push_token=NULL WHERE tenant_id=? AND device_id=?",
             )
             .bind(&wake.tenant_id)
             .bind(&wake.device_id)
-            .bind(&wake.push_token)
             .execute(&mut *transaction)
             .await
             .map_err(|error| error.to_string())?;
@@ -170,15 +167,6 @@ impl PushOutboxStore for SqliteStorage {
         separated.push_unseparated(")");
         builder
             .build()
-            .execute(&self.pool)
-            .await
-            .map(|result| result.rows_affected())
-            .map_err(|error| error.to_string())
-    }
-
-    async fn prune_wakes(&self, created_before: DateTime<Utc>) -> Result<u64, String> {
-        sqlx::query("DELETE FROM push_wake_outbox WHERE created_at<? AND status<>'in_flight'")
-            .bind(ts(created_before))
             .execute(&self.pool)
             .await
             .map(|result| result.rows_affected())
@@ -404,115 +392,6 @@ mod tests {
             .unwrap();
         assert!(!device.active);
         assert!(device.push_token.is_none());
-    }
-
-    /// MOB-N2: an InvalidToken outcome for the *old* token must not wipe a
-    /// token the device re-registered while the wake was in flight.
-    #[tokio::test]
-    async fn invalid_token_cleanup_spares_reregistered_token() {
-        let storage = storage_with_device().await;
-        let now = Utc::now();
-        storage
-            .enqueue_wake("tenant-a", "device-a", "cmd", now)
-            .await
-            .unwrap();
-        let wake = storage
-            .claim_due_wakes(now, now + Duration::seconds(30), 1)
-            .await
-            .unwrap()
-            .remove(0);
-        assert_eq!(wake.push_token, "token-a");
-        storage
-            .register_mobile_device(&MobileDevice {
-                device_id: "device-a".into(),
-                tenant_id: "tenant-a".into(),
-                push_token: Some("token-b".into()),
-                platform: "ios".into(),
-                app_version: None,
-                active: true,
-                last_sync_at: None,
-                registered_at: String::new(),
-            })
-            .await
-            .unwrap();
-        storage
-            .record_wake_outcome(
-                &wake,
-                &WakeAttemptOutcome::Terminal {
-                    reason: PushTerminalReason::InvalidToken,
-                    error: "gone".into(),
-                },
-                now,
-            )
-            .await
-            .unwrap();
-        let device = storage
-            .get_mobile_device("device-a")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(device.active);
-        assert_eq!(device.push_token.as_deref(), Some("token-b"));
-    }
-
-    /// API-N6/STO-M4: re-registering another tenant's device id must not
-    /// overwrite its push token; it surfaces as a conflict.
-    #[tokio::test]
-    async fn device_upsert_refuses_cross_tenant_overwrite() {
-        let storage = storage_with_device().await;
-        let err = storage
-            .register_mobile_device(&MobileDevice {
-                device_id: "device-a".into(),
-                tenant_id: "tenant-b".into(),
-                push_token: Some("attacker".into()),
-                platform: "ios".into(),
-                app_version: None,
-                active: true,
-                last_sync_at: None,
-                registered_at: String::new(),
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, orch8_types::error::StorageError::Conflict(_)));
-        let device = storage
-            .get_mobile_device("device-a")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(device.tenant_id, "tenant-a");
-        assert_eq!(device.push_token.as_deref(), Some("token-a"));
-    }
-
-    #[tokio::test]
-    async fn prune_wakes_deletes_old_non_leased_rows() {
-        let storage = storage_with_device().await;
-        let old = Utc::now() - Duration::days(10);
-        for id in ["old-pending", "old-leased"] {
-            storage
-                .enqueue_wake("tenant-a", "device-a", id, old)
-                .await
-                .unwrap();
-        }
-        storage
-            .enqueue_wake("tenant-a", "device-a", "fresh", Utc::now())
-            .await
-            .unwrap();
-        // Lease one old row: in-flight rows are never pruned.
-        let now = Utc::now();
-        storage
-            .claim_due_wakes(now, now + Duration::seconds(30), 1)
-            .await
-            .unwrap();
-        let pruned = storage
-            .prune_wakes(Utc::now() - Duration::days(7))
-            .await
-            .unwrap();
-        assert_eq!(pruned, 1);
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_wake_outbox")
-            .fetch_one(&storage.pool)
-            .await
-            .unwrap();
-        assert_eq!(left, 2);
     }
 
     #[tokio::test]

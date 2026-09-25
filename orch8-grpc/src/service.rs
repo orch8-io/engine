@@ -20,30 +20,22 @@ use crate::WORKER_STREAM_PROTOCOL_VERSION;
 use crate::auth::{caller_tenant, enforce_tenant_create, enforce_tenant_match, scoped_tenant_id};
 use crate::proto::{self, orch8_service_server::Orch8Service};
 
-/// How long an artifact transfer waits for the client's chunk ack before
-/// abandoning the transfer (and releasing the buffered object).
-const ARTIFACT_ACK_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
 #[derive(Clone)]
 pub struct Orch8GrpcService {
     storage: Arc<dyn StorageBackend>,
     /// Semantic cap on a single instance's serialized `ExecutionContext`.
     /// Mirrors the HTTP path's `state.max_context_bytes`. `0` disables it.
     max_context_bytes: u32,
-    /// Process shutdown signal. Long-lived bidi streams (worker stream,
-    /// artifact transfer) observe it and close, otherwise the server's
-    /// graceful shutdown waits on them forever.
-    shutdown: tokio_util::sync::CancellationToken,
-    /// Mirrors HTTP `/health/ready`: cleared when the engine tick loop or a
-    /// serving surface dies so `Health` stops reporting `ok`.
-    engine_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Orch8GrpcService {
     /// Construct with the default context-size cap
     /// ([`orch8_types::context::DEFAULT_MAX_CONTEXT_BYTES`]).
     pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
-        Self::with_max_context_bytes(storage, orch8_types::context::DEFAULT_MAX_CONTEXT_BYTES)
+        Self {
+            storage,
+            max_context_bytes: orch8_types::context::DEFAULT_MAX_CONTEXT_BYTES,
+        }
     }
 
     /// Construct with an explicit context-size cap (server wires
@@ -57,24 +49,7 @@ impl Orch8GrpcService {
         Self {
             storage,
             max_context_bytes,
-            shutdown: tokio_util::sync::CancellationToken::new(),
-            engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
-    }
-
-    /// Close long-lived streams when `shutdown` is cancelled.
-    #[must_use]
-    pub fn with_shutdown(mut self, shutdown: tokio_util::sync::CancellationToken) -> Self {
-        self.shutdown = shutdown;
-        self
-    }
-
-    /// Share the process readiness flag so `Health` agrees with
-    /// `/health/ready`.
-    #[must_use]
-    pub fn with_engine_ready(mut self, engine_ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
-        self.engine_ready = engine_ready;
-        self
     }
 
     /// Validate and sanitize a client-supplied instance before creation.
@@ -407,32 +382,16 @@ impl Orch8GrpcService {
         Ok(capabilities)
     }
 
-    /// Pending commands for `worker_id` visible to this session. `worker_id`
-    /// is client-chosen, so a tenant-scoped session only sees commands
-    /// addressed to its own tenant; `None` (unscoped root/insecure) sees all.
-    async fn visible_worker_commands(
+    async fn send_worker_commands(
         &self,
         worker_id: &str,
-        tenant: Option<&TenantId>,
-    ) -> Result<Vec<orch8_types::worker::WorkerCommand>, Status> {
-        let mut commands = self
+        sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
+    ) -> Result<bool, Status> {
+        let commands = self
             .storage
             .list_worker_commands(worker_id)
             .await
             .map_err(storage_err)?;
-        if let Some(tenant) = tenant {
-            commands.retain(|command| command.tenant_id == tenant.as_str());
-        }
-        Ok(commands)
-    }
-
-    async fn send_worker_commands(
-        &self,
-        worker_id: &str,
-        tenant: Option<&TenantId>,
-        sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
-    ) -> Result<bool, Status> {
-        let commands = self.visible_worker_commands(worker_id, tenant).await?;
         let mut drain_requested = false;
         for command in commands {
             drain_requested |= command.command == orch8_types::worker::WorkerCommandKind::Drain;
@@ -459,10 +418,13 @@ impl Orch8GrpcService {
     async fn acknowledge_worker_command(
         &self,
         worker_id: &str,
-        tenant: Option<&TenantId>,
         command_id: Uuid,
     ) -> Result<(), Status> {
-        let commands = self.visible_worker_commands(worker_id, tenant).await?;
+        let commands = self
+            .storage
+            .list_worker_commands(worker_id)
+            .await
+            .map_err(storage_err)?;
         if commands.iter().any(|command| command.id == command_id) {
             self.storage
                 .delete_worker_command(command_id)
@@ -623,9 +585,7 @@ impl Orch8GrpcService {
                     .await?;
                 *runtime_id = Some(capabilities.runtime_id);
                 *draining |= capabilities.draining;
-                *draining |= self
-                    .send_worker_commands(&open.worker_id, tenant, sender)
-                    .await?;
+                *draining |= self.send_worker_commands(&open.worker_id, sender).await?;
                 sender
                     .send(Ok(worker_server_frame(
                         proto::worker_stream_server::Payload::Ack(proto::WorkerStreamAck {
@@ -644,7 +604,7 @@ impl Orch8GrpcService {
                     ));
                 }
                 let command_id = parse_uuid(&ack.command_id)?;
-                self.acknowledge_worker_command(&open.worker_id, tenant, command_id)
+                self.acknowledge_worker_command(&open.worker_id, command_id)
                     .await?;
                 sender
                     .send(Ok(worker_server_frame(
@@ -766,17 +726,6 @@ fn from_json_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, Status> {
     }
     serde_json::from_str(s)
         .map_err(|e| Status::invalid_argument(format!("invalid JSON payload: {e}")))
-}
-
-/// Bulk mutations must be tenant-scoped (same contract as HTTP
-/// `/instances/bulk/*`): an empty filter would otherwise touch every tenant.
-fn require_bulk_tenant(filter: &orch8_types::filter::InstanceFilter) -> Result<(), Status> {
-    if filter.tenant_id.is_none() {
-        return Err(Status::invalid_argument(
-            "bulk operations require a tenant_id",
-        ));
-    }
-    Ok(())
 }
 
 fn storage_err(e: orch8_types::error::StorageError) -> Status {
@@ -1009,11 +958,6 @@ impl Orch8Service for Orch8GrpcService {
         &self,
         _req: Request<proto::HealthRequest>,
     ) -> Result<Response<proto::HealthResponse>, Status> {
-        if !self.engine_ready.load(std::sync::atomic::Ordering::Relaxed)
-            || self.shutdown.is_cancelled()
-        {
-            return Err(Status::unavailable("engine not ready"));
-        }
         self.storage.ping().await.map_err(storage_err)?;
         Ok(Response::new(proto::HealthResponse {
             status: "ok".into(),
@@ -1454,20 +1398,29 @@ impl Orch8Service for Orch8GrpcService {
             )));
         }
 
-        // CAS-claimed retry shared with the HTTP/MCP/batch paths: a racing
-        // retry loses the `Failed → Paused` claim instead of wiping the tree
-        // of the run the winner just started.
-        match orch8_storage::lifecycle::retry_failed_instance(self.storage.as_ref(), id)
+        self.storage
+            .delete_execution_tree(id)
             .await
-            .map_err(storage_err)?
-        {
-            orch8_storage::lifecycle::RetryOutcome::Retried => {}
-            _ => {
-                return Err(Status::aborted(
-                    "instance state changed concurrently during retry",
-                ));
-            }
-        }
+            .map_err(storage_err)?;
+        self.storage
+            .delete_sentinel_block_outputs(id)
+            .await
+            .map_err(storage_err)?;
+        // Reset the run identity and step counters so the new run's
+        // outputs/events aren't correlated to the failed run (mirrors the
+        // HTTP retry path's `reset_instance_run`).
+        self.storage
+            .reset_instance_run(id, &Uuid::now_v7().to_string())
+            .await
+            .map_err(storage_err)?;
+        self.storage
+            .update_instance_state(
+                id,
+                orch8_types::instance::InstanceState::Scheduled,
+                Some(chrono::Utc::now()),
+            )
+            .await
+            .map_err(storage_err)?;
 
         let inst = self
             .storage
@@ -1490,16 +1443,9 @@ impl Orch8Service for Orch8GrpcService {
         if let Some(caller) = crate::auth::caller_tenant(&req) {
             filter.tenant_id = Some(caller.clone());
         }
-        // Mirror HTTP bulk: an unscoped bulk mutation would touch every
-        // tenant's instances.
-        require_bulk_tenant(&filter)?;
         let new_state: orch8_types::instance::InstanceState =
             InstanceState::from_str(&req.get_ref().new_state)
                 .map_err(|e| Status::invalid_argument(e))?;
-        filter.states = Some(
-            orch8_storage::lifecycle::bulk_transition_sources(new_state, filter.states.as_deref())
-                .map_err(Status::invalid_argument)?,
-        );
         let updated = self
             .storage
             .bulk_update_state(&filter, new_state)
@@ -1517,7 +1463,6 @@ impl Orch8Service for Orch8GrpcService {
         if let Some(caller) = crate::auth::caller_tenant(&req) {
             filter.tenant_id = Some(caller.clone());
         }
-        require_bulk_tenant(&filter)?;
         let offset_secs = req.get_ref().offset_secs;
         let updated = self
             .storage
@@ -1674,7 +1619,6 @@ impl Orch8Service for Orch8GrpcService {
             .await
             .map_err(|_| Status::cancelled("artifact transfer closed during handshake"))?;
 
-        let shutdown = self.shutdown.clone();
         tokio::spawn(async move {
             let mut offset = usize::try_from(resume_offset).unwrap_or(bytes.len());
             loop {
@@ -1691,30 +1635,17 @@ impl Orch8Service for Orch8GrpcService {
                     sha256: chunk_digest,
                     final_chunk,
                 };
-                let sent = tokio::select! {
-                    () = shutdown.cancelled() => break,
-                    sent = sender.send(Ok(artifact_server_frame(
+                if sender
+                    .send(Ok(artifact_server_frame(
                         proto::artifact_transfer_server::Payload::Chunk(chunk),
-                    ))) => sent,
-                };
-                if sent.is_err() {
+                    )))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 let expected_offset = u64::try_from(end).unwrap_or(u64::MAX);
-                let next = tokio::select! {
-                    () = shutdown.cancelled() => {
-                        let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
-                        break;
-                    }
-                    next = tokio::time::timeout(ARTIFACT_ACK_IDLE_TIMEOUT, inbound.message()) => next,
-                };
-                let Ok(next) = next else {
-                    let _ = sender.try_send(Err(Status::deadline_exceeded(
-                        "artifact acknowledgement not received in time",
-                    )));
-                    break;
-                };
-                match next {
+                match inbound.message().await {
                     Ok(Some(proto::ArtifactTransferClient {
                         payload:
                             Some(proto::artifact_transfer_client::Payload::Ack(
@@ -1862,10 +1793,7 @@ impl Orch8Service for Orch8GrpcService {
                 .iter()
                 .any(|feature| feature == "placement_commands")
             {
-                match service
-                    .send_worker_commands(&open.worker_id, tenant.as_ref(), &sender)
-                    .await
-                {
+                match service.send_worker_commands(&open.worker_id, &sender).await {
                     Ok(drain_requested) => draining |= drain_requested,
                     Err(status) => {
                         let _ = sender.send(Err(status)).await;
@@ -1875,19 +1803,7 @@ impl Orch8Service for Orch8GrpcService {
             }
             let mut outstanding = std::collections::HashSet::new();
             let mut runtime_id = initial_capabilities.map(|capabilities| capabilities.runtime_id);
-            loop {
-                // Stop accepting frames (Demand included) on shutdown and end
-                // the response stream so graceful shutdown can complete; the
-                // worker reconnects to a live node.
-                let frame = tokio::select! {
-                    biased;
-                    () = service.shutdown.cancelled() => {
-                        let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
-                        break;
-                    }
-                    frame = inbound.message() => frame,
-                };
-                let Ok(Some(frame)) = frame else { break };
+            while let Ok(Some(frame)) = inbound.message().await {
                 let result = service
                     .handle_worker_stream_frame(
                         frame,

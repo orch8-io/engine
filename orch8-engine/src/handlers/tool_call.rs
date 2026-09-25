@@ -22,6 +22,8 @@
 //! | `body_artifact` | object | An `ArtifactRef` (or `{ "artifact": <ref> }`) whose bytes become the request body. |
 //! | `upload` | object | `{ "mode": "multipart", "field": "file", "filename": "x.png" }` → multipart/form-data; omit for a raw body. |
 
+use std::time::Duration;
+
 use serde_json::{Value, json};
 use tracing::debug;
 
@@ -60,9 +62,7 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    // Clamp to 1..=300000 ms: `0` would fail every request instantly and a
-    // huge value pins a connection (and worker slot) indefinitely.
-    let timeout = crate::outbound::clamp_timeout_ms(
+    let timeout = Duration::from_millis(
         ctx.params
             .get("timeout_ms")
             .and_then(Value::as_u64)
@@ -178,18 +178,12 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
     let resp = req.send().await.map_err(|e| {
         if e.is_timeout() || e.is_connect() {
             StepError::Retryable {
-                message: format!(
-                    "tool_call network error: {}",
-                    crate::outbound::redact_error(&e)
-                ),
+                message: format!("tool_call network error: {e}"),
                 details: None,
             }
         } else {
             StepError::Permanent {
-                message: format!(
-                    "tool_call request error: {}",
-                    crate::outbound::redact_error(&e)
-                ),
+                message: format!("tool_call request error: {e}"),
                 details: None,
             }
         }

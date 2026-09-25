@@ -16,7 +16,7 @@
           "handler": "llm_call",
           "params": {
             "provider": "openai",
-            "model": "gpt-6-astra",
+            "model": "gpt-4o",
             "system": "You are a ReAct agent. Given the task and previous observations, decide the next action. Respond with JSON: {\"thought\": \"...\", \"action\": \"tool_name\", \"action_input\": {...}} or {\"thought\": \"...\", \"action\": \"finish\", \"final_answer\": \"...\"}",
             "messages": [
               {

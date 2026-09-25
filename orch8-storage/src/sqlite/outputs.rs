@@ -72,7 +72,7 @@ pub(super) async fn get_batch(
             qb.push_bind(block_id.as_str());
             qb.push(")");
         }
-        qb.push(" ORDER BY instance_id, block_id, created_at DESC, id DESC");
+        qb.push(" ORDER BY instance_id, block_id, created_at DESC");
 
         let rows = qb.build().fetch_all(&storage.pool).await?;
         for row in rows {
@@ -112,14 +112,14 @@ pub(super) async fn get_after_created_at(
     let rows = if let Some(after) = after {
         sqlx::query(
             // Inclusive bound — see StorageBackend::get_outputs_after_created_at.
-            "SELECT * FROM block_outputs WHERE instance_id=?1 AND created_at >= ?2 ORDER BY created_at, id"
+            "SELECT * FROM block_outputs WHERE instance_id=?1 AND created_at >= ?2 ORDER BY created_at"
         )
         .bind(instance_id.into_uuid().to_string())
         .bind(ts(after))
         .fetch_all(&storage.pool)
         .await?
     } else {
-        sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 ORDER BY created_at, id")
+        sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 ORDER BY created_at")
             .bind(instance_id.into_uuid().to_string())
             .fetch_all(&storage.pool)
             .await?

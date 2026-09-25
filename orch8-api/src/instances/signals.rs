@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
-use orch8_types::signal::{Signal, SignalType};
+use orch8_types::signal::Signal;
 
 use super::types::SendSignalRequest;
 use crate::AppState;
@@ -27,7 +27,6 @@ use crate::error::ApiError;
 pub async fn send_signal(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
-    principal: Option<axum::Extension<crate::auth::PrincipalContext>>,
     Path(id): Path<Uuid>,
     Json(req): Json<SendSignalRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -52,18 +51,6 @@ pub async fn send_signal(
         &instance.tenant_id,
         &format!("instance {id}"),
     )?;
-
-    // The route is also reachable with the scoped `Approver` capability, which
-    // must only be able to answer human-in-the-loop gates — never pause,
-    // cancel, rewrite context, or fire arbitrary custom events. Checked after
-    // the tenant lookup so unknown/foreign instances still answer 404.
-    if !crate::auth::principal_is_operator(principal.as_ref().map(|axum::Extension(p)| p))
-        && !is_human_input_signal(&req.signal_type)
-    {
-        return Err(ApiError::Forbidden(
-            "API key may only send human_input signals".into(),
-        ));
-    }
 
     let signal = Signal {
         id: Uuid::now_v7(),
@@ -120,25 +107,4 @@ pub async fn send_signal(
         StatusCode::CREATED,
         Json(serde_json::json!({ "signal_id": signal.id })),
     ))
-}
-
-/// `custom:human_input:<block>` — the reply to a human-in-the-loop gate.
-fn is_human_input_signal(signal_type: &SignalType) -> bool {
-    matches!(signal_type, SignalType::Custom(name) if name.starts_with("human_input:"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_human_input_custom_signals_are_approver_signals() {
-        assert!(is_human_input_signal(&SignalType::Custom(
-            "human_input:review".into()
-        )));
-        assert!(!is_human_input_signal(&SignalType::Custom("go".into())));
-        assert!(!is_human_input_signal(&SignalType::Cancel));
-        assert!(!is_human_input_signal(&SignalType::Pause));
-        assert!(!is_human_input_signal(&SignalType::UpdateContext));
-    }
 }

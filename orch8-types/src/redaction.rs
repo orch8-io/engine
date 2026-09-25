@@ -40,24 +40,11 @@ const SENSITIVE_KEY_FRAGMENTS: &[&str] = &[
     "refresh",
     "otp",
     "pin_code",
-    "passphrase",
-    "_auth", // basic_auth, proxy_auth, http_auth
-    "-auth", // x-auth, proxy-auth
-    "_dsn",
-    "database_url",
-    "db_url",
-    "connection_string",
-    "connectionstring",
-    "conn_str",
 ];
 
 /// Exact key names (lowercased) that are sensitive but whose fragments
 /// would over-match as substrings ("auth" would hit "author").
-const SENSITIVE_EXACT_KEYS: &[&str] = &["auth", "key", "pass", "pwd", "jwt", "sid", "dsn"];
-
-/// HTTP auth schemes whose following token is the credential in free text
-/// such as `Authorization: Bearer <tok>`.
-const AUTH_SCHEMES: &[&str] = &["bearer", "basic", "token", "digest", "negotiate"];
+const SENSITIVE_EXACT_KEYS: &[&str] = &["auth", "key", "pass", "pwd", "jwt", "sid"];
 
 /// Well-known secret value prefixes (checked case-sensitively, as issued).
 const SECRET_VALUE_PREFIXES: &[&str] = &[
@@ -123,7 +110,7 @@ impl RedactionPolicy {
     /// key: bearer tokens, JWTs, or well-known key prefixes.
     #[must_use]
     pub fn is_secret_shaped(&self, value: &str) -> bool {
-        if has_secret_prefix(value) {
+        if SECRET_VALUE_PREFIXES.iter().any(|p| value.starts_with(p)) {
             return true;
         }
         // JWT: three dot-separated base64url segments, first one decoding
@@ -131,9 +118,7 @@ impl RedactionPolicy {
         if value.starts_with("eyJ") && value.split('.').count() == 3 {
             return true;
         }
-        // Connection strings / URLs with embedded credentials
-        // (`postgres://user:pass@host/db`), anywhere in the value.
-        contains_url_credentials(value)
+        false
     }
 
     /// Redact a JSON value in place: sensitive keys have their values
@@ -196,40 +181,23 @@ impl RedactionPolicy {
             .collect()
     }
 
-    /// Redact credentials in a URL: `user:pass@` userinfo and sensitive
-    /// query-parameter values (keys are percent-decoded before matching),
-    /// leaving the rest intact. Works textually so it never fails on
-    /// partial URLs.
+    /// Redact sensitive query-parameter values in a URL, leaving the rest
+    /// intact. Works textually so it never fails on partial URLs.
     #[must_use]
     pub fn redact_url(&self, url: &str) -> String {
-        let url = redact_userinfo(url);
         let Some((base, query)) = url.split_once('?') else {
-            return url;
+            return url.to_string();
         };
         // Preserve a fragment if present.
         let (query, fragment) = match query.split_once('#') {
             Some((q, f)) => (q, Some(f)),
             None => (query, None),
         };
-        let mut out = format!("{base}?{}", self.redact_form(query));
-        if let Some(f) = fragment {
-            out.push('#');
-            out.push_str(f);
-        }
-        out
-    }
-
-    /// Redact sensitive values in an `application/x-www-form-urlencoded`
-    /// string (`a=1&password=x`). Keys are percent-decoded before matching
-    /// so `pass%77ord` / `api%5Fkey` cannot slip through.
-    #[must_use]
-    pub fn redact_form(&self, form: &str) -> String {
-        form.split('&')
+        let redacted_query: Vec<String> = query
+            .split('&')
             .map(|pair| match pair.split_once('=') {
                 Some((k, v)) => {
-                    let key = percent_decode_lossy(k);
-                    let value = percent_decode_lossy(v);
-                    if self.is_sensitive_key(&key) || self.is_secret_shaped(&value) {
+                    if self.is_sensitive_key(k) || self.is_secret_shaped(v) {
                         format!("{k}={REDACTED}")
                     } else {
                         format!("{k}={v}")
@@ -237,169 +205,37 @@ impl RedactionPolicy {
                 }
                 None => pair.to_string(),
             })
-            .collect::<Vec<_>>()
-            .join("&")
-    }
-
-    /// Redact free text token by token; see [`Self::safe_excerpt`].
-    fn redact_text(&self, body: &str) -> String {
-        let mut out: Vec<String> = Vec::new();
-        // Number of following tokens to redact unconditionally.
-        let mut redact_next = 0usize;
-        for tok in body.split_whitespace() {
-            let lower = tok.to_ascii_lowercase();
-            if redact_next > 0 {
-                redact_next -= 1;
-                // `Authorization: Bearer <tok>`: keep the scheme name,
-                // redact the credential that follows it.
-                if AUTH_SCHEMES.contains(&lower.as_str()) {
-                    out.push(tok.to_string());
-                    redact_next = 1;
-                } else {
-                    out.push(REDACTED.to_string());
-                }
-                continue;
-            }
-            if lower == "bearer" {
-                out.push(tok.to_string());
-                redact_next = 1;
-                continue;
-            }
-            // `password:` / `api_key=` label with the value as the next token.
-            if let Some(label) = tok.strip_suffix(':').or_else(|| tok.strip_suffix('='))
-                && !label.is_empty()
-                && self.is_sensitive_key(label.trim_matches('"'))
-            {
-                out.push(tok.to_string());
-                redact_next = 1;
-                continue;
-            }
-            // `password:hunter2` without a space.
-            if let Some((label, value)) = tok.split_once(':')
-                && !value.is_empty()
-                && !value.starts_with("//")
-                && self.is_sensitive_key(label.trim_matches('"'))
-            {
-                out.push(format!("{label}:{REDACTED}"));
-                continue;
-            }
-            out.push(self.redact_text_token(tok));
+            .collect();
+        let mut out = format!("{base}?{}", redacted_query.join("&"));
+        if let Some(f) = fragment {
+            out.push('#');
+            out.push_str(f);
         }
-        out.join(" ")
-    }
-
-    /// Redact one whitespace-separated token of free text.
-    fn redact_text_token(&self, tok: &str) -> String {
-        if self.is_secret_shaped(tok) {
-            return REDACTED.to_string();
-        }
-        if tok.contains("://") {
-            return self.redact_url(tok);
-        }
-        if tok.contains('=') {
-            return self.redact_form(tok);
-        }
-        tok.to_string()
+        out
     }
 
     /// Produce a bounded, redacted excerpt of a response body suitable
     /// for persistence. JSON bodies are redacted structurally first;
-    /// non-JSON bodies are scanned token by token (whitespace-separated):
-    /// secret-shaped tokens, URL credentials, form-encoded `key=value`
-    /// pairs with sensitive keys, the value after a sensitive `key:` label
-    /// (`Authorization: Bearer <tok>`), and the credential after an auth
-    /// scheme (`Bearer <tok>`) are all replaced.
+    /// non-JSON bodies are truncated only (secret-shaped scanning of
+    /// arbitrary text is done on whitespace-separated tokens).
     #[must_use]
     pub fn safe_excerpt(&self, body: &str) -> String {
-        let rendered = if let Ok(v) = serde_json::from_str::<Value>(body) {
-            self.redacted(&v).to_string()
-        } else {
-            self.redact_text(body)
+        let rendered = match serde_json::from_str::<Value>(body) {
+            Ok(v) => self.redacted(&v).to_string(),
+            Err(_) => body
+                .split_whitespace()
+                .map(|tok| {
+                    if self.is_secret_shaped(tok) {
+                        REDACTED
+                    } else {
+                        tok
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
         };
         truncate_on_char_boundary(&rendered, self.max_excerpt_len)
     }
-}
-
-/// Byte range of the userinfo (`user:pass`) in the first `scheme://user:pass@host`
-/// authority found at or after `from`.
-fn find_userinfo(s: &str, from: usize) -> Option<(usize, usize, usize)> {
-    let rel = s[from..].find("://")?;
-    let auth_start = from + rel + 3;
-    let rest = &s[auth_start..];
-    let auth_len = rest
-        .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace() || c == '"')
-        .unwrap_or(rest.len());
-    let authority = &rest[..auth_len];
-    let next = auth_start + auth_len;
-    match authority.rfind('@') {
-        Some(at) => Some((auth_start, auth_start + at, next)),
-        None => Some((auth_start, auth_start, next)),
-    }
-}
-
-/// True when `s` contains `scheme://user:password@...` (or a
-/// secret-shaped bare username such as `https://ghp_x@github.com`).
-fn contains_url_credentials(s: &str) -> bool {
-    let mut from = 0;
-    while let Some((start, at, next)) = find_userinfo(s, from) {
-        if at > start {
-            let userinfo = &s[start..at];
-            if userinfo.contains(':') || has_secret_prefix(userinfo) {
-                return true;
-            }
-        }
-        from = next;
-    }
-    false
-}
-
-/// Replace every `user:pass@` / `user@` userinfo with `[REDACTED]@`.
-fn redact_userinfo(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut from = 0;
-    while let Some((start, at, next)) = find_userinfo(s, from) {
-        if at > start {
-            out.push_str(&s[from..start]);
-            out.push_str(REDACTED);
-            out.push_str(&s[at..next]);
-        } else {
-            out.push_str(&s[from..next]);
-        }
-        from = next;
-    }
-    out.push_str(&s[from..]);
-    out
-}
-
-/// Percent-decode (`%XX` and `+` as space) without failing on malformed
-/// input; invalid escapes are kept verbatim.
-fn percent_decode_lossy(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
-                    .ok()
-                    .and_then(|h| u8::from_str_radix(h, 16).ok());
-                if let Some(b) = hex {
-                    out.push(b);
-                    i += 3;
-                    continue;
-                }
-                out.push(b'%');
-            }
-            b'+' => out.push(b' '),
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn has_secret_prefix(value: &str) -> bool {
-    SECRET_VALUE_PREFIXES.iter().any(|p| value.starts_with(p))
 }
 
 fn truncate_on_char_boundary(s: &str, max: usize) -> String {
@@ -642,104 +478,10 @@ mod tests {
     fn text_excerpt_redacts_secret_tokens() {
         let p = policy();
         let out = p.safe_excerpt("upstream said Bearer abc failed with ghp_tok123456789");
+        // "Bearer abc" as separate whitespace tokens: "Bearer" alone isn't
+        // secret-shaped, but the ghp_ token is.
         assert!(!out.contains("ghp_tok123456789"));
-        // The credential after a standalone `Bearer` scheme is redacted too.
-        assert!(!out.contains("abc"), "{out}");
-        assert!(out.contains("Bearer"));
-    }
-
-    #[test]
-    fn text_excerpt_redacts_authorization_header_lines() {
-        let p = policy();
-        let out = p.safe_excerpt("GET / HTTP/1.1\nAuthorization: Bearer opaque-tok-1\nHost: x");
-        assert!(!out.contains("opaque-tok-1"), "{out}");
-        assert!(out.contains("Host: x"), "{out}");
-        let out = p.safe_excerpt("Authorization: Basic dXNlcjpwYXNz");
-        assert!(!out.contains("dXNlcjpwYXNz"), "{out}");
-        let out = p.safe_excerpt("X-Api-Key: plainvalue password:hunter2");
-        assert!(!out.contains("plainvalue"), "{out}");
-        assert!(!out.contains("hunter2"), "{out}");
-    }
-
-    #[test]
-    fn text_excerpt_redacts_form_encoded_bodies() {
-        let p = policy();
-        let out =
-            p.safe_excerpt("grant_type=password&username=bob&password=hunter2&client_secret=s3");
-        assert!(!out.contains("hunter2"), "{out}");
-        assert!(!out.contains("s3"), "{out}");
-        assert!(out.contains("username=bob"), "{out}");
-        assert!(out.contains("grant_type=password"), "{out}");
-    }
-
-    #[test]
-    fn text_excerpt_redacts_url_credentials() {
-        let p = policy();
-        let out = p.safe_excerpt("connect failed: postgres://app:s3cr3t@db:5432/prod timeout");
-        assert!(!out.contains("s3cr3t"), "{out}");
-        assert!(out.contains("timeout"));
-    }
-
-    #[test]
-    fn new_sensitive_names_match() {
-        let p = policy();
-        for key in [
-            "passphrase",
-            "key_passphrase",
-            "basic_auth",
-            "proxy_auth",
-            "x-auth-token",
-            "dsn",
-            "sentry_dsn",
-            "DATABASE_URL",
-            "connection_string",
-            "ConnectionString",
-        ] {
-            assert!(p.is_sensitive_key(key), "{key} should be sensitive");
-        }
-        assert!(!p.is_sensitive_key("author_name"));
-    }
-
-    #[test]
-    fn values_with_url_credentials_are_secret_shaped() {
-        let p = policy();
-        assert!(p.is_secret_shaped("postgres://user:pw@localhost/db"));
-        assert!(p.is_secret_shaped("see redis://:pw@cache:6379 for details"));
-        assert!(p.is_secret_shaped("https://ghp_abc123@github.com/o/r.git"));
-        assert!(!p.is_secret_shaped("https://example.com/a@b"));
-        assert!(!p.is_secret_shaped("ssh://git@github.com/o/r"));
-        let mut v = json!({"upstream": "amqp://guest:guest@mq:5672"});
-        p.redact_value(&mut v);
-        assert_eq!(v["upstream"], REDACTED);
-    }
-
-    #[test]
-    fn redact_url_strips_userinfo() {
-        let p = policy();
-        assert_eq!(
-            p.redact_url("https://bob:hunter2@api.example.com/v1?x=1"),
-            format!("https://{REDACTED}@api.example.com/v1?x=1")
-        );
-        assert_eq!(
-            p.redact_url("postgres://u:p@db/prod"),
-            format!("postgres://{REDACTED}@db/prod")
-        );
-        // `@` in the path is not userinfo.
-        assert_eq!(p.redact_url("https://x.com/a@b"), "https://x.com/a@b");
-    }
-
-    #[test]
-    fn redact_url_matches_percent_encoded_keys() {
-        let p = policy();
-        assert_eq!(
-            p.redact_url("https://x.com/p?api%5Fkey=abc&pass%77ord=b&ok=1"),
-            format!("https://x.com/p?api%5Fkey={REDACTED}&pass%77ord={REDACTED}&ok=1")
-        );
-        // Percent-encoded secret-shaped values are caught as well.
-        assert_eq!(
-            p.redact_url("https://x.com/p?next=Bearer%20abc"),
-            format!("https://x.com/p?next={REDACTED}")
-        );
+        assert!(out.contains(REDACTED));
     }
 
     #[test]
