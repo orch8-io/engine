@@ -519,6 +519,7 @@ mod tests {
             choices: None,
             store_as: None,
             allow_comment: false,
+            auto_decide: None,
         };
         let step = make_step("review", Some(human));
         let seq = make_sequence(step);
@@ -552,6 +553,7 @@ mod tests {
             choices: None,
             store_as: None,
             allow_comment: false,
+            auto_decide: None,
         };
         let step = make_step("review", Some(human));
         let seq = make_sequence(step);
@@ -584,6 +586,7 @@ mod tests {
             choices: Some(choices),
             store_as: Some("decision".into()),
             allow_comment: false,
+            auto_decide: None,
         };
         let step = make_step("review", Some(human));
         let seq = make_sequence(step);
@@ -607,6 +610,7 @@ mod tests {
             choices: None,
             store_as: None,
             allow_comment: false,
+            auto_decide: None,
         };
         let step = make_step("review", Some(human));
         let seq = make_sequence(step);

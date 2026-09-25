@@ -185,9 +185,10 @@ pub(super) async fn get_children(
     storage: &SqliteStorage,
     parent_id: ExecutionNodeId,
 ) -> Result<Vec<ExecutionNode>, StorageError> {
-    let rows = sqlx::query("SELECT * FROM execution_tree WHERE parent_id=?1")
-        .bind(parent_id.into_uuid().to_string())
-        .fetch_all(&storage.pool)
-        .await?;
+    let rows =
+        sqlx::query("SELECT * FROM execution_tree WHERE parent_id=?1 ORDER BY branch_index, id")
+            .bind(parent_id.into_uuid().to_string())
+            .fetch_all(&storage.pool)
+            .await?;
     rows.iter().map(row_to_node).collect()
 }

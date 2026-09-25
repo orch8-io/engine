@@ -1076,7 +1076,7 @@ async fn create_instance_externalized_still_externalizes_under_encryption() {
         "big",
     );
     let raw_ref = inner
-        .get_externalized_state(&ref_key)
+        .get_externalized_state(instance.id, &ref_key)
         .await
         .unwrap()
         .expect("big field must have been persisted to externalized_state");
@@ -1087,7 +1087,7 @@ async fn create_instance_externalized_still_externalizes_under_encryption() {
 
     // Through the wrapper, the externalized payload decrypts transparently.
     let decrypted_ref = storage
-        .get_externalized_state(&ref_key)
+        .get_externalized_state(instance.id, &ref_key)
         .await
         .unwrap()
         .unwrap();
@@ -1759,4 +1759,119 @@ async fn compensation_parameters_and_evidence_are_encrypted_at_rest() {
         decrypted.steps[0].error.as_deref(),
         Some("customer-sensitive failure")
     );
+}
+
+/// STO-N3: the `*_admitted` paths must reach the inner backend's atomic
+/// implementation (not the trait's racy default) and still encrypt.
+#[tokio::test]
+async fn admitted_creates_encrypt_and_enforce_quota() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let storage = EncryptingStorage::new(
+        inner.clone(),
+        FieldEncryptor::from_hex_key(TEST_KEY).unwrap(),
+    );
+    let first = mk_instance("T1", json!({"secret": 1}));
+    seed_sequence(&storage, first.sequence_id, "T1").await;
+    storage.create_instance_admitted(&first, 2).await.unwrap();
+    let raw = inner.get_instance(first.id).await.unwrap().unwrap();
+    assert!(FieldEncryptor::is_encrypted(&raw.context.data));
+
+    let mut second = mk_instance("T1", json!({"secret": 2}));
+    second.sequence_id = first.sequence_id;
+    let mut third = mk_instance("T1", json!({"secret": 3}));
+    third.sequence_id = first.sequence_id;
+    let limits = std::collections::HashMap::from([(TenantId::unchecked("T1"), 2)]);
+    assert!(matches!(
+        storage
+            .create_instances_batch_admitted(&[second.clone(), third], &limits)
+            .await,
+        Err(orch8_types::error::StorageError::QuotaExceeded(_))
+    ));
+    assert_eq!(
+        storage
+            .create_instances_batch_admitted(std::slice::from_ref(&second), &limits)
+            .await
+            .unwrap(),
+        1
+    );
+    let raw = inner.get_instance(second.id).await.unwrap().unwrap();
+    assert!(FieldEncryptor::is_encrypted(&raw.context.data));
+    assert_eq!(
+        storage
+            .get_instance(second.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .context
+            .data,
+        json!({"secret": 2})
+    );
+}
+
+/// STO-N4: one row whose ciphertext cannot be decrypted must not fail the
+/// whole claimed batch; it is released back to `scheduled` with a backoff.
+#[tokio::test]
+async fn claim_skips_and_releases_undecryptable_row() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let storage = EncryptingStorage::new(
+        inner.clone(),
+        FieldEncryptor::from_hex_key(TEST_KEY).unwrap(),
+    );
+    let past = Utc::now() - Duration::seconds(1);
+    let mut good = mk_instance("T1", json!({"ok": true}));
+    good.next_fire_at = Some(past);
+    seed_sequence(&storage, good.sequence_id, "T1").await;
+    storage.create_instance(&good).await.unwrap();
+
+    // Written straight to the inner backend under a different key.
+    let mut bad = mk_instance("T1", json!(null));
+    bad.sequence_id = good.sequence_id;
+    bad.next_fire_at = Some(past);
+    bad.context.data = FieldEncryptor::from_hex_key(ALT_KEY)
+        .unwrap()
+        .encrypt_value_with_aad(&json!({"x": 1}), bad.id.into_uuid().as_bytes())
+        .unwrap();
+    inner.create_instance(&bad).await.unwrap();
+
+    let now = Utc::now();
+    let claimed = storage.claim_due_instances(now, 10, 10).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, good.id);
+    assert_eq!(claimed[0].context.data, json!({"ok": true}));
+
+    let released = inner.get_instance(bad.id).await.unwrap().unwrap();
+    assert_eq!(released.state, InstanceState::Scheduled);
+    assert!(released.next_fire_at.unwrap() > now);
+}
+
+/// STO-N4: user plaintext that merely *looks* like ciphertext (`enc:` prefix)
+/// must be encrypted like any other value, not stored verbatim.
+#[tokio::test]
+async fn enc_prefixed_plaintext_is_encrypted_and_round_trips() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let storage = EncryptingStorage::new(
+        inner.clone(),
+        FieldEncryptor::from_hex_key(TEST_KEY).unwrap(),
+    );
+    let lookalike = json!("enc:v1:not-a-real-ciphertext");
+    let instance = mk_instance("T1", lookalike.clone());
+    seed_sequence(&storage, instance.sequence_id, "T1").await;
+    storage.create_instance(&instance).await.unwrap();
+
+    let raw = inner.get_instance(instance.id).await.unwrap().unwrap();
+    assert_ne!(raw.context.data, lookalike, "must not be stored verbatim");
+    assert!(FieldEncryptor::is_encrypted(&raw.context.data));
+    let got = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(got.context.data, lookalike);
+
+    // A genuine ciphertext for the same instance is still passed through
+    // without layering.
+    let mut ctx = got.context.clone();
+    ctx.data = raw.context.data.clone();
+    storage
+        .update_instance_context(instance.id, &ctx)
+        .await
+        .unwrap();
+    let got = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(got.context.data, lookalike);
 }

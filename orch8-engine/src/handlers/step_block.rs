@@ -32,10 +32,10 @@ use super::step_dispatch::{
 /// site (step dispatch, router conditions, …) shares one implementation.
 async fn resolve_markers(
     storage: &dyn StorageBackend,
-    _instance_id: InstanceId,
+    instance_id: InstanceId,
     ctx: ExecutionContext,
 ) -> Result<ExecutionContext, EngineError> {
-    externalized::resolve_context_markers(storage, ctx)
+    externalized::resolve_context_markers(storage, instance_id, ctx)
         .await
         .map_err(EngineError::Storage)
 }
@@ -312,6 +312,20 @@ pub(crate) async fn execute_step_node_with_clock(
         }
     }
 
+    // Shared step preamble (delay → send_window → rate limit), the same
+    // checks the flat path runs in `scheduler::step_exec`. Previously the
+    // tree path skipped them entirely, so one composite anywhere in a
+    // sequence silently disabled every step's delay/window/rate limit. On
+    // deferral the node stays Running and the instance is parked; the
+    // evaluator's top-of-loop state guard ends this tick.
+    if let Some(fire_at) =
+        crate::scheduler::step_preamble_deferral(storage.as_ref(), instance, step_def, clock)
+            .await?
+    {
+        crate::scheduler::park_tree_instance_until(storage.as_ref(), instance.id, fire_at).await?;
+        return Ok(false);
+    }
+
     // Human-in-the-loop: if this step has `wait_for_input`, check for a
     // matching signal before running the handler. If no signal exists yet,
     // set the node to Waiting so the tree evaluator transitions the instance
@@ -482,8 +496,13 @@ pub(crate) async fn execute_step_node_with_clock(
 
     // If the handler is a gRPC plugin, resolve via the plugin registry then dispatch.
     if plugin_kind == Some(super::PluginKind::Grpc) {
-        let Some(endpoint) =
-            resolve_plugin_source(storage.as_ref(), &step_def.handler, PluginType::Grpc).await
+        let Some(endpoint) = resolve_plugin_source(
+            storage.as_ref(),
+            &instance.tenant_id,
+            &step_def.handler,
+            PluginType::Grpc,
+        )
+        .await
         else {
             tracing::warn!(
                 instance_id = %instance.id,
@@ -525,8 +544,13 @@ pub(crate) async fn execute_step_node_with_clock(
         // arbitrary-code-execute surface for anyone who can submit a
         // sequence definition. Fail closed: no registry row → fail the
         // node with a permanent error.
-        let Some(wasm_path) =
-            resolve_plugin_source(storage.as_ref(), plugin_name, PluginType::Wasm).await
+        let Some(wasm_path) = resolve_plugin_source(
+            storage.as_ref(),
+            &instance.tenant_id,
+            plugin_name,
+            PluginType::Wasm,
+        )
+        .await
         else {
             tracing::warn!(
                 instance_id = %instance.id,

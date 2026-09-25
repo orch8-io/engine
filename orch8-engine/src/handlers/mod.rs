@@ -8,6 +8,7 @@ pub mod emit_event;
 pub mod for_each;
 pub mod grpc_plugin;
 pub mod human_review;
+pub mod jev;
 pub mod llm;
 pub mod loop_block;
 pub mod mcp;

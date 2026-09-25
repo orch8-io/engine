@@ -101,6 +101,17 @@ pub trait PushOutboxStore: Send + Sync + 'static {
         command_ids: &[String],
         acked_at: DateTime<Utc>,
     ) -> Result<u64, String>;
+
+    /// Retention sweep: delete wake rows created before `created_before` that
+    /// are not currently leased (`in_flight`). Delivered/terminal rows are
+    /// history; pending rows that old target devices that never became
+    /// claimable (no token, inactive, provider unconfigured) — the command
+    /// itself is still delivered by device polling. Returns rows deleted.
+    /// The default is a no-op for third-party stores.
+    async fn prune_wakes(&self, created_before: DateTime<Utc>) -> Result<u64, String> {
+        let _ = created_before;
+        Ok(0)
+    }
 }
 
 /// Bounded outbox worker. Safe to run on every server node when the store's
@@ -142,6 +153,13 @@ impl PushOutboxWorker {
     pub fn with_wake_signer(mut self, key_id: impl Into<String>, key: SigningKey) -> Self {
         self.wake_signer = Some((key_id.into(), key));
         self
+    }
+
+    /// Delete wake rows older than `retention` (see
+    /// [`PushOutboxStore::prune_wakes`]). Runs whether or not the provider
+    /// is configured, so an unconfigured deployment's outbox stays bounded.
+    pub async fn prune_once(&self, now: DateTime<Utc>, retention: Duration) -> Result<u64, String> {
+        self.store.prune_wakes(now - retention).await
     }
 
     /// Claim and deliver one bounded batch, returning the number attempted.

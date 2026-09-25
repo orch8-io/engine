@@ -9,7 +9,9 @@ use orch8_types::output::BlockOutput;
 use orch8_types::sequence::ABSplitDef;
 
 use crate::error::EngineError;
-use crate::evaluator::{all_completed, any_failed, children_of, complete_node, fail_node};
+use crate::evaluator::{
+    SeqProgress, advance_sequence, children_of, settle_composite, skip_subtrees,
+};
 use crate::handlers::HandlerRegistry;
 
 /// Execute an A/B split node.
@@ -17,6 +19,9 @@ use crate::handlers::HandlerRegistry;
 /// Selection algorithm: deterministic hash of `(instance_id, block_id)` modulo
 /// total weight. This ensures the same instance always takes the same path,
 /// even across re-executions, without requiring external randomness state.
+///
+/// The chosen variant's blocks run as an ordered sequence (one at a time,
+/// fail-fast); the other variants' subtrees are skipped on the first tick.
 pub async fn execute_ab_split(
     storage: &dyn StorageBackend,
     _handlers: &HandlerRegistry,
@@ -26,31 +31,23 @@ pub async fn execute_ab_split(
     tree: &[ExecutionNode],
 ) -> Result<bool, EngineError> {
     let children = children_of(tree, node.id, None);
+    let chosen_index = select_variant(instance, &ab_def.id, &ab_def.variants);
+    let chosen_i16 = i16::try_from(chosen_index).map_err(|_| {
+        EngineError::InvalidConfig(format!(
+            "ab_split chosen_index {chosen_index} exceeds i16 range"
+        ))
+    })?;
 
-    // If all children are still pending, we need to pick a variant and activate it.
-    let all_pending = children.iter().all(|c| c.state == NodeState::Pending);
-
-    if all_pending {
-        let chosen_index = select_variant(instance, &ab_def.id, &ab_def.variants);
-
-        // Skip all non-chosen variants, activate the chosen one.
-        for child in &children {
-            let branch_idx = child.branch_index.unwrap_or(-1);
-            let chosen_i16 = i16::try_from(chosen_index).map_err(|_| {
-                EngineError::InvalidConfig(format!(
-                    "ab_split chosen_index {chosen_index} exceeds i16 range"
-                ))
-            })?;
-            if branch_idx == chosen_i16 {
-                storage
-                    .update_node_state(child.id, NodeState::Running)
-                    .await?;
-            } else {
-                storage
-                    .update_node_state(child.id, NodeState::Skipped)
-                    .await?;
-            }
-        }
+    // First tick (nothing started yet): record the choice and skip every
+    // non-chosen variant. Selection is deterministic, so later ticks simply
+    // recompute the same index.
+    if children.iter().all(|c| c.state == NodeState::Pending) {
+        let non_chosen: Vec<_> = children
+            .iter()
+            .filter(|c| c.branch_index != Some(chosen_i16))
+            .map(|c| c.id)
+            .collect();
+        skip_subtrees(storage, instance.id, tree, &non_chosen).await?;
 
         // Record which variant was chosen as the block output.
         let variant_name = ab_def
@@ -80,28 +77,22 @@ pub async fn execute_ab_split(
             created_at: chrono::Utc::now(),
         };
         storage.save_block_output(&output).await?;
-
-        return Ok(true);
     }
 
-    // Check completion of the chosen branch.
-    let active_children: Vec<_> = children
+    // Run the chosen variant sequentially. An empty variant (or all-empty
+    // variants) is `Done` immediately, so the node completes on this tick
+    // instead of re-choosing and re-writing its output forever.
+    let chosen_children: Vec<_> = children
         .iter()
-        .filter(|c| !matches!(c.state, NodeState::Skipped))
+        .filter(|c| c.branch_index == Some(chosen_i16))
         .copied()
         .collect();
-
-    if all_completed(&active_children) {
-        complete_node(storage, node.id).await?;
-        return Ok(true);
-    }
-
-    if any_failed(&active_children) {
-        fail_node(storage, node.id).await?;
-        return Ok(true);
-    }
-
-    // Still running — no action needed this tick.
+    let final_state = match advance_sequence(storage, &chosen_children).await? {
+        SeqProgress::Advanced | SeqProgress::Blocked => return Ok(true),
+        SeqProgress::Failed | SeqProgress::Cancelled => NodeState::Failed,
+        SeqProgress::Done => NodeState::Completed,
+    };
+    settle_composite(storage, instance.id, tree, node.id, final_state).await?;
     Ok(true)
 }
 
@@ -144,6 +135,7 @@ fn select_variant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch8_storage::sqlite::SqliteStorage;
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
     use orch8_types::instance::Priority;
@@ -321,5 +313,111 @@ mod tests {
         ];
         let instance = make_instance();
         assert_eq!(select_variant(&instance, &block_id, &variants), 0);
+    }
+
+    fn ab_node(
+        inst: InstanceId,
+        block: &str,
+        parent: Option<orch8_types::ids::ExecutionNodeId>,
+        branch: Option<i16>,
+        state: NodeState,
+    ) -> ExecutionNode {
+        ExecutionNode {
+            id: orch8_types::ids::ExecutionNodeId::new(),
+            instance_id: inst,
+            block_id: BlockId::new(block),
+            parent_id: parent,
+            block_type: if parent.is_none() {
+                orch8_types::execution::BlockType::ABSplit
+            } else {
+                orch8_types::execution::BlockType::Step
+            },
+            branch_index: branch,
+            state,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    fn one_variant_def(blocks: Vec<orch8_types::sequence::BlockDefinition>) -> ABSplitDef {
+        ABSplitDef {
+            id: BlockId::new("ab"),
+            variants: vec![ABVariant {
+                name: "only".into(),
+                weight: 1,
+                blocks,
+            }],
+        }
+    }
+
+    async fn ab_storage(inst: &TaskInstance, nodes: &[ExecutionNode]) -> SqliteStorage {
+        use orch8_storage::{ExecutionTreeStore, InstanceStore};
+        let s = SqliteStorage::in_memory().await.unwrap();
+        s.create_instance(inst).await.unwrap();
+        if !nodes.is_empty() {
+            s.create_execution_nodes_batch(nodes).await.unwrap();
+        }
+        s
+    }
+
+    /// ENG-C-N8: all-empty variants complete on the first tick instead of
+    /// re-choosing (and re-writing the output) forever.
+    #[tokio::test]
+    async fn empty_variants_complete_immediately() {
+        use orch8_storage::{ExecutionTreeStore, OutputStore};
+        let inst = make_instance();
+        let ab = ab_node(inst.id, "ab", None, None, NodeState::Running);
+        let s = ab_storage(&inst, std::slice::from_ref(&ab)).await;
+        let tree = s.get_execution_tree(inst.id).await.unwrap();
+        execute_ab_split(
+            &s,
+            &HandlerRegistry::new(),
+            &inst,
+            &ab,
+            &one_variant_def(vec![]),
+            &tree,
+        )
+        .await
+        .unwrap();
+        let after = s.get_execution_tree(inst.id).await.unwrap();
+        assert_eq!(after[0].state, NodeState::Completed);
+        assert_eq!(s.get_all_outputs(inst.id).await.unwrap().len(), 1);
+    }
+
+    /// ENG-C-N2: the chosen variant runs sequentially with fail-fast.
+    #[tokio::test]
+    async fn chosen_variant_runs_sequentially_and_fails_fast() {
+        use orch8_storage::ExecutionTreeStore;
+        let inst = make_instance();
+        let ab = ab_node(inst.id, "ab", None, None, NodeState::Running);
+        let v1 = ab_node(inst.id, "v1", Some(ab.id), Some(0), NodeState::Pending);
+        let v2 = ab_node(inst.id, "v2", Some(ab.id), Some(0), NodeState::Pending);
+        let s = ab_storage(&inst, &[ab.clone(), v1.clone(), v2.clone()]).await;
+        let def = one_variant_def(vec![]);
+        let tree = s.get_execution_tree(inst.id).await.unwrap();
+        execute_ab_split(&s, &HandlerRegistry::new(), &inst, &ab, &def, &tree)
+            .await
+            .unwrap();
+        let after = s.get_execution_tree(inst.id).await.unwrap();
+        let state = |t: &[ExecutionNode], id| t.iter().find(|n| n.id == id).unwrap().state;
+        assert_eq!(state(&after, v1.id), NodeState::Running);
+        assert_eq!(
+            state(&after, v2.id),
+            NodeState::Pending,
+            "one block at a time"
+        );
+
+        s.update_node_state(v1.id, NodeState::Failed).await.unwrap();
+        let tree = s.get_execution_tree(inst.id).await.unwrap();
+        execute_ab_split(&s, &HandlerRegistry::new(), &inst, &ab, &def, &tree)
+            .await
+            .unwrap();
+        let after = s.get_execution_tree(inst.id).await.unwrap();
+        assert_eq!(state(&after, ab.id), NodeState::Failed);
+        assert_eq!(
+            state(&after, v2.id),
+            NodeState::Skipped,
+            "successor must never run"
+        );
     }
 }

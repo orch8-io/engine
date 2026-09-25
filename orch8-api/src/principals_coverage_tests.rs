@@ -7,7 +7,7 @@
 //! segment-based), that `Auditor` is method-gated, and that an empty grant
 //! denies everything.
 //!
-//! Count contract: 67 independently named unit tests.
+//! Count contract: 71 independently named unit tests.
 
 use super::*;
 
@@ -208,7 +208,7 @@ allow_case!(
     true
 );
 
-// --- Publisher: /releases, /plugins, /sequences. ---
+// --- Publisher: /releases, /sequences (minus migrate-instance), read-only /plugins. ---
 
 allow_case!(
     coverage_principal_025_publisher_allows_release_publish,
@@ -225,11 +225,11 @@ allow_case!(
     true
 );
 allow_case!(
-    coverage_principal_027_publisher_allows_plugins,
+    coverage_principal_027_publisher_denies_plugin_create,
     &[ApiCapability::Publisher],
     Method::POST,
     "/api/v1/plugins",
-    true
+    false
 );
 allow_case!(
     coverage_principal_028_publisher_allows_sequences,
@@ -253,10 +253,38 @@ allow_case!(
     true
 );
 allow_case!(
-    coverage_principal_031_publisher_allows_plugin_delete,
+    coverage_principal_031_publisher_denies_plugin_delete,
     &[ApiCapability::Publisher],
     Method::DELETE,
     "/api/v1/plugins/plug-1",
+    false
+);
+allow_case!(
+    coverage_principal_031a_publisher_allows_plugin_read,
+    &[ApiCapability::Publisher],
+    Method::GET,
+    "/api/v1/plugins/plug-1",
+    true
+);
+allow_case!(
+    coverage_principal_031b_publisher_denies_plugin_update,
+    &[ApiCapability::Publisher],
+    Method::PATCH,
+    "/api/v1/plugins/plug-1",
+    false
+);
+allow_case!(
+    coverage_principal_031c_publisher_denies_migrate_instance,
+    &[ApiCapability::Publisher],
+    Method::POST,
+    "/api/v1/sequences/migrate-instance",
+    false
+);
+allow_case!(
+    coverage_principal_031d_publisher_allows_sequence_create,
+    &[ApiCapability::Publisher],
+    Method::POST,
+    "/api/v1/sequences",
     true
 );
 allow_case!(

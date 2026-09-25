@@ -829,3 +829,119 @@ async fn instance_logs_empty_when_none() {
         0
     );
 }
+
+async fn claim_one(client: &reqwest::Client, base_url: &str) {
+    let resp = client
+        .post(format!("{base_url}/workers/tasks/poll"))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "handler_name": "external_handler",
+            "worker_id": "worker-1",
+            "limit": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// The task row is committed as completed before the instance transition.
+/// A crash in between used to strand the instance in Waiting and make the
+/// worker's retry a 409; the same lease holder's retry must now finish the
+/// transition.
+#[tokio::test]
+async fn complete_retry_after_partial_commit_finishes_transition() {
+    use orch8_storage::{InstanceStore, OutputStore};
+    use orch8_types::instance::InstanceState;
+
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let inst_id = create_instance(&client, &srv.base_url, seq_id).await;
+    let task_id = seed_worker_task(&srv, inst_id).await;
+    claim_one(&client, &srv.base_url).await;
+
+    // Simulate the crash window: task committed, instance never moved.
+    let claim = orch8_types::worker::WorkerClaim::new("worker-1".to_string(), 1);
+    assert!(
+        srv.storage
+            .complete_worker_task(task_id, &claim, &json!({"result": "ok"}))
+            .await
+            .unwrap()
+    );
+    let iid = orch8_types::ids::InstanceId::from_uuid(inst_id);
+    srv.storage
+        .update_instance_state(iid, InstanceState::Waiting, None)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "worker_id": "worker-1",
+            "claim_epoch": 1,
+            "output": { "result": "ok" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "{}",
+        resp.text().await.unwrap()
+    );
+
+    let inst = srv.storage.get_instance(iid).await.unwrap().unwrap();
+    assert_eq!(inst.state, InstanceState::Scheduled);
+    let out = srv
+        .storage
+        .get_block_output(iid, &orch8_types::ids::BlockId::new("s1"))
+        .await
+        .unwrap()
+        .expect("output saved by the retry");
+    assert_eq!(out.output, json!({"result": "ok"}));
+
+    // A further retry after the transition is a harmless no-op.
+    let resp = client
+        .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "worker_id": "worker-1",
+            "claim_epoch": 1,
+            "output": { "result": "ok" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(srv.storage.get_all_outputs(iid).await.unwrap().len(), 1);
+}
+
+/// Worker output merged into `context.data` must respect `max_context_bytes`
+/// like every other context writer; nothing is committed on rejection.
+#[tokio::test]
+async fn complete_rejects_output_exceeding_max_context_bytes() {
+    let srv = orch8_api::test_harness::spawn_test_server_with_context_limit(512).await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let inst_id = create_instance(&client, &srv.base_url, seq_id).await;
+    let task_id = seed_worker_task(&srv, inst_id).await;
+    claim_one(&client, &srv.base_url).await;
+
+    let resp = client
+        .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "worker_id": "worker-1",
+            "claim_epoch": 1,
+            "output": { "blob": "x".repeat(4096) }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let task = srv.storage.get_worker_task(task_id).await.unwrap().unwrap();
+    assert_eq!(task.state.to_string(), "claimed", "nothing committed");
+}

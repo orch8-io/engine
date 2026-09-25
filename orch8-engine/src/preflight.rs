@@ -452,7 +452,7 @@ fn check_handlers(
             continue;
         }
         if let Some(plugins) = &plugin_names
-            && plugins.contains(handler.as_str())
+            && plugins.contains(plugin_registry_name(handler))
         {
             continue; // served in-process by an enabled plugin
         }
@@ -564,6 +564,13 @@ fn check_handlers(
     }
 }
 
+/// The plugin-registry key a step handler resolves to at dispatch time: WASM
+/// handlers are `wasm://<name>` but registered as `<name>`; gRPC plugins are
+/// looked up by the raw handler string.
+fn plugin_registry_name(handler: &str) -> &str {
+    crate::handlers::wasm_plugin::parse_plugin_name(handler).unwrap_or(handler)
+}
+
 /// Handlers that name a *disabled* plugin fail fast at runtime — surface
 /// that here.
 fn check_plugins(
@@ -576,7 +583,9 @@ fn check_plugins(
     };
     let mut findings = Vec::new();
     for (block, handler) in &refs.steps {
-        if let Some(plugin) = plugins.iter().find(|p| &p.name == handler)
+        if let Some(plugin) = plugins
+            .iter()
+            .find(|p| p.name == plugin_registry_name(handler))
             && !plugin.enabled
         {
             findings.push(
@@ -1213,6 +1222,34 @@ mod tests {
         let c = check(&report, "plugins_enabled");
         assert_eq!(c.status, PreflightStatus::Fail);
         assert_eq!(c.findings[0].code, "PLUGIN_DISABLED");
+    }
+
+    #[test]
+    fn wasm_handler_matches_plugin_registered_by_bare_name() {
+        // Runtime strips `wasm://` before the registry lookup; preflight must too.
+        let s = seq(json!([
+            {"type": "step", "id": "x", "handler": "wasm://sentiment", "params": {}}
+        ]));
+        let mut inv = full_inventory();
+        inv.plugins = Some(vec![PluginInfo {
+            name: "sentiment".into(),
+            enabled: true,
+        }]);
+        let report = run_preflight(&s, &inv, t0());
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Pass
+        );
+
+        inv.plugins = Some(vec![PluginInfo {
+            name: "sentiment".into(),
+            enabled: false,
+        }]);
+        let report = run_preflight(&s, &inv, t0());
+        assert_eq!(
+            check(&report, "plugins_enabled").findings[0].code,
+            "PLUGIN_DISABLED"
+        );
     }
 
     // --- credentials ---

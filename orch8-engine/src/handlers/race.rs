@@ -78,6 +78,61 @@ async fn cancel_non_terminal_nodes(
     Ok(())
 }
 
+/// How a race stands, given the current states of its direct children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RaceOutcome {
+    /// No branch has won and the race cannot be failed yet.
+    Undecided,
+    /// A branch fully drained (Completed/Skipped only) — it won.
+    Won,
+    /// The race is lost: under `FirstToResolve` a branch failed, or every
+    /// branch reached a terminal state without a winner.
+    Failed,
+}
+
+/// Decide a race from its direct children, grouped by `branch_index`.
+///
+/// Single source of truth for race semantics, shared by [`execute_race`] and
+/// the evaluator's `is_inside_decided_race` dispatch guard. A branch decides
+/// the race only once the WHOLE branch has finished — a completed first block
+/// of a multi-block branch is not a win.
+pub(crate) fn race_outcome(semantics: &RaceSemantics, children: &[&ExecutionNode]) -> RaceOutcome {
+    // (branch_index, branch_failed, branch_drained). Races have a handful of
+    // branches, so a linear scan beats a map allocation on the dispatch path.
+    let mut branches: Vec<(i16, bool, bool)> = Vec::with_capacity(4);
+    for c in children {
+        let idx = c.branch_index.unwrap_or(0);
+        let pos = if let Some(pos) = branches.iter().position(|b| b.0 == idx) {
+            pos
+        } else {
+            branches.push((idx, false, true));
+            branches.len() - 1
+        };
+        let entry = &mut branches[pos];
+        if matches!(c.state, NodeState::Failed | NodeState::Cancelled) {
+            entry.1 = true;
+        }
+        if !c.state.is_terminal() {
+            entry.2 = false;
+        }
+    }
+
+    if branches
+        .iter()
+        .any(|&(_, failed, drained)| drained && !failed)
+    {
+        return RaceOutcome::Won;
+    }
+    let any_failed = branches.iter().any(|&(_, failed, _)| failed);
+    if matches!(semantics, RaceSemantics::FirstToResolve) && any_failed {
+        return RaceOutcome::Failed;
+    }
+    if branches.iter().all(|&(_, _, drained)| drained) {
+        return RaceOutcome::Failed;
+    }
+    RaceOutcome::Undecided
+}
+
 /// Execute a race block: first branch to complete wins.
 /// Remaining branches are cancelled. Returns `true` if more work.
 ///
@@ -86,19 +141,15 @@ async fn cancel_non_terminal_nodes(
 /// Like [`super::parallel::execute_parallel`], a branch is an ordered list of
 /// blocks and at most one block per branch is active at a time — branches
 /// race against each other, but blocks WITHIN a branch run sequentially.
-/// (Prior behaviour activated every pending child at once, so a later block
-/// in a branch could execute before its predecessors whenever an earlier one
-/// deferred — external-worker dispatch, delay, rate limit, or a human gate.)
 ///
 /// Each direct child is tagged with `branch_index` by
 /// `evaluator::build_nodes`. On every tick this handler:
-///   1. Groups children by `branch_index`, preserving source order.
-///   2. Activates each branch's cursor (first non-terminal node) if Pending.
-///   3. A branch whose cursor node Failed is dead: under `FirstToResolve`
-///      the race fails fast; under `FirstToSucceed` the branch's remaining
-///      nodes are cancelled so `all_terminal` can still settle the race.
-///   4. The first branch to fully drain without a failure wins; every other
-///      non-terminal node is cancelled.
+///   1. Decides the race via `race_outcome` (whole-branch granularity).
+///   2. If decided, cancels every non-terminal node and settles the race.
+///   3. Otherwise, a branch whose node Failed/Cancelled is dead: its
+///      remaining nodes are cancelled so the race can still settle
+///      (`FirstToSucceed`); every live branch gets its cursor (first
+///      non-terminal node) activated if Pending.
 pub async fn execute_race(
     storage: &dyn StorageBackend,
     _handlers: &HandlerRegistry,
@@ -114,6 +165,31 @@ pub async fn execute_race(
         return Ok(true);
     }
 
+    match race_outcome(&race_def.semantics, &children) {
+        RaceOutcome::Won => {
+            cancel_non_terminal_nodes(storage, instance, &race_def.id, tree, &children).await?;
+            evaluator::complete_node(storage, node.id).await?;
+            debug!(
+                instance_id = %instance.id,
+                block_id = %race_def.id,
+                "race block completed — winner found"
+            );
+            return Ok(true);
+        }
+        RaceOutcome::Failed => {
+            cancel_non_terminal_nodes(storage, instance, &race_def.id, tree, &children).await?;
+            evaluator::fail_node(storage, node.id).await?;
+            debug!(
+                instance_id = %instance.id,
+                block_id = %race_def.id,
+                semantics = ?race_def.semantics,
+                "race block failed — no branch can win"
+            );
+            return Ok(true);
+        }
+        RaceOutcome::Undecided => {}
+    }
+
     // Group by branch_index (BTreeMap: deterministic branch order). Within a
     // group, `children_of` preserves source order — see execute_parallel.
     let mut branches: std::collections::BTreeMap<i16, Vec<&ExecutionNode>> =
@@ -123,26 +199,16 @@ pub async fn execute_race(
         branches.entry(idx).or_default().push(*c);
     }
 
-    let mut any_branch_won = false;
-    let mut any_branch_failed = false;
-
     for (branch_idx, branch_nodes) in &branches {
         let branch_failed = branch_nodes
             .iter()
             .any(|n| matches!(n.state, NodeState::Failed | NodeState::Cancelled));
 
         if branch_failed {
-            any_branch_failed = true;
             // The branch can never win. Cancel its not-yet-started remainder
             // so the whole tree can reach all-terminal (under FirstToSucceed
             // the race still waits for the surviving branches).
             cancel_non_terminal_nodes(storage, instance, &race_def.id, tree, branch_nodes).await?;
-            continue;
-        }
-
-        if branch_nodes.iter().all(|n| n.state.is_terminal()) {
-            // Fully drained with no failure (Completed/Skipped only) — winner.
-            any_branch_won = true;
             continue;
         }
 
@@ -162,46 +228,6 @@ pub async fn execute_race(
                 "race: activating branch cursor"
             );
         }
-    }
-
-    // A drained branch wins the race — cancel everything still in flight.
-    if any_branch_won {
-        cancel_non_terminal_nodes(storage, instance, &race_def.id, tree, &children).await?;
-        evaluator::complete_node(storage, node.id).await?;
-        debug!(
-            instance_id = %instance.id,
-            block_id = %race_def.id,
-            "race block completed — winner found"
-        );
-        return Ok(true);
-    }
-
-    // `FirstToResolve` (the default): the first branch to reach ANY terminal
-    // state decides the race, whether that's a success or a failure. If a
-    // branch has already failed and no branch has won, fail fast instead of
-    // waiting for every remaining branch to also fail.
-    if matches!(race_def.semantics, RaceSemantics::FirstToResolve) && any_branch_failed {
-        cancel_non_terminal_nodes(storage, instance, &race_def.id, tree, &children).await?;
-        evaluator::fail_node(storage, node.id).await?;
-        debug!(
-            instance_id = %instance.id,
-            block_id = %race_def.id,
-            "race block failed fast — FirstToResolve semantics, a branch failed"
-        );
-        return Ok(true);
-    }
-
-    // `FirstToSucceed` (or `FirstToResolve` with no failures yet): the race
-    // only fails once every branch has reached a terminal state with no
-    // winner among them.
-    if evaluator::all_terminal(&children) {
-        evaluator::fail_node(storage, node.id).await?;
-        debug!(
-            instance_id = %instance.id,
-            block_id = %race_def.id,
-            "race block failed — all branches failed"
-        );
-        return Ok(true);
     }
 
     // Still waiting for a winner.

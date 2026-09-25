@@ -9,29 +9,184 @@ use super::common::{
     classify_api_error, classify_reqwest_error, extract_system_message, is_json_object_format,
     merge_json_response_fields, permanent, retryable, safe_truncate,
 };
-use super::sse::{SseParser, next_chunk, stream_idle_timeout};
-use super::{DeltaSink, anthropic_default_model, http_client};
+use super::sse::{SseParser, charge_stream_bytes, next_chunk, stream_idle_timeout};
+use super::{DeltaSink, http_client};
+
+/// Messages API version header. Still the current (and only) version.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// Default endpoint (fallbacks are a first-party Claude API feature).
+const DEFAULT_ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
+/// Beta enabling `fallbacks: "default"` (server-side refusal fallbacks).
+const SERVER_SIDE_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+/// Default output cap: generous enough not to truncate adaptive thinking plus
+/// a normal reply, while keeping non-streaming requests under HTTP timeouts.
+const DEFAULT_MAX_TOKENS: u64 = 16_000;
+
+/// Models that reject non-default sampling params (`temperature`, `top_p`,
+/// `top_k`) with a 400: Opus 4.7+, Sonnet 5, and the Fable/Mythos tier.
+fn rejects_sampling(model: &str) -> bool {
+    [
+        "claude-opus-5",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+        "claude-fable",
+        "claude-mythos",
+    ]
+    .iter()
+    .any(|prefix| model.starts_with(prefix))
+}
+
+/// Models on which server-side refusal fallbacks are enabled by default.
+fn fallbacks_by_default(model: &str) -> bool {
+    matches!(model, "claude-opus-5" | "claude-fable-5-1")
+}
+
+/// `OpenAI`-shaped function tools → Messages API tools. Native Anthropic tool
+/// definitions (and server tools) pass through unchanged.
+fn to_anthropic_tools(tools: &Value) -> Value {
+    let Some(arr) = tools.as_array() else {
+        return tools.clone();
+    };
+    Value::Array(
+        arr.iter()
+            .map(|t| {
+                let Some(f) = t
+                    .get("function")
+                    .filter(|_| t.get("type").and_then(Value::as_str) == Some("function"))
+                else {
+                    return t.clone();
+                };
+                let mut tool = Map::new();
+                tool.insert("name".into(), f.get("name").cloned().unwrap_or_default());
+                if let Some(desc) = f.get("description") {
+                    tool.insert("description".into(), desc.clone());
+                }
+                tool.insert(
+                    "input_schema".into(),
+                    f.get("parameters")
+                        .cloned()
+                        .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                );
+                if let Some(strict) = f.get("strict") {
+                    tool.insert("strict".into(), strict.clone());
+                }
+                Value::Object(tool)
+            })
+            .collect(),
+    )
+}
+
+/// `OpenAI` `tool_choice` → Messages API `tool_choice`.
+fn to_anthropic_tool_choice(choice: &Value) -> Value {
+    match choice {
+        Value::String(s) => match s.as_str() {
+            "required" | "any" => json!({"type": "any"}),
+            "none" => json!({"type": "none"}),
+            _ => json!({"type": "auto"}),
+        },
+        Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("function") => {
+            json!({"type": "tool", "name": o.get("function").and_then(|f| f.get("name"))})
+        }
+        other => other.clone(),
+    }
+}
+
+/// Convert one conversation message to Messages API shape. Handles the
+/// `OpenAI`-shaped tool loop produced by the `agent` handler: an assistant
+/// turn replays its raw `anthropic_content` blocks when present (so thinking
+/// blocks go back unchanged, as the API requires) or is rebuilt from
+/// `content` + `tool_calls`; a `role: tool` result becomes a `tool_result`
+/// block. Everything else goes through the multimodal image conversion.
+fn to_anthropic_message(msg: &Value) -> Value {
+    match msg.get("role").and_then(Value::as_str) {
+        Some("assistant") => {
+            if let Some(raw) = msg.get("anthropic_content").filter(|c| c.is_array()) {
+                return json!({"role": "assistant", "content": raw});
+            }
+            let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) else {
+                return super::multimodal::to_anthropic_message(msg);
+            };
+            let mut blocks = Vec::new();
+            if let Some(text) = msg
+                .get("content")
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty())
+            {
+                blocks.push(json!({"type": "text", "text": text}));
+            }
+            for call in calls {
+                let f = call.get("function");
+                let input = match f.and_then(|f| f.get("arguments")) {
+                    Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
+                    Some(v) if v.is_object() => v.clone(),
+                    _ => json!({}),
+                };
+                blocks.push(json!({
+                    "type": "tool_use",
+                    "id": call.get("id"),
+                    "name": f.and_then(|f| f.get("name")),
+                    "input": input,
+                }));
+            }
+            json!({"role": "assistant", "content": blocks})
+        }
+        Some("tool") => json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": msg.get("tool_call_id"),
+                "content": msg.get("content").cloned().unwrap_or_else(|| json!("")),
+            }],
+        }),
+        _ => super::multimodal::to_anthropic_message(msg),
+    }
+}
+
+/// Convert the conversation, merging consecutive tool results into one user
+/// message (parallel tool results must come back together).
+fn to_anthropic_messages(messages: &Value) -> Value {
+    let Some(arr) = messages.as_array() else {
+        return messages.clone();
+    };
+    let mut out: Vec<Value> = Vec::with_capacity(arr.len());
+    for msg in arr {
+        let converted = to_anthropic_message(msg);
+        let is_tool_result = msg.get("role").and_then(Value::as_str) == Some("tool");
+        if is_tool_result
+            && let Some(prev) = out.last_mut()
+            && prev.get("role").and_then(Value::as_str) == Some("user")
+            && prev
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|c| c.first())
+                .and_then(|b| b.get("type"))
+                .and_then(Value::as_str)
+                == Some("tool_result")
+            && let (Some(prev_blocks), Some(new_blocks)) = (
+                prev.get_mut("content").and_then(Value::as_array_mut),
+                converted.get("content").and_then(Value::as_array),
+            )
+        {
+            prev_blocks.extend(new_blocks.iter().cloned());
+            continue;
+        }
+        out.push(converted);
+    }
+    Value::Array(out)
+}
 
 /// Build the `/messages` request body shared by the streaming and
-/// non-streaming paths (so multimodal message conversion behaves identically).
+/// non-streaming paths (so message conversion behaves identically).
 fn build_body(params: &Value, model: &str) -> Map<String, Value> {
     let messages_raw = params.get("messages").cloned().unwrap_or(json!([]));
     let (system_from_msgs, messages) = extract_system_message(&messages_raw);
-    // Plain-string content is cloned unchanged; normalized image blocks
-    // become Anthropic base64 `source` blocks at request-build time.
-    let messages = match messages.as_array() {
-        Some(arr) => Value::Array(
-            arr.iter()
-                .map(super::multimodal::to_anthropic_message)
-                .collect(),
-        ),
-        None => messages,
-    };
+    let messages = to_anthropic_messages(&messages);
 
     let max_tokens = params
         .get("max_tokens")
         .and_then(Value::as_u64)
-        .unwrap_or(4096);
+        .unwrap_or(DEFAULT_MAX_TOKENS);
 
     let mut body = serde_json::Map::new();
     body.insert("model".into(), json!(model));
@@ -49,15 +204,68 @@ fn build_body(params: &Value, model: &str) -> Map<String, Value> {
         "top_p",
         "top_k",
         "stop_sequences",
-        "tools",
-        "tool_choice",
         "metadata",
+        "thinking",
+        "output_config",
     ] {
         if let Some(val) = params.get(key) {
             body.insert(key.into(), val.clone());
         }
     }
+    if let Some(tools) = params.get("tools") {
+        body.insert("tools".into(), to_anthropic_tools(tools));
+    }
+    if let Some(choice) = params.get("tool_choice") {
+        body.insert("tool_choice".into(), to_anthropic_tool_choice(choice));
+    }
+    // `effort` shorthand → `output_config.effort` (explicit output_config wins).
+    if let Some(effort) = params.get("effort").filter(|e| e.is_string())
+        && let Some(cfg) = body
+            .entry("output_config")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+    {
+        cfg.entry("effort").or_insert_with(|| effort.clone());
+    }
+    if rejects_sampling(model) {
+        let dropped: Vec<&str> = ["temperature", "top_p", "top_k"]
+            .into_iter()
+            .filter(|k| body.remove(*k).is_some())
+            .collect();
+        if !dropped.is_empty() {
+            warn!(
+                model,
+                ?dropped,
+                "llm_call: model rejects sampling params; dropped"
+            );
+        }
+    }
     body
+}
+
+/// Server-side refusal fallbacks: on by default for the models that need
+/// them at the first-party endpoint; `fallbacks: false` opts out, any other
+/// explicit `fallbacks` value passes through.
+fn apply_fallbacks(
+    body: &mut Map<String, Value>,
+    params: &Value,
+    model: &str,
+    base_url: &str,
+) -> bool {
+    match params.get("fallbacks") {
+        Some(Value::Bool(false)) => false,
+        Some(explicit) if !explicit.is_null() && !explicit.is_boolean() => {
+            body.insert("fallbacks".into(), explicit.clone());
+            true
+        }
+        _ if fallbacks_by_default(model)
+            && base_url.trim_end_matches('/') == DEFAULT_ANTHROPIC_BASE =>
+        {
+            body.insert("fallbacks".into(), json!("default"));
+            true
+        }
+        _ => false,
+    }
 }
 
 pub(super) async fn call_anthropic(
@@ -68,24 +276,27 @@ pub(super) async fn call_anthropic(
 ) -> Result<Value, StepError> {
     let url = format!("{base_url}/messages");
 
-    let model = params
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(anthropic_default_model());
+    let model = super::resolve_model(params, "anthropic")?;
+    let model = model.as_str();
 
     let mut body = build_body(params, model);
     if deltas.is_some() {
         body.insert("stream".into(), json!(true));
     }
+    let fallbacks = apply_fallbacks(&mut body, params, model, base_url);
     let body = Value::Object(body);
 
-    debug!(url = %url, model = %model, streaming = deltas.is_some(), "llm_call: Anthropic");
+    debug!(url = %url, model = %model, streaming = deltas.is_some(), fallbacks, "llm_call: Anthropic");
 
-    let resp = http_client()
+    let mut req = http_client()
         .post(&url)
         .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("Content-Type", "application/json")
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header("Content-Type", "application/json");
+    if fallbacks {
+        req = req.header("anthropic-beta", SERVER_SIDE_FALLBACK_BETA);
+    }
+    let resp = req
         .json(&body)
         .send()
         .await
@@ -96,15 +307,13 @@ pub(super) async fn call_anthropic(
     }
 
     let status = resp.status().as_u16();
-    let resp_body: Value = resp
-        .json()
-        .await
-        .map_err(|e| retryable(format!("response parse error: {e}")))?;
+    let resp_body: Value = super::read_json_capped(resp).await?;
 
     if status >= 400 {
         return Err(classify_api_error(status, &resp_body));
     }
 
+    refusal_error(&resp_body)?;
     let mut output = normalize_anthropic_response(&resp_body);
 
     if is_json_object_format(params)
@@ -217,6 +426,29 @@ impl AnthropicStreamAcc {
                         .push_str(fragment);
                 }
             }
+            // Thinking blocks must be replayable byte-for-byte in tool loops,
+            // so their text and signature are accumulated (not published —
+            // they are not user-visible output).
+            kind @ ("thinking_delta" | "signature_delta") => {
+                let field = if kind == "thinking_delta" {
+                    "thinking"
+                } else {
+                    "signature"
+                };
+                if let (Some(piece), Some(block)) = (
+                    delta.get(field).and_then(Value::as_str),
+                    self.blocks.get_mut(&index).and_then(Value::as_object_mut),
+                ) {
+                    let slot = block
+                        .entry(field)
+                        .or_insert_with(|| Value::String(String::new()));
+                    if let Value::String(existing) = slot {
+                        existing.push_str(piece);
+                    } else {
+                        *slot = Value::String(piece.to_owned());
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -311,10 +543,7 @@ async fn consume_anthropic_stream(
     let status = resp.status().as_u16();
     if status >= 400 {
         // Error responses are plain JSON, not SSE.
-        let resp_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| retryable(format!("response parse error: {e}")))?;
+        let resp_body: Value = super::read_json_capped(resp).await?;
         return Err(classify_api_error(status, &resp_body));
     }
 
@@ -322,7 +551,9 @@ async fn consume_anthropic_stream(
     let mut parser = SseParser::default();
     let mut acc = AnthropicStreamAcc::default();
 
+    let mut received = 0usize;
     while let Some(chunk) = next_chunk(&mut resp, idle_timeout).await? {
+        charge_stream_bytes(&mut received, chunk.len())?;
         for event in parser.push(&chunk) {
             acc.ingest(&event.data, sink)?;
         }
@@ -337,7 +568,32 @@ async fn consume_anthropic_stream(
         ));
     }
 
+    if acc.stop_reason.as_str() == Some("refusal") {
+        return Err(StepError::Permanent {
+            message: "model declined the request (refusal)".into(),
+            details: None,
+        });
+    }
     Ok(acc.into_output(params))
+}
+
+/// A `refusal` stop (safety classifiers declined; HTTP 200) carries no usable
+/// content — fail permanently with the category instead of returning an
+/// empty "success".
+fn refusal_error(resp_body: &Value) -> Result<(), StepError> {
+    if resp_body.get("stop_reason").and_then(Value::as_str) != Some("refusal") {
+        return Ok(());
+    }
+    let details = resp_body.get("stop_details").cloned();
+    let category = details
+        .as_ref()
+        .and_then(|d| d.get("category"))
+        .and_then(Value::as_str)
+        .unwrap_or("unspecified");
+    Err(StepError::Permanent {
+        message: format!("model declined the request (refusal, category: {category})"),
+        details,
+    })
 }
 
 fn normalize_anthropic_response(resp_body: &Value) -> Value {
@@ -379,6 +635,15 @@ fn normalize_anthropic_response(resp_body: &Value) -> Value {
     message.insert("content".into(), json!(text));
     if !tool_calls.is_empty() {
         message.insert("tool_calls".into(), json!(tool_calls));
+    }
+    // Raw blocks (thinking, tool_use, …) so a tool loop can replay this turn
+    // unchanged — the API rejects dropped or edited thinking blocks.
+    if content.as_array().is_some_and(|blocks| {
+        blocks
+            .iter()
+            .any(|b| b.get("type").and_then(Value::as_str) != Some("text"))
+    }) {
+        message.insert("anthropic_content".into(), content.clone());
     }
 
     json!({
@@ -450,5 +715,181 @@ mod tests {
             classify_stream_error(None),
             StepError::Retryable { .. }
         ));
+    }
+
+    #[test]
+    fn sampling_params_dropped_only_for_models_that_reject_them() {
+        let params = json!({"temperature": 0.2, "top_p": 0.9, "top_k": 5, "messages": []});
+        let body = build_body(&params, "claude-opus-5");
+        assert!(body.get("temperature").is_none() && body.get("top_k").is_none());
+        let body = build_body(&params, "claude-haiku-4-5");
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[test]
+    fn default_max_tokens_and_effort_shorthand() {
+        let body = build_body(&json!({"effort": "low", "messages": []}), "claude-opus-5");
+        assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert_eq!(body["output_config"]["effort"], "low");
+        // An explicit output_config wins over the shorthand.
+        let body = build_body(
+            &json!({"effort": "low", "output_config": {"effort": "high"}, "messages": []}),
+            "claude-opus-5",
+        );
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn openai_shaped_tools_and_tool_choice_are_translated() {
+        let params = json!({
+            "messages": [],
+            "tools": [
+                {"type": "function", "function": {"name": "search", "description": "d",
+                    "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}},
+                {"name": "native", "input_schema": {"type": "object"}}
+            ],
+            "tool_choice": "required",
+        });
+        let body = build_body(&params, "claude-opus-5");
+        assert_eq!(body["tools"][0]["name"], "search");
+        assert_eq!(
+            body["tools"][0]["input_schema"]["properties"]["q"]["type"],
+            "string"
+        );
+        assert!(body["tools"][0].get("function").is_none());
+        assert_eq!(body["tools"][1]["name"], "native");
+        assert_eq!(body["tool_choice"], json!({"type": "any"}));
+        assert_eq!(
+            to_anthropic_tool_choice(&json!({"type": "function", "function": {"name": "search"}})),
+            json!({"type": "tool", "name": "search"})
+        );
+    }
+
+    #[test]
+    fn tool_loop_conversation_round_trips_to_messages_api() {
+        let raw = json!([
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "tool_use", "id": "t1", "name": "search", "input": {"q": "x"}}
+        ]);
+        let messages = json!([
+            {"role": "user", "content": "find x"},
+            // A turn produced by this adapter: replayed verbatim (thinking kept).
+            {"role": "assistant", "content": "", "tool_calls": [], "anthropic_content": raw},
+            {"role": "tool", "tool_call_id": "t1", "content": "r1"},
+            // A turn from an OpenAI-compatible provider (failover): rebuilt.
+            {"role": "assistant", "content": "checking", "tool_calls": [
+                {"id": "t2", "type": "function", "function": {"name": "search", "arguments": "{\"q\":\"y\"}"}},
+                {"id": "t3", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "t2", "content": "r2"},
+            {"role": "tool", "tool_call_id": "t3", "content": "r3"}
+        ]);
+        let out = to_anthropic_messages(&messages);
+        let out = out.as_array().unwrap();
+        assert_eq!(
+            out.len(),
+            5,
+            "parallel tool results merge into one user turn"
+        );
+        assert_eq!(out[1]["content"], raw);
+        assert_eq!(out[2]["content"][0]["type"], "tool_result");
+        assert_eq!(out[2]["content"][0]["tool_use_id"], "t1");
+        assert_eq!(
+            out[3]["content"][0],
+            json!({"type": "text", "text": "checking"})
+        );
+        assert_eq!(out[3]["content"][1]["input"], json!({"q": "y"}));
+        let merged = out[4]["content"].as_array().unwrap();
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[1]["tool_use_id"], "t3");
+    }
+
+    #[test]
+    fn normalized_output_keeps_raw_blocks_for_replay() {
+        let resp = json!({
+            "content": [
+                {"type": "thinking", "thinking": "", "signature": "s"},
+                {"type": "text", "text": "hi"}
+            ],
+            "model": "claude-opus-5", "stop_reason": "end_turn", "usage": {}
+        });
+        let out = normalize_anthropic_response(&resp);
+        assert_eq!(out["message"]["content"], "hi");
+        assert_eq!(out["message"]["anthropic_content"][0]["type"], "thinking");
+        // Text-only responses stay lean.
+        let plain = json!({"content": [{"type": "text", "text": "x"}], "stop_reason": "end_turn"});
+        assert!(
+            normalize_anthropic_response(&plain)["message"]
+                .get("anthropic_content")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fallbacks_default_on_for_new_models_at_first_party_endpoint_only() {
+        let mut body = Map::new();
+        assert!(apply_fallbacks(
+            &mut body,
+            &json!({}),
+            "claude-opus-5",
+            DEFAULT_ANTHROPIC_BASE
+        ));
+        assert_eq!(body["fallbacks"], "default");
+
+        let mut body = Map::new();
+        assert!(!apply_fallbacks(
+            &mut body,
+            &json!({"fallbacks": false}),
+            "claude-opus-5",
+            DEFAULT_ANTHROPIC_BASE
+        ));
+        assert!(!apply_fallbacks(
+            &mut Map::new(),
+            &json!({}),
+            "claude-opus-5",
+            "https://proxy.example/v1"
+        ));
+        assert!(!apply_fallbacks(
+            &mut Map::new(),
+            &json!({}),
+            "claude-haiku-4-5",
+            DEFAULT_ANTHROPIC_BASE
+        ));
+
+        let mut body = Map::new();
+        assert!(apply_fallbacks(
+            &mut body,
+            &json!({"fallbacks": [{"model": "claude-opus-4-8"}]}),
+            "claude-sonnet-5",
+            DEFAULT_ANTHROPIC_BASE
+        ));
+        assert_eq!(body["fallbacks"][0]["model"], "claude-opus-4-8");
+    }
+
+    #[test]
+    fn refusal_is_a_permanent_error_with_category() {
+        let resp = json!({"stop_reason": "refusal", "content": [],
+                          "stop_details": {"type": "refusal", "category": "cyber"}});
+        let err = refusal_error(&resp).unwrap_err();
+        assert!(matches!(&err, StepError::Permanent { message, .. } if message.contains("cyber")));
+        assert!(refusal_error(&json!({"stop_reason": "end_turn"})).is_ok());
+    }
+
+    #[test]
+    fn streamed_thinking_blocks_accumulate_text_and_signature() {
+        let sink = DeltaSink::for_test();
+        let mut acc = AnthropicStreamAcc::default();
+        for event in [
+            json!({"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "thinking", "thinking": ""}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "thinking_delta", "thinking": "plan"}}),
+            json!({"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "signature_delta", "signature": "abc"}}),
+        ] {
+            acc.ingest(&event.to_string(), &sink).unwrap();
+        }
+        assert_eq!(acc.blocks[&0]["thinking"], "plan");
+        assert_eq!(acc.blocks[&0]["signature"], "abc");
     }
 }

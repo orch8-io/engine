@@ -102,10 +102,11 @@ pub const MOBILE_COMMAND_EXPIRED_DEFAULT_TTL: Duration = Duration::from_secs(604
 
 /// Run the expiry sweeper until `cancel` fires.
 ///
-/// Each tick calls `StorageBackend::delete_expired_externalized_state` once
-/// with [`GC_BATCH_LIMIT`] and then sweeps
-/// `StorageBackend::delete_expired_emit_event_dedupe`
-/// with the same bound. Continued backlog naturally spreads across ticks.
+/// Each tick calls `StorageBackend::delete_expired_externalized_state` with
+/// [`GC_BATCH_LIMIT`] and sweeps `StorageBackend::delete_expired_emit_event_dedupe`
+/// with the same bound, repeating a sweep while its batches come back full
+/// (up to [`GC_MAX_BATCHES_PER_TICK`]). Backlog beyond that spreads across
+/// ticks.
 ///
 /// Both tables share the same tick so the engine only maintains one timer;
 /// the two sweeps run concurrently via [`tokio::join!`]. They target disjoint
@@ -165,11 +166,37 @@ pub async fn run_gc_loop_with_ttl(
     }
 }
 
+/// Upper bound on batches per sweep per tick. A full batch means backlog, so
+/// the sweep keeps going (instead of 1000 rows per 5-minute tick, ~288k/day,
+/// which a busy deployment outgrows) — but boundedly, so one tick's GC can't
+/// monopolise the database.
+pub const GC_MAX_BATCHES_PER_TICK: u32 = 20;
+
+/// Run `batch` repeatedly while it keeps returning a full [`GC_BATCH_LIMIT`]
+/// batch, at most [`GC_MAX_BATCHES_PER_TICK`] times. Returns the total rows
+/// affected, or the first error (with rows deleted before it discarded —
+/// they are logged by the caller's next tick anyway).
+async fn drain_batches<F, Fut>(mut batch: F) -> Result<u64, StorageError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<u64, StorageError>>,
+{
+    let mut total = 0;
+    for _ in 0..GC_MAX_BATCHES_PER_TICK {
+        let n = batch().await?;
+        total += n;
+        if n < u64::from(GC_BATCH_LIMIT) {
+            break;
+        }
+        // Yield between batches so foreground work on this runtime (and the
+        // DB) gets a turn.
+        tokio::task::yield_now().await;
+    }
+    Ok(total)
+}
+
 async fn sweep_externalized(storage: &dyn StorageBackend) {
-    match storage
-        .delete_expired_externalized_state(GC_BATCH_LIMIT)
-        .await
-    {
+    match drain_batches(|| storage.delete_expired_externalized_state(GC_BATCH_LIMIT)).await {
         Ok(0) => {}
         Ok(n) => {
             tracing::info!(count = n, "externalized gc: deleted expired rows");
@@ -204,10 +231,7 @@ async fn sweep_emit_dedupe(storage: &dyn StorageBackend, ttl: Duration) {
         );
         return;
     };
-    match storage
-        .delete_expired_emit_event_dedupe(cutoff, GC_BATCH_LIMIT)
-        .await
-    {
+    match drain_batches(|| storage.delete_expired_emit_event_dedupe(cutoff, GC_BATCH_LIMIT)).await {
         Ok(0) => {}
         Ok(n) => {
             tracing::info!(count = n, "emit_event_dedupe gc: deleted expired rows");
@@ -228,10 +252,7 @@ async fn sweep_telemetry_events(storage: &dyn StorageBackend) {
     let ttl = chrono::Duration::from_std(TELEMETRY_EVENTS_DEFAULT_TTL)
         .unwrap_or_else(|_| chrono::Duration::zero());
     let cutoff = chrono::Utc::now() - ttl;
-    match storage
-        .delete_old_telemetry_events(cutoff, GC_BATCH_LIMIT)
-        .await
-    {
+    match drain_batches(|| storage.delete_old_telemetry_events(cutoff, GC_BATCH_LIMIT)).await {
         Ok(0) => {}
         Ok(n) => {
             tracing::info!(count = n, "telemetry gc: deleted expired rows");
@@ -463,6 +484,34 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    /// A full batch means backlog: keep draining (bounded), stop on the
+    /// first short batch.
+    #[tokio::test]
+    async fn drain_batches_loops_while_full_and_is_bounded() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let calls = AtomicU32::new(0);
+        // 2 full batches, then a short one.
+        let total = drain_batches(|| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(if n < 2 { u64::from(GC_BATCH_LIMIT) } else { 7 }) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(total, 2 * u64::from(GC_BATCH_LIMIT) + 7);
+
+        // Endless backlog is capped per tick.
+        let calls = AtomicU32::new(0);
+        drain_batches(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(u64::from(GC_BATCH_LIMIT)) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), GC_MAX_BATCHES_PER_TICK);
+    }
 
     /// Table-test `error_kind` exhaustively so a new `StorageError` variant
     /// forces a deliberate label choice (rather than silently mapping to
