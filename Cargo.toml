@@ -51,10 +51,10 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.18"
 
 # OpenTelemetry trace export (OTLP).
-opentelemetry = "0.32"
-opentelemetry_sdk = "0.32"
-opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
-tracing-opentelemetry = "0.33"
+opentelemetry = "0.33"
+opentelemetry_sdk = "0.33"
+opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.34"
 
 # API
 axum = "0.8"
