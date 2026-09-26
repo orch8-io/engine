@@ -18,6 +18,7 @@ COPY orch8-cli/Cargo.toml orch8-cli/Cargo.toml
 COPY orch8-mobile/Cargo.toml orch8-mobile/Cargo.toml
 COPY orch8-publisher/Cargo.toml orch8-publisher/Cargo.toml
 COPY orch8-push/Cargo.toml orch8-push/Cargo.toml
+COPY orch8-wasm/Cargo.toml orch8-wasm/Cargo.toml
 
 # Create dummy source files so cargo can resolve the workspace and cache deps.
 RUN mkdir -p orch8/src && echo "" > orch8/src/lib.rs \
@@ -34,7 +35,8 @@ RUN mkdir -p orch8/src && echo "" > orch8/src/lib.rs \
     && mkdir -p orch8-mobile/src/bin && echo "" > orch8-mobile/src/lib.rs \
     && echo "fn main() {}" > orch8-mobile/src/bin/uniffi-bindgen.rs \
     && mkdir -p orch8-publisher/src && echo "" > orch8-publisher/src/lib.rs \
-    && mkdir -p orch8-push/src && echo "" > orch8-push/src/lib.rs
+    && mkdir -p orch8-push/src && echo "" > orch8-push/src/lib.rs \
+    && mkdir -p orch8-wasm/src && echo "" > orch8-wasm/src/lib.rs
 
 # Proto file needed for grpc build.rs.
 COPY proto/ proto/

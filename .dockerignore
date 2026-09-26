@@ -13,3 +13,6 @@ docs/
 !docs/agent-patterns/**
 worker-sdk-node/
 *.md
+# `orch8 learn` embeds the quick starts at compile time.
+!docs/quick-starts
+!docs/quick-starts/*.md
