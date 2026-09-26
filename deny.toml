@@ -48,6 +48,10 @@ crate = "orch8-publisher"
 
 [[licenses.exceptions]]
 allow = ["BUSL-1.1"]
+crate = "orch8-wasm"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
 crate = "orch8-api"
 
 [[licenses.exceptions]]

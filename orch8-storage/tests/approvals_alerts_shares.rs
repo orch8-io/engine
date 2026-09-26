@@ -1,7 +1,7 @@
 //! Storage contract for approval action tokens, progress shares, and alert
 //! rules. Runs against `SQLite` always and Postgres when `DATABASE_URL` is set.
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, SubsecRound, Utc};
 use uuid::Uuid;
 
 use orch8_storage::StorageBackend;
@@ -36,7 +36,7 @@ fn token(
     ttl: Duration,
 ) -> (String, ApprovalActionToken) {
     let raw = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    let now = Utc::now();
+    let now = Utc::now().trunc_subsecs(6);
     (
         raw.clone(),
         ApprovalActionToken {
@@ -89,7 +89,7 @@ async fn approval_tokens_are_single_use_per_gate_and_expire() {
             .await
             .unwrap();
 
-        let now = Utc::now();
+        let now = Utc::now().trunc_subsecs(6);
         assert!(
             s.has_live_approval_tokens(
                 instance,
@@ -176,7 +176,7 @@ async fn progress_shares_are_tenant_scoped_and_revocable() {
         let tenant = TenantId::unchecked(format!("share-{}", Uuid::new_v4()));
         let other = TenantId::unchecked(format!("other-{}", Uuid::new_v4()));
         let instance = InstanceId::new();
-        let now = Utc::now();
+        let now = Utc::now().trunc_subsecs(6);
         let share = ProgressShare {
             id: Uuid::now_v7(),
             token_hash: hash_token(&format!("tok-{}", Uuid::new_v4())),
@@ -243,7 +243,7 @@ async fn alert_rules_crud_and_state_cas() {
     for (name, s) in backends().await {
         let tenant = TenantId::unchecked(format!("alert-{}", Uuid::new_v4()));
         let other = TenantId::unchecked(format!("other-{}", Uuid::new_v4()));
-        let now = Utc::now();
+        let now = Utc::now().trunc_subsecs(6);
         let mut rule = AlertRule {
             id: Uuid::now_v7(),
             tenant_id: tenant.clone(),

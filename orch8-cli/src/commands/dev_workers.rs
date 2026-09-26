@@ -604,7 +604,18 @@ mod tests {
         // The grandchild (same process group) must be gone.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
+            // A killed orphan can linger as a zombie until its new parent
+            // reaps it (e.g. a non-reaping PID 1 in a container); it has
+            // still exited.
+            let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    stat.rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_whitespace().next().map(|st| st == "Z"))
+                })
+                .unwrap_or(false);
+            let alive =
+                !zombie && nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok();
             if !alive {
                 break;
             }
