@@ -220,6 +220,19 @@ async fn accept_webhook(
         return Err(ApiError::NotFound(format!("webhook '{slug}'")));
     }
 
+    // Provider presets (Stripe/GitHub/Shopify/Svix/generic HMAC) replace the
+    // native Orch8 signature scheme when `config.verify` is present.
+    match crate::webhook_verify::VerifyConfig::from_trigger_config(&trigger.config) {
+        Ok(Some(cfg)) => {
+            return accept_preset_webhook(state, slug, &trigger, &cfg, headers, body).await;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(slug = %slug, %error, "webhook rejected: invalid verify config");
+            return Err(ApiError::Unauthorized);
+        }
+    }
+
     // If a secret is configured, require it. A missing secret on a public
     // endpoint would let anyone fire the trigger — deliberately refuse to
     // accept such triggers here. Empty secrets are treated as unconfigured
@@ -303,21 +316,26 @@ async fn accept_webhook(
         return Err(ApiError::Unauthorized);
     }
 
-    let body: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|error| ApiError::InvalidArgument(format!("invalid webhook JSON: {error}")))?;
-
     let meta = serde_json::json!({
         "source": "public_webhook",
         "user_agent": headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or(""),
     });
-    let instance_id = orch8_engine::triggers::create_trigger_instance(
-        &*state.storage,
-        &trigger,
-        body,
-        meta,
-        None,
-    )
-    .await?;
+    ingest(state, slug, &trigger, body, meta).await
+}
+
+/// Parse the verified body and create the trigger's instance.
+async fn ingest(
+    state: &AppState,
+    slug: &str,
+    trigger: &orch8_types::trigger::TriggerDef,
+    body: &Bytes,
+    meta: serde_json::Value,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let body: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| ApiError::InvalidArgument(format!("invalid webhook JSON: {error}")))?;
+    let instance_id =
+        orch8_engine::triggers::create_trigger_instance(&*state.storage, trigger, body, meta, None)
+            .await?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -326,6 +344,89 @@ async fn accept_webhook(
             "trigger": slug,
         })),
     ))
+}
+
+/// Resolve the preset's secret: `secret_ref` from the trigger tenant's
+/// credential store, else the trigger's own `secret`. Any failure is a 401
+/// (never a 5xx that would reveal configuration state to anonymous callers).
+async fn resolve_preset_secret(
+    state: &AppState,
+    trigger: &orch8_types::trigger::TriggerDef,
+    cfg: &crate::webhook_verify::VerifyConfig,
+) -> Result<zeroize::Zeroizing<String>, ApiError> {
+    if let Some(reference) = &cfg.secret_ref {
+        let reference = if reference.starts_with("credentials://") {
+            reference.clone()
+        } else {
+            format!("credentials://{reference}")
+        };
+        let mut value = serde_json::Value::String(reference);
+        if let Err(error) = orch8_engine::credentials::resolve_in_value(
+            &*state.storage,
+            trigger.tenant_id.as_str(),
+            &mut value,
+        )
+        .await
+        {
+            tracing::warn!(slug = %trigger.slug, error = ?error, "webhook rejected: verify secret_ref did not resolve");
+            return Err(ApiError::Unauthorized);
+        }
+        return match value {
+            serde_json::Value::String(s) if !s.is_empty() => Ok(zeroize::Zeroizing::new(s)),
+            _ => {
+                tracing::warn!(slug = %trigger.slug, "webhook rejected: verify secret_ref is not a non-empty string (use credentials://id/field)");
+                Err(ApiError::Unauthorized)
+            }
+        };
+    }
+    match &trigger.secret {
+        Some(secret) if !secret.is_empty() => {
+            Ok(zeroize::Zeroizing::new(secret.expose().to_string()))
+        }
+        _ => {
+            tracing::warn!(slug = %trigger.slug, "webhook rejected: verify preset has no secret_ref and trigger has no secret");
+            Err(ApiError::Unauthorized)
+        }
+    }
+}
+
+/// Verify a provider-signed delivery against the raw body bytes, claim its
+/// replay key once, then ingest.
+async fn accept_preset_webhook(
+    state: &AppState,
+    slug: &str,
+    trigger: &orch8_types::trigger::TriggerDef,
+    cfg: &crate::webhook_verify::VerifyConfig,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let secret = resolve_preset_secret(state, trigger, cfg).await?;
+    let now = chrono::Utc::now().timestamp();
+    let verified =
+        crate::webhook_verify::verify(cfg, &secret, headers, body, now).map_err(|reason| {
+            tracing::warn!(slug = %slug, preset = cfg.preset.as_str(), ?reason, "webhook rejected: preset verification failed");
+            ApiError::Unauthorized
+        })?;
+    drop(secret);
+
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(verified.replay_ttl_secs);
+    let claimed = state
+        .storage
+        .claim_webhook_nonce(slug, &verified.replay_key, expires_at)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "webhook nonce"))?;
+    if !claimed {
+        tracing::warn!(slug = %slug, preset = cfg.preset.as_str(), "webhook rejected: replayed delivery");
+        return Err(ApiError::Unauthorized);
+    }
+
+    let meta = serde_json::json!({
+        "source": "public_webhook",
+        "verify_preset": cfg.preset.as_str(),
+        "provider_event": verified.event,
+        "user_agent": headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or(""),
+    });
+    ingest(state, slug, trigger, body, meta).await
 }
 
 #[cfg(test)]

@@ -100,6 +100,23 @@ pub(crate) async fn create_trigger(
                 .into(),
         ));
     }
+    // Provider signature presets must be well-formed and only make sense on
+    // public webhook triggers.
+    match crate::webhook_verify::VerifyConfig::from_trigger_config(&body.config) {
+        Ok(Some(_)) if body.trigger_type != TriggerType::Webhook => {
+            return Err(ApiError::InvalidArgument(
+                "config.verify is only valid on webhook triggers".into(),
+            ));
+        }
+        Ok(Some(cfg)) if cfg.secret_ref.is_none() && body.secret.is_none() => {
+            return Err(ApiError::InvalidArgument(
+                "config.verify needs a secret_ref (credentials://id[/field]) or a trigger secret"
+                    .into(),
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(ApiError::InvalidArgument(format!("invalid config.verify: {e}"))),
+    }
     // Polling triggers carry a structured config (piece, trigger, schedule);
     // reject malformed configs here so the engine's poll loop never sees one.
     if body.trigger_type == TriggerType::ActivepiecesPoll {

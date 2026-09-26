@@ -42,6 +42,7 @@ pub mod test_harness;
 pub mod triggers;
 pub mod usage;
 pub mod webhook_outbox;
+pub(crate) mod webhook_verify;
 pub mod webhooks;
 pub mod workbench;
 pub mod workers;

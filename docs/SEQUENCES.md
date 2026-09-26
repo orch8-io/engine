@@ -741,6 +741,36 @@ Webhook notes:
 - Use `/triggers/{slug}/fire` for trusted internal service calls.
 - Use `/webhooks/{slug}` for public inbound third-party calls.
 
+### Provider signature presets
+
+Third-party senders sign with their own schemes. Add `config.verify` to a
+webhook trigger and Orch8 verifies the provider's signature instead of the
+native `x-orch8-signature` headers:
+
+```json
+{
+  "slug": "stripe-payment-succeeded",
+  "sequence_name": "payment-postprocess",
+  "tenant_id": "acme",
+  "trigger_type": "webhook",
+  "config": { "verify": { "preset": "stripe", "secret_ref": "credentials://stripe-webhook" } }
+}
+```
+
+| `preset` | Header(s) | Signed bytes | Replay protection |
+|---|---|---|---|
+| `stripe` | `Stripe-Signature: t=…,v1=<hex>` | `"{t}.{raw body}"` | 300 s tolerance + each `(t, v1)` accepted once |
+| `github` | `X-Hub-Signature-256: sha256=<hex>` | raw body | `X-GitHub-Delivery` accepted once (72 h) |
+| `shopify` | `X-Shopify-Hmac-Sha256: <base64>` | raw body | `X-Shopify-Webhook-Id` accepted once (72 h) |
+| `svix` (aliases `clerk`, `resend`, `standard_webhooks`) | `svix-id`, `svix-timestamp`, `svix-signature` (or `webhook-*`) | `"{id}.{ts}.{raw body}"`; `whsec_` secrets are base64-decoded | 300 s tolerance + each id accepted once |
+| `hmac_sha256` | `header` (default `X-Signature`), `encoding` `hex`/`base64`, optional `prefix` (e.g. `sha256=`) | raw body, or `"{ts}.{raw body}"` when `timestamp_header` is set | `id_header` value (or the signature) accepted once |
+
+- Signatures are always computed over the **raw request bytes** and compared in constant time.
+- `secret_ref` is a credential id or `credentials://id[/field]` resolved in the trigger's tenant; without it the trigger's own `secret` is used. A missing/disabled credential fails closed with `401`.
+- `tolerance_secs` (1–3600, default 300) changes the timestamp window for timestamped presets.
+- Verified instances record `metadata.verify_preset` and, when the provider sends one, `metadata.provider_event` (`X-GitHub-Event`, `X-Shopify-Topic`).
+- Ready-made recipes: [`examples/recipes/`](../examples/recipes/) (Stripe, GitHub, Shopify, Clerk).
+
 Trigger management:
 
 ```bash

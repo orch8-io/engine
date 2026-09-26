@@ -1,0 +1,60 @@
+{
+  "id": "01933333-0000-7000-8000-000000000001",
+  "tenant_id": "demo",
+  "namespace": "default",
+  "name": "stripe-payment-succeeded",
+  "version": 1,
+  "created_at": "2026-09-01T00:00:00Z",
+  "blocks": [
+    {
+      "type": "router",
+      "id": "only_succeeded",
+      "routes": [
+        {
+          "condition": "context.data.type == \"payment_intent.succeeded\"",
+          "blocks": [
+            {
+              "type": "step",
+              "id": "send_receipt",
+              "handler": "email",
+              "params": {
+                "provider": "resend",
+                "api_key": "credentials://resend/api_key",
+                "from": "Acme Billing <billing@acme.example>",
+                "to": "{{context.data.data.object.receipt_email}}",
+                "subject": "Payment received",
+                "text": "We received your payment of {{context.data.data.object.amount_received}} {{context.data.data.object.currency}}. Thank you!",
+                "idempotency_key": "receipt-{{context.data.id}}"
+              }
+            },
+            {
+              "type": "step",
+              "id": "tell_finance",
+              "handler": "notify",
+              "params": {
+                "provider": "slack",
+                "url": "credentials://finance-slack/url",
+                "title": "Payment succeeded",
+                "text": "PaymentIntent `{{context.data.data.object.id}}` settled",
+                "fields": {
+                  "amount": "{{context.data.data.object.amount_received}}",
+                  "currency": "{{context.data.data.object.currency}}"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "default": [
+        {
+          "type": "step",
+          "id": "ignore_other_events",
+          "handler": "log",
+          "params": {
+            "message": "ignoring {{context.data.type}}"
+          }
+        }
+      ]
+    }
+  ]
+}

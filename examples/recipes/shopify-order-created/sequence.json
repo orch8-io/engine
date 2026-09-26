@@ -1,0 +1,38 @@
+{
+  "id": "01933333-0000-7000-8000-000000000003",
+  "tenant_id": "demo",
+  "namespace": "default",
+  "name": "shopify-order-created",
+  "version": 1,
+  "created_at": "2026-09-01T00:00:00Z",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "confirm_order",
+      "handler": "email",
+      "params": {
+        "provider": "ses",
+        "aws": "credentials://aws-ses",
+        "from": "Acme Store <orders@acme.example>",
+        "to": "{{context.data.email}}",
+        "subject": "Order {{context.data.name}} confirmed",
+        "html": "<p>Thanks! We received order <b>{{context.data.name}}</b> totalling {{context.data.total_price}} {{context.data.currency}}.</p>",
+        "text": "Thanks! We received order {{context.data.name}} totalling {{context.data.total_price}} {{context.data.currency}}."
+      }
+    },
+    {
+      "type": "step",
+      "id": "tell_fulfilment",
+      "handler": "notify",
+      "params": {
+        "provider": "teams",
+        "url": "credentials://fulfilment-teams/url",
+        "title": "New order {{context.data.name}}",
+        "text": "Order from {{context.data.email}} is ready to pick",
+        "fields": {
+          "total": "{{context.data.total_price}} {{context.data.currency}}"
+        }
+      }
+    }
+  ]
+}
