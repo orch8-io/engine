@@ -13644,7 +13644,7 @@
           },
           "trigger_type": {
             "$ref": "#/components/schemas/TriggerType",
-            "description": "Trigger type: `webhook`, `nats`, `file_watch`, `event`, `activepieces_poll`."
+            "description": "Trigger type: `webhook`, `nats`, `file_watch`, `event`, `activepieces_poll`,\n`kafka`, `sqs`, `pubsub`, `redis_streams`, `postgres_rows`."
           },
           "updated_at": {
             "type": "string",
@@ -13709,7 +13709,12 @@
           "nats",
           "file_watch",
           "event",
-          "activepieces_poll"
+          "activepieces_poll",
+          "kafka",
+          "sqs",
+          "pubsub",
+          "redis_streams",
+          "postgres_rows"
         ]
       },
       "TrustBoundaryProfile": {

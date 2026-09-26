@@ -25,6 +25,19 @@ pub enum TriggerType {
     /// (config holds piece, trigger, auth, props, and a schedule) and
     /// creates one instance per returned item.
     ActivepiecesPoll,
+    /// Apache Kafka topic consumer (engine feature `kafka`).
+    Kafka,
+    /// AWS SQS queue consumer (engine feature `sqs`).
+    Sqs,
+    /// GCP Pub/Sub pull subscription (engine feature `pubsub`).
+    #[serde(rename = "pubsub")]
+    PubSub,
+    /// Redis Streams consumer group (engine feature `redis-streams`).
+    RedisStreams,
+    /// Row changes in a user Postgres table, captured by an installable
+    /// trigger function into a durable outbox and woken by LISTEN/NOTIFY
+    /// (engine feature `postgres-rows`).
+    PostgresRows,
 }
 
 impl fmt::Display for TriggerType {
@@ -35,6 +48,11 @@ impl fmt::Display for TriggerType {
             Self::FileWatch => f.write_str("file_watch"),
             Self::Event => f.write_str("event"),
             Self::ActivepiecesPoll => f.write_str("activepieces_poll"),
+            Self::Kafka => f.write_str("kafka"),
+            Self::Sqs => f.write_str("sqs"),
+            Self::PubSub => f.write_str("pubsub"),
+            Self::RedisStreams => f.write_str("redis_streams"),
+            Self::PostgresRows => f.write_str("postgres_rows"),
         }
     }
 }
@@ -48,6 +66,11 @@ impl TriggerType {
             "file_watch" => Some(Self::FileWatch),
             "event" => Some(Self::Event),
             "activepieces_poll" => Some(Self::ActivepiecesPoll),
+            "kafka" => Some(Self::Kafka),
+            "sqs" => Some(Self::Sqs),
+            "pubsub" => Some(Self::PubSub),
+            "redis_streams" => Some(Self::RedisStreams),
+            "postgres_rows" => Some(Self::PostgresRows),
             _ => None,
         }
     }
@@ -117,7 +140,8 @@ pub struct TriggerDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub secret: Option<crate::config::SecretString>,
-    /// Trigger type: `webhook`, `nats`, `file_watch`, `event`, `activepieces_poll`.
+    /// Trigger type: `webhook`, `nats`, `file_watch`, `event`, `activepieces_poll`,
+    /// `kafka`, `sqs`, `pubsub`, `redis_streams`, `postgres_rows`.
     #[serde(default)]
     pub trigger_type: TriggerType,
     /// Type-specific configuration (JSON).
@@ -153,6 +177,23 @@ mod tests {
         let t: TriggerType = serde_json::from_str(r#""activepieces_poll""#).unwrap();
         assert_eq!(t, TriggerType::ActivepiecesPoll);
         assert_eq!(serde_json::to_string(&t).unwrap(), r#""activepieces_poll""#);
+    }
+
+    #[test]
+    fn message_source_types_round_trip_display_and_serde() {
+        for (t, wire) in [
+            (TriggerType::Kafka, "kafka"),
+            (TriggerType::Sqs, "sqs"),
+            (TriggerType::PubSub, "pubsub"),
+            (TriggerType::RedisStreams, "redis_streams"),
+            (TriggerType::PostgresRows, "postgres_rows"),
+        ] {
+            assert_eq!(t.to_string(), wire);
+            assert_eq!(TriggerType::from_str_loose(wire), Some(t.clone()));
+            assert_eq!(serde_json::to_value(&t).unwrap(), serde_json::json!(wire));
+            let back: TriggerType = serde_json::from_value(serde_json::json!(wire)).unwrap();
+            assert_eq!(back, t);
+        }
     }
 
     #[test]

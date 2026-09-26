@@ -108,6 +108,13 @@ pub(crate) async fn create_trigger(
         })?;
     }
 
+    // Message-source triggers (kafka, sqs, pubsub, redis_streams,
+    // postgres_rows) carry structured configs; reject malformed ones up front
+    // so the listener never starts against an invalid config.
+    orch8_engine::trigger_sources::validate_config(&body.trigger_type, &body.config).map_err(
+        |e| ApiError::InvalidArgument(format!("invalid {} config: {e}", body.trigger_type)),
+    )?;
+
     let tenant_id = crate::auth::enforce_tenant_create(
         &tenant_ctx,
         &TenantId::unchecked(body.tenant_id.clone()),
@@ -204,9 +211,12 @@ pub(crate) async fn get_trigger(
         &format!("trigger '{slug}'"),
     )?;
 
-    // Polling triggers surface their runtime bookkeeping (dedupe cursor,
-    // last_error, consecutive_failures) alongside the definition.
-    if trigger.trigger_type == TriggerType::ActivepiecesPoll {
+    // Polling / cursor-based triggers surface their runtime bookkeeping
+    // (cursor, last_error, consecutive_failures) alongside the definition.
+    if matches!(
+        trigger.trigger_type,
+        TriggerType::ActivepiecesPoll | TriggerType::Kafka | TriggerType::PostgresRows
+    ) {
         let poll_state = state
             .storage
             .get_trigger_poll_state(&slug)

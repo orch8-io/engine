@@ -25,6 +25,7 @@ pub mod signal;
 pub mod support_bundle;
 pub mod templates;
 pub mod test_cmd;
+pub mod triggers;
 
 #[cfg(test)]
 mod request_contract_tests;

@@ -16,7 +16,11 @@ path = "src/bench.rs"
 [dependencies]
 orch8-types = { path = "../orch8-types" }
 orch8-storage = { path = "../orch8-storage" }
-orch8-engine = { path = "../orch8-engine", default-features = false, features = ["compression", "file-watch", "nats", "wasm"] }
+# Trigger sources: `sqs`, `pubsub` and `postgres-rows` are always built in —
+# they reuse reqwest/hmac/jsonwebtoken/sqlx that the server already links, so
+# they add no crates. Kafka and Redis Streams pull in new client crates and
+# are opt-in via the `trigger-kafka` / `trigger-redis-streams` features below.
+orch8-engine = { path = "../orch8-engine", default-features = false, features = ["compression", "file-watch", "nats", "wasm", "sqs", "pubsub", "postgres-rows"] }
 orch8-api = { path = "../orch8-api" }
 orch8-grpc = { path = "../orch8-grpc" }
 orch8-push = { path = "../orch8-push" }
@@ -56,6 +60,12 @@ serial_test.workspace = true
 
 [features]
 default = ["otlp"]
+# Kafka topic triggers (pure-Rust `rskafka`; gzip/snappy compression).
+trigger-kafka = ["orch8-engine/kafka"]
+# Redis Streams consumer-group triggers (`redis` crate, rediss:// TLS).
+trigger-redis-streams = ["orch8-engine/redis-streams"]
+# Every trigger source.
+all-triggers = ["trigger-kafka", "trigger-redis-streams"]
 # OpenTelemetry OTLP trace export (ORCH8_OTLP_ENDPOINT / [telemetry] otlp_endpoint).
 otlp = [
     "dep:opentelemetry",

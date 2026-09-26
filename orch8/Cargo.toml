@@ -28,6 +28,11 @@ ed25519-dalek = { workspace = true }
 default = ["compression"]
 compression = ["orch8-engine/compression"]
 nats = ["orch8-engine/nats"]
+kafka = ["orch8-engine/kafka"]
+sqs = ["orch8-engine/sqs"]
+pubsub = ["orch8-engine/pubsub"]
+redis-streams = ["orch8-engine/redis-streams"]
+postgres-rows = ["orch8-engine/postgres-rows"]
 file-watch = ["orch8-engine/file-watch"]
 wasm = ["orch8-engine/wasm"]
 

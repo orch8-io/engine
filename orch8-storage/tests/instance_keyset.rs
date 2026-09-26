@@ -1,5 +1,5 @@
-//! `InstanceStore::list_instances_keyset` contract, run against SQLite and
-//! (when `DATABASE_URL` is set) Postgres.
+//! `InstanceStore::list_instances_keyset` contract, run against `SQLite` and
+//! (when `DATABASE_URL` is set) `Postgres`.
 
 use chrono::Utc;
 use orch8_storage::StorageBackend;

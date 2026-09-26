@@ -46,6 +46,7 @@ pub mod stream_bus;
 pub mod stream_windows;
 pub mod template;
 pub mod template_trace;
+pub mod trigger_sources;
 pub mod triggers;
 pub mod webhooks;
 

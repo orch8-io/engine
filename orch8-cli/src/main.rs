@@ -30,6 +30,7 @@ use commands::release::ReleaseCmd;
 use commands::sequence::SequenceCmd;
 use commands::support_bundle::SupportBundleCmd;
 use commands::templates::TemplatesCmd;
+use commands::triggers::TriggersCmd;
 
 /// Output format for CLI commands.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -148,6 +149,9 @@ enum Commands {
     /// Search and install Activepieces connector packages.
     #[command(subcommand)]
     Pieces(PiecesCmd),
+    /// Trigger-source helpers (e.g. install Postgres row-change capture).
+    #[command(subcommand)]
+    Triggers(TriggersCmd),
     /// Checkpoint management.
     #[command(subcommand)]
     Checkpoint(CheckpointCmd),
@@ -600,6 +604,10 @@ async fn main() -> Result<()> {
     select_context(&mut cli, &matches, &contexts_path)?;
 
     // Handle migrate before building the HTTP client — it does not need one.
+    if let Commands::Triggers(cmd) = cli.command {
+        return commands::triggers::run(cmd).await;
+    }
+
     if let Commands::Migrate { database_url } = cli.command {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -660,6 +668,7 @@ async fn main() -> Result<()> {
         | Commands::Bootstrap(..)
         | Commands::Demo(..)
         | Commands::Migrate { .. }
+        | Commands::Triggers(_)
         | Commands::Completions { .. } => {
             anyhow::bail!("internal error: command should have been handled before dispatch")
         }

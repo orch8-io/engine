@@ -36,6 +36,12 @@ jsonschema.workspace = true
 bytes.workspace = true
 tokio-stream.workspace = true
 async-nats = { workspace = true, optional = true }
+rskafka = { workspace = true, optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+webpki-roots = { version = "1", optional = true }
+redis = { workspace = true, optional = true }
+jsonwebtoken = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 
@@ -43,6 +49,12 @@ wasmtime = { workspace = true, optional = true }
 default = ["compression"]
 compression = ["orch8-storage/compression"]
 nats = ["dep:async-nats"]
+# Trigger sources. Each pulls its own client so the default build stays lean.
+kafka = ["dep:rskafka", "dep:rustls", "dep:webpki-roots"]
+sqs = []
+pubsub = ["dep:jsonwebtoken"]
+redis-streams = ["dep:redis", "dep:rustls"]
+postgres-rows = ["dep:sqlx"]
 file-watch = ["dep:notify"]
 wasm = ["dep:wasmtime"]
 
