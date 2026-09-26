@@ -9,6 +9,7 @@ pub mod demo;
 pub mod deploy;
 pub mod dev;
 pub mod dev_server;
+pub mod dev_workers;
 pub mod doctor;
 pub mod explain;
 pub mod generate;

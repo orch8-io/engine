@@ -100,6 +100,19 @@ pub struct DevCmd {
     /// file change or workflows directory change).
     #[arg(long)]
     pub auto_run: bool,
+
+    /// Run a local worker process next to the dev engine (repeatable), e.g.
+    /// `--worker "node worker.js"`. Workers get `ORCH8_URL`, `ORCH8_API_KEY`,
+    /// and `ORCH8_TENANT_ID` for the dev server, prefixed/colorized logs, and
+    /// are restarted with backoff when they exit. The whole process group is
+    /// stopped when `orch8 dev` exits.
+    #[arg(long = "worker", value_name = "CMD")]
+    pub workers: Vec<String>,
+
+    /// Restart every `--worker` when a file matching this glob changes
+    /// (repeatable), e.g. `--worker-watch "src/**/*.ts"`.
+    #[arg(long = "worker-watch", value_name = "GLOB", requires = "workers")]
+    pub worker_watch: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -785,13 +798,20 @@ fn feature_line(cmd: &DevCmd) -> String {
     if cmd.once {
         features.push("once".into());
     }
+    if !cmd.workers.is_empty() {
+        features.push(format!("workers:{}", cmd.workers.len()));
+    }
     features.join(", ")
 }
 
-/// Entry point for `orch8 dev`.
+/// Entry point for `orch8 dev`. `api_key` / `tenant_id` are the CLI's
+/// resolved `--api-key` / `--tenant-id`, handed to `--worker` processes.
 #[allow(clippy::too_many_lines)]
-pub async fn run(cmd: DevCmd) -> Result<()> {
+pub async fn run(cmd: DevCmd, api_key: Option<String>, tenant_id: Option<String>) -> Result<()> {
     let started = Instant::now();
+    if !cmd.workers.is_empty() && !server_enabled(&cmd) {
+        bail!("--worker needs the dev HTTP server; drop --no-server");
+    }
     let seq_path =
         resolve_sequence_path(Path::new(&cmd.path), cmd.sequence.as_deref().map(Path::new))?;
 
@@ -813,6 +833,20 @@ pub async fn run(cmd: DevCmd) -> Result<()> {
     };
 
     let dev_server = maybe_start_server(&cmd).await?;
+    let workers = if cmd.workers.is_empty() {
+        None
+    } else {
+        let env = super::dev_workers::WorkerEnv {
+            url: format!("http://127.0.0.1:{}{}", cmd.port, orch8_api::API_V1_PREFIX),
+            api_key,
+            tenant_id: tenant_id.unwrap_or_else(|| DEV_TENANT.to_string()),
+        };
+        Some(super::dev_workers::WorkerSupervisor::start(
+            &cmd.workers,
+            &env,
+            &cmd.worker_watch,
+        )?)
+    };
 
     let manual_clock = cmd
         .skip_timers
@@ -863,6 +897,9 @@ pub async fn run(cmd: DevCmd) -> Result<()> {
         _ = tokio::signal::ctrl_c() => Ok(None),
     };
 
+    if let Some(workers) = workers {
+        workers.shutdown().await;
+    }
     if let Some(server) = &dev_server {
         server.shutdown.cancel();
     }
@@ -1456,6 +1493,8 @@ mod tests {
             port: 9090,
             workflows: None,
             auto_run: false,
+            workers: vec![],
+            worker_watch: vec![],
         };
         let line = feature_line(&cmd);
         assert!(line.contains("server:9090"), "got: {line}");
@@ -1478,6 +1517,8 @@ mod tests {
             port: 8080,
             workflows: Some("workflows/".into()),
             auto_run: true,
+            workers: vec![],
+            worker_watch: vec![],
         };
         let line = feature_line(&cmd);
         assert!(line.contains("server:8080"), "got: {line}");
@@ -1504,6 +1545,8 @@ mod tests {
             port: 8080,
             workflows: None,
             auto_run: false,
+            workers: vec![],
+            worker_watch: vec![],
         };
         let line = feature_line(&cmd);
         assert_eq!(line, "timers:real", "got: {line}");

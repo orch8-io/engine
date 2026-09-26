@@ -613,7 +613,7 @@ async fn main() -> Result<()> {
     // Handle dev before building the HTTP client — it runs an embedded
     // engine and never talks to a server.
     if let Commands::Dev(cmd) = cli.command {
-        return commands::dev::run(cmd).await;
+        return commands::dev::run(cmd, cli.api_key, cli.tenant_id).await;
     }
 
     // Import is an offline file conversion; `--tenant-id` / ORCH8_TENANT_ID

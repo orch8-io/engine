@@ -39,6 +39,13 @@ base64 = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
 tempfile = { workspace = true }
+# `orch8 dev --worker-watch <glob>` matching.
+globset = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+# `orch8 dev --worker`: signal whole worker process groups (killpg) so
+# forked grandchildren never outlive the dev session.
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
 [lints]
 workspace = true

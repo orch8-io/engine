@@ -3187,6 +3187,8 @@ dependencies = [
  "clap",
  "clap_complete",
  "ed25519-dalek 3.0.0",
+ "globset",
+ "nix",
  "orch8",
  "orch8-api",
  "orch8-engine",
