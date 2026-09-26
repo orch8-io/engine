@@ -2839,7 +2839,8 @@ mod tests {
         let inner: Arc<dyn crate::StorageBackend> =
             Arc::new(crate::sqlite::SqliteStorage::in_memory().await.unwrap());
         let enc = EncryptingStorage::new(Arc::clone(&inner), test_encryptor());
-        let now = chrono::Utc::now();
+        // Storage keeps microseconds; Linux clocks report nanoseconds.
+        let now = chrono::SubsecRound::trunc_subsecs(chrono::Utc::now(), 6);
         let entry = orch8_types::ai::LlmCacheEntry {
             tenant_id: "t1".into(),
             cache_key: "k1".into(),
