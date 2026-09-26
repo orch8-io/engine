@@ -1,0 +1,9 @@
+{
+  "name": "@orch8/bench-hatchet",
+  "private": true,
+  "type": "module",
+  "description": "Hatchet side of the Orch8 comparative benchmark. UNVERIFIED: not yet exercised end-to-end by the harness.",
+  "dependencies": {
+    "@hatchet-dev/typescript-sdk": "^1.0.0"
+  }
+}

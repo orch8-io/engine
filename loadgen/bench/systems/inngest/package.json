@@ -1,0 +1,10 @@
+{
+  "name": "@orch8/bench-inngest",
+  "private": true,
+  "type": "module",
+  "description": "Inngest side of the Orch8 comparative benchmark. UNVERIFIED: not yet exercised end-to-end by the harness.",
+  "dependencies": {
+    "express": "^4.21.0",
+    "inngest": "^3.27.0"
+  }
+}

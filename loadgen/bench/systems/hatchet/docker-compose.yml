@@ -1,0 +1,69 @@
+# Hatchet benchmark stack: PostgreSQL + hatchet-lite (engine, API, and
+# Postgres-backed message queue in one container) + one TypeScript worker.
+#
+# UNVERIFIED: environment variable names and the admin token command in
+# setup.sh follow Hatchet's hatchet-lite self-hosting docs as understood when
+# this harness was written. Pin HATCHET_LITE_IMAGE and confirm against the
+# release you benchmark.
+#
+# The worker needs an API token that only exists after hatchet-lite has
+# bootstrapped, so it sits behind the `worker` profile and setup.sh starts it.
+name: bench-hatchet
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: hatchet
+      POSTGRES_USER: hatchet
+      POSTGRES_PASSWORD: hatchet
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hatchet"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  hatchet-lite:
+    image: ${HATCHET_LITE_IMAGE:-ghcr.io/hatchet-dev/hatchet/hatchet-lite:latest}
+    restart: "no"
+    ports:
+      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:7077:7077"
+    environment:
+      DATABASE_URL: postgresql://hatchet:hatchet@postgres:5432/hatchet?sslmode=disable
+      SERVER_MSGQUEUE_KIND: postgres
+      SERVER_DEFAULT_ENGINE_VERSION: V1
+      SERVER_AUTH_COOKIE_DOMAIN: localhost
+      SERVER_AUTH_COOKIE_INSECURE: "t"
+      SERVER_AUTH_SET_EMAIL_VERIFIED: "t"
+      SERVER_GRPC_BIND_ADDRESS: 0.0.0.0
+      SERVER_GRPC_INSECURE: "t"
+      SERVER_GRPC_PORT: "7077"
+      SERVER_GRPC_BROADCAST_ADDRESS: localhost:7077
+      SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS: localhost:7077
+      SERVER_URL: http://localhost:8888
+    volumes:
+      - hatchet_config:/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    profiles: ["worker"]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      HATCHET_CLIENT_TOKEN: ${HATCHET_CLIENT_TOKEN:-}
+      HATCHET_CLIENT_TLS_STRATEGY: none
+      HATCHET_CLIENT_HOST_PORT: hatchet-lite:7077
+      WORKER_SLOTS: ${WORKER_SLOTS:-100}
+      ACTIVITY_LOG: /bench-out/activity.jsonl
+    volumes:
+      - ${BENCH_OUT_DIR:-./out}:/bench-out
+    depends_on:
+      - hatchet-lite
+
+volumes:
+  hatchet_config:

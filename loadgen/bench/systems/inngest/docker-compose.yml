@@ -1,0 +1,66 @@
+# Inngest benchmark stack: self-hosted `inngest start` backed by PostgreSQL and
+# Redis, plus one Node app that serves the benchmark function.
+#
+# UNVERIFIED: the `inngest start` flags (--event-key, --signing-key,
+# --postgres-uri, --redis-uri, --sdk-url) and ports 8288/8289 follow Inngest's
+# self-hosting documentation as understood when this harness was written.
+# Pin INNGEST_IMAGE and confirm the flags against `inngest start --help` for
+# the release you benchmark. Keys below are benchmark-only throwaway hex.
+name: bench-inngest
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: inngest
+      POSTGRES_USER: inngest
+      POSTGRES_PASSWORD: inngest
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inngest"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  inngest:
+    image: ${INNGEST_IMAGE:-inngest/inngest:latest}
+    restart: "no"
+    command:
+      - inngest
+      - start
+      - --event-key=0000000000000000000000000000000000000000000000000000000000000001
+      - --signing-key=0000000000000000000000000000000000000000000000000000000000000002
+      - --postgres-uri=postgres://inngest:inngest@postgres:5432/inngest?sslmode=disable
+      - --redis-uri=redis://redis:6379
+      - --sdk-url=http://app:3000/api/inngest
+    ports:
+      - "127.0.0.1:8288:8288"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      INNGEST_BASE_URL: http://inngest:8288
+      INNGEST_EVENT_KEY: "0000000000000000000000000000000000000000000000000000000000000001"
+      INNGEST_SIGNING_KEY: "0000000000000000000000000000000000000000000000000000000000000002"
+      INNGEST_DEV: "0"
+      ACTIVITY_LOG: /bench-out/activity.jsonl
+    volumes:
+      - ${BENCH_OUT_DIR:-./out}:/bench-out
+    depends_on:
+      - inngest
