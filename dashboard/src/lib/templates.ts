@@ -60,8 +60,6 @@ const REACT_LOOP_SEQUENCE: Record<string, unknown> = {
   $schema: "https://orch8.io/contracts/sequence.schema.json",
   schema_version: 1,
   name: "ReAct Loop Agent",
-  description:
-    "Observe-Think-Act loop with tool calling. The agent reasons about the task, selects tools, observes results, and iterates until done or max iterations reached.",
   blocks: [
     {
       type: "loop",
@@ -148,8 +146,6 @@ const TOOL_CALLING_PIPELINE_SEQUENCE: Record<string, unknown> = {
   $schema: "https://orch8.io/contracts/sequence.schema.json",
   schema_version: 1,
   name: "Tool-Calling Pipeline",
-  description:
-    "LLM generates a plan, executes tools in sequence, then synthesizes results. Linear pipeline with no looping — suited for structured multi-step tasks.",
   blocks: [
     {
       type: "step",
@@ -216,8 +212,6 @@ const GUARDRAIL_VALIDATION_SEQUENCE: Record<string, unknown> = {
   $schema: "https://orch8.io/contracts/sequence.schema.json",
   schema_version: 1,
   name: "Guardrail Validation Pipeline",
-  description:
-    "Input validation -> LLM generation -> output validation -> human review gate. Ensures AI outputs meet safety and quality standards before delivery.",
   blocks: [
     {
       type: "step",
@@ -338,8 +332,6 @@ const MULTI_AGENT_DELEGATION_SEQUENCE: Record<string, unknown> = {
   $schema: "https://orch8.io/contracts/sequence.schema.json",
   schema_version: 1,
   name: "Multi-Agent Delegation",
-  description:
-    "Orchestrator agent breaks a task into sub-tasks and delegates each to a specialized child agent instance. Results are collected and synthesized.",
   blocks: [
     {
       type: "step",
@@ -417,8 +409,6 @@ const MULTI_AGENT_DELEGATION_SEQUENCE: Record<string, unknown> = {
       },
     },
   ],
-  notes:
-    "In practice, use for_each + sub_sequence to dynamically delegate to N agents based on the decomposition output. The parallel block shown here is a simplified illustration for 3 sub-tasks.",
 };
 
 /** Registry of all built-in templates, in display order (mirrors the CLI's). */
@@ -509,7 +499,6 @@ export function templateEditorContent(
     name: template.name === "default" ? (src["name"] as string) : template.name,
     version: 1,
   };
-  if (typeof src["description"] === "string") out["description"] = src["description"];
   out["blocks"] = src["blocks"];
   return JSON.stringify(out, null, 2);
 }
