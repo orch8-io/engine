@@ -107,7 +107,7 @@ pub(super) async fn query_instance_usage_totals(
     let row = sqlx::query(
         "SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens, \
                 COALESCE(SUM(output_tokens), 0) AS output_tokens \
-         FROM usage_events WHERE instance_id = ?1",
+         FROM usage_events WHERE instance_id = ?1 AND kind = 'llm_tokens'",
     )
     .bind(instance_id.to_string())
     .fetch_one(storage.pool())

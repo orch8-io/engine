@@ -26,6 +26,7 @@
     clippy::option_if_let_else
 )]
 
+mod ai;
 mod api_keys;
 mod audit;
 mod checkpoints;

@@ -2,6 +2,7 @@
 // The values are always small enough that wrapping/sign-loss cannot occur.
 #![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 
+mod ai;
 mod api_keys;
 mod audit;
 mod checkpoints;
