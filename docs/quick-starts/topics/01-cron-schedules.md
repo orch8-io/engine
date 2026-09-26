@@ -1,5 +1,7 @@
 # Schedule recurring workflow runs
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../../STABILITY.md).
+
 Use a cron schedule when Orch8, rather than an upstream service, should own
 when a workflow starts. This guide publishes a schedule-safe sequence,
 previews its next fires, observes a run, and then disables the schedule.

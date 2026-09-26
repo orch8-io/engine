@@ -1,5 +1,7 @@
 # Level 1: Run one local workflow
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../STABILITY.md).
+
 In this level you will run a complete workflow in one process. There is no HTTP
 server, API key, or external database yet. The goal is to learn the four nouns
 that every later guide uses: sequence, block, handler, and instance.

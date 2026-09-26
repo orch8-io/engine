@@ -1,5 +1,7 @@
 # Operator dashboard
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 The dashboard is an operational decision interface. It is embedded in
 `orch8 dev`, which starts the Studio and persistent SQLite store by default;
 use `--no-server` only for ephemeral CLI/CI runs. The production

@@ -1,5 +1,7 @@
 # Orch8 Engine — API Reference
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 Canonical base URL: `http://localhost:8080/api/v1` (listen address configurable via `ORCH8_HTTP_ADDR`)
 
 > **Scope:** this is a curated guide to common requests and concepts, not the

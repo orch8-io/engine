@@ -1,5 +1,7 @@
 # Operator Support Bundle
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 Create a bounded, atomically written diagnostic artifact with:
 
 ```bash

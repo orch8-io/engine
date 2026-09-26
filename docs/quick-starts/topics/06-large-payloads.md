@@ -1,5 +1,7 @@
 # Externalize large workflow state
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Use externalization when large outputs would otherwise inflate the scheduler's
 hot database rows. Orch8 stores the payload separately, leaves a compact
 reference on the output row, and transparently hydrates it for API consumers.

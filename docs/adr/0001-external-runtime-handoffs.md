@@ -1,5 +1,7 @@
 # ADR 0001: External runtime handoff claims
 
+> **Stability: n/a**, architecture decision record.
+
 - Status: Accepted
 - Date: 2026-09-01
 

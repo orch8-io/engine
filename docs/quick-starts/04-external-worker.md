@@ -1,5 +1,7 @@
 # Level 4: Execute application code in a worker
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../STABILITY.md).
+
 The engine should own orchestration state, scheduling, retries, and recovery.
 Your services should own business logic and secrets. This level connects those
 responsibilities through Orch8's pull-based worker protocol.

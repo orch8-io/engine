@@ -1,5 +1,7 @@
 # Mobile protected fields and device tools
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 The mobile SDK exposes four standard capability descriptors: camera, scoped
 file access, biometric verification, and secure storage. `DeviceToolBridge`
 allows only each descriptor's listed operations, bounds request/response size,

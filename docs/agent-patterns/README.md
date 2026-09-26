@@ -1,5 +1,7 @@
 # Agent Patterns
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Reference sequence definitions for common AI agent architectures. Each JSON file is a complete sequence you can POST to `/sequences` (after setting up your tool dispatch endpoint and any external workers).
 
 These are **starting points**, not finished products — adapt params (model, provider, tool schemas, endpoints) to your setup.

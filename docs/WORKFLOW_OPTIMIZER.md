@@ -1,5 +1,7 @@
 # Workflow compiler optimization
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 `orch8_engine::optimizer::optimize` compiles a validated
 `SequenceDefinition` into an immutable optimization sidecar. The durable
 definition remains the execution authority; the optimizer never rewrites it.

@@ -1,5 +1,7 @@
 # Secure Production Bootstrap
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 `orch8 bootstrap` is the one-command path from an empty directory to a live,
 verified node:
 

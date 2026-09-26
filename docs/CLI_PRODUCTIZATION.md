@@ -1,5 +1,7 @@
 # CLI productization commands
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 - `orch8 debug open` fetches bounded timeline, checkpoint, and effect evidence
   (maximum 500 rows per surface). `debug fork` creates a dry-run sandbox unless
   the operator explicitly opts into live effects. It complements rather than

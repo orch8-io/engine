@@ -1,5 +1,7 @@
 # Level 6: Ship a guarded production release
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../STABILITY.md).
+
 This level moves from a single-node SQLite tutorial to the production change
 model: PostgreSQL, explicit migration, authenticated service startup, immutable
 sequence versions, semantic diff, historical validation, canary routing, gates,

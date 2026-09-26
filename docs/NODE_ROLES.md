@@ -1,5 +1,7 @@
 # Node Roles
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 `[node].role` selects the process assembly. Unknown roles fail during config
 parsing; a role never silently falls back to the all-in-one surface.
 

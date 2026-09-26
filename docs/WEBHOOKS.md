@@ -1,5 +1,7 @@
 # Webhooks
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 The engine POSTs JSON event payloads to URLs you configure when instances reach terminal states. Webhooks are delivered asynchronously with retry — they do not block the scheduler — and deliveries that exhaust their retries are parked in a queryable outbox.
 
 ---

@@ -1,5 +1,7 @@
 # External Workers
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 Workers run handler code **outside** the engine binary. Use them when you want to:
 
 - Write handlers in Node, Python, Go, or any language that can POST JSON.

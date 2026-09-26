@@ -1,5 +1,7 @@
 # Typed Dataflow
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Orch8 compiles declared sequence schemas and direct data references before a
 workflow runs. The compiler is deliberately conservative: contradictions are
 errors, while evidence it cannot prove remains an explicit warning.

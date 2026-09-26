@@ -1,97 +1,82 @@
 # Orch8 Engine
 
-A self-hosted, durable workflow orchestration engine built in Rust. Define workflows as composable JSON sequences. Orch8 guarantees every step either completes, retries, or surfaces in a dead-letter queue.
+A self-hosted, durable workflow engine written in Rust. You define workflows as JSON
+sequences, and Orch8 makes sure every step completes, retries, or lands in a dead-letter
+queue.
 
-Runs on servers and mobile devices. Single binary for servers, native SDK for iOS and Android (via UniFFI). One dependency: PostgreSQL (or SQLite for dev/embedded/mobile).
+It ships as one binary for servers, backed by PostgreSQL (or SQLite for single-node and
+embedded use), plus a native SDK that runs workflows on iOS and Android.
 
-[Docs](https://orch8.io/docs) · [Discord](https://discord.gg/BAbx7Dshu) · [Cloud](https://cloud.orch8.io) · [Playbook](https://orch8.io/playbook)
+[Docs](https://orch8.io/docs) · [Discord](https://discord.gg/BAbx7Dshu) · [Cloud](https://cloud.orch8.io) · [Playbook](https://orch8.io/playbook) · [All features](docs/FEATURES.md) · [Licensing](docs/LICENSING.md)
 
 ![Orch8 demo — orch8 init → orch8-server → engine ready in seconds](docs/demo.gif)
 
-## Why Orch8
+## Pick your path
 
-Existing durable workflow engines either ship a multi-service cluster (Temporal: Cassandra + Elasticsearch + JVM workers) or assume Python everywhere (Airflow: Celery + Redis + scheduler). Both are full-time operational jobs on a small team.
+Each path is about ten lines. [Install](#install) the `orch8` CLI first. All three run
+locally without a separate database.
 
-Orch8 keeps the execution model — state-snapshot durability, retries, replay-on-restart — but trades the ecosystem for one Rust binary and Postgres. Workers in any language via REST long-poll. Higher-level building blocks (Parallel, Race, TryCatch, CancellationScope, plus LLM/HumanReview/ToolCall) shipped as first-class instead of patterns you build on activities.
+### 1. Background jobs & cron
 
-Unlike every other workflow engine, Orch8 also runs natively on mobile devices (iOS and Android) via Rust + UniFFI. Workflows execute offline-first on-device, sync status to the server when connected, and support human-in-the-loop approvals via push notifications. No other orchestration engine can do this.
+Durable multi-step jobs with retries, delays, and schedules. No worker fleet is needed to
+start.
 
-Portable Continuity takes that further: a running execution can hand off between server and device — or between two servers, or across a federation boundary — mid-flight, with cryptographic ownership transfer, tamper-evident provenance, and at-most-once effect tracking that survives the move. Nothing else in this space lets a workflow physically relocate while it's running.
+```bash
+orch8 init my-jobs && cd my-jobs           # sequence.json + orch8.toml with generated keys
+orch8 dev --no-server --skip-timers --once # run the 3-step job once; delays are fast-forwarded
+orch8 dev                                  # local studio + API on http://localhost:8080, hot reload
+```
 
-## Features
+Add `"retry": { "max_attempts": 3, "initial_backoff": 1000, "max_backoff": 60000, "backoff_multiplier": 2.0 }`
+to any step, or `"delay": { "duration": 86400000 }` to wait a day durably. Next:
+[cron schedules](docs/quick-starts/topics/01-cron-schedules.md),
+[inbound webhooks](docs/quick-starts/topics/02-inbound-webhook-trigger.md),
+[external workers in any language](docs/WORKERS.md), and
+[one-off background jobs](docs/JOBS.md).
 
-**Durable execution** — Snapshot-based crash recovery, retry with exponential
-backoff and conditional failure policies, idempotency keys, persistent circuit
-breakers, dead-letter fingerprinting, automatic incident reproduction, and
-checkpoint-based fork/resume. Side-effecting steps use a universal effect
-ledger so recovery can distinguish uncommitted, committed, unknown, and
-compensated effects.
+### 2. Durable AI agents
 
-**Workflow language** — Step, Parallel, Race, TryCatch, Loop, ForEach, Router,
-SubSequence, CancellationScope, AB Split, and Saga; per-step `when` guards;
-JSON Schema input/output contracts; dynamic block injection; and bounded
-concurrent execution of independent `Parallel` branches.
+LLM calls, tools, and human approval gates. Each step's result is persisted, so a crash
+or redeploy resumes the run instead of starting it over.
 
-**Scheduling and dispatch** — Relative and cron schedules, business calendars,
-timezones, jitter, send windows, per-entity concurrency keys, weighted resource
-pools, sliding-window limits, daily caps, warmup ramps, four priority levels,
-and cooperative preemption at durable step boundaries.
+```bash
+mkdir agent && cat > agent/sequence.json <<'EOF'
+{ "name": "support-agent", "blocks": [
+  { "type": "step", "id": "draft", "handler": "llm_call",
+    "params": { "provider": "anthropic", "messages": [{ "role": "user", "content": "Draft a reply to: {{context.data.ticket}}" }] },
+    "retry": { "max_attempts": 3, "initial_backoff": 1000, "max_backoff": 30000, "backoff_multiplier": 2.0 } },
+  { "type": "step", "id": "approve", "handler": "human_review", "params": { "instructions": "Check the draft" },
+    "wait_for_input": { "prompt": "Send it?", "store_as": "decision", "choices": [{ "label": "Send", "value": "send" }, { "label": "Discard", "value": "discard" }] } } ] }
+EOF
+orch8 dev agent --no-server --dry-run --skip-timers --once --mock llm_call='{"text":"Your refund is on its way."}'
+```
 
-**Workers and extensions** — Lease-based REST workers with resumable heartbeat
-checkpoints, queue/version/capability routing, a [negotiated bidirectional gRPC
-session](docs/GRPC_WORKER_STREAM.md), gRPC sidecars, WASM plugins, MCP client and
-server modes, Activepieces, signed webhooks, and deduplicated events. Worker,
-runtime, artifact-transfer, telemetry, and control sessions are bounded and
-resumable.
+`--mock` and `--dry-run` let the run complete offline: the LLM is stubbed and the
+approval gate auto-approves. For a real run, drop both flags and export the provider key
+(for example `ANTHROPIC_API_KEY`). Next: [agent patterns](docs/agent-patterns/README.md)
+(ReAct loop, tool pipelines, guardrails, multi-agent), `orch8 templates list`, and
+[human approval](docs/quick-starts/topics/04-human-approval.md).
 
-**Data, artifacts, and streams** — Durable local or S3-compatible encrypted
-artifacts, automatic externalization of oversized state, instance and
-tenant-namespaced semantic memory, a resumable tenant change feed, and bounded
-tumbling/sliding/session windows over durable continuity frames.
+### 3. Offline mobile workflows
 
-**Multi-tenancy and governance** — Capability-scoped tenant principals,
-provider-neutral plan entitlements, tenant rate/concurrency limits,
-tenant-isolated breakers and memory, authoritative [tenant partition
-routing](docs/TENANT_PARTITION_ROUTING.md), and fail-closed residency,
-disclosure, delegation, and federation policy.
+The same engine runs on-device through Rust + UniFFI. Workflows run offline-first, sync
+status when the device reconnects, and wake for approvals through push notifications.
 
-**Security** — Secure-by-default API-key and tenant enforcement, AES-256-GCM
-encryption for context, credentials, artifacts, worker checkpoints, and
-protected mobile fields; OAuth2 credential refresh; mTLS workload identity;
-HMAC-signed webhooks; signed packages/capsules/provenance; nonce and federation
-replay boundaries; CORS controls; and outbound URL/SSRF validation.
+```swift
+// Package.swift: .package(url: "https://github.com/orch8-io/orch8-mobile-swift", exact: "0.7.1")
+import Orch8Mobile
 
-**AI and human workflows** — Multi-provider `llm_call` with structured-output
-repair, multimodal artifacts, cost/token telemetry, effect-safe provider
-failover, durable ReAct agents, governed shared knowledge, bounded cumulative
-budgets, evidence-scoped evaluation gates, and lease-safe human attention.
+let engine = try MobileEngine(dbPath: dbPath, config: config)   // config: see docs/MOBILE_SDK.md
+try engine.registerHandler(name: "show_screen", handler: ShowScreenHandler())
+_ = try engine.sync(manifestUrl: "https://api.example.com/mobile/manifest.json", tokenProvider: nil)
+engine.resume()                                                   // start the local tick loop
+let id = try engine.start(sequenceName: "onboarding_v2",
+                          input: "{\"user_id\": \"abc123\"}", dedupKey: "onboarding:abc123")
+```
 
-**Release and distribution safety** — Sequence preflight, typed-dataflow
-compilation, semantic diff, historical effect-free replay, guarded canaries,
-automatic rollback gates, workflow contracts, signed packages, append-only
-registry history, runtime-targeted channels, attestations, dependency locks,
-and verified delta fallback. See [Safe Releases](docs/RELEASES.md), [Package
-Registry](docs/PACKAGE_REGISTRY.md), and [Governed Distribution](docs/DISTRIBUTION_GOVERNANCE.md).
-
-**Mobile, edge, and portable continuity** — Native iOS/Android execution via
-Rust + UniFFI, offline-first sync, protected device tools, durable APNs/FCM
-wake delivery, capability-aware placement, signed capsule handoff, ownership
-epochs, provenance, live migration/rollback, receipt-backed compensation,
-what-if simulation, sovereign-edge enforcement, and signed federation
-send/receive primitives. See [Mobile SDK](docs/MOBILE_SDK.md), [Continuity
-Operations](docs/CONTINUITY_OPERATIONS.md), and [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md).
-
-**Operations and observability** — Role-specific all-in-one/control/executor/
-gateway/edge nodes, secure verified bootstrap, aggregate startup preflight,
-auditable draining, outbound managed-control tunnels, redacted support bundles,
-Prometheus metrics, OTLP/JSON telemetry, audit and provenance logs, execution
-workbench, ranked diagnosis, previewable remediation, and the operator
-dashboard. See [Node Roles](docs/NODE_ROLES.md), [Secure Bootstrap](docs/SECURE_BOOTSTRAP.md),
-and [Support Bundle](docs/SUPPORT_BUNDLE.md).
-
-The [documentation index](docs/README.md) maps each capability to its guide.
-For the exact release-by-release inventory, including migrations and explicit
-non-guarantees, see the [changelog](CHANGELOG.md#unreleased).
+Kotlin, React Native (`npm install react-native-orch8@0.7.1`), and Expo
+(`npx expo install @orch8.io/expo`) are also supported. Next: [Mobile SDK](docs/MOBILE_SDK.md)
+and [mobile-examples](https://github.com/orch8-io/mobile-examples).
 
 ## Install
 
@@ -110,23 +95,15 @@ pipx install orch8-cli
 irm https://raw.githubusercontent.com/orch8-io/engine/main/install.ps1 | iex
 ```
 
-The container image is `ghcr.io/orch8-io/engine:latest`, but a secure container
-also needs storage, API-key, and encryption configuration. Use the
-[Docker deployment example](docs/DEPLOYMENT.md#docker) instead of starting the
-image with only a port mapping.
+The container image is `ghcr.io/orch8-io/engine:latest`. A secure container also needs
+storage, API-key, and encryption-key configuration, so start from the
+[Docker deployment example](docs/DEPLOYMENT.md#docker) rather than running the image with
+only a port mapping. For one-click and PaaS setups (Render, DigitalOcean, Railway, Fly.io,
+Coolify), see [Deployment](docs/DEPLOYMENT.md#one-click-and-paas-templates). For Kubernetes,
+see the [Helm chart](deploy/helm/orch8/README.md). For single-node SQLite in production,
+see [SQLite + Litestream](docs/SQLITE_PRODUCTION.md).
 
-## Quick Start
-
-Start the local Studio. `orch8 dev` now uses a persistent `.orch8/dev.db`,
-hot reloads the sequence, and serves the dashboard at `http://localhost:8080`:
-
-```bash
-orch8 init my-project
-orch8 dev my-project
-```
-
-For a one-shot, in-memory CI run use
-`orch8 dev my-project --no-server --skip-timers --once`.
+## More from the CLI
 
 Authoring shortcuts:
 
@@ -138,33 +115,60 @@ orch8 pieces search slack
 orch8 demo crash-recovery
 ```
 
-Then follow the [progressive quick starts](docs/quick-starts/README.md) to add
-dataflow, the durable API server, external workers, failure recovery, and safe
-production releases.
+The [progressive quick starts](docs/quick-starts/README.md) take you through dataflow, the
+durable API server, external workers, failure recovery, and safe production releases.
+Community-contributed templates are covered in [Community templates](docs/COMMUNITY_TEMPLATES.md).
 
-To exercise portable continuity without a server or physical device, run the
-real signed/encrypted cloud-to-device-to-cloud protocol against three isolated
-local runtimes:
+To try portable continuity without a server or a physical device, run the real
+signed and encrypted cloud-to-device-to-cloud protocol against three isolated local
+runtimes:
 
 ```bash
 orch8 demo portable-agent
 # Add --output json for machine-readable invariant evidence.
 ```
 
-The demonstration rejects an untrusted capsule, verifies idempotent
-redelivery, advances ownership epochs `0 -> 1 -> 2`, and returns only a digest
-of the simulated device-private input.
+The demo rejects an untrusted capsule, checks that a repeated delivery is handled
+idempotently, advances ownership epochs `0 -> 1 -> 2`, and returns only a digest of the
+simulated device-private input.
 
-In CI, collapse the candidate preflight, semantic diff, and historical replay
-proofs into one strict exit code:
+In CI, one command combines the candidate preflight, semantic diff, and historical replay
+checks into a single strict exit code:
 
 ```bash
 orch8 release gate <release-id> --sample 50
 ```
 
-The gate rejects failed/unknown preflight checks, incompatible or
-side-effect-risking diffs, replay divergences, and inconclusive replays by
-default. Each risk allowance must be opted into explicitly.
+By default the gate rejects failed or unknown preflight checks, incompatible or
+side-effect-risking diffs, replay divergences, and inconclusive replays. You opt into
+each risk allowance explicitly. The repository's GitHub Action can also post a semantic
+diff and preflight result as a PR comment. See
+[GitHub Actions examples](docs/examples/github-actions/README.md).
+
+## Why Orch8
+
+Existing durable workflow engines either ship a multi-service cluster (Temporal:
+Cassandra + Elasticsearch + JVM workers) or assume Python everywhere (Airflow: Celery +
+Redis + scheduler). On a small team, either one is a full-time operations job.
+
+Orch8 keeps the same execution model (state-snapshot durability, retries,
+replay-on-restart) but replaces that stack with one Rust binary and Postgres. Workers can
+be written in any language and connect over REST long-poll. Higher-level building blocks
+(Parallel, Race, TryCatch, CancellationScope, plus LLM, HumanReview, and ToolCall) ship as
+built-in blocks rather than patterns you assemble from activities.
+
+Orch8 also runs natively on iOS and Android through Rust + UniFFI. Workflows run
+offline-first on the device, sync status to the server when connected, and support
+human-in-the-loop approvals through push notifications.
+
+Portable Continuity goes a step further: a running execution can move mid-flight between
+server and device, between two servers, or across a federation boundary. The move carries
+cryptographic ownership transfer, tamper-evident provenance, and at-most-once effect
+tracking.
+
+The full capability list is in [docs/FEATURES.md](docs/FEATURES.md). The
+[changelog](CHANGELOG.md#unreleased) has the release-by-release inventory, including
+migrations and explicit non-guarantees.
 
 ## SDKs
 
@@ -352,7 +356,11 @@ engine/
 - [API Reference](docs/API.md) — REST endpoints, block types, error codes
 - [Architecture](docs/ARCHITECTURE.md) — execution model, schema, performance
 - [Configuration](docs/CONFIGURATION.md) — all config options and env vars
-- [Deployment](docs/DEPLOYMENT.md) — production deploys (Docker, Kubernetes, managed cloud)
+- [Deployment](docs/DEPLOYMENT.md) — production deploys (Docker, Kubernetes/Helm, one-click PaaS templates, managed cloud)
+- [SQLite in production](docs/SQLITE_PRODUCTION.md) — single-node SQLite + Litestream, limits, and restore drill
+- [Features](docs/FEATURES.md) — the full capability list
+- [Licensing](docs/LICENSING.md) — plain-language "can I use this?" table
+- [Benchmarks](docs/BENCHMARKS.md) — reproducible cross-engine harness and methodology
 - [External Workers](docs/WORKERS.md) — writing handlers in any language
 - [Applications](docs/APPLICATIONS.md) — embedding patterns and use cases
 - [Webhooks](docs/WEBHOOKS.md) — event schema and delivery semantics
@@ -374,7 +382,9 @@ engine/
 ```bash
 docker run -d \
   -p 8080:8080 \
+  -e ORCH8_STORAGE_BACKEND=postgres \
   -e ORCH8_DATABASE_URL=postgres://user:pass@host:5432/orch8 \
+  -e ORCH8_RUN_MIGRATIONS=true \
   -e ORCH8_API_KEY=replace-with-a-long-random-secret \
   -e ORCH8_ENCRYPTION_KEY=replace-with-64-hex-characters \
   -e ORCH8_REQUIRE_TENANT_HEADER=true \
@@ -387,12 +397,14 @@ and [secure bootstrap](docs/SECURE_BOOTSTRAP.md).
 
 ### Helm
 
+The chart lives in this repository and isn't published to a Helm repository yet:
+
 ```bash
-helm repo add orch8 https://orch8-io.github.io/helm-charts
-helm install orch8 orch8/orch8-engine
+helm dependency build deploy/helm/orch8
+helm install orch8 deploy/helm/orch8 --set externalDatabase.url='postgres://…'
 ```
 
-Chart repo: [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts)
+The [chart README](deploy/helm/orch8/README.md) covers node roles, secrets, migrations, and monitoring.
 
 ## Community
 
@@ -418,19 +430,22 @@ If any of these are dealbreakers, file an issue — the gap-to-feature roadmap i
 
 ## License
 
-This project is licensed under the [Business Source License 1.1 (BUSL-1.1)](LICENSE).
+The engine is licensed under the [Business Source License 1.1 (BUSL-1.1)](LICENSE) with
+an Additional Use Grant. BUSL-1.1 is source-available, not OSI open source.
+[docs/LICENSING.md](docs/LICENSING.md) has a clause-by-clause "Can I use this?" table.
 
-**You can:**
+In short:
 
-- Use Orch8 in production for your own applications
-- Modify and extend the source code
-- Self-host for your team or company
-
-**You cannot:**
-
-- Offer Orch8 as a hosted or embedded service to third parties competing with us
-
-The license converts to Apache 2.0 four years from publication.
+- **You can** use Orch8 in development and in production for your own applications,
+  self-host it for your team or company, and modify and redistribute it under the same
+  license.
+- **You can't** offer Orch8 to third parties "on a hosted or embedded basis that is
+  competitive with the Licensor's products" without a commercial license.
+- **Ask us** at [hello@orch8.io](mailto:hello@orch8.io) about anything in between, such as
+  embedding Orch8 in a product you ship or running it for a client. The license doesn't
+  define "competitive", so we won't guess for you.
+- **Each version** becomes available under Apache 2.0 four years after it was first
+  published.
 
 ### Managed Cloud
 
@@ -438,4 +453,5 @@ Don't want to self-host? [orch8.io/pricing](https://orch8.io/pricing) — we run
 
 ### Commercial / OEM License
 
-Want to embed Orch8 in your SaaS product or offer it as a managed service? Contact [hello@orch8.io](mailto:hello@orch8.io) for commercial licensing.
+To embed Orch8 in a product or offer it as a managed service, contact
+[hello@orch8.io](mailto:hello@orch8.io) about commercial licensing.

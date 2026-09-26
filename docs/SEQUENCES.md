@@ -1,5 +1,7 @@
 # Sequences: Build, Publish, Trigger, and Extend
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 Sequences are Orch8's portable workflow format. A sequence is JSON: it names the workflow, versions it, and describes the blocks Orch8 should run. You publish that JSON once, then start instances manually, from triggers, from webhooks, from cron, or from another sequence.
 
 This document is optimized for fast adoption and for LLMs that need to generate valid sequences.

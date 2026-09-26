@@ -1,5 +1,7 @@
 # Rust Codebase Review — Best-Practice Issues
 
+> **Stability: n/a**, historical record.
+
 > **Historical review record, not current reference.** Findings and line
 > numbers describe the checkout reviewed in July 2026. Some rows have later
 > status annotations, but unresolved-looking items must be reverified against

@@ -1,5 +1,7 @@
 # API entitlements and generated-client gate
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 `PlanEntitlements` is provider-neutral: plans contain only Orch8 limits,
 namespace grants, and feature names. Single and batch instance creation check
 context bytes, batch size, namespace, and tenant active-instance count before
