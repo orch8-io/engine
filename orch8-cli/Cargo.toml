@@ -41,6 +41,10 @@ rust-embed = { version = "8", features = ["include-exclude"] }
 tempfile = { workspace = true }
 # `orch8 dev --worker-watch <glob>` matching.
 globset = "0.4"
+# `orch8 backup` / `orch8 restore` archives (tar.gz). tar >= 0.4.45 carries
+# the RUSTSEC-2026-0067/0068 fixes; restore never unpacks to disk anyway.
+flate2 = "1"
+tar = "0.4.45"
 
 [target.'cfg(unix)'.dependencies]
 # `orch8 dev --worker`: signal whole worker process groups (killpg) so

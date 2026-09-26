@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod bootstrap;
 pub mod checkpoint;
 pub mod config;
@@ -28,6 +29,7 @@ pub mod signal;
 pub mod support_bundle;
 pub mod templates;
 pub mod test_cmd;
+pub mod upgrade;
 
 #[cfg(test)]
 mod request_contract_tests;

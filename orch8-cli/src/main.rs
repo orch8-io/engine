@@ -202,6 +202,15 @@ enum Commands {
         #[arg(long, env = "ORCH8_DATABASE_URL")]
         database_url: String,
     },
+    /// Export sequences, triggers, cron schedules, queue routing rules, and
+    /// credentials (and optionally instances) to a versioned, checksummed
+    /// .tar.gz, reading the storage database directly.
+    Backup(commands::backup::BackupCmd),
+    /// Restore an `orch8 backup` archive (idempotent; `--dry-run` to preview).
+    Restore(commands::backup::RestoreCmd),
+    /// Check a database against this binary's bundled migrations
+    /// (`--check`): pending, destructive, and unknown migrations.
+    Upgrade(commands::upgrade::UpgradeCmd),
     /// Generate shell completions.
     Completions {
         /// Shell to generate completions for.
@@ -624,6 +633,14 @@ async fn main() -> Result<()> {
         return commands::learn::run(cmd).await;
     }
 
+    // Database-direct commands: no API client or fleet context involved.
+    match cli.command {
+        Commands::Backup(cmd) => return commands::backup::run_backup(cmd, format).await,
+        Commands::Restore(cmd) => return commands::backup::run_restore(cmd, format).await,
+        Commands::Upgrade(cmd) => return commands::upgrade::run(cmd, format).await,
+        _ => {}
+    }
+
     // Import is an offline file conversion; `--tenant-id` / ORCH8_TENANT_ID
     // only sets the generated sequence's tenant.
     if let Commands::Import(cmd) = cli.command {
@@ -714,6 +731,9 @@ async fn main() -> Result<()> {
         Commands::Dev(..)
         | Commands::Import(..)
         | Commands::Learn(..)
+        | Commands::Backup(..)
+        | Commands::Restore(..)
+        | Commands::Upgrade(..)
         | Commands::Bootstrap(..)
         | Commands::Demo(..)
         | Commands::Migrate { .. }
