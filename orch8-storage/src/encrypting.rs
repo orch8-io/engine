@@ -1076,6 +1076,20 @@ passthrough_impl! {
         Ok(instances)
     }
 
+    async fn list_instances_keyset(
+        &self,
+        filter: &orch8_types::filter::InstanceFilter,
+        before: Option<InstanceId>,
+        limit: u32,
+    ) -> Result<Vec<TaskInstance>, StorageError> {
+        let mut instances = self
+            .inner
+            .list_instances_keyset(filter, before, limit)
+            .await?;
+        self.decrypt_instances(&mut instances)?;
+        Ok(instances)
+    }
+
     async fn list_waiting_with_trees(
         &self,
         filter: &orch8_types::filter::InstanceFilter,

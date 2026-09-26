@@ -1033,6 +1033,35 @@ pub(super) async fn list(
         .collect::<Result<Vec<_>, _>>()
 }
 
+/// Keyset page ordered by `id DESC` (`UUIDv7` ⇒ newest first).
+pub(super) async fn list_keyset(
+    store: &PostgresStorage,
+    filter: &InstanceFilter,
+    before: Option<InstanceId>,
+    limit: u32,
+) -> Result<Vec<TaskInstance>, StorageError> {
+    let mut qb = sqlx::QueryBuilder::new(
+        r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
+                  priority, timezone, metadata, context,
+                  concurrency_key, max_concurrency, idempotency_key,
+                  session_id, parent_instance_id, budget, created_at, updated_at
+           FROM task_instances WHERE 1=1",
+    );
+    apply_instance_filter(&mut qb, filter);
+    if let Some(before) = before {
+        qb.push(" AND id < ").push_bind(before.into_uuid());
+    }
+    qb.push(" ORDER BY id DESC LIMIT ")
+        .push_bind(i64::from(limit.min(1000)));
+    let rows = qb
+        .build_query_as::<InstanceRow>()
+        .fetch_all(&store.pool)
+        .await?;
+    rows.into_iter()
+        .map(InstanceRow::into_instance)
+        .collect::<Result<Vec<_>, _>>()
+}
+
 pub(super) async fn list_waiting_with_trees(
     store: &PostgresStorage,
     filter: &InstanceFilter,

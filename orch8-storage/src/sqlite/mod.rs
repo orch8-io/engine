@@ -817,6 +817,15 @@ impl crate::InstanceStore for SqliteStorage {
         instances::list(self, filter, pagination).await
     }
 
+    async fn list_instances_keyset(
+        &self,
+        filter: &InstanceFilter,
+        before: Option<InstanceId>,
+        limit: u32,
+    ) -> Result<Vec<TaskInstance>, StorageError> {
+        instances::list_keyset(self, filter, before, limit).await
+    }
+
     async fn list_waiting_with_trees(
         &self,
         filter: &InstanceFilter,

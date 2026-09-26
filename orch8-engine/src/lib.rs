@@ -22,6 +22,7 @@ pub mod externalized;
 pub mod gc;
 pub mod handlers;
 pub mod interceptors;
+pub mod jobs;
 pub mod lifecycle;
 pub mod lint;
 pub mod memory_governance;
@@ -45,6 +46,7 @@ pub mod stream_bus;
 pub mod stream_windows;
 pub mod template;
 pub mod template_trace;
+pub mod trigger_sources;
 pub mod triggers;
 pub mod webhooks;
 

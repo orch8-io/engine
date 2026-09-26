@@ -1,5 +1,6 @@
 //! Trigger processor: watches for enabled trigger definitions and spawns
-//! listeners (NATS subscriptions, file watchers) that create instances on events.
+//! listeners (NATS subscriptions, file watchers, and the message sources in
+//! [`crate::trigger_sources`]) that create instances on events.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -220,12 +221,101 @@ async fn sync_triggers(
                         "activepieces-poll"
                     );
                 }
-                _ => {
-                    warn!(
-                        slug,
-                        trigger_type = %trigger.trigger_type,
-                        "unsupported trigger type, skipping"
+                #[cfg(feature = "kafka")]
+                TriggerType::Kafka => {
+                    let storage = Arc::clone(storage);
+                    let trigger = (*trigger).clone();
+                    let cancel = child_cancel;
+                    spawn_listener!(
+                        async move {
+                            if let Err(e) =
+                                crate::trigger_sources::kafka::run(storage, trigger, cancel).await
+                            {
+                                error!(error = %e, "kafka trigger listener failed");
+                            }
+                        },
+                        "kafka"
                     );
+                }
+                #[cfg(feature = "sqs")]
+                TriggerType::Sqs => {
+                    let storage = Arc::clone(storage);
+                    let trigger = (*trigger).clone();
+                    let cancel = child_cancel;
+                    spawn_listener!(
+                        async move {
+                            if let Err(e) =
+                                crate::trigger_sources::sqs::run(storage, trigger, cancel).await
+                            {
+                                error!(error = %e, "sqs trigger listener failed");
+                            }
+                        },
+                        "sqs"
+                    );
+                }
+                #[cfg(feature = "pubsub")]
+                TriggerType::PubSub => {
+                    let storage = Arc::clone(storage);
+                    let trigger = (*trigger).clone();
+                    let cancel = child_cancel;
+                    spawn_listener!(
+                        async move {
+                            if let Err(e) =
+                                crate::trigger_sources::pubsub::run(storage, trigger, cancel).await
+                            {
+                                error!(error = %e, "pubsub trigger listener failed");
+                            }
+                        },
+                        "pubsub"
+                    );
+                }
+                #[cfg(feature = "redis-streams")]
+                TriggerType::RedisStreams => {
+                    let storage = Arc::clone(storage);
+                    let trigger = (*trigger).clone();
+                    let cancel = child_cancel;
+                    spawn_listener!(
+                        async move {
+                            if let Err(e) =
+                                crate::trigger_sources::redis_streams::run(storage, trigger, cancel)
+                                    .await
+                            {
+                                error!(error = %e, "redis streams trigger listener failed");
+                            }
+                        },
+                        "redis-streams"
+                    );
+                }
+                #[cfg(feature = "postgres-rows")]
+                TriggerType::PostgresRows => {
+                    let storage = Arc::clone(storage);
+                    let trigger = (*trigger).clone();
+                    let cancel = child_cancel;
+                    spawn_listener!(
+                        async move {
+                            if let Err(e) =
+                                crate::trigger_sources::pg_rows::run(storage, trigger, cancel).await
+                            {
+                                error!(error = %e, "postgres_rows trigger listener failed");
+                            }
+                        },
+                        "postgres-rows"
+                    );
+                }
+                _ => {
+                    if crate::trigger_sources::is_compiled_in(&trigger.trigger_type) {
+                        warn!(
+                            slug,
+                            trigger_type = %trigger.trigger_type,
+                            "unsupported trigger type, skipping"
+                        );
+                    } else {
+                        warn!(
+                            slug,
+                            trigger_type = %trigger.trigger_type,
+                            "trigger type not compiled into this build (enable its engine cargo feature), skipping"
+                        );
+                    }
                     active.listeners.remove(slug);
                 }
             }

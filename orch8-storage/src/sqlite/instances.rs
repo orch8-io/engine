@@ -978,6 +978,27 @@ pub(super) async fn list(
     rows.iter().map(row_to_instance).collect()
 }
 
+/// Keyset page ordered by `id DESC` (`UUIDv7` ⇒ newest first). Hyphenated
+/// lowercase UUID text sorts in the same order as the underlying bytes, so a
+/// plain text comparison is a correct keyset predicate.
+pub(super) async fn list_keyset(
+    storage: &SqliteStorage,
+    filter: &InstanceFilter,
+    before: Option<InstanceId>,
+    limit: u32,
+) -> Result<Vec<TaskInstance>, StorageError> {
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM task_instances WHERE 1=1");
+    apply_filter_sql(&mut qb, filter);
+    if let Some(before) = before {
+        qb.push(" AND id < ");
+        qb.push_bind(before.into_uuid().to_string());
+    }
+    qb.push(" ORDER BY id DESC LIMIT ");
+    qb.push_bind(i64::from(limit.min(1000)));
+    let rows = qb.build().fetch_all(&storage.pool).await?;
+    rows.iter().map(row_to_instance).collect()
+}
+
 pub(super) async fn list_waiting_with_trees(
     storage: &SqliteStorage,
     filter: &InstanceFilter,
