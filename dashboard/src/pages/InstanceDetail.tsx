@@ -11,7 +11,8 @@ import {
   sendSignal,
   retryInstance,
   streamInstance,
-  getInstanceTimeline,
+  getSequence,
+  getForkPreview,
   listInstanceArtifacts,
   getArtifactUrl,
   getInstanceAudit,
@@ -31,11 +32,21 @@ import {
   type SignalType,
   type WorkerTask,
   type StepLog,
-  type TimelineEntry,
   type ArtifactRef,
   type AuditEntry,
   type Checkpoint,
+  type ForkPreview,
 } from "../api";
+import { TimeScrubber } from "../components/TimeScrubber";
+import { CopyAsMenu } from "../components/CopyAsMenu";
+import {
+  forkInstanceRequest,
+  retryInstanceRequest,
+  signalRequest,
+  type ApiRequestSpec,
+  type ForkBody,
+} from "../lib/requests";
+import { topLevelBlocks } from "../lib/sequenceModel";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Section } from "../components/ui/Section";
 import { Glossary, type GlossaryItem } from "../components/ui/Glossary";
@@ -44,7 +55,7 @@ import { INSTANCE_TONE, NODE_TONE } from "../components/ui/badgeTones";
 import { Button } from "../components/ui/Button";
 import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
 import { Relative } from "../components/ui/Relative";
-import { Input } from "../components/ui/Input";
+import { FieldLabel, Input, Select } from "../components/ui/Input";
 import { StatusDot } from "../components/ui/StatusDot";
 import { SkeletonLine } from "../components/ui/Skeleton";
 import {
@@ -385,7 +396,7 @@ export default function InstanceDetail() {
   const [busySignal, setBusySignal] = useState(false);
 
   const [activeTab, setActiveTab] = useState<DetailTab>("tree");
-  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [topLevel, setTopLevel] = useState<Array<{ id: string; descendants: string[] }>>([]);
   const [artifacts, setArtifacts] = useState<ArtifactRef[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
@@ -393,8 +404,12 @@ export default function InstanceDetail() {
   const [busyCheckpointPrune, setBusyCheckpointPrune] = useState(false);
 
   const [forkOpen, setForkOpen] = useState(false);
-  const [forkDryRun, setForkDryRun] = useState(false);
+  const [forkBlock, setForkBlock] = useState("");
+  // Forks default to dry-run (sandbox) on the engine too.
+  const [forkDryRun, setForkDryRun] = useState(true);
   const [forkContextPatch, setForkContextPatch] = useState("");
+  const [forkPreview, setForkPreview] = useState<ForkPreview | null>(null);
+  const [forkPreviewError, setForkPreviewError] = useState<string | null>(null);
   const [busyFork, setBusyFork] = useState(false);
 
   const [editContextOpen, setEditContextOpen] = useState(false);
@@ -446,9 +461,7 @@ export default function InstanceDetail() {
 
   useEffect(() => {
     if (!id || !initialized) return;
-    if (activeTab === "timeline") {
-      getInstanceTimeline(id).then(setTimeline).catch(() => setTimeline([]));
-    } else if (activeTab === "artifacts") {
+    if (activeTab === "artifacts") {
       listInstanceArtifacts(id).then(setArtifacts).catch(() => setArtifacts([]));
     } else if (activeTab === "audit") {
       getInstanceAudit(id).then(setAudit).catch(() => setAudit([]));
@@ -459,6 +472,44 @@ export default function InstanceDetail() {
     if (!id || !initialized) return;
     listCheckpoints(id).then(setCheckpoints).catch(() => setCheckpoints([]));
   }, [id, initialized]);
+
+  // Top-level blocks of the definition: fork points (the engine only forks
+  // from a top-level block) and the block list the time-scrubber shows.
+  const sequenceId = instance?.sequence_id;
+  useEffect(() => {
+    if (!sequenceId) return;
+    let live = true;
+    getSequence(sequenceId)
+      .then((s) => {
+        if (live) setTopLevel(topLevelBlocks(s));
+      })
+      .catch(() => {
+        if (live) setTopLevel([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [sequenceId]);
+
+  // Fork preview: what would be copied vs re-executed (read-only).
+  useEffect(() => {
+    if (!id || !forkOpen || !forkBlock) return;
+    let live = true;
+    getForkPreview(id, forkBlock)
+      .then((p) => {
+        if (!live) return;
+        setForkPreview(p);
+        setForkPreviewError(null);
+      })
+      .catch((e) => {
+        if (!live) return;
+        setForkPreview(null);
+        setForkPreviewError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [id, forkOpen, forkBlock]);
 
   useEffect(() => {
     if (!id || !live || !instance) return;
@@ -570,28 +621,79 @@ export default function InstanceDetail() {
     }
   };
 
+  const openForkAt = (blockId: string) => {
+    setForkBlock(blockId);
+    setForkPreview(null);
+    setForkPreviewError(null);
+    setForkOpen(true);
+    requestAnimationFrame(() =>
+      document.getElementById("fork-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    );
+  };
+
+  /** The exact `POST /instances/{id}/fork` body, or an error. */
+  const buildForkBody = (): { body: ForkBody } | { error: string } => {
+    if (!forkBlock) return { error: "Choose the block to fork from" };
+    const body: ForkBody = { from_block_id: forkBlock, dry_run: forkDryRun };
+    if (forkContextPatch.trim()) {
+      let patch: unknown;
+      try {
+        patch = JSON.parse(forkContextPatch);
+      } catch {
+        return { error: "Context patch is not valid JSON" };
+      }
+      if (patch === null || typeof patch !== "object" || Array.isArray(patch)) {
+        return { error: "Context patch must be a JSON object" };
+      }
+      body.context = patch as Record<string, unknown>;
+    }
+    return { body };
+  };
+
   const doFork = async () => {
     if (!id) return;
+    const built = buildForkBody();
+    if ("error" in built) {
+      setToast(built.error);
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+    const rerun = forkPreview?.re_executed_blocks.length ?? 0;
+    const effects = forkPreview?.side_effect_blocks ?? [];
+    const lines = [
+      `Fork this execution from "${built.body.from_block_id}"?`,
+      "",
+      `A new ${built.body.dry_run ? "SANDBOX (dry-run)" : "LIVE"} execution is created; this one is not changed.`,
+      forkPreview ? `${forkPreview.copied_blocks.length} block(s) copied, ${rerun} re-executed.` : "",
+      !built.body.dry_run && effects.length > 0
+        ? `\nReal side effects will run again in: ${effects.join(", ")}`
+        : "",
+    ];
+    if (!confirm(lines.filter(Boolean).join("\n"))) return;
     setBusyFork(true);
     try {
-      let contextPatch: Record<string, unknown> | undefined;
-      if (forkContextPatch.trim()) {
-        contextPatch = JSON.parse(forkContextPatch);
-      }
-      const res = await forkInstance(id, { dry_run: forkDryRun, context_patch: contextPatch });
-      if (forkDryRun) {
-        setToast("Dry run complete — no instance created");
-      } else {
-        setForkOpen(false);
-        navigate(`/instances/${res.id}`);
-        return;
-      }
+      const res = await forkInstance(id, built.body);
+      setForkOpen(false);
+      navigate(`/instances/${res.id}`);
     } catch (e) {
       setToast(`Failed: ${e instanceof Error ? e.message : String(e)}`);
+      setTimeout(() => setToast(null), 3500);
     } finally {
       setBusyFork(false);
-      setTimeout(() => setToast(null), 2500);
     }
+  };
+
+  const controlSpecs = (): ApiRequestSpec[] => {
+    if (!id || !instance) return [];
+    const specs: ApiRequestSpec[] = [];
+    if (["scheduled", "running", "waiting"].includes(instance.state)) specs.push(signalRequest(id, "pause"));
+    if (instance.state === "paused") specs.push(signalRequest(id, "resume"));
+    if (!["completed", "cancelled", "failed"].includes(instance.state)) {
+      specs.push(signalRequest(id, "cancel"));
+      if (customSignal) specs.push(signalRequest(id, { Custom: customSignal }));
+    }
+    if (instance.state === "failed") specs.push(retryInstanceRequest(id));
+    return specs;
   };
 
   const doEditContext = async () => {
@@ -1053,11 +1155,15 @@ export default function InstanceDetail() {
                 <Button
                   size="sm"
                   disabled={busyFork || !instance}
-                  title="Fork this execution into a new instance"
+                  title="Fork this execution into a new instance from a chosen block"
                   onClick={() => {
+                    if (forkOpen) {
+                      setForkOpen(false);
+                      return;
+                    }
                     setForkContextPatch("");
-                    setForkDryRun(false);
-                    setForkOpen(!forkOpen);
+                    setForkDryRun(true);
+                    openForkAt(forkBlock || topLevel[0]?.id || "");
                   }}
                 >
                   Fork
@@ -1105,6 +1211,13 @@ export default function InstanceDetail() {
                   >
                     <IconSend size={13} /> Send
                   </Button>
+                  <CopyAsMenu
+                    spec={() => {
+                      const s = controlSpecs();
+                      return s.length > 0 ? s : null;
+                    }}
+                    disabledReason={!instance || controlSpecs().length === 0 ? "No actions available in this state" : undefined}
+                  />
                 </div>
               </div>
               <p className="annotation mt-3">
@@ -1116,32 +1229,86 @@ export default function InstanceDetail() {
           </Section>
 
           {forkOpen && (
-            <Section eyebrow="Fork" title="Fork this execution">
+            <Section
+              id="fork-panel"
+              eyebrow="Fork"
+              title="Fork this execution"
+              description="Creates a new execution of the same sequence that copies the outputs of every completed top-level block before the fork point and re-executes from it. This execution is never modified."
+            >
               <div className="space-y-4">
-                <label className="flex items-center gap-2 text-[13px]">
-                  <input
-                    type="checkbox"
-                    checked={forkDryRun}
-                    onChange={(e) => setForkDryRun(e.target.checked)}
-                    className="accent-signal"
-                  />
-                  Dry run
-                </label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <FieldLabel htmlFor="fork-block">Fork from (top-level block)</FieldLabel>
+                    <Select
+                      id="fork-block"
+                      value={forkBlock}
+                      onChange={(e) => setForkBlock(e.target.value)}
+                      className="w-full font-mono"
+                    >
+                      <option value="">Select a block</option>
+                      {topLevel.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.id}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                  <label className="flex items-center gap-2 text-[13px] self-end min-h-8">
+                    <input
+                      type="checkbox"
+                      checked={forkDryRun}
+                      onChange={(e) => setForkDryRun(e.target.checked)}
+                      className="accent-signal"
+                    />
+                    Sandbox (dry run) — handlers do not fire real side effects
+                  </label>
+                </div>
+                {forkPreviewError && <div className="notice notice-warn">{forkPreviewError}</div>}
+                {forkPreview && (
+                  <div className="text-[12px] space-y-1" aria-live="polite">
+                    <div>
+                      <span className="text-faint">COPIED</span>{" "}
+                      <span className="font-mono text-ink-dim">{forkPreview.copied_blocks.join(", ") || "—"}</span>
+                    </div>
+                    <div>
+                      <span className="text-faint">RE-EXECUTED</span>{" "}
+                      <span className="font-mono text-ink-dim">{forkPreview.re_executed_blocks.join(", ") || "—"}</span>
+                    </div>
+                    {forkPreview.side_effect_blocks.length > 0 && (
+                      <div className={forkDryRun ? "text-muted" : "text-warn"}>
+                        <span className="text-faint">SIDE EFFECTS</span>{" "}
+                        <span className="font-mono">{forkPreview.side_effect_blocks.join(", ")}</span>
+                        {forkDryRun ? " (suppressed in sandbox)" : " — will run for real"}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div>
-                  <div className="field-label mb-1">Context patch (optional JSON)</div>
+                  <div className="field-label mb-1">Context patch (optional JSON, merged into context.data)</div>
                   <textarea
                     value={forkContextPatch}
                     onChange={(e) => setForkContextPatch(e.target.value)}
-                    rows={6}
+                    rows={4}
                     spellCheck={false}
                     placeholder='{"key": "value"}'
                     className="w-full bg-sunken border border-rule px-2.5 py-2 text-[12px] font-mono text-ink placeholder:text-faint focus:border-signal focus:outline-none"
                   />
                 </div>
                 <div className="flex justify-end gap-2">
+                  <CopyAsMenu
+                    spec={() => {
+                      const built = buildForkBody();
+                      return "body" in built && id ? forkInstanceRequest(id, built.body) : null;
+                    }}
+                  />
                   <Button size="sm" variant="ghost" onClick={() => setForkOpen(false)}>Cancel</Button>
-                  <Button size="sm" variant="primary" disabled={busyFork} onClick={doFork}>
-                    {busyFork ? "Forking…" : forkDryRun ? "Dry run" : "Fork"}
+                  <Button
+                    size="sm"
+                    variant={forkDryRun ? "primary" : "danger"}
+                    disabled={busyFork || !forkBlock}
+                    onClick={doFork}
+                  >
+                    {busyFork ? "Forking…" : forkDryRun ? "Create sandbox fork…" : "Create live fork…"}
                   </Button>
                 </div>
               </div>
@@ -1291,46 +1458,16 @@ export default function InstanceDetail() {
               )}
 
               {activeTab === "timeline" && (
-                <Table>
-                  <THead>
-                    <TH>Block ID</TH>
-                    <TH>Type</TH>
-                    <TH>State</TH>
-                    <TH>Started</TH>
-                    <TH>Completed</TH>
-                    <TH className="text-right">Duration</TH>
-                  </THead>
-                  <tbody>
-                    {timeline.length === 0 ? (
-                      <Empty colSpan={6}>No timeline entries</Empty>
-                    ) : (
-                      timeline.map((t, i) => (
-                        <TR key={`${t.block_id}-${i}`}>
-                          <TD className="font-mono text-[12px]">{t.block_id}</TD>
-                          <TD>
-                            <span className="inline-block border border-rule text-muted text-[10px] font-mono uppercase tracking-[0.1em] px-1.5 py-[1px]">
-                              {t.block_type}
-                            </span>
-                          </TD>
-                          <TD>
-                            <Badge tone={NODE_TONE[t.state as NodeState] ?? "dim"} dot>
-                              {t.state}
-                            </Badge>
-                          </TD>
-                          <TD className="text-[12px] tabular">
-                            {t.started_at ? new Date(t.started_at).toLocaleString() : "—"}
-                          </TD>
-                          <TD className="text-[12px] tabular">
-                            {t.completed_at ? new Date(t.completed_at).toLocaleString() : "—"}
-                          </TD>
-                          <TD className="text-right font-mono text-[12px] tabular">
-                            {t.duration_ms !== null ? `${t.duration_ms}ms` : "—"}
-                          </TD>
-                        </TR>
-                      ))
-                    )}
-                  </tbody>
-                </Table>
+                <TimeScrubber
+                  instanceId={id}
+                  topLevel={topLevel}
+                  checkpoints={checkpoints}
+                  onForkFrom={(blockId) => {
+                    setForkContextPatch("");
+                    setForkDryRun(true);
+                    openForkAt(blockId);
+                  }}
+                />
               )}
 
               {activeTab === "artifacts" && (
