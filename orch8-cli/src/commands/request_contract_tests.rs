@@ -452,7 +452,7 @@ async fn inspect_rejects_invalid_sequence_and_fixture_json_before_network_io() {
     )
     .await
     .unwrap_err();
-    assert!(sequence_error.to_string().contains("invalid JSON in"));
+    assert!(sequence_error.to_string().contains("invalid JSON"));
 
     let mut sequence = NamedTempFile::new().unwrap();
     write!(sequence, r#"{{"name":"draft","blocks":[]}}"#).unwrap();

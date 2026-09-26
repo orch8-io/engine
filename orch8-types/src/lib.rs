@@ -39,6 +39,7 @@ pub mod redaction;
 pub mod release;
 pub mod rollback;
 pub mod sequence;
+pub mod sequence_document;
 pub mod session;
 pub mod signal;
 pub mod step_log;

@@ -6,6 +6,7 @@ use reqwest::{Client, header};
 use serde_json::Value;
 
 mod commands;
+mod seqdoc;
 mod templates;
 
 use commands::bootstrap::BootstrapCmd;
@@ -158,9 +159,13 @@ enum Commands {
         /// Directory to initialize in (defaults to current directory).
         #[arg(default_value = ".")]
         dir: String,
-        /// Built-in template to write as sequence.json (see `orch8 templates list`).
+        /// Built-in template to write as the example sequence (see `orch8 templates list`).
         #[arg(long, default_value = "default")]
         template: String,
+        /// Syntax of the example sequence: `json` (sequence.json) or `yaml`
+        /// (sequence.yaml). Both use the same schema.
+        #[arg(long, value_enum, default_value = "json")]
+        format: seqdoc::FormatArg,
     },
     /// Generate, strictly validate, and repair a sequence with an LLM.
     Generate(GenerateCmd),
@@ -647,7 +652,11 @@ async fn main() -> Result<()> {
                 "internal error: context command should have been handled before dispatch"
             )
         }
-        Commands::Init { dir, template } => commands::init::run(&dir, &template)?,
+        Commands::Init {
+            dir,
+            template,
+            format,
+        } => commands::init::run_with_format(&dir, &template, format.into())?,
         Commands::Generate(cmd) => commands::generate::run(cmd).await?,
         Commands::Templates(cmd) => commands::templates::run(cmd).await?,
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,
@@ -939,7 +948,7 @@ mod tests {
         use clap::Parser;
         let cli = Cli::try_parse_from(["orch8", "init", "my-project"]).unwrap();
         match cli.command {
-            Commands::Init { dir, template } => {
+            Commands::Init { dir, template, .. } => {
                 assert_eq!(dir, "my-project");
                 assert_eq!(template, "default");
             }
@@ -952,7 +961,7 @@ mod tests {
         use clap::Parser;
         let cli = Cli::try_parse_from(["orch8", "init", ".", "--template", "react-loop"]).unwrap();
         match cli.command {
-            Commands::Init { dir, template } => {
+            Commands::Init { dir, template, .. } => {
                 assert_eq!(dir, ".");
                 assert_eq!(template, "react-loop");
             }
@@ -974,6 +983,7 @@ mod tests {
             Commands::Templates(TemplatesCmd::Show {
                 name,
                 catalog_url: None,
+                ..
             }) => assert_eq!(name, "react-loop"),
             _ => panic!("expected templates show command"),
         }

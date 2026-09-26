@@ -37,7 +37,7 @@ pub(crate) async fn compile_draft(
     State(_state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(options): Query<crate::sequences::DraftDecodeOptions>,
-    Json(value): Json<serde_json::Value>,
+    crate::sequences::SequenceDocument(value): crate::sequences::SequenceDocument,
 ) -> Result<impl IntoResponse, ApiError> {
     let (sequence, decode_warnings) =
         crate::sequences::decode_draft_sequence(&value, options.strict)?;

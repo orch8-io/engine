@@ -19,10 +19,13 @@ pub enum TemplatesCmd {
         #[arg(long)]
         catalog_url: Option<String>,
     },
-    /// Print a built-in or cloud template as JSON.
+    /// Print a built-in or cloud template as JSON (or YAML with `--format yaml`).
     Show {
         /// Template name.
         name: String,
+        /// Output syntax.
+        #[arg(long, value_enum, default_value = "json")]
+        format: crate::seqdoc::FormatArg,
         /// Catalog endpoint (or set `ORCH8_TEMPLATE_CATALOG_URL`).
         #[arg(long)]
         catalog_url: Option<String>,
@@ -31,7 +34,7 @@ pub enum TemplatesCmd {
     Pull {
         /// Template name.
         name: String,
-        /// Destination path.
+        /// Destination path; a `.yaml` / `.yml` extension writes YAML.
         #[arg(long, default_value = "sequence.json")]
         out: PathBuf,
         /// Catalog endpoint (or set `ORCH8_TEMPLATE_CATALOG_URL`).
@@ -121,9 +124,26 @@ async fn template_json(
     if let Some(download_url) = item.download_url {
         let response = client.get(&download_url).send().await?.error_for_status()?;
         return String::from_utf8(bounded_body(response).await?)
-            .context("downloaded template is not UTF-8 JSON");
+            .context("downloaded template is not UTF-8 JSON or YAML");
     }
     bail!("catalog entry '{name}' has neither sequence nor download_url")
+}
+
+/// Re-render template text (JSON, or YAML from a catalog `download_url`) in
+/// the requested syntax. JSON output of JSON text is passed through verbatim.
+fn convert_template(text: &str, format: crate::seqdoc::DocumentFormat) -> Result<String> {
+    use crate::seqdoc::DocumentFormat;
+    let value: Value = match serde_json::from_str(text) {
+        Ok(value) => {
+            if format == DocumentFormat::Json {
+                return Ok(text.to_string());
+            }
+            value
+        }
+        Err(_) => crate::seqdoc::parse_text(std::path::Path::new("template.yaml"), text)
+            .context("template is neither JSON nor YAML")?,
+    };
+    crate::seqdoc::render(&value, format)
 }
 
 pub async fn run(cmd: TemplatesCmd) -> Result<()> {
@@ -152,20 +172,43 @@ pub async fn run(cmd: TemplatesCmd) -> Result<()> {
             }
             print_table(&["name", "source", "description"], &rows);
         }
-        TemplatesCmd::Show { name, catalog_url } => {
-            print!("{}", template_json(&client, &name, catalog_url).await?);
+        TemplatesCmd::Show {
+            name,
+            format,
+            catalog_url,
+        } => {
+            let text = template_json(&client, &name, catalog_url).await?;
+            print!("{}", convert_template(&text, format.into())?);
         }
         TemplatesCmd::Pull {
             name,
             out,
             catalog_url,
         } => {
-            atomic_write(
-                &out,
-                template_json(&client, &name, catalog_url).await?.as_bytes(),
-            )?;
+            let text = template_json(&client, &name, catalog_url).await?;
+            let rendered = convert_template(&text, crate::seqdoc::DocumentFormat::from_path(&out))?;
+            atomic_write(&out, rendered.as_bytes())?;
             println!("downloaded {name} → {}", out.display());
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::seqdoc::DocumentFormat;
+
+    #[test]
+    fn templates_convert_between_json_and_yaml() {
+        let json = templates::find("default").unwrap().json;
+        assert_eq!(convert_template(json, DocumentFormat::Json).unwrap(), json);
+        let yaml = convert_template(json, DocumentFormat::Yaml).unwrap();
+        let original: Value = serde_json::from_str(json).unwrap();
+        let back = crate::seqdoc::parse_text(std::path::Path::new("t.yaml"), &yaml).unwrap();
+        assert_eq!(back, original);
+        // YAML catalog payloads convert back to JSON.
+        let as_json = convert_template(&yaml, DocumentFormat::Json).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&as_json).unwrap(), original);
+    }
 }

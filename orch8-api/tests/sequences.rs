@@ -53,6 +53,72 @@ async fn create_sequence_and_get_by_id_round_trip() {
 }
 
 #[tokio::test]
+async fn create_sequence_accepts_yaml_content_type() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = Uuid::now_v7();
+    let yaml = format!(
+        "id: {seq_id}\ntenant_id: t1\nnamespace: ns1\nname: yaml-seq\nversion: 1\n\
+         created_at: '{}'\nblocks:\n  - type: step\n    id: s1\n    handler: noop\n    \
+         params:\n      message: 'hello: yaml'\n",
+        chrono::Utc::now().to_rfc3339()
+    );
+    let resp = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .header("Content-Type", "application/yaml")
+        .body(yaml)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let fetched: serde_json::Value = client
+        .get(format!("{}/sequences/{seq_id}", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(fetched["name"], "yaml-seq");
+    assert_eq!(fetched["blocks"][0]["params"]["message"], "hello: yaml");
+
+    // A YAML syntax error is a 400 that points at the line and column.
+    let resp = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .header("Content-Type", "text/yaml; charset=utf-8")
+        .body("name: x\nblocks:\n  - id: [broken\n")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("invalid YAML at line"), "{message}");
+    assert!(message.contains("column"), "{message}");
+
+    // The same YAML is accepted by the draft preflight endpoint.
+    let resp = client
+        .post(format!("{}/sequences/preflight", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .header("Content-Type", "application/x-yaml")
+        .body(format!(
+            "id: {}\ntenant_id: t1\nnamespace: ns1\nname: yaml-pre\nversion: 1\n\
+             created_at: '2026-01-01T00:00:00Z'\nblocks:\n  - {{type: step, id: a, handler: noop}}\n",
+            Uuid::now_v7()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let report: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(report["sequence_name"], "yaml-pre");
+}
+
+#[tokio::test]
 async fn sequence_decode_is_lenient_by_default_and_strict_on_request() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

@@ -21,6 +21,43 @@ pub(crate) struct DraftDecodeOptions {
     pub(crate) strict: bool,
 }
 
+/// A sequence document body: JSON (default) or YAML when the request sends
+/// `Content-Type: application/yaml` (also `application/x-yaml`, `text/yaml`).
+/// Both syntaxes parse into the same JSON value and then run the identical
+/// decode/validation path; YAML syntax errors report line and column.
+pub(crate) struct SequenceDocument(pub(crate) serde_json::Value);
+
+impl<S> axum::extract::FromRequest<S> for SequenceDocument
+where
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        use orch8_types::sequence_document::{DocumentFormat, parse_document};
+        let format = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(DocumentFormat::from_content_type);
+        if format == Some(DocumentFormat::Yaml) {
+            let bytes = axum::body::Bytes::from_request(req, state)
+                .await
+                .map_err(IntoResponse::into_response)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                ApiError::InvalidArgument("YAML body is not valid UTF-8".into()).into_response()
+            })?;
+            let value = parse_document(text, DocumentFormat::Yaml)
+                .map_err(|e| ApiError::InvalidArgument(e.to_string()).into_response())?;
+            return Ok(Self(value));
+        }
+        let Json(value) = Json::<serde_json::Value>::from_request(req, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        Ok(Self(value))
+    }
+}
+
 pub(crate) fn decode_draft_sequence(
     value: &serde_json::Value,
     strict: bool,
@@ -50,7 +87,10 @@ pub fn routes() -> Router<AppState> {
 }
 
 #[utoipa::path(post, path = "/sequences", tag = "sequences",
-    request_body = SequenceDefinition,
+    request_body(content(
+        (SequenceDefinition = "application/json"),
+        (SequenceDefinition = "application/yaml"),
+    ), description = "Sequence definition as JSON, or as YAML with `Content-Type: application/yaml`"),
     responses(
         (status = 201, description = "Sequence created", body = serde_json::Value),
         (status = 409, description = "Sequence already exists"),
@@ -60,7 +100,7 @@ pub(crate) async fn create_sequence(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(options): Query<DraftDecodeOptions>,
-    Json(value): Json<serde_json::Value>,
+    SequenceDocument(value): SequenceDocument,
 ) -> Result<impl IntoResponse, ApiError> {
     let (mut seq, decode_warnings) = decode_draft_sequence(&value, options.strict)?;
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &seq.tenant_id)?;

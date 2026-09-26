@@ -38,7 +38,10 @@ pub fn routes() -> Router<AppState> {
 }
 
 #[utoipa::path(post, path = "/sequences/preflight", tag = "sequences",
-    request_body = SequenceDefinition,
+    request_body(content(
+        (SequenceDefinition = "application/json"),
+        (SequenceDefinition = "application/yaml"),
+    ), description = "Draft definition as JSON, or as YAML with `Content-Type: application/yaml`"),
     responses(
         (status = 200, description = "Preflight report for the draft definition", body = PreflightReport),
         (status = 400, description = "Body is not a sequence definition"),
@@ -48,7 +51,7 @@ pub(crate) async fn preflight_draft(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(options): Query<crate::sequences::DraftDecodeOptions>,
-    Json(value): Json<serde_json::Value>,
+    crate::sequences::SequenceDocument(value): crate::sequences::SequenceDocument,
 ) -> Result<impl IntoResponse, ApiError> {
     let (seq, decode_warnings) = crate::sequences::decode_draft_sequence(&value, options.strict)?;
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &seq.tenant_id)?;

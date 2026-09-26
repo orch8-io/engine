@@ -237,7 +237,7 @@ async fn tool_create_sequence(
             State(state),
             tenant_ctx,
             Query(crate::sequences::DraftDecodeOptions { strict: true }),
-            Json(sequence),
+            crate::sequences::SequenceDocument(sequence),
         )
         .await,
     )
@@ -259,7 +259,7 @@ async fn tool_preflight_sequence(
             State(state),
             tenant_ctx,
             Query(crate::sequences::DraftDecodeOptions { strict: true }),
-            Json(sequence),
+            crate::sequences::SequenceDocument(sequence),
         )
         .await,
     )
