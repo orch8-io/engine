@@ -34,6 +34,8 @@ const SIDE_EFFECT_BUILTINS: &[&str] = &[
     "memory_delete",
     "blob_put",
     "embed",
+    "email",
+    "notify",
 ];
 
 pub(crate) fn handler_has_side_effects(handler: &str) -> bool {

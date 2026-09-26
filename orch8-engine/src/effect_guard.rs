@@ -420,7 +420,7 @@ fn effect_kind(handler: &str) -> EffectKind {
     match handler {
         "http_request" => EffectKind::Http,
         "llm_call" | "agent" | "embed" => EffectKind::Model,
-        "emit_event" | "send_signal" => EffectKind::Message,
+        "emit_event" | "send_signal" | "email" | "notify" => EffectKind::Message,
         "memory_store" | "memory_delete" | "blob_put" => EffectKind::Storage,
         _ if !orch8_types::sequence::BUILTIN_HANDLER_NAMES.contains(&handler) => EffectKind::Worker,
         _ => EffectKind::Custom,

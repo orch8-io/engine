@@ -32,6 +32,7 @@ moka.workspace = true
 dashmap.workspace = true
 reqwest.workspace = true
 url.workspace = true
+lettre.workspace = true
 jsonschema.workspace = true
 bytes.workspace = true
 tokio-stream.workspace = true

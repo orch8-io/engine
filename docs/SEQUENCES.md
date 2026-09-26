@@ -484,6 +484,79 @@ Rules:
 - `send_window.days` uses `0=Monday` through `6=Sunday`.
 - `fire_at_local` can target a local wall-clock timestamp, e.g. `2026-03-08T02:30:00`.
 
+## Send Email and Chat Notifications
+
+Two side-effecting built-ins cover the most common outbound messages. Both
+run through the effect ledger (a crash after the provider may have accepted a
+message leaves an *unknown* receipt that blocks an automatic resend instead of
+double-sending), SSRF-check every destination, and never log or echo secrets.
+Keep secrets in the credential store and reference them with
+`credentials://<id>[/<field>]` — they are resolved per tenant at dispatch.
+
+### `email`
+
+```json
+{
+  "type": "step",
+  "id": "send_receipt",
+  "handler": "email",
+  "params": {
+    "provider": "resend",
+    "api_key": "credentials://resend/api_key",
+    "from": "Acme <billing@acme.com>",
+    "to": "{{context.data.email}}",
+    "bcc": ["audit@acme.com"],
+    "reply_to": "support@acme.com",
+    "subject": "Your receipt",
+    "text": "Thanks for your order.",
+    "html": "<p>Thanks for your order.</p>",
+    "attachments": [{ "artifact": "{{outputs.render_pdf.artifact}}", "filename": "receipt.pdf" }],
+    "idempotency_key": "receipt-{{context.data.order_id}}"
+  }
+}
+```
+
+| Param | Notes |
+|---|---|
+| `provider` | `smtp`, `resend`, or `ses` (AWS SES v2 HTTP API, SigV4-signed). |
+| `from`, `subject` | Required. Addresses and subject are validated; CR/LF header injection is rejected. |
+| `to` / `cc` / `bcc` / `reply_to` | String or array; at least one recipient, at most 50 in total. |
+| `text` / `html` | At least one. Both produce `multipart/alternative`. |
+| `attachments` | `[{artifact, filename?, content_type?}]` — `artifact` is a `blob_put` ref owned by *this* instance; 20 files / 20 MiB max. |
+| `smtp` | `{host, port?, username?, password?, tls?}`. `tls`: `starttls` (default, 587), `implicit` (465) or `none` (credentials refused). The host is resolved once, private/internal addresses are blocked, and the connection is pinned to the vetted IP while TLS still verifies the hostname. |
+| `api_key` | Resend API key. |
+| `aws` | SES: `{access_key_id, secret_access_key, session_token?, region}`. |
+| `idempotency_key` | Forwarded to Resend's `Idempotency-Key`. |
+
+Output: `{provider, message_id, provider_receipt_id, recipients}` (recipient count only).
+
+### `notify`
+
+One simple input renders a provider-shaped payload for Slack (Block Kit),
+Discord (embed, mentions disabled), or Microsoft Teams (Adaptive Card):
+
+```json
+{
+  "type": "step",
+  "id": "tell_ops",
+  "handler": "notify",
+  "params": {
+    "provider": "slack",
+    "url": "credentials://ops-slack/url",
+    "title": "Deploy finished",
+    "text": "*{{context.data.service}}* is live",
+    "fields": { "env": "prod", "version": "{{context.data.version}}" },
+    "link": { "url": "https://ci.example.com/runs/{{context.data.run_id}}", "label": "View run" }
+  }
+}
+```
+
+`url` is the incoming-webhook URL (a bearer secret — store it as a
+credential). `fields` may be an object or `[{name, value}]`; `link` may be a
+URL string or `{url, label}` (http(s) only); `color` (`#rrggbb`) tints Discord
+embeds. Non-2xx responses map to retryable (408/429/5xx) or permanent (other
+4xx) step errors.
+
 ## Human Review
 
 Use `human_review` plus `wait_for_input`.

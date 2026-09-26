@@ -315,6 +315,8 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     );
     registry.register("blob_get", super::blob::handle_blob_get);
     registry.register("jev", super::jev::handle_jev);
+    registry.register("email", super::email::handle_email);
+    registry.register("notify", super::notify::handle_notify);
 }
 
 /// No-op handler. Always succeeds with an empty result.

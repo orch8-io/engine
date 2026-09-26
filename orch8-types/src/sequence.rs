@@ -1383,6 +1383,8 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "blob_get",
     "wait_for_event",
     "jev",
+    "email",
+    "notify",
 ];
 
 impl SequenceDefinition {
