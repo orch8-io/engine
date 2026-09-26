@@ -22,6 +22,7 @@ pub mod error;
 pub mod error_catalog;
 pub mod event_correlation;
 pub mod execution;
+pub mod explain;
 pub mod failure;
 pub mod filter;
 pub mod finding;

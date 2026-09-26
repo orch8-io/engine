@@ -437,6 +437,7 @@ impl Modify for ContinuityOpenApi {
         crate::diagnosis::get_diagnosis,
         crate::diagnosis::preview_remediations,
         crate::diagnosis::apply_remediation,
+        crate::diagnosis::get_explanation,
         crate::changes::list_changes,
         crate::changes::stream_changes,
         // Template inspector
@@ -583,6 +584,9 @@ impl Modify for ContinuityOpenApi {
         orch8_types::diagnosis::RemediationPreview,
         crate::diagnosis::ApplyRemediationRequest,
         crate::diagnosis::RemediationApplyEvidence,
+        orch8_types::explain::InstanceExplanation,
+        orch8_types::explain::ExplanationMode,
+        orch8_types::explain::LlmNarrative,
         orch8_types::audit::ChangeCursor,
         crate::changes::ChangePage,
         orch8_types::api_key::ApiCapability,

@@ -10,6 +10,7 @@ pub mod deploy;
 pub mod dev;
 pub mod dev_server;
 pub mod doctor;
+pub mod explain;
 pub mod generate;
 pub mod health;
 pub mod init;

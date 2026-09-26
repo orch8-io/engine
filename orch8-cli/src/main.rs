@@ -20,6 +20,7 @@ use commands::demo::DemoCmd;
 use commands::deploy::DeployCmd;
 use commands::dev::DevCmd;
 use commands::doctor::DoctorCmd;
+use commands::explain::ExplainCmd;
 use commands::generate::GenerateCmd;
 use commands::inspect_cmd::InspectCmd;
 use commands::instance::InstanceCmd;
@@ -100,6 +101,10 @@ enum Commands {
     Doctor(DoctorCmd),
     /// Export a strictly redacted operational support bundle.
     SupportBundle(SupportBundleCmd),
+    /// Explain in plain language why an instance is stuck or failed: likely
+    /// cause, evidence, and suggested fix commands (`--llm` adds a redacted
+    /// LLM narrative from the server's configured provider).
+    Explain(ExplainCmd),
     /// Instance management.
     #[command(subcommand)]
     Instance(InstanceCmd),
@@ -644,6 +649,7 @@ async fn main() -> Result<()> {
         Commands::Health => commands::health::run(&client, base, format).await?,
         Commands::Doctor(cmd) => commands::doctor::run(&client, base, cmd, format).await?,
         Commands::SupportBundle(cmd) => commands::support_bundle::run(&client, base, cmd).await?,
+        Commands::Explain(cmd) => commands::explain::run(&client, base, cmd, format).await?,
         Commands::Instance(cmd) => {
             commands::instance::run(&client, base, cmd, format, cli.tenant_id.as_deref()).await?;
         }

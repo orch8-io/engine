@@ -6,7 +6,7 @@
 //! `orch8_engine::doctor`. Strictly read-only: recovery actions are only
 //! *described* in the response.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -18,6 +18,7 @@ use uuid::Uuid;
 use orch8_engine::doctor::{InstanceDiagnosticContext, diagnose, remediation_previews};
 use orch8_types::diagnosis::{InstanceDiagnosisReport, RemediationAction, RemediationPreview};
 use orch8_types::execution::NodeState;
+use orch8_types::explain::InstanceExplanation;
 use orch8_types::filter::Pagination;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::{InstanceState, TaskInstance};
@@ -37,6 +38,25 @@ pub fn routes() -> Router<AppState> {
             "/instances/{id}/remediations/apply",
             post(apply_remediation),
         )
+        .route("/instances/{id}/explain", get(get_explanation))
+}
+
+/// Server-side configuration for `?llm=true` explanations.
+///
+/// - `ORCH8_EXPLAIN_LLM_PROVIDER` — any `llm_call` provider (default `openai`).
+/// - `ORCH8_EXPLAIN_LLM_MODEL` — optional model override.
+/// - `ORCH8_EXPLAIN_LLM_API_KEY` — optional key, or a `credentials://<id>`
+///   reference resolved against the instance's tenant. When unset, the
+///   provider's default env var is used exactly like `llm_call`.
+const EXPLAIN_PROVIDER_ENV: &str = "ORCH8_EXPLAIN_LLM_PROVIDER";
+const EXPLAIN_MODEL_ENV: &str = "ORCH8_EXPLAIN_LLM_MODEL";
+const EXPLAIN_KEY_ENV: &str = "ORCH8_EXPLAIN_LLM_API_KEY";
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ExplainQuery {
+    /// Attach an LLM narrative (redacted evidence only). Defaults to false.
+    #[serde(default)]
+    llm: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -149,6 +169,14 @@ async fn diagnose_instance(
     tenant_ctx: &crate::auth::OptionalTenant,
     id: Uuid,
 ) -> Result<InstanceDiagnosisReport, ApiError> {
+    Ok(diagnose_with_context(state, tenant_ctx, id).await?.1)
+}
+
+async fn diagnose_with_context(
+    state: &AppState,
+    tenant_ctx: &crate::auth::OptionalTenant,
+    id: Uuid,
+) -> Result<(InstanceDiagnosticContext, InstanceDiagnosisReport), ApiError> {
     let instance = state
         .storage
         .get_instance(InstanceId::from_uuid(id))
@@ -157,7 +185,100 @@ async fn diagnose_instance(
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
     crate::auth::enforce_tenant_access(tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
     let ctx = collect_context(state, instance).await;
-    Ok(diagnose(&ctx, Utc::now()))
+    let report = diagnose(&ctx, Utc::now());
+    Ok((ctx, report))
+}
+
+#[utoipa::path(get, path = "/instances/{id}/explain", tag = "instances",
+    params(
+        ("id" = Uuid, Path, description = "Instance id"),
+        ("llm" = Option<bool>, Query, description = "Attach an LLM-written narrative. Evidence is redacted with the platform RedactionPolicy before it is sent; the structured fields stay template-based. Provider/model/key come from ORCH8_EXPLAIN_LLM_PROVIDER / _MODEL / _API_KEY."),
+    ),
+    responses(
+        (status = 200, description = "Plain-language explanation with likely cause, evidence, and suggested fix", body = InstanceExplanation),
+        (status = 404, description = "Instance not found"),
+    )
+)]
+pub(crate) async fn get_explanation(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+    Query(query): Query<ExplainQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (ctx, report) = diagnose_with_context(&state, &tenant_ctx, id).await?;
+    let failure = if ctx.instance.state == InstanceState::Failed {
+        let sequence = state
+            .storage
+            .get_sequence(ctx.instance.sequence_id)
+            .await
+            .ok()
+            .flatten();
+        let worker_failure = ctx.worker_tasks.as_ref().and_then(|tasks| {
+            tasks
+                .iter()
+                .find(|t| t.state == orch8_types::worker::WorkerTaskState::Failed)
+        });
+        Some(
+            crate::dlq_groups::derive_envelope(
+                &state,
+                &ctx.instance,
+                sequence.as_ref(),
+                worker_failure,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let mut explanation =
+        orch8_engine::explain::explain_instance(&report, failure.as_ref(), Utc::now());
+    if query.llm {
+        match explain_llm_config(&state, &ctx.instance.tenant_id).await {
+            Ok(config) => {
+                if let Err(error) =
+                    orch8_engine::explain::narrate_with_llm(&mut explanation, &config).await
+                {
+                    explanation.llm_error = Some(error.to_string());
+                }
+            }
+            Err(message) => explanation.llm_error = Some(message),
+        }
+    }
+    Ok(Json(explanation))
+}
+
+async fn explain_llm_config(
+    state: &AppState,
+    tenant: &orch8_types::ids::TenantId,
+) -> Result<orch8_engine::explain::LlmExplainConfig, String> {
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let provider = env(EXPLAIN_PROVIDER_ENV).unwrap_or_else(|| "openai".to_string());
+    let api_key = match env(EXPLAIN_KEY_ENV) {
+        Some(reference) if reference.starts_with("credentials://") => {
+            let mut value = serde_json::Value::String(reference);
+            orch8_engine::credentials::resolve_in_value(
+                state.storage.as_ref(),
+                tenant.as_str(),
+                &mut value,
+            )
+            .await
+            .map_err(|e| format!("{EXPLAIN_KEY_ENV}: {e}"))?;
+            Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| {
+                        format!("{EXPLAIN_KEY_ENV}: credential did not resolve to a string")
+                    })?
+                    .to_string(),
+            )
+        }
+        other => other,
+    };
+    Ok(orch8_engine::explain::LlmExplainConfig {
+        provider,
+        model: env(EXPLAIN_MODEL_ENV),
+        api_key,
+    })
 }
 
 async fn resume_paused(state: &AppState, instance_id: InstanceId) -> Result<(), ApiError> {
