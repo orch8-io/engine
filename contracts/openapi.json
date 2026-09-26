@@ -19,6 +19,277 @@
     }
   ],
   "paths": {
+    "/alerts/rules": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "list_rules",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Alert rules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AlertRule"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "create_rule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertRuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Rule created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertRule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid rule (e.g. literal secret instead of credentials:// reference)"
+          }
+        }
+      }
+    },
+    "/alerts/rules/{id}": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "get_rule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rule with evaluator state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertRuleView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "update_rule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertRuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Rule replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertRule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid rule"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "delete_rule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/approvals/act/{token}": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "operationId": "confirm_page",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Approval magic-link token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Confirmation page (no state change)",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "410": {
+            "description": "Unknown, used, or expired link",
+            "content": {
+              "text/html": {}
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "operationId": "act",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Approval magic-link token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional `comment` (form field or JSON `{\"comment\"}`)",
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Decision recorded"
+          },
+          "409": {
+            "description": "Workflow already finished"
+          },
+          "410": {
+            "description": "Unknown, used, or expired link"
+          }
+        }
+      }
+    },
+    "/approvals/slack/interactions": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "operationId": "slack_interaction",
+        "requestBody": {
+          "description": "Slack interactivity payload",
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Interaction processed (Slack requires 200)"
+          },
+          "401": {
+            "description": "Bad Slack signature, stale timestamp, or unknown token"
+          }
+        }
+      }
+    },
     "/artifacts/{key}": {
       "get": {
         "tags": [
@@ -51,6 +322,205 @@
           },
           "404": {
             "description": "Artifact not found"
+          }
+        }
+      }
+    },
+    "/budgets": {
+      "get": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "list_budgets",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Budgets with current-period spend and state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BudgetStatus"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "create_budget",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantBudget"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid budget"
+          },
+          "403": {
+            "description": "Requires the root/admin API key"
+          }
+        }
+      }
+    },
+    "/budgets/alerts": {
+      "get": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "list_alerts",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max alerts (default 100, max 1000)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`budget.threshold_crossed` records, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BudgetAlert"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/budgets/{id}": {
+      "put": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "update_budget",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Budget id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantBudget"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Requires the root/admin API key"
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "delete_budget",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Budget id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
           }
         }
       }
@@ -3298,6 +3768,127 @@
         }
       }
     },
+    "/instances/{id}/share": {
+      "post": {
+        "tags": [
+          "instances"
+        ],
+        "operationId": "create_share",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateShareRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Share created; token returned once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateShareResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid expiry or field allowlist"
+          },
+          "404": {
+            "description": "Instance not found"
+          }
+        }
+      }
+    },
+    "/instances/{id}/share/{share_id}": {
+      "delete": {
+        "tags": [
+          "instances"
+        ],
+        "operationId": "revoke_share",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "share_id",
+            "in": "path",
+            "description": "Share ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Share revoked"
+          },
+          "404": {
+            "description": "Unknown, foreign, or already-revoked share"
+          }
+        }
+      }
+    },
+    "/instances/{id}/shares": {
+      "get": {
+        "tags": [
+          "instances"
+        ],
+        "operationId": "list_shares",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Shares for the instance (tokens are never returned)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProgressShare"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/instances/{id}/signals": {
       "post": {
         "tags": [
@@ -3797,6 +4388,38 @@
         }
       }
     },
+    "/llm-cache": {
+      "delete": {
+        "tags": [
+          "usage"
+        ],
+        "operationId": "purge_llm_cache",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "description": "Tenant (admin/unscoped callers only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Entries removed: {\"deleted\": n}",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "No tenant resolvable"
+          }
+        }
+      }
+    },
     "/pools": {
       "get": {
         "tags": [
@@ -4062,6 +4685,421 @@
         "responses": {
           "204": {
             "description": ""
+          }
+        }
+      }
+    },
+    "/prompts": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "list_prompts",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PromptSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "push_prompt",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushPromptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Identical to the latest version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushPromptResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New version created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushPromptResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid prompt"
+          }
+        }
+      }
+    },
+    "/prompts/{name}": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "get_prompt",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/prompts/{name}/labels/{label}": {
+      "put": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "set_prompt_label",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label, e.g. production",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetLabelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptLabel"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "delete_prompt_label",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/prompts/{name}/resolve": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "resolve_prompt",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "query",
+            "description": "Resolve through this label (its stable version)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "Exact version",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptTemplate"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/prompts/{name}/versions/{version}": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "get_prompt_version",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptTemplate"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/public/progress/embed.js": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "embed_loader",
+        "responses": {
+          "200": {
+            "description": "Embed loader script",
+            "content": {
+              "application/javascript": {}
+            }
+          }
+        }
+      }
+    },
+    "/public/progress/{token}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "public_progress",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Share token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Redacted progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicProgress"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown, expired, or revoked link"
+          },
+          "429": {
+            "description": "Rate limited"
+          }
+        }
+      }
+    },
+    "/public/progress/{token}/embed": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "embed_page",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Share token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Self-contained progress-bar page",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "404": {
+            "description": "Unknown, expired, or revoked link"
           }
         }
       }
@@ -5809,7 +6847,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Usage aggregated by (kind, model) with estimated USD costs",
+            "description": "Usage aggregated by (kind, model) with estimated USD costs, cache savings and current budget status",
             "content": {
               "application/json": {
                 "schema": {}
@@ -6867,6 +7905,355 @@
           }
         }
       },
+      "AlertCondition": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Failed (dead-lettered) instances in the tenant. Fires when the total\nreaches `threshold`, or when at least `growth` new failures land\nwithin `window_secs`. At least one of the two must be set.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "growth": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "dlq_growth"
+                ]
+              },
+              "threshold": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "minimum": 0
+              },
+              "window_secs": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Any circuit breaker (or the named handler's) for the tenant is open.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "handler": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "circuit_breaker_opened"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Instances paused by budget enforcement (`paused_reason =\nbudget_exceeded`) reach `min_instances` (default 1).",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "budget_breach"
+                ]
+              },
+              "min_instances": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "No worker for `handler` (optionally on `queue`) has polled within\n`seen_within_secs`.",
+            "required": [
+              "handler",
+              "kind"
+            ],
+            "properties": {
+              "handler": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "worker_pool_empty"
+                ]
+              },
+              "queue": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "seen_within_secs": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "What the evaluator watches."
+      },
+      "AlertDestination": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Slack incoming webhook; `url_ref` is `credentials://id[/field]`.",
+            "required": [
+              "url_ref",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "slack"
+                ]
+              },
+              "url_ref": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "`PagerDuty` Events API v2. `routing_key_ref` is a credential reference.\nFiring sends `trigger`, recovery sends `resolve` with the same\n`dedup_key`.",
+            "required": [
+              "routing_key_ref",
+              "type"
+            ],
+            "properties": {
+              "routing_key_ref": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "pagerduty"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Generic JSON webhook, HMAC-signed (`X-Orch8-Signature`) with the\nsecret behind `secret_ref`.",
+            "required": [
+              "url",
+              "secret_ref",
+              "type"
+            ],
+            "properties": {
+              "secret_ref": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "webhook"
+                ]
+              },
+              "url": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "Where a transition is delivered."
+      },
+      "AlertRule": {
+        "type": "object",
+        "description": "A tenant-scoped alert rule.",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "condition",
+          "destination",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "condition": {
+            "$ref": "#/components/schemas/AlertCondition"
+          },
+          "cooldown_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "destination": {
+            "$ref": "#/components/schemas/AlertDestination"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AlertRuleRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "condition",
+          "destination"
+        ],
+        "properties": {
+          "condition": {
+            "$ref": "#/components/schemas/AlertCondition"
+          },
+          "cooldown_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "destination": {
+            "$ref": "#/components/schemas/AlertDestination"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string",
+            "description": "Tenant (defaults to the `X-Tenant-Id` header)."
+          }
+        }
+      },
+      "AlertRuleState": {
+        "type": "object",
+        "description": "Evaluator bookkeeping for one rule, updated with a version CAS so that\nexactly one engine node emits each transition.",
+        "required": [
+          "rule_id",
+          "firing",
+          "version"
+        ],
+        "properties": {
+          "firing": {
+            "type": "boolean"
+          },
+          "last_evaluated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_fired_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_value": {
+            "type": "number",
+            "format": "double",
+            "description": "Last observed metric value (DLQ count, open breakers, …)."
+          },
+          "rule_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": false,
+              "prefixItems": [
+                {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                {
+                  "type": "number",
+                  "format": "double"
+                }
+              ]
+            },
+            "description": "Rolling samples `(unix_secs, value)` for rate conditions."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Monotonic CAS version (0 = never stored)."
+          }
+        }
+      },
+      "AlertRuleView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AlertRule"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "state": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AlertRuleState",
+                    "description": "Evaluator state (absent until first evaluation)."
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
       "ApiCapability": {
         "type": "string",
         "description": "Coarse principal capabilities enforced before tenant API routing.",
@@ -7612,6 +8999,185 @@
             ],
             "format": "int64",
             "description": "Maximum elapsed execution time in milliseconds."
+          }
+        }
+      },
+      "BudgetAlert": {
+        "type": "object",
+        "description": "Durable record that a budget crossed a soft threshold. Exactly one row per\n`(budget_id, period_start, threshold_percent)`.",
+        "required": [
+          "id",
+          "event",
+          "tenant_id",
+          "budget_id",
+          "period",
+          "period_start",
+          "threshold_percent",
+          "spend_usd",
+          "limit_usd",
+          "blocking",
+          "created_at"
+        ],
+        "properties": {
+          "blocking": {
+            "type": "boolean",
+            "description": "Whether this threshold makes new dispatches fail (100% + hard cap)."
+          },
+          "budget_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "event": {
+            "type": "string",
+            "description": "Always [`BUDGET_THRESHOLD_EVENT`]."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "limit_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "period": {
+            "$ref": "#/components/schemas/BudgetPeriod"
+          },
+          "period_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "spend_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "threshold_percent": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "BudgetPeriod": {
+        "type": "string",
+        "description": "Budget accounting period (UTC calendar boundaries).",
+        "enum": [
+          "daily",
+          "monthly"
+        ]
+      },
+      "BudgetRequest": {
+        "type": "object",
+        "description": "Create/replace body. `limit_usd` is the per-period estimated spend cap.",
+        "required": [
+          "tenant_id",
+          "period",
+          "limit_usd"
+        ],
+        "properties": {
+          "hard_cap": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Fail new `llm_call` dispatches closed at 100%. Default `true`."
+          },
+          "limit_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model prefix filter (e.g. `gpt-5`, `claude-opus`); omit for all models."
+          },
+          "period": {
+            "$ref": "#/components/schemas/BudgetPeriod"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "thresholds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Soft alert thresholds in percent. Default `[50, 80, 100]`."
+          }
+        }
+      },
+      "BudgetState": {
+        "type": "string",
+        "description": "Budget health derived from spend vs. limit.",
+        "enum": [
+          "ok",
+          "warning",
+          "exceeded"
+        ]
+      },
+      "BudgetStatus": {
+        "type": "object",
+        "description": "Current-period status of one budget.",
+        "required": [
+          "budget",
+          "period_start",
+          "period_end",
+          "spend_usd",
+          "percent_used",
+          "state",
+          "blocking",
+          "unpriced_events"
+        ],
+        "properties": {
+          "blocking": {
+            "type": "boolean",
+            "description": "True when a hard-capped budget is exhausted: new dispatches fail."
+          },
+          "budget": {
+            "$ref": "#/components/schemas/TenantBudget"
+          },
+          "percent_used": {
+            "type": "number",
+            "format": "double"
+          },
+          "period_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "spend_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "state": {
+            "$ref": "#/components/schemas/BudgetState"
+          },
+          "unpriced_events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Usage from models without a known price is not counted."
           }
         }
       },
@@ -8543,6 +10109,70 @@
           },
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "CreateShareRequest": {
+        "type": "object",
+        "properties": {
+          "allowed_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Top-level `context.data` keys to expose publicly. Default: none."
+          },
+          "expires_in_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Lifetime in seconds (60..=7776000). Default 7 days."
+          }
+        }
+      },
+      "CreateShareResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "token",
+          "url",
+          "embed_url",
+          "embed_snippet",
+          "expires_at",
+          "allowed_fields"
+        ],
+        "properties": {
+          "allowed_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "embed_snippet": {
+            "type": "string",
+            "description": "Paste-in `<script>` snippet."
+          },
+          "embed_url": {
+            "type": "string",
+            "description": "Embeddable HTML page URL."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "token": {
+            "type": "string",
+            "description": "The bearer token. Returned only once; store it securely."
+          },
+          "url": {
+            "type": "string",
+            "description": "Public JSON URL (absolute when the server has `api.public_url`)."
           }
         }
       },
@@ -11780,12 +13410,305 @@
           }
         }
       },
+      "ProgressShare": {
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "instance_id",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "allowed_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Top-level `context.data` keys the public view may include."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
       "PromoteRequest": {
         "type": "object",
         "properties": {
           "force": {
             "type": "boolean",
             "description": "Promote even when gates are inconclusive or failing."
+          }
+        }
+      },
+      "PromptCanary": {
+        "type": "object",
+        "description": "Canary split of a label between its stable version and a candidate.",
+        "required": [
+          "version",
+          "percent"
+        ],
+        "properties": {
+          "percent": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0–100. Selection is a deterministic hash of `(instance, block, name)`,\nthe same scheme `ab_split` uses, so one execution always sees one side.",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Candidate version receiving `percent` of executions."
+          }
+        }
+      },
+      "PromptDetail": {
+        "type": "object",
+        "required": [
+          "name",
+          "versions",
+          "labels"
+        ],
+        "properties": {
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptLabel"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptTemplate"
+            },
+            "description": "Newest first."
+          }
+        }
+      },
+      "PromptLabel": {
+        "type": "object",
+        "description": "A movable alias (`production`, `canary`, …) onto an immutable version.",
+        "required": [
+          "tenant_id",
+          "name",
+          "label",
+          "version",
+          "updated_at"
+        ],
+        "properties": {
+          "canary": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PromptCanary"
+              }
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Stable version the label points at."
+          }
+        }
+      },
+      "PromptMessage": {
+        "type": "object",
+        "description": "One templated chat message of a prompt version.",
+        "required": [
+          "role",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Message text; `{{ variable }}` placeholders are rendered at dispatch."
+          },
+          "role": {
+            "type": "string",
+            "description": "Chat role (`system`, `user`, `assistant`)."
+          }
+        }
+      },
+      "PromptResolution": {
+        "type": "object",
+        "description": "Which version a step resolved, recorded in the step output and pinned per\n`(instance, block)` so retries and replays reuse the same version.",
+        "required": [
+          "name",
+          "version",
+          "variant",
+          "content_hash"
+        ],
+        "properties": {
+          "content_hash": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Label the version was resolved through, if any."
+          },
+          "name": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string",
+            "description": "`stable` or `canary` when resolved through a label; `pinned` when an\nexplicit version was requested; `latest` otherwise."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "PromptSummary": {
+        "type": "object",
+        "description": "One prompt in the registry listing.",
+        "required": [
+          "name",
+          "latest_version",
+          "versions",
+          "labels",
+          "updated_at"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptLabel"
+            }
+          },
+          "latest_version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "versions": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "PromptTemplate": {
+        "type": "object",
+        "description": "An immutable, tenant-scoped prompt version.",
+        "required": [
+          "tenant_id",
+          "name",
+          "version",
+          "content_hash",
+          "created_at"
+        ],
+        "properties": {
+          "content_hash": {
+            "type": "string",
+            "description": "SHA-256 over the canonical template content (not name/version), used\nto make `push` idempotent and to prove which content a step ran."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptMessage"
+            },
+            "description": "Templated messages, sent before any `messages` the step itself adds."
+          },
+          "model_params": {
+            "type": "object",
+            "description": "Default model params (`provider`, `model`, `temperature`,\n`max_tokens`, …). Step params override them key by key."
+          },
+          "name": {
+            "type": "string"
+          },
+          "response_schema": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Optional JSON Schema the response must satisfy (see `llm_call`\n`response_schema`). A step-level `response_schema` wins."
+          },
+          "system": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional system prompt (templated)."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Variable names referenced by the template (derived at push time)."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Monotonic per `(tenant_id, name)`, starting at 1. Never reused."
           }
         }
       },
@@ -11848,6 +13771,173 @@
             "format": "int32",
             "description": "Number of most recent checkpoints to keep.",
             "minimum": 0
+          }
+        }
+      },
+      "PublicProgress": {
+        "type": "object",
+        "required": [
+          "status",
+          "completed",
+          "total",
+          "percent",
+          "steps",
+          "created_at",
+          "updated_at",
+          "link_expires_at"
+        ],
+        "properties": {
+          "completed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "data": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Only the share's allowlisted `context.data` keys; absent otherwise."
+          },
+          "link_expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "percent": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0..=100.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "Instance status: `scheduled` | `running` | `waiting` | `paused` | `completed` | `failed` | `cancelled`."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicStep"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PublicStep": {
+        "type": "object",
+        "required": [
+          "label",
+          "status"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "label": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending` | `running` | `waiting` | `completed` | `failed` | `skipped` | `cancelled`"
+          }
+        }
+      },
+      "PushPromptRequest": {
+        "type": "object",
+        "description": "Push body: the content of a new prompt version.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optionally point this label at the pushed version in the same call."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptMessage"
+            }
+          },
+          "model_params": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "response_schema": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "system": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "type": "string",
+            "description": "Tenant (ignored/must match when the caller is tenant-scoped)."
+          }
+        }
+      },
+      "PushPromptResponse": {
+        "type": "object",
+        "required": [
+          "prompt",
+          "created"
+        ],
+        "properties": {
+          "created": {
+            "type": "boolean",
+            "description": "False when the content equals the latest version (returned as-is)."
+          },
+          "label": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PromptLabel"
+              }
+            ]
+          },
+          "prompt": {
+            "$ref": "#/components/schemas/PromptTemplate"
           }
         }
       },
@@ -13179,6 +15269,39 @@
           }
         }
       },
+      "SetLabelRequest": {
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "canary_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Percent (0–100) of executions routed to `canary_version`.",
+            "minimum": 0
+          },
+          "canary_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional canary candidate version."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Stable version the label points at."
+          }
+        }
+      },
       "SetVersionPinRequest": {
         "type": "object",
         "required": [
@@ -13650,6 +15773,63 @@
           },
           "timezone": {
             "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TenantBudget": {
+        "type": "object",
+        "description": "A tenant spend budget over estimated LLM cost (the same list-price\nestimates `GET /usage` reports).",
+        "required": [
+          "id",
+          "tenant_id",
+          "period",
+          "limit_usd",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hard_cap": {
+            "type": "boolean",
+            "description": "When true, new `llm_call` dispatches fail closed once spend reaches\n`limit_usd` (cache hits are still served — they cost nothing)."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "limit_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend limit in USD for one period."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional model filter: a prefix matched against the recorded model\n(`gpt-5` matches `gpt-5.4-mini`). `None` = all models."
+          },
+          "period": {
+            "$ref": "#/components/schemas/BudgetPeriod"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "thresholds": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Soft thresholds in percent (each emits one alert per period)."
           },
           "updated_at": {
             "type": "string",
@@ -15099,6 +17279,18 @@
       "description": "Resource pool management"
     },
     {
+      "name": "prompts",
+      "description": "Versioned, tenant-scoped prompt registry with labels and canaries"
+    },
+    {
+      "name": "budgets",
+      "description": "Tenant LLM spend budgets: hard caps and threshold alerts"
+    },
+    {
+      "name": "usage",
+      "description": "LLM usage, estimated cost, cache savings and budget status"
+    },
+    {
       "name": "cluster",
       "description": "Multi-node cluster management"
     },
@@ -15117,6 +17309,18 @@
     {
       "name": "webhooks",
       "description": "Public, unauthenticated webhook ingestion (HMAC-protected via trigger secret)"
+    },
+    {
+      "name": "approvals",
+      "description": "Human-in-the-loop approvals, including public Slack/Teams/email approval actions"
+    },
+    {
+      "name": "alerts",
+      "description": "Built-in alert rules (DLQ growth, circuit breakers, budget breaches, empty worker pools)"
+    },
+    {
+      "name": "public",
+      "description": "Unauthenticated, token-addressed public progress links"
     },
     {
       "name": "continuity-product",

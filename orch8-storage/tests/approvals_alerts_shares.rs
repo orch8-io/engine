@@ -56,6 +56,7 @@ fn token(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn approval_tokens_are_single_use_per_gate_and_expire() {
     for (name, s) in backends().await {
         let tenant = TenantId::unchecked(format!("appr-{}", Uuid::new_v4()));

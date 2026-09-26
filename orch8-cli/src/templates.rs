@@ -153,6 +153,23 @@ mod tests {
         }
     }
 
+    /// Blocks alone are not enough: `orch8 dev` decodes the whole document
+    /// strictly, so an unknown top-level key (e.g. `description`) breaks
+    /// `orch8 init --template <name>` followed by `orch8 dev`.
+    #[test]
+    fn every_template_loads_like_orch8_dev() {
+        for t in TEMPLATES {
+            let v: serde_json::Value = serde_json::from_str(t.json).unwrap();
+            let loaded = crate::commands::dev::parse_sequence_value(v, 1);
+            assert!(
+                loaded.is_ok(),
+                "template `{}` does not load in `orch8 dev`: {:?}",
+                t.name,
+                loaded.err()
+            );
+        }
+    }
+
     #[test]
     fn template_names_are_unique_kebab_case() {
         let mut seen = std::collections::HashSet::new();

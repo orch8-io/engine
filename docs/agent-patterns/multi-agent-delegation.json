@@ -2,7 +2,6 @@
   "$schema": "https://orch8.io/contracts/sequence.schema.json",
   "schema_version": 1,
   "name": "Multi-Agent Delegation",
-  "description": "Orchestrator agent breaks a task into sub-tasks and delegates each to a specialized child agent instance. Results are collected and synthesized.",
   "blocks": [
     {
       "type": "step",
@@ -75,6 +74,5 @@
         ]
       }
     }
-  ],
-  "notes": "In practice, use for_each + sub_sequence to dynamically delegate to N agents based on the decomposition output. The parallel block shown here is a simplified illustration for 3 sub-tasks."
+  ]
 }

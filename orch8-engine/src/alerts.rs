@@ -118,6 +118,7 @@ pub fn validate_config(config: &AlertsConfig) -> Result<(), String> {
 }
 
 /// One measurement: `(firing, value, human summary)`.
+#[allow(clippy::too_many_lines)]
 async fn measure(
     storage: &dyn StorageBackend,
     rule: &AlertRule,

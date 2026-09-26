@@ -1,5 +1,6 @@
 //! End-to-end: interactive approval actions (magic links, Slack), public
 //! progress links, and alert-rule CRUD.
+#![allow(clippy::too_many_lines)]
 
 use chrono::Utc;
 use hmac::{KeyInit, Mac};

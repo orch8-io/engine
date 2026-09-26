@@ -17,6 +17,10 @@ These are **starting points**, not finished products — adapt params (model, pr
 | [`multi-agent-delegation.json`](multi-agent-delegation.json) | Router → specialist sub-sequences | Coordinator delegates to domain experts; use when routing logic is cheap and specialists are expensive |
 | [`guardrail-validation.json`](guardrail-validation.json) | Pre + post LLM call validation | Regulated content, safety-critical outputs, PII scrubbing, structured-output enforcement |
 
+`multi-agent-delegation` uses a fixed `parallel` block for three sub-tasks to
+keep the example short. In practice, use `for_each` + `sub_sequence` to
+delegate to N agents based on the decomposition output.
+
 ---
 
 ## Built-in handlers used
