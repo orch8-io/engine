@@ -1,4 +1,5 @@
 pub mod bootstrap;
+pub mod budget;
 pub mod checkpoint;
 pub mod config;
 pub mod context;
@@ -18,6 +19,7 @@ pub mod instance;
 pub mod package_cmd;
 pub mod pieces;
 pub mod portable;
+pub mod prompt;
 pub mod release;
 pub mod sequence;
 pub mod signal;
