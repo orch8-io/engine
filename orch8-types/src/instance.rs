@@ -9,8 +9,12 @@ use crate::ids::{InstanceId, Namespace, SequenceId, TenantId};
 
 /// Instance states form a strict state machine.
 /// Transitions are validated at runtime via `can_transition_to`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
-#[sqlx(type_name = "instance_state", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "instance_state", rename_all = "snake_case")
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum InstanceState {
@@ -127,9 +131,9 @@ impl std::fmt::Display for InstanceState {
     Hash,
     Serialize,
     Deserialize,
-    sqlx::Type,
     ToSchema,
 )]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[repr(i16)]
 #[non_exhaustive]
 pub enum Priority {

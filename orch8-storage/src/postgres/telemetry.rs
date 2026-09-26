@@ -128,7 +128,7 @@ impl crate::TelemetryStore for PostgresStorage {
         let row = sqlx::query(
             r"SELECT COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
                      COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens
-              FROM usage_events WHERE instance_id = $1",
+              FROM usage_events WHERE instance_id = $1 AND kind = 'llm_tokens'",
         )
         .bind(instance_id.into_uuid())
         .fetch_one(&self.pool)

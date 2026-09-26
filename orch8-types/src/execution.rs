@@ -6,8 +6,12 @@ use utoipa::ToSchema;
 
 use crate::ids::{BlockId, ExecutionNodeId, InstanceId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
-#[sqlx(type_name = "node_state", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "node_state", rename_all = "snake_case")
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum NodeState {
@@ -64,8 +68,12 @@ impl std::fmt::Display for NodeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
-#[sqlx(type_name = "block_type", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "block_type", rename_all = "snake_case")
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum BlockType {

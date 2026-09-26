@@ -854,6 +854,97 @@ passthrough_impl! {
 }
 
 // ============================================================================
+// AiStore -- prompt registry / budgets pass through; the LLM response cache
+// holds model outputs (same data class as `context.data`), so `response` and
+// `embedding` are sealed, bound via AAD to their `(tenant_id, cache_key)` row.
+// ============================================================================
+
+impl EncryptingStorage {
+    fn llm_cache_aad(tenant_id: &str, cache_key: &str) -> Vec<u8> {
+        let mut aad = b"orch8.llm_cache".to_vec();
+        aad.push(0);
+        aad.extend_from_slice(tenant_id.as_bytes());
+        aad.push(0);
+        aad.extend_from_slice(cache_key.as_bytes());
+        aad
+    }
+
+    fn seal_llm_cache_entry(
+        &self,
+        entry: &orch8_types::ai::LlmCacheEntry,
+    ) -> Result<orch8_types::ai::LlmCacheEntry, StorageError> {
+        let aad = Self::llm_cache_aad(&entry.tenant_id, &entry.cache_key);
+        let seal = |v: &serde_json::Value| {
+            self.encryptor
+                .encrypt_value_with_aad(v, &aad)
+                .map_err(|e| StorageError::Encryption(e.to_string()))
+        };
+        let mut sealed = entry.clone();
+        sealed.response = seal(&entry.response)?;
+        sealed.embedding = entry.embedding.as_ref().map(seal).transpose()?;
+        Ok(sealed)
+    }
+
+    fn open_llm_cache_entry(
+        &self,
+        mut entry: orch8_types::ai::LlmCacheEntry,
+    ) -> Result<orch8_types::ai::LlmCacheEntry, StorageError> {
+        let aad = Self::llm_cache_aad(&entry.tenant_id, &entry.cache_key);
+        let open = |v: &serde_json::Value| {
+            if FieldEncryptor::is_encrypted(v) {
+                self.encryptor
+                    .decrypt_value_with_aad(v, &aad)
+                    .map_err(|e| StorageError::Encryption(e.to_string()))
+            } else {
+                // Written before encryption was enabled.
+                Ok(v.clone())
+            }
+        };
+        entry.response = open(&entry.response)?;
+        entry.embedding = entry.embedding.as_ref().map(open).transpose()?;
+        Ok(entry)
+    }
+}
+
+passthrough_impl! {
+    impl crate::AiStore for EncryptingStorage {
+        async fn insert_prompt_version(&self, prompt: &orch8_types::ai::PromptTemplate) -> Result<(), StorageError>;
+        async fn get_prompt_version(&self, tenant_id: &str, name: &str, version: i32) -> Result<Option<orch8_types::ai::PromptTemplate>, StorageError>;
+        async fn get_latest_prompt_version(&self, tenant_id: &str, name: &str) -> Result<Option<orch8_types::ai::PromptTemplate>, StorageError>;
+        async fn list_prompt_versions(&self, tenant_id: &str, name: Option<&str>, limit: u32) -> Result<Vec<orch8_types::ai::PromptTemplate>, StorageError>;
+        async fn upsert_prompt_label(&self, label: &orch8_types::ai::PromptLabel) -> Result<(), StorageError>;
+        async fn get_prompt_label(&self, tenant_id: &str, name: &str, label: &str) -> Result<Option<orch8_types::ai::PromptLabel>, StorageError>;
+        async fn list_prompt_labels(&self, tenant_id: &str, name: Option<&str>) -> Result<Vec<orch8_types::ai::PromptLabel>, StorageError>;
+        async fn delete_prompt_label(&self, tenant_id: &str, name: &str, label: &str) -> Result<bool, StorageError>;
+        async fn get_llm_cache_entry(&self, tenant_id: &str, cache_key: &str, now: DateTime<Utc>) -> Result<Option<orch8_types::ai::LlmCacheEntry>, StorageError> {
+            match self.inner.get_llm_cache_entry(tenant_id, cache_key, now).await? {
+                Some(entry) => Ok(Some(self.open_llm_cache_entry(entry)?)),
+                None => Ok(None),
+            }
+        }
+        async fn put_llm_cache_entry(&self, entry: &orch8_types::ai::LlmCacheEntry) -> Result<(), StorageError> {
+            let sealed = self.seal_llm_cache_entry(entry)?;
+            self.inner.put_llm_cache_entry(&sealed).await
+        }
+        async fn list_llm_cache_partition(&self, tenant_id: &str, partition_key: &str, now: DateTime<Utc>, limit: u32) -> Result<Vec<orch8_types::ai::LlmCacheEntry>, StorageError> {
+            self.inner
+                .list_llm_cache_partition(tenant_id, partition_key, now, limit)
+                .await?
+                .into_iter()
+                .map(|entry| self.open_llm_cache_entry(entry))
+                .collect()
+        }
+        async fn purge_llm_cache(&self, tenant_id: &str) -> Result<u64, StorageError>;
+        async fn delete_expired_llm_cache(&self, now: DateTime<Utc>, limit: u32) -> Result<u64, StorageError>;
+        async fn upsert_tenant_budget(&self, budget: &orch8_types::ai::TenantBudget) -> Result<(), StorageError>;
+        async fn list_tenant_budgets(&self, tenant_id: &str) -> Result<Vec<orch8_types::ai::TenantBudget>, StorageError>;
+        async fn delete_tenant_budget(&self, tenant_id: &str, id: Uuid) -> Result<bool, StorageError>;
+        async fn record_budget_alert(&self, alert: &orch8_types::ai::BudgetAlert) -> Result<bool, StorageError>;
+        async fn list_budget_alerts(&self, tenant_id: &str, limit: u32) -> Result<Vec<orch8_types::ai::BudgetAlert>, StorageError>;
+    }
+}
+
+// ============================================================================
 // Sub-trait 2: InstanceStore -- encryption on create/get/update context paths
 // ============================================================================
 
@@ -2738,6 +2829,64 @@ mod tests {
         let a = enc.encrypt_value(&v).unwrap();
         let b = enc.encrypt_value(&v).unwrap();
         assert_ne!(a, b, "nonce randomness should produce distinct ciphertexts");
+    }
+
+    #[tokio::test]
+    async fn llm_cache_entries_are_encrypted_at_rest_and_row_bound() {
+        use crate::AiStore;
+        use std::sync::Arc;
+
+        let inner: Arc<dyn crate::StorageBackend> =
+            Arc::new(crate::sqlite::SqliteStorage::in_memory().await.unwrap());
+        let enc = EncryptingStorage::new(Arc::clone(&inner), test_encryptor());
+        let now = chrono::Utc::now();
+        let entry = orch8_types::ai::LlmCacheEntry {
+            tenant_id: "t1".into(),
+            cache_key: "k1".into(),
+            partition_key: "p".into(),
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            response: json!({"message": {"content": "top secret answer"}}),
+            embedding: Some(json!([0.5, 0.25])),
+            input_tokens: 3,
+            output_tokens: 4,
+            size_bytes: 10,
+            created_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+        };
+        enc.put_llm_cache_entry(&entry).await.unwrap();
+
+        let raw = inner
+            .get_llm_cache_entry("t1", "k1", now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            FieldEncryptor::is_encrypted(&raw.response),
+            "response sealed at rest"
+        );
+        assert!(FieldEncryptor::is_encrypted(
+            raw.embedding.as_ref().unwrap()
+        ));
+        assert!(!raw.response.to_string().contains("top secret"));
+
+        let got = enc
+            .get_llm_cache_entry("t1", "k1", now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, entry);
+        let listed = enc
+            .list_llm_cache_partition("t1", "p", now, 5)
+            .await
+            .unwrap();
+        assert_eq!(listed, vec![entry.clone()]);
+
+        // A ciphertext copied onto another tenant's row fails to open (AAD).
+        let mut moved = raw.clone();
+        moved.tenant_id = "t2".into();
+        inner.put_llm_cache_entry(&moved).await.unwrap();
+        assert!(enc.get_llm_cache_entry("t2", "k1", now).await.is_err());
     }
 
     #[tokio::test]

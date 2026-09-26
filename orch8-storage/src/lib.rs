@@ -52,7 +52,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub(crate) const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 94;
+pub const STORAGE_SCHEMA_VERSION: u32 = 97;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -2455,8 +2455,9 @@ pub trait TelemetryStore: Send + Sync + 'static {
         end: DateTime<Utc>,
     ) -> Result<Vec<UsageAggregate>, StorageError>;
 
-    /// Sum recorded usage for a single instance across all `usage_events`
-    /// rows. Returns `(input_tokens, output_tokens)`.
+    /// Sum recorded billable usage (`kind = 'llm_tokens'`) for a single
+    /// instance. Returns `(input_tokens, output_tokens)`. Other kinds — e.g.
+    /// `llm_cache_hit`, tokens a cache hit *saved* — are not consumption.
     ///
     /// Used by the scheduler's budget enforcement — only called for instances
     /// that actually carry a token budget.
@@ -3590,6 +3591,142 @@ pub trait AttentionStore: Send + Sync + 'static {
 }
 
 // ============================================================================
+// Sub-trait: AiStore — prompt registry, LLM response cache, tenant budgets
+// ============================================================================
+
+/// Storage for AI governance: immutable prompt versions + labels, the
+/// `llm_call` response cache, and tenant spend budgets/alerts. Every method
+/// is tenant-scoped; no query ever crosses tenants.
+#[async_trait]
+pub trait AiStore: Send + Sync + 'static {
+    // === Prompt registry ===
+
+    /// Insert a new immutable prompt version. Fails with
+    /// [`StorageError::Conflict`] if `(tenant_id, name, version)` exists —
+    /// callers allocate `version = latest + 1` and retry on conflict.
+    async fn insert_prompt_version(
+        &self,
+        prompt: &orch8_types::ai::PromptTemplate,
+    ) -> Result<(), StorageError>;
+
+    async fn get_prompt_version(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        version: i32,
+    ) -> Result<Option<orch8_types::ai::PromptTemplate>, StorageError>;
+
+    async fn get_latest_prompt_version(
+        &self,
+        tenant_id: &str,
+        name: &str,
+    ) -> Result<Option<orch8_types::ai::PromptTemplate>, StorageError>;
+
+    /// Versions for a tenant (optionally one prompt), newest first.
+    async fn list_prompt_versions(
+        &self,
+        tenant_id: &str,
+        name: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::ai::PromptTemplate>, StorageError>;
+
+    /// Create or move a label (upsert on `(tenant_id, name, label)`).
+    async fn upsert_prompt_label(
+        &self,
+        label: &orch8_types::ai::PromptLabel,
+    ) -> Result<(), StorageError>;
+
+    async fn get_prompt_label(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        label: &str,
+    ) -> Result<Option<orch8_types::ai::PromptLabel>, StorageError>;
+
+    async fn list_prompt_labels(
+        &self,
+        tenant_id: &str,
+        name: Option<&str>,
+    ) -> Result<Vec<orch8_types::ai::PromptLabel>, StorageError>;
+
+    async fn delete_prompt_label(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        label: &str,
+    ) -> Result<bool, StorageError>;
+
+    // === LLM response cache ===
+
+    /// Unexpired entry for `(tenant_id, cache_key)`.
+    async fn get_llm_cache_entry(
+        &self,
+        tenant_id: &str,
+        cache_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<orch8_types::ai::LlmCacheEntry>, StorageError>;
+
+    /// Insert or replace the entry for `(tenant_id, cache_key)`.
+    async fn put_llm_cache_entry(
+        &self,
+        entry: &orch8_types::ai::LlmCacheEntry,
+    ) -> Result<(), StorageError>;
+
+    /// Unexpired entries in one semantic partition, newest first.
+    async fn list_llm_cache_partition(
+        &self,
+        tenant_id: &str,
+        partition_key: &str,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::ai::LlmCacheEntry>, StorageError>;
+
+    /// Delete every cache entry of a tenant. Returns rows removed.
+    async fn purge_llm_cache(&self, tenant_id: &str) -> Result<u64, StorageError>;
+
+    /// GC: delete up to `limit` expired entries across tenants.
+    async fn delete_expired_llm_cache(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError>;
+
+    // === Tenant budgets ===
+
+    /// Create or replace a budget (keyed by `id`, tenant-checked).
+    async fn upsert_tenant_budget(
+        &self,
+        budget: &orch8_types::ai::TenantBudget,
+    ) -> Result<(), StorageError>;
+
+    async fn list_tenant_budgets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<orch8_types::ai::TenantBudget>, StorageError>;
+
+    async fn delete_tenant_budget(
+        &self,
+        tenant_id: &str,
+        id: uuid::Uuid,
+    ) -> Result<bool, StorageError>;
+
+    /// Insert an alert unless one already exists for `(budget_id,
+    /// period_start, threshold_percent)`. Returns true when inserted, i.e.
+    /// exactly one caller wins each threshold crossing.
+    async fn record_budget_alert(
+        &self,
+        alert: &orch8_types::ai::BudgetAlert,
+    ) -> Result<bool, StorageError>;
+
+    /// Alerts for a tenant, newest first.
+    async fn list_budget_alerts(
+        &self,
+        tenant_id: &str,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::ai::BudgetAlert>, StorageError>;
+}
+
+// ============================================================================
 // StorageBackend supertrait
 // ============================================================================
 
@@ -3618,6 +3755,7 @@ pub trait StorageBackend:
     + InvariantStore
     + EvaluationStore
     + AttentionStore
+    + AiStore
     + orch8_push::PushOutboxStore
     + Send
     + Sync
@@ -3643,6 +3781,7 @@ impl<T> StorageBackend for T where
         + InvariantStore
         + EvaluationStore
         + AttentionStore
+        + AiStore
         + orch8_push::PushOutboxStore
         + Send
         + Sync

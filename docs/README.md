@@ -36,6 +36,7 @@ release notes.
 - `stable` [Sequences](SEQUENCES.md) — learn the workflow JSON model and block types.
 - `mixed` [Features](FEATURES.md) — the complete capability list, by area.
 - `experimental` [Community templates](COMMUNITY_TEMPLATES.md) — use and contribute catalog templates.
+- `experimental` [Browser playground](PLAYGROUND.md) — validate, preflight and dry-run a sequence in WebAssembly with virtual time; what it does and does not model.
 - `beta` [Agent patterns](agent-patterns/README.md) — run four composable AI workflow examples.
 - [Email classifier](../examples/email-classifier/README.md) — a complete TypeScript worker and webhook application.
 - [Portable agent product](../examples/portable-agent-product/README.md) — compile policy, wrap a local worker, score conformance, and validate an OEM plan.
@@ -44,6 +45,9 @@ release notes.
 
 - `beta` [Dashboard](DASHBOARD.md) — connect the operator console and use its current surfaces.
 - `stable` [Safe releases](RELEASES.md) — diff, validate, canary, evaluate, promote, and roll back.
+- `beta` [Prompt registry](PROMPTS.md) — versioned, tenant-scoped prompts with labels, canaries, and replay-safe resolution in `llm_call`.
+- `beta` [LLM response cache](LLM_CACHE.md) — opt-in exact/semantic `llm_call` caching, what is never cached, and savings reporting.
+- `beta` [Tenant spend budgets](BUDGETS.md) — daily/monthly USD caps, threshold alerts, and fail-closed hard caps.
 - `stable` [Deployment](DEPLOYMENT.md) — Docker, Kubernetes, the Helm chart, one-click PaaS templates, cloud targets, and the production checklist.
 - `beta` [SQLite in production](SQLITE_PRODUCTION.md) — single-node SQLite + Litestream, limits, and a restore drill.
 - `beta` [GitHub Actions](examples/github-actions/README.md) — release gate, PR semantic-diff comments, and ephemeral preview runs.

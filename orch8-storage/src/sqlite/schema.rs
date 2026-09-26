@@ -1165,6 +1165,79 @@ CREATE TABLE IF NOT EXISTS progress_shares (
 );
 CREATE INDEX IF NOT EXISTS idx_progress_shares_instance
     ON progress_shares(tenant_id, instance_id);
+
+-- Prompt registry (Postgres migration 095): immutable versions + labels.
+CREATE TABLE IF NOT EXISTS prompt_versions (
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version > 0),
+    content_hash TEXT NOT NULL,
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, name, version)
+);
+CREATE TABLE IF NOT EXISTS prompt_labels (
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    label TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    canary_version INTEGER,
+    canary_percent INTEGER NOT NULL DEFAULT 0 CHECK(canary_percent BETWEEN 0 AND 100),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, name, label),
+    FOREIGN KEY (tenant_id, name, version)
+        REFERENCES prompt_versions(tenant_id, name, version),
+    FOREIGN KEY (tenant_id, name, canary_version)
+        REFERENCES prompt_versions(tenant_id, name, version)
+);
+
+-- llm_call response cache (Postgres migration 096). Timestamps are
+-- fixed-width RFC 3339 (microseconds, `Z`) so text comparison is ordered.
+CREATE TABLE IF NOT EXISTS llm_response_cache (
+    tenant_id TEXT NOT NULL,
+    cache_key TEXT NOT NULL,
+    partition_key TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    response TEXT NOT NULL,
+    embedding TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, cache_key)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_response_cache_partition
+    ON llm_response_cache(tenant_id, partition_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_response_cache_expiry
+    ON llm_response_cache(expires_at);
+
+-- Tenant spend budgets + threshold alerts (Postgres migration 097).
+CREATE TABLE IF NOT EXISTS tenant_budgets (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    model TEXT,
+    period TEXT NOT NULL CHECK(period IN ('daily', 'monthly')),
+    limit_usd REAL NOT NULL CHECK(limit_usd > 0),
+    hard_cap INTEGER NOT NULL DEFAULT 1,
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_budgets_tenant ON tenant_budgets(tenant_id);
+CREATE TABLE IF NOT EXISTS tenant_budget_alerts (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    budget_id TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    threshold_percent INTEGER NOT NULL CHECK(threshold_percent BETWEEN 1 AND 100),
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (budget_id, period_start, threshold_percent)
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_budget_alerts_tenant
+    ON tenant_budget_alerts(tenant_id, created_at);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is

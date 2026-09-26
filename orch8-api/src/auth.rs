@@ -201,6 +201,7 @@ fn capabilities_allow(
         // open), and `migrate-instance` rewrites a running instance.
         ApiCapability::Publisher => {
             path.starts_with("/releases")
+                || path.starts_with("/prompts")
                 || (path.starts_with("/plugins") && is_read_method(method))
                 || (path.starts_with("/sequences")
                     && path.trim_end_matches('/') != "/sequences/migrate-instance")

@@ -321,10 +321,15 @@ fn lint_handler_params(
         "mcp_call" if params.get("server").is_none() => {
             check_required_str(block_id, handler, params, "url", warnings);
         }
-        "llm_call" if params.get("messages").is_none() && params.get("system").is_none() => {
+        "llm_call"
+            if params.get("messages").is_none()
+                && params.get("system").is_none()
+                && params.get("prompt").is_none() =>
+        {
             warnings.push(LintWarning {
                 block_id: block_id.into(),
-                message: "llm_call: requires at least `messages` or `system` param".into(),
+                message: "llm_call: requires at least `messages`, `system` or `prompt` param"
+                    .into(),
             });
         }
         // Only literal question maps can be checked here; templated ones

@@ -30,6 +30,8 @@
 //! | `max_image_bytes` | number | 20 MiB | Per-image size cap, pre-encoding (can only lower the default) |
 //! | `stream` | bool | `false` | Consume the provider's SSE stream (see Streaming) |
 //! | `stream_idle_timeout_secs` | number | `30` | Max gap between streamed chunks before failing retryable |
+//! | `prompt` | object | — | Registry prompt `{name, version \| label, variables}` (see `docs/PROMPTS.md`) |
+//! | `cache` | object | — | Response cache `{mode: exact\|semantic, ttl, …}` (see `docs/LLM_CACHE.md`) |
 //!
 //! ## Streaming
 //!
@@ -138,6 +140,7 @@
 //!   unless the step sets `fallbacks: false`.
 
 mod anthropic;
+mod cache;
 pub(crate) mod common;
 mod multimodal;
 mod openai;
@@ -316,8 +319,20 @@ impl DeltaSink {
 /// If the params contain a `providers` array, iterates through each provider
 /// in order, attempting the call. On failure, tries the next provider.
 /// The output includes a `tried` array listing providers attempted in order.
+///
+/// Pipeline: prompt-registry resolution (`prompt`) → `response_schema`
+/// compile → config validation → dry-run skip → response-cache lookup
+/// (`cache`) → tenant budget hard cap → provider dispatch → usage + budget
+/// thresholds → cache store.
+#[allow(clippy::too_many_lines)] // one linear pipeline; each stage is commented
 pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
     let dry = ctx.is_dry_run();
+
+    // Prompt registry: render the referenced immutable version into params
+    // BEFORE anything else reads them (schema, model, messages). Real runs
+    // pin the resolution per (instance, block) for replay determinism.
+    let prompt = resolve_prompt(&mut ctx, dry).await?;
+    let cache_cfg = cache::CacheConfig::from_params(&ctx.params)?;
 
     // Compile `response_schema` once per step, BEFORE any provider call (and
     // before the dry-run skip), so an invalid schema is surfaced as a config
@@ -349,80 +364,179 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
         None
     };
 
-    if let Some(providers) = ctx.params.get("providers").and_then(Value::as_array) {
-        if dry {
-            // Validate before skipping: an empty providers array is a config
-            // error a dry-run should surface.
-            if providers.is_empty() {
-                return Err(permanent("providers array is empty".to_string()));
-            }
-            return Ok(llm_dry_run_stub(&ctx.params));
-        }
-        let providers = providers.clone();
-        // Resolve artifact-backed image blocks ONCE, before the failover loop
-        // and schema paths, so every provider attempt reuses the fetched bytes.
-        multimodal::resolve_message_images(&ctx.storage, ctx.instance_id, &mut ctx.params).await?;
-        let out = handle_llm_call_failover(
-            &ctx.params,
-            &providers,
-            response_schema.as_ref(),
-            delta_sink.as_ref(),
-        )
-        .await?;
-        // Capture token usage for cost aggregation (best-effort — never fails
-        // the call), exactly as the single-provider path does below.
-        record_llm_usage(&ctx, &out).await;
-        return Ok(out);
-    }
-
-    let provider = ctx
+    let providers = ctx
         .params
-        .get("provider")
-        .and_then(Value::as_str)
-        .unwrap_or("openai")
-        .to_string();
-    let format = provider_format(&provider);
+        .get("providers")
+        .and_then(Value::as_array)
+        .cloned();
+    let single = if let Some(providers) = &providers {
+        // Validate before any skip: an empty providers array is a config
+        // error a dry-run should surface.
+        if providers.is_empty() {
+            return Err(permanent("providers array is empty".to_string()));
+        }
+        None
+    } else {
+        let provider = ctx
+            .params
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("openai")
+            .to_string();
+        let format = provider_format(&provider);
 
-    // Resolve + validate (api key present, base URL allowed) BEFORE the
-    // dry-run skip, so a dry-run still catches missing keys / blocked URLs.
-    let api_key = resolve_api_key(&ctx.params, &provider)?;
-    let base = resolve_base_url(&ctx.params, &provider);
+        // Resolve + validate (api key present, base URL allowed) BEFORE the
+        // dry-run skip, so a dry-run still catches missing keys / blocked URLs.
+        let api_key = resolve_api_key(&ctx.params, &provider)?;
+        let base = resolve_base_url(&ctx.params, &provider);
 
-    if !super::builtin::is_url_safe(&base).await {
-        return Err(permanent(format!("base_url is not allowed: {base}")));
-    }
+        if !super::builtin::is_url_safe(&base).await {
+            return Err(permanent(format!("base_url is not allowed: {base}")));
+        }
+        Some((provider, format, api_key, base))
+    };
 
     // Dry-run: validation passed; skip only the model call. Mirror the output
     // shape (empty assistant message) so downstream templates resolve. Image
-    // resolution stays AFTER this skip — a dry-run never reads artifacts.
+    // resolution stays AFTER this skip — a dry-run never reads artifacts, and
+    // the response cache is neither read nor written.
     if dry {
-        return Ok(llm_dry_run_stub(&ctx.params));
+        let mut out = llm_dry_run_stub(&ctx.params);
+        attach_prompt(&mut out, prompt.as_ref());
+        return Ok(out);
     }
 
+    let tenant_id = ctx.tenant_id.as_str().to_string();
+    let cache_keys = cache_cfg
+        .as_ref()
+        .and_then(|_| cache::compute_keys(&tenant_id, &ctx.params, prompt.as_ref()));
+    let mut cache_embedding = None;
+    if let (Some(cfg), Some(keys)) = (&cache_cfg, &cache_keys) {
+        let found = cache::lookup(ctx.storage.as_ref(), &tenant_id, cfg, keys).await;
+        cache_embedding = found.embedding;
+        if let Some(hit) = found.hit {
+            let mut out = cache::serve_hit(
+                ctx.storage.as_ref(),
+                &tenant_id,
+                ctx.instance_id,
+                ctx.block_id.as_str(),
+                cfg,
+                hit,
+            )
+            .await;
+            attach_prompt(&mut out, prompt.as_ref());
+            return Ok(out);
+        }
+    }
+
+    // Tenant spend budgets: a hard-capped, exhausted budget fails new
+    // dispatches closed (cache hits above are free and still served).
+    let budgets = crate::tenant_budgets::cached_budget_statuses(ctx.storage.as_ref(), &tenant_id)
+        .await
+        .map_err(|e| retryable(format!("tenant budget check failed: {e}")))?;
+
+    // Resolve artifact-backed image blocks ONCE, before the failover loop
+    // and schema paths, so every provider attempt reuses the fetched bytes.
     multimodal::resolve_message_images(&ctx.storage, ctx.instance_id, &mut ctx.params).await?;
 
-    let out = match response_schema.as_ref() {
-        Some(compiled) => {
-            call_provider_with_schema(&ctx.params, &api_key, &base, &provider, format, compiled)
-                .await
-                .map_err(SchemaCallFailure::into_permanent)?
+    let mut out = if let Some(providers) = &providers {
+        handle_llm_call_failover(
+            &ctx.params,
+            providers,
+            response_schema.as_ref(),
+            delta_sink.as_ref(),
+            &budgets,
+        )
+        .await?
+    } else {
+        let Some((provider, format, api_key, base)) = single else {
+            return Err(permanent("llm_call: no provider configured".to_string()));
+        };
+        let model = resolve_model(&ctx.params, &provider).unwrap_or_default();
+        if let Some(err) = crate::tenant_budgets::blocking_error(&budgets, &model) {
+            return Err(err);
         }
-        None => {
-            dispatch_provider(
-                &ctx.params,
-                &api_key,
-                &base,
-                &provider,
-                format,
-                delta_sink.as_ref(),
-            )
-            .await?
-        }
+        let out = match response_schema.as_ref() {
+            Some(compiled) => {
+                call_provider_with_schema(&ctx.params, &api_key, &base, &provider, format, compiled)
+                    .await
+                    .map_err(SchemaCallFailure::into_permanent)?
+            }
+            None => {
+                dispatch_provider(
+                    &ctx.params,
+                    &api_key,
+                    &base,
+                    &provider,
+                    format,
+                    delta_sink.as_ref(),
+                )
+                .await?
+            }
+        };
+        emit_gen_ai_telemetry(&ctx.params, &provider, &out);
+        out
     };
-    emit_gen_ai_telemetry(&ctx.params, &provider, &out);
-    // Capture token usage for cost aggregation (best-effort — never fails the call).
+
+    // Capture token usage for cost aggregation (best-effort — never fails the
+    // call), then evaluate tenant budget thresholds against the new spend.
     record_llm_usage(&ctx, &out).await;
+    crate::tenant_budgets::evaluate_thresholds(
+        ctx.storage.as_ref(),
+        &tenant_id,
+        chrono::Utc::now(),
+    )
+    .await;
+
+    if let (Some(cfg), Some(keys)) = (&cache_cfg, &cache_keys) {
+        let stored = cache::store(
+            ctx.storage.as_ref(),
+            &tenant_id,
+            cfg,
+            keys,
+            &out,
+            cache_embedding,
+        )
+        .await;
+        cache::annotate_miss(&mut out, cfg, stored);
+    } else if let Some(cfg) = &cache_cfg {
+        cache::annotate_miss(&mut out, cfg, Err("uncacheable_request"));
+    }
+    attach_prompt(&mut out, prompt.as_ref());
     Ok(out)
+}
+
+/// Resolve + render the `prompt` param, if any (see [`crate::prompt_registry`]).
+async fn resolve_prompt(
+    ctx: &mut StepContext,
+    dry: bool,
+) -> Result<Option<orch8_types::ai::PromptResolution>, StepError> {
+    let Some(raw) = ctx.params.get("prompt").cloned() else {
+        return Ok(None);
+    };
+    let reference = crate::prompt_registry::parse_prompt_ref(&raw)?;
+    let (template, resolution) = crate::prompt_registry::resolve_for_step(
+        ctx.storage.as_ref(),
+        ctx.tenant_id.as_str(),
+        ctx.instance_id,
+        ctx.block_id.as_str(),
+        &reference,
+        !dry,
+    )
+    .await?;
+    let variables = reference.variables.clone().unwrap_or_else(|| json!({}));
+    crate::prompt_registry::apply_prompt(&mut ctx.params, &template, &variables)?;
+    Ok(Some(resolution))
+}
+
+/// Record which prompt version produced this output (replay/audit evidence).
+fn attach_prompt(out: &mut Value, prompt: Option<&orch8_types::ai::PromptResolution>) {
+    if let (Some(p), Some(obj)) = (prompt, out.as_object_mut()) {
+        obj.insert(
+            "prompt".into(),
+            serde_json::to_value(p).unwrap_or(Value::Null),
+        );
+    }
 }
 
 /// Emit `OTel` `GenAI` semantic-convention telemetry for a completed LLM call.
@@ -680,6 +794,7 @@ async fn handle_llm_call_failover(
     providers: &[Value],
     response_schema: Option<&schema::CompiledSchema>,
     delta_sink: Option<&DeltaSink>,
+    budgets: &[orch8_types::ai::BudgetStatus],
 ) -> Result<Value, StepError> {
     if providers.is_empty() {
         return Err(permanent("providers array is empty".to_string()));
@@ -691,12 +806,12 @@ async fn handle_llm_call_failover(
         .map_or(DEFAULT_TOTAL_TIMEOUT, Duration::from_secs);
 
     if total_timeout.is_zero() {
-        return failover_inner(params, providers, response_schema, delta_sink).await;
+        return failover_inner(params, providers, response_schema, delta_sink, budgets).await;
     }
 
     match tokio::time::timeout(
         total_timeout,
-        failover_inner(params, providers, response_schema, delta_sink),
+        failover_inner(params, providers, response_schema, delta_sink, budgets),
     )
     .await
     {
@@ -712,6 +827,7 @@ async fn failover_inner(
     providers: &[Value],
     response_schema: Option<&schema::CompiledSchema>,
     delta_sink: Option<&DeltaSink>,
+    budgets: &[orch8_types::ai::BudgetStatus],
 ) -> Result<Value, StepError> {
     let per_attempt_timeout = params
         .get("per_provider_timeout_secs")
@@ -731,6 +847,18 @@ async fn failover_inner(
 
         let format = provider_format(provider_name);
         let merged = merge_provider_params(params, provider_config);
+
+        // A provider whose model is under an exhausted hard-capped tenant
+        // budget is skipped (fail closed); failover may still fall through
+        // to a model that budget does not govern.
+        if let Some(err) = crate::tenant_budgets::blocking_error(
+            budgets,
+            &resolve_model(&merged, provider_name).unwrap_or_default(),
+        ) {
+            warn!(provider = %provider_name, "llm_call failover: provider blocked by tenant budget");
+            last_error = Some(err);
+            continue;
+        }
 
         let api_key = match resolve_api_key(&merged, provider_name) {
             Ok(key) => key,
@@ -894,7 +1022,7 @@ mod tests {
     fn empty_providers_returns_error() {
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(handle_llm_call_failover(&json!({}), &[], None, None));
+            .block_on(handle_llm_call_failover(&json!({}), &[], None, None, &[]));
         assert!(result.is_err());
     }
 
@@ -988,7 +1116,7 @@ mod tests {
     fn cumulative_timeout_returns_error_on_empty_providers_before_timeout() {
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(handle_llm_call_failover(&json!({}), &[], None, None));
+            .block_on(handle_llm_call_failover(&json!({}), &[], None, None, &[]));
         assert!(matches!(result, Err(StepError::Permanent { .. })));
     }
 
@@ -997,7 +1125,7 @@ mod tests {
         let params = json!({"total_timeout_secs": 0});
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(handle_llm_call_failover(&params, &[], None, None));
+            .block_on(handle_llm_call_failover(&params, &[], None, None, &[]));
         assert!(matches!(result, Err(StepError::Permanent { .. })));
     }
 
@@ -2162,5 +2290,404 @@ mod tests {
         assert_eq!(out["message"]["content"], "Hello world");
         assert_eq!(out["usage"]["completion_tokens"], 5);
         assert_eq!(requests_b.lock().await.len(), 1);
+    }
+
+    // --- prompt registry / response cache / tenant budgets (mock provider) --
+
+    fn unique_tenant(prefix: &str) -> String {
+        format!("{prefix}-{}", uuid::Uuid::now_v7())
+    }
+
+    fn ctx_on(
+        storage: &Arc<dyn orch8_storage::StorageBackend>,
+        tenant: &str,
+        instance_id: orch8_types::ids::InstanceId,
+        params: Value,
+    ) -> StepContext {
+        StepContext {
+            instance_id,
+            tenant_id: orch8_types::ids::TenantId::unchecked(tenant),
+            block_id: orch8_types::ids::BlockId::new("llm"),
+            params,
+            context: Arc::new(orch8_types::context::ExecutionContext::default()),
+            attempt: 0,
+            storage: Arc::clone(storage),
+            wait_for_input: None,
+        }
+    }
+
+    async fn sqlite_storage() -> Arc<dyn orch8_storage::StorageBackend> {
+        Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        )
+    }
+
+    async fn push(
+        storage: &Arc<dyn orch8_storage::StorageBackend>,
+        tenant: &str,
+        text: &str,
+    ) -> i32 {
+        crate::prompt_registry::push_prompt(
+            storage.as_ref(),
+            crate::prompt_registry::PromptDraft {
+                tenant_id: tenant.into(),
+                name: "triage".into(),
+                system: Some("Classify {{ product }} tickets.".into()),
+                messages: vec![orch8_types::ai::PromptMessage {
+                    role: "user".into(),
+                    content: text.into(),
+                }],
+                model_params: Some(json!({"model": "gpt-4o", "temperature": 0})),
+                response_schema: None,
+                description: None,
+            },
+        )
+        .await
+        .unwrap()
+        .0
+        .version
+    }
+
+    #[tokio::test]
+    async fn prompt_reference_renders_registry_version_and_records_resolution() {
+        let storage = sqlite_storage().await;
+        let tenant = unique_tenant("prompt");
+        push(&storage, &tenant, "v1 {{ ticket }}").await;
+        let v2 = push(&storage, &tenant, "v2 {{ ticket }}").await;
+        crate::prompt_registry::set_label(
+            storage.as_ref(),
+            &tenant,
+            "triage",
+            "production",
+            1,
+            None,
+        )
+        .await
+        .unwrap();
+        let (base, requests) = start_openai_mock(vec![
+            openai_resp("billing", 5, 1),
+            openai_resp("billing", 5, 1),
+            openai_resp("billing", 5, 1),
+        ])
+        .await;
+        let params = json!({
+            "provider": "openai", "api_key": "k", "base_url": base,
+            "prompt": {"name": "triage", "label": "production",
+                       "variables": {"product": "Orch8", "ticket": "refund please"}},
+        });
+        let instance = orch8_types::ids::InstanceId::new();
+        let out = handle_llm_call(ctx_on(&storage, &tenant, instance, params.clone()))
+            .await
+            .unwrap();
+        assert_eq!(out["prompt"]["name"], "triage");
+        assert_eq!(out["prompt"]["version"], 1);
+        assert_eq!(out["prompt"]["label"], "production");
+        assert_eq!(out["prompt"]["variant"], "stable");
+        let req = requests.lock().await[0].clone();
+        assert_eq!(
+            req["model"], "gpt-4o",
+            "model param from the prompt version"
+        );
+        assert_eq!(req["messages"][0]["content"], "Classify Orch8 tickets.");
+        assert_eq!(req["messages"][1]["content"], "v1 refund please");
+
+        // The label moves; a retry of the SAME step keeps v1 (replay
+        // determinism) while a new execution gets v2.
+        crate::prompt_registry::set_label(
+            storage.as_ref(),
+            &tenant,
+            "triage",
+            "production",
+            v2,
+            None,
+        )
+        .await
+        .unwrap();
+        let retry = handle_llm_call(ctx_on(&storage, &tenant, instance, params.clone()))
+            .await
+            .unwrap();
+        assert_eq!(retry["prompt"]["version"], 1);
+        let fresh = handle_llm_call(ctx_on(
+            &storage,
+            &tenant,
+            orch8_types::ids::InstanceId::new(),
+            params,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(fresh["prompt"]["version"], v2);
+        assert_eq!(
+            requests.lock().await[2]["messages"][1]["content"],
+            "v2 refund please"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_missing_variables_fail_permanently_without_provider_call() {
+        let storage = sqlite_storage().await;
+        let tenant = unique_tenant("prompt");
+        push(&storage, &tenant, "{{ ticket }}").await;
+        let (base, requests) = start_openai_mock(vec![]).await;
+        let err = handle_llm_call(ctx_on(
+            &storage,
+            &tenant,
+            orch8_types::ids::InstanceId::new(),
+            json!({"provider": "openai", "api_key": "k", "base_url": base,
+                   "prompt": {"name": "triage", "variables": {"product": "x"}}}),
+        ))
+        .await
+        .unwrap_err();
+        assert!(matches!(err, StepError::Permanent { .. }), "{err:?}");
+        assert!(err.to_string().contains("ticket"), "{err}");
+        assert!(requests.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_cache_serves_second_call_and_records_savings() {
+        let storage = sqlite_storage().await;
+        let tenant = unique_tenant("cache");
+        let (base, requests) = start_openai_mock(vec![openai_resp("cached answer", 100, 20)]).await;
+        let params = json!({
+            "provider": "openai", "model": "gpt-4o", "api_key": "k", "base_url": base,
+            "messages": [{"role": "user", "content": "same question"}],
+            "cache": {"mode": "exact", "ttl": "1h"},
+        });
+        let first = handle_llm_call(ctx_on(
+            &storage,
+            &tenant,
+            orch8_types::ids::InstanceId::new(),
+            params.clone(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(first["cache"]["hit"], false);
+        assert_eq!(first["cache"]["stored"], true, "{first}");
+
+        // Different credentials, same request → still a hit (other instance).
+        let mut again = params.clone();
+        again["api_key"] = json!("another-key");
+        let second = handle_llm_call(ctx_on(
+            &storage,
+            &tenant,
+            orch8_types::ids::InstanceId::new(),
+            again,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(second["cache"]["hit"], true);
+        assert_eq!(second["message"]["content"], "cached answer");
+        assert_eq!(requests.lock().await.len(), 1, "provider called once");
+
+        // Another tenant never sees the entry.
+        let (base2, requests2) = start_openai_mock(vec![openai_resp("fresh", 1, 1)]).await;
+        let mut other = params.clone();
+        other["base_url"] = json!(base2);
+        let other_tenant = unique_tenant("cache");
+        handle_llm_call(ctx_on(
+            &storage,
+            &other_tenant,
+            orch8_types::ids::InstanceId::new(),
+            other,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(requests2.lock().await.len(), 1);
+
+        let now = chrono::Utc::now();
+        let usage = storage
+            .query_usage(
+                &tenant,
+                now - chrono::Duration::hours(1),
+                now + chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        let hit = usage
+            .iter()
+            .find(|u| u.kind == crate::tenant_budgets::CACHE_HIT_USAGE_KIND)
+            .expect("cache-hit savings recorded");
+        assert_eq!((hit.input_tokens, hit.output_tokens), (100, 20));
+    }
+
+    #[tokio::test]
+    async fn cache_never_stores_errors_tool_calls_or_dry_runs() {
+        let storage = sqlite_storage().await;
+        let tenant = unique_tenant("cache");
+        let tool_turn = json!({
+            "model": "gpt-4o",
+            "choices": [{"message": {"role": "assistant", "content": null,
+                "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"}}]},
+                "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+        });
+        let (base, requests) = start_openai_mock(vec![tool_turn.clone(), tool_turn]).await;
+        let params = json!({
+            "provider": "openai", "model": "gpt-4o", "api_key": "k", "base_url": base,
+            "messages": [{"role": "user", "content": "use a tool"}],
+            "cache": {"mode": "exact"},
+        });
+        for _ in 0..2 {
+            let out = handle_llm_call(ctx_on(
+                &storage,
+                &tenant,
+                orch8_types::ids::InstanceId::new(),
+                params.clone(),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(out["cache"]["hit"], false);
+            assert_eq!(out["cache"]["skip_reason"], "tool_call_turn");
+        }
+        assert_eq!(
+            requests.lock().await.len(),
+            2,
+            "tool-call turns are not cached"
+        );
+
+        // A provider error is never cached: the next call reaches the provider.
+        let (base, requests) = start_openai_mock(vec![
+            json!({"error": {"message": "boom"}}),
+            openai_resp("ok", 1, 1),
+        ])
+        .await;
+        let mut p = params.clone();
+        p["base_url"] = json!(base);
+        p["messages"][0]["content"] = json!("different");
+        let _ = handle_llm_call(ctx_on(
+            &storage,
+            &tenant,
+            orch8_types::ids::InstanceId::new(),
+            p.clone(),
+        ))
+        .await;
+        let ok = handle_llm_call(ctx_on(
+            &storage,
+            &tenant,
+            orch8_types::ids::InstanceId::new(),
+            p,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(ok["message"]["content"], "ok");
+        assert_eq!(requests.lock().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tenant_hard_cap_fails_closed_but_cache_hits_still_serve() {
+        let storage = sqlite_storage().await;
+        let tenant = unique_tenant("budget");
+        // gpt-4o: $2.50/1M input → 400k tokens = $1.00 = the whole budget.
+        let mut spent = openai_resp("spent", 400_000, 0);
+        spent["model"] = json!("gpt-4o-2024-08-06"); // usage is attributed to the response model
+        let (base, requests) = start_openai_mock(vec![spent]).await;
+        let now = chrono::Utc::now();
+        crate::tenant_budgets::save_budget(
+            storage.as_ref(),
+            &orch8_types::ai::TenantBudget {
+                id: uuid::Uuid::now_v7(),
+                tenant_id: tenant.clone(),
+                model: Some("gpt-4o".into()),
+                period: orch8_types::ai::BudgetPeriod::Monthly,
+                limit_usd: 1.0,
+                thresholds: vec![50, 80, 100],
+                hard_cap: true,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+        let params = json!({
+            "provider": "openai", "model": "gpt-4o", "api_key": "k", "base_url": base,
+            "messages": [{"role": "user", "content": "q1"}],
+            "cache": {"mode": "exact"},
+        });
+        handle_llm_call(ctx_on(
+            &storage,
+            &tenant,
+            orch8_types::ids::InstanceId::new(),
+            params.clone(),
+        ))
+        .await
+        .unwrap();
+        let alerts = storage.list_budget_alerts(&tenant, 10).await.unwrap();
+        assert_eq!(alerts.len(), 3, "50/80/100% crossed once each");
+
+        // Same request: served from cache even though the budget is spent.
+        let hit = handle_llm_call(ctx_on(
+            &storage,
+            &tenant,
+            orch8_types::ids::InstanceId::new(),
+            params.clone(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(hit["cache"]["hit"], true);
+
+        // New request: blocked before any provider dispatch.
+        let mut new_q = params;
+        new_q["messages"][0]["content"] = json!("q2");
+        let err = handle_llm_call(ctx_on(
+            &storage,
+            &tenant,
+            orch8_types::ids::InstanceId::new(),
+            new_q,
+        ))
+        .await
+        .unwrap_err();
+        let StepError::Permanent { details, .. } = &err else {
+            panic!("expected permanent budget error, got {err:?}")
+        };
+        assert_eq!(
+            details.as_ref().unwrap()["code"],
+            crate::tenant_budgets::BUDGET_EXCEEDED_CODE
+        );
+        assert_eq!(requests.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn semantic_cache_hits_similar_requests_in_same_partition() {
+        let storage = sqlite_storage().await;
+        let tenant = unique_tenant("semantic");
+        let emb = |v: Value| json!({"model": "text-embedding-3-small", "data": [{"index": 0, "embedding": v}]});
+        let (base, requests) = start_openai_mock(vec![
+            emb(json!([1.0, 0.0, 0.0])),
+            openai_resp("Paris", 12, 1),
+            emb(json!([0.99, 0.05, 0.0])),
+            emb(json!([0.0, 1.0, 0.0])),
+            openai_resp("Blue", 12, 1),
+        ])
+        .await;
+        super::super::builtin::mark_url_safe_for_test(&format!("{base}/embeddings")).await;
+        let params = |q: &str| {
+            json!({
+                "provider": "openai", "model": "gpt-4o", "api_key": "k", "base_url": base,
+                "messages": [{"role": "user", "content": q}],
+                "cache": {"mode": "semantic", "similarity_threshold": 0.95,
+                          "embedding": {"base_url": base, "api_key": "k"}},
+            })
+        };
+        let run = |p: Value| {
+            handle_llm_call(ctx_on(
+                &storage,
+                &tenant,
+                orch8_types::ids::InstanceId::new(),
+                p,
+            ))
+        };
+        let first = run(params("What is the capital of France?")).await.unwrap();
+        assert_eq!(first["cache"]["stored"], true, "{first}");
+        let similar = run(params("Capital of France?")).await.unwrap();
+        assert_eq!(similar["cache"]["hit"], true);
+        assert_eq!(similar["cache"]["mode"], "semantic");
+        assert!(similar["cache"]["similarity"].as_f64().unwrap() > 0.95);
+        assert_eq!(similar["message"]["content"], "Paris");
+        let unrelated = run(params("Favourite colour?")).await.unwrap();
+        assert_eq!(unrelated["cache"]["hit"], false);
+        assert_eq!(unrelated["message"]["content"], "Blue");
+        assert_eq!(requests.lock().await.len(), 5);
     }
 }

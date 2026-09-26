@@ -3,6 +3,7 @@ pub mod api_keys;
 pub mod approval_actions;
 pub mod approvals;
 pub mod auth;
+pub(crate) mod budgets;
 pub mod changes;
 pub mod circuit_breakers;
 pub mod client_contract;
@@ -31,6 +32,7 @@ pub mod plugins;
 pub mod pools;
 pub mod preflight;
 pub mod progress_share;
+pub(crate) mod prompts;
 pub(crate) mod public_http;
 pub mod queue_dispatch;
 pub mod queue_routing;
@@ -251,6 +253,8 @@ fn api_routes() -> Router<AppState> {
         .merge(telemetry::routes())
         .merge(rollback::routes())
         .merge(usage::routes())
+        .merge(prompts::routes())
+        .merge(budgets::routes())
         .merge(webhook_outbox::routes())
         .merge(queue_routing::routes())
         .merge(queue_dispatch::routes())

@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod alert;
 pub mod api_key;
 pub mod approval_link;

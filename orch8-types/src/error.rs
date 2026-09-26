@@ -79,6 +79,7 @@ impl StorageError {
     }
 }
 
+#[cfg(feature = "sqlx")]
 impl From<sqlx::Error> for StorageError {
     fn from(err: sqlx::Error) -> Self {
         match err {
@@ -131,6 +132,7 @@ impl From<sqlx::Error> for StorageError {
 /// (`40001`) and deadlocks (`40P01`), and `SQLite` `SQLITE_BUSY`/`SQLITE_LOCKED`
 /// (primary codes 5/6 and their extended variants — sqlx-sqlite reports the
 /// extended result code).
+#[cfg(feature = "sqlx")]
 fn is_transient_db_code(code: Option<&str>) -> bool {
     matches!(
         code,
@@ -138,6 +140,7 @@ fn is_transient_db_code(code: Option<&str>) -> bool {
     )
 }
 
+#[cfg(feature = "sqlx")]
 impl From<sqlx::migrate::MigrateError> for StorageError {
     fn from(err: sqlx::migrate::MigrateError) -> Self {
         Self::Migration(err.to_string())
@@ -214,6 +217,7 @@ mod tests {
     /// Transport-level sqlx failures must surface as `Connection` (transient),
     /// not `Query` (permanent) — otherwise a momentary network/TLS blip or a
     /// closed pool fails/DLQs healthy instances.
+    #[cfg(feature = "sqlx")]
     #[test]
     fn sqlx_io_error_maps_to_transient_connection() {
         let err: StorageError = sqlx::Error::Io(std::io::Error::new(
@@ -225,6 +229,7 @@ mod tests {
         assert!(err.is_transient());
     }
 
+    #[cfg(feature = "sqlx")]
     #[test]
     fn sqlx_tls_error_maps_to_transient_connection() {
         let err: StorageError = sqlx::Error::Tls("handshake failed".into()).into();
@@ -232,6 +237,7 @@ mod tests {
         assert!(err.is_transient());
     }
 
+    #[cfg(feature = "sqlx")]
     #[test]
     fn sqlx_pool_closed_maps_to_transient_connection() {
         let err: StorageError = sqlx::Error::PoolClosed.into();
@@ -239,6 +245,7 @@ mod tests {
         assert!(err.is_transient());
     }
 
+    #[cfg(feature = "sqlx")]
     #[test]
     fn sqlx_pool_timed_out_maps_to_transient_pool_exhausted() {
         let err: StorageError = sqlx::Error::PoolTimedOut.into();
@@ -249,6 +256,7 @@ mod tests {
     /// Deadlocks (40P01), serialization failures (40001), and `SQLite` lock
     /// contention (BUSY/LOCKED, incl. extended codes) must classify as
     /// transient so the scheduler reschedules instead of DLQ-ing.
+    #[cfg(feature = "sqlx")]
     #[test]
     fn transient_db_error_codes_are_recognised() {
         // 773 is SQLITE_BUSY_TIMEOUT (SQLITE_BUSY | (3 << 8)).

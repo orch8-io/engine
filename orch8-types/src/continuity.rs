@@ -31,10 +31,10 @@ macro_rules! uuid_id {
             Hash,
             Serialize,
             Deserialize,
-            sqlx::Type,
             ToSchema,
         )]
-        #[sqlx(transparent)]
+        #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+        #[cfg_attr(feature = "sqlx", sqlx(transparent))]
         #[serde(transparent)]
         pub struct $name(Uuid);
 

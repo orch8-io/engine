@@ -10,6 +10,7 @@ mod templates;
 
 use commands::alert::AlertCmd;
 use commands::bootstrap::BootstrapCmd;
+use commands::budget::BudgetCmd;
 use commands::checkpoint::CheckpointCmd;
 use commands::config::ConfigCmd;
 use commands::context::ContextCmd;
@@ -27,6 +28,7 @@ use commands::job::JobCmd;
 use commands::package_cmd::PackageCmd;
 use commands::pieces::PiecesCmd;
 use commands::portable::PortableCmd;
+use commands::prompt::PromptCmd;
 use commands::release::ReleaseCmd;
 use commands::sequence::SequenceCmd;
 use commands::share::ShareCmd;
@@ -151,6 +153,12 @@ enum Commands {
     /// Safe workflow releases: diff, validate, canary, promote, rollback.
     #[command(subcommand)]
     Release(ReleaseCmd),
+    /// Versioned prompt registry: push, list, get, label (canaries).
+    #[command(subcommand)]
+    Prompt(PromptCmd),
+    /// Tenant LLM spend budgets: set, list, delete, alerts.
+    #[command(subcommand)]
+    Budget(BudgetCmd),
     /// Signed workflow packages: keygen, build, verify, inspect, install.
     #[command(subcommand)]
     Package(PackageCmd),
@@ -661,6 +669,8 @@ async fn main() -> Result<()> {
         Commands::Debug(cmd) => commands::debugger::run(&client, base, cmd, format).await?,
         Commands::Deploy(cmd) => commands::deploy::run(&client, base, cmd, format).await?,
         Commands::Release(cmd) => commands::release::run(&client, base, cmd, format).await?,
+        Commands::Prompt(cmd) => commands::prompt::run(&client, base, cmd, format).await?,
+        Commands::Budget(cmd) => commands::budget::run(&client, base, cmd, format).await?,
         Commands::Package(cmd) => commands::package_cmd::run(&client, base, cmd, format).await?,
         Commands::Pieces(cmd) => commands::pieces::run(cmd).await?,
         Commands::Checkpoint(cmd) => commands::checkpoint::run(&client, base, cmd, format).await?,

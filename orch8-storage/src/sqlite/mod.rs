@@ -26,6 +26,7 @@
     clippy::option_if_let_else
 )]
 
+mod ai;
 mod alert_rules;
 mod api_keys;
 mod approval_tokens;
