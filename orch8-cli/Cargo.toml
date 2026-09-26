@@ -8,6 +8,9 @@ rust-version.workspace = true
 [[bin]]
 name = "orch8"
 path = "src/main.rs"
+# Same output name as the `orch8` library crate; documenting both races on
+# target/doc/orch8 (cargo#6313).
+doc = false
 
 [dependencies]
 clap.workspace = true
