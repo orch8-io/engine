@@ -1,0 +1,11 @@
+{{- if .Values.config.toml }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "orch8.fullname" . }}-config
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+data:
+  orch8.toml: |
+    {{- .Values.config.toml | nindent 4 }}
+{{- end }}

@@ -1,0 +1,265 @@
+# Default values for the Orch8 engine chart.
+# Every key is validated by values.schema.json.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/orch8-io/engine
+  # Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# -- Process topology (see docs/NODE_ROLES.md).
+#   allInOne: one Deployment running role `all_in_one` (API + engine + push outbox).
+#   split:    a `control` Deployment (API, metrics, webhooks, push outbox, no engine)
+#             plus an `executor` Deployment (engine + worker gRPC surface, HTTP health only).
+# The `edge` role is intentionally not offered: it targets device/edge hosts
+# that run outside the cluster and talk to a managed control plane.
+mode: allInOne
+
+# Settings for the all_in_one Deployment (mode=allInOne).
+allInOne:
+  replicas: 2
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits: { cpu: "2", memory: 1Gi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  extraEnv: []
+
+# Settings for the control Deployment (mode=split).
+control:
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  extraEnv: []
+
+# Settings for the executor Deployment (mode=split).
+executor:
+  replicas: 2
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits: { cpu: "2", memory: 1Gi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  pdb:
+    enabled: true
+    maxUnavailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  extraEnv: []
+
+# Optional continuity gateway (role `gateway`). Startup fails unless root API
+# key, tenant headers, encryption key and full gRPC mTLS material are present
+# and the HTTP listener is loopback-only. It is therefore probed with exec
+# probes and never exposed through the HTTP Ingress; only gRPC (mTLS) is
+# published through its Service.
+gateway:
+  enabled: false
+  replicas: 1
+  tls:
+    # Secret holding the gRPC server certificate chain, private key and the
+    # client CA bundle (all PEM). Required when gateway.enabled=true.
+    existingSecret: ""
+    certKey: tls.crt
+    keyKey: tls.key
+    clientCaKey: ca.crt
+  service:
+    type: ClusterIP
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  pdb:
+    enabled: false
+    maxUnavailable: 1
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  extraEnv: []
+
+# -- Engine settings mapped to ORCH8_* environment variables.
+config:
+  logLevel: info
+  logJson: true
+  # Secure default. Disabling also requires ORCH8_ALLOW_NO_TENANT_ISOLATION=1
+  # (set it via extraEnv) or the server refuses to start.
+  requireTenantHeader: true
+  # Comma-separated origins. `*` is rejected at startup while API-key auth is on.
+  corsOrigins: ""
+  # Optional orch8.toml content. When set it is mounted from a ConfigMap and
+  # passed with --config. Environment variables still take precedence.
+  toml: ""
+
+# Extra env vars added to every engine container (all roles).
+extraEnv: []
+
+# -- Storage backend: postgres (recommended, required for >1 replica or
+# mode=split) or sqlite (single all-in-one replica on a PVC only).
+storage:
+  backend: postgres
+
+externalDatabase:
+  # Full Postgres URL, e.g. postgres://orch8:pass@db:5432/orch8?sslmode=require.
+  # Stored in the chart Secret. Prefer existingSecret in production.
+  url: ""
+  existingSecret: ""
+  existingSecretKey: database-url
+
+# Bundled PostgreSQL (Bitnami subchart). Off by default; intended for
+# evaluation. Requires `helm dependency build` before install. Use a managed
+# Postgres with backups for production.
+postgresql:
+  enabled: false
+  auth:
+    username: orch8
+    database: orch8
+    # Leave empty to let the subchart generate an alphanumeric password.
+    password: ""
+
+sqlite:
+  persistence:
+    size: 5Gi
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    # Use an existing PVC instead of creating one.
+    existingClaim: ""
+
+# -- API key and encryption key.
+# Both are mandatory: the server refuses to start without them.
+secrets:
+  # Use a pre-created Secret instead of the chart-managed one.
+  existingSecret: ""
+  apiKeyKey: api-key
+  encryptionKeyKey: encryption-key
+  # Explicit values (ignored when existingSecret is set). When empty the chart
+  # generates them once and reuses them on upgrade (via `lookup`). The chart
+  # Secret carries helm.sh/resource-policy=keep so an uninstall never deletes
+  # the encryption key. Back it up: data encrypted with it is unreadable
+  # without it.
+  apiKey: ""
+  # Exactly 64 hex characters (openssl rand -hex 32).
+  encryptionKey: ""
+
+# -- Schema migrations (Postgres only; SQLite migrates itself at boot).
+#   job:    a Helm hook Job runs `orch8 migrate` before install/upgrade
+#           (after install when the bundled postgresql subchart is used).
+#   server: every engine pod sets ORCH8_RUN_MIGRATIONS=true.
+#   none:   you run `orch8 migrate` yourself.
+migrations:
+  mode: job
+  backoffLimit: 6
+  activeDeadlineSeconds: 600
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+service:
+  type: ClusterIP
+  httpPort: 8080
+  grpcPort: 50051
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: orch8.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# -- Prometheus integration.
+# /metrics is served only by all_in_one and control pods and REQUIRES the
+# `x-api-key` header (no tenant header). A prometheus-operator ServiceMonitor
+# cannot attach a custom header, so an enabled ServiceMonitor receives 401
+# unless something in front of the pods injects `x-api-key`. Prefer
+# `scrapeConfigSecret` with a Prometheus version that supports the
+# `http_headers` scrape option.
+metrics:
+  # Value of the Prometheus `job` label. Empty = metrics Service name.
+  jobName: ""
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+  scrapeConfigSecret:
+    # Renders a Secret with a raw scrape config for
+    # Prometheus additionalScrapeConfigs. The API key is read from the file
+    # /etc/prometheus/secrets/<secret>/<key>; add the engine Secret to the
+    # Prometheus `spec.secrets` list (it must live in Prometheus' namespace).
+    enabled: false
+    interval: 30s
+  prometheusRule:
+    enabled: false
+    labels: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+# Must exceed the engine's shutdown_grace_period_secs (default 30) so
+# in-flight steps drain before SIGKILL.
+terminationGracePeriodSeconds: 45
+
+probes:
+  startup:
+    periodSeconds: 5
+    failureThreshold: 30
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 6

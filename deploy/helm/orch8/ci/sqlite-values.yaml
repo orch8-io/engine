@@ -1,0 +1,10 @@
+# Single-node SQLite on a PVC.
+storage:
+  backend: sqlite
+allInOne:
+  replicas: 1
+  autoscaling: { enabled: false }
+  pdb: { enabled: true }
+sqlite:
+  persistence:
+    size: 2Gi

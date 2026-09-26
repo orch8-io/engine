@@ -1,0 +1,195 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Orch8 Helm chart values",
+  "type": "object",
+  "definitions": {
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": { "type": "object" },
+        "limits": { "type": "object" }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "pdb": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxUnavailable": { "type": ["integer", "string"] }
+      }
+    },
+    "envList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" } }
+      }
+    },
+    "roleDeployment": {
+      "type": "object",
+      "required": ["replicas", "autoscaling", "pdb"],
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 0 },
+        "resources": { "$ref": "#/definitions/resources" },
+        "autoscaling": { "$ref": "#/definitions/autoscaling" },
+        "pdb": { "$ref": "#/definitions/pdb" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "extraEnv": { "$ref": "#/definitions/envList" }
+      }
+    }
+  },
+  "required": ["image", "mode", "storage", "secrets", "migrations", "service"],
+  "properties": {
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets": { "type": "array" },
+    "mode": {
+      "description": "allInOne = one all_in_one Deployment; split = control + executor Deployments. The edge role is not offered by this chart.",
+      "enum": ["allInOne", "split"]
+    },
+    "allInOne": { "$ref": "#/definitions/roleDeployment" },
+    "control": { "$ref": "#/definitions/roleDeployment" },
+    "executor": { "$ref": "#/definitions/roleDeployment" },
+    "gateway": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicas": { "type": "integer", "minimum": 0 },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "certKey": { "type": "string", "minLength": 1 },
+            "keyKey": { "type": "string", "minLength": 1 },
+            "clientCaKey": { "type": "string", "minLength": 1 }
+          }
+        },
+        "service": { "type": "object", "properties": { "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] } } },
+        "resources": { "$ref": "#/definitions/resources" },
+        "pdb": { "$ref": "#/definitions/pdb" },
+        "extraEnv": { "$ref": "#/definitions/envList" }
+      },
+      "if": { "properties": { "enabled": { "const": true } } },
+      "then": {
+        "properties": { "tls": { "required": ["existingSecret"], "properties": { "existingSecret": { "minLength": 1 } } } }
+      }
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "logLevel": { "enum": ["trace", "debug", "info", "warn", "error"] },
+        "logJson": { "type": "boolean" },
+        "requireTenantHeader": { "type": "boolean" },
+        "corsOrigins": { "type": "string", "not": { "const": "*" } },
+        "toml": { "type": "string" }
+      }
+    },
+    "extraEnv": { "$ref": "#/definitions/envList" },
+    "storage": {
+      "type": "object",
+      "required": ["backend"],
+      "properties": { "backend": { "enum": ["postgres", "sqlite"] } }
+    },
+    "externalDatabase": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string", "pattern": "^$|^postgres(ql)?://" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "postgresql": {
+      "type": "object",
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "sqlite": { "type": "object" },
+    "secrets": {
+      "type": "object",
+      "required": ["apiKeyKey", "encryptionKeyKey"],
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "apiKeyKey": { "type": "string", "minLength": 1 },
+        "encryptionKeyKey": { "type": "string", "minLength": 1 },
+        "apiKey": { "type": "string" },
+        "encryptionKey": {
+          "type": "string",
+          "description": "Exactly 64 hex characters, or empty to generate one.",
+          "pattern": "^$|^[0-9a-fA-F]{64}$"
+        }
+      }
+    },
+    "migrations": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["job", "server", "none"] },
+        "backoffLimit": { "type": "integer", "minimum": 0 },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 1 },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "required": ["httpPort", "grpcPort"],
+      "properties": {
+        "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "httpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "grpcPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "annotations": { "type": "object" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "hosts": { "type": "array" },
+        "tls": { "type": "array" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "jobName": { "type": "string" },
+        "serviceMonitor": { "type": "object", "properties": { "enabled": { "type": "boolean" } } },
+        "scrapeConfigSecret": { "type": "object", "properties": { "enabled": { "type": "boolean" } } },
+        "prometheusRule": { "type": "object", "properties": { "enabled": { "type": "boolean" } } }
+      }
+    },
+    "serviceAccount": { "type": "object" },
+    "podSecurityContext": { "type": "object" },
+    "securityContext": { "type": "object" },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 31 },
+    "probes": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "storage": { "properties": { "backend": { "const": "sqlite" } } } } },
+      "then": { "properties": { "mode": { "const": "allInOne" } } }
+    }
+  ]
+}

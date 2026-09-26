@@ -1,0 +1,11 @@
+# All-in-one, external Postgres URL, generated secrets, migration hook Job.
+externalDatabase:
+  url: postgres://orch8:secret@db.example:5432/orch8?sslmode=require
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: orch8.example.com
+      paths:
+        - path: /
+          pathType: Prefix

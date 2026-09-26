@@ -1,0 +1,36 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- $job := include "orch8.metricsJobName" . }}
+# Rules mirror docs/prometheus-alerts.yml with the job label templated.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "orch8.fullname" . }}
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: orch8
+      rules:
+        - alert: Orch8EngineDown
+          expr: up{job="{{ $job }}"} == 0
+          for: 2m
+          labels: { severity: critical }
+          annotations: { summary: "Orch8 engine is unavailable" }
+        - alert: Orch8QueueBacklogGrowing
+          expr: deriv(orch8_queue_depth{job="{{ $job }}"}[15m]) > 0 and orch8_queue_depth{job="{{ $job }}"} > 100
+          for: 10m
+          labels: { severity: warning }
+          annotations: { summary: "Orch8 queue backlog is growing" }
+        - alert: Orch8HighFailureRatio
+          expr: rate(orch8_instances_failed_total{job="{{ $job }}"}[10m]) / clamp_min(rate(orch8_instances_completed_total{job="{{ $job }}"}[10m]) + rate(orch8_instances_failed_total{job="{{ $job }}"}[10m]), 0.001) > 0.1
+          for: 10m
+          labels: { severity: warning }
+          annotations: { summary: "More than 10% of Orch8 instances are failing" }
+        - alert: Orch8StaleRecovery
+          expr: increase(orch8_recovery_stale_instances_total{job="{{ $job }}"}[10m]) > 0
+          labels: { severity: warning }
+          annotations: { summary: "Orch8 reclaimed stale running instances" }
+{{- end }}
