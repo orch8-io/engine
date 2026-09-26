@@ -51,6 +51,21 @@ An execution detail page includes the execution tree, unified timeline, artifact
 audit entries, context patching, checkpoints, resume-from-block, and fork preview.
 Potentially destructive actions ask for confirmation and keep their scope visible.
 
+The execution **Timeline** tab is a time-scrubber: a keyboard-accessible slider over
+`GET /instances/{id}/timeline` that shows block states and outputs as of each
+executed step, the nearest saved checkpoint's context, and **Fork from here**
+(`POST /instances/{id}/fork`, sandbox by default, previewed and confirmed first).
+
+Sequence detail and **New sequence** include a visual editor that edits the same
+JSON shown in its JSON tab (the JSON is authoritative; unknown fields are kept).
+It runs `POST /sequences/preflight` live and saves edits as a new immutable
+version; roll it out gradually with a release.
+
+Action buttons (start, signal, cancel, retry, DLQ retry, approvals, batch actions,
+fork, create sequence, create cron) offer **Copy as** curl, Node SDK, Python SDK,
+or `orch8` CLI for the exact request, with the API key shown as `$ORCH8_API_KEY`.
+The CLI option is disabled where no CLI command sends the identical request.
+
 ## Environment identity
 
 Set an environment label so operators do not confuse production with staging:

@@ -4,9 +4,16 @@ import { usePageTitle } from "../hooks/usePageTitle";
 import {
   getSequence,
   createInstance,
+  createSequence,
+  listSequences,
+  listSequenceVersions,
   setSequenceStatus,
   type SequenceDefinition,
 } from "../api";
+import { SequenceEditor } from "../components/SequenceEditor";
+import { CopyAsMenu } from "../components/CopyAsMenu";
+import { createInstanceRequest, createSequenceRequest } from "../lib/requests";
+import { parseSequenceText, prepareNewVersion, serializeSequence } from "../lib/sequenceModel";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Section } from "../components/ui/Section";
 import { Glossary, type GlossaryItem } from "../components/ui/Glossary";
@@ -104,6 +111,15 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
       "Belong to an A/B block. Each execution picks one variant weighted by the given number — useful for canaries and experiments.",
   },
 ];
+
+/** Every stored version number for (tenant, namespace, name), deprecated ones included. */
+async function fetchVersions(tenant: string, namespace: string, name: string): Promise<number[]> {
+  const [live, all] = await Promise.all([
+    listSequenceVersions({ tenant_id: tenant, namespace, name }).catch(() => [] as SequenceDefinition[]),
+    listSequences({ tenant_id: tenant, namespace, limit: "1000" }).catch(() => [] as SequenceDefinition[]),
+  ]);
+  return [...live, ...all.filter((s) => s.name === name)].map((s) => s.version);
+}
 
 function countNodes(blocks: BlockLike[]): number {
   let n = 0;
@@ -307,6 +323,63 @@ export default function SequenceDetail() {
     }
   };
 
+  const [editOpen, setEditOpen] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<{ id: string; version: number; name: string; warnings: string[] } | null>(null);
+  const [knownVersions, setKnownVersions] = useState<number[]>([]);
+
+  const openEditor = () => {
+    if (!seq) return;
+    setEditText(serializeSequence(seq));
+    setSaveError(null);
+    setSaved(null);
+    setEditOpen(true);
+  };
+
+  // Keep the next version number current (for the label and Copy-as) as the
+  // draft's identity changes.
+  const parsedEdit = editOpen ? parseSequenceText(editText) : null;
+  const draftIdentity =
+    parsedEdit?.ok === true
+      ? JSON.stringify([parsedEdit.value.tenant_id, parsedEdit.value.namespace, parsedEdit.value.name])
+      : null;
+  useEffect(() => {
+    if (!draftIdentity) return;
+    const [tenant, namespace, name] = JSON.parse(draftIdentity) as [string, string, string];
+    let live = true;
+    fetchVersions(String(tenant), String(namespace), String(name)).then((v) => {
+      if (live) setKnownVersions(v);
+    });
+    return () => {
+      live = false;
+    };
+  }, [draftIdentity]);
+
+  const saveNewVersion = async () => {
+    const parsed = parseSequenceText(editText);
+    if (!parsed.ok) {
+      setSaveError(`Sequence JSON is invalid: ${parsed.error}`);
+      return;
+    }
+    const d = parsed.value;
+    setSaveBusy(true);
+    setSaveError(null);
+    try {
+      // Re-read versions at save time so a concurrent deploy cannot make us
+      // reuse a number; the engine still rejects a duplicate version.
+      const versions = await fetchVersions(String(d.tenant_id), String(d.namespace), String(d.name));
+      const body = prepareNewVersion(d, versions, crypto.randomUUID(), new Date());
+      const res = await createSequence(body);
+      setSaved({ id: res.id, version: body.version as number, name: String(d.name), warnings: res.warnings ?? [] });
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaveBusy(false);
+    }
+  };
+
   const [runOpen, setRunOpen] = useState(false);
   const [runJson, setRunJson] = useState("{}");
   const [runBusy, setRunBusy] = useState(false);
@@ -394,6 +467,14 @@ export default function SequenceDetail() {
                   Run
                 </Button>
               )}
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => (editOpen ? setEditOpen(false) : openEditor())}
+                title="Edit visually or as JSON and save as a new immutable version"
+              >
+                {editOpen ? "Close editor" : "Edit"}
+              </Button>
               {seq.deprecated ? (
                 <Button
                   variant="default"
@@ -474,11 +555,103 @@ export default function SequenceDetail() {
                 </div>
                 {runError && <div className="notice notice-warn">{runError}</div>}
                 <div className="flex justify-end gap-2">
+                  <CopyAsMenu
+                    spec={() => {
+                      try {
+                        const data = JSON.parse(runJson) as unknown;
+                        if (data === null || typeof data !== "object" || Array.isArray(data)) return null;
+                        return createInstanceRequest({
+                          sequence_id: seq.id,
+                          tenant_id: seq.tenant_id,
+                          namespace: seq.namespace,
+                          context: { data, config: {}, audit: [] },
+                        });
+                      } catch {
+                        return null;
+                      }
+                    }}
+                  />
                   <Button size="sm" variant="ghost" disabled={runBusy} onClick={() => setRunOpen(false)}>
                     Cancel
                   </Button>
                   <Button size="sm" variant="primary" disabled={runBusy} onClick={submitRun}>
                     {runBusy ? "Starting…" : "Start instance"}
+                  </Button>
+                </div>
+              </div>
+            </Section>
+          )}
+
+          {editOpen && (
+            <Section
+              eyebrow="Editor"
+              title="Edit as a new version"
+              description={
+                <>
+                  Edit visually or in JSON — the <strong className="text-ink">JSON tab is authoritative</strong> and
+                  fields the editor does not know are kept verbatim. Saving never modifies v{seq.version}: it
+                  registers the draft as a new immutable version with a fresh id. Preflight runs live against
+                  the engine as you edit.
+                </>
+              }
+              annotation={
+                <>
+                  <strong className="text-ink">Routing.</strong> Starts that name a sequence id stay on that
+                  version. Name-based resolution (triggers, sub-sequences) picks the highest non-deprecated
+                  version, so a saved version takes that traffic immediately. To expose it gradually, create a{" "}
+                  <Link to="/releases" className="text-signal hover:underline">release</Link> from v{seq.version}{" "}
+                  to the new version and canary it (docs/RELEASES.md).
+                </>
+              }
+            >
+              <div className="space-y-4">
+                <SequenceEditor text={editText} onTextChange={setEditText} />
+                {saveError && <div className="notice notice-warn">{saveError}</div>}
+                {saved && (
+                  <div className="notice notice-ok space-y-1" role="status">
+                    <div>
+                      Saved <span className="font-mono">{saved.name}</span> v{saved.version}.{" "}
+                      <Link to={`/sequences/${saved.id}`} className="underline" onClick={() => setEditOpen(false)}>
+                        Open v{saved.version}
+                      </Link>
+                      {" · "}
+                      <Link
+                        to={`/releases?${new URLSearchParams({ tenant: seq.tenant_id, baseline: seq.id, candidate: saved.id }).toString()}`}
+                        className="underline"
+                      >
+                        Create guarded release v{seq.version} → v{saved.version}
+                      </Link>
+                    </div>
+                    {saved.warnings.length > 0 && (
+                      <ul className="text-hold text-[12px]">
+                        {saved.warnings.map((w) => (
+                          <li key={w}>{w}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                <div className="flex justify-end items-center gap-2 flex-wrap">
+                  <span className="annotation text-[11px] mr-auto">
+                    Saves as v{Math.max(seq.version, ...knownVersions) + 1}
+                    {parsedEdit?.ok && parsedEdit.value.name !== seq.name
+                      ? ` of “${String(parsedEdit.value.name)}” (name changed)`
+                      : ""}
+                  </span>
+                  <CopyAsMenu
+                    spec={() => {
+                      const parsed = parseSequenceText(editText);
+                      if (!parsed.ok) return null;
+                      return createSequenceRequest(
+                        prepareNewVersion(parsed.value, [seq.version, ...knownVersions], crypto.randomUUID(), new Date()),
+                      );
+                    }}
+                  />
+                  <Button size="sm" variant="ghost" disabled={saveBusy} onClick={() => setEditOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" variant="primary" disabled={saveBusy || !parsedEdit?.ok} onClick={saveNewVersion}>
+                    {saveBusy ? "Saving…" : "Save as new version"}
                   </Button>
                 </div>
               </div>

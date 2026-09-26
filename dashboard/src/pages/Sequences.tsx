@@ -21,6 +21,9 @@ import { Id } from "../components/ui/Mono";
 import { Relative } from "../components/ui/Relative";
 import { SkeletonTable } from "../components/ui/Skeleton";
 import { IconPlus } from "../components/ui/Icons";
+import { SequenceEditor } from "../components/SequenceEditor";
+import { CopyAsMenu } from "../components/CopyAsMenu";
+import { createSequenceRequest } from "../lib/requests";
 import {
   BLANK_TEMPLATE,
   templateEditorContent,
@@ -415,24 +418,33 @@ function CreateSequenceForm({
     if (!dirty) setJson(templateEditorContent(template, { tenantId, namespace: v }));
   };
 
-  const submit = async () => {
+  /** The exact body Deploy posts, or an error message. */
+  const buildBody = (): { body: Record<string, unknown> } | { error: string } => {
     let parsed: unknown;
     try {
       parsed = JSON.parse(json);
     } catch {
-      onError("Sequence JSON is not valid JSON");
-      return;
+      return { error: "Sequence JSON is not valid JSON" };
     }
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      onError("Sequence JSON must be an object");
-      return;
+      return { error: "Sequence JSON must be an object" };
     }
-    const body = parsed as Record<string, unknown>;
+    const body = { ...(parsed as Record<string, unknown>) };
     // POST /sequences deserializes the full SequenceDefinition, which carries
     // server-side identity fields authoring payloads usually omit — fill them
     // here so the editor only needs the human-authored part.
     if (!body["id"]) body["id"] = crypto.randomUUID();
     if (!body["created_at"]) body["created_at"] = new Date().toISOString();
+    return { body };
+  };
+
+  const submit = async () => {
+    const built = buildBody();
+    if ("error" in built) {
+      onError(built.error);
+      return;
+    }
+    const body = built.body;
     setBusy(true);
     try {
       const res = await createSequence(body);
@@ -508,22 +520,27 @@ function CreateSequenceForm({
         <div>
           <FieldLabel>Sequence definition (JSON)</FieldLabel>
           <p className="annotation mb-1">
-            Exactly what gets POSTed to /sequences — id and created_at are
-            filled in automatically if you leave them out.
+            Build it visually or edit the JSON — the JSON is exactly what gets
+            POSTed to /sequences; id and created_at are filled in automatically
+            if you leave them out.
           </p>
-          <textarea
-            value={json}
-            onChange={(e) => {
-              setJson(e.target.value);
+          <SequenceEditor
+            text={json}
+            onTextChange={(t) => {
+              setJson(t);
               setDirty(true);
             }}
             rows={18}
-            spellCheck={false}
-            className="w-full bg-sunken border border-rule px-2.5 py-2 text-[12px] font-mono text-ink placeholder:text-faint focus:border-signal focus:outline-none"
           />
         </div>
 
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          <CopyAsMenu
+            spec={() => {
+              const built = buildBody();
+              return "body" in built ? createSequenceRequest(built.body) : null;
+            }}
+          />
           <Button variant="primary" size="sm" disabled={busy} onClick={submit}>
             Deploy sequence
           </Button>

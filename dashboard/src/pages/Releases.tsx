@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   createRelease,
   evaluateRelease,
@@ -146,9 +147,12 @@ function CreateReleaseForm({ sequences, loading, onCreated, onError }: {
   onCreated: (release: WorkflowRelease) => void;
   onError: (text: string) => void;
 }) {
-  const [tenant, setTenant] = useState("");
-  const [baseline, setBaseline] = useState("");
-  const [candidate, setCandidate] = useState("");
+  // Prefill from the sequence editor's "Create guarded release" link
+  // (?tenant=…&baseline=…&candidate=…). Nothing is created until submit.
+  const [params] = useSearchParams();
+  const [tenant, setTenant] = useState(params.get("tenant") ?? "");
+  const [baseline, setBaseline] = useState(params.get("baseline") ?? "");
+  const [candidate, setCandidate] = useState(params.get("candidate") ?? "");
   const [maxRegression, setMaxRegression] = useState("0.05");
   const [minSample, setMinSample] = useState("20");
   const [busy, setBusy] = useState(false);
