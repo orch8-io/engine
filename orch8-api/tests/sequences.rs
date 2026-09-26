@@ -119,6 +119,59 @@ async fn create_sequence_accepts_yaml_content_type() {
 }
 
 #[tokio::test]
+async fn validation_errors_carry_stable_error_code_and_docs_url() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let body = json!({
+        "id": Uuid::now_v7(),
+        "tenant_id": "t1",
+        "namespace": "ns1",
+        "name": "dup",
+        "version": 1,
+        "blocks": [
+            {"type": "step", "id": "a", "handler": "noop"},
+            {"type": "step", "id": "a", "handler": "noop"}
+        ],
+        "created_at": chrono::Utc::now().to_rfc3339()
+    });
+    let resp = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "invalid_argument");
+    assert_eq!(body["error"]["error_code"], "ORCH8-V005");
+    assert_eq!(
+        body["error"]["docs_url"],
+        "https://orch8.io/docs/errors#ORCH8-V005"
+    );
+
+    // JSON syntax errors now come back in the same envelope, with location.
+    let resp = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .header("Content-Type", "application/json")
+        .body("{\n  \"name\": ,\n}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["error_code"], "ORCH8-V001");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid JSON at line 2"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn sequence_decode_is_lenient_by_default_and_strict_on_request() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

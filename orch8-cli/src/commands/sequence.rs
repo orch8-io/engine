@@ -512,10 +512,14 @@ fn print_preflight_report(report: &serde_json::Value) {
         );
         for finding in check["findings"].as_array().into_iter().flatten() {
             println!(
-                "      - {} {}",
+                "      - {}{} {}",
                 finding["code"].as_str().unwrap_or(""),
+                crate::error_code_suffix(finding),
                 finding["summary"].as_str().unwrap_or("")
             );
+            if let Some(url) = finding["docs_url"].as_str() {
+                println!("        docs: {url}");
+            }
             for rem in finding["remediation"].as_array().into_iter().flatten() {
                 if let Some(cmd) = rem["command"].as_str() {
                     println!("        fix: {cmd}");

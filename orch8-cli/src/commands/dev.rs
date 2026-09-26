@@ -184,11 +184,18 @@ pub fn parse_sequence_value(mut value: Value, version: i32) -> Result<LoadedSequ
     obj.insert("created_at".into(), serde_json::json!(Utc::now()));
 
     let handlers_by_block = block_handlers(&value);
-    let definition = orch8_types::sequence::deserialize_sequence_strict(&value)
-        .context("invalid sequence definition")?;
-    definition
-        .validate()
-        .map_err(|e| anyhow!("invalid sequence: {e}"))?;
+    let definition = orch8_types::sequence::deserialize_sequence_strict(&value).map_err(|e| {
+        anyhow!(
+            "invalid sequence definition: {e}{}",
+            crate::seqdoc::coded_suffix("SEQUENCE_DECODE_FAILED")
+        )
+    })?;
+    definition.validate().map_err(|e| {
+        anyhow!(
+            "invalid sequence: {e}{}",
+            crate::seqdoc::coded_suffix(e.catalog_key())
+        )
+    })?;
     Ok(LoadedSequence {
         definition,
         handlers_by_block,
@@ -1241,6 +1248,7 @@ mod tests {
         let err = format!("{:#}", load_sequence(&file, 2).unwrap_err());
         assert!(err.contains("invalid YAML"), "got: {err}");
         assert!(err.contains("sequence.yaml:"), "got: {err}");
+        assert!(err.contains("[ORCH8-V001]"), "got: {err}");
 
         // The workflows directory watcher tracks YAML documents too.
         let watch = DirWatch::new(dir.path());

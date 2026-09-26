@@ -23,13 +23,23 @@ pub fn parse_text(path: &Path, text: &str) -> Result<Value> {
     let format = DocumentFormat::from_path(path);
     parse_document(text, format).map_err(|e| match (e.line, e.column) {
         (Some(line), Some(column)) => anyhow!(
-            "{}:{line}:{column}: invalid {}: {}",
+            "{}:{line}:{column}: invalid {}: {}{}",
             path.display(),
             format.as_str().to_ascii_uppercase(),
-            e.message
+            e.message,
+            coded_suffix("DOCUMENT_SYNTAX")
         ),
-        _ => anyhow!("{}: {e}", path.display()),
+        _ => anyhow!("{}: {e}{}", path.display(), coded_suffix("DOCUMENT_SYNTAX")),
     })
+}
+
+/// ` [ORCH8-V001] — see https://orch8.io/docs/errors#ORCH8-V001` for a
+/// catalogued key, empty otherwise. Appended to local validation errors so
+/// CLI output carries the same stable codes as API error bodies.
+pub fn coded_suffix(key: &str) -> String {
+    orch8_types::error_catalog::lookup(key)
+        .map(|entry| format!(" [{}] — see {}", entry.code, entry.docs_url()))
+        .unwrap_or_default()
 }
 
 /// Read and parse a JSON or YAML document from disk.

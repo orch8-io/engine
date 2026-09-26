@@ -346,6 +346,35 @@ fn render_json_table(body: &Value) -> Option<String> {
     }
 }
 
+/// ` [ORCH8-P001]` when a finding / error body carries a stable error code,
+/// else empty. Used next to the machine key in human output.
+pub fn error_code_suffix(value: &Value) -> String {
+    value
+        .get("error_code")
+        .and_then(Value::as_str)
+        .map(|code| format!(" [{code}]"))
+        .unwrap_or_default()
+}
+
+/// Render an API error body's message plus its stable code and docs link
+/// (`message [ORCH8-V005] — see https://orch8.io/docs/errors#ORCH8-V005`).
+pub fn describe_api_error(body: &Value, fallback: &str) -> String {
+    let message = body
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| body.get("error").and_then(Value::as_str))
+        .unwrap_or(fallback);
+    let detail = body.get("error").unwrap_or(&Value::Null);
+    match (
+        detail.get("error_code").and_then(Value::as_str),
+        detail.get("docs_url").and_then(Value::as_str),
+    ) {
+        (Some(code), Some(url)) => format!("{message} [{code}] — see {url}"),
+        (Some(code), None) => format!("{message} [{code}]"),
+        _ => message.to_string(),
+    }
+}
+
 pub async fn print_response(resp: reqwest::Response, format: OutputFormat) -> Result<()> {
     let status = resp.status();
     let text = resp
@@ -363,11 +392,8 @@ pub async fn print_response(resp: reqwest::Response, format: OutputFormat) -> Re
             _ => println!("{}", serde_json::to_string_pretty(&body)?),
         }
     } else {
-        let message = body
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .or_else(|| body.get("error").and_then(Value::as_str))
-            .unwrap_or_else(|| status.canonical_reason().unwrap_or("request failed"));
+        let message =
+            describe_api_error(&body, status.canonical_reason().unwrap_or("request failed"));
         let hint = match status {
             reqwest::StatusCode::UNAUTHORIZED => {
                 " Set --api-key or ORCH8_API_KEY to the server's configured key."
@@ -708,6 +734,28 @@ mod tests {
                 .contains("failed to read response body (HTTP 200 OK)")
         );
         server.await.unwrap();
+    }
+
+    #[test]
+    fn api_errors_render_stable_code_and_docs_link() {
+        let body = serde_json::json!({"error": {
+            "code": "invalid_argument",
+            "message": "invalid argument: duplicate block id: a",
+            "error_code": "ORCH8-V005",
+            "docs_url": "https://orch8.io/docs/errors#ORCH8-V005",
+        }});
+        assert_eq!(
+            describe_api_error(&body, "x"),
+            "invalid argument: duplicate block id: a [ORCH8-V005] — see \
+             https://orch8.io/docs/errors#ORCH8-V005"
+        );
+        let plain = serde_json::json!({"error": {"message": "nope"}});
+        assert_eq!(describe_api_error(&plain, "x"), "nope");
+        assert_eq!(describe_api_error(&Value::Null, "fallback"), "fallback");
+        assert_eq!(
+            error_code_suffix(&serde_json::json!({"error_code": "ORCH8-P001"})),
+            " [ORCH8-P001]"
+        );
     }
 
     #[test]

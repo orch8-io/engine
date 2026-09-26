@@ -17,12 +17,16 @@ use crate::error::ApiError;
 /// authored, not on the first instance.
 pub fn validate_schema_is_well_formed(schema: &serde_json::Value) -> Result<(), ApiError> {
     if !schema.is_object() {
-        return Err(ApiError::InvalidArgument(
-            "input_schema must be a JSON object".into(),
+        return Err(ApiError::validation(
+            "INVALID_INPUT_SCHEMA",
+            "input_schema must be a JSON object",
         ));
     }
     jsonschema::validator_for(schema).map_err(|e| {
-        ApiError::InvalidArgument(format!("input_schema is not a valid JSON Schema: {e}"))
+        ApiError::validation(
+            "INVALID_INPUT_SCHEMA",
+            format!("input_schema is not a valid JSON Schema: {e}"),
+        )
     })?;
     Ok(())
 }
