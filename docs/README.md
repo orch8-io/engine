@@ -26,6 +26,9 @@ or download `/api-docs/openapi.json`. Published snapshots live at
 
 - [Dashboard](DASHBOARD.md) — connect the operator console and use its current surfaces.
 - [Safe releases](RELEASES.md) — diff, validate, canary, evaluate, promote, and roll back.
+- [Prompt registry](PROMPTS.md) — versioned, tenant-scoped prompts with labels, canaries, and replay-safe resolution in `llm_call`.
+- [LLM response cache](LLM_CACHE.md) — opt-in exact/semantic `llm_call` caching, what is never cached, and savings reporting.
+- [Tenant spend budgets](BUDGETS.md) — daily/monthly USD caps, threshold alerts, and fail-closed hard caps.
 - [Deployment](DEPLOYMENT.md) — Docker, Kubernetes, cloud targets, and the production checklist.
 - [Migration guides](MIGRATION_GUIDES.md) — move from Temporal, Airflow, or Prefect with a reversible cutover.
 - [Local tunnel](LOCAL_TUNNEL.md) — receive signed webhooks during development.

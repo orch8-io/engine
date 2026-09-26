@@ -30,6 +30,8 @@
 //! | `max_image_bytes` | number | 20 MiB | Per-image size cap, pre-encoding (can only lower the default) |
 //! | `stream` | bool | `false` | Consume the provider's SSE stream (see Streaming) |
 //! | `stream_idle_timeout_secs` | number | `30` | Max gap between streamed chunks before failing retryable |
+//! | `prompt` | object | — | Registry prompt `{name, version \| label, variables}` (see `docs/PROMPTS.md`) |
+//! | `cache` | object | — | Response cache `{mode: exact\|semantic, ttl, …}` (see `docs/LLM_CACHE.md`) |
 //!
 //! ## Streaming
 //!
