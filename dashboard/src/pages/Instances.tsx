@@ -11,6 +11,8 @@ import {
   type BatchActionKind,
 } from "../api";
 import { Button } from "../components/ui/Button";
+import { CopyAsMenu } from "../components/CopyAsMenu";
+import { batchActionRequest } from "../lib/requests";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageMeta } from "../components/ui/PageMeta";
 import { Section } from "../components/ui/Section";
@@ -316,6 +318,10 @@ export default function Instances() {
               >
                 Confirm {pending.kind}
               </Button>
+              <CopyAsMenu
+                align="left"
+                spec={() => batchActionRequest({ filter: buildBatchFilter(), action: pending.kind })}
+              />
               <Button variant="ghost" size="sm" disabled={batchBusy} onClick={() => setPending(null)}>
                 Cancel
               </Button>

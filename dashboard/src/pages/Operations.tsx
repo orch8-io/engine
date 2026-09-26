@@ -26,6 +26,8 @@ import { Section } from "../components/ui/Section";
 import { Glossary, type GlossaryItem } from "../components/ui/Glossary";
 import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
 import { Button } from "../components/ui/Button";
+import { CopyAsMenu } from "../components/CopyAsMenu";
+import { retryInstanceRequest } from "../lib/requests";
 import { Badge } from "../components/ui/Badge";
 import { Relative } from "../components/ui/Relative";
 import { IconRetry, IconRefresh, IconStop } from "../components/ui/Icons";
@@ -442,14 +444,17 @@ function DlqSection({
                     <Relative at={i.updated_at} />
                   </TD>
                   <TD className="text-right align-top">
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      onClick={() => retry(i.id)}
-                      title="Re-queue this execution from the failed step"
-                    >
-                      <IconRetry size={13} /> Retry
-                    </Button>
+                    <div className="inline-flex items-center gap-1">
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => retry(i.id)}
+                        title="Re-queue this execution from the failed step"
+                      >
+                        <IconRetry size={13} /> Retry
+                      </Button>
+                      <CopyAsMenu spec={() => retryInstanceRequest(i.id)} />
+                    </div>
                   </TD>
                 </TR>
               );

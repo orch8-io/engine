@@ -1,3 +1,17 @@
+import type { ConnectionInfo } from "./lib/copyAs";
+import type { TimelineEntryDto, TimelineTransitionDto } from "./lib/timeTravel";
+import {
+  batchActionRequest,
+  createCronRequest,
+  createInstanceRequest,
+  createSequenceRequest,
+  forkInstanceRequest,
+  retryInstanceRequest,
+  signalRequest,
+  type ApiRequestSpec,
+  type ForkBody,
+} from "./lib/requests";
+
 const DEFAULT_API_URL = import.meta.env.VITE_ORCH8_API_URL || "http://localhost:8080";
 
 function getApiUrl(): string {
@@ -10,6 +24,11 @@ function getApiKey(): string | null {
 
 function getTenantId(): string | null {
   return localStorage.getItem("orch8_tenant_id");
+}
+
+/** Base URL + tenant header the dashboard uses (never the API key). */
+export function connectionInfo(): ConnectionInfo {
+  return { baseUrl: getApiUrl(), tenantId: getTenantId() };
 }
 
 export function setApiUrl(url: string) {
@@ -339,20 +358,14 @@ export async function sendSignal(
   payload: unknown = {},
   signal?: AbortSignal,
 ): Promise<{ signal_id: string }> {
-  return mutate(
-    `/instances/${encodeURIComponent(instanceId)}/signals`,
-    "POST",
-    { signal_type, payload },
-    undefined,
-    signal,
-  );
+  return sendSpec(signalRequest(instanceId, signal_type, payload), signal);
 }
 
 export async function retryInstance(
   id: string,
   signal?: AbortSignal,
 ): Promise<{ id: string; state: string }> {
-  return mutate(`/instances/${encodeURIComponent(id)}/retry`, "POST", undefined, undefined, signal);
+  return sendSpec(retryInstanceRequest(id), signal);
 }
 
 export type BatchActionKind = "retry" | "pause" | "resume" | "cancel" | "signal";
@@ -384,7 +397,7 @@ export function batchAction(
   body: BatchActionBody,
   signal?: AbortSignal,
 ): Promise<BatchActionResult> {
-  return mutate("/instances/batch-action", "POST", body, undefined, signal);
+  return sendSpec(batchActionRequest(body as unknown as Record<string, unknown>), signal);
 }
 
 export interface CreateInstanceBody {
@@ -399,7 +412,7 @@ export async function createInstance(
   body: CreateInstanceBody,
   signal?: AbortSignal,
 ): Promise<{ id: string; deduplicated?: boolean }> {
-  return mutate("/instances", "POST", body, undefined, signal);
+  return sendSpec(createInstanceRequest(body), signal);
 }
 
 // ─── Sequences ───────────────────────────────────────────────────────────────
@@ -427,6 +440,41 @@ export function listSequenceVersions(
   signal?: AbortSignal,
 ): Promise<SequenceDefinition[]> {
   return request("/sequences/versions", params, signal);
+}
+
+export function getSequenceByName(
+  params: { tenant_id: string; namespace: string; name: string; version?: string },
+  signal?: AbortSignal,
+): Promise<SequenceDefinition> {
+  return request("/sequences/by-name", params, signal);
+}
+
+export type PreflightStatus = "pass" | "warning" | "unknown" | "fail";
+
+export interface PreflightFinding {
+  code: string;
+  severity: "info" | "warning" | "error" | "critical";
+  summary: string;
+}
+
+export interface PreflightCheck {
+  id: string;
+  status: PreflightStatus;
+  summary: string;
+  findings?: PreflightFinding[];
+}
+
+export interface PreflightReport {
+  sequence_name: string;
+  sequence_version: number;
+  overall: PreflightStatus;
+  checks: PreflightCheck[];
+  generated_at: string;
+}
+
+/** `POST /sequences/preflight` — readiness report for an unsaved draft. */
+export function preflightDraft(body: Record<string, unknown>, signal?: AbortSignal): Promise<PreflightReport> {
+  return mutate("/sequences/preflight", "POST", body, undefined, signal);
 }
 
 export interface ListSequencesParams {
@@ -457,7 +505,7 @@ export function createSequence(
   body: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<CreateSequenceResponse> {
-  return mutate("/sequences", "POST", body, undefined, signal);
+  return sendSpec(createSequenceRequest(body), signal);
 }
 
 export function deprecateSequence(
@@ -808,7 +856,7 @@ export function createCronSchedule(
   body: CreateCronRequest,
   signal?: AbortSignal,
 ): Promise<{ id: string; next_fire_at: string | null }> {
-  return mutate("/cron", "POST", body, undefined, signal);
+  return sendSpec(createCronRequest(body as unknown as Record<string, unknown>), signal);
 }
 
 export function updateCronSchedule(
@@ -983,6 +1031,12 @@ async function mutate<T>(
 
   const text = await res.text();
   return (text ? JSON.parse(text) : null) as T;
+}
+
+/** Execute a request descriptor (see lib/requests.ts) — what "Copy as" renders. */
+export function sendSpec<T>(spec: ApiRequestSpec, signal?: AbortSignal): Promise<T> {
+  const path = spec.query ? `${spec.path}?${new URLSearchParams(spec.query)}` : spec.path;
+  return mutate(path, spec.method, spec.body, undefined, signal);
 }
 
 // ─── Sessions ────────────────────────────────────────────────────────────────
@@ -1443,17 +1497,36 @@ export function listMobileDevices(
 
 // ─── Instance Fork ──────────────────────────────────────────────────────────
 
-export interface ForkInstanceRequest {
-  dry_run?: boolean;
-  context_patch?: Record<string, unknown>;
+export type ForkInstanceRequest = ForkBody;
+
+export interface ForkResponse {
+  id: string;
+  forked_from: string;
+  state: string;
+  copied_blocks: number;
+  rerun_blocks: string[];
+  dry_run: boolean;
 }
 
 export function forkInstance(
   id: string,
-  body?: ForkInstanceRequest,
+  body: ForkInstanceRequest,
   signal?: AbortSignal,
-): Promise<{ id: string }> {
-  return mutate(`/instances/${encodeURIComponent(id)}/fork`, "POST", body ?? {}, undefined, signal);
+): Promise<ForkResponse> {
+  return sendSpec(forkInstanceRequest(id, body), signal);
+}
+
+export interface ForkPreview {
+  instance_id: string;
+  from_block_id: string;
+  copied_blocks: string[];
+  re_executed_blocks: string[];
+  side_effect_blocks: string[];
+  sandbox_default: boolean;
+}
+
+export function getForkPreview(id: string, fromBlockId: string, signal?: AbortSignal): Promise<ForkPreview> {
+  return request(`/instances/${encodeURIComponent(id)}/fork-preview`, { from_block_id: fromBlockId }, signal);
 }
 
 // ─── Resume-from-block ──────────────────────────────────────────────────────
@@ -1479,18 +1552,54 @@ export function resumeFromBlock(
 
 // ─── Instance Timeline ──────────────────────────────────────────────────────
 
-export interface TimelineEntry {
-  block_id: string;
-  block_type: string;
-  state: string;
-  started_at: string | null;
-  completed_at: string | null;
-  duration_ms: number | null;
-  error: string | null;
+export interface TimelineResponse {
+  instance: {
+    id: string;
+    sequence_id: string;
+    state: InstanceState;
+    created_at: string;
+    updated_at: string;
+    context?: Record<string, unknown>;
+  };
+  state_transitions: TimelineTransitionDto[];
+  entries: TimelineEntryDto[];
+  offset: number;
+  limit: number;
+  has_more: boolean;
 }
 
-export function getInstanceTimeline(id: string, signal?: AbortSignal): Promise<TimelineEntry[]> {
-  return request(`/instances/${encodeURIComponent(id)}/timeline`, undefined, signal);
+export function getInstanceTimeline(
+  id: string,
+  params: { offset?: number; limit?: number; include_outputs?: boolean } = {},
+  signal?: AbortSignal,
+): Promise<TimelineResponse> {
+  return request(
+    `/instances/${encodeURIComponent(id)}/timeline`,
+    {
+      offset: params.offset !== undefined ? String(params.offset) : undefined,
+      limit: params.limit !== undefined ? String(params.limit) : undefined,
+      include_outputs: params.include_outputs === false ? "false" : undefined,
+    },
+    signal,
+  );
+}
+
+/** Fetch every timeline page (bounded by `maxEntries`). */
+export async function getFullInstanceTimeline(
+  id: string,
+  maxEntries = 5000,
+  signal?: AbortSignal,
+): Promise<TimelineResponse & { truncated: boolean }> {
+  const pageSize = 1000;
+  const first = await getInstanceTimeline(id, { offset: 0, limit: pageSize }, signal);
+  const entries = [...first.entries];
+  let hasMore = first.has_more;
+  while (hasMore && entries.length < maxEntries) {
+    const page = await getInstanceTimeline(id, { offset: entries.length, limit: pageSize }, signal);
+    entries.push(...page.entries);
+    hasMore = page.has_more;
+  }
+  return { ...first, entries, has_more: hasMore, truncated: hasMore };
 }
 
 // ─── Instance Artifacts ─────────────────────────────────────────────────────
@@ -1532,7 +1641,10 @@ export interface Checkpoint {
   id: string;
   instance_id: string;
   created_at: string;
-  context: Record<string, unknown>;
+  /** Snapshot payload as stored by the engine (`orch8_types::checkpoint`). */
+  checkpoint_data?: unknown;
+  /** Legacy field name kept for older engines. */
+  context?: Record<string, unknown>;
 }
 
 export function listCheckpoints(instanceId: string, signal?: AbortSignal): Promise<Checkpoint[]> {
