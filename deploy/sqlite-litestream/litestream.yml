@@ -1,0 +1,20 @@
+# Litestream configuration for a single-node Orch8 on SQLite.
+# Litestream continuously ships SQLite WAL frames to S3-compatible storage.
+# Environment variables are expanded by Litestream at load time.
+# See docs/SQLITE_PRODUCTION.md for the operating model and restore drill.
+dbs:
+  - path: /data/orch8.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: ${LITESTREAM_PATH}
+        # Empty for AWS S3. Set for MinIO, Cloudflare R2, Backblaze B2, etc.
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: ${LITESTREAM_REGION}
+        force-path-style: ${LITESTREAM_FORCE_PATH_STYLE}
+        # WAL frames are shipped every sync-interval; a full snapshot is taken
+        # every snapshot-interval. A restore replays WAL on top of the newest
+        # snapshot, so restore time grows with the snapshot interval.
+        sync-interval: 1s
+        snapshot-interval: 24h
+        retention: 168h
