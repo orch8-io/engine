@@ -1,5 +1,7 @@
 # MCP authoring
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 The server exposes `/api/v1/mcp` with eleven tools, including
 `create_sequence`, `preflight_sequence`, and `lint_sequence`. It uses the same
 API key and tenant boundary as REST.

@@ -1,5 +1,7 @@
 # Governed execution wakes
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 `orch8-push::governance` defines the vendor-independent wake boundary.
 
 - Credential routes use an exact tenant/application/topic tuple and return

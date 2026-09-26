@@ -1,5 +1,7 @@
 # Safe workflow releases
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 Use a release when a new immutable sequence version must be compared with the
 current version before it receives all new traffic. A release never edits an
 existing sequence and never silently migrates in-flight executions.

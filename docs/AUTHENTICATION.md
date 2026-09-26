@@ -1,5 +1,7 @@
 # Authentication and SSO
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 The standalone engine authenticates workloads with capability-scoped API keys.
 It does not implement browser login or OIDC user sessions. For organization SSO,
 put the Orch8 Cloud gateway in front of the engine: the gateway terminates OIDC,

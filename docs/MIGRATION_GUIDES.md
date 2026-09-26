@@ -1,5 +1,7 @@
 # Migrate to Orch8
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 Orch8 does not emulate another orchestrator's runtime. Migration is an explicit
 translation into a versioned sequence plus external workers, followed by
 effect-free replay and a canary. This keeps cutover observable and reversible.

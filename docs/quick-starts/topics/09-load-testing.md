@@ -1,5 +1,7 @@
 # Generate disposable local load
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note. Note: development tool, not a product surface.
+
 Use the load generator to populate dashboards, exercise mixed block types, and
 compare engine behavior under a repeatable workload. It intentionally does not
 send API-key headers, so it belongs only beside an isolated insecure server and

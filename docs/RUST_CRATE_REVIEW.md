@@ -1,5 +1,7 @@
 # Rust crate review ledger
 
+> **Stability: n/a**, historical record.
+
 Objective: review every Rust crate in `engine/`, including excluded native bindings
 and the fuzz package, for edge cases, code smells, and optimization opportunities.
 Started 2026-09-05. This is an active review, not a completed audit.

@@ -1,0 +1,31 @@
+# Publish the PR's sequence into an ephemeral namespace, run the server-side
+# preflight against the stored copy, run the offline contract suites, then
+# delete everything the run created (even when a step fails).
+name: orch8-preview
+on:
+  pull_request:
+    paths: ["sequences/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: orch8
+        uses: orch8-io/engine@main # pin to a release tag or commit SHA in production
+        with:
+          mode: preview
+          sequence: sequences/checkout.json
+          contracts: "sequences/**/*.contracts.json"
+          url: ${{ secrets.ORCH8_URL }}
+          api-key: ${{ secrets.ORCH8_API_KEY }}
+          tenant-id: acme
+          # preview-tenant-id: acme-preview  # optional dedicated tenant
+      - if: always() && steps.orch8.outputs.junit-dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: orch8-contract-junit
+          path: ${{ steps.orch8.outputs.junit-dir }}

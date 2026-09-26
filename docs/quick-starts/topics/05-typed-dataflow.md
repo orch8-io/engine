@@ -1,5 +1,7 @@
 # Generate typed dataflow bindings
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Use typed dataflow before publishing when one step consumes structured output
 from another. Orch8 checks direct references and generates deterministic
 TypeScript, Python, JSON Schema, and machine-readable findings.

@@ -1,5 +1,7 @@
 # Level 5: Observe failure and recover
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../STABILITY.md).
+
 Happy-path demos do not show why durable orchestration matters. This level
 forces an external handler to fail, watches the retry policy exhaust, examines
 the dead-letter queue, fixes the worker, and retries the same instance.

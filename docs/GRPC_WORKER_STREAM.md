@@ -1,5 +1,7 @@
 # Negotiated gRPC Worker Stream
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note. Note: lease/heartbeat semantics are stable; the negotiated stream protocol is beta.
+
 `Orch8Service.WorkerStream` is a bidirectional, demand-driven alternative to
 the unary worker polling RPCs. The unary methods remain compatible; workers
 can adopt the stream without changing workflow definitions or task storage.

@@ -1,5 +1,7 @@
 # Receive local webhooks
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 Orch8 intentionally does not ship a proprietary reverse-tunnel service. Use a
 maintained tunnel and point the provider at Orch8's signed webhook route.
 

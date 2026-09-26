@@ -29,6 +29,8 @@ services:
       ORCH8_API_KEY: ${ORCH8_API_KEY:?set ORCH8_API_KEY}
       ORCH8_ENCRYPTION_KEY: ${ORCH8_ENCRYPTION_KEY:?set ORCH8_ENCRYPTION_KEY}
       ORCH8_REQUIRE_TENANT_HEADER: "true"
+      # Postgres migrations are opt-in; a fresh database needs them applied.
+      ORCH8_RUN_MIGRATIONS: "true"
     depends_on:
       postgres:
         condition: service_healthy

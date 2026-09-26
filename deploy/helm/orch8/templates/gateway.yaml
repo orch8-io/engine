@@ -1,0 +1,118 @@
+{{- if .Values.gateway.enabled }}
+{{- $v := .Values }}
+{{- $g := .Values.gateway }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orch8.fullname" . }}-gateway
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ $g.replicas }}
+  selector:
+    matchLabels:
+      {{- include "orch8.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "orch8.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+      {{- with $g.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "orch8.serviceAccountName" . }}
+      automountServiceAccountToken: {{ $v.serviceAccount.automountServiceAccountToken }}
+      {{- with $v.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ $v.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml $v.podSecurityContext | nindent 8 }}
+      containers:
+        - name: orch8
+          image: {{ include "orch8.image" . }}
+          imagePullPolicy: {{ $v.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $v.securityContext | nindent 12 }}
+          ports:
+            - name: grpc
+              containerPort: {{ $v.service.grpcPort }}
+              protocol: TCP
+          env:
+            {{- include "orch8.env" (dict "root" . "role" "gateway" "httpAddr" "127.0.0.1:8080" "extraEnv" $g.extraEnv) | nindent 12 }}
+            - name: ORCH8_GRPC_TLS_CERT_PATH
+              value: /run/orch8/tls/{{ $g.tls.certKey }}
+            - name: ORCH8_GRPC_TLS_KEY_PATH
+              value: /run/orch8/tls/{{ $g.tls.keyKey }}
+            - name: ORCH8_GRPC_TLS_CLIENT_CA_PATH
+              value: /run/orch8/tls/{{ $g.tls.clientCaKey }}
+          # The gateway HTTP listener must be loopback-only, so kubelet HTTP
+          # probes cannot reach it; probe from inside the container instead.
+          startupProbe:
+            exec:
+              command: ["/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+            periodSeconds: {{ $v.probes.startup.periodSeconds }}
+            failureThreshold: {{ $v.probes.startup.failureThreshold }}
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+            periodSeconds: {{ $v.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ $v.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ $v.probes.readiness.failureThreshold }}
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+            periodSeconds: {{ $v.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ $v.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ $v.probes.liveness.failureThreshold }}
+          resources:
+            {{- toYaml $g.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: tls
+              mountPath: /run/orch8/tls
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: {{ $g.tls.existingSecret }}
+            defaultMode: 0440
+      {{- with $g.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $g.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $g.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "orch8.fullname" . }}-gateway
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: {{ $g.service.type }}
+  selector:
+    {{- include "orch8.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: grpc
+      port: {{ $v.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+{{- end }}

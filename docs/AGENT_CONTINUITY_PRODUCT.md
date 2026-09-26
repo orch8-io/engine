@@ -1,5 +1,7 @@
 # Agent continuity product surface
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Orch8 implements the **Durable Agent Handoff Protocol** as a transport-neutral
 contract above the continuity engine. An agent can offer work to a trusted
 runtime, move ownership across a device boundary, fence external effects, and

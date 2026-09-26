@@ -1,5 +1,7 @@
 # Durable Push Delivery
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Mobile commands and their silent APNs/FCM wakes use one durable delivery path.
 The API inserts the command and its `push_wake_outbox` row in the same database
 transaction. A process crash can therefore leave both records pending, but

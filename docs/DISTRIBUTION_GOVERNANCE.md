@@ -1,5 +1,7 @@
 # Governed distribution
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 `orch8-publisher::distribution` is the stable boundary for runtime-targeted
 release channels, package deltas, private registry policy, supply-chain
 attestations, and dependency locks.

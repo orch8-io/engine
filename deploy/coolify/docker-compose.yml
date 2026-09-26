@@ -1,0 +1,56 @@
+# documentation: https://github.com/orch8-io/engine/blob/main/docs/DEPLOYMENT.md#coolify
+# slogan: Self-hosted durable workflow engine: one Rust binary plus PostgreSQL.
+# tags: workflow,orchestration,durable-execution,queue,cron,ai-agents
+# port: 8080
+#
+# Coolify "Docker Compose" resource. Coolify fills SERVICE_* variables itself:
+#   SERVICE_FQDN_ENGINE_8080   -> public URL routed to the engine's port 8080
+#   SERVICE_PASSWORD_*         -> generated secrets, stable across redeploys
+# ORCH8_ENCRYPTION_KEY must be 64 hex characters, so you set it in the Coolify
+# UI (openssl rand -hex 32); the deploy fails fast when it is missing.
+# Back the encryption key up outside Coolify.
+services:
+  engine:
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      - SERVICE_FQDN_ENGINE_8080
+      - ORCH8_STORAGE_BACKEND=postgres
+      - ORCH8_DATABASE_URL=postgres://${SERVICE_USER_POSTGRES}:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/orch8
+      - ORCH8_RUN_MIGRATIONS=true
+      - ORCH8_HTTP_ADDR=0.0.0.0:8080
+      - ORCH8_GRPC_ADDR=0.0.0.0:50051
+      - ORCH8_API_KEY=${SERVICE_PASSWORD_64_APIKEY}
+      - ORCH8_ENCRYPTION_KEY=${ORCH8_ENCRYPTION_KEY:?set ORCH8_ENCRYPTION_KEY to 64 hex characters}
+      - ORCH8_REQUIRE_TENANT_HEADER=true
+      - ORCH8_LOG_JSON=true
+    labels:
+      - org.opencontainers.image.licenses=BUSL-1.1
+      - io.orch8.role=all_in_one
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=orch8
+      - POSTGRES_USER=${SERVICE_USER_POSTGRES}
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+    volumes:
+      - orch8-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d orch8"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  orch8-postgres:

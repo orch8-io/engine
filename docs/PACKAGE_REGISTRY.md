@@ -1,5 +1,7 @@
 # Package Registry
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 `orch8-publisher` provides a tenant-scoped registry for deterministic,
 Ed25519-signed workflow and connector packages. The registry is a set of static
 CDN objects, so it does not introduce a control-plane service or database.

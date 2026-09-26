@@ -1,5 +1,7 @@
 # Continuity debugging and production-to-test extraction
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note. Note: the fault laboratory (`ORCH8_CONTINUITY_LAB_ENABLED`) is **experimental** and off by default.
+
 Use continuity checkpoints to inspect one execution across runtime handoffs,
 run an effect-free continuation from a durable boundary, and turn the same
 evidence into a reviewable offline regression fixture.

@@ -1,0 +1,9 @@
+{
+  "name": "@orch8/bench-trigger",
+  "private": true,
+  "type": "module",
+  "description": "Trigger.dev side of the Orch8 comparative benchmark. UNVERIFIED SKELETON: the self-hosted stack is incomplete; see docker-compose.yml.",
+  "dependencies": {
+    "@trigger.dev/sdk": "^4.0.0"
+  }
+}

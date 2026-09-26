@@ -1,5 +1,7 @@
 # Agent-framework adapters
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Orch8's stable integration boundary is the framework-neutral portable protocol,
 not framework-specific state. LangGraph, CrewAI, AutoGen, and custom agents use
 the same adapter shape:

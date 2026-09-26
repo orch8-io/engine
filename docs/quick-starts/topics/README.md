@@ -1,5 +1,7 @@
 # Topic quick starts
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../../STABILITY.md). Note: individual topics carry their own label.
+
 These guides solve focused integration and operations tasks outside the
 six-level [progressive learning path](../README.md). They are independent: pick
 the outcome you need instead of reading them in order.

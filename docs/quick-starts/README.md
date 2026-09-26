@@ -1,5 +1,7 @@
 # Orch8 progressive quick starts
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../STABILITY.md).
+
 This folder is a tutorial ladder: start with one local workflow, then add data,
 durability, application code, recovery, and production release controls. Each
 level ends with a working result and introduces one major concept.

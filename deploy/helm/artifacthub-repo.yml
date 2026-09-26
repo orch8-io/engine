@@ -1,0 +1,12 @@
+# Artifact Hub repository metadata file.
+# Publish this file at the root of the Helm repository (next to index.yaml)
+# once a chart repository exists. See
+# https://artifacthub.io/docs/topics/repositories/helm-charts/
+#
+# repositoryID is assigned by Artifact Hub when the repository is registered
+# in the control panel. Uncomment and fill it in to claim verified publisher
+# status; do not invent a value.
+# repositoryID: 00000000-0000-0000-0000-000000000000
+owners:
+  - name: Orch8
+    email: hello@orch8.io

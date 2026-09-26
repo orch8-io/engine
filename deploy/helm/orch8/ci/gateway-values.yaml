@@ -1,0 +1,13 @@
+# Split roles plus the continuity gateway (mTLS gRPC).
+mode: split
+externalDatabase:
+  url: postgres://orch8:secret@db.example:5432/orch8
+secrets:
+  apiKey: ci-api-key-not-a-real-secret
+  encryptionKey: "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+gateway:
+  enabled: true
+  tls:
+    existingSecret: orch8-gateway-tls
+migrations:
+  mode: none

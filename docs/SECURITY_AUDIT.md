@@ -1,5 +1,7 @@
 # Security Audit Notes — Second Rust Workspace Review
 
+> **Stability: n/a**, historical record.
+
 > **Historical security record, not a current assurance statement.** This file
 > preserves the scope and results of a specific audit pass. Reverify remaining
 > items against the current source and consult current CI/security tooling

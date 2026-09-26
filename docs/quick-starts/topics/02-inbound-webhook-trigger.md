@@ -1,5 +1,7 @@
 # Accept a signed inbound webhook
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../../STABILITY.md).
+
 Use a public webhook trigger when an external system should start a workflow
 without receiving your Orch8 API key. The trigger owns a separate shared
 secret, verifies an exact-body HMAC, and rejects stale or replayed requests.

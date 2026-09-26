@@ -1,0 +1,8 @@
+# Temporal's Node SDK ships a native core bridge built for glibc, so use a
+# Debian-based image rather than Alpine.
+FROM node:22-bookworm-slim
+WORKDIR /bench
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
+COPY workflows.cjs worker.cjs ./
+CMD ["node", "worker.cjs"]

@@ -1,5 +1,7 @@
 # Engine capability priorities
 
+> **Stability: n/a**, planning record.
+
 This is the engine-only capability map. UI work, dashboards, visual builders,
 and generic “AI assistant” features are intentionally excluded.
 

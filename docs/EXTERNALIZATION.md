@@ -1,5 +1,7 @@
 # Externalized State
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 The scheduler hot path assumes `task_instances.context` is small — small rows mean cheap claims, cheap prefetch, and cheap fan-out to step handlers. When a context field or a block output grows large (e.g. an LLM response, a big document, a scraped page), inlining it balloons every claim cycle.
 
 Externalization solves this by replacing large inline payloads with a short **marker** and stashing the original value in the dedicated `externalized_state` table. Readers recognize the marker and re-hydrate the value only when a step actually needs it.

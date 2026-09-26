@@ -1,0 +1,27 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+# NOTE: /metrics requires the `x-api-key` header, which a ServiceMonitor cannot
+# send. Scrapes return 401 unless a proxy in front of the pods injects the
+# header. See metrics.scrapeConfigSecret for a header-capable alternative.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "orch8.fullname" . }}
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  jobLabel: orch8.io/metrics-job
+  selector:
+    matchLabels:
+      {{- include "orch8.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: {{ include "orch8.apiComponent" . }}
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace | quote }}]
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+{{- end }}

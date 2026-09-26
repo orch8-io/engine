@@ -1,0 +1,89 @@
+{{- $v := .Values }}
+{{- if and (eq $v.storage.backend "postgres") (eq $v.migrations.mode "job") }}
+{{- $inlineUrl := and (not $v.postgresql.enabled) (not $v.externalDatabase.existingSecret) }}
+{{- /* The bundled subchart's Postgres does not exist before install, so run after it. */}}
+{{- $hook := ternary "post-install,pre-upgrade" "pre-install,pre-upgrade" $v.postgresql.enabled }}
+{{- if $inlineUrl }}
+# Hook-scoped copy of the database URL: the chart Secret is a regular release
+# resource and does not exist yet when pre-install hooks run.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "orch8.fullname" . }}-migrate
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: {{ $hook }}
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+type: Opaque
+data:
+  database-url: {{ $v.externalDatabase.url | b64enc | quote }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "orch8.fullname" . }}-migrate
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: {{ $hook }}
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $v.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ $v.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "orch8.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      {{- with $v.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $v.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "orch8.image" . }}
+          imagePullPolicy: {{ $v.image.pullPolicy }}
+          command: ["/usr/local/bin/orch8", "migrate"]
+          securityContext:
+            {{- toYaml $v.securityContext | nindent 12 }}
+          env:
+            {{- if $v.postgresql.enabled }}
+            - name: ORCH8_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "orch8.postgresHost" . }}
+                  key: password
+            - name: ORCH8_DATABASE_URL
+              value: {{ printf "postgres://%s:$(ORCH8_PG_PASSWORD)@%s:5432/%s" $v.postgresql.auth.username (include "orch8.postgresHost" .) $v.postgresql.auth.database | quote }}
+            {{- else if $v.externalDatabase.existingSecret }}
+            - name: ORCH8_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $v.externalDatabase.existingSecret }}
+                  key: {{ $v.externalDatabase.existingSecretKey }}
+            {{- else }}
+            - name: ORCH8_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "orch8.fullname" . }}-migrate
+                  key: database-url
+            {{- end }}
+          resources:
+            {{- toYaml $v.migrations.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

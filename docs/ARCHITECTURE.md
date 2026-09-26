@@ -1,5 +1,7 @@
 # Orch8 Engine — Architecture
 
+> **Stability: n/a**, explanation.
+
 > Core concepts, execution model, database schema, and performance characteristics.
 
 ---

@@ -1,5 +1,7 @@
 # Orch8 Engine — Configuration Reference
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md).
+
 Configuration is layered: `orch8.toml` is the base, environment variables override individual fields, and CLI flags (where supported) take final precedence.
 
 The `orch8.toml` file is organized into typed sections; omitted sections use

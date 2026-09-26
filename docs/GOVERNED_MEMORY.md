@@ -1,5 +1,7 @@
 # Governed durable memory
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Orch8 supports private instance memory and tenant-shared knowledge without
 making the workflow definition itself an authority boundary. Every new memory
 record carries bounded retention and immutable provenance, while tenant-shared

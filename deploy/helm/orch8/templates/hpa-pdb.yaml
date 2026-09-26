@@ -1,0 +1,31 @@
+{{- if eq .Values.mode "split" }}
+{{- range $component := list "control" "executor" }}
+{{- $cfg := index $.Values $component }}
+{{- with (include "orch8.hpa" (dict "root" $ "component" $component "cfg" $cfg)) }}
+---
+{{ . }}
+{{- end }}
+{{- with (include "orch8.pdb" (dict "root" $ "component" $component "cfg" $cfg)) }}
+---
+{{ . }}
+{{- end }}
+{{- end }}
+{{- else }}
+{{- with (include "orch8.hpa" (dict "root" . "component" "all-in-one" "cfg" .Values.allInOne)) }}
+---
+{{ . }}
+{{- end }}
+{{- /* A PDB on a single SQLite pod would block every voluntary eviction. */}}
+{{- if ne .Values.storage.backend "sqlite" }}
+{{- with (include "orch8.pdb" (dict "root" . "component" "all-in-one" "cfg" .Values.allInOne)) }}
+---
+{{ . }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.gateway.enabled }}
+{{- with (include "orch8.pdb" (dict "root" . "component" "gateway" "cfg" .Values.gateway)) }}
+---
+{{ . }}
+{{- end }}
+{{- end }}

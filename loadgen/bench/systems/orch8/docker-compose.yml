@@ -1,0 +1,66 @@
+# Orch8 benchmark stack: PostgreSQL + one all-in-one engine node + one
+# external REST worker that implements the 50 ms activity.
+#
+# Engine settings are the documented defaults except the ones required to
+# start securely (API key, encryption key, migrations). Credentials below are
+# benchmark-only throwaway values for a loopback stack; never reuse them.
+#
+# Pin ORCH8_IMAGE to an exact tag or digest before publishing results; run.sh
+# records the resolved digest in every result file either way.
+name: bench-orch8
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: orch8
+      POSTGRES_USER: orch8
+      POSTGRES_PASSWORD: orch8
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orch8"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  engine:
+    image: ${ORCH8_IMAGE:-ghcr.io/orch8-io/engine:latest}
+    restart: "no"
+    ports:
+      - "127.0.0.1:18080:8080"
+    environment:
+      ORCH8_STORAGE_BACKEND: postgres
+      ORCH8_DATABASE_URL: postgres://orch8:orch8@postgres:5432/orch8
+      ORCH8_RUN_MIGRATIONS: "true"
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+      ORCH8_GRPC_ADDR: 0.0.0.0:50051
+      ORCH8_API_KEY: bench-only-api-key-not-a-secret-0123456789
+      ORCH8_ENCRYPTION_KEY: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+      ORCH8_REQUIRE_TENANT_HEADER: "true"
+      ORCH8_LOG_LEVEL: warn
+      ORCH8_LOG_JSON: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  worker:
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /bench
+    command: ["node", "worker.mjs"]
+    environment:
+      ORCH8_URL: http://engine:8080/api/v1
+      ORCH8_API_KEY: bench-only-api-key-not-a-secret-0123456789
+      ORCH8_TENANT_ID: bench
+      WORKER_SLOTS: ${WORKER_SLOTS:-100}
+      ACTIVITY_LOG: /bench-out/activity.jsonl
+    volumes:
+      - ./worker.mjs:/bench/worker.mjs:ro
+      - ${BENCH_OUT_DIR:-./out}:/bench-out
+    depends_on:
+      engine:
+        condition: service_healthy

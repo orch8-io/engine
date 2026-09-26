@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://orch8.io/contracts/sequence.schema.json",
   "title": "Orch8 Sequence Definition",
+  "description": "A persisted Orch8 workflow sequence as stored and returned by the engine API (POST/GET /api/v1/sequences). Includes server-assigned identity fields. For hand-written sequence files, use sequence-file.schema.json.",
   "type": "object",
   "required": [
     "id",

@@ -1,5 +1,7 @@
 # Connect the dashboard and Prometheus metrics
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Use the operator dashboard for interactive diagnosis and `/metrics` for
 automated monitoring. Both management surfaces should use the same environment
 identity and authenticated engine connection.

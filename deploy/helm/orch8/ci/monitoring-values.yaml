@@ -1,0 +1,13 @@
+# Monitoring: ServiceMonitor, PrometheusRule, and header-capable scrape config.
+externalDatabase:
+  url: postgres://orch8:secret@db.example:5432/orch8
+metrics:
+  jobName: orch8
+  serviceMonitor:
+    enabled: true
+    labels: { release: kube-prometheus-stack }
+  scrapeConfigSecret:
+    enabled: true
+  prometheusRule:
+    enabled: true
+    labels: { release: kube-prometheus-stack }

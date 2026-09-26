@@ -1,5 +1,7 @@
 # Portable Continuity Operations
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 This is a task-oriented operator guide for deployments with portable
 continuity enabled. Start with the section matching the operation you need;
 commands assume an authenticated `orch8` CLI configured for the canonical

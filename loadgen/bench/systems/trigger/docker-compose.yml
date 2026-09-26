@@ -1,0 +1,60 @@
+# Trigger.dev benchmark stack — SKELETON, NOT RUNNABLE AS-IS.
+#
+# TODO / UNVERIFIED: a self-hosted Trigger.dev (v4) deployment needs more
+# services than are listed here (at minimum the webapp, PostgreSQL, Redis,
+# Electric, ClickHouse, an object store, a container registry, and the
+# supervisor that runs task containers). Its official compose files live in
+# the triggerdotdev/trigger.dev repository under `hosting/docker/`. Rather than
+# copy a large, fast-moving stack from memory, this file only declares the
+# datastores and the webapp with explicit version variables, and run.sh
+# refuses to run this system unless TRIGGER_BENCH_UNVERIFIED_OK=1.
+#
+# To complete it: start from the upstream compose for the pinned
+# TRIGGER_VERSION, deploy ./trigger/bench.mjs with the Trigger.dev CLI, set
+# TRIGGER_SECRET_KEY / TRIGGER_API_URL for driver.mjs, and record every
+# deviation from upstream defaults in the result `notes`.
+name: bench-trigger
+
+services:
+  postgres:
+    image: postgres:16
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_DB: trigger
+      POSTGRES_USER: trigger
+      POSTGRES_PASSWORD: trigger
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trigger"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  webapp:
+    image: ghcr.io/triggerdotdev/trigger.dev:${TRIGGER_VERSION:-v4-beta}
+    restart: "no"
+    ports:
+      - "127.0.0.1:8030:3000"
+    environment:
+      # UNVERIFIED: see upstream hosting/docker/.env.example for the full,
+      # current variable list (secrets, Electric/ClickHouse/object-store URLs).
+      DATABASE_URL: postgresql://trigger:trigger@postgres:5432/trigger?schema=public&sslmode=disable
+      DIRECT_URL: postgresql://trigger:trigger@postgres:5432/trigger?schema=public&sslmode=disable
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_TLS_DISABLED: "true"
+      APP_ORIGIN: http://localhost:8030
+      LOGIN_ORIGIN: http://localhost:8030
+      API_ORIGIN: http://localhost:8030
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

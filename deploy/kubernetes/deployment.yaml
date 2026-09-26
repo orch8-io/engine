@@ -23,6 +23,7 @@ spec:
               containerPort: 50051
           env:
             - { name: ORCH8_STORAGE_BACKEND, value: postgres }
+            - { name: ORCH8_RUN_MIGRATIONS, value: "true" }
             - { name: ORCH8_HTTP_ADDR, value: "0.0.0.0:8080" }
             - { name: ORCH8_GRPC_ADDR, value: "0.0.0.0:50051" }
             - { name: ORCH8_REQUIRE_TENANT_HEADER, value: "true" }

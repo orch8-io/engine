@@ -1,5 +1,7 @@
 # Deliver signed lifecycle webhooks
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../../STABILITY.md).
+
 Use outbound webhooks when another service needs low-latency notification that
 an Orch8 instance completed, failed, or breached an SLA. Delivery is
 asynchronous and at-least-once, so the receiver must verify the raw body and

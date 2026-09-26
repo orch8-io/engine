@@ -1,0 +1,51 @@
+apiVersion: v2
+name: orch8
+description: >-
+  Orch8 durable workflow engine (self-hosted). Deploys all-in-one or split
+  control/executor node roles, an optional continuity gateway, migrations,
+  autoscaling, disruption budgets, and Prometheus integration.
+type: application
+version: 0.1.0
+appVersion: "0.7.1"
+kubeVersion: ">=1.25.0-0"
+home: https://orch8.io
+icon: https://orch8.io/favicon.svg
+sources:
+  - https://github.com/orch8-io/engine
+keywords:
+  - workflow
+  - orchestration
+  - durable-execution
+  - job-queue
+  - ai-agents
+maintainers:
+  - name: Orch8
+    email: hello@orch8.io
+    url: https://orch8.io
+dependencies:
+  - name: postgresql
+    version: "16.x.x"
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.enabled
+annotations:
+  artifacthub.io/license: BUSL-1.1
+  artifacthub.io/category: integration-delivery
+  artifacthub.io/prerelease: "true"
+  artifacthub.io/containsSecurityUpdates: "false"
+  artifacthub.io/operator: "false"
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://orch8.io/docs
+    - name: Source
+      url: https://github.com/orch8-io/engine
+    - name: Node roles
+      url: https://github.com/orch8-io/engine/blob/main/docs/NODE_ROLES.md
+    - name: License (BUSL-1.1)
+      url: https://github.com/orch8-io/engine/blob/main/LICENSE
+  artifacthub.io/images: |
+    - name: engine
+      image: ghcr.io/orch8-io/engine:0.7.1
+      whitelisted: false
+  artifacthub.io/maintainers: |
+    - name: Orch8
+      email: hello@orch8.io

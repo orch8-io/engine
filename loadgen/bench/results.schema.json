@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orch8.io/contracts/bench-result.schema.json",
+  "title": "Orch8 comparative benchmark result",
+  "description": "One run of one scenario against one system, produced by loadgen/bench/run.sh. See docs/BENCHMARKS.md for the methodology.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "system",
+    "system_version",
+    "harness_version",
+    "git_sha",
+    "scenario",
+    "workload",
+    "hardware",
+    "timings",
+    "results",
+    "raw_samples_file"
+  ],
+  "properties": {
+    "system": {
+      "enum": ["orch8", "temporal", "inngest", "trigger", "hatchet"]
+    },
+    "system_version": {
+      "type": "object",
+      "description": "Exact versions under test. `images` maps each compose service to the resolved image reference and digest so a result can be tied to the bits that produced it.",
+      "required": ["images"],
+      "additionalProperties": false,
+      "properties": {
+        "images": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "sdk": {
+          "type": "object",
+          "description": "Client/worker SDK package versions (package name -> version).",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "harness_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "git_sha": { "type": "string", "pattern": "^([0-9a-f]{7,40}|unknown)$" },
+    "scenario": { "enum": ["throughput", "crash_recovery"] },
+    "run_index": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based index within a repeated set (the methodology uses 3 runs and reports the median)."
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflows", "steps", "activity_ms", "concurrency"],
+      "properties": {
+        "workflows": { "type": "integer", "minimum": 1, "description": "N: number of workflows submitted." },
+        "steps": { "const": 3 },
+        "activity_ms": { "const": 50 },
+        "concurrency": { "type": "integer", "minimum": 1, "description": "Maximum workflows the driver keeps in flight." },
+        "warmup_workflows": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "cores", "memory_bytes", "os", "docker_version"],
+      "properties": {
+        "cpu": { "type": "string" },
+        "cores": { "type": "integer", "minimum": 1 },
+        "memory_bytes": { "type": "integer", "minimum": 1 },
+        "os": { "type": "string" },
+        "docker_version": { "type": "string" },
+        "docker_cpus": { "type": "integer", "minimum": 1, "description": "CPUs visible to the Docker VM/daemon." },
+        "docker_memory_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "timings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["started_at", "ended_at", "total_duration_ms"],
+      "properties": {
+        "started_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": "string", "format": "date-time" },
+        "total_duration_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "results": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completed", "failed", "throughput_wf_per_s", "latency_ms", "latency_source", "errors"],
+      "properties": {
+        "completed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "throughput_wf_per_s": {
+          "type": ["number", "null"],
+          "description": "completed / (last completion - first submission), in workflows per second."
+        },
+        "latency_ms": {
+          "type": "object",
+          "description": "End-to-end workflow latency (start to close).",
+          "additionalProperties": false,
+          "required": ["p50", "p95", "p99"],
+          "properties": {
+            "p50": { "type": ["number", "null"] },
+            "p95": { "type": ["number", "null"] },
+            "p99": { "type": ["number", "null"] },
+            "max": { "type": ["number", "null"] }
+          }
+        },
+        "latency_source": {
+          "enum": ["server", "driver"],
+          "description": "`server`: start/close timestamps recorded by the system under test. `driver`: submit/observe timestamps taken by the driver (includes polling granularity)."
+        },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Deduplicated error messages observed by the driver (bounded)."
+        }
+      }
+    },
+    "crash_recovery": {
+      "type": ["object", "null"],
+      "description": "Present only for scenario=crash_recovery.",
+      "additionalProperties": false,
+      "required": [
+        "killed_service",
+        "kill_at",
+        "restart_at",
+        "recovered_count",
+        "lost_count",
+        "duplicate_activity_executions",
+        "time_to_recover_ms"
+      ],
+      "properties": {
+        "killed_service": { "type": "string" },
+        "kill_at": { "type": "string", "format": "date-time" },
+        "restart_at": { "type": "string", "format": "date-time" },
+        "in_flight_at_kill": { "type": ["integer", "null"], "minimum": 0 },
+        "recovered_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Workflows submitted before kill_at that completed after restart_at."
+        },
+        "lost_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Workflows submitted that never completed before the driver deadline."
+        },
+        "duplicate_activity_executions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Activity-log lines minus distinct (workflow, step) pairs. Measures at-least-once re-execution, not correctness bugs."
+        },
+        "time_to_recover_ms": {
+          "type": ["number", "null"],
+          "description": "restart_at to the first workflow completion observed after restart_at."
+        }
+      }
+    },
+    "raw_samples_file": {
+      "type": "string",
+      "description": "Path (relative to the result file) of the JSONL per-workflow samples."
+    },
+    "activity_log_file": { "type": ["string", "null"] },
+    "notes": { "type": "string" }
+  }
+}

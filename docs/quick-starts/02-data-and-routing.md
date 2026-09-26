@@ -1,5 +1,7 @@
 # Level 2: Pass data and choose a route
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../STABILITY.md).
+
 This level turns a fixed workflow into a reusable one. You will validate input,
 insert run data into handler parameters, read a prior block's output, and choose
 one of two routes.

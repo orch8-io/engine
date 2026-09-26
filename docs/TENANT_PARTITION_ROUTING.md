@@ -1,5 +1,7 @@
 # Tenant partition routing
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Orch8 can route tenants to independently configured storage backends through
 `TenantPartitionRouter`. Routing is authoritative and fail closed: every tenant
 must have a durable placement record and that record must name a backend

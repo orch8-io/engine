@@ -1,0 +1,114 @@
+# Single-node Orch8 on SQLite with continuous Litestream replication.
+#
+#   export ORCH8_API_KEY=$(openssl rand -hex 32)
+#   export ORCH8_ENCRYPTION_KEY=$(openssl rand -hex 32)   # back this up separately!
+#   export LITESTREAM_BUCKET=my-bucket
+#   export LITESTREAM_ACCESS_KEY_ID=... LITESTREAM_SECRET_ACCESS_KEY=...
+#   docker compose up -d
+#
+# Local restore drill with MinIO instead of a cloud bucket:
+#   export LITESTREAM_ENDPOINT=http://minio:9000 LITESTREAM_FORCE_PATH_STYLE=true
+#   docker compose --profile local-s3 up -d
+#
+# Read docs/SQLITE_PRODUCTION.md first: exactly ONE engine process may use the
+# database file, and this topology cannot scale out.
+name: orch8-sqlite
+
+x-litestream-env: &litestream-env
+  LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:?set LITESTREAM_ACCESS_KEY_ID}
+  LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:?set LITESTREAM_SECRET_ACCESS_KEY}
+  LITESTREAM_BUCKET: ${LITESTREAM_BUCKET:?set LITESTREAM_BUCKET}
+  LITESTREAM_PATH: ${LITESTREAM_PATH:-orch8}
+  LITESTREAM_ENDPOINT: ${LITESTREAM_ENDPOINT:-}
+  LITESTREAM_REGION: ${LITESTREAM_REGION:-us-east-1}
+  LITESTREAM_FORCE_PATH_STYLE: ${LITESTREAM_FORCE_PATH_STYLE:-false}
+
+services:
+  # The image's engine user is uid/gid 999; make the named volume writable
+  # for both the engine and Litestream (which also runs as 999 below).
+  volume-init:
+    image: busybox:1.36
+    command: ["sh", "-c", "chown -R 999:999 /data"]
+    volumes:
+      - orch8-data:/data
+
+  # Restore the database from the replica if (and only if) the local volume
+  # has no database and a replica exists. On a fresh bucket this is a no-op.
+  restore:
+    image: litestream/litestream:${LITESTREAM_VERSION:-0.3.13}
+    user: "999:999"
+    command: ["restore", "-config", "/etc/litestream.yml", "-if-db-not-exists", "-if-replica-exists", "/data/orch8.db"]
+    environment: *litestream-env
+    volumes:
+      - orch8-data:/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+
+  # The engine: one process, all_in_one role, SQLite in WAL mode.
+  engine:
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${ORCH8_HTTP_PORT:-8080}:8080"
+    environment:
+      ORCH8_NODE_ROLE: all_in_one
+      ORCH8_STORAGE_BACKEND: sqlite
+      ORCH8_DATABASE_URL: sqlite:///data/orch8.db?mode=rwc
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+      ORCH8_GRPC_ADDR: 0.0.0.0:50051
+      ORCH8_API_KEY: ${ORCH8_API_KEY:?set ORCH8_API_KEY}
+      ORCH8_ENCRYPTION_KEY: ${ORCH8_ENCRYPTION_KEY:?set ORCH8_ENCRYPTION_KEY}
+      ORCH8_REQUIRE_TENANT_HEADER: "true"
+      ORCH8_LOG_JSON: "true"
+      # Litestream replicates only the SQLite file. Keep artifacts disabled or
+      # on S3; a `local` artifact directory would need its own backup.
+      ORCH8_ARTIFACT_BACKEND: ${ORCH8_ARTIFACT_BACKEND:-none}
+    volumes:
+      - orch8-data:/data
+    depends_on:
+      restore:
+        condition: service_completed_successfully
+    # Longer than the engine's 30 s default shutdown grace period.
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # Continuous replication sidecar. Shares the volume with the engine and must
+  # run for as long as the engine runs.
+  litestream:
+    image: litestream/litestream:${LITESTREAM_VERSION:-0.3.13}
+    user: "999:999"
+    restart: unless-stopped
+    command: ["replicate", "-config", "/etc/litestream.yml"]
+    environment: *litestream-env
+    volumes:
+      - orch8-data:/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+    depends_on:
+      engine:
+        condition: service_started
+
+  # Optional local S3 for restore drills (`--profile local-s3`).
+  minio:
+    profiles: ["local-s3"]
+    image: minio/minio:${MINIO_VERSION:-RELEASE.2025-04-08T15-41-24Z}
+    command: ["server", "/export"]
+    environment:
+      MINIO_ROOT_USER: ${LITESTREAM_ACCESS_KEY_ID:?set LITESTREAM_ACCESS_KEY_ID}
+      MINIO_ROOT_PASSWORD: ${LITESTREAM_SECRET_ACCESS_KEY:?set LITESTREAM_SECRET_ACCESS_KEY}
+    volumes:
+      - minio-data:/export
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  orch8-data:
+  minio-data:

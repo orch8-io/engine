@@ -1,0 +1,58 @@
+Orch8 {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" (mode: {{ .Values.mode }}, storage: {{ .Values.storage.backend }}).
+
+API service: {{ include "orch8.apiServiceName" . }}:{{ .Values.service.httpPort }} (REST under /api/v1, health at /health/live and /health/ready)
+{{- if eq .Values.mode "split" }}
+Executor gRPC service: {{ include "orch8.fullname" . }}-executor:{{ .Values.service.grpcPort }} (worker lifecycle surface only; HTTP is health only)
+{{- end }}
+{{- if .Values.gateway.enabled }}
+Continuity gateway gRPC (mTLS): {{ include "orch8.fullname" . }}-gateway:{{ .Values.service.grpcPort }}
+{{- end }}
+
+1. Read the API key:
+{{- if .Values.secrets.existingSecret }}
+   kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secrets.existingSecret }} -o jsonpath='{.data.{{ .Values.secrets.apiKeyKey }}}' | base64 -d
+{{- else }}
+   kubectl -n {{ .Release.Namespace }} get secret {{ include "orch8.fullname" . }} -o jsonpath='{.data.{{ .Values.secrets.apiKeyKey }}}' | base64 -d
+{{- end }}
+
+2. Talk to the engine:
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "orch8.apiServiceName" . }} 8080:{{ .Values.service.httpPort }}
+   ORCH8_API_KEY=<key> ORCH8_TENANT_ID=default orch8 --url http://127.0.0.1:8080/api/v1 health
+
+3. BACK UP the encryption key (secret key "{{ .Values.secrets.encryptionKeyKey }}").
+   Encrypted context, credentials and artifacts are unreadable without it.
+   The chart-managed Secret is kept on `helm uninstall` (resource-policy: keep).
+
+{{- $engineReplicas := 0 }}
+{{- if eq .Values.mode "split" }}
+{{- $engineReplicas = int .Values.executor.replicas }}
+{{- if .Values.executor.autoscaling.enabled }}{{ $engineReplicas = int .Values.executor.autoscaling.maxReplicas }}{{ end }}
+{{- else }}
+{{- $engineReplicas = int .Values.allInOne.replicas }}
+{{- if .Values.allInOne.autoscaling.enabled }}{{ $engineReplicas = int .Values.allInOne.autoscaling.maxReplicas }}{{ end }}
+{{- end }}
+{{- if gt $engineReplicas 1 }}
+
+WARNING: more than one engine replica. Instance claiming is safe at any
+replica count, but NATS and file-watch triggers are not lease-gated: every
+engine node subscribes, so one event starts one instance PER NODE. If you use
+those triggers, run a single engine replica (see docs/DEPLOYMENT.md, "High
+availability").
+{{- end }}
+{{- if eq .Values.storage.backend "sqlite" }}
+
+SQLite mode: single writer node only. Data lives on PVC
+{{ default (printf "%s-data" (include "orch8.fullname" .)) .Values.sqlite.persistence.existingClaim }}. Back it up (e.g. Litestream);
+move to Postgres before scaling out.
+{{- end }}
+{{- if and (eq .Values.storage.backend "postgres") (eq .Values.migrations.mode "none") }}
+
+migrations.mode=none: run `orch8 migrate --database-url <url>` before the
+engine serves traffic.
+{{- end }}
+{{- if .Values.metrics.serviceMonitor.enabled }}
+
+ServiceMonitor enabled: /metrics requires the x-api-key header, which a
+ServiceMonitor cannot send. Expect 401s unless a proxy injects the header;
+see metrics.scrapeConfigSecret.
+{{- end }}

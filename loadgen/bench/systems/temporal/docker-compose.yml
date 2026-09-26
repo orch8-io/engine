@@ -1,0 +1,50 @@
+# Temporal benchmark stack: PostgreSQL + temporalio/auto-setup (single
+# binary running all Temporal services) + one TypeScript worker.
+#
+# UNVERIFIED: the auto-setup image is intended for development/CI and its
+# environment variables (DB, POSTGRES_SEEDS, ...) are taken from Temporal's
+# docker-compose samples; Temporal recommends separate services for
+# production. Confirm the tag and env names against the Temporal release you
+# benchmark and record the deviation in the result `notes`.
+name: bench-temporal
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  temporal:
+    image: ${TEMPORAL_IMAGE:-temporalio/auto-setup:1.25.2}
+    restart: "no"
+    ports:
+      - "127.0.0.1:7233:7233"
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      WORKER_SLOTS: ${WORKER_SLOTS:-100}
+      ACTIVITY_LOG: /bench-out/activity.jsonl
+    volumes:
+      - ${BENCH_OUT_DIR:-./out}:/bench-out
+    depends_on:
+      - temporal

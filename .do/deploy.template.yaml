@@ -1,0 +1,47 @@
+# DigitalOcean App Platform "Deploy to DigitalOcean" template.
+# Docs: docs/DEPLOYMENT.md#digitalocean-app-platform
+spec:
+  name: orch8-engine
+  services:
+    - name: engine
+      image:
+        registry_type: GHCR
+        registry: orch8-io
+        repository: engine
+        tag: latest
+      http_port: 8080
+      instance_count: 1
+      instance_size_slug: apps-s-1vcpu-1gb
+      health_check:
+        http_path: /health/ready
+        initial_delay_seconds: 15
+        period_seconds: 10
+      envs:
+        - key: ORCH8_STORAGE_BACKEND
+          value: postgres
+        - key: ORCH8_DATABASE_URL
+          scope: RUN_TIME
+          value: ${db.DATABASE_URL}
+        - key: ORCH8_RUN_MIGRATIONS
+          value: "true"
+        - key: ORCH8_HTTP_ADDR
+          value: 0.0.0.0:8080
+        - key: ORCH8_REQUIRE_TENANT_HEADER
+          value: "true"
+        - key: ORCH8_LOG_JSON
+          value: "true"
+        # Required. Any long random string: openssl rand -hex 32
+        - key: ORCH8_API_KEY
+          scope: RUN_TIME
+          type: SECRET
+          value: ""
+        # Required. Exactly 64 hex characters: openssl rand -hex 32
+        # Back it up outside DigitalOcean; losing it makes encrypted data unreadable.
+        - key: ORCH8_ENCRYPTION_KEY
+          scope: RUN_TIME
+          type: SECRET
+          value: ""
+  databases:
+    - name: db
+      engine: PG
+      production: false

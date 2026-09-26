@@ -1,0 +1,15 @@
+# Split control/executor roles with HPA and PDB, existing DB secret.
+mode: split
+externalDatabase:
+  existingSecret: orch8-db
+  existingSecretKey: url
+control:
+  replicas: 2
+  autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 4, targetCPUUtilizationPercentage: 70 }
+  pdb: { enabled: true, maxUnavailable: 1 }
+executor:
+  replicas: 3
+  autoscaling: { enabled: true, minReplicas: 3, maxReplicas: 12, targetCPUUtilizationPercentage: 60 }
+  pdb: { enabled: true, maxUnavailable: 1 }
+migrations:
+  mode: server

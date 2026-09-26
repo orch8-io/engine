@@ -1,5 +1,7 @@
 # PostgreSQL outbox intake
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Engine exposes a provider-neutral relay boundary for application-owned
 transactional outboxes:
 

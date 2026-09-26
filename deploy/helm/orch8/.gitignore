@@ -1,0 +1,2 @@
+# Dependencies are fetched with `helm dependency build`; never commit them.
+charts/

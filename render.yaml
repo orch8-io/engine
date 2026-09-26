@@ -16,6 +16,11 @@ services:
         value: 0.0.0.0:8080
       - key: ORCH8_REQUIRE_TENANT_HEADER
         value: "true"
+      # Postgres migrations are opt-in (default false); a fresh database needs them.
+      - key: ORCH8_RUN_MIGRATIONS
+        value: "true"
+      - key: ORCH8_LOG_JSON
+        value: "true"
       - key: ORCH8_API_KEY
         generateValue: true
       - key: ORCH8_ENCRYPTION_KEY

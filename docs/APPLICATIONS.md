@@ -1,5 +1,7 @@
 # Orch8 — Embedding Use Cases
 
+> **Stability: n/a**, explanation.
+
 Orch8 is built as an embeddable workflow runtime. Because it compiles to a native library and uses SQLite as its default backend, it can run inside any process — not just as a standalone server.
 
 The common thread across all embedding contexts: the engine replaces something teams are building themselves, badly, with no durability, no audit trail, and no ability to update logic without a release.

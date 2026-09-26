@@ -1,5 +1,7 @@
 # Level 3: Run the durable API server
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../STABILITY.md).
+
 Local development mode is intentionally ephemeral. This level starts the real
 server with SQLite, authentication, encrypted storage, and canonical HTTP API
 routes. You will publish a sequence, create an instance, inspect its outputs,

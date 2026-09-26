@@ -1,5 +1,7 @@
 # Orch8 Mobile SDK
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Server-configurable workflows running on-device. Update onboarding flows, promotions, and feature journeys without app store deployments.
 
 This document describes the `0.7.1` SDK family. Engine and SDK releases use

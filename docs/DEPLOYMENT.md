@@ -1,5 +1,7 @@
 # Deployment
 
+> **Stability: stable**, covered by the [1.0 stability contract](../STABILITY.md). Note: Docker and plain Kubernetes manifests are stable; the Helm chart and one-click templates are **beta**.
+
 The engine ships as a single binary (`orch8-server`) or a container image (`ghcr.io/orch8-io/engine`). You need Postgres (or SQLite for single-node deployments) and a way to run the process.
 
 This page is the index. Each cloud target has its own section below with a copy-pasteable starting point.
@@ -11,10 +13,12 @@ This page is the index. Each cloud target has its own section below with a copy-
 | Scenario | Backend | Notes |
 |---|---|---|
 | Local dev, tests, demos | SQLite | Zero dependencies, single file on disk |
-| Single-node production | SQLite | Fine up to ~hundreds of instances/sec — beyond that, switch |
+| Single-node production | SQLite + Litestream | One engine process, no scale-out; see [SQLite in production](SQLITE_PRODUCTION.md) |
 | HA / multi-replica production | Postgres | Multiple engine replicas coordinate via `FOR UPDATE SKIP LOCKED` |
 
-SQLite is a first-class backend for small deployments. Once you need more than one engine replica **or** want off-host durability, move to Postgres.
+SQLite is a supported backend for small single-node deployments. Pair it with Litestream for off-host durability ([guide](SQLITE_PRODUCTION.md)). Once you need more than one engine replica, split node roles, or zero-downtime deploys, move to Postgres.
+
+> **Postgres migrations are opt-in.** `ORCH8_RUN_MIGRATIONS` defaults to `false`. On a fresh database, set it to `true` or run `orch8 migrate --database-url ...` (for example as a pre-deploy job) before starting the server. Without that the server boots, `/health/ready` returns 503, and API calls fail with `relation "..." does not exist`. SQLite creates and reconciles its schema at boot.
 
 Upgrades are safe on both backends: Postgres migrations are checksum-verified and never edited in place (CI-enforced), and a file-backed SQLite database created by an older binary is migrated forward at boot with versioned schema deltas.
 
@@ -54,6 +58,7 @@ The container image defaults to SQLite. The server is secure by default: it refu
 docker run --rm -p 8080:8080 -p 50051:50051 \
   -e ORCH8_STORAGE_BACKEND=postgres \
   -e ORCH8_DATABASE_URL=postgres://orch8:secret@db:5432/orch8?sslmode=require \
+  -e ORCH8_RUN_MIGRATIONS=true \
   -e ORCH8_API_KEY=$ORCH8_API_KEY \
   -e ORCH8_ENCRYPTION_KEY=$ORCH8_ENCRYPTION_KEY \
   -e ORCH8_LOG_JSON=true \
@@ -106,6 +111,7 @@ spec:
             - { containerPort: 50051, name: grpc }
           env:
             - { name: ORCH8_STORAGE_BACKEND, value: postgres }
+            - { name: ORCH8_RUN_MIGRATIONS, value: "true" }
             - { name: ORCH8_LOG_JSON,       value: "true" }
             - { name: ORCH8_HTTP_ADDR,      value: 0.0.0.0:8080 }
           envFrom:
@@ -132,12 +138,40 @@ spec:
 
 ### Helm chart
 
-The production path is the Helm chart at [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts). Install and tune values there — this repo does not duplicate chart documentation.
+The chart is in this repository at [`deploy/helm/orch8`](../deploy/helm/orch8/README.md).
+It isn't published to a Helm repository or Artifact Hub yet, so install it from a checkout:
 
 ```bash
-helm repo add orch8 https://orch8-io.github.io/helm-charts
-helm install orch8 orch8/orch8-engine
+helm dependency build deploy/helm/orch8
+helm install orch8 deploy/helm/orch8 \
+  --set externalDatabase.url='postgres://orch8:secret@db:5432/orch8?sslmode=require'
 ```
+
+What the chart does:
+
+- **Node roles.** `mode: allInOne` runs one Deployment with the `all_in_one` role.
+  `mode: split` runs a `control` Deployment and an `executor` Deployment, each with its
+  own replicas, HPA, and PDB. The optional `gateway` Deployment is for the continuity gateway
+  role. It needs gRPC mTLS material and binds its HTTP listener to loopback only, so it uses
+  exec probes. The chart doesn't offer the `edge` role.
+- **Secrets.** Pass `secrets.existingSecret`, or let the chart generate the API key and
+  the 64-hex encryption key once. Generated keys are reused on upgrade and the chart
+  keeps the Secret on uninstall.
+- **Database.** Use `externalDatabase.url` or `externalDatabase.existingSecret`, or turn on
+  the bundled Bitnami `postgresql` subchart for evaluation with `postgresql.enabled=true`.
+  SQLite (`storage.backend=sqlite`) is allowed only with one all-in-one replica on a PVC.
+- **Migrations.** `migrations.mode: job` (the default) runs `orch8 migrate` as a Helm
+  pre-install/pre-upgrade hook. `server` sets `ORCH8_RUN_MIGRATIONS=true` on the pods, and
+  `none` leaves migrations to you.
+- **Pods.** Readiness and liveness probes use `/health/ready` and `/health/live`. Pods run
+  as non-root uid 999 with a read-only root filesystem and all capabilities dropped.
+- **Extras.** Ingress, HPA, and PDB are available. So are a PrometheusRule (the same rules
+  as [`prometheus-alerts.yml`](prometheus-alerts.yml)) and a ServiceMonitor.
+- **Metrics caveat.** `/metrics` requires the `x-api-key` header, and a prometheus-operator
+  ServiceMonitor can't send custom headers. The chart README describes the
+  `metrics.scrapeConfigSecret` alternative.
+
+`scripts/helm-test.sh` lints and renders every `deploy/helm/orch8/ci/*-values.yaml` case.
 
 ---
 
@@ -169,49 +203,85 @@ helm install orch8 orch8/orch8-engine
 
 ---
 
-## Fly.io
+## One-click and PaaS templates
 
-Single-region, SQLite-on-volume is the fastest path:
+Every template below meets the requirements for a secure container: a storage backend,
+`ORCH8_API_KEY`, and `ORCH8_ENCRYPTION_KEY`, which must be 64 hex characters from
+`openssl rand -hex 32`. Postgres templates also set `ORCH8_RUN_MIGRATIONS=true` so that a
+fresh database gets its schema. Back up the encryption key outside the platform, because data
+encrypted with it can't be read without it. All templates run **one** engine instance. See
+[High availability](#high-availability) before you scale out.
 
-```toml
-# fly.toml
-app = "orch8-engine"
+| Platform | File | Storage | Button / command |
+|---|---|---|---|
+| Render | [`render.yaml`](../render.yaml) | Render Postgres | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/orch8-io/engine) |
+| DigitalOcean App Platform | [`.do/deploy.template.yaml`](../.do/deploy.template.yaml) | DO dev database (PG) | [![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/orch8-io/engine/tree/main) |
+| Railway | [`deploy/railway/`](../deploy/railway/) | Railway Postgres | Template not published yet (see below) |
+| Fly.io | [`fly.toml`](../fly.toml) | SQLite on a Fly volume | `fly launch --copy-config` (no button) |
+| Coolify | [`deploy/coolify/docker-compose.yml`](../deploy/coolify/docker-compose.yml) | Postgres container | Paste as a Docker Compose resource |
 
-[build]
-  image = "ghcr.io/orch8-io/engine:latest"
+The Render and DigitalOcean buttons read the template from the default branch of the
+public repository. A template added on a feature branch only takes effect after it merges.
 
-[mounts]
-  source = "orch8_data"
-  destination = "/data"
+### Render
 
-[env]
-  ORCH8_STORAGE_BACKEND = "sqlite"
-  ORCH8_DATABASE_URL    = "sqlite:///data/orch8.db?mode=rwc"
-  ORCH8_LOG_JSON        = "true"
-  # ORCH8_API_KEY and ORCH8_ENCRYPTION_KEY are required for startup — set them
-  # as secrets, not in this file:
-  #   fly secrets set ORCH8_API_KEY=<random> ORCH8_ENCRYPTION_KEY=<64-hex-chars>
+`render.yaml` creates a `basic-256mb` Render Postgres and a web service from
+`ghcr.io/orch8-io/engine:latest`. Render generates `ORCH8_API_KEY`. `ORCH8_ENCRYPTION_KEY`
+is `sync: false`, so Render asks for it during setup: paste the output of
+`openssl rand -hex 32`. The health check is `/health/ready`.
 
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_stop_machines = false   # scheduler needs to stay up
-  min_machines_running = 1
+### DigitalOcean App Platform
+
+`.do/deploy.template.yaml` pulls the image from GHCR, attaches a dev PostgreSQL database
+through `${db.DATABASE_URL}`, and declares `ORCH8_API_KEY` and `ORCH8_ENCRYPTION_KEY` as
+empty `SECRET` values. Fill both in on the review screen, or the server exits at startup.
+For production, attach a managed database cluster instead of the dev database. If the
+first deploy logs `permission denied for schema public`, the database user can't create
+tables. Grant it rights on the schema, or use a database the user owns.
+
+### Railway
+
+A Railway template is created in the Railway dashboard, not from a file, so there's no
+button until a maintainer publishes one. The repository side is ready:
+`deploy/railway/railway.json` builds `deploy/railway/Dockerfile`, which is just
+`FROM ghcr.io/orch8-io/engine`, and sets the `/health/ready` health check. To create the template:
+
+1. New project, then add a **PostgreSQL** database.
+2. Add a service from the GitHub repo. In **Settings → Config-as-code**, set the path to
+   `deploy/railway/railway.json`.
+3. Variables:
+   `ORCH8_STORAGE_BACKEND=postgres`, `ORCH8_DATABASE_URL=${{Postgres.DATABASE_URL}}`,
+   `ORCH8_RUN_MIGRATIONS=true`, `ORCH8_HTTP_ADDR=0.0.0.0:8080`, `ORCH8_REQUIRE_TENANT_HEADER=true`,
+   `ORCH8_API_KEY=<random>`, `ORCH8_ENCRYPTION_KEY=<64 hex>`. In a published template, the
+   template variable functions can generate these values. Check in the template editor
+   that the encryption key comes out as exactly 64 hex characters.
+4. Networking: generate a domain that targets port **8080**.
+
+### Fly.io
+
+Single-region SQLite on a volume is the quickest way to run on Fly. Fly has no deploy
+button. From a checkout:
+
+```bash
+fly launch --copy-config --no-deploy          # reuses fly.toml; pick your own app name
+fly volumes create orch8_data --size 1
+fly secrets set ORCH8_API_KEY=$(openssl rand -hex 32) ORCH8_ENCRYPTION_KEY=$(openssl rand -hex 32)
+fly deploy
 ```
 
-For HA or multi-region, use Fly Postgres and bump `min_machines_running = 2`.
+`fly.toml` keeps one machine running (`auto_stop_machines = false`, because the scheduler
+must stay up). A Fly volume lives on one host. Add Litestream as described in
+[SQLite in production](SQLITE_PRODUCTION.md) for off-host copies. If you need more than
+one machine, switch to Postgres. Several machines can't share one SQLite volume.
 
----
+### Coolify
 
-## Railway / Render
-
-Both support the container image directly. Steps:
-
-1. Provision managed Postgres.
-2. Create a service from `ghcr.io/orch8-io/engine:latest`.
-3. Set env vars: `ORCH8_STORAGE_BACKEND=postgres`, `ORCH8_DATABASE_URL=<managed db url>`, `ORCH8_API_KEY=<random>`, `ORCH8_ENCRYPTION_KEY=<64 hex>`.
-4. Expose port 8080. Set health check to `/health/ready`.
-5. Scale to 2+ replicas for HA.
+Create a **Docker Compose** resource and paste `deploy/coolify/docker-compose.yml`.
+Coolify fills `SERVICE_FQDN_ENGINE_8080`, `SERVICE_USER_POSTGRES`,
+`SERVICE_PASSWORD_POSTGRES`, and `SERVICE_PASSWORD_64_APIKEY` (used as the API key) itself.
+Set `ORCH8_ENCRYPTION_KEY` in the resource's environment. The compose file refuses to
+start without it. The same file was smoke-tested with plain `docker compose` using
+substituted values: Postgres came up healthy, migrations ran, and the engine turned ready.
 
 ---
 

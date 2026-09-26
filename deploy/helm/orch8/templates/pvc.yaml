@@ -1,0 +1,20 @@
+{{- $p := .Values.sqlite.persistence }}
+{{- if and (eq .Values.storage.backend "sqlite") (not $p.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "orch8.fullname" . }}-data
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml $p.accessModes | nindent 4 }}
+  {{- if $p.storageClass }}
+  storageClassName: {{ $p.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $p.size }}
+{{- end }}

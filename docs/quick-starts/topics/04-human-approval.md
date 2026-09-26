@@ -1,5 +1,7 @@
 # Add a human approval gate
 
+> **Stability: stable**, covered by the [1.0 stability contract](../../../STABILITY.md).
+
 Use `wait_for_input` when a workflow must pause for a validated human decision.
 The decision arrives as a custom signal, is stored in `context.data`, and then
 drives the next route.

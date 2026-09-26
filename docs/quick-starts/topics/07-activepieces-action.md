@@ -1,5 +1,7 @@
 # Run an Activepieces action
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Use the Activepieces sidecar when a workflow needs a community integration but
 the engine should remain a small Rust runtime. An `ap://piece.action` handler
 is dispatched over HTTP to the Node sidecar, which loads the installed piece

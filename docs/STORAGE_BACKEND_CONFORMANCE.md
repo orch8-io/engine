@@ -1,5 +1,7 @@
 # Storage backend conformance
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Third-party `StorageBackend` implementations can run Orch8's public minimum
 behavior suite instead of copying SQLite-specific integration tests:
 
