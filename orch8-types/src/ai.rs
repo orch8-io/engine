@@ -124,7 +124,8 @@ pub struct PromptResolution {
     pub content_hash: String,
 }
 
-/// Validate a prompt name or label: 1–128 chars of `[A-Za-z0-9._/-]`.
+/// Validate a prompt name or label: 1–128 chars of `[A-Za-z0-9._-]` (no
+/// `/`, so names are single URL path segments).
 ///
 /// # Errors
 /// Returns a human-readable reason when invalid.
@@ -134,10 +135,10 @@ pub fn validate_prompt_identifier(kind: &str, value: &str) -> Result<(), String>
     }
     if !value
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
         return Err(format!(
-            "{kind} may only contain letters, digits, '.', '_', '-', '/'"
+            "{kind} may only contain letters, digits, '.', '_', '-'"
         ));
     }
     Ok(())
@@ -712,7 +713,8 @@ mod tests {
 
     #[test]
     fn identifiers_are_validated() {
-        assert!(validate_prompt_identifier("name", "support/triage-v2.en").is_ok());
+        assert!(validate_prompt_identifier("name", "support.triage-v2_en").is_ok());
+        assert!(validate_prompt_identifier("name", "a/b").is_err());
         assert!(validate_prompt_identifier("name", "").is_err());
         assert!(validate_prompt_identifier("name", "bad name").is_err());
         assert!(validate_prompt_identifier("name", &"x".repeat(129)).is_err());
