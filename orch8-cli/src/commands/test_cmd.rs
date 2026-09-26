@@ -196,11 +196,29 @@ async fn extract_fixture(
 // `orch8 test run`
 // ---------------------------------------------------------------------------
 
-/// Derive the sequence path from `<name>.contracts.json` → `<name>.json`.
+/// Derive the sequence path from `<name>.contracts.{json,yaml,yml}` →
+/// `<name>.{json,yaml,yml}`: the first sibling that exists, else the one with
+/// the contract file's own extension.
 fn default_sequence_path(contract_path: &Path) -> Option<PathBuf> {
     let name = contract_path.file_name()?.to_str()?;
-    let stem = name.strip_suffix(".contracts.json")?;
-    Some(contract_path.with_file_name(format!("{stem}.json")))
+    let (stem, own_ext) = ["json", "yaml", "yml"].iter().find_map(|ext| {
+        name.strip_suffix(&format!(".contracts.{ext}"))
+            .map(|stem| (stem, *ext))
+    })?;
+    let candidates = std::iter::once(own_ext).chain(
+        ["json", "yaml", "yml"]
+            .into_iter()
+            .filter(move |ext| *ext != own_ext),
+    );
+    let mut first = None;
+    for ext in candidates {
+        let candidate = contract_path.with_file_name(format!("{stem}.{ext}"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        first.get_or_insert(candidate);
+    }
+    first
 }
 
 async fn run_contracts(
@@ -209,30 +227,24 @@ async fn run_contracts(
     recorded: Option<&Path>,
     report_format: ReportFormat,
 ) -> Result<()> {
-    let contract_raw = std::fs::read_to_string(contract_file)
-        .with_context(|| format!("reading {}", contract_file.display()))?;
-    let suite: ContractSuite =
-        serde_json::from_str(&contract_raw).context("contract file is not a valid suite")?;
+    let suite: ContractSuite = serde_json::from_value(crate::seqdoc::read_document(contract_file)?)
+        .context("contract file is not a valid suite")?;
 
     let seq_path = match sequence {
         Some(p) => p.to_path_buf(),
         None => default_sequence_path(contract_file).context(
-            "cannot derive the sequence path (contract file does not end in `.contracts.json`); \
-             pass --sequence",
+            "cannot derive the sequence path (contract file does not end in \
+             `.contracts.json` / `.contracts.yaml`); pass --sequence",
         )?,
     };
-    let seq_raw = std::fs::read_to_string(&seq_path)
-        .with_context(|| format!("reading {}", seq_path.display()))?;
-    let seq_json: Value =
-        serde_json::from_str(&seq_raw).context("sequence file is not valid JSON")?;
+    let seq_json = crate::seqdoc::read_document(&seq_path)?;
     let seq = decode_test_sequence(&seq_json)?;
 
     let mut opts = orch8::contract::RunOptions::default();
     if let Some(recorded_path) = recorded {
-        let raw = std::fs::read_to_string(recorded_path)
-            .with_context(|| format!("reading {}", recorded_path.display()))?;
         let map: HashMap<String, Value> =
-            serde_json::from_str(&raw).context("recorded outputs must be {block_id: output}")?;
+            serde_json::from_value(crate::seqdoc::read_document(recorded_path)?)
+                .context("recorded outputs must be {block_id: output}")?;
         opts.recorded_outputs = map;
     }
 
@@ -331,7 +343,11 @@ async fn record(client: &Client, base: &str, instance_id: Uuid, out: Option<&Pat
     let outputs = get_recorded_outputs(client, base, instance_id).await?;
 
     let draft = build_recorded_case(&inst, &seq, &outputs, &RedactionPolicy::default());
-    let rendered = serde_json::to_string_pretty(&draft)?;
+    // `--out *.yaml` writes the draft suite as YAML; otherwise pretty JSON.
+    let rendered = match out {
+        Some(path) => crate::seqdoc::render_for_path(path, &draft)?,
+        None => serde_json::to_string_pretty(&draft)?,
+    };
 
     match out {
         Some(path) => {
@@ -729,7 +745,29 @@ mod tests {
     #[test]
     fn default_sequence_path_requires_contracts_suffix() {
         assert!(default_sequence_path(Path::new("workflows/checkout.json")).is_none());
-        assert!(default_sequence_path(Path::new("checkout.contracts.yaml")).is_none());
+        assert!(default_sequence_path(Path::new("checkout.contracts.toml")).is_none());
+    }
+
+    #[test]
+    fn default_sequence_path_supports_yaml_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let contract = dir.path().join("checkout.contracts.yaml");
+        // Nothing exists yet: same extension as the contract file.
+        assert_eq!(
+            default_sequence_path(&contract).unwrap(),
+            dir.path().join("checkout.yaml")
+        );
+        // A JSON sequence next to a YAML contract is found.
+        std::fs::write(dir.path().join("checkout.json"), "{}").unwrap();
+        assert_eq!(
+            default_sequence_path(&contract).unwrap(),
+            dir.path().join("checkout.json")
+        );
+        std::fs::write(dir.path().join("checkout.yaml"), "a: 1").unwrap();
+        assert_eq!(
+            default_sequence_path(&contract).unwrap(),
+            dir.path().join("checkout.yaml")
+        );
     }
 
     fn sample_report(passed: bool) -> SuiteReport {

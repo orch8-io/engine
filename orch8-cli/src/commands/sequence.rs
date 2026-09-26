@@ -10,9 +10,9 @@ use crate::{OutputFormat, print_response};
 
 #[derive(Subcommand)]
 pub enum SequenceCmd {
-    /// Create a sequence from a JSON file.
+    /// Create a sequence from a JSON or YAML file.
     Create {
-        /// Path to the JSON definition file.
+        /// Path to the definition file (`.json`, `.yaml`, or `.yml`).
         #[arg(long, short)]
         file: PathBuf,
     },
@@ -41,10 +41,10 @@ pub enum SequenceCmd {
     },
     /// Git-ops apply: diff a local sequence definition against the server and,
     /// on change, upload it with the version bumped. Accepts a file or a
-    /// directory of `.json` files. Idempotent — an unchanged sequence is left
-    /// alone.
+    /// directory of `.json` / `.yaml` / `.yml` files. Idempotent — an
+    /// unchanged sequence is left alone.
     Apply {
-        /// Path to a sequence JSON file or a directory of them.
+        /// Path to a sequence file (JSON or YAML) or a directory of them.
         path: PathBuf,
         /// Show what would change without applying.
         #[arg(long)]
@@ -57,7 +57,7 @@ pub enum SequenceCmd {
         /// Stored sequence id to check.
         #[arg(long, conflicts_with = "file")]
         id: Option<Uuid>,
-        /// Local draft definition to check instead of a stored sequence.
+        /// Local draft definition (JSON or YAML) to check instead of a stored sequence.
         #[arg(long, short)]
         file: Option<PathBuf>,
     },
@@ -67,7 +67,7 @@ pub enum SequenceCmd {
         /// Stored sequence id to compile.
         #[arg(long, conflicts_with = "file")]
         id: Option<Uuid>,
-        /// Local draft definition to compile instead of a stored sequence.
+        /// Local draft definition (JSON or YAML) to compile instead of a stored sequence.
         #[arg(long, short)]
         file: Option<PathBuf>,
         /// Atomically write TS/Python/Swift/Kotlin types, schema, and report.
@@ -76,9 +76,9 @@ pub enum SequenceCmd {
     },
     /// Upgrade a sequence document to the current persisted format.
     UpgradeFormat {
-        /// Existing sequence JSON.
+        /// Existing sequence document (JSON or YAML).
         file: PathBuf,
-        /// Destination; omit to print upgraded JSON to stdout.
+        /// Destination (`.json` / `.yaml`); omit to print upgraded JSON to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -161,10 +161,7 @@ async fn apply_one(
     file: &std::path::Path,
     dry_run: bool,
 ) -> Result<String> {
-    let content = std::fs::read_to_string(file)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", file.display()))?;
-    let mut local: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("invalid JSON in {}: {e}", file.display()))?;
+    let mut local = crate::seqdoc::read_document(file)?;
 
     let tenant_id = local["tenant_id"].as_str().map(str::to_string);
     let namespace = local["namespace"].as_str().map(str::to_string);
@@ -227,18 +224,19 @@ async fn apply_one(
     Ok(format!("applied    {name} v{next_version}"))
 }
 
-/// Collect `.json` files from a path (a single file, or every `.json` in a dir).
+/// Collect sequence documents from a path (a single file, or every
+/// `.json` / `.yaml` / `.yml` in a dir).
 fn collect_json_files(path: &std::path::Path) -> Result<Vec<PathBuf>> {
     if path.is_dir() {
         let mut files: Vec<PathBuf> = std::fs::read_dir(path)?
             .map(|entry| entry.map(|entry| entry.path()))
             .collect::<std::io::Result<Vec<_>>>()?
             .into_iter()
-            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .filter(|p| crate::seqdoc::is_document_path(p))
             .collect();
         files.sort();
         if files.is_empty() {
-            anyhow::bail!("no .json files found in {}", path.display());
+            anyhow::bail!("no .json/.yaml/.yml files found in {}", path.display());
         }
         Ok(files)
     } else {
@@ -255,10 +253,7 @@ pub async fn run(
 ) -> Result<()> {
     match cmd {
         SequenceCmd::Create { file } => {
-            let content = std::fs::read_to_string(&file)
-                .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", file.display()))?;
-            let body: serde_json::Value = serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("invalid JSON in {}: {e}", file.display()))?;
+            let body = crate::seqdoc::read_document(&file)?;
             let resp = client
                 .post(format!("{base}/sequences"))
                 .json(&body)
@@ -329,10 +324,7 @@ pub async fn run(
             print_response(resp, format).await?;
         }
         SequenceCmd::UpgradeFormat { file, out } => {
-            let raw = std::fs::read_to_string(&file)
-                .with_context(|| format!("reading {}", file.display()))?;
-            let mut value: serde_json::Value = serde_json::from_str(&raw)
-                .with_context(|| format!("invalid JSON in {}", file.display()))?;
+            let mut value = crate::seqdoc::read_document(&file)?;
             let object = value
                 .as_object_mut()
                 .context("sequence document must be a JSON object")?;
@@ -350,12 +342,15 @@ pub async fn run(
             sequence
                 .validate()
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let rendered = format!("{}\n", serde_json::to_string_pretty(&value)?);
             if let Some(out) = out {
+                let rendered = crate::seqdoc::render_for_path(&out, &value)?;
                 atomic_write(&out, rendered.as_bytes())?;
                 println!("upgraded {} → {}", file.display(), out.display());
             } else {
-                print!("{rendered}");
+                print!(
+                    "{}",
+                    crate::seqdoc::render(&value, crate::seqdoc::DocumentFormat::Json)?
+                );
             }
         }
         SequenceCmd::Apply { path, dry_run } => {
@@ -384,10 +379,7 @@ pub async fn run(
                         .await?
                 }
                 (None, Some(file)) => {
-                    let content = std::fs::read_to_string(&file)
-                        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", file.display()))?;
-                    let body: serde_json::Value = serde_json::from_str(&content)
-                        .map_err(|e| anyhow::anyhow!("invalid JSON in {}: {e}", file.display()))?;
+                    let body = crate::seqdoc::read_document(&file)?;
                     client
                         .post(format!("{base}/sequences/preflight"))
                         .json(&body)
@@ -418,10 +410,7 @@ pub async fn run(
                         .await?
                 }
                 (None, Some(file)) => {
-                    let content = std::fs::read_to_string(&file)
-                        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", file.display()))?;
-                    let body: serde_json::Value = serde_json::from_str(&content)
-                        .map_err(|e| anyhow::anyhow!("invalid JSON in {}: {e}", file.display()))?;
+                    let body = crate::seqdoc::read_document(&file)?;
                     client
                         .post(format!("{base}/sequences/dataflow"))
                         .json(&body)
@@ -523,10 +512,14 @@ fn print_preflight_report(report: &serde_json::Value) {
         );
         for finding in check["findings"].as_array().into_iter().flatten() {
             println!(
-                "      - {} {}",
+                "      - {}{} {}",
                 finding["code"].as_str().unwrap_or(""),
+                crate::error_code_suffix(finding),
                 finding["summary"].as_str().unwrap_or("")
             );
+            if let Some(url) = finding["docs_url"].as_str() {
+                println!("        docs: {url}");
+            }
             for rem in finding["remediation"].as_array().into_iter().flatten() {
                 if let Some(cmd) = rem["command"].as_str() {
                     println!("        fix: {cmd}");

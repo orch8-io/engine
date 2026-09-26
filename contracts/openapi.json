@@ -2862,6 +2862,50 @@
         }
       }
     },
+    "/instances/{id}/explain": {
+      "get": {
+        "tags": [
+          "instances"
+        ],
+        "operationId": "get_explanation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "llm",
+            "in": "query",
+            "description": "Attach an LLM-written narrative. Evidence is redacted with the platform RedactionPolicy before it is sent; the structured fields stay template-based. Provider/model/key come from ORCH8_EXPLAIN_LLM_PROVIDER / _MODEL / _API_KEY.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Plain-language explanation with likely cause, evidence, and suggested fix",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceExplanation"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Instance not found"
+          }
+        }
+      }
+    },
     "/instances/{id}/fork": {
       "post": {
         "tags": [
@@ -4763,8 +4807,14 @@
         ],
         "operationId": "create_sequence",
         "requestBody": {
+          "description": "Sequence definition as JSON, or as YAML with `Content-Type: application/yaml`",
           "content": {
             "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SequenceDefinition"
+              }
+            },
+            "application/yaml": {
               "schema": {
                 "$ref": "#/components/schemas/SequenceDefinition"
               }
@@ -4954,8 +5004,14 @@
         ],
         "operationId": "preflight_draft",
         "requestBody": {
+          "description": "Draft definition as JSON, or as YAML with `Content-Type: application/yaml`",
           "content": {
             "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SequenceDefinition"
+              }
+            },
+            "application/yaml": {
               "schema": {
                 "$ref": "#/components/schemas/SequenceDefinition"
               }
@@ -9894,6 +9950,14 @@
           }
         }
       },
+      "ExplanationMode": {
+        "type": "string",
+        "description": "How the explanation text was produced.",
+        "enum": [
+          "template",
+          "llm"
+        ]
+      },
       "FailRequest": {
         "type": "object",
         "required": [
@@ -10040,6 +10104,20 @@
           },
           "confidence": {
             "$ref": "#/components/schemas/Confidence"
+          },
+          "docs_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Documentation link for `error_code`\n(`https://orch8.io/docs/errors#ORCH8-P001`)."
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stable public error code from [`crate::error_catalog`], e.g.\n`ORCH8-P001`. Filled automatically for catalogued keys."
           },
           "evidence": {
             "type": "array",
@@ -10661,6 +10739,119 @@
           }
         }
       },
+      "InstanceExplanation": {
+        "type": "object",
+        "description": "A plain-language explanation of an instance's current situation.",
+        "required": [
+          "instance_id",
+          "state",
+          "headline",
+          "likely_cause",
+          "suggested_fix",
+          "code",
+          "confidence",
+          "mode",
+          "generated_at"
+        ],
+        "properties": {
+          "alternatives": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Other plausible explanations, ranked, as `CODE: summary` lines."
+          },
+          "code": {
+            "type": "string",
+            "description": "Machine key of the primary diagnosis or failure (e.g. `NO_COMPATIBLE_WORKER`, `HTTP_STATUS`)."
+          },
+          "commands": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Commands the operator can run verbatim. Describing a command never\nruns it."
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/Confidence"
+          },
+          "docs_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stable public code when catalogued (`ORCH8-P001`)."
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Facts backing the explanation (already redacted by their producers)."
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FailureEnvelope",
+                "description": "Structured failure envelope for failed instances."
+              }
+            ]
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "headline": {
+            "type": "string",
+            "description": "One sentence: what is going on."
+          },
+          "instance_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "likely_cause": {
+            "type": "string",
+            "description": "The most likely cause, in plain language."
+          },
+          "llm_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why an LLM narrative was requested but not produced (the template\nexplanation is still complete)."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ExplanationMode"
+          },
+          "narrative": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LlmNarrative"
+              }
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "Engine state name at explanation time."
+          },
+          "suggested_fix": {
+            "type": "string",
+            "description": "What to do about it."
+          }
+        }
+      },
       "InstanceId": {
         "type": "string",
         "format": "uuid",
@@ -10942,6 +11133,26 @@
           }
         ],
         "description": "Join policies for multi-event waits."
+      },
+      "LlmNarrative": {
+        "type": "object",
+        "description": "Optional LLM narrative. The prompt contained only redacted evidence.",
+        "required": [
+          "provider",
+          "model",
+          "text"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
       },
       "LocalityPolicy": {
         "type": "object",

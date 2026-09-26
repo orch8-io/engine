@@ -6,6 +6,7 @@ use reqwest::{Client, header};
 use serde_json::Value;
 
 mod commands;
+mod seqdoc;
 mod templates;
 
 use commands::alert::AlertCmd;
@@ -21,6 +22,7 @@ use commands::demo::DemoCmd;
 use commands::deploy::DeployCmd;
 use commands::dev::DevCmd;
 use commands::doctor::DoctorCmd;
+use commands::explain::ExplainCmd;
 use commands::generate::GenerateCmd;
 use commands::inspect_cmd::InspectCmd;
 use commands::instance::InstanceCmd;
@@ -105,6 +107,10 @@ enum Commands {
     Doctor(DoctorCmd),
     /// Export a strictly redacted operational support bundle.
     SupportBundle(SupportBundleCmd),
+    /// Explain in plain language why an instance is stuck or failed: likely
+    /// cause, evidence, and suggested fix commands (`--llm` adds a redacted
+    /// LLM narrative from the server's configured provider).
+    Explain(ExplainCmd),
     /// Instance management.
     #[command(subcommand)]
     Instance(InstanceCmd),
@@ -182,12 +188,24 @@ enum Commands {
         /// Directory to initialize in (defaults to current directory).
         #[arg(default_value = ".")]
         dir: String,
-        /// Built-in template to write as sequence.json (see `orch8 templates list`).
+        /// Built-in template to write as the example sequence (see `orch8 templates list`).
         #[arg(long, default_value = "default")]
         template: String,
+        /// Syntax of the example sequence: `json` (sequence.json) or `yaml`
+        /// (sequence.yaml). Both use the same schema.
+        #[arg(long, value_enum, default_value = "json")]
+        format: seqdoc::FormatArg,
     },
     /// Generate, strictly validate, and repair a sequence with an LLM.
     Generate(GenerateCmd),
+    /// Convert an exported n8n workflow or Zapier zap into an Orch8 sequence
+    /// (JSON or YAML) with a conversion report of TODOs and triggers.
+    #[command(subcommand)]
+    Import(commands::import::ImportCmd),
+    /// Interactive tutorial: walk through docs/quick-starts step by step,
+    /// running real commands against a local dev engine and checking the
+    /// results (progress in .orch8/learn.json).
+    Learn(commands::learn::LearnCmd),
     /// Browse built-in sequence templates.
     #[command(subcommand)]
     Templates(TemplatesCmd),
@@ -208,6 +226,15 @@ enum Commands {
         #[arg(long, env = "ORCH8_DATABASE_URL")]
         database_url: String,
     },
+    /// Export sequences, triggers, cron schedules, queue routing rules, and
+    /// credentials (and optionally instances) to a versioned, checksummed
+    /// .tar.gz, reading the storage database directly.
+    Backup(commands::backup::BackupCmd),
+    /// Restore an `orch8 backup` archive (idempotent; `--dry-run` to preview).
+    Restore(commands::backup::RestoreCmd),
+    /// Check a database against this binary's bundled migrations
+    /// (`--check`): pending, destructive, and unknown migrations.
+    Upgrade(commands::upgrade::UpgradeCmd),
     /// Generate shell completions.
     Completions {
         /// Shell to generate completions for.
@@ -365,6 +392,35 @@ fn render_json_table(body: &Value) -> Option<String> {
     }
 }
 
+/// ` [ORCH8-P001]` when a finding / error body carries a stable error code,
+/// else empty. Used next to the machine key in human output.
+pub fn error_code_suffix(value: &Value) -> String {
+    value
+        .get("error_code")
+        .and_then(Value::as_str)
+        .map(|code| format!(" [{code}]"))
+        .unwrap_or_default()
+}
+
+/// Render an API error body's message plus its stable code and docs link
+/// (`message [ORCH8-V005] — see https://orch8.io/docs/errors#ORCH8-V005`).
+pub fn describe_api_error(body: &Value, fallback: &str) -> String {
+    let message = body
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .or_else(|| body.get("error").and_then(Value::as_str))
+        .unwrap_or(fallback);
+    let detail = body.get("error").unwrap_or(&Value::Null);
+    match (
+        detail.get("error_code").and_then(Value::as_str),
+        detail.get("docs_url").and_then(Value::as_str),
+    ) {
+        (Some(code), Some(url)) => format!("{message} [{code}] — see {url}"),
+        (Some(code), None) => format!("{message} [{code}]"),
+        _ => message.to_string(),
+    }
+}
+
 pub async fn print_response(resp: reqwest::Response, format: OutputFormat) -> Result<()> {
     let status = resp.status();
     let text = resp
@@ -382,11 +438,8 @@ pub async fn print_response(resp: reqwest::Response, format: OutputFormat) -> Re
             _ => println!("{}", serde_json::to_string_pretty(&body)?),
         }
     } else {
-        let message = body
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .or_else(|| body.get("error").and_then(Value::as_str))
-            .unwrap_or_else(|| status.canonical_reason().unwrap_or("request failed"));
+        let message =
+            describe_api_error(&body, status.canonical_reason().unwrap_or("request failed"));
         let hint = match status {
             reqwest::StatusCode::UNAUTHORIZED => {
                 " Set --api-key or ORCH8_API_KEY to the server's configured key."
@@ -573,6 +626,7 @@ pub(crate) fn confirm_destructive(prompt: &str) -> Result<()> {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     use std::io::IsTerminal as _;
 
@@ -596,7 +650,25 @@ async fn main() -> Result<()> {
     // Handle dev before building the HTTP client — it runs an embedded
     // engine and never talks to a server.
     if let Commands::Dev(cmd) = cli.command {
-        return commands::dev::run(cmd).await;
+        return commands::dev::run(cmd, cli.api_key, cli.tenant_id).await;
+    }
+
+    if let Commands::Learn(cmd) = cli.command {
+        return commands::learn::run(cmd).await;
+    }
+
+    // Database-direct commands: no API client or fleet context involved.
+    match cli.command {
+        Commands::Backup(cmd) => return commands::backup::run_backup(cmd, format).await,
+        Commands::Restore(cmd) => return commands::backup::run_restore(cmd, format).await,
+        Commands::Upgrade(cmd) => return commands::upgrade::run(cmd, format).await,
+        _ => {}
+    }
+
+    // Import is an offline file conversion; `--tenant-id` / ORCH8_TENANT_ID
+    // only sets the generated sequence's tenant.
+    if let Commands::Import(cmd) = cli.command {
+        return commands::import::run(cmd, cli.tenant_id.as_deref());
     }
 
     // Demonstrations are self-contained and deliberately do not require a
@@ -641,6 +713,7 @@ async fn main() -> Result<()> {
         Commands::Health => commands::health::run(&client, base, format).await?,
         Commands::Doctor(cmd) => commands::doctor::run(&client, base, cmd, format).await?,
         Commands::SupportBundle(cmd) => commands::support_bundle::run(&client, base, cmd).await?,
+        Commands::Explain(cmd) => commands::explain::run(&client, base, cmd, format).await?,
         Commands::Instance(cmd) => {
             commands::instance::run(&client, base, cmd, format, cli.tenant_id.as_deref()).await?;
         }
@@ -680,11 +753,20 @@ async fn main() -> Result<()> {
                 "internal error: context command should have been handled before dispatch"
             )
         }
-        Commands::Init { dir, template } => commands::init::run(&dir, &template)?,
+        Commands::Init {
+            dir,
+            template,
+            format,
+        } => commands::init::run_with_format(&dir, &template, format.into())?,
         Commands::Generate(cmd) => commands::generate::run(cmd).await?,
         Commands::Templates(cmd) => commands::templates::run(cmd).await?,
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,
         Commands::Dev(..)
+        | Commands::Import(..)
+        | Commands::Learn(..)
+        | Commands::Backup(..)
+        | Commands::Restore(..)
+        | Commands::Upgrade(..)
         | Commands::Bootstrap(..)
         | Commands::Demo(..)
         | Commands::Migrate { .. }
@@ -733,6 +815,28 @@ mod tests {
                 .contains("failed to read response body (HTTP 200 OK)")
         );
         server.await.unwrap();
+    }
+
+    #[test]
+    fn api_errors_render_stable_code_and_docs_link() {
+        let body = serde_json::json!({"error": {
+            "code": "invalid_argument",
+            "message": "invalid argument: duplicate block id: a",
+            "error_code": "ORCH8-V005",
+            "docs_url": "https://orch8.io/docs/errors#ORCH8-V005",
+        }});
+        assert_eq!(
+            describe_api_error(&body, "x"),
+            "invalid argument: duplicate block id: a [ORCH8-V005] — see \
+             https://orch8.io/docs/errors#ORCH8-V005"
+        );
+        let plain = serde_json::json!({"error": {"message": "nope"}});
+        assert_eq!(describe_api_error(&plain, "x"), "nope");
+        assert_eq!(describe_api_error(&Value::Null, "fallback"), "fallback");
+        assert_eq!(
+            error_code_suffix(&serde_json::json!({"error_code": "ORCH8-P001"})),
+            " [ORCH8-P001]"
+        );
     }
 
     #[test]
@@ -962,6 +1066,12 @@ mod tests {
     }
 
     #[test]
+    fn cli_definition_is_consistent() {
+        // Catches clashing short flags / ids across every subcommand.
+        <Cli as clap::CommandFactory>::command().debug_assert();
+    }
+
+    #[test]
     fn cli_parses_completions_command() {
         use clap::Parser;
         let cli = Cli::try_parse_from(["orch8", "completions", "bash"]);
@@ -973,7 +1083,7 @@ mod tests {
         use clap::Parser;
         let cli = Cli::try_parse_from(["orch8", "init", "my-project"]).unwrap();
         match cli.command {
-            Commands::Init { dir, template } => {
+            Commands::Init { dir, template, .. } => {
                 assert_eq!(dir, "my-project");
                 assert_eq!(template, "default");
             }
@@ -986,7 +1096,7 @@ mod tests {
         use clap::Parser;
         let cli = Cli::try_parse_from(["orch8", "init", ".", "--template", "react-loop"]).unwrap();
         match cli.command {
-            Commands::Init { dir, template } => {
+            Commands::Init { dir, template, .. } => {
                 assert_eq!(dir, ".");
                 assert_eq!(template, "react-loop");
             }
@@ -1008,6 +1118,7 @@ mod tests {
             Commands::Templates(TemplatesCmd::Show {
                 name,
                 catalog_url: None,
+                ..
             }) => assert_eq!(name, "react-loop"),
             _ => panic!("expected templates show command"),
         }

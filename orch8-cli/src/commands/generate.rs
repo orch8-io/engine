@@ -4,8 +4,6 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::atomic_write;
-
 #[derive(Args)]
 pub struct GenerateCmd {
     /// Natural-language workflow description, or @path to read it from a file.
@@ -131,10 +129,8 @@ pub async fn run(cmd: GenerateCmd) -> Result<()> {
             });
         match decoded {
             Ok(_) => {
-                atomic_write(
-                    &cmd.out,
-                    format!("{}\n", serde_json::to_string_pretty(&value)?).as_bytes(),
-                )?;
+                // `--out flow.yaml` writes YAML; any other extension JSON.
+                crate::seqdoc::write_document(&cmd.out, &value)?;
                 println!("generated and validated {}", cmd.out.display());
                 return Ok(());
             }

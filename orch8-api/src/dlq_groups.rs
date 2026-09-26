@@ -422,7 +422,7 @@ async fn collect_failures(
 /// `__retry__` marker; instances with no recorded error get an `unknown`
 /// envelope so they still group (by sequence/version) instead of
 /// disappearing.
-async fn derive_envelope(
+pub(crate) async fn derive_envelope(
     state: &AppState,
     instance: &TaskInstance,
     seq: Option<&SequenceDefinition>,

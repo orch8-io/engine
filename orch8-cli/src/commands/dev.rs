@@ -40,7 +40,8 @@ const STALL_HINT_AFTER: Duration = Duration::from_secs(5);
 #[derive(Debug, clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct DevCmd {
-    /// Directory containing `sequence.json`, or a sequence file directly.
+    /// Directory containing `sequence.json` / `sequence.yaml`, or a sequence
+    /// file (JSON or YAML) directly.
     #[arg(default_value = ".")]
     pub path: String,
 
@@ -89,8 +90,9 @@ pub struct DevCmd {
     #[arg(long, default_value_t = 8080)]
     pub port: u16,
 
-    /// Directory of workflow JSON files to watch. All `*.json` files are
-    /// loaded as sequences on startup and hot-reloaded on change.
+    /// Directory of workflow files to watch. All `*.json`, `*.yaml`, and
+    /// `*.yml` files are loaded as sequences on startup and hot-reloaded on
+    /// change.
     #[arg(long)]
     pub workflows: Option<String>,
 
@@ -98,6 +100,19 @@ pub struct DevCmd {
     /// file change or workflows directory change).
     #[arg(long)]
     pub auto_run: bool,
+
+    /// Run a local worker process next to the dev engine (repeatable), e.g.
+    /// `--worker "node worker.js"`. Workers get `ORCH8_URL`, `ORCH8_API_KEY`,
+    /// and `ORCH8_TENANT_ID` for the dev server, prefixed/colorized logs, and
+    /// are restarted with backoff when they exit. The whole process group is
+    /// stopped when `orch8 dev` exits.
+    #[arg(long = "worker", value_name = "CMD")]
+    pub workers: Vec<String>,
+
+    /// Restart every `--worker` when a file matching this glob changes
+    /// (repeatable), e.g. `--worker-watch "src/**/*.ts"`.
+    #[arg(long = "worker-watch", value_name = "GLOB", requires = "workers")]
+    pub worker_watch: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -116,13 +131,12 @@ pub fn resolve_sequence_path(path: &Path, sequence: Option<&Path>) -> Result<Pat
     if path.is_file() {
         return Ok(path.to_path_buf());
     }
-    let candidate = path.join("sequence.json");
-    if candidate.is_file() {
+    if let Some(candidate) = crate::seqdoc::default_sequence_in(path) {
         return Ok(candidate);
     }
     bail!(
-        "no sequence.json found in {} — pass a file, use --sequence <file>, \
-         or scaffold one with `orch8 init`",
+        "no sequence.json (or sequence.yaml / sequence.yml) found in {} — pass a file, \
+         use --sequence <file>, or scaffold one with `orch8 init`",
         path.display()
     )
 }
@@ -156,15 +170,20 @@ pub struct LoadedSequence {
 /// (`id`, `tenant_id`, `version`, `created_at`) so the same file can be
 /// republished as a new immutable version on every hot reload.
 pub fn load_sequence(path: &Path, version: i32) -> Result<LoadedSequence> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    parse_sequence(&raw, version)
+    let value = crate::seqdoc::read_document(path)?;
+    parse_sequence_value(value, version)
 }
 
 /// Parse raw sequence JSON (see [`load_sequence`]). Split out so the
 /// invalid-JSON / invalid-definition error paths are unit-testable.
+#[cfg(test)]
 pub fn parse_sequence(raw: &str, version: i32) -> Result<LoadedSequence> {
-    let mut value: Value = serde_json::from_str(raw).context("invalid JSON")?;
+    let value: Value = serde_json::from_str(raw).context("invalid JSON")?;
+    parse_sequence_value(value, version)
+}
+
+/// Decode an already-parsed sequence document (JSON or YAML source).
+pub fn parse_sequence_value(mut value: Value, version: i32) -> Result<LoadedSequence> {
     let obj = value
         .as_object_mut()
         .ok_or_else(|| anyhow!("sequence file must be a JSON object"))?;
@@ -179,11 +198,18 @@ pub fn parse_sequence(raw: &str, version: i32) -> Result<LoadedSequence> {
     obj.insert("created_at".into(), serde_json::json!(Utc::now()));
 
     let handlers_by_block = block_handlers(&value);
-    let definition = orch8_types::sequence::deserialize_sequence_strict(&value)
-        .context("invalid sequence definition")?;
-    definition
-        .validate()
-        .map_err(|e| anyhow!("invalid sequence: {e}"))?;
+    let definition = orch8_types::sequence::deserialize_sequence_strict(&value).map_err(|e| {
+        anyhow!(
+            "invalid sequence definition: {e}{}",
+            crate::seqdoc::coded_suffix("SEQUENCE_DECODE_FAILED")
+        )
+    })?;
+    definition.validate().map_err(|e| {
+        anyhow!(
+            "invalid sequence: {e}{}",
+            crate::seqdoc::coded_suffix(e.catalog_key())
+        )
+    })?;
     Ok(LoadedSequence {
         definition,
         handlers_by_block,
@@ -273,7 +299,7 @@ impl FileWatch {
     }
 }
 
-/// Watches a directory of `*.json` files for changes, tracking each file's
+/// Watches a directory of sequence documents (`*.json`, `*.yaml`, `*.yml`) for changes, tracking each file's
 /// (mtime, size) signature independently.
 pub struct DirWatch {
     dir: PathBuf,
@@ -296,7 +322,7 @@ impl DirWatch {
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e == "json")
+                if crate::seqdoc::is_document_path(&path)
                     && let Some(sig) = FileWatch::stat(&path)
                 {
                     self.signatures.insert(path, sig);
@@ -314,7 +340,7 @@ impl DirWatch {
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e == "json")
+                if crate::seqdoc::is_document_path(&path)
                     && let Some(sig) = FileWatch::stat(&path)
                 {
                     if self.signatures.get(&path) != Some(&sig) {
@@ -329,7 +355,7 @@ impl DirWatch {
         changed
     }
 
-    /// All `*.json` file paths currently tracked.
+    /// All sequence document paths currently tracked.
     pub fn paths(&self) -> Vec<PathBuf> {
         self.signatures.keys().cloned().collect()
     }
@@ -705,7 +731,7 @@ fn dev_db_path(cmd: &DevCmd) -> PathBuf {
     project_dir.join(".orch8").join("dev.db")
 }
 
-/// Load all `*.json` files from the workflows directory and upsert them as
+/// Load all sequence documents from the workflows directory and upsert them as
 /// sequences into the dev engine. Returns the directory watcher.
 fn init_workflows(dir: &str, engine: &Engine) -> DirWatch {
     let dw = DirWatch::new(dir);
@@ -772,13 +798,20 @@ fn feature_line(cmd: &DevCmd) -> String {
     if cmd.once {
         features.push("once".into());
     }
+    if !cmd.workers.is_empty() {
+        features.push(format!("workers:{}", cmd.workers.len()));
+    }
     features.join(", ")
 }
 
-/// Entry point for `orch8 dev`.
+/// Entry point for `orch8 dev`. `api_key` / `tenant_id` are the CLI's
+/// resolved `--api-key` / `--tenant-id`, handed to `--worker` processes.
 #[allow(clippy::too_many_lines)]
-pub async fn run(cmd: DevCmd) -> Result<()> {
+pub async fn run(cmd: DevCmd, api_key: Option<String>, tenant_id: Option<String>) -> Result<()> {
     let started = Instant::now();
+    if !cmd.workers.is_empty() && !server_enabled(&cmd) {
+        bail!("--worker needs the dev HTTP server; drop --no-server");
+    }
     let seq_path =
         resolve_sequence_path(Path::new(&cmd.path), cmd.sequence.as_deref().map(Path::new))?;
 
@@ -800,6 +833,20 @@ pub async fn run(cmd: DevCmd) -> Result<()> {
     };
 
     let dev_server = maybe_start_server(&cmd).await?;
+    let workers = if cmd.workers.is_empty() {
+        None
+    } else {
+        let env = super::dev_workers::WorkerEnv {
+            url: format!("http://127.0.0.1:{}{}", cmd.port, orch8_api::API_V1_PREFIX),
+            api_key,
+            tenant_id: tenant_id.unwrap_or_else(|| DEV_TENANT.to_string()),
+        };
+        Some(super::dev_workers::WorkerSupervisor::start(
+            &cmd.workers,
+            &env,
+            &cmd.worker_watch,
+        )?)
+    };
 
     let manual_clock = cmd
         .skip_timers
@@ -850,6 +897,9 @@ pub async fn run(cmd: DevCmd) -> Result<()> {
         _ = tokio::signal::ctrl_c() => Ok(None),
     };
 
+    if let Some(workers) = workers {
+        workers.shutdown().await;
+    }
     if let Some(server) = &dev_server {
         server.shutdown.cancel();
     }
@@ -1223,6 +1273,31 @@ mod tests {
     }
 
     #[test]
+    fn load_sequence_accepts_yaml_and_reports_yaml_error_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let json: Value = serde_json::from_str(SIMPLE_SEQ).unwrap();
+        let file = dir.path().join("sequence.yaml");
+        std::fs::write(&file, serde_norway_free_yaml(&json)).unwrap();
+        assert_eq!(resolve_sequence_path(dir.path(), None).unwrap(), file);
+        let loaded = load_sequence(&file, 1).unwrap();
+        assert_eq!(loaded.definition.name, "dev-test");
+
+        std::fs::write(&file, "name: x\nblocks:\n  - id: [broken\n").unwrap();
+        let err = format!("{:#}", load_sequence(&file, 2).unwrap_err());
+        assert!(err.contains("invalid YAML"), "got: {err}");
+        assert!(err.contains("sequence.yaml:"), "got: {err}");
+        assert!(err.contains("[ORCH8-V001]"), "got: {err}");
+
+        // The workflows directory watcher tracks YAML documents too.
+        let watch = DirWatch::new(dir.path());
+        assert_eq!(watch.paths(), vec![file]);
+    }
+
+    fn serde_norway_free_yaml(value: &Value) -> String {
+        crate::seqdoc::render(value, crate::seqdoc::DocumentFormat::Yaml).unwrap()
+    }
+
+    #[test]
     fn block_handlers_recurses_into_composites() {
         let value: Value = serde_json::from_str(
             r#"{
@@ -1418,6 +1493,8 @@ mod tests {
             port: 9090,
             workflows: None,
             auto_run: false,
+            workers: vec![],
+            worker_watch: vec![],
         };
         let line = feature_line(&cmd);
         assert!(line.contains("server:9090"), "got: {line}");
@@ -1440,6 +1517,8 @@ mod tests {
             port: 8080,
             workflows: Some("workflows/".into()),
             auto_run: true,
+            workers: vec![],
+            worker_watch: vec![],
         };
         let line = feature_line(&cmd);
         assert!(line.contains("server:8080"), "got: {line}");
@@ -1466,6 +1545,8 @@ mod tests {
             port: 8080,
             workflows: None,
             auto_run: false,
+            workers: vec![],
+            worker_watch: vec![],
         };
         let line = feature_line(&cmd);
         assert_eq!(line, "timers:real", "got: {line}");

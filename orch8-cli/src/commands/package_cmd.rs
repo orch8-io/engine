@@ -378,6 +378,7 @@ fn read_package(path: &Path) -> Result<SignedPackage> {
     serde_json::from_str(&raw).context("file is not a signed orch8 package")
 }
 
+#[allow(clippy::too_many_lines)]
 fn build(dir: &Path, key_arg: &str, out: Option<&Path>) -> Result<()> {
     let signing_key = load_signing_key(key_arg)?;
 
@@ -412,6 +413,9 @@ fn build(dir: &Path, key_arg: &str, out: Option<&Path>) -> Result<()> {
     };
 
     // Collect files deterministically: sequences/, contracts/, README.md.
+    // YAML sources (`.yaml` / `.yml`) are normalized to canonical pretty JSON
+    // under a `.json` name, so the signed archive format (and every installer)
+    // stays JSON-only.
     let mut files = BTreeMap::new();
     for sub in ["sequences", "contracts"] {
         let sub_dir = dir.join(sub);
@@ -422,7 +426,7 @@ fn build(dir: &Path, key_arg: &str, out: Option<&Path>) -> Result<()> {
             .map(|entry| entry.map(|entry| entry.path()))
             .collect::<std::io::Result<Vec<_>>>()?
             .into_iter()
-            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .filter(|p| crate::seqdoc::is_document_path(p))
             .collect();
         entries.sort();
         for entry in entries {
@@ -430,11 +434,28 @@ fn build(dir: &Path, key_arg: &str, out: Option<&Path>) -> Result<()> {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .context("non-utf8 file name")?;
-            files.insert(
-                format!("{sub}/{name}"),
-                std::fs::read_to_string(&entry)
-                    .with_context(|| format!("reading {}", entry.display()))?,
-            );
+            let (name, content) = match crate::seqdoc::DocumentFormat::from_path(&entry) {
+                crate::seqdoc::DocumentFormat::Json => (
+                    name.to_string(),
+                    std::fs::read_to_string(&entry)
+                        .with_context(|| format!("reading {}", entry.display()))?,
+                ),
+                crate::seqdoc::DocumentFormat::Yaml => {
+                    let value = crate::seqdoc::read_document(&entry)?;
+                    let stem = entry
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .context("non-utf8 file name")?;
+                    (
+                        format!("{stem}.json"),
+                        crate::seqdoc::render(&value, crate::seqdoc::DocumentFormat::Json)?,
+                    )
+                }
+            };
+            let key = format!("{sub}/{name}");
+            if files.insert(key.clone(), content).is_some() {
+                bail!("{key} is provided twice (both JSON and YAML sources?)");
+            }
         }
     }
     let readme = dir.join("README.md");
@@ -731,3 +752,34 @@ async fn install(
 #[cfg(test)]
 #[path = "package_cmd_coverage_tests.rs"]
 mod package_cmd_coverage_tests;
+
+#[cfg(test)]
+mod yaml_source_tests {
+    use super::*;
+
+    #[test]
+    fn build_normalizes_yaml_sequences_to_canonical_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "acme/billing", "version": "1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("sequences")).unwrap();
+        std::fs::write(
+            dir.path().join("sequences/billing.yaml"),
+            "id: 0191e4f2-a1b2-7c3d-8e4f-a5b6c7d8e9f0\ntenant_id: demo\nnamespace: default\n\
+             name: billing\nversion: 1\ncreated_at: '2026-07-25T00:00:00Z'\n\
+             blocks:\n  - type: step\n    id: charge\n    handler: charge_card\n",
+        )
+        .unwrap();
+        let key = BASE64.encode([5u8; 32]);
+        let out = dir.path().join("out.orch8pkg");
+        build(dir.path(), &key, Some(&out)).unwrap();
+        let pkg = read_package(&out).unwrap();
+        let body = pkg.archive.files.get("sequences/billing.json").unwrap();
+        let seq: orch8::SequenceDefinition = serde_json::from_str(body).unwrap();
+        assert_eq!(seq.name, "billing");
+        assert!(!pkg.archive.files.contains_key("sequences/billing.yaml"));
+    }
+}

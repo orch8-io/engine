@@ -191,6 +191,14 @@ impl Remediation {
 pub struct Finding {
     /// Stable machine code, `SCREAMING_SNAKE_CASE`, e.g. `NO_COMPATIBLE_WORKER`.
     pub code: String,
+    /// Stable public error code from [`crate::error_catalog`], e.g.
+    /// `ORCH8-P001`. Filled automatically for catalogued keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Documentation link for `error_code`
+    /// (`https://orch8.io/docs/errors#ORCH8-P001`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_url: Option<String>,
     pub severity: FindingSeverity,
     /// One-sentence human-readable statement.
     pub summary: String,
@@ -216,8 +224,12 @@ impl Finding {
         confidence: Confidence,
         observed_at: DateTime<Utc>,
     ) -> Self {
+        let code = code.into();
+        let entry = crate::error_catalog::lookup(&code);
         Self {
-            code: code.into(),
+            error_code: entry.map(|e| e.code.to_string()),
+            docs_url: entry.map(crate::error_catalog::ErrorCodeEntry::docs_url),
+            code,
             severity,
             summary: summary.into(),
             evidence: Vec::new(),
@@ -330,6 +342,29 @@ mod tests {
         assert_eq!(res.kind, "handler");
         assert_eq!(res.name.as_deref(), Some("Charge card"));
         assert!(!f.remediation[0].side_effect_risk);
+    }
+
+    #[test]
+    fn catalogued_keys_get_a_stable_code_and_docs_url() {
+        let f = Finding::new(
+            "NO_COMPATIBLE_WORKER",
+            FindingSeverity::Error,
+            "s",
+            Confidence::High,
+            t0(),
+        );
+        assert_eq!(f.error_code.as_deref(), Some("ORCH8-P001"));
+        assert_eq!(
+            f.docs_url.as_deref(),
+            Some("https://orch8.io/docs/errors#ORCH8-P001")
+        );
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["error_code"], "ORCH8-P001");
+
+        let unknown = Finding::new("X", FindingSeverity::Info, "s", Confidence::Low, t0());
+        assert!(unknown.error_code.is_none());
+        let v = serde_json::to_value(&unknown).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("error_code"));
     }
 
     #[test]

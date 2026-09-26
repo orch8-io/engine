@@ -4,9 +4,15 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rand::Rng;
 
+use crate::seqdoc::DocumentFormat;
 use crate::templates;
 
 pub fn run(dir: &str, template: &str) -> Result<()> {
+    run_with_format(dir, template, DocumentFormat::Json)
+}
+
+/// `orch8 init --format json|yaml`.
+pub fn run_with_format(dir: &str, template: &str, format: DocumentFormat) -> Result<()> {
     // Resolve the template before touching the filesystem so an unknown
     // name fails cleanly without leaving a half-initialized directory.
     let template = templates::find(template)?;
@@ -16,13 +22,13 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
         fs::create_dir_all(base).context("failed to create directory")?;
     }
 
-    write_scaffolds(base, template)?;
+    let sequence_file = write_scaffolds(base, template, format)?;
 
     println!("Initialized Orch8 project in {dir}/");
     println!();
     println!("Files created:");
     println!("  orch8.toml          Configuration (SQLite by default)");
-    println!("  sequence.json       Example sequence definition");
+    println!("  {sequence_file:<18}  Example sequence definition");
     println!("  docker-compose.yml  Engine + Postgres stack");
     println!();
     // Check if default port is already in use.
@@ -41,7 +47,7 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
     println!("  docker compose up -d");
     println!();
     println!("Then create the example sequence:");
-    println!("{}", sequence_apply_command());
+    println!("{}", sequence_apply_command(&sequence_file));
 
     Ok(())
 }
@@ -49,14 +55,14 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
 /// Quick-start command. The API key goes through `ORCH8_API_KEY` (read from
 /// the generated config) rather than a `--api-key` flag, so the secret isn't
 /// printed to the terminal or saved in shell history.
-fn sequence_apply_command() -> String {
-    concat!(
+fn sequence_apply_command(sequence_file: &str) -> String {
+    let command = concat!(
         "  export ORCH8_API_KEY=\"$(sed -n 's/^api_key = \"\\(.*\\)\"$/\\1/p' orch8.toml)\"\n",
-        "  orch8 sequence apply sequence.json --url http://localhost:8080/api/v1 ",
+        "  orch8 sequence apply SEQUENCE_FILE --url http://localhost:8080/api/v1 ",
         "\\\n",
         "    --tenant-id demo",
-    )
-    .to_owned()
+    );
+    command.replace("SEQUENCE_FILE", sequence_file)
 }
 
 /// Generate a 32-byte random token rendered as hex so the scaffold ships
@@ -149,7 +155,12 @@ volumes:
   pgdata:
 "#;
 
-fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<()> {
+/// Write the scaffold files; returns the example sequence's file name.
+fn write_scaffolds(
+    base: &Path,
+    template: &templates::Template,
+    format: DocumentFormat,
+) -> Result<String> {
     let api_key = generate_secret_hex();
     let encryption_key = generate_secret_hex();
     #[allow(clippy::literal_string_with_formatting_args)]
@@ -165,12 +176,21 @@ fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<()> {
         fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
             .context("secure orch8.toml permissions")?;
     }
-    write_if_absent(&base.join("sequence.json"), template.json)?;
+    let sequence_file = format!("sequence.{}", format.extension());
+    let sequence_body = match format {
+        DocumentFormat::Json => template.json.to_string(),
+        DocumentFormat::Yaml => {
+            let value: serde_json::Value = serde_json::from_str(template.json)
+                .context("built-in template is not valid JSON")?;
+            crate::seqdoc::render(&value, DocumentFormat::Yaml)?
+        }
+    };
+    write_if_absent(&base.join(&sequence_file), &sequence_body)?;
     let compose = DOCKER_COMPOSE_TEMPLATE
         .replace("{api_key}", &api_key)
         .replace("{encryption_key}", &encryption_key);
     write_if_absent(&base.join("docker-compose.yml"), &compose)?;
-    Ok(())
+    Ok(sequence_file)
 }
 
 fn write_if_absent(path: &Path, content: &str) -> Result<()> {
@@ -330,6 +350,23 @@ mod tests {
     }
 
     #[test]
+    fn init_yaml_writes_an_equivalent_sequence_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        run_with_format(
+            dir.path().to_str().unwrap(),
+            "default",
+            DocumentFormat::Yaml,
+        )
+        .unwrap();
+        assert!(!dir.path().join("sequence.json").exists());
+        let yaml_path = dir.path().join("sequence.yaml");
+        let from_yaml = crate::seqdoc::read_document(&yaml_path).unwrap();
+        let from_json: serde_json::Value =
+            serde_json::from_str(templates::find("default").unwrap().json).unwrap();
+        assert_eq!(from_yaml, from_json);
+    }
+
+    #[test]
     fn init_creates_missing_directory() {
         let base = tempfile::tempdir().unwrap();
         let target = base.path().join("nested").join("project");
@@ -339,14 +376,14 @@ mod tests {
 
     #[test]
     fn quick_start_continuation_has_no_literal_patch_marker() {
-        let command = sequence_apply_command();
+        let command = sequence_apply_command("sequence.json");
         assert!(command.contains("\\\n    --tenant-id demo"));
         assert!(!command.contains("\n+"));
     }
 
     #[test]
     fn quick_start_never_passes_the_api_key_as_a_flag() {
-        let command = sequence_apply_command();
+        let command = sequence_apply_command("sequence.json");
         assert!(!command.contains("--api-key"), "{command}");
         assert!(command.contains("ORCH8_API_KEY"));
     }

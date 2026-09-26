@@ -338,6 +338,117 @@ fn init_scaffolds_project_and_never_clobbers() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn dev_once_runs_a_yaml_sequence() {
+    let sb = Sandbox::new();
+    let sequence = sb.write_sequence(
+        "flow.yaml",
+        "name: yaml-flow\nblocks:\n  - type: step\n    id: emit\n    handler: probe\n",
+    );
+    let stdout = sb.run_ok(&[
+        "dev",
+        sequence.to_str().unwrap(),
+        "--no-server",
+        "--once",
+        "--mock",
+        r#"probe={"outcome":"from-yaml"}"#,
+    ]);
+    assert!(stdout.contains("from-yaml"), "{stdout}");
+    assert!(stdout.contains("instance completed"), "{stdout}");
+
+    let broken = sb.write_sequence("broken.yaml", "name: x\nblocks:\n  - id: [oops\n");
+    let stderr = sb.run_err(&["dev", broken.to_str().unwrap(), "--no-server", "--once"]);
+    assert!(stderr.contains("invalid YAML"), "{stderr}");
+    assert!(stderr.contains("[ORCH8-V001]"), "{stderr}");
+}
+
+#[test]
+fn import_n8n_writes_yaml_sequence_that_dev_accepts() {
+    let sb = Sandbox::new();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/import/n8n-daily-report.json");
+    let out = sb.root.join("report.yaml");
+    let report = sb.root.join("report.json");
+    let output = sb
+        .cmd()
+        .args([
+            "import",
+            "n8n",
+            fixture.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("TODO"), "{stderr}");
+    let yaml = std::fs::read_to_string(&out).unwrap();
+    assert!(yaml.contains("handler: http_request"), "{yaml}");
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    assert_eq!(report["triggers"][0]["body"]["cron_expr"], "0 7 * * 1-5");
+}
+
+#[test]
+fn learn_prints_steps_without_a_tty_and_runs_real_checks() {
+    let sb = Sandbox::new();
+    let list = sb.run_ok(&["learn", "--list"]);
+    assert!(list.contains("Level 1"), "{list}");
+    assert!(list.contains("0/"), "{list}");
+
+    // No TTY: prints the current step only.
+    let shown = sb.run_ok(&["learn"]);
+    assert!(shown.contains("Create a workspace"), "{shown}");
+    assert!(shown.contains("no TTY"), "{shown}");
+    assert!(!sb.root.join(".orch8/learn.json").exists());
+
+    // Step 1 writes the guide's sequence; step 2 runs it on a local dev
+    // engine through the real binary; step 4 proves validation rejects it.
+    sb.run_ok(&["learn", "--step", "1", "--check"]);
+    let ran = sb.run_ok(&["learn", "--step", "2", "--check"]);
+    assert!(ran.contains("check passed"), "{ran}");
+    let rejected = sb.run_ok(&["learn", "--step", "4", "--check"]);
+    assert!(rejected.contains("duplicate block id"), "{rejected}");
+
+    let progress: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.root.join(".orch8/learn.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        progress["completed"],
+        serde_json::json!(["1.1", "1.2", "1.4"])
+    );
+
+    // A manual step has no automated check.
+    let err = sb.run_err(&["learn", "--step", "3", "--check"]);
+    assert!(err.contains("no automated check"), "{err}");
+
+    sb.run_ok(&["learn", "--reset"]);
+    assert!(!sb.root.join(".orch8/learn.json").exists());
+}
+
+#[test]
+fn learn_publishes_to_a_local_dev_engine() {
+    let sb = Sandbox::new();
+    sb.run_ok(&["learn", "--step", "1", "--check"]);
+    let list = sb.run_ok(&["learn", "--list"]);
+    let index = |id: &str| -> String {
+        list.lines()
+            .find(|l| l.contains(&format!("({id})")))
+            .and_then(|l| l.split('.').next())
+            .and_then(|n| n.split_whitespace().last())
+            .map_or_else(|| panic!("step {id} not listed:\n{list}"), str::to_string)
+    };
+    sb.run_ok(&["learn", "--step", &index("2.1"), "--check"]);
+    let published = sb.run_ok(&["learn", "--step", &index("3.4"), "--check"]);
+    assert!(
+        published.contains("published to the dev engine"),
+        "{published}"
+    );
+}
+
+#[test]
 fn dev_once_completes_sequence_and_prints_mocked_output() {
     let sb = Sandbox::new();
     let sequence = sb.write_sequence(

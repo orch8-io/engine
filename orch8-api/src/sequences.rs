@@ -21,17 +21,61 @@ pub(crate) struct DraftDecodeOptions {
     pub(crate) strict: bool,
 }
 
+/// A sequence document body: JSON (default) or YAML when the request sends
+/// `Content-Type: application/yaml` (also `application/x-yaml`, `text/yaml`).
+/// Both syntaxes parse into the same JSON value and then run the identical
+/// decode/validation path; YAML syntax errors report line and column.
+pub(crate) struct SequenceDocument(pub(crate) serde_json::Value);
+
+impl<S> axum::extract::FromRequest<S> for SequenceDocument
+where
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        use orch8_types::sequence_document::{DocumentFormat, parse_document};
+        let format = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(DocumentFormat::from_content_type);
+        // A declared JSON or YAML body is parsed here so syntax errors of
+        // both formats report line/column with a stable error code. Anything
+        // else (missing / foreign content type) falls through to axum's JSON
+        // extractor, which answers 415 as before.
+        let declared = req.headers().contains_key(axum::http::header::CONTENT_TYPE);
+        if let (Some(format), true) = (format, declared) {
+            let bytes = axum::body::Bytes::from_request(req, state)
+                .await
+                .map_err(IntoResponse::into_response)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                ApiError::validation("DOCUMENT_SYNTAX", "request body is not valid UTF-8")
+                    .into_response()
+            })?;
+            let value = parse_document(text, format).map_err(|e| {
+                ApiError::validation("DOCUMENT_SYNTAX", e.to_string()).into_response()
+            })?;
+            return Ok(Self(value));
+        }
+        let Json(value) = Json::<serde_json::Value>::from_request(req, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        Ok(Self(value))
+    }
+}
+
 pub(crate) fn decode_draft_sequence(
     value: &serde_json::Value,
     strict: bool,
 ) -> Result<(SequenceDefinition, Vec<String>), ApiError> {
     if strict {
         let sequence = orch8_types::sequence::deserialize_sequence_strict(value)
-            .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+            .map_err(|error| ApiError::validation("SEQUENCE_DECODE_FAILED", error.to_string()))?;
         Ok((sequence, Vec::new()))
     } else {
         orch8_types::sequence::deserialize_sequence_lenient(value)
-            .map_err(|error| ApiError::InvalidArgument(error.to_string()))
+            .map_err(|error| ApiError::validation("SEQUENCE_DECODE_FAILED", error.to_string()))
     }
 }
 
@@ -50,7 +94,10 @@ pub fn routes() -> Router<AppState> {
 }
 
 #[utoipa::path(post, path = "/sequences", tag = "sequences",
-    request_body = SequenceDefinition,
+    request_body(content(
+        (SequenceDefinition = "application/json"),
+        (SequenceDefinition = "application/yaml"),
+    ), description = "Sequence definition as JSON, or as YAML with `Content-Type: application/yaml`"),
     responses(
         (status = 201, description = "Sequence created", body = serde_json::Value),
         (status = 409, description = "Sequence already exists"),
@@ -60,7 +107,7 @@ pub(crate) async fn create_sequence(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(options): Query<DraftDecodeOptions>,
-    Json(value): Json<serde_json::Value>,
+    SequenceDocument(value): SequenceDocument,
 ) -> Result<impl IntoResponse, ApiError> {
     let (mut seq, decode_warnings) = decode_draft_sequence(&value, options.strict)?;
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &seq.tenant_id)?;
@@ -70,7 +117,7 @@ pub(crate) async fn create_sequence(
     // engine isn't forced to reconcile collisions in block_outputs /
     // execution_tree keyed on BlockId.
     seq.validate()
-        .map_err(|e| ApiError::InvalidArgument(e.to_string()))?;
+        .map_err(|e| ApiError::validation(e.catalog_key(), e.to_string()))?;
 
     // Reject a malformed `input_schema` at authoring time, not on the first
     // instance create.
@@ -621,7 +668,12 @@ fn validate_output_schemas_in_blocks(blocks: &[BlockDefinition]) -> Result<(), A
             BlockDefinition::Step(step) => {
                 if let Some(schema) = &step.output_schema {
                     crate::input_schema::validate_output_schema_is_well_formed(schema).map_err(
-                        |e| ApiError::InvalidArgument(format!("step '{}': {e}", step.id)),
+                        |e| {
+                            ApiError::validation(
+                                "INVALID_OUTPUT_SCHEMA",
+                                format!("step '{}': {e}", step.id),
+                            )
+                        },
                     )?;
                 }
             }

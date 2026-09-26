@@ -18,6 +18,7 @@ pub mod effect_guard;
 pub mod error;
 pub mod evaluator;
 pub mod event_correlation;
+pub mod explain;
 pub mod expression;
 pub mod externalized;
 pub mod gc;

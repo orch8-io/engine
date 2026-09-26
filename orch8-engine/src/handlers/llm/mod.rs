@@ -607,6 +607,69 @@ async fn dispatch_provider(
     }
 }
 
+/// One-shot, non-streaming text completion through the same provider
+/// plumbing as the `llm_call` handler, for engine features that are not
+/// workflow steps (e.g. `GET /instances/{id}/explain?llm=true`).
+///
+/// Key resolution and endpoint safety are identical to a step: an explicit
+/// `api_key`, else the provider's default env var (`ANTHROPIC_API_KEY`,
+/// `OPENAI_API_KEY`, …), always sent only to the provider's default base
+/// URL, which must pass the outbound URL policy. Callers are responsible for
+/// redacting `user` / `system` before calling. Returns `(model, text)`.
+pub async fn complete_text(
+    provider: &str,
+    model: Option<&str>,
+    api_key: Option<&str>,
+    system: &str,
+    user: &str,
+) -> Result<(String, String), StepError> {
+    let format = provider_format(provider);
+    let mut params = match format {
+        ProviderFormat::Anthropic => json!({
+            "provider": provider,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+            "max_tokens": 1024,
+        }),
+        ProviderFormat::OpenAiCompat => json!({
+            "provider": provider,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": 1024,
+        }),
+    };
+    if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
+        params["model"] = json!(model);
+    }
+    if let Some(key) = api_key {
+        params["api_key"] = json!(key);
+    }
+    let model = resolve_model(&params, provider)?;
+    params["model"] = json!(model);
+    let key = resolve_api_key(&params, provider)?;
+    let base = resolve_base_url(&params, provider);
+    if !super::builtin::is_url_safe(&base).await {
+        return Err(permanent(format!("base_url is not allowed: {base}")));
+    }
+    let out = dispatch_provider(&params, &key, &base, provider, format, None).await?;
+    emit_gen_ai_telemetry(&params, provider, &out);
+    let text = out
+        .pointer("/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| permanent("provider returned no text content".to_string()))?
+        .to_string();
+    let used_model = out
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty())
+        .map_or(model, str::to_owned);
+    Ok((used_model, text))
+}
+
 /// How a schema-validated provider attempt failed.
 enum SchemaCallFailure {
     /// The underlying provider call failed (network, auth, API error, …).

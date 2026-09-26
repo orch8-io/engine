@@ -9,6 +9,13 @@ use orch8_types::error::StorageError;
 pub struct ErrorDetail {
     pub code: &'static str,
     pub message: String,
+    /// Stable public error code (`ORCH8-V005`) when the failure is a
+    /// catalogued validation error; see `docs/ERRORS.md`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<&'static str>,
+    /// `https://orch8.io/docs/errors#<error_code>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_url: Option<String>,
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
@@ -27,6 +34,12 @@ pub enum ApiError {
 
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+
+    /// A catalogued validation failure: HTTP 400 like `InvalidArgument`,
+    /// plus a stable `error_code` / `docs_url` in the body. `key` is an
+    /// `orch8_types::error_catalog` key such as `DUPLICATE_BLOCK_ID`.
+    #[error("invalid argument: {message}")]
+    Validation { key: &'static str, message: String },
 
     #[error("already exists: {0}")]
     AlreadyExists(String),
@@ -64,7 +77,7 @@ impl ApiError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::NotFound(_) => "not_found",
-            Self::InvalidArgument(_) => "invalid_argument",
+            Self::InvalidArgument(_) | Self::Validation { .. } => "invalid_argument",
             Self::AlreadyExists(_) => "already_exists",
             Self::Conflict(_) => "conflict",
             Self::Unauthorized => "unauthorized",
@@ -75,6 +88,23 @@ impl ApiError {
             Self::UnprocessableEntity(_) => "unprocessable_entity",
             Self::BadGateway(_) => "bad_gateway",
             Self::RateLimited(_) => "rate_limited",
+        }
+    }
+
+    /// A catalogued validation error (400 with `error_code` + `docs_url`).
+    pub fn validation(key: &'static str, message: impl Into<String>) -> Self {
+        Self::Validation {
+            key,
+            message: message.into(),
+        }
+    }
+
+    /// The catalogued error-code entry, if this error has one.
+    #[must_use]
+    pub fn catalog_entry(&self) -> Option<&'static orch8_types::error_catalog::ErrorCodeEntry> {
+        match self {
+            Self::Validation { key, .. } => orch8_types::error_catalog::lookup(key),
+            _ => None,
         }
     }
 
@@ -109,7 +139,7 @@ impl IntoResponse for ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
-            Self::InvalidArgument(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidArgument(_) | Self::Validation { .. } => StatusCode::BAD_REQUEST,
             Self::AlreadyExists(_) | Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -125,10 +155,13 @@ impl IntoResponse for ApiError {
             }
             _ => self.to_string(),
         };
+        let entry = self.catalog_entry();
         let body = ErrorEnvelope {
             error: ErrorDetail {
                 code: self.code(),
                 message,
+                error_code: entry.map(|e| e.code),
+                docs_url: entry.map(orch8_types::error_catalog::ErrorCodeEntry::docs_url),
                 request_id: None,
                 details: None,
             },
@@ -225,6 +258,34 @@ mod tests {
             "already exists: duplicate sequence"
         );
         assert!(value["error"]["request_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn validation_errors_carry_stable_code_and_docs_url() {
+        let err = ApiError::validation("DUPLICATE_BLOCK_ID", "duplicate block id: a");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "invalid_argument");
+        assert_eq!(value["error"]["error_code"], "ORCH8-V005");
+        assert_eq!(
+            value["error"]["docs_url"],
+            "https://orch8.io/docs/errors#ORCH8-V005"
+        );
+        assert_eq!(
+            value["error"]["message"],
+            "invalid argument: duplicate block id: a"
+        );
+        // Uncatalogued errors keep the old body shape.
+        let response = ApiError::InvalidArgument("x".into()).into_response();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(value["error"].get("error_code").is_none());
     }
 
     #[test]

@@ -1351,6 +1351,18 @@ pub enum SequenceValidationError {
     InvalidBlock { block_id: String, message: String },
 }
 
+impl SequenceValidationError {
+    /// Error-catalog key (see [`crate::error_catalog`]) for this failure.
+    #[must_use]
+    pub const fn catalog_key(&self) -> &'static str {
+        match self {
+            Self::DuplicateBlockId(_) => "DUPLICATE_BLOCK_ID",
+            Self::InvalidHumanInput { .. } => "INVALID_HUMAN_INPUT",
+            Self::InvalidBlock { .. } => "INVALID_BLOCK",
+        }
+    }
+}
+
 /// Known built-in handler names shipped with the engine. Used for
 /// create-time validation warnings when a sequence references an
 /// unknown handler (likely a typo).

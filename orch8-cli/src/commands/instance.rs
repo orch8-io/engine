@@ -415,9 +415,12 @@ fn print_diagnosis(report: &Value) {
             val_str(d, "category"),
             val_str(d, "health"),
             val_str(d, "confidence"),
-            val_str(d, "code"),
+            format_args!("{}{}", val_str(d, "code"), crate::error_code_suffix(d)),
         );
         println!("      {}", val_str(d, "summary"));
+        if let Some(url) = d["docs_url"].as_str() {
+            println!("      docs: {url}");
+        }
         for ev in d["evidence"].as_array().into_iter().flatten() {
             println!(
                 "      evidence: {} = {}",

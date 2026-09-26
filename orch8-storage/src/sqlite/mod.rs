@@ -119,6 +119,10 @@ async fn column_defs(pool: &SqlitePool, table: &str) -> Result<Vec<ColumnDef>, S
         .collect())
 }
 
+/// Schema version bundled with this binary and recorded in the
+/// `schema_versions` table on boot (`orch8 upgrade --check` compares them).
+pub const BUNDLED_SCHEMA_VERSION: i64 = schema::SCHEMA_VERSION;
+
 /// SQLite storage backend. Supports in-memory (testing) and file-backed (standalone).
 pub struct SqliteStorage {
     pub(crate) pool: SqlitePool,

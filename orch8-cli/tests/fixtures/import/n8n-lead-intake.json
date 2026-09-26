@@ -1,0 +1,173 @@
+{
+  "name": "Lead intake and routing",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "5f1a2c3e-0001-4a6b-9c1d-111111111111",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "b1f0c7a4-7d10-4f55-9a55-5d7b1c9e0a01"
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "id": "a1", "name": "email", "value": "={{ $json.body.email }}", "type": "string" },
+            { "id": "a2", "name": "company", "value": "={{ $json.body.company }}", "type": "string" },
+            { "id": "a3", "name": "employees", "value": "={{ $json.body.employees }}", "type": "number" },
+            { "id": "a4", "name": "source", "value": "website", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5f1a2c3e-0002-4a6b-9c1d-222222222222",
+      "name": "Normalize Lead",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.employees }}",
+              "rightValue": 200,
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5f1a2c3e-0003-4a6b-9c1d-333333333333",
+      "name": "Is Enterprise?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"properties\": {\n    \"dealname\": \"{{ $json.company }}\",\n    \"pipeline\": \"enterprise\"\n  }\n}",
+        "options": { "timeout": 15000 }
+      },
+      "id": "5f1a2c3e-0004-4a6b-9c1d-444444444444",
+      "name": "Create HubSpot Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 180],
+      "credentials": { "hubspotAppToken": { "id": "7", "name": "HubSpot prod" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C0SALES", "mode": "id" },
+        "text": "=New enterprise lead: {{ $('Normalize Lead').item.json.company }} ({{ $('Normalize Lead').item.json.email }})",
+        "otherOptions": {}
+      },
+      "id": "5f1a2c3e-0005-4a6b-9c1d-555555555555",
+      "name": "Notify Sales",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1120, 180],
+      "credentials": { "slackApi": { "id": "3", "name": "Slack" } }
+    },
+    {
+      "parameters": {
+        "amount": 2,
+        "unit": "hours"
+      },
+      "id": "5f1a2c3e-0006-4a6b-9c1d-666666666666",
+      "name": "Wait 2h",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [900, 420],
+      "webhookId": "0c4f9f15-4d3b-4a7c-8f1a-2d9d9d9d9d06"
+    },
+    {
+      "parameters": {
+        "fromEmail": "hello@example.com",
+        "toEmail": "={{ $('Normalize Lead').item.json.email }}",
+        "subject": "Thanks for reaching out",
+        "emailFormat": "text",
+        "text": "=Hi! Someone from our team will contact {{ $('Normalize Lead').item.json.company }} soon.",
+        "options": {}
+      },
+      "id": "5f1a2c3e-0007-4a6b-9c1d-777777777777",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1120, 420],
+      "credentials": { "smtp": { "id": "4", "name": "SMTP" } }
+    },
+    {
+      "parameters": {},
+      "id": "5f1a2c3e-0008-4a6b-9c1d-888888888888",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Score the lead\nconst lead = $input.first().json;\nreturn [{ json: { score: lead.employees > 1000 ? 'A' : 'B' } }];"
+      },
+      "id": "5f1a2c3e-0009-4a6b-9c1d-999999999999",
+      "name": "Score Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "1AbCdEf", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Leads", "mode": "name" }
+      },
+      "id": "5f1a2c3e-0010-4a6b-9c1d-000000000010",
+      "name": "Log to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1780, 300]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Normalize Lead", "type": "main", "index": 0 }]] },
+    "Normalize Lead": { "main": [[{ "node": "Is Enterprise?", "type": "main", "index": 0 }]] },
+    "Is Enterprise?": {
+      "main": [
+        [{ "node": "Create HubSpot Deal", "type": "main", "index": 0 }],
+        [{ "node": "Wait 2h", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create HubSpot Deal": { "main": [[{ "node": "Notify Sales", "type": "main", "index": 0 }]] },
+    "Notify Sales": { "main": [[{ "node": "Merge", "type": "main", "index": 0 }]] },
+    "Wait 2h": { "main": [[{ "node": "Send Welcome Email", "type": "main", "index": 0 }]] },
+    "Send Welcome Email": { "main": [[{ "node": "Merge", "type": "main", "index": 1 }]] },
+    "Merge": { "main": [[{ "node": "Score Lead", "type": "main", "index": 0 }]] },
+    "Score Lead": { "main": [[{ "node": "Log to Sheet", "type": "main", "index": 0 }]] }
+  },
+  "active": true,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "e3a0b1c2-3d4e-4f50-8a9b-0c1d2e3f4a5b",
+  "meta": { "templateCredsSetupCompleted": true, "instanceId": "d6b8a1f2c3e4" },
+  "id": "Xq7LmN2pQr8sTu9v",
+  "tags": [{ "name": "sales", "id": "1" }]
+}

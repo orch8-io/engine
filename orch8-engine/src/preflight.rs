@@ -1486,4 +1486,63 @@ mod tests {
         assert_eq!(report.overall, PreflightStatus::Fail);
         assert!(!report.is_ready());
     }
+
+    /// String literals passed as the code argument right after `marker`.
+    fn literal_codes_after(source: &str, marker: &str) -> Vec<String> {
+        let mut codes = Vec::new();
+        for (idx, _) in source.match_indices(marker) {
+            let rest = source[idx + marker.len()..].trim_start();
+            if let Some(body) = rest.strip_prefix('"')
+                && let Some(end) = body.find('"')
+            {
+                let code = &body[..end];
+                if !code.is_empty()
+                    && code
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b == b'_' || b == b':')
+                {
+                    codes.push(code.to_string());
+                }
+            }
+        }
+        codes
+    }
+
+    /// Every finding code emitted by preflight, typed dataflow, the stuck
+    /// instance doctor, and the API preflight layer must have a stable
+    /// `ORCH8-*` code in the error catalog (and therefore in docs/ERRORS.md).
+    #[test]
+    fn every_emitted_finding_code_is_catalogued() {
+        let sources = [
+            include_str!("preflight.rs"),
+            include_str!("doctor.rs"),
+            include_str!("dataflow.rs"),
+            include_str!("../../orch8-api/src/preflight.rs"),
+        ];
+        let mut codes = Vec::new();
+        for source in sources {
+            // Only production code: stop at the unit-test module.
+            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+            codes.extend(literal_codes_after(production, "Finding::new("));
+            codes.extend(literal_codes_after(production, "finding("));
+            codes.extend(literal_codes_after(production, "code: "));
+        }
+        codes.extend(
+            [
+                crate::dataflow::MISSING_PRODUCER,
+                crate::dataflow::SCHEMA_PATH_MISSING,
+            ]
+            .map(String::from),
+        );
+        assert!(codes.len() > 30, "scanner found too few codes: {codes:?}");
+        let missing: Vec<&String> = codes
+            .iter()
+            .filter(|code| orch8_types::error_catalog::lookup(code).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "finding codes without an ORCH8-* catalog entry (add them to \
+             orch8-types/src/error_catalog.rs and regenerate docs/ERRORS.md): {missing:?}"
+        );
+    }
 }

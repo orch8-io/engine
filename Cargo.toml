@@ -35,6 +35,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_ignored = "0.1"
 serde_path_to_error = "0.1"
+# YAML sequence documents. `serde_norway` is the maintained serde_yaml fork
+# recommended by RUSTSEC-2025-0068 (serde_yml is unsound/archived, serde_yaml
+# is deprecated, and serde_yaml_ng still builds on unmaintained unsafe-libyaml).
+serde_norway = "0.9"
 
 # IDs & time
 uuid = { version = "1", features = ["v4", "v7", "serde"] }

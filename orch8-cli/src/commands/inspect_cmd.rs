@@ -82,10 +82,7 @@ pub async fn run(client: &Client, base: &str, cmd: InspectCmd, format: OutputFor
             } else {
                 let seq_path =
                     sequence_file.context("pass --instance <id> or --sequence-file <path>")?;
-                let seq_raw = std::fs::read_to_string(&seq_path)
-                    .with_context(|| format!("failed to read {}", seq_path.display()))?;
-                let sequence: Value = serde_json::from_str(&seq_raw)
-                    .with_context(|| format!("invalid JSON in {}", seq_path.display()))?;
+                let sequence = crate::seqdoc::read_document(&seq_path)?;
                 let body = serde_json::json!({
                     "sequence": sequence,
                     "block_id": block,

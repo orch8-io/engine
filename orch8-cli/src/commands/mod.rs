@@ -1,4 +1,5 @@
 pub mod alert;
+pub mod backup;
 pub mod bootstrap;
 pub mod budget;
 pub mod checkpoint;
@@ -11,13 +12,17 @@ pub mod demo;
 pub mod deploy;
 pub mod dev;
 pub mod dev_server;
+pub mod dev_workers;
 pub mod doctor;
+pub mod explain;
 pub mod generate;
 pub mod health;
+pub mod import;
 pub mod init;
 pub mod inspect_cmd;
 pub mod instance;
 pub mod job;
+pub mod learn;
 pub mod package_cmd;
 pub mod pieces;
 pub mod portable;
@@ -30,6 +35,7 @@ pub mod support_bundle;
 pub mod templates;
 pub mod test_cmd;
 pub mod triggers;
+pub mod upgrade;
 
 #[cfg(test)]
 mod request_contract_tests;
