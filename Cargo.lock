@@ -3441,6 +3441,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch8-wasm"
+version = "0.7.1"
+dependencies = [
+ "chrono",
+ "getrandom 0.4.3",
+ "moka",
+ "orch8-types",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tracing",
+ "uuid",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

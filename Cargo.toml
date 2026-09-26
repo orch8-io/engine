@@ -11,6 +11,7 @@ members = [
     "orch8-grpc",
     "orch8-server",
     "orch8-cli",
+    "orch8-wasm",
 ]
 resolver = "2"
 exclude = ["packages/node-native", "packages/python-native"]

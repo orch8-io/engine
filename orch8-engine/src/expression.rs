@@ -1,9 +1,16 @@
 use std::borrow::Cow;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::LazyLock;
 
 use orch8_types::context::ExecutionContext;
 use tracing::warn;
 
+// This file is also compiled into `orch8-wasm` (via `#[path]`) so the browser
+// playground evaluates conditions with exactly the engine's semantics. moka's
+// time-to-idle needs `Instant::now()`, which panics on wasm32-unknown-unknown,
+// so the wasm build tokenizes without the cache.
+#[cfg(not(target_arch = "wasm32"))]
 static TOKEN_CACHE: LazyLock<moka::sync::Cache<String, Arc<[Token]>>> = LazyLock::new(|| {
     moka::sync::Cache::builder()
         .max_capacity(10_000)
@@ -11,6 +18,7 @@ static TOKEN_CACHE: LazyLock<moka::sync::Cache<String, Arc<[Token]>>> = LazyLock
         .build()
 });
 
+#[cfg(not(target_arch = "wasm32"))]
 fn tokenize_cached(input: &str) -> Arc<[Token]> {
     if let Some(cached) = TOKEN_CACHE.get(input) {
         return cached;
@@ -18,6 +26,11 @@ fn tokenize_cached(input: &str) -> Arc<[Token]> {
     let tokens: Arc<[Token]> = tokenize(input).into();
     TOKEN_CACHE.insert(input.to_owned(), Arc::clone(&tokens));
     tokens
+}
+
+#[cfg(target_arch = "wasm32")]
+fn tokenize_cached(input: &str) -> Arc<[Token]> {
+    tokenize(input).into()
 }
 
 /// Expression evaluation error with position information.

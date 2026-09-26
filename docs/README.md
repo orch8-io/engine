@@ -16,6 +16,8 @@ or download `/api-docs/openapi.json`. Published snapshots live at
   cron, webhooks, approvals, typed dataflow, large payloads, integrations,
   observability, and load testing.
 - [Sequences](SEQUENCES.md) — learn the workflow JSON model and block types.
+- [Browser playground](PLAYGROUND.md) — validate, preflight and dry-run a
+  sequence in WebAssembly with virtual time; what it does and does not model.
 - [Agent patterns](agent-patterns/README.md) — run four composable AI workflow examples.
 - [Email classifier](../examples/email-classifier/README.md) — a complete TypeScript worker and webhook application.
 - [Portable agent product](../examples/portable-agent-product/README.md) — compile policy, wrap a local worker, score conformance, and validate an OEM plan.

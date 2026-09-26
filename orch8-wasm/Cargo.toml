@@ -1,0 +1,43 @@
+[package]
+name = "orch8-wasm"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Browser playground build of Orch8: sequence validation, static preflight and a dry-run interpreter with virtual time"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# `default-features = false` drops the `sqlx` derives so the crate compiles
+# for wasm32-unknown-unknown.
+orch8-types = { path = "../orch8-types", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+# Used by the engine's expression evaluator (compiled in via `#[path]`):
+# `uuid()` / `random()` / `now()` expression functions and its warnings.
+tracing = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+wasm-bindgen = "0.2"
+
+# The shared expression evaluator caches tokens with moka on native targets.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+moka = { workspace = true }
+
+# uuid/aes-gcm pull in getrandom, which refuses to build for
+# wasm32-unknown-unknown unless the browser (`crypto.getRandomValues`)
+# backend is selected explicitly.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+uuid = { workspace = true, features = ["js"] }
+# `now()` in expressions: read the clock via `Date.now()` instead of
+# panicking on wasm32-unknown-unknown.
+chrono = { workspace = true, features = ["wasmbind"] }
+
+[lints]
+workspace = true

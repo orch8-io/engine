@@ -13,7 +13,7 @@ serde_path_to_error.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
-sqlx.workspace = true
+sqlx = { workspace = true, optional = true }
 utoipa.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
@@ -22,6 +22,13 @@ sha2.workspace = true
 subtle.workspace = true
 zeroize.workspace = true
 strsim = "0.11"
+
+[features]
+# `sqlx` derives `sqlx::Type` on id/state enums and maps `sqlx::Error` into
+# `StorageError`. On by default; turned off only by `orch8-wasm`, which must
+# compile for wasm32 where sqlx (tokio, libsqlite3) cannot.
+default = ["sqlx"]
+sqlx = ["dep:sqlx"]
 
 [dev-dependencies]
 # TOML round-trip tests for `EngineConfig` ([telemetry] section parsing).
