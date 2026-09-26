@@ -163,6 +163,7 @@ pub fn load_sequence(path: &Path, version: i32) -> Result<LoadedSequence> {
 
 /// Parse raw sequence JSON (see [`load_sequence`]). Split out so the
 /// invalid-JSON / invalid-definition error paths are unit-testable.
+#[cfg(test)]
 pub fn parse_sequence(raw: &str, version: i32) -> Result<LoadedSequence> {
     let value: Value = serde_json::from_str(raw).context("invalid JSON")?;
     parse_sequence_value(value, version)

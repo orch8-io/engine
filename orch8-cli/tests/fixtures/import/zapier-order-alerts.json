@@ -1,0 +1,164 @@
+{
+  "metadata": {
+    "version": 2,
+    "exported_at": "2026-08-14T09:12:44Z",
+    "exporter": "zapier-export"
+  },
+  "zaps": [
+    {
+      "id": 213377001,
+      "title": "Large Shopify orders → Slack + fulfilment API",
+      "status": "on",
+      "steps": [
+        {
+          "id": 901,
+          "type_of": "read",
+          "app": "WebHookCLIAPI",
+          "action": "hook_v2",
+          "title": "Catch Hook",
+          "params": {}
+        },
+        {
+          "id": 902,
+          "type_of": "filter",
+          "app": "FilterAPI",
+          "action": "filter",
+          "title": "Only orders over $500",
+          "params": {
+            "filter_criteria": [
+              [
+                { "key": "{{901__total_price}}", "match": "float_greater_than", "value": "500" },
+                { "key": "{{901__currency}}", "match": "exact", "value": "USD" }
+              ]
+            ]
+          }
+        },
+        {
+          "id": 903,
+          "type_of": "write",
+          "app": "FormatterV2API",
+          "action": "number",
+          "title": "Format total",
+          "params": { "transform": "number.currency", "input": "{{901__total_price}}" }
+        },
+        {
+          "id": 904,
+          "type_of": "write",
+          "app": "SlackCLIAPI",
+          "action": "channel_message",
+          "title": "Post to #big-orders",
+          "params": {
+            "channel": "C0BIGORDERS",
+            "text": "Order {{901__order_number}} from {{901__customer__email}} for {{903__output}}",
+            "as_bot": "yes"
+          }
+        },
+        {
+          "id": 905,
+          "type_of": "write",
+          "app": "WebHookCLIAPI",
+          "action": "post",
+          "title": "Create fulfilment request",
+          "params": {
+            "url": "https://fulfil.example.com/api/requests",
+            "payload_type": "json",
+            "data": { "order_id": "{{901__id}}", "priority": "high" },
+            "headers": { "X-Source": "zapier" }
+          }
+        },
+        {
+          "id": 906,
+          "type_of": "write",
+          "app": "DelayCLIAPI",
+          "action": "delay_for",
+          "title": "Wait 30 minutes",
+          "params": { "time_value": "30", "time_unit": "minutes" }
+        },
+        {
+          "id": 907,
+          "type_of": "write",
+          "app": "BranchingAPI",
+          "action": "paths",
+          "title": "Split by country",
+          "params": {},
+          "paths": [
+            {
+              "title": "Domestic",
+              "conditions": [[{ "key": "{{901__shipping_address__country_code}}", "match": "exact", "value": "US" }]],
+              "steps": [
+                {
+                  "id": 908,
+                  "type_of": "write",
+                  "app": "CodeCLIAPI",
+                  "action": "run_python",
+                  "title": "Compute carrier",
+                  "params": {
+                    "code": "output = {'carrier': 'ups' if float(input_data['weight']) < 20 else 'freight'}",
+                    "input_data": { "weight": "{{901__total_weight}}" }
+                  }
+                }
+              ]
+            },
+            {
+              "title": "International",
+              "conditions": [[{ "key": "{{901__shipping_address__country_code}}", "match": "does_not_exact", "value": "US" }]],
+              "steps": [
+                {
+                  "id": 909,
+                  "type_of": "write",
+                  "app": "GmailV2API",
+                  "action": "message",
+                  "title": "Email customs team",
+                  "params": {
+                    "to": "customs@example.com",
+                    "subject": "Customs docs for order {{901__order_number}}",
+                    "body": "Please prepare customs paperwork."
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": 910,
+          "type_of": "write",
+          "app": "GoogleSheetsV2API",
+          "action": "add_row",
+          "title": "Log order",
+          "params": { "spreadsheet": "1XyZ", "worksheet": "Orders", "COL$A": "{{901__order_number}}" }
+        }
+      ]
+    },
+    {
+      "id": 213377002,
+      "title": "Weekly digest",
+      "status": "off",
+      "steps": [
+        {
+          "id": 950,
+          "type_of": "read",
+          "app": "ScheduleCLIAPI",
+          "action": "every_week",
+          "title": "Every Monday 9am",
+          "params": { "day_of_week": "1", "time_of_day": "9", "trigger_on_weekends": "no" }
+        },
+        {
+          "id": 951,
+          "type_of": "write",
+          "app": "WebHookCLIAPI",
+          "action": "get",
+          "title": "Fetch KPIs",
+          "params": { "url": "https://kpi.example.com/weekly", "query": { "format": "json" } }
+        },
+        {
+          "id": 952,
+          "type_of": "write",
+          "app": "SlackCLIAPI",
+          "action": "channel_message",
+          "title": "Post digest",
+          "params": { "channel": "C0DIGEST", "text": "Weekly KPIs: {{951__summary}}" }
+        }
+      ]
+    }
+  ]
+}

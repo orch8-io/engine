@@ -378,6 +378,7 @@ fn read_package(path: &Path) -> Result<SignedPackage> {
     serde_json::from_str(&raw).context("file is not a signed orch8 package")
 }
 
+#[allow(clippy::too_many_lines)]
 fn build(dir: &Path, key_arg: &str, out: Option<&Path>) -> Result<()> {
     let signing_key = load_signing_key(key_arg)?;
 

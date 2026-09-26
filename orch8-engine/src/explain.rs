@@ -255,7 +255,8 @@ fn explain_failure(
     });
     // Failures are not catalogued findings; link the terminal-state entry.
     out.error_code = None;
-    out.docs_url = orch8_types::error_catalog::lookup("TERMINAL_STATE").map(|e| e.docs_url());
+    out.docs_url = orch8_types::error_catalog::lookup("TERMINAL_STATE")
+        .map(orch8_types::error_catalog::ErrorCodeEntry::docs_url);
     out
 }
 

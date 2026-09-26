@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod explain;
 pub mod generate;
 pub mod health;
+pub mod import;
 pub mod init;
 pub mod inspect_cmd;
 pub mod instance;

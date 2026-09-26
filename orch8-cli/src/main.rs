@@ -174,6 +174,10 @@ enum Commands {
     },
     /// Generate, strictly validate, and repair a sequence with an LLM.
     Generate(GenerateCmd),
+    /// Convert an exported n8n workflow or Zapier zap into an Orch8 sequence
+    /// (JSON or YAML) with a conversion report of TODOs and triggers.
+    #[command(subcommand)]
+    Import(commands::import::ImportCmd),
     /// Browse built-in sequence templates.
     #[command(subcommand)]
     Templates(TemplatesCmd),
@@ -585,6 +589,7 @@ pub(crate) fn confirm_destructive(prompt: &str) -> Result<()> {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     use std::io::IsTerminal as _;
 
@@ -609,6 +614,12 @@ async fn main() -> Result<()> {
     // engine and never talks to a server.
     if let Commands::Dev(cmd) = cli.command {
         return commands::dev::run(cmd).await;
+    }
+
+    // Import is an offline file conversion; `--tenant-id` / ORCH8_TENANT_ID
+    // only sets the generated sequence's tenant.
+    if let Commands::Import(cmd) = cli.command {
+        return commands::import::run(cmd, cli.tenant_id.as_deref());
     }
 
     // Demonstrations are self-contained and deliberately do not require a
@@ -693,6 +704,7 @@ async fn main() -> Result<()> {
         Commands::Templates(cmd) => commands::templates::run(cmd).await?,
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,
         Commands::Dev(..)
+        | Commands::Import(..)
         | Commands::Bootstrap(..)
         | Commands::Demo(..)
         | Commands::Migrate { .. }
