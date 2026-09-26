@@ -1,0 +1,30 @@
+# Validate a sequence locally on every PR and, when a release candidate id is
+# provided, run the remote release proof gate (preflight, semantic diff,
+# historical replay). This is the action's default mode.
+name: orch8-gate
+on:
+  pull_request:
+    paths: ["sequences/**"]
+  workflow_dispatch:
+    inputs:
+      release-id:
+        description: Orch8 release id to gate
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write # PR summary comment
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: orch8-io/engine@main # pin to a release tag or commit SHA in production
+        with:
+          mode: gate
+          sequence: sequences/checkout.json
+          release-id: ${{ inputs.release-id }}
+          url: ${{ secrets.ORCH8_URL }}
+          api-key: ${{ secrets.ORCH8_API_KEY }}
+          tenant-id: acme

@@ -1,14 +1,23 @@
 name: Orch8 workflow gate
-description: Validate an Orch8 sequence and optionally run a remote release gate
+description: Validate an Orch8 sequence, run a release gate, post a semantic diff to the PR, or preview it in an ephemeral namespace
 inputs:
+  mode:
+    description: >-
+      gate (default, original behavior): local validation plus optional remote
+      release gate. diff: semantic diff of the sequence against the PR base plus
+      preflight, posted as a PR comment updated in place. preview: publish the
+      sequence into an ephemeral namespace, run server-side preflight and the
+      offline contract suites, then delete it.
+    required: false
+    default: gate
   sequence:
     description: Path to the sequence JSON file
     required: true
   release-id:
-    description: Existing Orch8 release ID to diff, validate, and gate
+    description: "gate mode: existing Orch8 release ID to diff, validate, and gate"
     required: false
   url:
-    description: Orch8 API base URL
+    description: Orch8 API base URL (including /api/v1)
     required: false
     default: http://127.0.0.1:8080/api/v1
   api-key:
@@ -23,12 +32,66 @@ inputs:
     required: false
     default: latest
   comment:
-    description: Post the gate summary to the pull request
+    description: Post the result to the pull request (gate and diff modes)
     required: false
     default: "true"
+  github-token:
+    description: "Token used for PR comments (needs pull-requests: write)"
+    required: false
+    default: ${{ github.token }}
+  base-ref:
+    description: >-
+      diff mode: git revision holding the baseline sequence. Defaults to the
+      pull request base SHA. The checkout needs that commit (fetch-depth: 0).
+    required: false
+    default: ""
+  fail-on-severity:
+    description: "diff mode: fail when the max diff severity reaches none|informational|behavioral|side_effect_risk|incompatible"
+    required: false
+    default: incompatible
+  fail-on-preflight:
+    description: "diff mode: fail when preflight is not pass or warning"
+    required: false
+    default: "true"
+  contracts:
+    description: >-
+      preview mode: glob of contract suites to run with `orch8 test run`
+      (e.g. "sequences/**/*.contracts.json"). Suites run offline with mocked
+      handlers and virtual time; they do not execute against the server.
+    required: false
+    default: ""
+  preview-tenant-id:
+    description: >-
+      preview mode: tenant to publish into instead of tenant-id. The ephemeral
+      namespace is only a logical scope inside a tenant; use this for a
+      dedicated preview tenant if your API key is allowed to act for it.
+    required: false
+    default: ""
+outputs:
+  namespace:
+    description: Ephemeral namespace used by diff/preview modes
+    value: ${{ steps.diff.outputs.namespace || steps.preview.outputs.namespace }}
+  max-severity:
+    description: "diff mode: worst semantic diff severity (none when no diff was computed)"
+    value: ${{ steps.diff.outputs.max-severity }}
+  preflight-overall:
+    description: "diff/preview modes: preflight overall status"
+    value: ${{ steps.diff.outputs.preflight-overall || steps.preview.outputs.preflight-overall }}
+  junit-dir:
+    description: "preview mode: directory holding one JUnit XML report per contract suite"
+    value: ${{ steps.preview.outputs.junit-dir }}
 runs:
   using: composite
   steps:
+    - name: Check mode
+      shell: bash
+      env:
+        ORCH8_MODE: ${{ inputs.mode }}
+      run: |
+        case "$ORCH8_MODE" in
+          gate|diff|preview) ;;
+          *) echo "::error::unknown mode '$ORCH8_MODE' (expected gate, diff, or preview)"; exit 1 ;;
+        esac
     - name: Install Orch8 CLI
       shell: bash
       env:
@@ -45,7 +108,7 @@ runs:
       run: orch8 dev "$ORCH8_SEQUENCE_PATH" --no-server --dry-run --skip-timers --once
     - name: Preflight, diff, historical replay, and canary gate
       id: gate
-      if: inputs.release-id != ''
+      if: inputs.mode == 'gate' && inputs.release-id != ''
       shell: bash
       env:
         ORCH8_URL: ${{ inputs.url }}
@@ -57,10 +120,10 @@ runs:
         orch8 release validate "$ORCH8_RELEASE_ID" --sample 50 --output json
         orch8 release gate "$ORCH8_RELEASE_ID" --sample 50 --output json | tee "$RUNNER_TEMP/orch8-gate.json"
     - name: Comment on pull request
-      if: always() && inputs.comment == 'true' && github.event_name == 'pull_request'
+      if: always() && inputs.mode == 'gate' && inputs.comment == 'true' && github.event_name == 'pull_request'
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.github-token }}
         ORCH8_SEQUENCE_PATH: ${{ inputs.sequence }}
         ORCH8_RELEASE_ID: ${{ inputs.release-id }}
         ORCH8_LOCAL_OUTCOME: ${{ steps.local.outcome }}
@@ -72,3 +135,41 @@ runs:
           summary="❌ Orch8 workflow gate failed for \`$ORCH8_SEQUENCE_PATH\`. See the action log."
         fi
         gh pr comment "${{ github.event.pull_request.number }}" --body "$summary"
+    - name: Semantic diff and preflight
+      id: diff
+      if: inputs.mode == 'diff'
+      shell: bash
+      env:
+        ORCH8_URL: ${{ inputs.url }}
+        ORCH8_API_KEY: ${{ inputs.api-key }}
+        ORCH8_TENANT_ID: ${{ inputs.tenant-id }}
+        ORCH8_SEQUENCE_PATH: ${{ inputs.sequence }}
+        ORCH8_BASE_REF: ${{ inputs.base-ref || github.event.pull_request.base.sha }}
+        ORCH8_FAIL_ON: ${{ inputs.fail-on-severity }}
+        ORCH8_FAIL_ON_PREFLIGHT: ${{ inputs.fail-on-preflight }}
+        ORCH8_COMMENT: ${{ inputs.comment }}
+        ORCH8_PR_NUMBER: ${{ github.event.pull_request.number }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/diff.sh"
+    - name: Preview in an ephemeral namespace
+      id: preview
+      if: inputs.mode == 'preview'
+      shell: bash
+      env:
+        ORCH8_URL: ${{ inputs.url }}
+        ORCH8_API_KEY: ${{ inputs.api-key }}
+        ORCH8_TENANT_ID: ${{ inputs.tenant-id }}
+        ORCH8_PREVIEW_TENANT_ID: ${{ inputs.preview-tenant-id }}
+        ORCH8_SEQUENCE_PATH: ${{ inputs.sequence }}
+        ORCH8_CONTRACTS: ${{ inputs.contracts }}
+        ORCH8_PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/preview.sh"
+    - name: Tear down ephemeral namespace
+      if: always() && (inputs.mode == 'diff' || inputs.mode == 'preview')
+      shell: bash
+      env:
+        ORCH8_URL: ${{ inputs.url }}
+        ORCH8_API_KEY: ${{ inputs.api-key }}
+        ORCH8_TENANT_ID: ${{ inputs.tenant-id }}
+        ORCH8_PREVIEW_TENANT_ID: ${{ inputs.mode == 'preview' && inputs.preview-tenant-id || '' }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/cleanup.sh"

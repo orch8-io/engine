@@ -1,0 +1,35 @@
+# Post a semantic diff (base branch vs PR head) plus a preflight report as a
+# single PR comment that is updated in place on every push.
+name: orch8-sequence-diff
+on:
+  pull_request:
+    paths: ["sequences/**"]
+
+permissions:
+  contents: read
+  pull-requests: write # create/update the diff comment
+
+concurrency:
+  group: orch8-diff-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sequence: [sequences/checkout.json, sequences/onboarding.json]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the baseline is read with `git show <base-sha>:<path>`
+      - uses: orch8-io/engine@main # pin to a release tag or commit SHA in production
+        with:
+          mode: diff
+          sequence: ${{ matrix.sequence }}
+          url: ${{ secrets.ORCH8_URL }}
+          api-key: ${{ secrets.ORCH8_API_KEY }}
+          tenant-id: acme
+          fail-on-severity: incompatible # or side_effect_risk / behavioral / informational / none
+          fail-on-preflight: "true"
