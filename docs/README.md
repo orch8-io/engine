@@ -52,6 +52,9 @@ release notes.
 - `beta` [SQLite in production](SQLITE_PRODUCTION.md) — single-node SQLite + Litestream, limits, and a restore drill.
 - `beta` [GitHub Actions](examples/github-actions/README.md) — release gate, PR semantic-diff comments, and ephemeral preview runs.
 - `stable` [Migration guides](MIGRATION_GUIDES.md) — move from Temporal, Airflow, or Prefect with a reversible cutover.
+- `beta` [Alerts](ALERTS.md) — built-in DLQ, circuit-breaker, budget, and worker-pool alerts to Slack, PagerDuty, or a signed webhook.
+- `beta` [Public progress links](PUBLIC_PROGRESS.md) — revocable, redacted instance progress pages and an embeddable progress bar.
+- `stable` [Error codes](ERRORS.md) — stable `ORCH8-V/P/D` finding codes and what to do about each.
 - `stable` [Local tunnel](LOCAL_TUNNEL.md) — receive signed webhooks during development.
 - `stable` [Authentication and SSO](AUTHENTICATION.md) — engine keys and the Cloud OIDC boundary.
 - `stable` [Secure production bootstrap](SECURE_BOOTSTRAP.md) — scaffold, validate, start, and readiness-check a secure node.

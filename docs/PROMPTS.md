@@ -1,5 +1,7 @@
 # Prompt registry
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Keep prompts out of sequence JSON: push them to a versioned, tenant-scoped
 registry, move labels such as `production` between versions, canary a new
 version on a slice of traffic, and reference the prompt from `llm_call`.

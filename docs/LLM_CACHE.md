@@ -1,5 +1,7 @@
 # `llm_call` response cache
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Opt in per step to reuse a previous answer for the same request. A hit costs no
 tokens, returns in milliseconds, and still succeeds when a tenant budget is
 exhausted.

@@ -89,7 +89,7 @@ Contributions go to the community-templates repository. Read its
   [SEQUENCES.md](SEQUENCES.md), and it must contain no secrets.
 - `scripts/validate.sh` runs static checks. It then runs every template once
   through the real engine with
-  `orch8 dev <file> --dry-run --skip-timers --once --context … --mock …`, and
+  `orch8 dev <file> --dry-run --skip-timers --once --input … --mock …`, and
   checks that `catalog.json` matches `scripts/build-catalog.mjs`. The
   repository's CI runs the same script against the published engine image.
 - Validation mocks every side-effecting and worker handler. It proves that the

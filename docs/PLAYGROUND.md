@@ -1,5 +1,7 @@
 # Browser playground (`orch8-wasm`)
 
+> **Stability: experimental**, may change or be removed in any release.
+
 `orch8-wasm` compiles a subset of Orch8 to `wasm32-unknown-unknown` so a
 sequence can be validated, preflighted and dry-run entirely in the browser —
 no server, no account, no network calls. The website's `/play` page loads it.

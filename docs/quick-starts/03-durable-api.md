@@ -251,7 +251,7 @@ You are ready for Level 4 when:
 - The instance reaches `completed` and its outputs remain available after a
   server restart.
 - You understand why server-mode context is `{"data": {...}}`, while local
-  `orch8 dev --context` accepts the inner data object.
+  `orch8 dev --input` accepts the inner data object.
 
 Keep the server running for the next level.
 

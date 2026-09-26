@@ -29,6 +29,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Background jobs**: `POST/GET/DELETE /jobs` and keyset-paginated `GET /jobs`
+  enqueue a handler without authoring a sequence (each job is an instance of a
+  managed `_job.<handler>` sequence, so retries, DLQ and workers are unchanged);
+  `orch8 job enqueue|get|list|cancel`. See `docs/JOBS.md`.
+- **Triggers**: `kafka`, `sqs`, `pubsub` and `redis_streams` sources (one cargo
+  feature each; `sqs`/`pubsub` on by default) with ack-after-create and
+  per-message idempotency, plus `postgres_rows` row-change triggers backed by a
+  transactional outbox, LISTEN/NOTIFY and a polling fallback
+  (`orch8 triggers pg-install`). See `docs/TRIGGERS.md`.
+- **Built-ins**: `email` (SMTP, Resend, SES v2) and `notify` (Slack, Discord,
+  Teams), guarded by the effect ledger and the outbound URL policy.
+- **Interactive approvals**: `human_review` can post Slack buttons, Teams cards
+  and email magic links (`POST /approvals/slack/interactions`,
+  `GET|POST /approvals/act/{token}`); tokens are single-use and stored hashed.
+- **Webhook signature presets** for triggers (`stripe`, `github`, `shopify`,
+  `svix`, `hmac_sha256`) and four recipes under `examples/recipes/`.
+- **Alerts**: DLQ growth, open circuit breaker, budget breach and empty worker
+  pool rules delivered to Slack, PagerDuty Events v2 or a signed webhook
+  (`/alerts/rules`, `orch8 alert`). See `docs/ALERTS.md`.
+- **Public progress links**: revocable, redacted instance progress
+  (`POST /instances/{id}/share`, `GET /public/progress/{token}[/embed]`,
+  `orch8 share`) with an embeddable progress bar.
+- **Prompt registry**: versioned, tenant-scoped prompts with labels and
+  canaries; `llm_call` `prompt: {name, version|label}` pins the resolved
+  version per block for replay; `orch8 prompt`.
+- **LLM response cache**: opt-in `cache: {mode: exact|semantic, ttl}` on
+  `llm_call`, encrypted and tenant-isolated; savings reported in `/usage`.
+- **Tenant spend budgets**: daily/monthly USD caps (optionally per model) with
+  50/80/100% `budget.threshold_crossed` records and fail-closed hard caps;
+  `orch8 budget`; `/usage` includes budget status.
+- **YAML sequences** everywhere in the CLI and `Content-Type: application/yaml`
+  on `/sequences`, `/sequences/preflight` and `/sequences/dataflow`, with
+  line/column errors.
+- **Stable error codes** (`ORCH8-V/P/D…`) with `docs_url` in findings, API
+  errors and CLI output; generated `docs/ERRORS.md`.
+- **CLI**: `orch8 explain` / `GET /instances/{id}/explain` (template or
+  redacted LLM narrative), `orch8 import n8n|zapier`, `orch8 dev --worker` and
+  `--worker-watch`, `orch8 learn`, `orch8 backup` / `orch8 restore`, and
+  `orch8 upgrade --check`.
+- **`orch8-wasm`**: validation, preflight and a dry-run interpreter with
+  virtual time for the browser playground (`docs/PLAYGROUND.md`).
+- **Dashboard**: visual sequence editor with lossless JSON round-trip and live
+  preflight; "Copy as" curl / Node / Python / CLI on operator actions; an
+  execution time-scrubber with previewed "fork from here".
+- **Packaging**: Helm chart (`deploy/helm/orch8`), one-click templates for
+  Render, DigitalOcean, Railway, Fly.io and Coolify, a SQLite + Litestream
+  production guide, GitHub Action `diff` and `preview` modes,
+  `contracts/sequence-file.schema.json` for hand-written files, a
+  cross-engine benchmark harness (`loadgen/bench`, no published results), and
+  a Kotlin Multiplatform wrapper (`packages/kmp`, preview).
+- **Docs**: README reorganized around jobs, AI agents and offline mobile;
+  `docs/FEATURES.md`, `docs/LICENSING.md`, stability labels on every page.
+- Migrations 089–094 (approval action tokens, alert rules, progress shares,
+  prompt registry, LLM response cache, tenant budgets).
+
 - **1.0 authoring and distribution surface**: published versioned OpenAPI and
   recursive sequence JSON Schema contracts; added sequence format upgrade and
   instance migration commands, an OpenAI-compatible generate/repair loop, a
@@ -56,6 +111,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generated OpenAPI. Domain boundary tests, black-box HTTP tests, compiled-CLI
   E2E tests, and executable `examples/portable-agent-product` fixtures cover
   the product surface and its failure modes.
+
+### Fixed
+
+- Render, the root `docker-compose.yml` and the Kubernetes manifest now set
+  `ORCH8_RUN_MIGRATIONS=true`; a fresh Postgres previously never became ready.
+- Dashboard timeline and fork calls now match the engine's API.
+- Quick starts used `orch8 dev --context`, which the global fleet-context flag
+  swallowed; they now use `--input`.
 
 ## [0.7.1] — 2026-07-30
 

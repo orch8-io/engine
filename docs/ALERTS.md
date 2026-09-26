@@ -1,5 +1,7 @@
 # Built-in Alerts
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Orch8 can page you without an external monitoring stack. An alert rule
 pairs one **condition** with one **destination**; every engine node
 evaluates rules every `alerts.eval_interval_secs` (default 30 s) and delivers

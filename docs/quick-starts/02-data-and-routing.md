@@ -199,7 +199,7 @@ The instance must not execute normally because `enterprise` is outside the
 input schema's enum. Also try omitting `customer`:
 
 ```bash
-orch8 dev . --no-server --once --context '{"plan":"trial"}'
+orch8 dev . --no-server --once --input '{"plan":"trial"}'
 ```
 
 Both failures happen at the input boundary, before the workflow can send a

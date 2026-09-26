@@ -1,5 +1,7 @@
 # Background Jobs
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Enqueue a handler invocation with one HTTP call, no sequence required. This
 is the Orch8 equivalent of a BullMQ / Sidekiq / Celery job, with the
 durability, retries, DLQ, and observability of a full workflow engine.

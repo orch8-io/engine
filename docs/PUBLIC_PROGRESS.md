@@ -1,5 +1,7 @@
 # Public Progress Links
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Share a read-only, live progress view of one workflow instance with someone
 who has no Orch8 account — a customer watching their order, a candidate
 watching an onboarding checklist — without exposing the workflow's data.

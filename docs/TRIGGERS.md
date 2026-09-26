@@ -1,5 +1,7 @@
 # Triggers
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 A trigger maps an event source to a sequence. Every event creates one
 instance of the trigger's sequence in the trigger's tenant and namespace.
 The event body becomes `context.data`, and source details are stored under

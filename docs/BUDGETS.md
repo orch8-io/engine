@@ -1,5 +1,7 @@
 # Tenant spend budgets
 
+> **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
+
 Cap what a tenant spends on LLM calls per day or per month, optionally per
 model family. Soft thresholds raise alerts; a hard cap stops new `llm_call`
 dispatches with a clear error.
