@@ -8,12 +8,18 @@ This document describes the `0.7.1` SDK family. Engine and SDK releases use
 unified versioning: Swift, Android, Flutter, and React Native packages at
 `0.7.1` embed or resolve Orch8 Engine `0.7.1`.
 
+> **Building with Expo or React Native?** Start with
+> [Expo (recommended)](#expo-recommended). `@orch8.io/expo` bundles the native
+> engine for iOS and Android, a REST client, and React hooks in one package.
+> **Sharing workflow code across Android and iOS in Kotlin?** See
+> [Kotlin Multiplatform](#kotlin-multiplatform).
+
 ## Architecture
 
 ```
 ┌─────────────────────────────┐
 │         Host App            │
-│  (Swift / Kotlin / RN)      │
+│  (Swift/Kotlin/RN/Expo/KMP) │
 ├─────────────────────────────┤
 │     UniFFI Bindings          │
 ├─────────────────────────────┤
@@ -30,6 +36,68 @@ unified versioning: Swift, Android, Flutter, and React Native packages at
 The SDK embeds the full orch8 engine compiled as a native library. Sequences are synced from your server, verified with Ed25519 signatures, stored in a local SQLite database, and executed entirely on-device.
 
 ## Installation
+
+### Expo (recommended)
+
+[`@orch8.io/expo`](https://github.com/orch8-io/sdk-expo) is an Expo module.
+Expo autolinking finds it through its `expo-module.config.json`, so no config
+plugin or `app.json` change is needed. It contains native code, so it runs in
+a [development build](https://docs.expo.dev/develop/development-builds/introduction/)
+or a prebuilt app, not in Expo Go.
+
+```bash
+npx expo install @orch8.io/expo
+npx expo prebuild        # or: eas build --profile development
+```
+
+Quick start: load a sequence, start it offline, and answer its
+`wait_for_input` step from React:
+
+```tsx
+import { useEffect } from "react";
+import { Button } from "react-native";
+import * as FileSystem from "expo-file-system";
+import { Orch8Provider, useOrch8, useNativeEngine, useNativeWorkflow } from "@orch8.io/expo";
+import sequence from "./field-inspection-offline.json";
+
+const dbPath = `${FileSystem.documentDirectory!.replace("file://", "")}orch8.db`;
+const Ready = () => (useOrch8().engine ? <Inspect /> : null); // engine opens after first render
+export default () => <Orch8Provider nativeConfig={{ dbPath }}><Ready /></Orch8Provider>;
+
+function Inspect() {
+  const engine = useNativeEngine();
+  const { start, pendingSteps, completeStep } = useNativeWorkflow();
+  useEffect(() => engine.loadSequenceFromJson(sequence), [engine]);
+  const step = pendingSteps[0]; // a step parked on wait_for_input
+  return step
+    ? <Button title={`Complete ${step.stepName}`} onPress={() => completeStep(step.instanceId, step.stepName, { value: "complete" })} />
+    : <Button title="Start" onPress={() => start("field-inspection-offline", { site_id: "A-12" }, "insp:A-12")} />;
+}
+```
+
+This snippet is type-checked as `field-inspection/src/docs/QuickStart.tsx` in
+`mobile-examples`.
+
+`completeStep` output for a `wait_for_input` step must include
+`"value"` set to one of the step's `choices` (`"yes"`/`"no"` when the step
+declares none). The engine stores that value under `store_as` and merges
+the other top-level keys into `context.data`. Any other payload is
+rejected, and the step stays waiting.
+
+Expo-specific behavior (as of `@orch8.io/expo` 0.7):
+
+- `engine.registerHandler(name)` registers a **fire-and-forget** handler. The
+  native side emits a `handlerInvoked` event and returns `{}` right away. For
+  anything that needs user input or async JS work, give the step a
+  `wait_for_input` gate and resume it with `completeStep()`.
+- Set `syncUrl`, `deviceId`, and `syncApiKey` in `nativeConfig` to report
+  status and approval requests to your server. For OS background windows,
+  call `engine.runUntilIdle(maxTicks, timeBudgetMs)` from an Expo
+  BackgroundTask.
+- For a complete offline app with photo capture, sync, supervisor approval,
+  and push, see the
+  [`field-inspection`](https://github.com/orch8-io/mobile-examples/tree/main/field-inspection)
+  reference app in `mobile-examples`.
 
 ### iOS (Swift Package Manager)
 
@@ -89,6 +157,48 @@ npm install react-native-orch8@0.7.1
 
 Run `pod install` after installation on iOS. Both wrappers resolve the native
 SDK at exactly `0.7.1`.
+
+### Kotlin Multiplatform
+
+[`packages/kmp`](../packages/kmp) (`io.orch8:orch8-kmp`, preview, not
+published yet) gives shared KMP code one coroutine/Flow API over the same
+native runtime:
+
+- **Android:** `androidMain` calls the UniFFI Kotlin bindings from the
+  `io.orch8:orch8-mobile` AAR above.
+- **iOS:** `iosMain` reaches the `Orch8Mobile` Swift package through a small
+  Swift adapter that you compile into the app
+  (`packages/kmp/ios-bridge/Orch8KmpBridge.swift`).
+
+```kotlin
+commonMain.dependencies { implementation("io.orch8:orch8-kmp:0.7.1") }
+```
+
+```swift
+// iOS app launch, before shared code opens the engine
+import Orch8Kmp
+Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
+```
+
+```kotlin
+// shared code
+val engine = Orch8Engine.open(dbPath, EngineConfig(syncUrl = syncUrl, deviceId = deviceId, syncApiKey = key))
+engine.registerHandler("load_assignment") { _, input -> loadAssignment(input) } // suspend handler
+engine.loadSequence(sequenceJson)
+engine.resume()
+val id = engine.start("field-inspection", buildJsonObject { put("site_id", "A-12") })
+engine.pendingSteps.collect { render(it) }                 // StateFlow<List<PendingStep>>
+engine.answer(id, "capture_checklist", choice = "complete", data = buildJsonObject { put("checklist", checklist) })
+engine.observeInstance(id).collect { showState(it.state) } // completes at a terminal state
+```
+
+Every call is `suspend` and runs on `Dispatchers.IO`. Listener callbacks
+arrive as `events: SharedFlow<EngineEvent>`. Errors from both platforms
+arrive as one `Orch8Exception(kind)`. `exportContinuityCapsule`
+(it needs a Secure Enclave or KeyStore signer) and the Swift-only distributed-worker and
+trusted-handoff helpers are not wrapped. Call them through the platform SDKs.
+See [`packages/kmp/README.md`](../packages/kmp/README.md) for setup, the
+iOS bridge design, and the full API map.
 
 ## Quick Start
 
