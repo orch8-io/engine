@@ -17,3 +17,6 @@
 ## 2025-11-06 - [Replace HashMap with Vec in DeadlineOutputs]
 **Learning:** In the `prefetch_deadline_outputs` phase of the scheduler (`orch8-engine/src/scheduler.rs`), building a `HashMap` of references incurred unnecessary hashing and allocation overhead on every tick.
 **Action:** When creating a lookup table from a batch of pre-fetched results on a hot path, replace the `HashMap` with a flat `Vec` initialized with `Vec::with_capacity()`, sort it by a composite key, and use `.binary_search_by()` for O(log N) zero-allocation lookups.
+## 2026-09-27 - [Avoid vector allocation in slice state checks]
+**Learning:** In execution hot paths like `orch8-engine/src/handlers/saga.rs`, using helper functions that first collect node references into an intermediate `Vec` (e.g., `children_of(...)`) before iterating over them with `.all()` or `.any()` incurs unnecessary memory allocations.
+**Action:** Replace intermediate collection-then-check patterns with direct short-circuiting iteration over the slice (e.g., `all_children_terminal` or `any_child_failed`) that evaluate conditions inline without allocating a `Vec`.

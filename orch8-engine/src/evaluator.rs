@@ -1361,6 +1361,37 @@ pub fn any_failed(nodes: &[&ExecutionNode]) -> bool {
     nodes.iter().any(|n| n.state == NodeState::Failed)
 }
 
+/// Check if all children of a parent node are in a terminal state without allocating a vector.
+pub fn all_children_terminal(
+    tree: &[ExecutionNode],
+    parent_id: ExecutionNodeId,
+    branch_index: Option<i16>,
+) -> bool {
+    for n in tree {
+        if n.parent_id == Some(parent_id)
+            && (branch_index.is_none() || n.branch_index == branch_index)
+            && !n.state.is_terminal()
+        {
+            return false;
+        }
+    }
+    // If no children were found, `all_terminal([])` is historically true.
+    true
+}
+
+/// Check if any child of a parent node has failed without allocating a vector.
+pub fn any_child_failed(
+    tree: &[ExecutionNode],
+    parent_id: ExecutionNodeId,
+    branch_index: Option<i16>,
+) -> bool {
+    tree.iter().any(|n| {
+        n.parent_id == Some(parent_id)
+            && (branch_index.is_none() || n.branch_index == branch_index)
+            && n.state == NodeState::Failed
+    })
+}
+
 /// Check if the tree has any nodes waiting for external work.
 pub fn has_waiting_nodes(tree: &[ExecutionNode]) -> bool {
     tree.iter().any(|n| n.state == NodeState::Waiting)
