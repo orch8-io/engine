@@ -2825,14 +2825,30 @@ mod tests {
         };
         enc.put_llm_cache_entry(&entry).await.unwrap();
 
-        let raw = inner.get_llm_cache_entry("t1", "k1", now).await.unwrap().unwrap();
-        assert!(FieldEncryptor::is_encrypted(&raw.response), "response sealed at rest");
-        assert!(FieldEncryptor::is_encrypted(raw.embedding.as_ref().unwrap()));
+        let raw = inner
+            .get_llm_cache_entry("t1", "k1", now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            FieldEncryptor::is_encrypted(&raw.response),
+            "response sealed at rest"
+        );
+        assert!(FieldEncryptor::is_encrypted(
+            raw.embedding.as_ref().unwrap()
+        ));
         assert!(!raw.response.to_string().contains("top secret"));
 
-        let got = enc.get_llm_cache_entry("t1", "k1", now).await.unwrap().unwrap();
+        let got = enc
+            .get_llm_cache_entry("t1", "k1", now)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got, entry);
-        let listed = enc.list_llm_cache_partition("t1", "p", now, 5).await.unwrap();
+        let listed = enc
+            .list_llm_cache_partition("t1", "p", now, 5)
+            .await
+            .unwrap();
         assert_eq!(listed, vec![entry.clone()]);
 
         // A ciphertext copied onto another tenant's row fails to open (AAD).

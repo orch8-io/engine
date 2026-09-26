@@ -160,6 +160,7 @@ pub async fn run_gc_loop_with_ttl(
                     sweep_terminal_instances_opt(storage.as_ref(), instance_retention),
                     sweep_webhook_attempts(storage.as_ref()),
                     sweep_event_inbox(storage.as_ref()),
+                    sweep_llm_cache(storage.as_ref()),
                 );
             }
         }
@@ -263,6 +264,17 @@ async fn sweep_telemetry_events(storage: &dyn StorageBackend) {
             tracing::error!(error = %e, kind, "telemetry gc sweep failed");
             metrics::inc_with(metrics::GC_TELEMETRY_ERRORS, &[("kind", kind)]);
         }
+    }
+}
+
+/// Delete expired `llm_call` response-cache entries. Reads already ignore
+/// expired rows; this only reclaims space.
+async fn sweep_llm_cache(storage: &dyn StorageBackend) {
+    let now = chrono::Utc::now();
+    match drain_batches(|| storage.delete_expired_llm_cache(now, GC_BATCH_LIMIT)).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(count = n, "llm cache gc: deleted expired entries"),
+        Err(e) => tracing::error!(error = %e, "llm cache gc sweep failed"),
     }
 }
 

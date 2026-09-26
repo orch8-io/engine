@@ -65,18 +65,37 @@ fn prompt(tenant: &str, name: &str, version: i32) -> PromptTemplate {
 async fn pg_prompt_versions_labels_and_isolation() {
     let s = require_postgres!();
     let (t1, t2) = (tenant(), tenant());
-    s.insert_prompt_version(&prompt(&t1, "triage", 1)).await.unwrap();
-    s.insert_prompt_version(&prompt(&t1, "triage", 2)).await.unwrap();
-    s.insert_prompt_version(&prompt(&t2, "triage", 1)).await.unwrap();
+    s.insert_prompt_version(&prompt(&t1, "triage", 1))
+        .await
+        .unwrap();
+    s.insert_prompt_version(&prompt(&t1, "triage", 2))
+        .await
+        .unwrap();
+    s.insert_prompt_version(&prompt(&t2, "triage", 1))
+        .await
+        .unwrap();
     assert!(matches!(
         s.insert_prompt_version(&prompt(&t1, "triage", 2)).await,
         Err(StorageError::Conflict(_))
     ));
-    let latest = s.get_latest_prompt_version(&t1, "triage").await.unwrap().unwrap();
+    let latest = s
+        .get_latest_prompt_version(&t1, "triage")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(latest.version, 2);
     assert_eq!(latest.response_schema, Some(json!({"type": "object"})));
-    assert_eq!(s.list_prompt_versions(&t1, None, 10).await.unwrap().len(), 2);
-    assert_eq!(s.list_prompt_versions(&t2, Some("triage"), 10).await.unwrap().len(), 1);
+    assert_eq!(
+        s.list_prompt_versions(&t1, None, 10).await.unwrap().len(),
+        2
+    );
+    assert_eq!(
+        s.list_prompt_versions(&t2, Some("triage"), 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     let mut label = PromptLabel {
         tenant_id: t1.clone(),
@@ -90,18 +109,38 @@ async fn pg_prompt_versions_labels_and_isolation() {
         updated_at: Utc::now(),
     };
     s.upsert_prompt_label(&label).await.unwrap();
-    let got = s.get_prompt_label(&t1, "triage", "production").await.unwrap().unwrap();
+    let got = s
+        .get_prompt_label(&t1, "triage", "production")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(got.canary, label.canary);
     label.version = 2;
     label.canary = None;
     s.upsert_prompt_label(&label).await.unwrap();
-    let got = s.get_prompt_label(&t1, "triage", "production").await.unwrap().unwrap();
+    let got = s
+        .get_prompt_label(&t1, "triage", "production")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!((got.version, got.canary), (2, None));
-    assert!(s.get_prompt_label(&t2, "triage", "production").await.unwrap().is_none());
+    assert!(
+        s.get_prompt_label(&t2, "triage", "production")
+            .await
+            .unwrap()
+            .is_none()
+    );
     label.version = 42;
-    assert!(s.upsert_prompt_label(&label).await.is_err(), "FK to versions");
+    assert!(
+        s.upsert_prompt_label(&label).await.is_err(),
+        "FK to versions"
+    );
     assert_eq!(s.list_prompt_labels(&t1, None).await.unwrap().len(), 1);
-    assert!(s.delete_prompt_label(&t1, "triage", "production").await.unwrap());
+    assert!(
+        s.delete_prompt_label(&t1, "triage", "production")
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -126,11 +165,31 @@ async fn pg_llm_cache_tenant_expiry_and_partition() {
     s.put_llm_cache_entry(&mk(&t1, "k1", 60)).await.unwrap();
     s.put_llm_cache_entry(&mk(&t1, "k1", 120)).await.unwrap(); // upsert
     s.put_llm_cache_entry(&mk(&t1, "stale", -5)).await.unwrap();
-    let hit = s.get_llm_cache_entry(&t1, "k1", now).await.unwrap().unwrap();
+    let hit = s
+        .get_llm_cache_entry(&t1, "k1", now)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(hit.input_tokens, 7);
-    assert!(s.get_llm_cache_entry(&t2, "k1", now).await.unwrap().is_none());
-    assert!(s.get_llm_cache_entry(&t1, "stale", now).await.unwrap().is_none());
-    assert_eq!(s.list_llm_cache_partition(&t1, "part", now, 10).await.unwrap().len(), 1);
+    assert!(
+        s.get_llm_cache_entry(&t2, "k1", now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        s.get_llm_cache_entry(&t1, "stale", now)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        s.list_llm_cache_partition(&t1, "part", now, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(s.delete_expired_llm_cache(now, 1_000).await.unwrap() >= 1);
     assert_eq!(s.purge_llm_cache(&t1).await.unwrap(), 1);
 }
@@ -155,7 +214,10 @@ async fn pg_budgets_alerts_and_billable_usage() {
     let mut hijack = budget.clone();
     hijack.tenant_id = tenant();
     assert!(s.upsert_tenant_budget(&hijack).await.is_err());
-    assert_eq!(s.list_tenant_budgets(&t1).await.unwrap(), vec![budget.clone()]);
+    assert_eq!(
+        s.list_tenant_budgets(&t1).await.unwrap(),
+        vec![budget.clone()]
+    );
 
     let alert = BudgetAlert {
         id: Uuid::now_v7(),
@@ -194,5 +256,8 @@ async fn pg_budgets_alerts_and_billable_usage() {
         .await
         .unwrap();
     }
-    assert_eq!(s.query_instance_usage_totals(instance).await.unwrap(), (10, 5));
+    assert_eq!(
+        s.query_instance_usage_totals(instance).await.unwrap(),
+        (10, 5)
+    );
 }

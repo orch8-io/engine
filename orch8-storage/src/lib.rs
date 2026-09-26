@@ -3583,8 +3583,11 @@ pub trait AiStore: Send + Sync + 'static {
         tenant_id: &str,
     ) -> Result<Vec<orch8_types::ai::TenantBudget>, StorageError>;
 
-    async fn delete_tenant_budget(&self, tenant_id: &str, id: uuid::Uuid)
-    -> Result<bool, StorageError>;
+    async fn delete_tenant_budget(
+        &self,
+        tenant_id: &str,
+        id: uuid::Uuid,
+    ) -> Result<bool, StorageError>;
 
     /// Insert an alert unless one already exists for `(budget_id,
     /// period_start, threshold_percent)`. Returns true when inserted, i.e.

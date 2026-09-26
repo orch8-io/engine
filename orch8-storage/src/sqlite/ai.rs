@@ -348,7 +348,10 @@ impl crate::AiStore for SqliteStorage {
         Ok(())
     }
 
-    async fn list_tenant_budgets(&self, tenant_id: &str) -> Result<Vec<TenantBudget>, StorageError> {
+    async fn list_tenant_budgets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TenantBudget>, StorageError> {
         let rows = sqlx::query(
             "SELECT record FROM tenant_budgets WHERE tenant_id = ?1 ORDER BY created_at, id",
         )
@@ -447,25 +450,58 @@ mod tests {
     #[tokio::test]
     async fn prompt_versions_are_immutable_and_tenant_scoped() {
         let s = store().await;
-        s.insert_prompt_version(&prompt("t1", "triage", 1)).await.unwrap();
-        s.insert_prompt_version(&prompt("t1", "triage", 2)).await.unwrap();
-        s.insert_prompt_version(&prompt("t2", "triage", 1)).await.unwrap();
+        s.insert_prompt_version(&prompt("t1", "triage", 1))
+            .await
+            .unwrap();
+        s.insert_prompt_version(&prompt("t1", "triage", 2))
+            .await
+            .unwrap();
+        s.insert_prompt_version(&prompt("t2", "triage", 1))
+            .await
+            .unwrap();
         let dup = s.insert_prompt_version(&prompt("t1", "triage", 2)).await;
         assert!(matches!(dup, Err(StorageError::Conflict(_))), "{dup:?}");
 
-        let latest = s.get_latest_prompt_version("t1", "triage").await.unwrap().unwrap();
+        let latest = s
+            .get_latest_prompt_version("t1", "triage")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(latest.version, 2);
-        assert!(s.get_prompt_version("t1", "triage", 3).await.unwrap().is_none());
-        assert_eq!(s.list_prompt_versions("t1", None, 100).await.unwrap().len(), 2);
-        assert_eq!(s.list_prompt_versions("t2", Some("triage"), 100).await.unwrap().len(), 1);
-        assert!(s.get_latest_prompt_version("t3", "triage").await.unwrap().is_none());
+        assert!(
+            s.get_prompt_version("t1", "triage", 3)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            s.list_prompt_versions("t1", None, 100).await.unwrap().len(),
+            2
+        );
+        assert_eq!(
+            s.list_prompt_versions("t2", Some("triage"), 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            s.get_latest_prompt_version("t3", "triage")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn labels_upsert_move_and_require_existing_versions() {
         let s = store().await;
-        s.insert_prompt_version(&prompt("t1", "p", 1)).await.unwrap();
-        s.insert_prompt_version(&prompt("t1", "p", 2)).await.unwrap();
+        s.insert_prompt_version(&prompt("t1", "p", 1))
+            .await
+            .unwrap();
+        s.insert_prompt_version(&prompt("t1", "p", 2))
+            .await
+            .unwrap();
         let mut label = PromptLabel {
             tenant_id: "t1".into(),
             name: "p".into(),
@@ -481,15 +517,38 @@ mod tests {
         label.version = 2;
         label.canary = None;
         s.upsert_prompt_label(&label).await.unwrap();
-        let got = s.get_prompt_label("t1", "p", "production").await.unwrap().unwrap();
+        let got = s
+            .get_prompt_label("t1", "p", "production")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!((got.version, got.canary), (2, None));
-        assert!(s.get_prompt_label("t2", "p", "production").await.unwrap().is_none());
+        assert!(
+            s.get_prompt_label("t2", "p", "production")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         label.version = 99;
-        assert!(s.upsert_prompt_label(&label).await.is_err(), "FK to versions");
-        assert_eq!(s.list_prompt_labels("t1", Some("p")).await.unwrap().len(), 1);
-        assert!(s.delete_prompt_label("t1", "p", "production").await.unwrap());
-        assert!(!s.delete_prompt_label("t1", "p", "production").await.unwrap());
+        assert!(
+            s.upsert_prompt_label(&label).await.is_err(),
+            "FK to versions"
+        );
+        assert_eq!(
+            s.list_prompt_labels("t1", Some("p")).await.unwrap().len(),
+            1
+        );
+        assert!(
+            s.delete_prompt_label("t1", "p", "production")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !s.delete_prompt_label("t1", "p", "production")
+                .await
+                .unwrap()
+        );
     }
 
     fn entry(tenant: &str, key: &str, ttl: i64) -> LlmCacheEntry {
@@ -515,13 +574,32 @@ mod tests {
         let s = store().await;
         let now = Utc::now();
         s.put_llm_cache_entry(&entry("t1", "k1", 60)).await.unwrap();
-        s.put_llm_cache_entry(&entry("t1", "old", -1)).await.unwrap();
-        let hit = s.get_llm_cache_entry("t1", "k1", now).await.unwrap().unwrap();
+        s.put_llm_cache_entry(&entry("t1", "old", -1))
+            .await
+            .unwrap();
+        let hit = s
+            .get_llm_cache_entry("t1", "k1", now)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(hit.embedding, Some(json!([0.1, 0.2])));
-        assert!(s.get_llm_cache_entry("t2", "k1", now).await.unwrap().is_none());
-        assert!(s.get_llm_cache_entry("t1", "old", now).await.unwrap().is_none());
+        assert!(
+            s.get_llm_cache_entry("t2", "k1", now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.get_llm_cache_entry("t1", "old", now)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
-            s.list_llm_cache_partition("t1", "part", now, 10).await.unwrap().len(),
+            s.list_llm_cache_partition("t1", "part", now, 10)
+                .await
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(s.delete_expired_llm_cache(now, 100).await.unwrap(), 1);
@@ -550,7 +628,10 @@ mod tests {
             s.upsert_tenant_budget(&other_tenant).await.is_err(),
             "cannot hijack another tenant's budget id"
         );
-        assert_eq!(s.list_tenant_budgets("t1").await.unwrap(), vec![budget.clone()]);
+        assert_eq!(
+            s.list_tenant_budgets("t1").await.unwrap(),
+            vec![budget.clone()]
+        );
         assert!(s.list_tenant_budgets("t2").await.unwrap().is_empty());
 
         let alert = BudgetAlert {
@@ -570,7 +651,10 @@ mod tests {
         assert!(s.record_budget_alert(&alert).await.unwrap());
         let mut again = alert.clone();
         again.id = uuid::Uuid::now_v7();
-        assert!(!s.record_budget_alert(&again).await.unwrap(), "once per period");
+        assert!(
+            !s.record_budget_alert(&again).await.unwrap(),
+            "once per period"
+        );
         assert_eq!(s.list_budget_alerts("t1", 10).await.unwrap().len(), 1);
         assert!(s.delete_tenant_budget("t1", budget.id).await.unwrap());
         assert!(!s.delete_tenant_budget("t2", budget.id).await.unwrap());

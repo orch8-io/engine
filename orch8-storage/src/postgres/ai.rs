@@ -331,7 +331,10 @@ impl crate::AiStore for PostgresStorage {
         Ok(())
     }
 
-    async fn list_tenant_budgets(&self, tenant_id: &str) -> Result<Vec<TenantBudget>, StorageError> {
+    async fn list_tenant_budgets(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<TenantBudget>, StorageError> {
         let rows = sqlx::query(
             "SELECT record FROM tenant_budgets WHERE tenant_id = $1 ORDER BY created_at, id",
         )

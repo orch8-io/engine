@@ -356,14 +356,17 @@ pub async fn handle_memory_delete(ctx: StepContext) -> Result<Value, StepError> 
 const MAX_EMBED_RESPONSE_BYTES: usize = 10_485_760; // 10 MB
 
 #[derive(Debug)]
-struct EmbeddingBatch {
-    vectors: Vec<Vec<f64>>,
-    model: String,
+pub(crate) struct EmbeddingBatch {
+    pub(crate) vectors: Vec<Vec<f64>>,
+    pub(crate) model: String,
 }
 
 /// Resolve config and POST to the `/embeddings` endpoint, returning one vector
 /// per input string (in order).
-async fn embed_inputs(params: &Value, inputs: &[String]) -> Result<EmbeddingBatch, StepError> {
+pub(crate) async fn embed_inputs(
+    params: &Value,
+    inputs: &[String],
+) -> Result<EmbeddingBatch, StepError> {
     requested_model(params)?;
     if inputs.is_empty() {
         return Err(permanent("embed: `input` array is empty"));
