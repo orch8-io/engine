@@ -1166,7 +1166,7 @@ CREATE TABLE IF NOT EXISTS progress_shares (
 CREATE INDEX IF NOT EXISTS idx_progress_shares_instance
     ON progress_shares(tenant_id, instance_id);
 
--- Prompt registry (Postgres migration 095): immutable versions + labels.
+-- Prompt registry (Postgres migration 092): immutable versions + labels.
 CREATE TABLE IF NOT EXISTS prompt_versions (
     tenant_id TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -1191,7 +1191,7 @@ CREATE TABLE IF NOT EXISTS prompt_labels (
         REFERENCES prompt_versions(tenant_id, name, version)
 );
 
--- llm_call response cache (Postgres migration 096). Timestamps are
+-- llm_call response cache (Postgres migration 093). Timestamps are
 -- fixed-width RFC 3339 (microseconds, `Z`) so text comparison is ordered.
 CREATE TABLE IF NOT EXISTS llm_response_cache (
     tenant_id TEXT NOT NULL,
@@ -1213,7 +1213,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_response_cache_partition
 CREATE INDEX IF NOT EXISTS idx_llm_response_cache_expiry
     ON llm_response_cache(expires_at);
 
--- Tenant spend budgets + threshold alerts (Postgres migration 097).
+-- Tenant spend budgets + threshold alerts (Postgres migration 094).
 CREATE TABLE IF NOT EXISTS tenant_budgets (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,

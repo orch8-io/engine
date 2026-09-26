@@ -136,5 +136,5 @@ event. The record shape is the contract.
 
 ## Storage
 
-Postgres migration `097_tenant_budgets.sql` (down file in `migrations/down/`)
+Postgres migration `094_tenant_budgets.sql` (down file in `migrations/down/`)
 and SQLite schema v45 add `tenant_budgets` and `tenant_budget_alerts`.
