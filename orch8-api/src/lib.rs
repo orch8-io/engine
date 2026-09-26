@@ -18,6 +18,7 @@ pub mod health;
 pub mod input_schema;
 pub mod inspect;
 pub mod instances;
+pub mod jobs;
 pub mod mcp_server;
 pub mod metrics;
 pub mod mobile_sync;
@@ -222,6 +223,7 @@ fn api_routes() -> Router<AppState> {
         .merge(preflight::routes())
         .merge(approvals::routes())
         .merge(instances::routes())
+        .merge(jobs::routes())
         .merge(diagnosis::routes())
         .merge(dlq_groups::routes())
         .merge(events::routes())

@@ -22,6 +22,7 @@ pub mod externalized;
 pub mod gc;
 pub mod handlers;
 pub mod interceptors;
+pub mod jobs;
 pub mod lifecycle;
 pub mod lint;
 pub mod memory_governance;

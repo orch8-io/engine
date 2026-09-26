@@ -31,7 +31,9 @@ or download `/api-docs/openapi.json`. Published snapshots live at
 - [Secure production bootstrap](SECURE_BOOTSTRAP.md) — scaffold, validate, start, and readiness-check a secure node.
 - [Node roles](NODE_ROLES.md) — assemble all-in-one, control, executor, gateway, and edge processes; operate managed-control sessions and fleet draining.
 - [Operator support bundle](SUPPORT_BUNDLE.md) — collect bounded, redacted diagnostics atomically.
+- [Background jobs](JOBS.md) — enqueue a handler with one call (`POST /jobs`), no sequence required.
 - [External workers](WORKERS.md) — poll, heartbeat, complete, and fail work from any language.
+- [Triggers](TRIGGERS.md) — start workflows from webhooks, NATS, Kafka, SQS, Pub/Sub, Redis Streams, and Postgres row changes.
 - [Negotiated gRPC worker stream](GRPC_WORKER_STREAM.md) — worker sessions, control, resumable artifacts, telemetry, and mTLS identity.
 - [Webhooks](WEBHOOKS.md) — delivery, signatures, replay protection, and receiver example.
 - [Durable push delivery](PUSH_DELIVERY.md) — APNs/FCM wake outbox lifecycle and recovery.

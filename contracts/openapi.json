@@ -3543,6 +3543,216 @@
         }
       }
     },
+    "/jobs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "List jobs, newest first, with keyset pagination.",
+        "operationId": "list_jobs",
+        "parameters": [
+          {
+            "name": "handler",
+            "in": "query",
+            "description": "Only jobs for this handler",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "scheduled | running | completed | failed | cancelled | dead_lettered",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, max 500)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque `next_cursor` from the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant filter (admin callers without X-Tenant-Id only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "description": "Namespace filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid status or cursor"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Enqueue a background job.",
+        "operationId": "enqueue_job",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnqueueJobRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Idempotent replay: existing job returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Job enqueued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "413": {
+            "description": "Payload exceeds the context size limit"
+          }
+        }
+      }
+    },
+    "/jobs/{id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Fetch one job.",
+        "operationId": "get_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id (= instance id)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Cancel a job. A job that has not started yet is cancelled immediately\n(200, status `cancelled`); a running job receives a cancel signal that\nthe engine applies at its next step boundary (202). Cancelling a job that\nalready finished is a 409.",
+        "operationId": "cancel_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job id (= instance id)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Cancellation requested for a running job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job not found"
+          },
+          "409": {
+            "description": "Job already finished"
+          }
+        }
+      }
+    },
     "/pools": {
       "get": {
         "tags": [
@@ -9055,6 +9265,88 @@
           }
         }
       },
+      "EnqueueJobRequest": {
+        "type": "object",
+        "description": "Body of `POST /jobs`.",
+        "required": [
+          "handler"
+        ],
+        "properties": {
+          "delay_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Run no earlier than `now + delay_ms`. Mutually exclusive with `run_at`.",
+            "minimum": 0
+          },
+          "handler": {
+            "type": "string",
+            "description": "Handler name. Built-in handlers run in-process; any other name is\ndispatched to external workers (pull via `/workers/tasks/poll` or push\nvia a queue dispatch config)."
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant-scoped idempotency key. Re-posting the same key returns the\nexisting job with HTTP 200 instead of creating a duplicate."
+          },
+          "metadata": {
+            "description": "Free-form caller metadata (JSON object) stored on the instance."
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional namespace. Default `default`."
+          },
+          "payload": {
+            "description": "JSON object passed to the handler as its `params` (and stored as the\ninstance's `context.data`)."
+          },
+          "priority": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Priority level name: `low`, `normal` (default), `high`, `critical`\n(case-insensitive)."
+          },
+          "queue": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Named worker queue. Omitted = default queue."
+          },
+          "retry": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/JobRetry"
+              }
+            ]
+          },
+          "run_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Run no earlier than this instant. Mutually exclusive with `delay_ms`."
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional tenant (the `X-Tenant-Id` header is authoritative when set)."
+          }
+        },
+        "additionalProperties": false
+      },
       "ErrorClass": {
         "type": "string",
         "description": "Broad, stable classification of where a failure originates. Used to\nseparate \"fix your workflow\" from \"fix your infrastructure\" without\nreading messages.",
@@ -10463,6 +10755,137 @@
             ]
           }
         }
+      },
+      "Job": {
+        "type": "object",
+        "description": "Job representation returned by every `/jobs` endpoint.",
+        "required": [
+          "id",
+          "instance_id",
+          "handler",
+          "status",
+          "created_at",
+          "run_at"
+        ],
+        "properties": {
+          "attempts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Executions started so far (0 before the first run).",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Last error message when failed / dead-lettered (or while retrying)."
+          },
+          "handler": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Job id (identical to `instance_id`)."
+          },
+          "instance_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Backing instance id — usable with every `/instances/{id}` endpoint."
+          },
+          "output": {
+            "description": "Handler output once completed."
+          },
+          "queue": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the job is (or was first) due to run."
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          }
+        }
+      },
+      "JobPage": {
+        "type": "object",
+        "description": "`GET /jobs` response page (keyset-paginated, newest first).",
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Job"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next (older) page; absent on the last page."
+          }
+        }
+      },
+      "JobRetry": {
+        "type": "object",
+        "description": "Retry policy for a job.\n\n`max_attempts` counts **total** executions including the first one\n(BullMQ/Sidekiq semantics): `1` means \"never retry\", `3` means \"run at\nmost three times\". Backoff is exponential (x2) starting at\n`initial_backoff_ms`, capped at `max_backoff_ms` (default 60 000).",
+        "required": [
+          "max_attempts",
+          "initial_backoff_ms"
+        ],
+        "properties": {
+          "initial_backoff_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_attempts": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_backoff_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "JobStatus": {
+        "type": "string",
+        "description": "Externally visible job status, derived from the instance state.",
+        "enum": [
+          "scheduled",
+          "running",
+          "completed",
+          "failed",
+          "cancelled",
+          "dead_lettered"
+        ]
       },
       "JoinMode": {
         "oneOf": [
@@ -14466,6 +14889,10 @@
     {
       "name": "credentials",
       "description": "Shared secrets referenced by step params via credentials://<id>"
+    },
+    {
+      "name": "jobs",
+      "description": "Background jobs: enqueue a handler invocation without authoring a sequence"
     },
     {
       "name": "triggers",

@@ -691,6 +691,19 @@ pub trait InstanceStore: Send + Sync + 'static {
         pagination: &Pagination,
     ) -> Result<Vec<TaskInstance>, StorageError>;
 
+    /// Keyset-paginated listing ordered by `id` descending (instance ids are
+    /// `UUIDv7`, so this is newest-first by creation time). When `before` is
+    /// set only instances with `id < before` are returned, which makes the
+    /// last id of one page the cursor for the next. `limit` is capped at
+    /// 1000. Unlike [`Self::list_instances`], concurrent inserts/updates never
+    /// shift rows between pages.
+    async fn list_instances_keyset(
+        &self,
+        filter: &InstanceFilter,
+        before: Option<InstanceId>,
+        limit: u32,
+    ) -> Result<Vec<TaskInstance>, StorageError>;
+
     /// List instances currently in the Waiting state together with their execution trees.
     /// Only instances matching `filter.tenant_id` / `filter.namespace` are returned.
     /// Ignores `filter.states` -- this method always filters to Waiting.

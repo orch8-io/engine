@@ -22,6 +22,7 @@ use commands::doctor::DoctorCmd;
 use commands::generate::GenerateCmd;
 use commands::inspect_cmd::InspectCmd;
 use commands::instance::InstanceCmd;
+use commands::job::JobCmd;
 use commands::package_cmd::PackageCmd;
 use commands::pieces::PiecesCmd;
 use commands::portable::PortableCmd;
@@ -102,6 +103,9 @@ enum Commands {
     /// Instance management.
     #[command(subcommand)]
     Instance(InstanceCmd),
+    /// Background jobs: enqueue a handler without authoring a sequence.
+    #[command(subcommand)]
+    Job(JobCmd),
     /// Portable execution handoff, capsules, effects, and provenance.
     #[command(subcommand)]
     Execution(ExecutionCmd),
@@ -627,6 +631,7 @@ async fn main() -> Result<()> {
         }
         Commands::Sequence(cmd) => commands::sequence::run(&client, base, cmd, format).await?,
         Commands::Cron(cmd) => commands::cron::run(&client, base, cmd, format).await?,
+        Commands::Job(cmd) => commands::job::run(&client, base, cmd, format).await?,
         Commands::Signal {
             instance_id,
             signal_type,

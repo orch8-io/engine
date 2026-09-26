@@ -15,6 +15,7 @@ pub mod health;
 pub mod init;
 pub mod inspect_cmd;
 pub mod instance;
+pub mod job;
 pub mod package_cmd;
 pub mod pieces;
 pub mod portable;

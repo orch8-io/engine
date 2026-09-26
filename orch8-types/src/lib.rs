@@ -27,6 +27,7 @@ pub mod finding;
 pub mod ids;
 pub mod instance;
 pub mod interceptor;
+pub mod job;
 pub mod net;
 pub mod output;
 pub mod plugin;

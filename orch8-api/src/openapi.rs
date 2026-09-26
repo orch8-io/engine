@@ -510,6 +510,11 @@ impl Modify for ContinuityOpenApi {
         crate::workers::set_version_pin,
         crate::workers::list_version_pins,
         crate::workers::delete_version_pin,
+        // Jobs
+        crate::jobs::enqueue_job,
+        crate::jobs::get_job,
+        crate::jobs::list_jobs,
+        crate::jobs::cancel_job,
         // Triggers
         crate::triggers::create_trigger,
         crate::triggers::list_triggers,
@@ -751,6 +756,12 @@ impl Modify for ContinuityOpenApi {
         orch8_types::credential::CredentialKind,
         crate::credentials::CreateCredentialRequest,
         crate::credentials::UpdateCredentialRequest,
+        // Jobs
+        orch8_types::job::EnqueueJobRequest,
+        orch8_types::job::JobRetry,
+        orch8_types::job::JobStatus,
+        orch8_types::job::Job,
+        orch8_types::job::JobPage,
         // Triggers
         orch8_types::trigger::TriggerDef,
         orch8_types::trigger::TriggerType,
@@ -790,6 +801,7 @@ impl Modify for ContinuityOpenApi {
         (name = "pools", description = "Resource pool management"),
         (name = "cluster", description = "Multi-node cluster management"),
         (name = "credentials", description = "Shared secrets referenced by step params via credentials://<id>"),
+        (name = "jobs", description = "Background jobs: enqueue a handler invocation without authoring a sequence"),
         (name = "triggers", description = "Trigger definitions that convert inbound events into instance creations"),
         (name = "webhooks", description = "Public, unauthenticated webhook ingestion (HMAC-protected via trigger secret)"),
         (name = "continuity-product", description = "Framework-neutral handoff protocol, profiles, receipts, conformance, and commercial deployment validation"),
