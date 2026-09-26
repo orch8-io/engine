@@ -26,7 +26,9 @@
     clippy::option_if_let_else
 )]
 
+mod alert_rules;
 mod api_keys;
+mod approval_tokens;
 mod audit;
 mod checkpoints;
 mod circuit_breakers;
@@ -46,6 +48,7 @@ mod mobile_sync;
 mod outputs;
 mod plugins;
 mod pools;
+mod progress_shares;
 mod push_outbox;
 mod queue_dispatch;
 mod queue_routing;
@@ -2054,6 +2057,123 @@ impl crate::AdminStore for SqliteStorage {
         expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, StorageError> {
         triggers::claim_nonce(self, slug, nonce, expires_at).await
+    }
+
+    async fn create_approval_tokens(
+        &self,
+        tokens: &[orch8_types::approval_link::ApprovalActionToken],
+    ) -> Result<(), StorageError> {
+        approval_tokens::create(self, tokens).await
+    }
+
+    async fn get_approval_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<orch8_types::approval_link::ApprovalActionToken>, StorageError> {
+        approval_tokens::get(self, token_hash).await
+    }
+
+    async fn consume_approval_token(
+        &self,
+        token_hash: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<orch8_types::approval_link::ApprovalActionToken>, StorageError> {
+        approval_tokens::consume(self, token_hash, now).await
+    }
+
+    async fn has_live_approval_tokens(
+        &self,
+        instance_id: orch8_types::ids::InstanceId,
+        block_id: &orch8_types::ids::BlockId,
+        channel: orch8_types::approval_link::ApprovalChannel,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        approval_tokens::has_live(self, instance_id, block_id, channel, now).await
+    }
+
+    async fn create_progress_share(
+        &self,
+        share: &orch8_types::progress_share::ProgressShare,
+    ) -> Result<(), StorageError> {
+        progress_shares::create(self, share).await
+    }
+
+    async fn get_progress_share_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<orch8_types::progress_share::ProgressShare>, StorageError> {
+        progress_shares::get_by_hash(self, token_hash).await
+    }
+
+    async fn list_progress_shares(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+        instance_id: orch8_types::ids::InstanceId,
+    ) -> Result<Vec<orch8_types::progress_share::ProgressShare>, StorageError> {
+        progress_shares::list(self, tenant_id, instance_id).await
+    }
+
+    async fn revoke_progress_share(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+        instance_id: orch8_types::ids::InstanceId,
+        share_id: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        progress_shares::revoke(self, tenant_id, instance_id, share_id, now).await
+    }
+
+    async fn create_alert_rule(
+        &self,
+        rule: &orch8_types::alert::AlertRule,
+    ) -> Result<(), StorageError> {
+        alert_rules::create(self, rule).await
+    }
+
+    async fn get_alert_rule(
+        &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
+        id: uuid::Uuid,
+    ) -> Result<Option<orch8_types::alert::AlertRule>, StorageError> {
+        alert_rules::get(self, tenant_id, id).await
+    }
+
+    async fn list_alert_rules(
+        &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError> {
+        alert_rules::list(self, tenant_id, limit).await
+    }
+
+    async fn update_alert_rule(
+        &self,
+        rule: &orch8_types::alert::AlertRule,
+    ) -> Result<bool, StorageError> {
+        alert_rules::update(self, rule).await
+    }
+
+    async fn delete_alert_rule(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+        id: uuid::Uuid,
+    ) -> Result<bool, StorageError> {
+        alert_rules::delete(self, tenant_id, id).await
+    }
+
+    async fn get_alert_rule_state(
+        &self,
+        rule_id: uuid::Uuid,
+    ) -> Result<Option<orch8_types::alert::AlertRuleState>, StorageError> {
+        alert_rules::get_state(self, rule_id).await
+    }
+
+    async fn cas_alert_rule_state(
+        &self,
+        state: &orch8_types::alert::AlertRuleState,
+        expected_version: i64,
+    ) -> Result<bool, StorageError> {
+        alert_rules::cas_state(self, state, expected_version).await
     }
 
     async fn get_trigger_poll_state(

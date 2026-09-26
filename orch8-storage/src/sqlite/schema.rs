@@ -1112,9 +1112,62 @@ CREATE TABLE IF NOT EXISTS tenant_storage_placements (
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_storage_placements_backend
     ON tenant_storage_placements(backend_id);
+
+-- human_review interactive approval actions (hash of token only).
+CREATE TABLE IF NOT EXISTS approval_action_tokens (
+    token_hash TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    block_id TEXT NOT NULL,
+    choice TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    recipient TEXT,
+    verify_secret_ref TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approval_action_tokens_gate
+    ON approval_action_tokens(instance_id, block_id);
+CREATE INDEX IF NOT EXISTS idx_approval_action_tokens_expiry
+    ON approval_action_tokens(expires_at);
+
+-- Built-in alert rules + evaluator state (version CAS).
+CREATE TABLE IF NOT EXISTS alert_rules (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    condition TEXT NOT NULL,
+    destination TEXT NOT NULL,
+    cooldown_secs INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_alert_rules_tenant ON alert_rules(tenant_id, created_at);
+CREATE TABLE IF NOT EXISTS alert_rule_state (
+    rule_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Revocable public progress links (hash of token only).
+CREATE TABLE IF NOT EXISTS progress_shares (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    allowed_fields TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_progress_shares_instance
+    ON progress_shares(tenant_id, instance_id);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 44;
+pub(super) const SCHEMA_VERSION: i64 = 45;

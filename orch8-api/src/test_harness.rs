@@ -133,6 +133,7 @@ async fn spawn_test_server_inner(
         }))
         .merge(crate::health::routes().with_state(state.clone()))
         .merge(webhooks::public_routes().with_state(state.clone()))
+        .merge(crate::public_routes().with_state(state.clone()))
         .layer(axum::middleware::from_fn(
             crate::request_id::request_id_middleware,
         ));

@@ -1,3 +1,4 @@
+pub mod alert;
 pub mod bootstrap;
 pub mod checkpoint;
 pub mod config;
@@ -21,6 +22,7 @@ pub mod pieces;
 pub mod portable;
 pub mod release;
 pub mod sequence;
+pub mod share;
 pub mod signal;
 pub mod support_bundle;
 pub mod templates;

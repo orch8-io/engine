@@ -1923,6 +1923,23 @@ passthrough_impl! {
     }
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
     async fn claim_webhook_nonce(&self, slug: &str, nonce: &str, expires_at: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+    // Approval tokens, progress shares, and alert rules hold hashes and
+    // credential references only -- nothing for this wrapper to encrypt.
+    async fn create_approval_tokens(&self, tokens: &[orch8_types::approval_link::ApprovalActionToken]) -> Result<(), StorageError>;
+    async fn get_approval_token(&self, token_hash: &str) -> Result<Option<orch8_types::approval_link::ApprovalActionToken>, StorageError>;
+    async fn consume_approval_token(&self, token_hash: &str, now: chrono::DateTime<chrono::Utc>) -> Result<Option<orch8_types::approval_link::ApprovalActionToken>, StorageError>;
+    async fn has_live_approval_tokens(&self, instance_id: orch8_types::ids::InstanceId, block_id: &orch8_types::ids::BlockId, channel: orch8_types::approval_link::ApprovalChannel, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+    async fn create_progress_share(&self, share: &orch8_types::progress_share::ProgressShare) -> Result<(), StorageError>;
+    async fn get_progress_share_by_hash(&self, token_hash: &str) -> Result<Option<orch8_types::progress_share::ProgressShare>, StorageError>;
+    async fn list_progress_shares(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId) -> Result<Vec<orch8_types::progress_share::ProgressShare>, StorageError>;
+    async fn revoke_progress_share(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId, share_id: uuid::Uuid, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+    async fn create_alert_rule(&self, rule: &orch8_types::alert::AlertRule) -> Result<(), StorageError>;
+    async fn get_alert_rule(&self, tenant_id: Option<&orch8_types::ids::TenantId>, id: uuid::Uuid) -> Result<Option<orch8_types::alert::AlertRule>, StorageError>;
+    async fn list_alert_rules(&self, tenant_id: Option<&orch8_types::ids::TenantId>, limit: u32) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError>;
+    async fn update_alert_rule(&self, rule: &orch8_types::alert::AlertRule) -> Result<bool, StorageError>;
+    async fn delete_alert_rule(&self, tenant_id: &orch8_types::ids::TenantId, id: uuid::Uuid) -> Result<bool, StorageError>;
+    async fn get_alert_rule_state(&self, rule_id: uuid::Uuid) -> Result<Option<orch8_types::alert::AlertRuleState>, StorageError>;
+    async fn cas_alert_rule_state(&self, state: &orch8_types::alert::AlertRuleState, expected_version: i64) -> Result<bool, StorageError>;
     async fn get_trigger_poll_state(&self, slug: &str) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError>;
     async fn upsert_trigger_poll_state(&self, state: &orch8_types::trigger::TriggerPollState) -> Result<(), StorageError>;
     async fn try_acquire_trigger_poll_lease(&self, slug: &str, owner: &str, now: chrono::DateTime<chrono::Utc>, lease_until: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;

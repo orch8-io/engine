@@ -104,6 +104,20 @@ Controls the HTTP and gRPC servers, authentication, CORS, and rate limiting.
 | `api_key` | string | `""` | Root API key. When set, all requests must include an `x-api-key: <key>` header (per-tenant keys created via the API are also accepted). If empty, the server **refuses to start** unless `--insecure-auth` (or `--insecure`) is passed explicitly |
 | `require_tenant_header` | bool | `true` | If `true` (the default — secure by default), all requests must include `X-Tenant-Id`; requests without it receive `400 Bad Request`. With API-key auth on, disabling this additionally requires `ORCH8_ALLOW_NO_TENANT_ISOLATION=1` — otherwise startup fails |
 | `max_concurrent_requests` | integer | `0` | Global cap on in-flight HTTP requests (0 = unlimited). This is a concurrency limit, not an RPS limiter. Accepts the legacy alias `rate_limit_rps`. |
+| `public_url` | string | `""` | Externally reachable base URL (e.g. `https://orch8.acme.com`). Used to build approval magic links (Teams/email) and absolute public progress URLs. Empty = progress URLs are returned as relative paths and email/Teams approvals need `approvals.public_base_url` in the step. |
+
+---
+
+## [alerts]
+
+Built-in operational alerts evaluated on engine nodes; see [Alerts](ALERTS.md). Rules can also be managed per tenant via `/alerts/rules`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Run the evaluator (a no-op without rules) |
+| `eval_interval_secs` | integer | `30` | Evaluation cadence (minimum 5) |
+| `pagerduty_events_url` | string | `https://events.pagerduty.com/v2/enqueue` | PagerDuty Events API v2 endpoint (override for proxies/tests only) |
+| `rules` | array | `[]` | `[[alerts.rules]]` entries: `name`, `tenant_id`, `condition`, `destination`, `cooldown_secs`, `enabled` — same shapes as the API |
 
 ---
 
@@ -198,6 +212,9 @@ mount a config file for those settings.
 | `ORCH8_REQUIRE_TENANT_HEADER` | `true` | Enforce `X-Tenant-Id` header (secure by default) |
 | `ORCH8_ALLOW_NO_TENANT_ISOLATION` | — | Set to `1` to allow `require_tenant_header=false` while API-key auth is on (explicit opt-out of tenant isolation; the server warns loudly) |
 | `ORCH8_MAX_CONCURRENT_REQUESTS` | `0` | Global in-flight request cap (0 = unlimited). Legacy `ORCH8_RATE_LIMIT_RPS` still accepted. |
+| `ORCH8_PUBLIC_URL` | — | Sets `api.public_url` (base for approval magic links and public progress URLs) |
+| `ORCH8_ALERTS_ENABLED` | `true` | Sets `alerts.enabled` |
+| `ORCH8_ALERTS_EVAL_INTERVAL_SECS` | `30` | Sets `alerts.eval_interval_secs` |
 | `ORCH8_MOBILE_SYNC_ENABLED` | `false` | Set to `true` or `1` to enable mobile sync API endpoints (`/mobile/*`) |
 
 ### Artifacts

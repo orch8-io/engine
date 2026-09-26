@@ -143,6 +143,68 @@ pub struct EngineConfig {
     pub artifacts: ArtifactConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Built-in operational alerts (DLQ growth, open circuit breakers,
+    /// budget breaches, empty worker pools). Tenants also manage rules via
+    /// the `/alerts/rules` API.
+    #[serde(default)]
+    pub alerts: AlertsConfig,
+}
+
+/// `[alerts]` section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertsConfig {
+    /// Run the alert evaluator on engine nodes. Default `true` (a no-op when
+    /// no rules exist).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Evaluation cadence. Default 30 s, minimum 5 s.
+    #[serde(default = "default_alert_eval_interval_secs")]
+    pub eval_interval_secs: u64,
+    /// `PagerDuty` Events API v2 endpoint (override only for testing/proxies).
+    #[serde(default = "default_pagerduty_events_url")]
+    pub pagerduty_events_url: String,
+    /// Operator-declared rules, evaluated alongside API-managed ones.
+    #[serde(default)]
+    pub rules: Vec<ConfiguredAlertRule>,
+}
+
+impl Default for AlertsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            eval_interval_secs: default_alert_eval_interval_secs(),
+            pagerduty_events_url: default_pagerduty_events_url(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+const fn default_alert_eval_interval_secs() -> u64 {
+    30
+}
+
+fn default_pagerduty_events_url() -> String {
+    "https://events.pagerduty.com/v2/enqueue".into()
+}
+
+const fn default_alert_cooldown_secs() -> u64 {
+    crate::alert::DEFAULT_COOLDOWN_SECS
+}
+
+/// An alert rule declared in the server config (`[[alerts.rules]]`).
+/// Credential references resolve in `tenant_id`'s scope (plus global).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfiguredAlertRule {
+    pub name: String,
+    pub tenant_id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub condition: crate::alert::AlertCondition,
+    pub destination: crate::alert::AlertDestination,
+    #[serde(default = "default_alert_cooldown_secs")]
+    pub cooldown_secs: u64,
 }
 
 /// Process assembly role. Each role starts only its declared listeners and
@@ -622,6 +684,12 @@ pub struct ApiConfig {
     /// `ORCH8_RATE_LIMIT_RPS` env var.
     #[serde(default = "default_max_concurrent_requests", alias = "rate_limit_rps")]
     pub max_concurrent_requests: u64,
+    /// Externally reachable base URL of this server (e.g.
+    /// `https://orch8.acme.com`). Used to build approval magic links and
+    /// public progress URLs. Empty = links are returned as relative paths
+    /// and email/Teams approvals require `approvals.public_base_url`.
+    #[serde(default)]
+    pub public_url: String,
 }
 
 impl Default for ApiConfig {
@@ -637,6 +705,7 @@ impl Default for ApiConfig {
             api_key: SecretString::default(),
             require_tenant_header: default_require_tenant_header(),
             max_concurrent_requests: default_max_concurrent_requests(),
+            public_url: String::new(),
         }
     }
 }

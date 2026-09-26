@@ -283,6 +283,7 @@ fn lint_step(s: &StepDef, warnings: &mut Vec<LintWarning>) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn lint_handler_params(
     block_id: &str,
     handler: &str,
@@ -292,6 +293,28 @@ fn lint_handler_params(
     match handler {
         "http_request" | "tool_call" => {
             check_required_str(block_id, handler, params, "url", warnings);
+        }
+        "email" => {
+            for key in ["provider", "from", "subject"] {
+                check_required_str(block_id, handler, params, key, warnings);
+            }
+            if params.get("text").is_none() && params.get("html").is_none() {
+                warnings.push(LintWarning {
+                    block_id: block_id.into(),
+                    message: "email: requires `text` or `html`".into(),
+                });
+            }
+        }
+        "notify" => {
+            for key in ["provider", "text"] {
+                check_required_str(block_id, handler, params, key, warnings);
+            }
+            if params.get("url").is_none() {
+                warnings.push(LintWarning {
+                    block_id: block_id.into(),
+                    message: "notify: requires `url` (use credentials://)".into(),
+                });
+            }
         }
         // `mcp_call` resolves its endpoint from `url` or a named `server`
         // (looked up in `config.mcp_servers`) — either one satisfies it.

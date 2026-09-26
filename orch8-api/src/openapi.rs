@@ -524,6 +524,23 @@ impl Modify for ContinuityOpenApi {
         crate::triggers::retarget_trigger,
         // Webhooks
         crate::webhooks::public_webhook,
+        // Interactive approvals (public, token-authenticated)
+        crate::approval_actions::confirm_page,
+        crate::approval_actions::act,
+        crate::approval_actions::slack_interaction,
+        // Public progress links
+        crate::progress_share::create_share,
+        crate::progress_share::list_shares,
+        crate::progress_share::revoke_share,
+        crate::progress_share::public_progress,
+        crate::progress_share::embed_page,
+        crate::progress_share::embed_loader,
+        // Alert rules
+        crate::alerts::create_rule,
+        crate::alerts::list_rules,
+        crate::alerts::get_rule,
+        crate::alerts::update_rule,
+        crate::alerts::delete_rule,
         // Usage
         crate::usage::get_usage,
         // Streaming
@@ -789,6 +806,18 @@ impl Modify for ContinuityOpenApi {
         orch8_types::continuity_product::ProfileContract,
         orch8_types::continuity_product::RelayDeployment,
         orch8_types::continuity_product::CommercialContinuityPlan,
+        // Alerts, approvals, public progress
+        orch8_types::alert::AlertRule,
+        orch8_types::alert::AlertCondition,
+        orch8_types::alert::AlertDestination,
+        orch8_types::alert::AlertRuleState,
+        orch8_types::progress_share::ProgressShare,
+        crate::alerts::AlertRuleRequest,
+        crate::alerts::AlertRuleView,
+        crate::progress_share::CreateShareRequest,
+        crate::progress_share::CreateShareResponse,
+        crate::progress_share::PublicProgress,
+        crate::progress_share::PublicStep,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -804,6 +833,9 @@ impl Modify for ContinuityOpenApi {
         (name = "jobs", description = "Background jobs: enqueue a handler invocation without authoring a sequence"),
         (name = "triggers", description = "Trigger definitions that convert inbound events into instance creations"),
         (name = "webhooks", description = "Public, unauthenticated webhook ingestion (HMAC-protected via trigger secret)"),
+        (name = "approvals", description = "Human-in-the-loop approvals, including public Slack/Teams/email approval actions"),
+        (name = "alerts", description = "Built-in alert rules (DLQ growth, circuit breakers, budget breaches, empty worker pools)"),
+        (name = "public", description = "Unauthenticated, token-addressed public progress links"),
         (name = "continuity-product", description = "Framework-neutral handoff protocol, profiles, receipts, conformance, and commercial deployment validation"),
     )
 )]

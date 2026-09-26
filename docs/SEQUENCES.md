@@ -486,6 +486,79 @@ Rules:
 - `send_window.days` uses `0=Monday` through `6=Sunday`.
 - `fire_at_local` can target a local wall-clock timestamp, e.g. `2026-03-08T02:30:00`.
 
+## Send Email and Chat Notifications
+
+Two side-effecting built-ins cover the most common outbound messages. Both
+run through the effect ledger (a crash after the provider may have accepted a
+message leaves an *unknown* receipt that blocks an automatic resend instead of
+double-sending), SSRF-check every destination, and never log or echo secrets.
+Keep secrets in the credential store and reference them with
+`credentials://<id>[/<field>]` — they are resolved per tenant at dispatch.
+
+### `email`
+
+```json
+{
+  "type": "step",
+  "id": "send_receipt",
+  "handler": "email",
+  "params": {
+    "provider": "resend",
+    "api_key": "credentials://resend/api_key",
+    "from": "Acme <billing@acme.com>",
+    "to": "{{context.data.email}}",
+    "bcc": ["audit@acme.com"],
+    "reply_to": "support@acme.com",
+    "subject": "Your receipt",
+    "text": "Thanks for your order.",
+    "html": "<p>Thanks for your order.</p>",
+    "attachments": [{ "artifact": "{{outputs.render_pdf.artifact}}", "filename": "receipt.pdf" }],
+    "idempotency_key": "receipt-{{context.data.order_id}}"
+  }
+}
+```
+
+| Param | Notes |
+|---|---|
+| `provider` | `smtp`, `resend`, or `ses` (AWS SES v2 HTTP API, SigV4-signed). |
+| `from`, `subject` | Required. Addresses and subject are validated; CR/LF header injection is rejected. |
+| `to` / `cc` / `bcc` / `reply_to` | String or array; at least one recipient, at most 50 in total. |
+| `text` / `html` | At least one. Both produce `multipart/alternative`. |
+| `attachments` | `[{artifact, filename?, content_type?}]` — `artifact` is a `blob_put` ref owned by *this* instance; 20 files / 20 MiB max. |
+| `smtp` | `{host, port?, username?, password?, tls?}`. `tls`: `starttls` (default, 587), `implicit` (465) or `none` (credentials refused). The host is resolved once, private/internal addresses are blocked, and the connection is pinned to the vetted IP while TLS still verifies the hostname. |
+| `api_key` | Resend API key. |
+| `aws` | SES: `{access_key_id, secret_access_key, session_token?, region}`. |
+| `idempotency_key` | Forwarded to Resend's `Idempotency-Key`. |
+
+Output: `{provider, message_id, provider_receipt_id, recipients}` (recipient count only).
+
+### `notify`
+
+One simple input renders a provider-shaped payload for Slack (Block Kit),
+Discord (embed, mentions disabled), or Microsoft Teams (Adaptive Card):
+
+```json
+{
+  "type": "step",
+  "id": "tell_ops",
+  "handler": "notify",
+  "params": {
+    "provider": "slack",
+    "url": "credentials://ops-slack/url",
+    "title": "Deploy finished",
+    "text": "*{{context.data.service}}* is live",
+    "fields": { "env": "prod", "version": "{{context.data.version}}" },
+    "link": { "url": "https://ci.example.com/runs/{{context.data.run_id}}", "label": "View run" }
+  }
+}
+```
+
+`url` is the incoming-webhook URL (a bearer secret — store it as a
+credential). `fields` may be an object or `[{name, value}]`; `link` may be a
+URL string or `{url, label}` (http(s) only); `color` (`#rrggbb`) tints Discord
+embeds. Non-2xx responses map to retryable (408/429/5xx) or permanent (other
+4xx) step errors.
+
 ## Human Review
 
 Use `human_review` plus `wait_for_input`.
@@ -532,6 +605,74 @@ Then route on the decision:
 ```
 
 Use human review for approvals, compliance gates, manual QA, escalations, and human-in-the-loop agent workflows.
+
+### Interactive approvals (Slack, Teams, email)
+
+A step's handler runs only *after* its own `wait_for_input` is answered, so
+approval messages are sent by a `human_review` step placed **before** the
+gate, pointing at it with `approvals.gate`:
+
+```json
+[
+  {
+    "type": "step",
+    "id": "ask_manager",
+    "handler": "human_review",
+    "params": {
+      "instructions": "Refund for {{context.data.customer}}",
+      "review_data": { "amount": "{{context.data.amount}}" },
+      "approvals": {
+        "gate": "manager_decision",
+        "slack": { "url": "credentials://ops-slack/url", "signing_secret_credential": "slack-app/signing_secret" },
+        "teams": { "url": "credentials://ops-teams/url" },
+        "email": {
+          "provider": "resend",
+          "api_key": "credentials://resend/api_key",
+          "from": "Approvals <approvals@acme.com>",
+          "to": "manager@acme.com"
+        }
+      }
+    }
+  },
+  {
+    "type": "step",
+    "id": "manager_decision",
+    "handler": "noop",
+    "wait_for_input": {
+      "prompt": "Approve the refund?",
+      "timeout": 86400000,
+      "choices": [ { "label": "Approve", "value": "approve" }, { "label": "Reject", "value": "reject" } ],
+      "store_as": "refund_decision"
+    }
+  }
+]
+```
+
+- **Slack** gets Block Kit buttons (one per choice). Point the Slack app's
+  *Interactivity Request URL* at `POST /approvals/slack/interactions`. Each
+  click is verified with the app's signing secret (`v0` HMAC over the raw
+  body, 5-minute timestamp tolerance) read from the credential named by
+  `signing_secret_credential` — a **bare** credential id/field, not a
+  `credentials://` string (those are resolved inline, and the handler refuses
+  anything that is not an existing credential).
+- **Teams** gets an Adaptive Card whose buttons open the magic-link confirm
+  page (incoming webhooks cannot deliver `Action.Submit`). The same URL also
+  accepts a JSON `POST`, e.g. from an `Action.Http` or Power Automate flow.
+- **Email** gets magic links (via the `email` handler params). `GET
+  /approvals/act/{token}` only renders a confirmation page — link scanners and
+  prefetchers cannot approve anything; the `POST` from that page records the
+  decision (with an optional comment).
+
+Every choice on every channel has its own 256-bit random token; only its
+SHA-256 is stored. Tokens expire (`approvals.ttl_secs`, default the gate's
+timeout or 7 days, max 30 days) and are single-use per gate: the first
+decision burns every other token for that gate. A decision is recorded like
+an Approver-scoped API call — a `human_input:<gate>` signal (refused for
+finished instances) plus an `approval_decision` audit entry naming the
+channel and actor. Magic links need the server's public base URL
+(`api.public_url` / `ORCH8_PUBLIC_URL`, or `approvals.public_base_url`).
+Re-running the `human_review` step never re-sends a channel whose tokens are
+still live.
 
 ## Publish and Version
 
@@ -669,6 +810,36 @@ Webhook notes:
 - Body size is limited to 1 MB.
 - Use `/triggers/{slug}/fire` for trusted internal service calls.
 - Use `/webhooks/{slug}` for public inbound third-party calls.
+
+### Provider signature presets
+
+Third-party senders sign with their own schemes. Add `config.verify` to a
+webhook trigger and Orch8 verifies the provider's signature instead of the
+native `x-orch8-signature` headers:
+
+```json
+{
+  "slug": "stripe-payment-succeeded",
+  "sequence_name": "payment-postprocess",
+  "tenant_id": "acme",
+  "trigger_type": "webhook",
+  "config": { "verify": { "preset": "stripe", "secret_ref": "credentials://stripe-webhook" } }
+}
+```
+
+| `preset` | Header(s) | Signed bytes | Replay protection |
+|---|---|---|---|
+| `stripe` | `Stripe-Signature: t=…,v1=<hex>` | `"{t}.{raw body}"` | 300 s tolerance + each `(t, v1)` accepted once |
+| `github` | `X-Hub-Signature-256: sha256=<hex>` | raw body | `X-GitHub-Delivery` accepted once (72 h) |
+| `shopify` | `X-Shopify-Hmac-Sha256: <base64>` | raw body | `X-Shopify-Webhook-Id` accepted once (72 h) |
+| `svix` (aliases `clerk`, `resend`, `standard_webhooks`) | `svix-id`, `svix-timestamp`, `svix-signature` (or `webhook-*`) | `"{id}.{ts}.{raw body}"`; `whsec_` secrets are base64-decoded | 300 s tolerance + each id accepted once |
+| `hmac_sha256` | `header` (default `X-Signature`), `encoding` `hex`/`base64`, optional `prefix` (e.g. `sha256=`) | raw body, or `"{ts}.{raw body}"` when `timestamp_header` is set | `id_header` value (or the signature) accepted once |
+
+- Signatures are always computed over the **raw request bytes** and compared in constant time.
+- `secret_ref` is a credential id or `credentials://id[/field]` resolved in the trigger's tenant; without it the trigger's own `secret` is used. A missing/disabled credential fails closed with `401`.
+- `tolerance_secs` (1–3600, default 300) changes the timestamp window for timestamped presets.
+- Verified instances record `metadata.verify_preset` and, when the provider sends one, `metadata.provider_event` (`X-GitHub-Event`, `X-Shopify-Topic`).
+- Ready-made recipes: [`examples/recipes/`](../examples/recipes/) (Stripe, GitHub, Shopify, Clerk).
 
 Trigger management:
 

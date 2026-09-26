@@ -8,6 +8,7 @@ use serde_json::Value;
 mod commands;
 mod templates;
 
+use commands::alert::AlertCmd;
 use commands::bootstrap::BootstrapCmd;
 use commands::checkpoint::CheckpointCmd;
 use commands::config::ConfigCmd;
@@ -28,6 +29,7 @@ use commands::pieces::PiecesCmd;
 use commands::portable::PortableCmd;
 use commands::release::ReleaseCmd;
 use commands::sequence::SequenceCmd;
+use commands::share::ShareCmd;
 use commands::support_bundle::SupportBundleCmd;
 use commands::templates::TemplatesCmd;
 use commands::triggers::TriggersCmd;
@@ -122,6 +124,12 @@ enum Commands {
     /// Cron schedule management.
     #[command(subcommand)]
     Cron(CronCmd),
+    /// Built-in alert rules (DLQ growth, circuit breakers, budgets, worker pools).
+    #[command(subcommand)]
+    Alert(AlertCmd),
+    /// Public, revocable progress links for an instance.
+    #[command(subcommand)]
+    Share(ShareCmd),
     /// Send a signal to an instance.
     Signal {
         /// Instance ID.
@@ -640,6 +648,8 @@ async fn main() -> Result<()> {
         Commands::Sequence(cmd) => commands::sequence::run(&client, base, cmd, format).await?,
         Commands::Cron(cmd) => commands::cron::run(&client, base, cmd, format).await?,
         Commands::Job(cmd) => commands::job::run(&client, base, cmd, format).await?,
+        Commands::Alert(cmd) => commands::alert::run(&client, base, cmd, format).await?,
+        Commands::Share(cmd) => commands::share::run(&client, base, cmd, format).await?,
         Commands::Signal {
             instance_id,
             signal_type,

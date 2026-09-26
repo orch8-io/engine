@@ -84,6 +84,8 @@ base64 = "0.23"
 # HTTP client
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "multipart", "form", "query"] }
 url = "2"
+# Outbound email (`email` builtin, SMTP transport). rustls only — no native-tls.
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
 
 # JSON Schema validation (llm_call `response_schema`). default-features off:
 # the default feature set enables remote `$ref` resolution over HTTP, which

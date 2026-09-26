@@ -262,6 +262,10 @@ async fn main() -> anyhow::Result<()> {
         insecure_auth,
         &config.api.cors_origins,
     )?;
+    orch8_engine::alerts::validate_config(&config.alerts)
+        .map_err(|e| anyhow::anyhow!("invalid [alerts] config: {e}"))?;
+    // Magic links / public progress URLs are built from this base.
+    orch8_engine::handlers::approval_links::set_public_base_url(&config.api.public_url);
     let managed_control = if config.node.managed_control_endpoint.is_empty() {
         None
     } else {
@@ -397,6 +401,10 @@ async fn main() -> anyhow::Result<()> {
     if assembly.public_webhooks {
         protected_app =
             protected_app.merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()));
+        // Token-authenticated public surfaces: approval magic links, the
+        // Slack interactivity endpoint, and public progress links.
+        protected_app =
+            protected_app.merge(orch8_api::public_routes().with_state(app_state.clone()));
     }
     let operational_app = if assembly.full_api {
         orch8_api::metrics::routes()
@@ -1073,6 +1081,15 @@ fn spawn_engine(
     // engine's check/record_* calls roll up into the rows persisted by the
     // inspection endpoints.
     let handlers = handlers.with_circuit_breakers(cb_registry);
+    if config.alerts.enabled {
+        let alert_storage = Arc::clone(&storage);
+        let alert_config = config.alerts.clone();
+        let alert_cancel = shutdown.clone();
+        tokio::spawn(async move {
+            orch8_engine::alerts::run_alert_loop(alert_storage, alert_config, alert_cancel).await;
+            tracing::info!("alert evaluator loop exited");
+        });
+    }
     let engine = Engine::new(storage, config.engine.clone(), handlers, shutdown);
 
     tokio::spawn(async move {
@@ -1369,6 +1386,15 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     }
     if let Ok(val) = std::env::var("ORCH8_API_KEY") {
         config.api.api_key = val.into();
+    }
+    if let Ok(val) = std::env::var("ORCH8_PUBLIC_URL") {
+        config.api.public_url = val.trim().to_string();
+    }
+    if let Some(enabled) = env_parse::<bool>("ORCH8_ALERTS_ENABLED") {
+        config.alerts.enabled = enabled;
+    }
+    if let Some(n) = env_parse("ORCH8_ALERTS_EVAL_INTERVAL_SECS") {
+        config.alerts.eval_interval_secs = n;
     }
     // `ORCH8_MAX_CONCURRENT_REQUESTS` is the preferred name; the older
     // `ORCH8_RATE_LIMIT_RPS` is still accepted as an alias (Perf#10). The

@@ -36,6 +36,7 @@
 //! | `reviewer` | string | `"unassigned"` | Reviewer identifier |
 //! | `notify_url` | string | — | Webhook URL to notify about pending review |
 //! | `notify_headers` | object | `{}` | Extra headers for notification webhook |
+//! | `approvals` | object | — | Interactive approvals (Slack buttons, Teams card, email magic links) for a later `wait_for_input` gate named by `approvals.gate` — see [`super::approval_links`] |
 
 use serde_json::{Value, json};
 use tracing::{debug, warn};
@@ -44,6 +45,7 @@ use orch8_types::error::StepError;
 
 use super::StepContext;
 
+#[allow(clippy::too_many_lines)]
 pub async fn handle_human_review(ctx: StepContext) -> Result<Value, StepError> {
     let review_data = ctx
         .params
@@ -144,9 +146,25 @@ pub async fn handle_human_review(ctx: StepContext) -> Result<Value, StepError> {
         }
     }
 
+    // Interactive approvals (Slack buttons / Teams card / email magic links)
+    // for a later `wait_for_input` gate. See `approval_links`.
+    let approvals = match ctx.params.get("approvals").filter(|v| !v.is_null()) {
+        Some(cfg) => Some(
+            super::approval_links::send_interactive_approvals(
+                &ctx,
+                cfg,
+                instructions,
+                &review_data,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+
     Ok(json!({
         "type": "human_review",
         "status": "pending",
+        "approvals": approvals,
         "reviewer": reviewer,
         "instructions": instructions,
         "review_data": review_data,
