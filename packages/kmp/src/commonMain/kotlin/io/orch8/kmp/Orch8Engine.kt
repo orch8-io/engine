@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -113,7 +114,28 @@ class Orch8Engine internal constructor(
 
     suspend fun activeInstances(): List<InstanceSummary> = offload { backend.activeInstances() }
 
-    /** Resume a step parked on `wait_for_input`; [output] is stored under its `store_as`. */
+    /**
+     * Answer a `wait_for_input` gate. [choice] must be one of the step's
+     * `choices` values (`"yes"`/`"no"` when none are declared); the engine
+     * stores it under `store_as` and merges the top-level keys of [data]
+     * into `context.data`. A payload without a valid choice is rejected by
+     * the engine and the step keeps waiting.
+     */
+    suspend fun answer(
+        instanceId: String,
+        stepName: String,
+        choice: String,
+        data: JsonObject = JsonObject(emptyMap()),
+    ) {
+        require(choice.isNotBlank()) { "choice must not be blank" }
+        require("value" !in data) { "data must not contain 'value'; pass it as choice" }
+        completeStep(instanceId, stepName, JsonObject(data + ("value" to JsonPrimitive(choice))))
+    }
+
+    /**
+     * Resume a step parked on `wait_for_input` with a raw payload. Prefer
+     * [answer]; the payload must carry `"value"` set to a declared choice.
+     */
     suspend fun completeStep(instanceId: String, stepName: String, output: JsonObject = JsonObject(emptyMap())) =
         completeStepJson(instanceId, stepName, output.toString())
 

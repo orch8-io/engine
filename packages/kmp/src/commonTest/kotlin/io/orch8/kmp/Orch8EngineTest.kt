@@ -122,6 +122,18 @@ class Orch8EngineTest {
     }
 
     @Test
+    fun answerBuildsTheGatePayloadTheEngineAccepts() = runTest {
+        val backend = FakeBackend()
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        engine.answer("i1", "capture_checklist", "complete", buildJsonObject { put("failed", 1) })
+        assertEquals("""{"failed":1,"value":"complete"}""", backend.completed.single().third)
+        assertFailsWith<IllegalArgumentException> {
+            engine.answer("i1", "s", "yes", buildJsonObject { put("value", "no") })
+        }
+        assertFailsWith<IllegalArgumentException> { engine.answer("i1", "s", " ") }
+    }
+
+    @Test
     fun handlersMapFailuresToRetryableOrPermanent() = runTest {
         val backend = FakeBackend()
         val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))

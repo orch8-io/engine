@@ -123,8 +123,8 @@ val id = engine.start("field-inspection", buildJsonObject { put("site_id", "A-12
 // UI: react to steps waiting on the user
 engine.pendingSteps.collect { steps -> render(steps) }
 
-// Resume a wait_for_input step. The output lands under its `store_as` key.
-engine.completeStep(id, "capture_checklist", buildJsonObject { put("passed", true) })
+// Answer a wait_for_input gate: the choice is stored under `store_as`; data keys merge into context.data.
+engine.answer(id, "capture_checklist", choice = "complete", data = buildJsonObject { put("checklist", checklist) })
 
 // Status
 engine.observeInstance(id).collect { snapshot -> showState(snapshot.state) }
@@ -149,7 +149,7 @@ approvals and commands with the server.
 | `setListener(EngineListener)` | `events: SharedFlow<EngineEvent>`, `pendingSteps: StateFlow` |
 | `resume()` / `pause()` / `shutdown()` | `resume()` / `pause()` / `close()` |
 | `tickOnce()` / `runUntilIdle(maxTicks, timeBudgetMs)` | `suspend tick()` / `suspend runUntilIdle(maxTicks, Duration)` |
-| `start` / `cancelInstance` / `getInstance` / `activeInstances` / `completeStep` | same names, `suspend`, `JsonObject` overloads |
+| `start` / `cancelInstance` / `getInstance` / `activeInstances` / `completeStep` | same names, `suspend`, `JsonObject` overloads, plus `answer(id, step, choice, data)` for `wait_for_input` gates |
 | `loadSequenceFromJson` / `loadSequencesFromUrl` / `loadedSequences` | `loadSequence` / `loadSequencesFromUrl` / `loadedSequences` |
 | `sync(manifestUrl, TokenProvider?)` | `sync(manifestUrl, Orch8TokenSource?)` |
 | `flushTelemetry` / `setDeviceContext` / `reportPowerState` / `onPushReceived` | same, plus `PowerState.fromBattery(level, charging)` |
