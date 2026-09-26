@@ -52,7 +52,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub(crate) const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 88;
+pub const STORAGE_SCHEMA_VERSION: u32 = 94;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -1987,6 +1987,114 @@ pub trait AdminStore: Send + Sync + 'static {
         slug: &str,
         nonce: &str,
         expires_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    // === Approval action tokens (human_review interactive approvals) ===
+
+    /// Store freshly issued approval action tokens (hashes only).
+    async fn create_approval_tokens(
+        &self,
+        tokens: &[orch8_types::approval_link::ApprovalActionToken],
+    ) -> Result<(), StorageError>;
+
+    /// Look up a token by its SHA-256 hash (used, expired, or live).
+    async fn get_approval_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<orch8_types::approval_link::ApprovalActionToken>, StorageError>;
+
+    /// Atomically consume a live (unused, unexpired) token and burn every
+    /// sibling token of the same `(instance, block)` gate. Returns the token
+    /// only for the single caller that won; `None` if it was unknown, used,
+    /// or expired.
+    async fn consume_approval_token(
+        &self,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<orch8_types::approval_link::ApprovalActionToken>, StorageError>;
+
+    /// Whether the gate already has live tokens on `channel` (so a retried
+    /// `human_review` does not re-send the interactive message).
+    async fn has_live_approval_tokens(
+        &self,
+        instance_id: InstanceId,
+        block_id: &BlockId,
+        channel: orch8_types::approval_link::ApprovalChannel,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    // === Public progress shares ===
+
+    async fn create_progress_share(
+        &self,
+        share: &orch8_types::progress_share::ProgressShare,
+    ) -> Result<(), StorageError>;
+
+    async fn get_progress_share_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<orch8_types::progress_share::ProgressShare>, StorageError>;
+
+    async fn list_progress_shares(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+    ) -> Result<Vec<orch8_types::progress_share::ProgressShare>, StorageError>;
+
+    /// Revoke a share (tenant + instance scoped). Returns whether a live
+    /// share was revoked.
+    async fn revoke_progress_share(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        share_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    // === Alert rules ===
+
+    async fn create_alert_rule(
+        &self,
+        rule: &orch8_types::alert::AlertRule,
+    ) -> Result<(), StorageError>;
+
+    /// Fetch a rule; `Some(tenant)` scopes the lookup to that tenant.
+    async fn get_alert_rule(
+        &self,
+        tenant_id: Option<&TenantId>,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::alert::AlertRule>, StorageError>;
+
+    /// List rules; `None` lists every tenant's rules (evaluator / admin).
+    async fn list_alert_rules(
+        &self,
+        tenant_id: Option<&TenantId>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError>;
+
+    /// Update a rule in place, scoped to `rule.tenant_id`. Returns whether a
+    /// row matched.
+    async fn update_alert_rule(
+        &self,
+        rule: &orch8_types::alert::AlertRule,
+    ) -> Result<bool, StorageError>;
+
+    /// Delete a rule (and its evaluator state). Returns whether it existed.
+    async fn delete_alert_rule(&self, tenant_id: &TenantId, id: Uuid)
+    -> Result<bool, StorageError>;
+
+    async fn get_alert_rule_state(
+        &self,
+        rule_id: Uuid,
+    ) -> Result<Option<orch8_types::alert::AlertRuleState>, StorageError>;
+
+    /// Compare-and-swap the evaluator state: insert when `expected_version`
+    /// is 0, else update only if the stored version still equals it.
+    /// `state.version` is the new version to store.
+    async fn cas_alert_rule_state(
+        &self,
+        state: &orch8_types::alert::AlertRuleState,
+        expected_version: i64,
     ) -> Result<bool, StorageError>;
 
     // === Trigger poll state (activepieces_poll) ===

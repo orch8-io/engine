@@ -89,12 +89,12 @@ fn coverage_schema_008_collapse_index_covers_pending_lookup() {
 
 #[test]
 fn coverage_schema_009_sqlite_schema_version_is_current() {
-    assert_eq!(SCHEMA_VERSION, 44);
+    assert_eq!(SCHEMA_VERSION, 45);
 }
 
 #[test]
 fn coverage_schema_010_crate_storage_schema_version_is_current() {
-    assert_eq!(crate::STORAGE_SCHEMA_VERSION, 88);
+    assert_eq!(crate::STORAGE_SCHEMA_VERSION, 94);
 }
 
 #[test]

@@ -140,7 +140,11 @@ pub(crate) fn parse_notification(params: &Value) -> Result<Notification, StepErr
             let label = obj.get("label").and_then(Value::as_str).unwrap_or("Open");
             Some((url.to_string(), label.to_string()))
         }
-        Some(_) => return Err(permanent("notify: `link` must be a URL string or {url,label}")),
+        Some(_) => {
+            return Err(permanent(
+                "notify: `link` must be a URL string or {url,label}",
+            ));
+        }
     };
     if let Some((u, _)) = &link {
         // Links are rendered as clickable buttons for humans: only http(s).
@@ -208,7 +212,9 @@ pub(crate) fn render(provider: Provider, n: &Notification) -> Value {
 pub(crate) fn render_slack(n: &Notification, extra_actions: Option<Vec<Value>>) -> Value {
     let mut blocks = Vec::new();
     if let Some(t) = &n.title {
-        blocks.push(json!({"type": "header", "text": {"type": "plain_text", "text": t, "emoji": true}}));
+        blocks.push(
+            json!({"type": "header", "text": {"type": "plain_text", "text": t, "emoji": true}}),
+        );
     }
     blocks.push(json!({"type": "section", "text": {"type": "mrkdwn", "text": n.text}}));
     if !n.fields.is_empty() {
@@ -225,7 +231,9 @@ pub(crate) fn render_slack(n: &Notification, extra_actions: Option<Vec<Value>>) 
     }
     let mut actions = Vec::new();
     if let Some((u, label)) = &n.link {
-        actions.push(json!({"type": "button", "text": {"type": "plain_text", "text": label}, "url": u}));
+        actions.push(
+            json!({"type": "button", "text": {"type": "plain_text", "text": label}, "url": u}),
+        );
     }
     if let Some(extra) = extra_actions {
         actions.extend(extra);
@@ -296,7 +304,9 @@ pub(crate) fn webhook_url(params: &Value, key: &str) -> Result<String, StepError
         _ => return Err(permanent(format!("notify: `{key}` must be a URL string"))),
     };
     if url.starts_with("credentials://") {
-        return Err(permanent(format!("notify: `{key}` credential reference was not resolved")));
+        return Err(permanent(format!(
+            "notify: `{key}` credential reference was not resolved"
+        )));
     }
     Ok(url)
 }
@@ -340,7 +350,9 @@ pub async fn handle_notify(ctx: StepContext) -> Result<Value, StepError> {
         .params
         .get("provider")
         .and_then(Value::as_str)
-        .ok_or_else(|| permanent("notify: missing required param: provider (slack|discord|teams)"))?;
+        .ok_or_else(|| {
+            permanent("notify: missing required param: provider (slack|discord|teams)")
+        })?;
     let provider = Provider::parse(provider_raw).ok_or_else(|| {
         permanent(format!(
             "notify: unsupported provider `{provider_raw}`; expected slack, discord, or teams"
@@ -428,7 +440,12 @@ mod tests {
                 }
             }
             let _ = sock
-                .write_all(format!("HTTP/1.1 {status} X\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").as_bytes())
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                    )
+                    .as_bytes(),
+                )
                 .await;
             let t = String::from_utf8_lossy(&buf).to_string();
             let _ = tx.send(t[t.find("\r\n\r\n").unwrap() + 4..].to_string());
@@ -453,7 +470,10 @@ mod tests {
         assert_eq!(body["blocks"][0]["type"], "header");
         assert_eq!(body["blocks"][1]["text"]["text"], "Deploy finished");
         assert_eq!(body["blocks"][2]["fields"].as_array().unwrap().len(), 2);
-        assert_eq!(body["blocks"][3]["elements"][0]["url"], "https://example.com/run/1");
+        assert_eq!(
+            body["blocks"][3]["elements"][0]["url"],
+            "https://example.com/run/1"
+        );
         assert!(body["text"].as_str().unwrap().contains("Deploy"));
     }
 
@@ -463,8 +483,11 @@ mod tests {
         let body = render(Provider::Discord, &n);
         assert_eq!(body["embeds"][0]["title"], "Deploy");
         assert_eq!(body["embeds"][0]["url"], "https://example.com/run/1");
-        assert_eq!(body["embeds"][0]["color"], 0x36a6_4f);
-        assert_eq!(body["allowed_mentions"]["parse"].as_array().unwrap().len(), 0);
+        assert_eq!(body["embeds"][0]["color"], 0x0036_a64f);
+        assert_eq!(
+            body["allowed_mentions"]["parse"].as_array().unwrap().len(),
+            0
+        );
     }
 
     #[test]
@@ -472,7 +495,10 @@ mod tests {
         let n = parse_notification(&sample()).unwrap();
         let body = render(Provider::Teams, &n);
         let card = &body["attachments"][0]["content"];
-        assert_eq!(body["attachments"][0]["contentType"], "application/vnd.microsoft.card.adaptive");
+        assert_eq!(
+            body["attachments"][0]["contentType"],
+            "application/vnd.microsoft.card.adaptive"
+        );
         assert_eq!(card["type"], "AdaptiveCard");
         assert_eq!(card["body"][2]["type"], "FactSet");
         assert_eq!(card["actions"][0]["type"], "Action.OpenUrl");
@@ -480,7 +506,8 @@ mod tests {
 
     #[test]
     fn rejects_javascript_links() {
-        let err = parse_notification(&json!({"text": "x", "link": "javascript:alert(1)"})).unwrap_err();
+        let err =
+            parse_notification(&json!({"text": "x", "link": "javascript:alert(1)"})).unwrap_err();
         assert!(format!("{err:?}").contains("http(s)"));
     }
 
@@ -502,9 +529,10 @@ mod tests {
     async fn non_2xx_maps_to_step_error() {
         let (url, _rx) = mock(404).await;
         crate::handlers::builtin::mark_url_safe_for_test(&url).await;
-        let err = handle_notify(ctx_with(json!({"provider": "discord", "url": url, "text": "x"})).await)
-            .await
-            .unwrap_err();
+        let err =
+            handle_notify(ctx_with(json!({"provider": "discord", "url": url, "text": "x"})).await)
+                .await
+                .unwrap_err();
         assert!(matches!(err, StepError::Permanent { .. }));
         assert!(!format!("{err:?}").contains("/hook"));
     }
@@ -512,7 +540,8 @@ mod tests {
     #[tokio::test]
     async fn blocks_internal_webhook_urls() {
         let err = handle_notify(
-            ctx_with(json!({"provider": "teams", "url": "http://169.254.169.254/x", "text": "x"})).await,
+            ctx_with(json!({"provider": "teams", "url": "http://169.254.169.254/x", "text": "x"}))
+                .await,
         )
         .await
         .unwrap_err();

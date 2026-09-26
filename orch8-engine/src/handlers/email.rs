@@ -170,7 +170,8 @@ impl EmailSpec {
                 let ct = ContentType::parse(&a.content_type).map_err(|e| {
                     permanent(format!("email: invalid attachment content_type: {e}"))
                 })?;
-                mixed = mixed.singlepart(Attachment::new(a.filename.clone()).body(a.bytes.clone(), ct));
+                mixed =
+                    mixed.singlepart(Attachment::new(a.filename.clone()).body(a.bytes.clone(), ct));
             }
             mixed
         };
@@ -231,15 +232,14 @@ async fn resolve_attachments(ctx: &StepContext) -> Result<Vec<ResolvedAttachment
             })
             .unwrap_or("application/octet-stream")
             .to_string();
-        let filename = item
-            .get("filename")
-            .and_then(Value::as_str)
-            .map_or_else(
-                || key.rsplit('/').next().unwrap_or("attachment").to_string(),
-                str::to_string,
-            );
+        let filename = item.get("filename").and_then(Value::as_str).map_or_else(
+            || key.rsplit('/').next().unwrap_or("attachment").to_string(),
+            str::to_string,
+        );
         if filename.chars().any(char::is_control) || filename.contains(['/', '\\']) {
-            return Err(permanent("email: attachment filename contains invalid characters"));
+            return Err(permanent(
+                "email: attachment filename contains invalid characters",
+            ));
         }
         out.push(ResolvedAttachment {
             filename,
@@ -269,7 +269,9 @@ async fn build_spec(ctx: &StepContext) -> Result<EmailSpec, StepError> {
     let reply_to = parse_all("reply_to")?;
     let total = to.len() + cc.len() + bcc.len();
     if total == 0 {
-        return Err(permanent("email: at least one of `to`, `cc`, `bcc` is required"));
+        return Err(permanent(
+            "email: at least one of `to`, `cc`, `bcc` is required",
+        ));
     }
     if total > MAX_RECIPIENTS {
         return Err(permanent(format!(
@@ -463,10 +465,12 @@ async fn send_resend(
     if let Some(k) = &spec.idempotency_key {
         req = req.header("Idempotency-Key", k);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| retryable(format!("email: resend request failed: {}", crate::outbound::redact_error(&e))))?;
+    let resp = req.send().await.map_err(|e| {
+        retryable(format!(
+            "email: resend request failed: {}",
+            crate::outbound::redact_error(&e)
+        ))
+    })?;
     let status = resp.status().as_u16();
     let bytes = crate::outbound::read_body_capped(resp, 64 * 1024)
         .await
@@ -513,7 +517,8 @@ impl AwsCreds {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
         };
-        let region = field("region").ok_or_else(|| permanent("email: ses requires `aws.region`"))?;
+        let region =
+            field("region").ok_or_else(|| permanent("email: ses requires `aws.region`"))?;
         // Region lands in the hostname — restrict to the AWS region alphabet.
         if !region
             .chars()
@@ -593,10 +598,12 @@ async fn send_ses(
             req = req.header(k.as_str(), v.as_str());
         }
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| retryable(format!("email: ses request failed: {}", crate::outbound::redact_error(&e))))?;
+    let resp = req.send().await.map_err(|e| {
+        retryable(format!(
+            "email: ses request failed: {}",
+            crate::outbound::redact_error(&e)
+        ))
+    })?;
     let status = resp.status().as_u16();
     let bytes = crate::outbound::read_body_capped(resp, 64 * 1024)
         .await
@@ -651,7 +658,11 @@ fn sigv4_authorization(r: &SigV4Request<'_>) -> String {
         .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string()))
         .collect();
     headers.sort();
-    let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+    let canonical_headers = headers.iter().fold(String::new(), |mut s, (k, v)| {
+        use std::fmt::Write as _;
+        let _ = writeln!(s, "{k}:{v}");
+        s
+    });
     let signed_headers = headers
         .iter()
         .map(|(k, _)| k.as_str())
@@ -673,7 +684,10 @@ fn sigv4_authorization(r: &SigV4Request<'_>) -> String {
         r.amz_date,
         hex(&Sha256::digest(canonical_request.as_bytes()))
     );
-    let k_date = hmac_sha256(format!("AWS4{}", r.secret_access_key).as_bytes(), date.as_bytes());
+    let k_date = hmac_sha256(
+        format!("AWS4{}", r.secret_access_key).as_bytes(),
+        date.as_bytes(),
+    );
     let k_region = hmac_sha256(&k_date, r.region.as_bytes());
     let k_service = hmac_sha256(&k_region, r.service.as_bytes());
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
@@ -709,9 +723,9 @@ struct SmtpTarget {
 
 impl SmtpTarget {
     fn from_params(params: &Value) -> Result<Self, StepError> {
-        let smtp = params
-            .get("smtp")
-            .ok_or_else(|| permanent("email: smtp requires an `smtp` object (use credentials://)"))?;
+        let smtp = params.get("smtp").ok_or_else(|| {
+            permanent("email: smtp requires an `smtp` object (use credentials://)")
+        })?;
         let host = smtp
             .get("host")
             .and_then(Value::as_str)
@@ -719,9 +733,15 @@ impl SmtpTarget {
             .ok_or_else(|| permanent("email: `smtp.host` is required"))?
             .to_string();
         if host.contains(['/', '@', ' ', ':']) && host.parse::<std::net::IpAddr>().is_err() {
-            return Err(permanent("email: `smtp.host` must be a bare hostname or IP"));
+            return Err(permanent(
+                "email: `smtp.host` must be a bare hostname or IP",
+            ));
         }
-        let tls = match smtp.get("tls").and_then(Value::as_str).unwrap_or("starttls") {
+        let tls = match smtp
+            .get("tls")
+            .and_then(Value::as_str)
+            .unwrap_or("starttls")
+        {
             "starttls" => SmtpTls::StartTls,
             "implicit" | "tls" | "ssl" => SmtpTls::Implicit,
             "none" => SmtpTls::None,
@@ -779,14 +799,16 @@ impl SmtpTarget {
                 std::net::IpAddr::V4(v4) => orch8_types::net::is_non_public_ipv4(v4),
                 std::net::IpAddr::V6(v6) => orch8_types::net::is_non_public_ipv6(v6),
             };
-            if blocked && !allow_internal && !(smtp_test_allow_loopback() && sa.ip().is_loopback()) {
+            if blocked && !allow_internal && !(smtp_test_allow_loopback() && sa.ip().is_loopback())
+            {
                 return Err(permanent(
                     "blocked: SMTP host resolves to a private/internal network address",
                 ));
             }
             chosen.get_or_insert(sa);
         }
-        let chosen = chosen.ok_or_else(|| retryable("email: SMTP host resolved to no addresses"))?;
+        let chosen =
+            chosen.ok_or_else(|| retryable("email: SMTP host resolved to no addresses"))?;
         if let Ok(mut slot) = self.resolved.lock() {
             *slot = Some(chosen);
         }
@@ -835,10 +857,11 @@ async fn send_smtp(
             }
         }
     };
-    let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(addr.ip().to_string())
-        .port(addr.port())
-        .tls(tls)
-        .timeout(Some(timeout));
+    let mut builder =
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(addr.ip().to_string())
+            .port(addr.port())
+            .tls(tls)
+            .timeout(Some(timeout));
     if let (Some(u), Some(p)) = (&target.username, &target.password) {
         builder = builder.credentials(Credentials::new(u.clone(), p.clone()));
     }
@@ -865,7 +888,9 @@ mod tests {
             SqliteStorage::in_memory()
                 .await
                 .unwrap()
-                .with_artifact_store(Arc::new(orch8_storage::artifacts::ObjectArtifactStore::memory())),
+                .with_artifact_store(Arc::new(
+                    orch8_storage::artifacts::ObjectArtifactStore::memory(),
+                )),
         );
         StepContext {
             instance_id: InstanceId::new(),
@@ -880,7 +905,10 @@ mod tests {
     }
 
     /// One-shot HTTP mock: captures the raw request, replies with `status` + `reply`.
-    async fn mock_http(status: u16, reply: &'static str) -> (String, tokio::sync::oneshot::Receiver<String>) {
+    async fn mock_http(
+        status: u16,
+        reply: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -954,21 +982,32 @@ mod tests {
             "subject": "hi", "text": "x",
         }))
         .await;
-        assert!(matches!(handle_email(ctx).await, Err(StepError::Permanent { .. })));
+        assert!(matches!(
+            handle_email(ctx).await,
+            Err(StepError::Permanent { .. })
+        ));
         let ctx = ctx_with(json!({
             "provider": "resend", "api_key": "k",
             "from": "a@example.com", "to": "b@example.com",
             "subject": "hi\r\nBcc: evil@example.com", "text": "x",
         }))
         .await;
-        assert!(matches!(handle_email(ctx).await, Err(StepError::Permanent { .. })));
+        assert!(matches!(
+            handle_email(ctx).await,
+            Err(StepError::Permanent { .. })
+        ));
     }
 
     #[tokio::test]
     async fn requires_body_and_recipient() {
-        let ctx = ctx_with(json!({"provider":"resend","from":"a@example.com","subject":"s","text":"t"})).await;
+        let ctx =
+            ctx_with(json!({"provider":"resend","from":"a@example.com","subject":"s","text":"t"}))
+                .await;
         assert!(handle_email(ctx).await.is_err());
-        let ctx = ctx_with(json!({"provider":"resend","from":"a@example.com","to":"b@example.com","subject":"s"})).await;
+        let ctx = ctx_with(
+            json!({"provider":"resend","from":"a@example.com","to":"b@example.com","subject":"s"}),
+        )
+        .await;
         assert!(handle_email(ctx).await.is_err());
     }
 
@@ -990,7 +1029,11 @@ mod tests {
         let mut ctx = ctx_with(json!({})).await;
         let aref = ctx
             .storage
-            .put_artifact(ctx.instance_id, "text/plain", bytes::Bytes::from_static(b"hello-attachment"))
+            .put_artifact(
+                ctx.instance_id,
+                "text/plain",
+                bytes::Bytes::from_static(b"hello-attachment"),
+            )
             .await
             .unwrap();
         ctx.params = json!({
@@ -1004,15 +1047,27 @@ mod tests {
         assert_eq!(out["message_id"], "re_123");
         assert_eq!(out["provider_receipt_id"], "re_123");
         assert_eq!(out["recipients"], 2);
-        assert!(out.to_string().find("re_secret").is_none(), "secret must not leak");
+        assert!(
+            out.to_string().find("re_secret").is_none(),
+            "secret must not leak"
+        );
         let raw = rx.await.unwrap();
-        assert!(raw.contains("authorization: Bearer re_secret") || raw.contains("Authorization: Bearer re_secret"));
-        assert!(raw.to_ascii_lowercase().contains("idempotency-key: welcome-42"));
+        assert!(
+            raw.contains("authorization: Bearer re_secret")
+                || raw.contains("Authorization: Bearer re_secret")
+        );
+        assert!(
+            raw.to_ascii_lowercase()
+                .contains("idempotency-key: welcome-42")
+        );
         let body: Value = serde_json::from_str(&raw[raw.find("\r\n\r\n").unwrap() + 4..]).unwrap();
         assert_eq!(body["to"][0], "b@example.com");
         assert_eq!(body["cc"][0], "c@example.com");
         assert_eq!(body["attachments"][0]["filename"], "note.txt");
-        assert_eq!(body["attachments"][0]["content"], STANDARD.encode("hello-attachment"));
+        assert_eq!(
+            body["attachments"][0]["content"],
+            STANDARD.encode("hello-attachment")
+        );
     }
 
     #[tokio::test]
@@ -1024,7 +1079,10 @@ mod tests {
             "from": "a@example.com", "to": "b@example.com", "subject": "s", "text": "t",
         }))
         .await;
-        assert!(matches!(handle_email(ctx).await, Err(StepError::Permanent { .. })));
+        assert!(matches!(
+            handle_email(ctx).await,
+            Err(StepError::Permanent { .. })
+        ));
         let (base, _rx) = mock_http(503, "{}").await;
         crate::handlers::builtin::mark_url_safe_for_test(&format!("{base}/emails")).await;
         let ctx = ctx_with(json!({
@@ -1032,7 +1090,10 @@ mod tests {
             "from": "a@example.com", "to": "b@example.com", "subject": "s", "text": "t",
         }))
         .await;
-        assert!(matches!(handle_email(ctx).await, Err(StepError::Retryable { .. })));
+        assert!(matches!(
+            handle_email(ctx).await,
+            Err(StepError::Retryable { .. })
+        ));
     }
 
     #[tokio::test]
@@ -1050,7 +1111,10 @@ mod tests {
     #[tokio::test]
     async fn ses_request_is_sigv4_signed_raw_message() {
         let (base, rx) = mock_http(200, r#"{"MessageId":"ses-1"}"#).await;
-        crate::handlers::builtin::mark_url_safe_for_test(&format!("{base}/v2/email/outbound-emails")).await;
+        crate::handlers::builtin::mark_url_safe_for_test(&format!(
+            "{base}/v2/email/outbound-emails"
+        ))
+        .await;
         let ctx = ctx_with(json!({
             "provider": "ses", "api_base_url": base,
             "aws": {"access_key_id": "AKID", "secret_access_key": "sekret", "region": "eu-west-1"},
@@ -1067,9 +1131,17 @@ mod tests {
         assert!(!raw.contains("sekret"));
         let body: Value = serde_json::from_str(&raw[raw.find("\r\n\r\n").unwrap() + 4..]).unwrap();
         assert_eq!(body["Destination"]["BccAddresses"][0], "hidden@example.com");
-        let mime = String::from_utf8(STANDARD.decode(body["Content"]["Raw"]["Data"].as_str().unwrap()).unwrap()).unwrap();
+        let mime = String::from_utf8(
+            STANDARD
+                .decode(body["Content"]["Raw"]["Data"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
         assert!(mime.contains("Subject: s"));
-        assert!(!mime.contains("hidden@example.com"), "Bcc must not appear in headers");
+        assert!(
+            !mime.contains("hidden@example.com"),
+            "Bcc must not appear in headers"
+        );
     }
 
     #[tokio::test]
@@ -1110,7 +1182,9 @@ mod tests {
                 if in_data {
                     if line == ".\r\n" {
                         in_data = false;
-                        w.write_all(b"250 2.0.0 Ok: queued as MOCK1\r\n").await.unwrap();
+                        w.write_all(b"250 2.0.0 Ok: queued as MOCK1\r\n")
+                            .await
+                            .unwrap();
                     }
                     continue;
                 }

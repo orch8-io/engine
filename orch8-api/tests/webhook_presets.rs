@@ -15,7 +15,11 @@ fn hmac(secret: &[u8], parts: &[&[u8]]) -> Vec<u8> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 async fn setup(verify: Value, credential: Option<(&str, &str)>) -> (TestServer, reqwest::Client) {
@@ -24,9 +28,11 @@ async fn setup(verify: Value, credential: Option<(&str, &str)>) -> (TestServer, 
     client
         .post(format!("{}/sequences", server.base_url))
         .header("X-Tenant-Id", "acme")
-        .json(&json!({"id": uuid::Uuid::now_v7(), "created_at": chrono::Utc::now().to_rfc3339(),
+        .json(
+            &json!({"id": uuid::Uuid::now_v7(), "created_at": chrono::Utc::now().to_rfc3339(),
             "tenant_id": "acme", "namespace": "default", "name": "on-event", "version": 1,
-            "blocks": [{"type": "step", "id": "s1", "handler": "noop", "params": {}}]}))
+            "blocks": [{"type": "step", "id": "s1", "handler": "noop", "params": {}}]}),
+        )
         .send()
         .await
         .unwrap()
@@ -46,12 +52,18 @@ async fn setup(verify: Value, credential: Option<(&str, &str)>) -> (TestServer, 
     let resp = client
         .post(format!("{}/triggers", server.base_url))
         .header("X-Tenant-Id", "acme")
-        .json(&json!({"slug": "hook", "sequence_name": "on-event", "tenant_id": "acme",
-            "trigger_type": "webhook", "config": {"verify": verify}}))
+        .json(
+            &json!({"slug": "hook", "sequence_name": "on-event", "tenant_id": "acme",
+            "trigger_type": "webhook", "config": {"verify": verify}}),
+        )
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "create trigger: {}", resp.text().await.unwrap());
+    assert!(
+        resp.status().is_success(),
+        "create trigger: {}",
+        resp.text().await.unwrap()
+    );
     (server, client)
 }
 
@@ -81,23 +93,50 @@ async fn stripe_preset_accepts_signed_raw_body_and_rejects_replay() {
     // Deliberately non-canonical JSON: verification must use raw bytes.
     let body = "{ \"id\": \"evt_1\",  \"type\": \"payment_intent.succeeded\" }";
     let t = chrono::Utc::now().timestamp().to_string();
-    let sig = hex(&hmac(b"whsec_test_secret", &[t.as_bytes(), b".", body.as_bytes()]));
+    let sig = hex(&hmac(
+        b"whsec_test_secret",
+        &[t.as_bytes(), b".", body.as_bytes()],
+    ));
     let headers = [("stripe-signature", format!("t={t},v1={sig}"))];
-    assert_eq!(post(&client, &server, &headers, body).await, StatusCode::ACCEPTED);
+    assert_eq!(
+        post(&client, &server, &headers, body).await,
+        StatusCode::ACCEPTED
+    );
     // Exact replay inside the tolerance window is refused.
-    assert_eq!(post(&client, &server, &headers, body).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        post(&client, &server, &headers, body).await,
+        StatusCode::UNAUTHORIZED
+    );
     // Tampered body.
     let t2 = (chrono::Utc::now().timestamp() - 1).to_string();
-    let sig2 = hex(&hmac(b"whsec_test_secret", &[t2.as_bytes(), b".", body.as_bytes()]));
+    let sig2 = hex(&hmac(
+        b"whsec_test_secret",
+        &[t2.as_bytes(), b".", body.as_bytes()],
+    ));
     assert_eq!(
-        post(&client, &server, &[("stripe-signature", format!("t={t2},v1={sig2}"))], "{\"id\":\"evt_2\"}").await,
+        post(
+            &client,
+            &server,
+            &[("stripe-signature", format!("t={t2},v1={sig2}"))],
+            "{\"id\":\"evt_2\"}"
+        )
+        .await,
         StatusCode::UNAUTHORIZED
     );
     // Stale timestamp.
     let old = (chrono::Utc::now().timestamp() - 3600).to_string();
-    let sig3 = hex(&hmac(b"whsec_test_secret", &[old.as_bytes(), b".", body.as_bytes()]));
+    let sig3 = hex(&hmac(
+        b"whsec_test_secret",
+        &[old.as_bytes(), b".", body.as_bytes()],
+    ));
     assert_eq!(
-        post(&client, &server, &[("stripe-signature", format!("t={old},v1={sig3}"))], body).await,
+        post(
+            &client,
+            &server,
+            &[("stripe-signature", format!("t={old},v1={sig3}"))],
+            body
+        )
+        .await,
         StatusCode::UNAUTHORIZED
     );
 }
@@ -109,9 +148,11 @@ async fn github_preset_with_trigger_secret_fallback() {
     client
         .post(format!("{}/sequences", server.base_url))
         .header("X-Tenant-Id", "acme")
-        .json(&json!({"id": uuid::Uuid::now_v7(), "created_at": chrono::Utc::now().to_rfc3339(),
+        .json(
+            &json!({"id": uuid::Uuid::now_v7(), "created_at": chrono::Utc::now().to_rfc3339(),
             "tenant_id": "acme", "namespace": "default", "name": "on-event", "version": 1,
-            "blocks": [{"type": "step", "id": "s1", "handler": "noop", "params": {}}]}))
+            "blocks": [{"type": "step", "id": "s1", "handler": "noop", "params": {}}]}),
+        )
         .send()
         .await
         .unwrap()
@@ -134,16 +175,28 @@ async fn github_preset_with_trigger_secret_fallback() {
         ("x-github-delivery", uuid::Uuid::now_v7().to_string()),
         ("x-github-event", "pull_request".to_string()),
     ];
-    assert_eq!(post(&client, &server, &headers, body).await, StatusCode::ACCEPTED);
-    assert_eq!(post(&client, &server, &headers, body).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        post(&client, &server, &headers, body).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        post(&client, &server, &headers, body).await,
+        StatusCode::UNAUTHORIZED
+    );
     // Native Orch8 headers are not accepted in place of the preset.
-    assert_eq!(post(&client, &server, &[], body).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        post(&client, &server, &[], body).await,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
 async fn svix_preset_verifies_clerk_style_delivery() {
     let key = b"clerk-signing-key";
-    let secret = format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(key));
+    let secret = format!(
+        "whsec_{}",
+        base64::engine::general_purpose::STANDARD.encode(key)
+    );
     let (server, client) = setup(
         json!({"preset": "svix", "secret_ref": "clerk-hook"}),
         Some(("clerk-hook", &secret)),
@@ -151,15 +204,23 @@ async fn svix_preset_verifies_clerk_style_delivery() {
     .await;
     let body = r#"{"type":"user.created","data":{"id":"user_1"}}"#;
     let ts = chrono::Utc::now().timestamp().to_string();
-    let sig = base64::engine::general_purpose::STANDARD
-        .encode(hmac(key, &[b"msg_abc", b".", ts.as_bytes(), b".", body.as_bytes()]));
+    let sig = base64::engine::general_purpose::STANDARD.encode(hmac(
+        key,
+        &[b"msg_abc", b".", ts.as_bytes(), b".", body.as_bytes()],
+    ));
     let headers = [
         ("svix-id", "msg_abc".to_string()),
         ("svix-timestamp", ts),
         ("svix-signature", format!("v1,{sig}")),
     ];
-    assert_eq!(post(&client, &server, &headers, body).await, StatusCode::ACCEPTED);
-    assert_eq!(post(&client, &server, &headers, body).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        post(&client, &server, &headers, body).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        post(&client, &server, &headers, body).await,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
@@ -170,13 +231,17 @@ async fn shopify_preset_and_missing_secret_fails_closed() {
     )
     .await;
     let body = r#"{"id":820982911946154508,"email":"jon@example.com"}"#;
-    let sig = base64::engine::general_purpose::STANDARD.encode(hmac(b"shpss_secret", &[body.as_bytes()]));
+    let sig =
+        base64::engine::general_purpose::STANDARD.encode(hmac(b"shpss_secret", &[body.as_bytes()]));
     let headers = [
         ("x-shopify-hmac-sha256", sig),
         ("x-shopify-webhook-id", uuid::Uuid::now_v7().to_string()),
         ("x-shopify-topic", "orders/create".to_string()),
     ];
-    assert_eq!(post(&client, &server, &headers, body).await, StatusCode::ACCEPTED);
+    assert_eq!(
+        post(&client, &server, &headers, body).await,
+        StatusCode::ACCEPTED
+    );
 
     // Deleting the credential makes the trigger fail closed (401, not 5xx).
     client
@@ -189,7 +254,10 @@ async fn shopify_preset_and_missing_secret_fails_closed() {
         ("x-shopify-hmac-sha256", headers[0].1.clone()),
         ("x-shopify-webhook-id", uuid::Uuid::now_v7().to_string()),
     ];
-    assert_eq!(post(&client, &server, &headers2, body).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        post(&client, &server, &headers2, body).await,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
@@ -199,8 +267,10 @@ async fn trigger_creation_rejects_bad_verify_config() {
     let resp = client
         .post(format!("{}/triggers", server.base_url))
         .header("X-Tenant-Id", "acme")
-        .json(&json!({"slug": "x", "sequence_name": "nope", "tenant_id": "acme",
-            "trigger_type": "webhook", "config": {"verify": {"preset": "stripe"}}}))
+        .json(
+            &json!({"slug": "x", "sequence_name": "nope", "tenant_id": "acme",
+            "trigger_type": "webhook", "config": {"verify": {"preset": "stripe"}}}),
+        )
         .send()
         .await
         .unwrap();

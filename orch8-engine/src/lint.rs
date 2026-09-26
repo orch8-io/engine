@@ -283,6 +283,7 @@ fn lint_step(s: &StepDef, warnings: &mut Vec<LintWarning>) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn lint_handler_params(
     block_id: &str,
     handler: &str,

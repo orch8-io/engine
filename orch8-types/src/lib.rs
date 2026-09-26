@@ -1,4 +1,6 @@
+pub mod alert;
 pub mod api_key;
+pub mod approval_link;
 pub mod artifact;
 pub mod audit;
 pub mod auth;
@@ -32,6 +34,7 @@ pub mod output;
 pub mod plugin;
 pub mod pool;
 pub mod preflight;
+pub mod progress_share;
 pub mod queue_dispatch;
 pub mod queue_routing;
 pub mod rate_limit;

@@ -1,4 +1,6 @@
+pub mod alerts;
 pub mod api_keys;
+pub mod approval_actions;
 pub mod approvals;
 pub mod auth;
 pub mod changes;
@@ -27,6 +29,8 @@ pub mod openapi;
 pub mod plugins;
 pub mod pools;
 pub mod preflight;
+pub mod progress_share;
+pub(crate) mod public_http;
 pub mod queue_dispatch;
 pub mod queue_routing;
 pub mod releases;
@@ -222,6 +226,8 @@ fn api_routes() -> Router<AppState> {
         .merge(releases::routes())
         .merge(preflight::routes())
         .merge(approvals::routes())
+        .merge(progress_share::routes())
+        .merge(alerts::routes())
         .merge(instances::routes())
         .merge(diagnosis::routes())
         .merge(dlq_groups::routes())
@@ -276,6 +282,16 @@ pub fn build_router(state: AppState) -> Router {
         // panics on overlapping routes) and would also place them behind
         // auth. The test harness mounts them separately.
         .with_state(state)
+}
+
+/// Public, unauthenticated, token-addressed routes: approval magic links,
+/// the Slack interactivity endpoint, and public progress links. Like
+/// [`webhooks::public_routes`], the server merges these *outside* the
+/// API-key and tenant middleware; each handler authenticates its own token.
+pub fn public_routes() -> Router<AppState> {
+    Router::new()
+        .merge(approval_actions::public_routes())
+        .merge(progress_share::public_routes())
 }
 
 /// Build the hardened continuity-gateway surface.

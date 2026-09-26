@@ -115,7 +115,11 @@ pub(crate) async fn create_trigger(
             ));
         }
         Ok(_) => {}
-        Err(e) => return Err(ApiError::InvalidArgument(format!("invalid config.verify: {e}"))),
+        Err(e) => {
+            return Err(ApiError::InvalidArgument(format!(
+                "invalid config.verify: {e}"
+            )));
+        }
     }
     // Polling triggers carry a structured config (piece, trigger, schedule);
     // reject malformed configs here so the engine's poll loop never sees one.

@@ -604,6 +604,74 @@ Then route on the decision:
 
 Use human review for approvals, compliance gates, manual QA, escalations, and human-in-the-loop agent workflows.
 
+### Interactive approvals (Slack, Teams, email)
+
+A step's handler runs only *after* its own `wait_for_input` is answered, so
+approval messages are sent by a `human_review` step placed **before** the
+gate, pointing at it with `approvals.gate`:
+
+```json
+[
+  {
+    "type": "step",
+    "id": "ask_manager",
+    "handler": "human_review",
+    "params": {
+      "instructions": "Refund for {{context.data.customer}}",
+      "review_data": { "amount": "{{context.data.amount}}" },
+      "approvals": {
+        "gate": "manager_decision",
+        "slack": { "url": "credentials://ops-slack/url", "signing_secret_credential": "slack-app/signing_secret" },
+        "teams": { "url": "credentials://ops-teams/url" },
+        "email": {
+          "provider": "resend",
+          "api_key": "credentials://resend/api_key",
+          "from": "Approvals <approvals@acme.com>",
+          "to": "manager@acme.com"
+        }
+      }
+    }
+  },
+  {
+    "type": "step",
+    "id": "manager_decision",
+    "handler": "noop",
+    "wait_for_input": {
+      "prompt": "Approve the refund?",
+      "timeout": 86400000,
+      "choices": [ { "label": "Approve", "value": "approve" }, { "label": "Reject", "value": "reject" } ],
+      "store_as": "refund_decision"
+    }
+  }
+]
+```
+
+- **Slack** gets Block Kit buttons (one per choice). Point the Slack app's
+  *Interactivity Request URL* at `POST /approvals/slack/interactions`. Each
+  click is verified with the app's signing secret (`v0` HMAC over the raw
+  body, 5-minute timestamp tolerance) read from the credential named by
+  `signing_secret_credential` — a **bare** credential id/field, not a
+  `credentials://` string (those are resolved inline, and the handler refuses
+  anything that is not an existing credential).
+- **Teams** gets an Adaptive Card whose buttons open the magic-link confirm
+  page (incoming webhooks cannot deliver `Action.Submit`). The same URL also
+  accepts a JSON `POST`, e.g. from an `Action.Http` or Power Automate flow.
+- **Email** gets magic links (via the `email` handler params). `GET
+  /approvals/act/{token}` only renders a confirmation page — link scanners and
+  prefetchers cannot approve anything; the `POST` from that page records the
+  decision (with an optional comment).
+
+Every choice on every channel has its own 256-bit random token; only its
+SHA-256 is stored. Tokens expire (`approvals.ttl_secs`, default the gate's
+timeout or 7 days, max 30 days) and are single-use per gate: the first
+decision burns every other token for that gate. A decision is recorded like
+an Approver-scoped API call — a `human_input:<gate>` signal (refused for
+finished instances) plus an `approval_decision` audit entry naming the
+channel and actor. Magic links need the server's public base URL
+(`api.public_url` / `ORCH8_PUBLIC_URL`, or `approvals.public_base_url`).
+Re-running the `human_review` step never re-sends a channel whose tokens are
+still live.
+
 ## Publish and Version
 
 Create version 1:

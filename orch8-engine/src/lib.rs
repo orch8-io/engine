@@ -1,3 +1,4 @@
+pub mod alerts;
 pub mod ap_poll;
 pub mod capsule;
 pub mod circuit_breaker;

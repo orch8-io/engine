@@ -83,6 +83,13 @@ pub fn init_outbox(storage: Arc<dyn StorageBackend>, config: WebhookConfig) {
 /// returns `302 → http://169.254.169.254/…` must not be followed into the
 /// cloud-metadata / internal network. Mirrors `llm::http_client`'s policy.
 fn http_client() -> &'static reqwest::Client {
+    operator_client()
+}
+
+/// The operator-trust client (checked redirects, no resolver filter), for
+/// operator-configured targets such as webhook URLs and the `PagerDuty`
+/// endpoint.
+pub(crate) fn operator_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         crate::outbound::build(
@@ -277,16 +284,29 @@ async fn deliver_claimed(
     // its whole backoff series (head-of-line blocking, ENG-R-N7).
     let prior_attempts = u32::try_from(entry.attempts).unwrap_or(0);
     let attempt_number = entry.attempts.saturating_add(1);
-    let outcome = send_once(
-        delivery_id,
-        &entry.url,
-        &event,
-        &body,
-        Duration::from_secs(config.timeout_secs),
-        secret.as_deref(),
-        attempt_number,
-    )
-    .await;
+    let outcome = if let Some(alert) = crate::alerts::AlertDelivery::from_event(&event) {
+        send_alert_once(
+            storage,
+            delivery_id,
+            &entry.url,
+            &event,
+            &alert,
+            Duration::from_secs(config.timeout_secs),
+            attempt_number,
+        )
+        .await
+    } else {
+        send_once(
+            delivery_id,
+            &entry.url,
+            &event,
+            &body,
+            Duration::from_secs(config.timeout_secs),
+            secret.as_deref(),
+            attempt_number,
+        )
+        .await
+    };
     let (reason, retry_at) = match outcome {
         SendOutcome::Delivered => {
             if let Err(error) = complete_claimed(storage, entry).await {
@@ -516,6 +536,44 @@ async fn send_once(
     }
 }
 
+/// One alert delivery attempt: provider body + destination credentials
+/// resolved at send time. Classified exactly like [`send_once`].
+async fn send_alert_once(
+    storage: &dyn StorageBackend,
+    delivery_id: uuid::Uuid,
+    url: &str,
+    event: &WebhookEvent,
+    alert: &crate::alerts::AlertDelivery,
+    timeout: Duration,
+    attempt_number: i32,
+) -> SendOutcome {
+    let started = std::time::Instant::now();
+    let result = crate::alerts::send_alert(storage, url, alert, timeout).await;
+    record_attempt(
+        delivery_id,
+        url,
+        event,
+        attempt_number,
+        started,
+        result.as_ref().map(|s| *s).map_err(String::as_str),
+        alert.signed(),
+    )
+    .await;
+    match result {
+        Ok(status) if status < 400 => {
+            metrics::inc(metrics::WEBHOOKS_SENT);
+            SendOutcome::Delivered
+        }
+        Ok(status) if is_terminal_status(status) => SendOutcome::Terminal(format!("http {status}")),
+        Ok(status) => SendOutcome::Transient(format!("http {status}")),
+        // Unresolvable credentials / blocked targets are configuration errors.
+        Err(e) if e.starts_with("blocked") || e.starts_with("credential") => {
+            SendOutcome::Terminal(e)
+        }
+        Err(e) => SendOutcome::Transient(e),
+    }
+}
+
 /// One full in-memory retry pass (used by the non-durable [`emit`] path and
 /// operator redelivery; the durable outbox makes one attempt per claim).
 /// Returns `Ok(())` on a 2xx/3xx, or `Err(last_error)` after exhausting
@@ -637,6 +695,26 @@ pub async fn redeliver(
 ) -> Result<uuid::Uuid, String> {
     let event: WebhookEvent =
         serde_json::from_value(entry.payload.clone()).map_err(|e| format!("bad payload: {e}"))?;
+    if let Some(alert) = crate::alerts::AlertDelivery::from_event(&event) {
+        let storage = OUTBOX_STORAGE
+            .get()
+            .ok_or_else(|| "outbox storage not initialised".to_string())?;
+        let delivery_id = uuid::Uuid::now_v7();
+        return match send_alert_once(
+            storage.as_ref(),
+            delivery_id,
+            &entry.url,
+            &event,
+            &alert,
+            Duration::from_secs(10),
+            1,
+        )
+        .await
+        {
+            SendOutcome::Delivered => Ok(delivery_id),
+            SendOutcome::Terminal(e) | SendOutcome::Transient(e) => Err(e),
+        };
+    }
     let (timeout, max_retries, secret) = match OUTBOX_CONFIG.get() {
         Some(c) => (
             Duration::from_secs(c.timeout_secs),

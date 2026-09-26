@@ -106,7 +106,9 @@ impl VerifyConfig {
             .and_then(serde_json::Value::as_str)
             .ok_or("`verify.preset` is required")?;
         let preset = Preset::parse(preset_raw).ok_or_else(|| {
-            format!("unknown verify preset `{preset_raw}` (stripe, github, shopify, svix, hmac_sha256)")
+            format!(
+                "unknown verify preset `{preset_raw}` (stripe, github, shopify, svix, hmac_sha256)"
+            )
         })?;
         let str_field = |k: &str| {
             obj.get(k)
@@ -119,17 +121,27 @@ impl VerifyConfig {
             Some(t) => t
                 .as_i64()
                 .filter(|t| (1..=MAX_TOLERANCE_SECS).contains(t))
-                .ok_or_else(|| format!("`verify.tolerance_secs` must be 1..={MAX_TOLERANCE_SECS}"))?,
+                .ok_or_else(|| {
+                    format!("`verify.tolerance_secs` must be 1..={MAX_TOLERANCE_SECS}")
+                })?,
         };
         let encoding = match str_field("encoding").as_deref() {
             None | Some("hex") => Encoding::Hex,
             Some("base64") => Encoding::Base64,
-            Some(other) => return Err(format!("`verify.encoding` must be hex or base64 (got `{other}`)")),
+            Some(other) => {
+                return Err(format!(
+                    "`verify.encoding` must be hex or base64 (got `{other}`)"
+                ));
+            }
         };
         let header = str_field("header").unwrap_or_else(|| "x-signature".into());
-        for h in [Some(&header), str_field("timestamp_header").as_ref(), str_field("id_header").as_ref()]
-            .into_iter()
-            .flatten()
+        for h in [
+            Some(&header),
+            str_field("timestamp_header").as_ref(),
+            str_field("id_header").as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             if axum::http::HeaderName::from_bytes(h.as_bytes()).is_err() {
                 return Err(format!("invalid header name `{h}` in verify config"));
@@ -169,7 +181,10 @@ pub(crate) enum VerifyError {
 }
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim)
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
 }
 
 fn mac(secret: &[u8]) -> Hmac<Sha256> {
@@ -187,7 +202,7 @@ fn mac_matches(secret: &[u8], parts: &[&[u8]], candidate: &[u8]) -> bool {
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 || s.len() > 256 {
+    if !s.len().is_multiple_of(2) || s.len() > 256 {
         return None;
     }
     (0..s.len())
@@ -224,7 +239,9 @@ pub(crate) fn verify(
         Preset::Github => {
             let sig = header(headers, "x-hub-signature-256")
                 .ok_or(VerifyError::MissingHeader("X-Hub-Signature-256"))?;
-            let hex = sig.strip_prefix("sha256=").ok_or(VerifyError::Malformed("signature prefix"))?;
+            let hex = sig
+                .strip_prefix("sha256=")
+                .ok_or(VerifyError::Malformed("signature prefix"))?;
             let provided = decode_hex(hex).ok_or(VerifyError::Malformed("signature encoding"))?;
             if !mac_matches(secret.as_bytes(), &[body], &provided) {
                 return Err(VerifyError::BadSignature);
@@ -269,8 +286,8 @@ fn verify_stripe(
     body: &[u8],
     now: i64,
 ) -> Result<Verified, VerifyError> {
-    let sig_header =
-        header(headers, "stripe-signature").ok_or(VerifyError::MissingHeader("Stripe-Signature"))?;
+    let sig_header = header(headers, "stripe-signature")
+        .ok_or(VerifyError::MissingHeader("Stripe-Signature"))?;
     let mut ts: Option<&str> = None;
     let mut candidates = Vec::new();
     for part in sig_header.split(',') {
@@ -281,7 +298,9 @@ fn verify_stripe(
         }
     }
     let ts_str = ts.ok_or(VerifyError::Malformed("missing t="))?;
-    let ts_val: i64 = ts_str.parse().map_err(|_| VerifyError::Malformed("t= not an integer"))?;
+    let ts_val: i64 = ts_str
+        .parse()
+        .map_err(|_| VerifyError::Malformed("t= not an integer"))?;
     if candidates.is_empty() {
         return Err(VerifyError::Malformed("missing v1="));
     }
@@ -289,7 +308,8 @@ fn verify_stripe(
         return Err(VerifyError::StaleTimestamp);
     }
     let matched = candidates.iter().find(|c| {
-        decode_hex(c).is_some_and(|bytes| mac_matches(secret, &[ts_str.as_bytes(), b".", body], &bytes))
+        decode_hex(c)
+            .is_some_and(|bytes| mac_matches(secret, &[ts_str.as_bytes(), b".", body], &bytes))
     });
     let Some(sig) = matched else {
         return Err(VerifyError::BadSignature);
@@ -317,7 +337,9 @@ fn verify_svix(
     if id.is_empty() || id.len() > 128 {
         return Err(VerifyError::Malformed("svix-id"));
     }
-    let ts_val: i64 = ts.parse().map_err(|_| VerifyError::Malformed("svix-timestamp"))?;
+    let ts_val: i64 = ts
+        .parse()
+        .map_err(|_| VerifyError::Malformed("svix-timestamp"))?;
     if !timestamp_ok(now, ts_val, cfg.tolerance_secs) {
         return Err(VerifyError::StaleTimestamp);
     }
@@ -332,7 +354,11 @@ fn verify_svix(
             .strip_prefix("v1,")
             .and_then(|b64| STANDARD.decode(b64).ok())
             .is_some_and(|bytes| {
-                mac_matches(&key, &[id.as_bytes(), b".", ts.as_bytes(), b".", body], &bytes)
+                mac_matches(
+                    &key,
+                    &[id.as_bytes(), b".", ts.as_bytes(), b".", body],
+                    &bytes,
+                )
             })
     });
     if !ok {
@@ -363,7 +389,9 @@ fn verify_generic(
     .ok_or(VerifyError::Malformed("signature encoding"))?;
     let (ok, ttl) = if let Some(th) = &cfg.timestamp_header {
         let ts = header(headers, th).ok_or(VerifyError::MissingHeader("timestamp header"))?;
-        let ts_val: i64 = ts.parse().map_err(|_| VerifyError::Malformed("timestamp"))?;
+        let ts_val: i64 = ts
+            .parse()
+            .map_err(|_| VerifyError::Malformed("timestamp"))?;
         if !timestamp_ok(now, ts_val, cfg.tolerance_secs) {
             return Err(VerifyError::StaleTimestamp);
         }
@@ -372,7 +400,10 @@ fn verify_generic(
             cfg.tolerance_secs * 2,
         )
     } else {
-        (mac_matches(secret, &[body], &provided), UNTIMED_REPLAY_TTL_SECS)
+        (
+            mac_matches(secret, &[body], &provided),
+            UNTIMED_REPLAY_TTL_SECS,
+        )
     };
     if !ok {
         return Err(VerifyError::BadSignature);
@@ -382,7 +413,10 @@ fn verify_generic(
         .as_deref()
         .and_then(|h| header(headers, h))
         .filter(|s| !s.is_empty() && s.len() <= 128)
-        .map_or_else(|| format!("sig:{}", short_hash(&provided)), |d| format!("id:{d}"));
+        .map_or_else(
+            || format!("sig:{}", short_hash(&provided)),
+            |d| format!("id:{d}"),
+        );
     Ok(Verified {
         replay_key: format!("hmac:{id}"),
         replay_ttl_secs: ttl,
@@ -397,7 +431,11 @@ mod tests {
     use serde_json::json;
 
     fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        bytes.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
     }
 
     fn sign(secret: &[u8], parts: &[&[u8]]) -> Vec<u8> {
@@ -408,8 +446,10 @@ mod tests {
         m.finalize().into_bytes().to_vec()
     }
 
-    fn cfg(v: serde_json::Value) -> VerifyConfig {
-        VerifyConfig::from_trigger_config(&json!({"verify": v})).unwrap().unwrap()
+    fn cfg(v: &serde_json::Value) -> VerifyConfig {
+        VerifyConfig::from_trigger_config(&json!({"verify": v}))
+            .unwrap()
+            .unwrap()
     }
 
     fn headers(pairs: &[(&'static str, String)]) -> HeaderMap {
@@ -427,24 +467,48 @@ mod tests {
     fn config_parsing_validates_preset_and_knobs() {
         assert_eq!(VerifyConfig::from_trigger_config(&json!({})).unwrap(), None);
         assert!(VerifyConfig::from_trigger_config(&json!({"verify": {"preset": "nope"}})).is_err());
-        assert!(VerifyConfig::from_trigger_config(&json!({"verify": {"preset": "stripe", "tolerance_secs": 0}})).is_err());
-        assert!(VerifyConfig::from_trigger_config(&json!({"verify": {"preset": "hmac_sha256", "encoding": "rot13"}})).is_err());
-        assert!(VerifyConfig::from_trigger_config(&json!({"verify": {"preset": "hmac_sha256", "header": "bad header"}})).is_err());
-        assert_eq!(cfg(json!({"preset": "clerk"})).preset, Preset::Svix);
+        assert!(
+            VerifyConfig::from_trigger_config(
+                &json!({"verify": {"preset": "stripe", "tolerance_secs": 0}})
+            )
+            .is_err()
+        );
+        assert!(
+            VerifyConfig::from_trigger_config(
+                &json!({"verify": {"preset": "hmac_sha256", "encoding": "rot13"}})
+            )
+            .is_err()
+        );
+        assert!(
+            VerifyConfig::from_trigger_config(
+                &json!({"verify": {"preset": "hmac_sha256", "header": "bad header"}})
+            )
+            .is_err()
+        );
+        assert_eq!(cfg(&json!({"preset": "clerk"})).preset, Preset::Svix);
     }
 
     #[test]
     fn stripe_accepts_valid_and_rejects_tampered_stale_or_wrong_secret() {
-        let c = cfg(json!({"preset": "stripe"}));
+        let c = cfg(&json!({"preset": "stripe"}));
         let secret = "whsec_stripe_test";
         let t = NOW.to_string();
         let sig = hex(&sign(secret.as_bytes(), &[t.as_bytes(), b".", BODY]));
         let h = headers(&[("stripe-signature", format!("t={t},v1=deadbeef,v1={sig}"))]);
         let ok = verify(&c, secret, &h, BODY, NOW).unwrap();
         assert!(ok.replay_key.starts_with("stripe:"));
-        assert_eq!(verify(&c, secret, &h, b"{}", NOW), Err(VerifyError::BadSignature));
-        assert_eq!(verify(&c, "other", &h, BODY, NOW), Err(VerifyError::BadSignature));
-        assert_eq!(verify(&c, secret, &h, BODY, NOW + 301), Err(VerifyError::StaleTimestamp));
+        assert_eq!(
+            verify(&c, secret, &h, b"{}", NOW),
+            Err(VerifyError::BadSignature)
+        );
+        assert_eq!(
+            verify(&c, "other", &h, BODY, NOW),
+            Err(VerifyError::BadSignature)
+        );
+        assert_eq!(
+            verify(&c, secret, &h, BODY, NOW + 301),
+            Err(VerifyError::StaleTimestamp)
+        );
         assert_eq!(
             verify(&c, secret, &HeaderMap::new(), BODY, NOW),
             Err(VerifyError::MissingHeader("Stripe-Signature"))
@@ -453,39 +517,54 @@ mod tests {
 
     #[test]
     fn github_uses_sha256_header_and_delivery_id() {
-        let c = cfg(json!({"preset": "github"}));
+        let c = cfg(&json!({"preset": "github"}));
         let sig = hex(&sign(b"gh-secret", &[BODY]));
         let h = headers(&[
             ("x-hub-signature-256", format!("sha256={sig}")),
-            ("x-github-delivery", "72d3162e-cc78-11e3-81ab-4c9367dc0958".into()),
+            (
+                "x-github-delivery",
+                "72d3162e-cc78-11e3-81ab-4c9367dc0958".into(),
+            ),
             ("x-github-event", "pull_request".into()),
         ]);
         let ok = verify(&c, "gh-secret", &h, BODY, NOW).unwrap();
-        assert_eq!(ok.replay_key, "github:id:72d3162e-cc78-11e3-81ab-4c9367dc0958");
+        assert_eq!(
+            ok.replay_key,
+            "github:id:72d3162e-cc78-11e3-81ab-4c9367dc0958"
+        );
         assert_eq!(ok.event.as_deref(), Some("pull_request"));
         let bad = headers(&[("x-hub-signature-256", format!("sha1={sig}"))]);
         assert!(verify(&c, "gh-secret", &bad, BODY, NOW).is_err());
-        assert_eq!(verify(&c, "gh-secret", &h, b"tampered", NOW), Err(VerifyError::BadSignature));
+        assert_eq!(
+            verify(&c, "gh-secret", &h, b"tampered", NOW),
+            Err(VerifyError::BadSignature)
+        );
     }
 
     #[test]
     fn shopify_uses_base64_hmac() {
-        let c = cfg(json!({"preset": "shopify"}));
+        let c = cfg(&json!({"preset": "shopify"}));
         let sig = STANDARD.encode(sign(b"shp", &[BODY]));
         let h = headers(&[
             ("x-shopify-hmac-sha256", sig),
-            ("x-shopify-webhook-id", "b54557e4-bdd9-4b37-8a5f-bf7d70bcd043".into()),
+            (
+                "x-shopify-webhook-id",
+                "b54557e4-bdd9-4b37-8a5f-bf7d70bcd043".into(),
+            ),
             ("x-shopify-topic", "orders/create".into()),
         ]);
         let ok = verify(&c, "shp", &h, BODY, NOW).unwrap();
         assert_eq!(ok.event.as_deref(), Some("orders/create"));
         assert!(ok.replay_key.starts_with("shopify:id:"));
-        assert_eq!(verify(&c, "nope", &h, BODY, NOW), Err(VerifyError::BadSignature));
+        assert_eq!(
+            verify(&c, "nope", &h, BODY, NOW),
+            Err(VerifyError::BadSignature)
+        );
     }
 
     #[test]
     fn svix_decodes_whsec_and_checks_timestamp() {
-        let c = cfg(json!({"preset": "svix"}));
+        let c = cfg(&json!({"preset": "svix"}));
         let key = b"svix-signing-key-bytes";
         let secret = format!("whsec_{}", STANDARD.encode(key));
         let ts = NOW.to_string();
@@ -495,9 +574,18 @@ mod tests {
             ("svix-timestamp", ts.clone()),
             ("svix-signature", format!("v1,Zm9v v1,{sig}")),
         ]);
-        assert_eq!(verify(&c, &secret, &h, BODY, NOW).unwrap().replay_key, "svix:msg_1");
-        assert_eq!(verify(&c, &secret, &h, BODY, NOW - 400), Err(VerifyError::StaleTimestamp));
-        assert_eq!(verify(&c, &secret, &h, b"x", NOW), Err(VerifyError::BadSignature));
+        assert_eq!(
+            verify(&c, &secret, &h, BODY, NOW).unwrap().replay_key,
+            "svix:msg_1"
+        );
+        assert_eq!(
+            verify(&c, &secret, &h, BODY, NOW - 400),
+            Err(VerifyError::StaleTimestamp)
+        );
+        assert_eq!(
+            verify(&c, &secret, &h, b"x", NOW),
+            Err(VerifyError::BadSignature)
+        );
         // Standard Webhooks header names are accepted too.
         let h2 = headers(&[
             ("webhook-id", "msg_1".into()),
@@ -509,16 +597,26 @@ mod tests {
 
     #[test]
     fn generic_hmac_supports_prefix_encoding_and_timestamp() {
-        let c = cfg(json!({"preset": "hmac_sha256", "header": "X-Sig", "prefix": "sha256=", "id_header": "X-Id"}));
+        let c = cfg(
+            &json!({"preset": "hmac_sha256", "header": "X-Sig", "prefix": "sha256=", "id_header": "X-Id"}),
+        );
         let sig = hex(&sign(b"k", &[BODY]));
         let h = headers(&[("x-sig", format!("sha256={sig}")), ("x-id", "abc".into())]);
-        assert_eq!(verify(&c, "k", &h, BODY, NOW).unwrap().replay_key, "hmac:id:abc");
+        assert_eq!(
+            verify(&c, "k", &h, BODY, NOW).unwrap().replay_key,
+            "hmac:id:abc"
+        );
 
-        let c = cfg(json!({"preset": "hmac_sha256", "encoding": "base64", "timestamp_header": "X-Ts"}));
+        let c = cfg(
+            &json!({"preset": "hmac_sha256", "encoding": "base64", "timestamp_header": "X-Ts"}),
+        );
         let ts = NOW.to_string();
         let sig = STANDARD.encode(sign(b"k", &[ts.as_bytes(), b".", BODY]));
         let h = headers(&[("x-signature", sig), ("x-ts", ts)]);
         assert!(verify(&c, "k", &h, BODY, NOW).is_ok());
-        assert_eq!(verify(&c, "k", &h, BODY, NOW + 1000), Err(VerifyError::StaleTimestamp));
+        assert_eq!(
+            verify(&c, "k", &h, BODY, NOW + 1000),
+            Err(VerifyError::StaleTimestamp)
+        );
     }
 }
