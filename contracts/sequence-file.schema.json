@@ -1,18 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://orch8.io/contracts/sequence.schema.json",
-  "title": "Orch8 Sequence Definition",
-  "description": "A persisted Orch8 workflow sequence as stored and returned by the engine API (POST/GET /api/v1/sequences). Includes server-assigned identity fields. For hand-written sequence files, use sequence-file.schema.json.",
+  "$id": "https://orch8.io/contracts/sequence-file.schema.json",
+  "title": "Orch8 Sequence File",
+  "description": "A hand-written Orch8 workflow sequence file (for example *.orch8.json). Only `name` and `blocks` are required; `id`, `version`, and `created_at` are assigned by `orch8 sequence apply` / the API, and `orch8 dev` also fills `tenant_id` and defaults `namespace`. See https://orch8.io/docs.",
   "type": "object",
-  "required": [
-    "id",
-    "tenant_id",
-    "namespace",
-    "name",
-    "version",
-    "blocks",
-    "created_at"
-  ],
   "properties": {
     "$schema": {
       "type": [
@@ -105,6 +96,10 @@
       "format": "int32"
     }
   },
+  "required": [
+    "name",
+    "blocks"
+  ],
   "$defs": {
     "ABSplitDef": {
       "type": "object",

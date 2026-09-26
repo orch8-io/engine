@@ -1,0 +1,11 @@
+{
+  "name": "Orch8 sequence",
+  "description": "Orch8 durable workflow sequence definition file",
+  "fileMatch": [
+    "*.orch8.json",
+    "*.orch8.yaml",
+    "*.orch8.yml",
+    "orch8.sequence.json"
+  ],
+  "url": "https://orch8.io/contracts/sequence-file.schema.json"
+}
