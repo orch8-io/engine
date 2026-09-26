@@ -55,6 +55,205 @@
         }
       }
     },
+    "/budgets": {
+      "get": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "list_budgets",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Budgets with current-period spend and state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BudgetStatus"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "create_budget",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantBudget"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid budget"
+          },
+          "403": {
+            "description": "Requires the root/admin API key"
+          }
+        }
+      }
+    },
+    "/budgets/alerts": {
+      "get": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "list_alerts",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max alerts (default 100, max 1000)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`budget.threshold_crossed` records, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BudgetAlert"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/budgets/{id}": {
+      "put": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "update_budget",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Budget id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantBudget"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Requires the root/admin API key"
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "budgets"
+        ],
+        "operationId": "delete_budget",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Budget id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/changes": {
       "get": {
         "tags": [
@@ -3543,6 +3742,38 @@
         }
       }
     },
+    "/llm-cache": {
+      "delete": {
+        "tags": [
+          "usage"
+        ],
+        "operationId": "purge_llm_cache",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "description": "Tenant (admin/unscoped callers only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Entries removed: {\"deleted\": n}",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "No tenant resolvable"
+          }
+        }
+      }
+    },
     "/pools": {
       "get": {
         "tags": [
@@ -3807,6 +4038,338 @@
         ],
         "responses": {
           "204": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/prompts": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "list_prompts",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PromptSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "push_prompt",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushPromptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Identical to the latest version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushPromptResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New version created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushPromptResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid prompt"
+          }
+        }
+      }
+    },
+    "/prompts/{name}": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "get_prompt",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/prompts/{name}/labels/{label}": {
+      "put": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "set_prompt_label",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label, e.g. production",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetLabelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptLabel"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "delete_prompt_label",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/prompts/{name}/resolve": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "resolve_prompt",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "query",
+            "description": "Resolve through this label (its stable version)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "Exact version",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptTemplate"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/prompts/{name}/versions/{version}": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "operationId": "get_prompt_version",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Prompt name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptTemplate"
+                }
+              }
+            }
+          },
+          "404": {
             "description": ""
           }
         }
@@ -5543,7 +6106,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Usage aggregated by (kind, model) with estimated USD costs",
+            "description": "Usage aggregated by (kind, model) with estimated USD costs, cache savings and current budget status",
             "content": {
               "application/json": {
                 "schema": {}
@@ -7346,6 +7909,185 @@
             ],
             "format": "int64",
             "description": "Maximum elapsed execution time in milliseconds."
+          }
+        }
+      },
+      "BudgetAlert": {
+        "type": "object",
+        "description": "Durable record that a budget crossed a soft threshold. Exactly one row per\n`(budget_id, period_start, threshold_percent)`.",
+        "required": [
+          "id",
+          "event",
+          "tenant_id",
+          "budget_id",
+          "period",
+          "period_start",
+          "threshold_percent",
+          "spend_usd",
+          "limit_usd",
+          "blocking",
+          "created_at"
+        ],
+        "properties": {
+          "blocking": {
+            "type": "boolean",
+            "description": "Whether this threshold makes new dispatches fail (100% + hard cap)."
+          },
+          "budget_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "event": {
+            "type": "string",
+            "description": "Always [`BUDGET_THRESHOLD_EVENT`]."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "limit_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "period": {
+            "$ref": "#/components/schemas/BudgetPeriod"
+          },
+          "period_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "spend_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "threshold_percent": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "BudgetPeriod": {
+        "type": "string",
+        "description": "Budget accounting period (UTC calendar boundaries).",
+        "enum": [
+          "daily",
+          "monthly"
+        ]
+      },
+      "BudgetRequest": {
+        "type": "object",
+        "description": "Create/replace body. `limit_usd` is the per-period estimated spend cap.",
+        "required": [
+          "tenant_id",
+          "period",
+          "limit_usd"
+        ],
+        "properties": {
+          "hard_cap": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Fail new `llm_call` dispatches closed at 100%. Default `true`."
+          },
+          "limit_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Model prefix filter (e.g. `gpt-5`, `claude-opus`); omit for all models."
+          },
+          "period": {
+            "$ref": "#/components/schemas/BudgetPeriod"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "thresholds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Soft alert thresholds in percent. Default `[50, 80, 100]`."
+          }
+        }
+      },
+      "BudgetState": {
+        "type": "string",
+        "description": "Budget health derived from spend vs. limit.",
+        "enum": [
+          "ok",
+          "warning",
+          "exceeded"
+        ]
+      },
+      "BudgetStatus": {
+        "type": "object",
+        "description": "Current-period status of one budget.",
+        "required": [
+          "budget",
+          "period_start",
+          "period_end",
+          "spend_usd",
+          "percent_used",
+          "state",
+          "blocking",
+          "unpriced_events"
+        ],
+        "properties": {
+          "blocking": {
+            "type": "boolean",
+            "description": "True when a hard-capped budget is exhausted: new dispatches fail."
+          },
+          "budget": {
+            "$ref": "#/components/schemas/TenantBudget"
+          },
+          "percent_used": {
+            "type": "number",
+            "format": "double"
+          },
+          "period_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "spend_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "state": {
+            "$ref": "#/components/schemas/BudgetState"
+          },
+          "unpriced_events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Usage from models without a known price is not counted."
           }
         }
       },
@@ -11155,6 +11897,255 @@
           }
         }
       },
+      "PromptCanary": {
+        "type": "object",
+        "description": "Canary split of a label between its stable version and a candidate.",
+        "required": [
+          "version",
+          "percent"
+        ],
+        "properties": {
+          "percent": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0–100. Selection is a deterministic hash of `(instance, block, name)`,\nthe same scheme `ab_split` uses, so one execution always sees one side.",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Candidate version receiving `percent` of executions."
+          }
+        }
+      },
+      "PromptDetail": {
+        "type": "object",
+        "required": [
+          "name",
+          "versions",
+          "labels"
+        ],
+        "properties": {
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptLabel"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptTemplate"
+            },
+            "description": "Newest first."
+          }
+        }
+      },
+      "PromptLabel": {
+        "type": "object",
+        "description": "A movable alias (`production`, `canary`, …) onto an immutable version.",
+        "required": [
+          "tenant_id",
+          "name",
+          "label",
+          "version",
+          "updated_at"
+        ],
+        "properties": {
+          "canary": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PromptCanary"
+              }
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Stable version the label points at."
+          }
+        }
+      },
+      "PromptMessage": {
+        "type": "object",
+        "description": "One templated chat message of a prompt version.",
+        "required": [
+          "role",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Message text; `{{ variable }}` placeholders are rendered at dispatch."
+          },
+          "role": {
+            "type": "string",
+            "description": "Chat role (`system`, `user`, `assistant`)."
+          }
+        }
+      },
+      "PromptResolution": {
+        "type": "object",
+        "description": "Which version a step resolved, recorded in the step output and pinned per\n`(instance, block)` so retries and replays reuse the same version.",
+        "required": [
+          "name",
+          "version",
+          "variant",
+          "content_hash"
+        ],
+        "properties": {
+          "content_hash": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Label the version was resolved through, if any."
+          },
+          "name": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string",
+            "description": "`stable` or `canary` when resolved through a label; `pinned` when an\nexplicit version was requested; `latest` otherwise."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "PromptSummary": {
+        "type": "object",
+        "description": "One prompt in the registry listing.",
+        "required": [
+          "name",
+          "latest_version",
+          "versions",
+          "labels",
+          "updated_at"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptLabel"
+            }
+          },
+          "latest_version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "versions": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "PromptTemplate": {
+        "type": "object",
+        "description": "An immutable, tenant-scoped prompt version.",
+        "required": [
+          "tenant_id",
+          "name",
+          "version",
+          "content_hash",
+          "created_at"
+        ],
+        "properties": {
+          "content_hash": {
+            "type": "string",
+            "description": "SHA-256 over the canonical template content (not name/version), used\nto make `push` idempotent and to prove which content a step ran."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptMessage"
+            },
+            "description": "Templated messages, sent before any `messages` the step itself adds."
+          },
+          "model_params": {
+            "type": "object",
+            "description": "Default model params (`provider`, `model`, `temperature`,\n`max_tokens`, …). Step params override them key by key."
+          },
+          "name": {
+            "type": "string"
+          },
+          "response_schema": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Optional JSON Schema the response must satisfy (see `llm_call`\n`response_schema`). A step-level `response_schema` wins."
+          },
+          "system": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional system prompt (templated)."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Variable names referenced by the template (derived at push time)."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Monotonic per `(tenant_id, name)`, starting at 1. Never reused."
+          }
+        }
+      },
       "ProtocolDescription": {
         "type": "object",
         "required": [
@@ -11214,6 +12205,85 @@
             "format": "int32",
             "description": "Number of most recent checkpoints to keep.",
             "minimum": 0
+          }
+        }
+      },
+      "PushPromptRequest": {
+        "type": "object",
+        "description": "Push body: the content of a new prompt version.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optionally point this label at the pushed version in the same call."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptMessage"
+            }
+          },
+          "model_params": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "response_schema": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "system": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "type": "string",
+            "description": "Tenant (ignored/must match when the caller is tenant-scoped)."
+          }
+        }
+      },
+      "PushPromptResponse": {
+        "type": "object",
+        "required": [
+          "prompt",
+          "created"
+        ],
+        "properties": {
+          "created": {
+            "type": "boolean",
+            "description": "False when the content equals the latest version (returned as-is)."
+          },
+          "label": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PromptLabel"
+              }
+            ]
+          },
+          "prompt": {
+            "$ref": "#/components/schemas/PromptTemplate"
           }
         }
       },
@@ -12545,6 +13615,39 @@
           }
         }
       },
+      "SetLabelRequest": {
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "canary_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Percent (0–100) of executions routed to `canary_version`.",
+            "minimum": 0
+          },
+          "canary_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional canary candidate version."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Stable version the label points at."
+          }
+        }
+      },
       "SetVersionPinRequest": {
         "type": "object",
         "required": [
@@ -13016,6 +14119,63 @@
           },
           "timezone": {
             "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TenantBudget": {
+        "type": "object",
+        "description": "A tenant spend budget over estimated LLM cost (the same list-price\nestimates `GET /usage` reports).",
+        "required": [
+          "id",
+          "tenant_id",
+          "period",
+          "limit_usd",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hard_cap": {
+            "type": "boolean",
+            "description": "When true, new `llm_call` dispatches fail closed once spend reaches\n`limit_usd` (cache hits are still served — they cost nothing)."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "limit_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend limit in USD for one period."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional model filter: a prefix matched against the recorded model\n(`gpt-5` matches `gpt-5.4-mini`). `None` = all models."
+          },
+          "period": {
+            "$ref": "#/components/schemas/BudgetPeriod"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "thresholds": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Soft thresholds in percent (each emits one alert per period)."
           },
           "updated_at": {
             "type": "string",
@@ -14458,6 +15618,18 @@
     {
       "name": "pools",
       "description": "Resource pool management"
+    },
+    {
+      "name": "prompts",
+      "description": "Versioned, tenant-scoped prompt registry with labels and canaries"
+    },
+    {
+      "name": "budgets",
+      "description": "Tenant LLM spend budgets: hard caps and threshold alerts"
+    },
+    {
+      "name": "usage",
+      "description": "LLM usage, estimated cost, cache savings and budget status"
     },
     {
       "name": "cluster",
