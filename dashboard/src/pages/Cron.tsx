@@ -15,6 +15,8 @@ import { Section } from "../components/ui/Section";
 import { Glossary, type GlossaryItem } from "../components/ui/Glossary";
 import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
 import { Button } from "../components/ui/Button";
+import { CopyAsMenu } from "../components/CopyAsMenu";
+import { createCronRequest } from "../lib/requests";
 import { Input, FieldLabel } from "../components/ui/Input";
 import { Badge } from "../components/ui/Badge";
 import { Relative } from "../components/ui/Relative";
@@ -512,7 +514,21 @@ function CreateCronForm({
             </p>
           </div>
         </div>
-        <div className="mt-6 flex justify-end">
+        <div className="mt-6 flex justify-end gap-2">
+          <CopyAsMenu
+            spec={() =>
+              sequenceId
+                ? createCronRequest({
+                    tenant_id: tenantId,
+                    namespace,
+                    sequence_id: sequenceId,
+                    cron_expr: cronExpr,
+                    timezone,
+                  })
+                : null
+            }
+            disabledReason={sequenceId ? undefined : "Enter a sequence ID first"}
+          />
           <Button variant="primary" size="sm" disabled={busy} onClick={submit}>
             Create schedule
           </Button>

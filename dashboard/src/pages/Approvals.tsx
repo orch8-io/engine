@@ -14,6 +14,8 @@ import { PageMeta } from "../components/ui/PageMeta";
 import { Section } from "../components/ui/Section";
 import { Glossary, type GlossaryItem } from "../components/ui/Glossary";
 import { Button } from "../components/ui/Button";
+import { CopyAsMenu } from "../components/CopyAsMenu";
+import { humanInputRequest } from "../lib/requests";
 import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
 import { Id } from "../components/ui/Mono";
 import { Relative } from "../components/ui/Relative";
@@ -162,6 +164,17 @@ export default function Approvals() {
                             {c.label}
                           </Button>
                         ))}
+                        {item.choices.length > 0 && (
+                          <CopyAsMenu
+                            spec={() =>
+                              item.choices.map((c) => {
+                                const s = humanInputRequest(item.instance_id, item.block_id, c.value);
+                                s.label = `Answer “${c.label}”`;
+                                return s;
+                              })
+                            }
+                          />
+                        )}
                       </div>
                     </TD>
                   </TR>
