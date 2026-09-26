@@ -45,7 +45,7 @@ pub struct ImportArgs {
     /// Exported workflow file.
     pub file: PathBuf,
     /// Output sequence file (`.json`, `.yaml`, `.yml`); prints to stdout when omitted.
-    #[arg(long, short)]
+    #[arg(long)]
     pub out: Option<PathBuf>,
     /// Syntax for stdout output (a file's extension wins).
     #[arg(long, value_enum, default_value = "json")]

@@ -178,6 +178,10 @@ enum Commands {
     /// (JSON or YAML) with a conversion report of TODOs and triggers.
     #[command(subcommand)]
     Import(commands::import::ImportCmd),
+    /// Interactive tutorial: walk through docs/quick-starts step by step,
+    /// running real commands against a local dev engine and checking the
+    /// results (progress in .orch8/learn.json).
+    Learn(commands::learn::LearnCmd),
     /// Browse built-in sequence templates.
     #[command(subcommand)]
     Templates(TemplatesCmd),
@@ -616,6 +620,10 @@ async fn main() -> Result<()> {
         return commands::dev::run(cmd, cli.api_key, cli.tenant_id).await;
     }
 
+    if let Commands::Learn(cmd) = cli.command {
+        return commands::learn::run(cmd).await;
+    }
+
     // Import is an offline file conversion; `--tenant-id` / ORCH8_TENANT_ID
     // only sets the generated sequence's tenant.
     if let Commands::Import(cmd) = cli.command {
@@ -705,6 +713,7 @@ async fn main() -> Result<()> {
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,
         Commands::Dev(..)
         | Commands::Import(..)
+        | Commands::Learn(..)
         | Commands::Bootstrap(..)
         | Commands::Demo(..)
         | Commands::Migrate { .. }
@@ -1000,6 +1009,12 @@ mod tests {
             cli.command,
             Commands::Instance(commands::instance::InstanceCmd::Create { .. })
         ));
+    }
+
+    #[test]
+    fn cli_definition_is_consistent() {
+        // Catches clashing short flags / ids across every subcommand.
+        <Cli as clap::CommandFactory>::command().debug_assert();
     }
 
     #[test]

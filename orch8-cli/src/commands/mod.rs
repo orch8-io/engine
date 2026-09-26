@@ -18,6 +18,7 @@ pub mod import;
 pub mod init;
 pub mod inspect_cmd;
 pub mod instance;
+pub mod learn;
 pub mod package_cmd;
 pub mod pieces;
 pub mod portable;
