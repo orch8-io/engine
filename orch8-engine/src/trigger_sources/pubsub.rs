@@ -194,6 +194,7 @@ mod listener {
 
     struct TokenSource {
         http: reqwest::Client,
+        metadata_http: reqwest::Client,
         auth: Auth,
         cached: Option<(String, Instant, Duration)>,
     }
@@ -211,6 +212,12 @@ mod listener {
             let resp = match &self.auth {
                 Auth::None => return Ok(None),
                 Auth::ServiceAccount(sa) => {
+                    if !crate::handlers::builtin::is_url_safe(&sa.token_uri).await {
+                        return Err(
+                            "service account token_uri targets an internal or unreachable address"
+                                .into(),
+                        );
+                    }
                     let now = chrono::Utc::now().timestamp();
                     let claims = Claims {
                         iss: &sa.client_email,
@@ -237,21 +244,28 @@ mod listener {
                         .await
                 }
                 Auth::Metadata => {
-                    self.http
+                    self.metadata_http
                         .get(METADATA_TOKEN_URL)
                         .header("Metadata-Flavor", "Google")
                         .send()
                         .await
                 }
             }
-            .map_err(|e| format!("token request failed: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "token request failed: {}",
+                    crate::outbound::redact_error(&e)
+                )
+            })?;
             if !resp.status().is_success() {
                 return Err(format!("token endpoint returned {}", resp.status()));
             }
-            let body: TokenResponse = resp
-                .json()
-                .await
-                .map_err(|e| format!("token response invalid: {e}"))?;
+            let body: TokenResponse = resp.json().await.map_err(|e| {
+                format!(
+                    "token response invalid: {}",
+                    crate::outbound::redact_error(&e)
+                )
+            })?;
             let ttl = Duration::from_secs(body.expires_in.unwrap_or(3600).saturating_mul(9) / 10);
             self.cached = Some((body.access_token.clone(), Instant::now(), ttl));
             Ok(Some(body.access_token))
@@ -295,7 +309,10 @@ mod listener {
         if let Some(t) = tokens.token().await? {
             req = req.bearer_auth(t);
         }
-        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| crate::outbound::redact_error(&e))?;
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             tokens.cached = None;
@@ -305,7 +322,9 @@ mod listener {
             let preview: String = text.chars().take(300).collect();
             return Err(format!("pubsub returned {status}: {preview}"));
         }
-        resp.json().await.map_err(|e| e.to_string())
+        resp.json()
+            .await
+            .map_err(|e| crate::outbound::redact_error(&e))
     }
 
     /// Run the Pub/Sub listener until cancelled.
@@ -319,17 +338,34 @@ mod listener {
             .map_err(|e| EngineError::InvalidConfig(format!("pubsub: {e}")))?;
         let emulator_env = std::env::var("PUBSUB_EMULATOR_HOST").ok();
         let emulator = cfg.endpoint.is_some() || emulator_env.is_some();
+        let operator_emulator = cfg.endpoint.is_none() && emulator_env.is_some();
         let base = cfg
             .endpoint
             .clone()
             .or_else(|| emulator_env.map(|h| format!("http://{h}")))
             .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(90))
-            .build()
-            .map_err(|e| EngineError::InvalidConfig(format!("pubsub http client: {e}")))?;
+        let profile = if operator_emulator {
+            crate::outbound::Profile::LocalSidecar
+        } else {
+            crate::outbound::trigger_endpoint_profile()
+        };
+        if cfg.endpoint.is_some()
+            && profile != crate::outbound::Profile::LocalSidecar
+            && !crate::handlers::builtin::is_url_safe(&base).await
+        {
+            return Err(EngineError::InvalidConfig(
+                "pubsub: endpoint targets an internal or unreachable address".into(),
+            ));
+        }
+        let http = crate::outbound::build(
+            crate::outbound::builder(profile).timeout(Duration::from_secs(90)),
+        );
         let mut tokens = TokenSource {
             http: http.clone(),
+            metadata_http: crate::outbound::build(
+                crate::outbound::builder(crate::outbound::Profile::LocalSidecar)
+                    .timeout(Duration::from_secs(10)),
+            ),
             auth: auth_for(&cfg, emulator && cfg.credentials_json.is_none())?,
             cached: None,
         };

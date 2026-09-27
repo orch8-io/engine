@@ -202,11 +202,11 @@ pub(crate) async fn ingest_errors(
 fn webhook_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(2)
-            .build()
-            .unwrap_or_default()
+        orch8_engine::outbound::build(
+            orch8_engine::outbound::builder(orch8_engine::outbound::Profile::Untrusted)
+                .timeout(std::time::Duration::from_secs(10))
+                .pool_max_idle_per_host(2),
+        )
     })
 }
 /// Check if the error rate for a sequence has exceeded its rollback policy
@@ -376,10 +376,10 @@ async fn check_rollback(
                 .await
             {
                 Ok(resp) => {
-                    debug!(status = %resp.status(), url = %url, "rollback webhook delivered");
+                    debug!(status = %resp.status(), url = %orch8_engine::outbound::redact_url(&url), "rollback webhook delivered");
                 }
                 Err(e) => {
-                    warn!(error = %e, url = %url, "rollback webhook delivery failed");
+                    warn!(error = %orch8_engine::outbound::redact_error(&e), url = %orch8_engine::outbound::redact_url(&url), "rollback webhook delivery failed");
                 }
             }
         });

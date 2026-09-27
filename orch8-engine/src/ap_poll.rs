@@ -81,14 +81,11 @@ const MIN_POLL_DELAY: Duration = Duration::from_secs(1);
 /// client (`handlers::activepieces`): pooled connections, generous ceiling
 /// so we don't race the sidecar's own per-piece timeout.
 static POLL_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(75))
-        .build()
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "failed to build activepieces poll HTTP client, using default");
-            reqwest::Client::new()
-        })
+    crate::outbound::build(
+        crate::outbound::builder(crate::outbound::Profile::LocalSidecar)
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(75)),
+    )
 });
 
 /// Slack added to a poll lease beyond the poll interval: covers the sidecar
@@ -252,7 +249,7 @@ pub async fn run_ap_poll_listener_with_url(
         slug = %trigger.slug,
         piece = %config.piece,
         trigger_name = %config.trigger,
-        url = %url,
+        url = %crate::outbound::redact_url(&url),
         "starting activepieces poll listener"
     );
 
@@ -420,7 +417,7 @@ async fn poll_once(
         slug = %trigger.slug,
         piece = %config.piece,
         trigger_name = %config.trigger,
-        url = %url,
+        url = %crate::outbound::redact_url(&url),
         "polling activepieces sidecar"
     );
 
@@ -430,7 +427,13 @@ async fn poll_once(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("sidecar unreachable at {url}: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "sidecar unreachable at {}: {}",
+                crate::outbound::redact_url(&url),
+                crate::outbound::redact_error(&e)
+            )
+        })?;
 
     let status = response.status().as_u16();
     let text = response

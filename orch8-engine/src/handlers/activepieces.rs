@@ -35,29 +35,13 @@ const AP_PREFIX: &str = "ap://";
 /// Shared HTTP client for all `ActivePieces` sidecar calls. Reusing the client
 /// enables connection pooling and a single shared DNS cache.
 static AP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        // Per-piece timeout is enforced sidecar-side (ORCH8_AP_TIMEOUT_MS, default 60s).
-        // Our ceiling is a little higher so we don't race the sidecar's own timer.
-        .timeout(Duration::from_secs(75))
-        // The sidecar URL is operator-trusted, but a compromised or
-        // misconfigured sidecar must not be able to redirect the engine into
-        // the internal network / cloud-metadata endpoint. Re-validate hops.
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 10 {
-                return attempt.error("too many redirects");
-            }
-            if crate::handlers::builtin::redirect_target_allowed(attempt.url()) {
-                attempt.follow()
-            } else {
-                attempt.error("blocked: redirect targets a private/internal network address")
-            }
-        }))
-        .build()
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to build activepieces HTTP client, using default");
-            reqwest::Client::new()
-        })
+    crate::outbound::build(
+        crate::outbound::builder(crate::outbound::Profile::LocalSidecar)
+            .connect_timeout(Duration::from_secs(5))
+            // Per-piece timeout is enforced sidecar-side (ORCH8_AP_TIMEOUT_MS, default 60s).
+            // Our ceiling is a little higher so we don't race the sidecar's own timer.
+            .timeout(Duration::from_secs(75)),
+    )
 });
 
 /// Sidecar URL resolved once at first call — changing `ORCH8_ACTIVEPIECES_URL`
@@ -162,7 +146,7 @@ async fn handle_ap_at(ctx: StepContext, handler_name: &str, url: &str) -> Result
         block_id = %ctx.block_id,
         piece = %piece,
         action = %action,
-        url = %url,
+        url = %crate::outbound::redact_url(url),
         "dispatching step to activepieces sidecar"
     );
 
@@ -173,13 +157,21 @@ async fn handle_ap_at(ctx: StepContext, handler_name: &str, url: &str) -> Result
         .send()
         .await
         .map_err(|e| StepError::Retryable {
-            message: format!("activepieces: sidecar unreachable at {url}: {e}"),
+            message: format!(
+                "activepieces: sidecar unreachable at {}: {}",
+                crate::outbound::redact_url(url),
+                crate::outbound::redact_error(&e)
+            ),
             details: None,
         })?;
 
     let status = response.status().as_u16();
     let text = response.text().await.map_err(|e| StepError::Retryable {
-        message: format!("activepieces: failed to read response body from {url}: {e}"),
+        message: format!(
+            "activepieces: failed to read response body from {}: {}",
+            crate::outbound::redact_url(url),
+            crate::outbound::redact_error(&e)
+        ),
         details: None,
     })?;
 
@@ -198,13 +190,19 @@ async fn handle_ap_at(ctx: StepContext, handler_name: &str, url: &str) -> Result
     // Un-envelope-able response: classify purely by HTTP status.
     if status >= 500 {
         return Err(StepError::Retryable {
-            message: format!("activepieces: sidecar server error {status} from {url}"),
+            message: format!(
+                "activepieces: sidecar server error {status} from {}",
+                crate::outbound::redact_url(url)
+            ),
             details: Some(json!({ "status": status, "body": text })),
         });
     }
     if status >= 400 {
         return Err(StepError::Permanent {
-            message: format!("activepieces: sidecar client error {status} from {url}"),
+            message: format!(
+                "activepieces: sidecar client error {status} from {}",
+                crate::outbound::redact_url(url)
+            ),
             details: Some(json!({ "status": status, "body": text })),
         });
     }

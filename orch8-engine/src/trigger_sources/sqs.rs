@@ -305,9 +305,16 @@ mod listener {
             if let Some(token) = &self.creds.session_token {
                 req = req.header("x-amz-security-token", token);
             }
-            let resp = req.body(payload).send().await.map_err(|e| e.to_string())?;
+            let resp = req
+                .body(payload)
+                .send()
+                .await
+                .map_err(|e| crate::outbound::redact_error(&e))?;
             let status = resp.status();
-            let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| crate::outbound::redact_error(&e))?;
             if bytes.len() > MAX_RESPONSE_BYTES {
                 return Err("SQS response too large".into());
             }
@@ -338,10 +345,17 @@ mod listener {
                     .into(),
             )
         })?;
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(cfg.wait_time_seconds + 15))
-            .build()
-            .map_err(|e| EngineError::InvalidConfig(format!("sqs http client: {e}")))?;
+        if crate::outbound::trigger_endpoint_profile() != crate::outbound::Profile::LocalSidecar
+            && !crate::handlers::builtin::is_url_safe(&cfg.endpoint).await
+        {
+            return Err(EngineError::InvalidConfig(
+                "sqs: queue_url targets an internal or unreachable address".into(),
+            ));
+        }
+        let http = crate::outbound::build(
+            crate::outbound::builder(crate::outbound::trigger_endpoint_profile())
+                .timeout(Duration::from_secs(cfg.wait_time_seconds + 15)),
+        );
         let client = SqsClient { http, cfg, creds };
         let slug = trigger.slug.clone();
         info!(slug, queue = %client.cfg.queue_url, "sqs trigger listener active");

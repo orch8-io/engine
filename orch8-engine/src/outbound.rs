@@ -15,6 +15,9 @@
 //! - [`Profile::Operator`]: operator-configured targets that may legitimately
 //!   be internal (webhooks). No resolver filter, but redirect hops are still
 //!   re-checked so a trusted target can't bounce us into cloud metadata.
+//! - [`Profile::LocalSidecar`]: operator-configured local services. Proxies
+//!   and redirects are disabled so credential-bearing POSTs stay at the
+//!   configured endpoint.
 //!
 //! Building fails closed: a builder error panics instead of silently falling
 //! back to `reqwest::Client::new()`, which would drop every guard above.
@@ -37,6 +40,20 @@ pub enum Profile {
     TokenEndpoint,
     /// Operator-configured URL: checked redirects only.
     Operator,
+    /// Operator-configured local service that receives credentials: no proxy
+    /// and no redirects, since a 307/308 would forward the POST body.
+    LocalSidecar,
+}
+
+/// Tenant-configured trigger endpoints are public-only by default. Operators
+/// running SQS/PubSub emulators can explicitly opt in to internal endpoints.
+#[must_use]
+pub fn trigger_endpoint_profile() -> Profile {
+    if std::env::var("ORCH8_ALLOW_INTERNAL_TRIGGER_ENDPOINTS").is_ok_and(|v| v == "true") {
+        Profile::LocalSidecar
+    } else {
+        Profile::TokenEndpoint
+    }
 }
 
 /// Start a `ClientBuilder` with the hardening for `profile` applied. Callers
@@ -53,6 +70,7 @@ pub fn builder(profile: Profile) -> reqwest::ClientBuilder {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none()),
         Profile::Operator => b.redirect(checked_redirects()),
+        Profile::LocalSidecar => b.no_proxy().redirect(reqwest::redirect::Policy::none()),
     }
 }
 
@@ -199,5 +217,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status().as_u16(), 307);
+    }
+
+    #[tokio::test]
+    async fn local_sidecar_profile_does_not_forward_post_on_redirect() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:1/steal\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+        let response = build(builder(Profile::LocalSidecar))
+            .post(format!("http://127.0.0.1:{port}/execute"))
+            .body("secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 307);
     }
 }
