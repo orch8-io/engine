@@ -328,7 +328,6 @@ mod listener {
     }
 
     /// Run the Pub/Sub listener until cancelled.
-    #[allow(clippy::too_many_lines)]
     pub async fn run(
         storage: Arc<dyn StorageBackend>,
         trigger: TriggerDef,

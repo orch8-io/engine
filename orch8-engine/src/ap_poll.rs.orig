@@ -417,7 +417,7 @@ async fn poll_once(
         slug = %trigger.slug,
         piece = %config.piece,
         trigger_name = %config.trigger,
-        url = %crate::outbound::redact_url(url),
+        url = %crate::outbound::redact_url(&url),
         "polling activepieces sidecar"
     );
 
@@ -430,7 +430,7 @@ async fn poll_once(
         .map_err(|e| {
             format!(
                 "sidecar unreachable at {}: {}",
-                crate::outbound::redact_url(url),
+                crate::outbound::redact_url(&url),
                 crate::outbound::redact_error(&e)
             )
         })?;
