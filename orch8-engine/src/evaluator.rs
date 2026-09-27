@@ -1443,10 +1443,24 @@ pub async fn reset_subtree_to_pending(
     instance_id: InstanceId,
     root_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
+    // ⚡ Bolt: Optimize O(N^2) tree traversal by building a flat Vec sorted by parent ID
+    // for O(log N) zero-allocation lookups during the recursive descent.
+    let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = tree
+        .iter()
+        .filter_map(|n| n.parent_id.map(|parent| (parent, n)))
+        .collect();
+    // Use a stable sort to preserve sibling node execution order exactly as provided in the `tree` slice.
+    children_of.sort_by_key(|&(parent, _)| parent);
+
     let mut frontier = vec![root_id];
     let mut descendants: Vec<(ExecutionNodeId, BlockType, BlockId)> = Vec::new();
     while let Some(parent) = frontier.pop() {
-        for node in tree.iter().filter(|node| node.parent_id == Some(parent)) {
+        let start = children_of.partition_point(|&(p, _)| p < parent);
+        for &(_, node) in children_of
+            .iter()
+            .skip(start)
+            .take_while(|&(p, _)| *p == parent)
+        {
             descendants.push((node.id, node.block_type, node.block_id.clone()));
             frontier.push(node.id);
         }
@@ -1729,9 +1743,24 @@ pub async fn settle_live_descendants(
     let mut to_skip: Vec<ExecutionNodeId> = Vec::new();
     let mut to_cancel: Vec<ExecutionNodeId> = Vec::new();
     let mut live_block_ids: Vec<String> = Vec::new();
+
+    // ⚡ Bolt: Optimize O(N^2) tree traversal by building a flat Vec sorted by parent ID
+    // for O(log N) zero-allocation lookups during the recursive descent.
+    let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = tree
+        .iter()
+        .filter_map(|n| n.parent_id.map(|parent| (parent, n)))
+        .collect();
+    // Use a stable sort to preserve sibling node execution order exactly as provided in the `tree` slice.
+    children_of.sort_by_key(|&(parent, _)| parent);
+
     let mut frontier = vec![root_id];
     while let Some(parent) = frontier.pop() {
-        for n in tree.iter().filter(|n| n.parent_id == Some(parent)) {
+        let start = children_of.partition_point(|&(p, _)| p < parent);
+        for &(_, n) in children_of
+            .iter()
+            .skip(start)
+            .take_while(|&(p, _)| *p == parent)
+        {
             frontier.push(n.id);
             match n.state {
                 NodeState::Pending => to_skip.push(n.id),
