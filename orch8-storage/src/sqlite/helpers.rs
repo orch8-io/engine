@@ -269,6 +269,40 @@ pub(super) fn row_to_worker_task(
         error_message: row.get::<Option<String>, _>("error_message"),
         error_retryable: row.get::<Option<i32>, _>("error_retryable").map(|v| v != 0),
         created_at: parse_ts(row.get::<&str, _>("created_at"))?,
+        effect_id: row
+            .try_get::<Option<String>, _>("effect_id")
+            .ok()
+            .flatten()
+            .map(|id| parse_uuid(&id).map(orch8_types::continuity::EffectId::from_uuid))
+            .transpose()?,
+        continuity_epoch: row
+            .try_get::<Option<i64>, _>("continuity_epoch")
+            .ok()
+            .flatten()
+            .map(|epoch| {
+                u64::try_from(epoch)
+                    .map_err(|_| StorageError::Query("negative continuity_epoch".into()))
+            })
+            .transpose()?,
+        lease_secs: row
+            .try_get::<Option<i64>, _>("lease_secs")
+            .ok()
+            .flatten()
+            .map(|secs| {
+                u32::try_from(secs)
+                    .map_err(|_| StorageError::Query("invalid worker lease_secs".into()))
+            })
+            .transpose()?,
+        carries_credentials: row
+            .try_get::<i64, _>("carries_credentials")
+            .is_ok_and(|flag| flag != 0),
+        claimed_runtime_kind: row
+            .try_get::<Option<String>, _>("claimed_runtime_kind")
+            .ok()
+            .flatten()
+            .map(|kind| kind.parse())
+            .transpose()
+            .map_err(StorageError::Query)?,
     })
 }
 

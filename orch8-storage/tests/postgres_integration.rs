@@ -603,6 +603,11 @@ async fn tenant_worker_claim_does_not_lock_task_instances_row() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -712,6 +717,11 @@ async fn capability_aware_postgres_claim_skips_incompatible_work_atomically() {
             error_message: None,
             error_retryable: None,
             created_at: now,
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         })
         .await
         .unwrap();
@@ -790,6 +800,11 @@ async fn worker_claim_epoch_fences_restarted_postgres_worker() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -1637,6 +1652,11 @@ async fn postgres_reaper_reclaims_null_heartbeat_by_claimed_at() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
     assert_eq!(
@@ -2089,6 +2109,11 @@ async fn worker_claims_skip_tasks_of_terminal_instances_postgres() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     storage.create_worker_task(&task).await.unwrap();
     assert!(

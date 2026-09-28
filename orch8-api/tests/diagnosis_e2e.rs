@@ -196,6 +196,11 @@ fn mk_task(instance_id: &str, block: &str, handler: &str, state: WorkerTaskState
         error_message: None,
         error_retryable: None,
         created_at: Utc::now() - Duration::seconds(5),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     }
 }
 

@@ -1486,6 +1486,33 @@ pub trait WorkerStore: Send + Sync + 'static {
     /// Returns the number of tasks expired.
     async fn expire_timed_out_worker_tasks(&self) -> Result<u64, StorageError>;
 
+    /// Claimed tasks whose lease expired: no heartbeat within the task's own
+    /// `lease_secs` (set from the claimant's runtime kind) or, when unset,
+    /// within `default_lease`. Read-only; the engine classifies each task
+    /// (pure requeue vs ambiguous side effect) and applies a fenced
+    /// [`Self::resolve_worker_task`].
+    async fn list_expired_worker_leases(
+        &self,
+        default_lease: Duration,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    /// Pending or claimed tasks whose `timeout_ms` elapsed since creation.
+    /// Read-only; see [`Self::list_expired_worker_leases`].
+    async fn list_timed_out_worker_tasks(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    /// Atomically apply a fenced resolution (requeue / retry / fail node /
+    /// fail instance) to a worker task and its instance. Returns `false`
+    /// without side effects when the task moved on (completed, reclaimed,
+    /// released, or deleted) since it was read.
+    async fn resolve_worker_task(
+        &self,
+        resolution: &orch8_types::worker::WorkerTaskResolution,
+    ) -> Result<bool, StorageError>;
+
     /// Delete pending/claimed worker tasks for an instance + block (used when race cancels a branch).
     async fn cancel_worker_tasks_for_block(
         &self,
@@ -3109,6 +3136,19 @@ pub trait ContinuityStore: Send + Sync + 'static {
         tenant_id: &TenantId,
         instance_id: InstanceId,
     ) -> Result<Option<ContinuityExecution>, StorageError>;
+
+    /// The continuity execution whose ownership history contains
+    /// `instance_id` — either as its current instance or as a former
+    /// location (a handed-off source). Callers compare
+    /// `current_instance_id` to detect a superseded local instance.
+    async fn get_continuity_execution_touching_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+    ) -> Result<Option<ContinuityExecution>, StorageError> {
+        self.get_continuity_execution_by_instance(tenant_id, instance_id)
+            .await
+    }
 
     async fn list_continuity_locations(
         &self,

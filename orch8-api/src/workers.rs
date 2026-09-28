@@ -1488,6 +1488,11 @@ pub(crate) async fn fail_task(
                 error_message: None,
                 error_retryable: None,
                 created_at: chrono::Utc::now(),
+                effect_id: None,
+                continuity_epoch: None,
+                lease_secs: None,
+                carries_credentials: false,
+                claimed_runtime_kind: None,
             };
             let node_id = tree
                 .iter()
@@ -1602,6 +1607,11 @@ pub(crate) async fn fail_task(
                 error_message: None,
                 error_retryable: None,
                 created_at: chrono::Utc::now(),
+                effect_id: None,
+                continuity_epoch: None,
+                lease_secs: None,
+                carries_credentials: false,
+                claimed_runtime_kind: None,
             };
             state
                 .storage
@@ -1890,6 +1900,7 @@ pub(crate) async fn list_tasks(
         handler_name: query.handler_name,
         worker_id: query.worker_id,
         queue_name: query.queue_name,
+        instance_id: None,
     };
 
     let pagination = Pagination {

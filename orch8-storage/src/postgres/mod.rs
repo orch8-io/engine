@@ -1204,6 +1204,28 @@ impl crate::WorkerStore for PostgresStorage {
         workers::expire_timed_out(self).await
     }
 
+    async fn list_expired_worker_leases(
+        &self,
+        default_lease: Duration,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        workers::list_expired_leases(self, default_lease, limit).await
+    }
+
+    async fn list_timed_out_worker_tasks(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        workers::list_timed_out(self, limit).await
+    }
+
+    async fn resolve_worker_task(
+        &self,
+        resolution: &orch8_types::worker::WorkerTaskResolution,
+    ) -> Result<bool, StorageError> {
+        workers::resolve(self, resolution).await
+    }
+
     async fn cancel_worker_tasks_for_block(
         &self,
         instance_id: Uuid,

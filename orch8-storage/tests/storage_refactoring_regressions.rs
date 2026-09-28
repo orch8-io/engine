@@ -96,6 +96,11 @@ fn make_worker_task(instance_id: InstanceId, timeout_ms: Option<i64>) -> WorkerT
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     }
 }
 

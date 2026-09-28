@@ -93,6 +93,11 @@ fn worker_task(
         error_message: None,
         error_retryable: None,
         created_at: now,
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     }
 }
 
@@ -368,6 +373,11 @@ async fn leased_artifact_upload_is_tenant_scoped_and_idempotent() {
             error_message: None,
             error_retryable: None,
             created_at: Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         })
         .await
         .unwrap();

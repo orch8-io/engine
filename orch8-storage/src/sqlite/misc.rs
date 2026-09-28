@@ -240,6 +240,8 @@ async fn claim_from_queue_inner(
         t.claimed_at = Some(now_dt);
         t.heartbeat_at = Some(now_dt);
         t.claim_epoch = t.claim_epoch.saturating_add(1);
+        t.lease_secs = None;
+        t.claimed_runtime_kind = None;
     }
     if !tasks.is_empty() {
         let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
@@ -248,7 +250,7 @@ async fn claim_from_queue_inner(
         qb.push_bind(&now);
         qb.push(", heartbeat_at=");
         qb.push_bind(&now);
-        qb.push(", claim_epoch=claim_epoch+1");
+        qb.push(", claim_epoch=claim_epoch+1, lease_secs=NULL, claimed_runtime_kind=NULL");
         qb.push(" WHERE id IN (");
         let mut separated = qb.separated(",");
         for t in &tasks {

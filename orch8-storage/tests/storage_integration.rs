@@ -199,6 +199,11 @@ fn distributed_task(
         error_message: None,
         error_retryable: None,
         created_at,
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     }
 }
 
@@ -541,6 +546,11 @@ async fn worker_task_full_lifecycle() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -637,6 +647,11 @@ async fn constrained_worker_task_is_claimed_only_by_matching_runtime() {
         error_message: None,
         error_retryable: None,
         created_at: now,
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
     assert!(
@@ -920,6 +935,11 @@ async fn worker_activity_checkpoint_survives_lease_recovery() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
     s.claim_worker_tasks("long_activity", "worker-1", 1)
@@ -1015,6 +1035,11 @@ async fn worker_task_fail_and_cancel() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -1061,6 +1086,11 @@ async fn worker_task_fail_and_cancel() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task2).await.unwrap();
     let cancelled = s
@@ -1118,6 +1148,11 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&iter0).await.unwrap();
     s.claim_worker_tasks("external_handler", "w1", 1)
@@ -1163,6 +1198,11 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&iter1).await.unwrap();
 
@@ -1207,6 +1247,11 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
     s.claim_worker_tasks("external_handler", "w1", 1)
@@ -1251,6 +1296,11 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task2).await.unwrap();
     let fetched = s.get_worker_task(task2.id).await.unwrap();
@@ -1305,6 +1355,11 @@ async fn worker_task_queue_routing() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -3126,6 +3181,11 @@ async fn worker_task_list_and_stats() {
             error_message: None,
             error_retryable: None,
             created_at: Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         };
         s.create_worker_task(&task).await.unwrap();
     }
@@ -3320,6 +3380,11 @@ async fn perf_concurrent_worker_claims() {
             error_message: None,
             error_retryable: None,
             created_at: Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         };
         s.create_worker_task(&task).await.unwrap();
     }
@@ -4484,6 +4549,11 @@ async fn retry_worker_task_atomically_replaces_task() {
         error_message: Some("boom".into()),
         error_retryable: Some(true),
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&old_task).await.unwrap();
 
@@ -4510,6 +4580,11 @@ async fn retry_worker_task_atomically_replaces_task() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
 
     let fire_at = Utc::now() + Duration::seconds(5);

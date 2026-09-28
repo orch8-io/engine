@@ -661,6 +661,11 @@ mod tests {
             error_message: None,
             error_retryable: None,
             created_at: chrono::Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         };
         s.create_worker_task(&iter0).await.unwrap();
         s.claim_worker_tasks("external_handler", "w1", 1)
@@ -707,6 +712,11 @@ mod tests {
             error_message: None,
             error_retryable: None,
             created_at: chrono::Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         };
         s.create_worker_task(&iter1).await.unwrap();
         let claimed = s

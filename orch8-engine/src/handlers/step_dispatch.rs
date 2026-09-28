@@ -181,26 +181,44 @@ where
     }
 }
 
-/// Dispatch a step within the execution tree to the external worker queue.
-/// The node is marked Waiting; the instance state is NOT changed here.
+/// Why a step could not be handed to a remote runtime. Always permanent: the
+/// step definition (or its placement against policy) is wrong, so retrying
+/// would fail identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteDispatchRejected(pub String);
+
+/// Build, persist, and announce the durable worker task for one step attempt.
 ///
-/// `resolved_params` must already have been through template + credential
-/// resolution — external workers receive materialised values, not raw
-/// `{{…}}` or `credentials://…` strings.
-pub(crate) async fn dispatch_step_to_external_worker(
+/// Shared by the tree evaluator and the fast path so placement, effect, and
+/// ownership bookkeeping cannot drift between them. `resolved_params` must
+/// already have been through template + credential resolution;
+/// `carries_credentials` says whether the unresolved params referenced
+/// `credentials://` material.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn enqueue_worker_task(
     storage: &dyn StorageBackend,
     instance: &TaskInstance,
-    node: &ExecutionNode,
     step_def: &StepDef,
     resolved_params: serde_json::Value,
-    step_context: ExecutionContext,
+    step_context: &ExecutionContext,
     attempt: u32,
-) -> Result<bool, EngineError> {
+    carries_credentials: bool,
+) -> Result<Result<orch8_types::worker::WorkerTask, RemoteDispatchRejected>, EngineError> {
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
     let (requirements, resolved_params) =
-        orch8_types::worker::take_runtime_requirements(resolved_params)
-            .map_err(orch8_types::error::StorageError::Query)?;
+        match orch8_types::worker::take_runtime_requirements(resolved_params) {
+            Ok(split) => split,
+            Err(message) => return Ok(Err(RemoteDispatchRejected(message))),
+        };
+    let attempt_u16 = u16::try_from(attempt).map_err(|_| {
+        tracing::warn!(
+            instance_id = %instance.id,
+            attempt = %attempt,
+            "attempt counter exceeds u16::MAX, rejecting dispatch"
+        );
+        orch8_types::error::StorageError::Query("attempt counter overflow".into())
+    })?;
 
     // Apply dynamic queue routing: a (tenant, handler) rule may override the
     // step's declared queue at enqueue time.
@@ -212,7 +230,7 @@ pub(crate) async fn dispatch_step_to_external_worker(
     )
     .await;
 
-    let _effect_guard = if step_context.runtime.dry_run {
+    let effect_guard = if step_context.runtime.dry_run {
         None
     } else {
         crate::effect_guard::EffectGuard::begin(
@@ -226,6 +244,16 @@ pub(crate) async fn dispatch_step_to_external_worker(
         )
         .await?
     };
+    let effect_id = effect_guard
+        .as_ref()
+        .map(crate::effect_guard::EffectGuard::effect_id);
+
+    // Owner epoch at dispatch: completion is fenced on it so a task issued
+    // under an older owner can never advance the execution after a handoff.
+    let continuity_epoch = storage
+        .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+        .await?
+        .map(|execution| execution.epoch.get());
 
     let task = WorkerTask {
         id: uuid::Uuid::now_v7(),
@@ -235,12 +263,12 @@ pub(crate) async fn dispatch_step_to_external_worker(
         queue_name,
         requirements,
         params: resolved_params,
-        // Apply the step's context_access policy before handing the context
-        // off to an external worker. The remote process can't be trusted to
+        // Context already had `context_access` filtering and externalization
+        // markers inflated upstream — the remote process can't be trusted to
         // filter on its own.
         context: serde_json::to_value(step_context)
             .map_err(orch8_types::error::StorageError::Serialization)?,
-        attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
+        attempt: attempt_u16,
         timeout_ms: step_def
             .timeout
             .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
@@ -256,12 +284,17 @@ pub(crate) async fn dispatch_step_to_external_worker(
         error_message: None,
         error_retryable: None,
         created_at: chrono::Utc::now(),
+        effect_id,
+        continuity_epoch,
+        lease_secs: None,
+        carries_credentials,
+        claimed_runtime_kind: None,
     };
 
     storage.create_worker_task(&task).await?;
 
-    // If the resolved queue is push-mode, POST a signed envelope to its target
-    // (best-effort; the durable row above is the source of truth).
+    // Push-mode queues: POST an id-only wake-up hint (best-effort; the
+    // durable row above is the source of truth).
     crate::push::maybe_push_task(
         storage,
         instance.tenant_id.as_str(),
@@ -269,6 +302,72 @@ pub(crate) async fn dispatch_step_to_external_worker(
         &tokio_util::sync::CancellationToken::new(),
     )
     .await;
+
+    Ok(Ok(task))
+}
+
+/// Dispatch a step within the execution tree to the external worker queue.
+/// The node is marked Waiting; the instance state is NOT changed here.
+///
+/// `resolved_params` must already have been through template + credential
+/// resolution — external workers receive materialised values, not raw
+/// `{{…}}` or `credentials://…` strings (browsers never receive such steps).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_step_to_external_worker(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    node: &ExecutionNode,
+    step_def: &StepDef,
+    resolved_params: serde_json::Value,
+    step_context: ExecutionContext,
+    attempt: u32,
+    carries_credentials: bool,
+) -> Result<bool, EngineError> {
+    match enqueue_worker_task(
+        storage,
+        instance,
+        step_def,
+        resolved_params,
+        &step_context,
+        attempt,
+        carries_credentials,
+    )
+    .await?
+    {
+        Ok(_) => {}
+        Err(RemoteDispatchRejected(message)) => {
+            tracing::error!(
+                instance_id = %instance.id,
+                block_id = %step_def.id,
+                error = %message,
+                "remote dispatch rejected — failing node permanently"
+            );
+            let err_output = serde_json::json!({
+                "__error__": true,
+                "retryable": false,
+                "message": message,
+            });
+            let output_size = serde_json::to_vec(&err_output)
+                .map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
+            if let Err(error) = storage
+                .save_block_output(&orch8_types::output::BlockOutput {
+                    id: uuid::Uuid::now_v7(),
+                    instance_id: instance.id,
+                    block_id: step_def.id.clone(),
+                    output: err_output,
+                    output_ref: Some("__error__".into()),
+                    output_size,
+                    attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
+                    created_at: chrono::Utc::now(),
+                })
+                .await
+            {
+                tracing::warn!(%error, "failed to persist remote-dispatch rejection marker");
+            }
+            evaluator::fail_node(storage, node.id).await?;
+            return Ok(false);
+        }
+    }
 
     // Mark the execution node as Waiting so the evaluator won't re-dispatch it.
     // The instance state is NOT changed here — the evaluator may have other steps
@@ -756,6 +855,7 @@ mod tests {
             json!({"url": "https://example.com"}),
             ExecutionContext::default(),
             0,
+            false,
         )
         .await
         .unwrap();
@@ -841,6 +941,7 @@ mod tests {
             }),
             ExecutionContext::default(),
             0,
+            false,
         )
         .await
         .unwrap();

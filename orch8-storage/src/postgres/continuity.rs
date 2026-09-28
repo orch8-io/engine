@@ -133,6 +133,33 @@ impl crate::ContinuityStore for PostgresStorage {
         row.map(|row| decode(row.get("record"))).transpose()
     }
 
+    async fn get_continuity_execution_touching_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+    ) -> Result<Option<ContinuityExecution>, StorageError> {
+        // Current owner first, then any execution whose location history
+        // contains this instance (a handed-off source).
+        let row = sqlx::query(
+            "SELECT ce.record FROM continuity_executions ce
+             WHERE ce.tenant_id = $1
+               AND (ce.record->>'current_instance_id' = $2
+                    OR EXISTS (SELECT 1 FROM continuity_locations cl
+                               WHERE cl.tenant_id = ce.tenant_id
+                                 AND cl.continuity_id = ce.continuity_id
+                                 AND cl.instance_id = $3))
+             ORDER BY (ce.record->>'current_instance_id' = $2) DESC
+             LIMIT 1",
+        )
+        .bind(tenant_id.as_str())
+        .bind(instance_id.to_string())
+        .bind(instance_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(row.get("record"))).transpose()
+    }
+
     async fn list_continuity_locations(
         &self,
         tenant_id: &TenantId,

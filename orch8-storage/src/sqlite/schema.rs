@@ -128,6 +128,12 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     checkpoint_seq INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_seq >= 0),
     completed_at TEXT,
     created_at TEXT NOT NULL,
+    -- Distributed execution (Postgres migration 095).
+    effect_id TEXT,
+    continuity_epoch INTEGER CHECK(continuity_epoch >= 0),
+    lease_secs INTEGER CHECK(lease_secs > 0),
+    carries_credentials INTEGER NOT NULL DEFAULT 0,
+    claimed_runtime_kind TEXT,
     UNIQUE(instance_id, block_id),
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
@@ -333,6 +339,7 @@ CREATE INDEX IF NOT EXISTS idx_task_instances_parent ON task_instances(parent_in
 CREATE INDEX IF NOT EXISTS idx_task_instances_session ON task_instances(session_id);
 CREATE INDEX IF NOT EXISTS idx_signal_inbox_instance ON signal_inbox(instance_id, delivered);
 CREATE INDEX IF NOT EXISTS idx_worker_tasks_handler ON worker_tasks(handler_name, state);
+CREATE INDEX IF NOT EXISTS idx_worker_tasks_instance_state ON worker_tasks(instance_id, state);
 CREATE INDEX IF NOT EXISTS idx_block_outputs_instance ON block_outputs(instance_id);
 CREATE INDEX IF NOT EXISTS idx_execution_tree_instance ON execution_tree(instance_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_instance ON audit_log(instance_id);
@@ -782,6 +789,8 @@ CREATE TABLE IF NOT EXISTS continuity_locations (
     FOREIGN KEY (tenant_id, continuity_id)
         REFERENCES continuity_executions(tenant_id, continuity_id)
 );
+CREATE INDEX IF NOT EXISTS idx_continuity_locations_instance
+    ON continuity_locations(tenant_id, instance_id);
 CREATE INDEX IF NOT EXISTS idx_continuity_locations_runtime
     ON continuity_locations(tenant_id, runtime_id, entered_at DESC);
 
@@ -1243,4 +1252,4 @@ CREATE INDEX IF NOT EXISTS idx_tenant_budget_alerts_tenant
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 45;
+pub(super) const SCHEMA_VERSION: i64 = 46;

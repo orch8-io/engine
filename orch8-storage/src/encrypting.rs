@@ -661,6 +661,7 @@ passthrough_impl! {
         async fn create_continuity_execution(&self, execution: &orch8_types::continuity::ContinuityExecution) -> Result<(), StorageError>;
         async fn get_continuity_execution(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
         async fn get_continuity_execution_by_instance(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
+        async fn get_continuity_execution_touching_instance(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
         async fn list_continuity_locations(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ContinuityLocation>, StorageError>;
         async fn cas_continuity_owner(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId, expected_epoch: orch8_types::continuity::ExecutionEpoch, expected_owner: orch8_types::continuity::RuntimeId, next: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
         async fn create_handoff(&self, handoff: &orch8_types::continuity::ExecutionHandoff) -> Result<(), StorageError>;
@@ -1771,6 +1772,52 @@ passthrough_impl! {
     }
     async fn reap_stale_worker_tasks(&self, stale_threshold: std::time::Duration) -> Result<u64, StorageError>;
     async fn expire_timed_out_worker_tasks(&self) -> Result<u64, StorageError>;
+
+    async fn list_expired_worker_leases(
+        &self,
+        default_lease: std::time::Duration,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
+        let mut tasks = self.inner.list_expired_worker_leases(default_lease, limit).await?;
+        for t in &mut tasks {
+            self.decrypt_worker_task(t)?;
+        }
+        Ok(tasks)
+    }
+
+    async fn list_timed_out_worker_tasks(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
+        let mut tasks = self.inner.list_timed_out_worker_tasks(limit).await?;
+        for t in &mut tasks {
+            self.decrypt_worker_task(t)?;
+        }
+        Ok(tasks)
+    }
+
+    async fn resolve_worker_task(
+        &self,
+        resolution: &orch8_types::worker::WorkerTaskResolution,
+    ) -> Result<bool, StorageError> {
+        use orch8_types::worker::WorkerTaskResolutionAction as Action;
+        if let Action::Retry {
+            retry_task,
+            node_id,
+            fire_at,
+        } = &resolution.action
+        {
+            let encrypted = self.encrypt_worker_task(retry_task)?.into_owned();
+            let mut sealed = resolution.clone();
+            sealed.action = Action::Retry {
+                retry_task: Box::new(encrypted),
+                node_id: *node_id,
+                fire_at: *fire_at,
+            };
+            return self.inner.resolve_worker_task(&sealed).await;
+        }
+        self.inner.resolve_worker_task(resolution).await
+    }
     async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
     async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
 

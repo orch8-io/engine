@@ -1153,6 +1153,7 @@ pub(super) async fn execute_step_block(
         step_context,
         resolved_params,
         resolved_cache_key,
+        carries_credentials,
     } = match crate::handlers::step_block::prepare_step(
         storage.as_ref(),
         instance,
@@ -1212,16 +1213,34 @@ pub(super) async fn execute_step_block(
     // If the handler is not registered in-process, dispatch to an external
     // worker queue. This mirrors the tree evaluator path in `step_block.rs`
     // which always dispatches unregistered handlers to external workers.
-    if !handlers.contains(&step_def.handler) {
-        return dispatch_to_external_worker(
+    // Placed steps (`$runtime.runtime_id`, or kinds excluding `server`) go to
+    // the worker queue even when the handler is registered in-process.
+    let placed_remotely = orch8_types::worker::peek_runtime_requirements(&resolved_params)
+        .is_ok_and(|requirements| requirements.is_remote_placement());
+    if placed_remotely || !handlers.contains(&step_def.handler) {
+        return match dispatch_to_external_worker(
             storage.as_ref(),
             instance,
             step_def,
             attempt,
             resolved_params,
             step_context,
+            carries_credentials,
         )
-        .await;
+        .await?
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(message) => {
+                fail_instance_with_error(
+                    storage.as_ref(),
+                    instance,
+                    webhook_config,
+                    cancel,
+                    &message,
+                )
+                .await
+            }
+        };
     }
 
     crate::metrics::inc(crate::metrics::STEPS_EXECUTED);
@@ -1738,86 +1757,22 @@ pub(super) async fn dispatch_to_external_worker(
     attempt: u32,
     resolved_params: serde_json::Value,
     step_context: orch8_types::context::ExecutionContext,
-) -> Result<StepOutcome, EngineError> {
-    use orch8_types::worker::{WorkerTask, WorkerTaskState};
-
-    let (requirements, resolved_params) =
-        orch8_types::worker::take_runtime_requirements(resolved_params)
-            .map_err(orch8_types::error::StorageError::Query)?;
-
-    let _effect_guard = if step_context.runtime.dry_run {
-        None
-    } else {
-        crate::effect_guard::EffectGuard::begin(
+    carries_credentials: bool,
+) -> Result<Result<StepOutcome, String>, EngineError> {
+    if let Err(crate::handlers::step_dispatch::RemoteDispatchRejected(message)) =
+        crate::handlers::step_dispatch::enqueue_worker_task(
             storage,
-            &instance.tenant_id,
-            instance.id,
-            &step_def.id,
-            &step_def.handler,
-            &resolved_params,
+            instance,
+            step_def,
+            resolved_params,
+            &step_context,
             attempt,
+            carries_credentials,
         )
         .await?
-    };
-
-    // Apply dynamic queue routing: a (tenant, handler) rule may override the
-    // step's declared queue at enqueue time.
-    let queue_name = crate::queue_routing::resolve_queue(
-        storage,
-        &instance.tenant_id,
-        &step_def.handler,
-        step_def.queue_name.clone(),
-    )
-    .await;
-
-    let task = WorkerTask {
-        id: uuid::Uuid::now_v7(),
-        instance_id: instance.id,
-        block_id: step_def.id.clone(),
-        handler_name: step_def.handler.clone(),
-        queue_name,
-        requirements,
-        params: resolved_params,
-        // Context has already had `context_access` filtering and
-        // externalization-marker inflation applied upstream — the remote
-        // process cannot be trusted to filter on its own.
-        context: serde_json::to_value(&step_context)
-            .map_err(orch8_types::error::StorageError::Serialization)?,
-        attempt: u16::try_from(attempt).map_err(|_| {
-            tracing::warn!(
-                instance_id = %instance.id,
-                attempt = %attempt,
-                "attempt counter exceeds u16::MAX, rejecting dispatch"
-            );
-            orch8_types::error::StorageError::Query("attempt counter overflow".into())
-        })?,
-        timeout_ms: step_def
-            .timeout
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
-        state: WorkerTaskState::Pending,
-        worker_id: None,
-        claimed_at: None,
-        heartbeat_at: None,
-        claim_epoch: 0,
-        resume_checkpoint: None,
-        checkpoint_seq: 0,
-        completed_at: None,
-        output: None,
-        error_message: None,
-        error_retryable: None,
-        created_at: chrono::Utc::now(),
-    };
-
-    storage.create_worker_task(&task).await?;
-
-    // Push-mode queues: POST a signed envelope to the target (best-effort).
-    crate::push::maybe_push_task(
-        storage,
-        instance.tenant_id.as_str(),
-        &task,
-        &tokio_util::sync::CancellationToken::new(),
-    )
-    .await;
+    {
+        return Ok(Err(message));
+    }
 
     // Transition instance Running -> Waiting so the scheduler doesn't re-claim it.
     crate::lifecycle::transition_instance(
@@ -1837,5 +1792,5 @@ pub(super) async fn dispatch_to_external_worker(
         "dispatched step to external worker queue"
     );
 
-    Ok(StepOutcome::Deferred)
+    Ok(Ok(StepOutcome::Deferred))
 }

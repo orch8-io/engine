@@ -336,6 +336,7 @@ async fn collect_context(state: &AppState, instance: TaskInstance) -> InstanceDi
                 handler_name: None,
                 worker_id: None,
                 queue_name: None,
+                instance_id: None,
             },
             &Pagination::default(),
         )

@@ -155,6 +155,47 @@ pub enum RuntimeKind {
     Browser,
 }
 
+impl RuntimeKind {
+    /// Lease (seconds between heartbeats) the server expects from a node of
+    /// this kind. `None` means "use the server-wide default lease".
+    /// Browsers heartbeat from a foreground tab and are reclaimed quickly;
+    /// phones are frequently suspended by the OS and get a longer grace.
+    #[must_use]
+    pub const fn default_lease_secs(self) -> Option<u32> {
+        match self {
+            Self::Browser => Some(30),
+            Self::Mobile => Some(120),
+            Self::Server | Self::Edge | Self::Desktop => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Server => "server",
+            Self::Edge => "edge",
+            Self::Mobile => "mobile",
+            Self::Desktop => "desktop",
+            Self::Browser => "browser",
+        }
+    }
+}
+
+impl std::str::FromStr for RuntimeKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "server" => Ok(Self::Server),
+            "edge" => Ok(Self::Edge),
+            "mobile" => Ok(Self::Mobile),
+            "desktop" => Ok(Self::Desktop),
+            "browser" => Ok(Self::Browser),
+            other => Err(format!("unknown runtime kind: {other}")),
+        }
+    }
+}
+
 /// How strongly a runtime's identity and environment are verified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -252,9 +293,52 @@ pub struct CapsuleRequirements {
     pub requires_human_ui: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum_trust: Option<RuntimeTrustLevel>,
+    /// Placement: only runtimes of these kinds may claim. Empty = any kind.
+    /// A list that excludes `server` forces remote dispatch even when the
+    /// server has the handler registered in-process.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_kinds: Vec<RuntimeKind>,
+    /// Placement: only this runtime may claim. The task then acts as that
+    /// node's durable mailbox: it stays `pending` until the node polls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<RuntimeId>,
+    /// Locality/residency policy evaluated at dispatch (recorded as a
+    /// placement decision) and re-evaluated against every claimant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<LocalityPolicy>,
+    /// Data classification the `policy` is evaluated for (default `internal`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<DataClassification>,
 }
 
 impl CapsuleRequirements {
+    /// Whether these requirements place the step on specific remote runtimes:
+    /// a targeted `runtime_id`, or a kind list that excludes `server`. Placed
+    /// steps are always dispatched to the worker queue, even when the server
+    /// has the handler registered in-process.
+    #[must_use]
+    pub fn is_remote_placement(&self) -> bool {
+        self.runtime_id.is_some()
+            || (!self.runtime_kinds.is_empty()
+                && !self.runtime_kinds.contains(&RuntimeKind::Server))
+    }
+
+    /// Whether only browser runtimes may execute the step.
+    #[must_use]
+    pub fn is_browser_only(&self) -> bool {
+        !self.runtime_kinds.is_empty()
+            && self
+                .runtime_kinds
+                .iter()
+                .all(|kind| *kind == RuntimeKind::Browser)
+    }
+
+    /// Whether a locality policy must be evaluated for this placement.
+    #[must_use]
+    pub fn has_locality_policy(&self) -> bool {
+        self.policy.is_some() || self.classification.is_some()
+    }
+
     /// Whether a live runtime may safely claim work with these requirements.
     /// Unlike preview diagnostics, unknown network/UI facts fail closed here:
     /// task claiming changes ownership and must be based on positive evidence.
@@ -304,6 +388,29 @@ impl CapsuleRequirements {
                         | RuntimeConnectivity::Ethernet
                 )
             )
+        {
+            return false;
+        }
+        if !self.runtime_kinds.is_empty() && !self.runtime_kinds.contains(&capabilities.kind) {
+            return false;
+        }
+        if self
+            .runtime_id
+            .is_some_and(|runtime_id| runtime_id != capabilities.runtime_id)
+        {
+            return false;
+        }
+        // Residency is re-checked against every claimant with positive
+        // evidence only: an `unknown` outcome (missing region/connectivity
+        // facts) fails closed exactly like a denial.
+        if self.has_locality_policy()
+            && crate::locality::evaluate_locality(
+                self.policy.as_ref(),
+                self.classification.unwrap_or_default(),
+                capabilities,
+            )
+            .outcome
+                != PolicyOutcome::Allow
         {
             return false;
         }
@@ -917,6 +1024,7 @@ mod tests {
             requires_network: true,
             requires_human_ui: true,
             minimum_trust: Some(RuntimeTrustLevel::Registered),
+            ..CapsuleRequirements::default()
         }
     }
 
@@ -1093,3 +1201,146 @@ mod tests {
 #[cfg(test)]
 #[path = "continuity_coverage_tests.rs"]
 mod continuity_coverage_tests;
+
+#[cfg(test)]
+mod placement_requirement_tests {
+    use super::*;
+
+    fn runtime(kind: RuntimeKind, now: DateTime<Utc>) -> RuntimeCapabilities {
+        RuntimeCapabilities {
+            runtime_id: RuntimeId::new(),
+            kind,
+            trust: RuntimeTrustLevel::Registered,
+            handlers: vec!["scrape".into()],
+            plugins: Vec::new(),
+            credentials: Vec::new(),
+            regions: vec!["eu".into()],
+            hardware: Vec::new(),
+            offline_capable: false,
+            connectivity: Some(RuntimeConnectivity::Wifi),
+            battery_percent: None,
+            estimated_cost_microunits: None,
+            estimated_latency_ms: None,
+            draining: false,
+            capsule_signing_public_key: None,
+            observed_at: now,
+            expires_at: now + chrono::Duration::minutes(4),
+        }
+    }
+
+    #[test]
+    fn runtime_kinds_restrict_claimants() {
+        let now = Utc::now();
+        let requirements = CapsuleRequirements {
+            runtime_kinds: vec![RuntimeKind::Browser],
+            ..CapsuleRequirements::default()
+        };
+        assert!(requirements.is_satisfied_by(&runtime(RuntimeKind::Browser, now), now));
+        assert!(!requirements.is_satisfied_by(&runtime(RuntimeKind::Server, now), now));
+        assert!(!requirements.is_satisfied_by(&runtime(RuntimeKind::Mobile, now), now));
+    }
+
+    #[test]
+    fn runtime_id_is_a_mailbox_for_exactly_one_node() {
+        let now = Utc::now();
+        let target = runtime(RuntimeKind::Mobile, now);
+        let requirements = CapsuleRequirements {
+            runtime_id: Some(target.runtime_id),
+            ..CapsuleRequirements::default()
+        };
+        assert!(requirements.is_satisfied_by(&target, now));
+        assert!(!requirements.is_satisfied_by(&runtime(RuntimeKind::Mobile, now), now));
+    }
+
+    #[test]
+    fn locality_policy_is_rechecked_against_claimants_and_fails_closed() {
+        let now = Utc::now();
+        let requirements = CapsuleRequirements {
+            policy: Some(LocalityPolicy {
+                version: 1,
+                rules: vec![LocalityRule {
+                    classification: DataClassification::Confidential,
+                    allowed_runtime_ids: Vec::new(),
+                    allowed_runtime_kinds: Vec::new(),
+                    allowed_regions: vec!["eu".into()],
+                    minimum_trust: None,
+                    require_offline: None,
+                    require_hardware: None,
+                    allowed_connectivity: Vec::new(),
+                    minimum_battery_percent: None,
+                    maximum_cost_microunits: None,
+                    maximum_latency_ms: None,
+                }],
+            }),
+            classification: Some(DataClassification::Confidential),
+            ..CapsuleRequirements::default()
+        };
+        let eu = runtime(RuntimeKind::Desktop, now);
+        assert!(requirements.is_satisfied_by(&eu, now));
+        let mut us = runtime(RuntimeKind::Desktop, now);
+        us.regions = vec!["us".into()];
+        assert!(!requirements.is_satisfied_by(&us, now));
+        let mut unknown = runtime(RuntimeKind::Desktop, now);
+        unknown.regions.clear();
+        assert!(
+            !requirements.is_satisfied_by(&unknown, now),
+            "unknown residency fails closed"
+        );
+    }
+
+    #[test]
+    fn remote_placement_detection() {
+        assert!(!CapsuleRequirements::default().is_remote_placement());
+        let with_server = CapsuleRequirements {
+            runtime_kinds: vec![RuntimeKind::Server, RuntimeKind::Mobile],
+            ..CapsuleRequirements::default()
+        };
+        assert!(!with_server.is_remote_placement());
+        let browser = CapsuleRequirements {
+            runtime_kinds: vec![RuntimeKind::Browser],
+            ..CapsuleRequirements::default()
+        };
+        assert!(browser.is_remote_placement());
+        assert!(browser.is_browser_only());
+        let targeted = CapsuleRequirements {
+            runtime_id: Some(RuntimeId::new()),
+            ..CapsuleRequirements::default()
+        };
+        assert!(targeted.is_remote_placement());
+        assert!(!targeted.is_browser_only());
+    }
+
+    #[test]
+    fn placement_fields_are_additive_on_the_wire() {
+        let parsed: CapsuleRequirements = serde_json::from_value(serde_json::json!({
+            "runtime_kinds": ["browser", "mobile"],
+            "runtime_id": "0190f5a0-0000-7000-8000-000000000001"
+        }))
+        .unwrap();
+        assert_eq!(
+            parsed.runtime_kinds,
+            [RuntimeKind::Browser, RuntimeKind::Mobile]
+        );
+        assert!(parsed.runtime_id.is_some());
+        assert_eq!(
+            serde_json::to_value(CapsuleRequirements::default()).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn per_kind_default_leases() {
+        assert_eq!(RuntimeKind::Browser.default_lease_secs(), Some(30));
+        assert_eq!(RuntimeKind::Mobile.default_lease_secs(), Some(120));
+        assert_eq!(RuntimeKind::Server.default_lease_secs(), None);
+        for kind in [
+            RuntimeKind::Server,
+            RuntimeKind::Edge,
+            RuntimeKind::Mobile,
+            RuntimeKind::Desktop,
+            RuntimeKind::Browser,
+        ] {
+            assert_eq!(kind.as_str().parse::<RuntimeKind>().unwrap(), kind);
+        }
+    }
+}

@@ -176,7 +176,8 @@ pub(super) async fn claim_worker_tasks_from_queue(
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
-        SET state = 'claimed', worker_id = $4, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1
+        SET state = 'claimed', worker_id = $4, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1,
+            lease_secs = NULL, claimed_runtime_kind = NULL
         WHERE id IN (
             SELECT id FROM worker_tasks
             WHERE handler_name = $1 AND state = 'pending' AND queue_name = $5
@@ -231,7 +232,8 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
-        SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1
+        SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1,
+            lease_secs = NULL, claimed_runtime_kind = NULL
         WHERE id IN (
             SELECT wt.id FROM worker_tasks wt
             JOIN task_instances ti ON ti.id = wt.instance_id

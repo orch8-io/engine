@@ -1417,6 +1417,11 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
         error_message: None,
         error_retryable: None,
         created_at: long_ago,
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     storage.create_worker_task(&task).await.unwrap();
 
@@ -2192,6 +2197,11 @@ async fn a14_unknown_handler_currently_parks_instance_in_waiting() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     storage.create_worker_task(&task).await.unwrap();
 

@@ -968,6 +968,11 @@ mod tests {
             error_message: None,
             error_retryable: None,
             created_at: t0() - Duration::seconds(age_secs),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         }
     }
 

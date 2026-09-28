@@ -187,6 +187,11 @@ fn claimed_task() -> WorkerTask {
         error_message: Some("boom".into()),
         error_retryable: Some(true),
         created_at: chrono::Utc::now() - chrono::Duration::hours(1),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     }
 }
 

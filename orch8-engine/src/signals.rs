@@ -612,6 +612,11 @@ mod tests {
             error_message: None,
             error_retryable: None,
             created_at: Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         };
         storage.create_worker_task(&task).await.unwrap();
 

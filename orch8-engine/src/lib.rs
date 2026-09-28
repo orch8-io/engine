@@ -54,6 +54,7 @@ pub mod tenant_budgets;
 pub mod trigger_sources;
 pub mod triggers;
 pub mod webhooks;
+pub mod worker_lease;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -252,19 +253,25 @@ impl Engine {
                 tokio::select! {
                     () = reaper_cancel.cancelled() => break,
                     _ = ticker.tick() => {
-                        match reaper_storage
-                            .reap_stale_worker_tasks(worker_reaper_stale)
-                            .await
+                        // Expired leases (per-task lease wins over the
+                        // default) and timed-out tasks. Side-effecting
+                        // tasks are never blindly requeued: their receipt
+                        // goes `unknown` and the step's retry policy
+                        // decides; timed-out tasks always advance.
+                        match crate::worker_lease::reap_worker_tasks(
+                            reaper_storage.as_ref(),
+                            worker_reaper_stale,
+                        )
+                        .await
                         {
-                            Ok(0) => {}
-                            Ok(n) => tracing::info!(count = n, "reaped stale worker tasks"),
+                            Ok(report) if report.total() == 0 => {}
+                            Ok(report) => tracing::info!(
+                                requeued = report.requeued,
+                                ambiguous = report.ambiguous,
+                                timed_out = report.timed_out,
+                                "resolved expired worker tasks"
+                            ),
                             Err(e) => tracing::error!(error = %e, "worker task reaper error"),
-                        }
-                        // Also expire tasks whose timeout_ms has elapsed.
-                        match reaper_storage.expire_timed_out_worker_tasks().await {
-                            Ok(0) => {}
-                            Ok(n) => tracing::info!(count = n, "expired timed-out worker tasks"),
-                            Err(e) => tracing::error!(error = %e, "worker task timeout expiry error"),
                         }
                     }
                 }

@@ -146,6 +146,11 @@ fn make_queue_task(instance_id: InstanceId, block: &str) -> WorkerTask {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     }
 }
 

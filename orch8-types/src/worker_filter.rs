@@ -13,6 +13,9 @@ pub struct WorkerTaskFilter {
     pub handler_name: Option<String>,
     pub worker_id: Option<String>,
     pub queue_name: Option<String>,
+    /// Restrict to tasks of one instance.
+    #[serde(default)]
+    pub instance_id: Option<crate::ids::InstanceId>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, ToSchema)]
