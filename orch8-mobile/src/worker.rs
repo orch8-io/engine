@@ -23,6 +23,18 @@
 //! A server without the `release` endpoint (404/405) gets a retryable `fail`
 //! instead, which requeues the task under its retry policy.
 //!
+//! ## Device-side timeouts
+//!
+//! When a task's `timeout_ms` (or the engine's `handler_timeout_ms`) elapses
+//! on the device, the handler may still be running — an app-native call
+//! cannot be interrupted — so the outcome is *ambiguous*, not a failure. The
+//! worker answers `release {started: true}`: the server marks the effect
+//! receipt `unknown` and applies the step's retry policy (a new attempt gets
+//! a new `effect_id`), exactly like a lease expiry after start. Until the
+//! timed-out invocation actually returns, the worker claims no new task for
+//! that handler (see [`crate::stragglers`]), so a retry never overlaps the
+//! attempt it replaces on the same device.
+//!
 //! ## Handler input
 //!
 //! App-native handlers receive the task `params` JSON. When `params` is an
@@ -62,6 +74,7 @@ use orch8_types::ids::{BlockId, InstanceId};
 use crate::PowerState;
 use crate::error::MobileError;
 use crate::node::{LeaseResponse, NodeClient, RemoteTask};
+use crate::stragglers::{Stragglers, device_timeout_error, is_device_timeout};
 
 /// Default lease when neither the task nor the poll response carries one.
 const DEFAULT_LEASE_SECS: u64 = 120;
@@ -395,6 +408,8 @@ pub(crate) struct WorkerDeps {
     pub foreign_handlers: HashSet<String>,
     pub storage: Arc<dyn StorageBackend>,
     pub signals: HostSignals,
+    /// Handler invocations still running after a device-side timeout.
+    pub stragglers: Arc<Stragglers>,
 }
 
 pub(crate) struct Worker {
@@ -577,6 +592,11 @@ impl Worker {
                 break;
             }
             let handler = &self.handlers[(*cursor + offset) % count];
+            if self.deps.stragglers.blocks(handler) {
+                // A timed-out invocation of this handler is still running:
+                // never start a retry of it alongside.
+                continue;
+            }
             #[allow(clippy::cast_possible_truncation)]
             let response = self
                 .deps
@@ -697,6 +717,22 @@ impl Worker {
             return true;
         };
 
+        if let Err(error) = &result
+            && is_device_timeout(error)
+        {
+            // Ambiguous: the handler may still complete its side effect.
+            // Give the lease back as "started" so the server marks the
+            // receipt unknown and follows the retry policy. If the release
+            // cannot be delivered now, the journal (started, no outcome)
+            // makes the orphan drain send the same release later.
+            warn!(task_id = %task.id, "device-side timeout; releasing the task as started (effect unknown)");
+            let released = release(client, task.id, task.claim_epoch, true).await;
+            if released {
+                self.counters.released.fetch_add(1, Ordering::Relaxed);
+            }
+            return released;
+        }
+
         let outcome = match result {
             Ok(output) => Outcome::Complete { output },
             Err(StepError::Retryable { message, .. }) => Outcome::Fail {
@@ -768,20 +804,35 @@ impl Worker {
             wait_for_input: None,
         };
         let future = handler(ctx);
-        match task
+        let Some(ms) = task
             .timeout_ms
             .and_then(|ms| u64::try_from(ms).ok())
             .filter(|ms| *ms > 0)
-        {
-            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), future)
-                .await
-                .unwrap_or_else(|_| {
-                    Err(StepError::Retryable {
-                        message: format!("task timed out after {ms}ms on device"),
-                        details: None,
-                    })
-                }),
-            None => future.await,
+        else {
+            return future.await;
+        };
+        // Run the invocation as its own task so a timeout stops *waiting*
+        // without pretending the handler stopped: it keeps running and is
+        // tracked as a straggler until it returns.
+        let mut running = tokio::spawn(future);
+        match tokio::time::timeout(Duration::from_millis(ms), &mut running).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(join_error)) => Err(StepError::Permanent {
+                message: format!("handler task failed: {join_error}"),
+                details: None,
+            }),
+            Err(_elapsed) => {
+                let stragglers = Arc::clone(&self.deps.stragglers);
+                let handler_name = task.handler_name.clone();
+                stragglers.begin(&handler_name);
+                tokio::spawn(async move {
+                    let _ = running.await;
+                    stragglers.end(&handler_name);
+                });
+                Err(device_timeout_error(format!(
+                    "task timed out after {ms}ms on device"
+                )))
+            }
         }
     }
 

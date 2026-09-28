@@ -96,6 +96,7 @@ async fn harness_with(server: &MockControlPlane, handler: Recording, idle_ms: u6
         "scan",
         Arc::new(handler),
         Duration::from_secs(10),
+        Arc::new(crate::stragglers::Stragglers::default()),
     );
     let client = NodeClient::new_unchecked(
         server.base.clone(),
@@ -121,6 +122,7 @@ async fn harness_with(server: &MockControlPlane, handler: Recording, idle_ms: u6
                 foreground: Arc::clone(&foreground),
                 power_state: Arc::clone(&power),
             },
+            stragglers: Arc::new(crate::stragglers::Stragglers::default()),
         },
         WorkerOptions {
             max_concurrent_tasks: 1,
@@ -464,8 +466,46 @@ async fn worker_rejects_unregistered_advertised_handlers() {
                 foreground: Arc::new(AtomicBool::new(true)),
                 power_state: Arc::new(AtomicU8::new(0)),
             },
+            stragglers: Arc::new(crate::stragglers::Stragglers::default()),
         },
         WorkerOptions::default(),
     );
     assert!(matches!(result, Err(MobileError::InvalidInput { .. })));
+}
+
+/// A device-side timeout is an ambiguous outcome, not a failure: the native
+/// handler keeps running, so the worker releases the task as `started`
+/// (server: receipt unknown → retry policy) and claims nothing new for that
+/// handler until the timed-out call returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_timeout_releases_as_started_and_quarantines_the_handler() {
+    let task_id = uuid::Uuid::new_v4();
+    let mut task = task_json(task_id);
+    task["timeout_ms"] = json!(200);
+    let server = spawn_control_plane(route_with(vec![task], 200, 204)).await;
+    let h = harness_with(&server, ok_handler(Duration::from_millis(1500)), 50).await;
+    h.worker.spawn(&tokio::runtime::Handle::current());
+
+    wait_for(|| server.count(&format!("{task_id}/release")) == 1).await;
+    let release = &server.bodies(&format!("{task_id}/release"))[0];
+    assert_eq!(release["started"], true);
+    assert_eq!(release["claim_epoch"], 7);
+    assert_eq!(server.count(&format!("{task_id}/fail")), 0);
+    assert_eq!(server.count(&format!("{task_id}/complete")), 0);
+
+    // While the native call is still running, no new claim for "scan".
+    let polls_at_release = server.count("/workers/tasks/poll");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        server.count("/workers/tasks/poll"),
+        polls_at_release,
+        "a handler with a running timed-out invocation must not claim new work"
+    );
+
+    // Once it returns, polling resumes; its late result is never reported.
+    wait_for(|| server.count("/workers/tasks/poll") > polls_at_release).await;
+    h.worker.stop();
+    assert_eq!(server.count(&format!("{task_id}/complete")), 0);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert_eq!(h.worker.stats().released, 1);
 }

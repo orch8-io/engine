@@ -22,6 +22,7 @@ mod notifier;
 mod privacy;
 mod runtime;
 mod storage;
+mod stragglers;
 mod sync;
 mod sync_reporter;
 mod telemetry;
@@ -236,6 +237,9 @@ pub struct MobileEngine {
     node_pool: sqlx::SqlitePool,
     node: StdMutex<Option<NodeSlot>>,
     worker: StdMutex<Option<Arc<worker::Worker>>>,
+    /// Handler calls still running after a device-side timeout; the worker
+    /// claims nothing new for their handler until they return.
+    stragglers: Arc<stragglers::Stragglers>,
 }
 
 /// A registered runtime node and its re-advertisement task.
@@ -459,6 +463,7 @@ impl MobileEngine {
             node_pool,
             node: StdMutex::new(None),
             worker: StdMutex::new(None),
+            stragglers: Arc::new(stragglers::Stragglers::default()),
         });
         engine.release_orphaned_claims_in_background();
         Ok(engine)
@@ -1269,6 +1274,7 @@ impl MobileEngine {
                     foreground: Arc::clone(&self.foreground),
                     power_state: self.tick_controller.power_state_handle(),
                 },
+                stragglers: Arc::clone(&self.stragglers),
             },
             options,
         )?;
@@ -1342,7 +1348,13 @@ impl MobileEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
         {
-            handlers::register_foreign_handler(&mut registry, name, Arc::clone(handler), timeout);
+            handlers::register_foreign_handler(
+                &mut registry,
+                name,
+                Arc::clone(handler),
+                timeout,
+                Arc::clone(&self.stragglers),
+            );
         }
         *guard = Arc::new(registry);
         Ok(())

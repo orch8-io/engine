@@ -817,6 +817,28 @@ reported. On the next launch (engine construction when `syncApiKey` is set,
 
 Servers without `/release` (404/405) get a retryable `fail` instead.
 
+**Device-side timeouts.** A remote task's `timeout_ms` (and the engine's
+`handlerTimeoutMs`) is enforced on the device too, but a timeout cannot stop
+an app-native handler: the native `execute` call keeps running on its thread
+and may still perform its side effect. Under the engine's ambiguous-effect
+policy that outcome is **unknown**, not failed, so the worker answers
+`release {started: true}` rather than `fail`:
+
+- the server marks the step's effect receipt `unknown` and applies the step's
+  retry policy — a retry is a new attempt with a **new** `effect_id`, the
+  exact treatment of a lease that expired after the step started (a
+  pre-contract server without `/release` gets a retryable `fail`, which the
+  server resolves the same way);
+- until the timed-out call actually returns, the worker **claims no new task
+  for that handler**, so a retry never runs on the same device concurrently
+  with the attempt it replaces. The quarantine ends when the call returns, or
+  after 15 minutes for a call that never does (logged);
+- the late result of the timed-out call is discarded; it is never reported.
+
+Handlers that can take longer than the step timeout should either raise the
+step's `timeout` or pass `__orch8.effect_id` downstream as an idempotency key,
+so a retry that reaches the same backend is deduplicated there.
+
 ## Capability-routed distributed work
 
 External steps may reserve the `$runtime` param for durable placement
@@ -978,6 +1000,10 @@ openssl pkey -in private.pem -pubout -outform DER | base64
 
 ### "handler timed out"
 The default handler timeout is 30 seconds. For handlers that need user interaction, the step transitions to `Waiting` state. Use `completeStep()` when the user responds.
+For remote (server-placed) tasks a device-side timeout releases the task as
+started instead of failing it, and the handler is not offered new work until
+the timed-out native call returns — see
+[device-side timeouts](#the-phone-as-a-runtime-node).
 
 ### "max concurrent instances reached"
 Reduce active instances by calling `cancelInstance()` on stale ones, or increase `maxConcurrentInstances`.
