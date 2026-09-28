@@ -385,7 +385,16 @@ engine.setListener(listener: MyListener())
 | `flushTelemetry(endpointUrl)` | Flush buffered telemetry events |
 | `setDeviceContext(ctx)` | Set device info for telemetry |
 | `reportPowerState(state)` | Report device power state to throttle background work |
-| `onPushReceived()` | Trigger an immediate tick after a push notification |
+| `onPushReceived()` | Trigger an immediate sync and worker poll after a push notification |
+| `onPushWake(envelopeJson)` | Handle an id-only wake envelope (`{task_id?, runtime_id?, reason?}`); ignored when addressed to another runtime |
+| `enableBuiltin(name)` | Enable an opt-in builtin handler (`http_request`); see [Built-in handlers](#built-in-handlers) |
+| `nodeRuntimeId()` | Stable runtime UUID of this installation (lease `worker_id`) |
+| `registerNode(capabilities)` | Join the runtime mesh (device + capability registration, auto re-advertise) |
+| `updateNodeStatus(connectivity, batteryPercent)` | Push fresh liveness facts |
+| `unregisterNode()` | Stop the worker, advertise `draining`, stop re-advertising |
+| `startWorker(options)` / `stopWorker()` | Run / stop the remote worker loop |
+| `runWorkerWindow(timeBudgetMs)` | Claim and run remote tasks inside a bounded background window |
+| `workerStats()` | Worker counters (claimed, completed, failed, released, lost, in flight) |
 | `shutdown()` | Shut down the engine |
 
 ### MobileEngineConfig
@@ -590,6 +599,100 @@ credential for the transport headers and HTTPS outside loopback development.
 This feature promises durable recovery from interruption, not unrestricted
 background execution. iOS still decides when the process may run.
 
+## Built-in handlers
+
+The embedded engine registers a safe subset of the server's builtins so
+server-authored sequences can use them without host code:
+
+| Set | Handlers | How |
+|-----|----------|-----|
+| Default | `noop`, `log`, `sleep`, `fail`, `transform`, `assert`, `set_state`, `get_state`, `delete_state`, `merge_state` | Always registered (pure data / control flow + instance-local state) |
+| Opt-in | `http_request` | `engine.enableBuiltin(name: "http_request")` before `resume()`; keeps the SSRF guard |
+| Server-only | `email`, `llm_call`, `tool_call`, `mcp_call`, `agent`, `embed`, `memory_*`, `human_review`, `self_modify`, `emit_event`, `send_signal`, `query_instance`, `blob_*`, `wait_for_event`, `jev`, `notify` | Not available on-device; place those steps on a server runtime |
+
+A handler registered with `registerHandler` under a builtin's name replaces
+the builtin. Only app-native handlers are advertised to the control plane by
+default; list a builtin in `NodeCapabilities.handlers` to serve it remotely.
+
+## The phone as a runtime node
+
+A device can join the distributed-execution mesh as a runtime of kind
+`mobile` and execute server-placed steps with its app-native handlers
+(camera, NFC, Secure Enclave signing, on-device models, …). The worker loop
+runs in Rust, so Swift, Kotlin, React Native and Expo all get the same
+behaviour.
+
+```swift
+try engine.registerHandler(name: "scan_document", handler: ScanHandler())
+let node = Orch8RuntimeNode(engine: engine)          // packages/swift
+try await node.join(capabilities: NodeCapabilities(
+    hardware: ["camera"], pushToken: apnsToken))
+try node.startWorker()
+```
+
+```kotlin
+engine.registerHandler("scan_document", ScanHandler())
+engine.registerNode(NodeCapabilities(hardware = listOf("camera"), pushToken = fcmToken))
+engine.startWorker(WorkerOptions())
+```
+
+**Registration.** `registerNode` uses `deviceId`, `syncApiKey` and the API base
+derived from `syncUrl` (`…/api/v1/mobile/sync` → `…/api/v1`; override with
+`NodeCapabilities.apiBaseUrl`). It calls `POST /mobile/devices/register` and
+`POST /mobile/devices/{deviceId}/runtime`, then re-advertises every ~4 minutes
+(capability TTL is 5 minutes) — that refresh is the node's liveness signal.
+The runtime id is a UUID persisted in the engine database; it is the lease
+`worker_id` and the target of `$runtime.runtime_id` placement (the per-device
+mailbox). `handlers` defaults to every handler registered with
+`registerHandler`.
+
+**Worker loop.** `startWorker` polls `POST /workers/tasks/poll` as kind
+`mobile` (one poll per advertised handler, round-robin), runs each claimed task
+through the handler registry, heartbeats every `lease_secs / 3` (per-task lease
+when the server sends one, default 120 s for mobile), and settles with
+`complete`, `fail` (`retryable` from `HandlerError`), or `release`. A lost lease
+(404/409 on heartbeat) abandons the task without reporting.
+
+**Handler input.** App-native handlers receive the task params plus a reserved
+`__orch8` member (only when params is a JSON object):
+
+```json
+{ "document": "passport", "__orch8": {
+    "effect_id": "…", "task_id": "…", "instance_id": "…", "block_id": "…",
+    "attempt": 1, "runtime_id": "…", "continuity_epoch": 3, "resume_checkpoint": null } }
+```
+
+`effect_id` is the server's deterministic idempotency key for the step's
+effect; send it to downstream APIs (for example as `Idempotency-Key`) so a
+retry after a crash cannot duplicate the side effect. It is `null` against
+servers that predate the distributed-execution contract.
+
+**App lifecycle and power.** `pause()` stops claiming; a task claimed but not
+yet started is released (`started: false`), tasks already executing finish
+while the process lives. `resume()` claims again. `reportPowerState` scales the
+idle poll interval (2× low battery, 4× critical) and `CriticalBattery` stops
+claiming entirely. For BGTask / WorkManager / push-wake handlers call
+`runWorkerWindow(timeBudgetMs:)`: it claims even while paused and returns when
+idle or out of budget.
+
+**Push.** Wake pushes are id-only hints (`{task_id?, runtime_id?, reason?}`)
+and never carry params. Forward them with `onPushWake(envelopeJson:)` (Swift:
+`node.handlePush(userInfo:)`); the worker polls immediately and the task
+arrives through a leased claim.
+
+**Crash safety.** Every claim is journaled in the engine database before the
+handler runs, marked `started`, then updated with the outcome before it is
+reported. On the next launch (engine construction when `syncApiKey` is set,
+`registerNode`, and `startWorker`) the journal is drained:
+
+| Journaled state | Action |
+|-----------------|--------|
+| claimed, not started | `release {started: false}` — back to pending |
+| started, no outcome | `release {started: true}` — server marks the effect unknown |
+| outcome recorded | re-deliver `complete` / `fail` |
+
+Servers without `/release` (404/405) get a retryable `fail` instead.
+
 ## Capability-routed distributed work
 
 External steps may reserve the `$runtime` param for durable placement
@@ -614,8 +717,11 @@ atomically compatible worker can claim the task:
 }
 ```
 
-`DistributedWorkerClient` publishes a short-lived capability advertisement on
-every poll. Keep its runtime UUID stable for the installation, but refresh the
+`DistributedWorkerClient` (Swift) is the low-level HTTP client for the same
+lease protocol — `poll`, `heartbeat`, `upload`, `complete`, `fail`, `release`.
+Prefer the Rust worker loop above; use this client when a task needs an
+artifact upload or custom settlement. It publishes a short-lived capability
+advertisement on every poll. Keep its runtime UUID stable for the installation, but refresh the
 observation and expiry before polling. Advertisements live for at most five
 minutes; draining and expired runtimes receive no new work.
 
@@ -772,7 +878,17 @@ construction — per-version schema deltas are applied based on the database's r
 schema version. No action needed.
 
 ### Crash recovery
-The engine sets a `dirty` flag when `pause()` times out. On the next `resume()`, it automatically recovers stale instances that were mid-execution when the app was killed.
+When iOS/Android kills the app mid-step, the next `MobileEngine` construction on
+that database reschedules every instance left `Running` (no `pause()` needed;
+the `dirty` flag from a timed-out `pause()` still triggers recovery on
+`resume()`). Replay-safe steps (builtins such as `sleep`, `transform`, `log`)
+simply run again and the instance completes once. App-native handlers are
+treated as side-effecting: the engine's at-most-once effect guard does **not**
+re-run an effect whose outcome is unknown — the instance fails and
+`onInstanceFailed` fires once, so the app can reconcile. Remote tasks held by
+the killed process are released as described in
+[crash safety](#the-phone-as-a-runtime-node). This relies on one engine per
+database file.
 
 ### SQLite errors
 The SDK uses WAL mode for concurrent reads. Ensure only one `MobileEngine` instance exists per database file.
@@ -797,3 +913,13 @@ export ANDROID_NDK_HOME=/path/to/ndk
 ```
 
 Output: `packages/android/orch8-mobile/build/outputs/aar/orch8-mobile-release.aar`
+
+### What the mobile library links
+
+`orch8-mobile` builds `orch8-engine`, `orch8-storage` and `orch8-push` with
+`default-features = false`, so the device library contains only the SQLite
+backend: no Postgres driver (`orch8-storage/postgres`), no object-store
+artifact backend (`orch8-storage/artifacts`), no SMTP/`email` builtin
+(`orch8-engine/email`), no APNs/FCM senders (`orch8-push/providers`), and only
+the Tokio features it uses. Server crates enable these features explicitly, so
+their builds are unchanged.

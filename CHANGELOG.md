@@ -29,6 +29,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mobile runtime node** (`orch8-mobile`): `MobileEngine.registerNode`
+  registers the device and its runtime capabilities
+  (`/mobile/devices/register` + `/mobile/devices/{id}/runtime`) with a
+  persistent runtime UUID and re-advertises before the 5-minute capability
+  TTL. `startWorker` / `stopWorker` / `runWorkerWindow` run a Rust worker loop
+  (so Swift, Kotlin, RN and Expo share it) that polls as kind `mobile`, runs
+  app-native `StepHandler`s, heartbeats per `lease_secs`, and completes / fails
+  / releases tasks. Handlers receive `__orch8.effect_id` (plus task/instance
+  ids and `continuity_epoch`) for downstream idempotency. Claims are journaled
+  locally; after an OS kill the next launch releases unstarted/started tasks
+  (`started` flag) or re-delivers recorded outcomes, falling back to a
+  retryable `fail` on servers without `/release`. `pause()` stops claiming and
+  releases unstarted claims; critical battery stops claiming; `onPushWake`
+  handles id-only wake envelopes. New contract fields (`effect_id`,
+  `continuity_epoch`, `lease_secs`) are optional, so the SDK works against
+  older servers.
+- **Mobile builtins**: the embedded engine registers `noop`, `log`, `sleep`,
+  `fail`, `transform`, `assert`, `set_state`, `get_state`, `delete_state`,
+  `merge_state` by default; `http_request` is opt-in via `enableBuiltin`.
+  Host handlers with the same name take precedence.
+- **Swift**: `Orch8RuntimeNode` wraps the Rust node/worker API;
+  `DistributedWorkerClient` gains `heartbeat`, `fail`, `release` and decodes
+  `effectId` / `continuityEpoch` / `leaseSecs`.
 - **Background jobs**: `POST/GET/DELETE /jobs` and keyset-paginated `GET /jobs`
   enqueue a handler without authoring a sequence (each job is an instance of a
   managed `_job.<handler>` sequence, so retries, DLQ and workers are unchanged);
@@ -114,11 +137,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Mobile crash recovery (P0)**: an app killed mid-step left its instance
+  `Running` forever unless a previous `pause()` had timed out. Engine
+  construction now reschedules every instance left `Running` by a dead
+  process; replay-safe steps finish exactly once and app-native effects stay
+  at-most-once (the effect guard fails the instance instead of replaying).
+
 - Render, the root `docker-compose.yml` and the Kubernetes manifest now set
   `ORCH8_RUN_MIGRATIONS=true`; a fresh Postgres previously never became ready.
 - Dashboard timeline and fork calls now match the engine's API.
 - Quick starts used `orch8 dev --context`, which the global fleet-context flag
   swallowed; they now use `--input`.
+
+### Changed
+
+- **Mobile binary size**: `orch8-mobile` no longer links sqlx-postgres,
+  object_store, lettre/SMTP, the APNs/FCM push senders (jsonwebtoken +
+  aws-lc JWT signing), or Tokio process/signal support. New cargo features —
+  `orch8-storage/{postgres,artifacts}`, `orch8-engine/email`,
+  `orch8-push/providers` — are on by default and enabled explicitly by the
+  server crates, whose dependency/feature sets are unchanged. The workspace
+  `tokio` and `sqlx` dependencies no longer carry `full` / `postgres`; crates
+  opt in. aarch64-apple-ios `mobile-release` static library: 266.2 MB →
+  212.8 MB from the gating alone (216.9 MB including the new worker loop);
+  the mobile dependency graph drops from 438 to 284 crates.
+- `orch8-mobile` no longer carries the unused `queue_step_delegation` outbox
+  path; remote steps run through the leased worker loop instead.
 
 ## [0.7.1] — 2026-07-30
 
