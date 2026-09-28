@@ -680,3 +680,69 @@ async fn worker_completion_is_fenced_on_continuity_ownership_epoch() {
         "stale result never landed"
     );
 }
+
+#[tokio::test]
+async fn browser_claimant_receives_filtered_context_and_per_task_lease() {
+    let server = spawn_test_server_with_artifacts().await;
+    let client = Client::new();
+    let tenant = "browser-tenant";
+    let instance = create_instance(&server, &client, tenant).await;
+    let mut task = worker_task(
+        instance,
+        "page-read",
+        CapsuleRequirements::default(),
+        None,
+        WorkerTaskState::Pending,
+        None,
+        0,
+    );
+    task.context = json!({
+        "data": {"order": {"id": 7}, "api_token": "tok", "cred": "credentials://vault"},
+        "config": {"stripe": "sk_live_x"},
+        "audit": [{"event": "created"}],
+        "runtime": {"current_step": "page-read"}
+    });
+    server.storage.create_worker_task(&task).await.unwrap();
+    let runtime_id = Uuid::now_v7();
+    let mut capabilities = runtime_capabilities(runtime_id, "device_file", "norway");
+    capabilities["kind"] = json!("browser");
+
+    let tasks = poll_tasks(
+        client
+            .post(format!("{}/workers/tasks/poll", server.v1_url()))
+            .header("X-Tenant-Id", tenant)
+            .json(&json!({
+                "handler_name": "device_file",
+                "worker_id": runtime_id,
+                "capabilities": capabilities
+            }))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(tasks.len(), 1);
+    let context = &tasks[0]["context"];
+    assert!(
+        context.get("config").is_none(),
+        "config never reaches a browser"
+    );
+    assert!(context.get("audit").is_none());
+    assert!(context["data"].get("cred").is_none());
+    assert_eq!(context["data"]["order"]["id"], 7);
+    assert_ne!(
+        context["data"]["api_token"], "tok",
+        "secret-shaped keys redacted"
+    );
+    assert_eq!(tasks[0]["lease_secs"], 30, "browser lease");
+    assert_eq!(tasks[0]["claimed_runtime_kind"], "browser");
+
+    // The stored row keeps the full context for any later non-browser claim.
+    let stored = server
+        .storage
+        .get_worker_task(task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.context["config"]["stripe"], "sk_live_x");
+}

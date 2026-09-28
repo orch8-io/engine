@@ -31,7 +31,27 @@ pub(crate) struct PollTasksResponse {
     poll_after_ms: u64,
 }
 
+/// Shape claimed tasks for the wire: every task reports its effective lease,
+/// and a browser claimant never receives secrets — its context is filtered
+/// (`config`/audit dropped, credential-bearing entries removed, redaction
+/// policy applied). The stored row keeps the full context for other kinds.
+fn prepare_claimed_tasks(
+    state: &AppState,
+    mut tasks: Vec<orch8_types::worker::WorkerTask>,
+) -> Vec<orch8_types::worker::WorkerTask> {
+    for task in &mut tasks {
+        if task.lease_secs.is_none() {
+            task.lease_secs = Some(u32::try_from(state.worker_lease_secs).unwrap_or(u32::MAX));
+        }
+        if task.claimed_runtime_kind == Some(orch8_types::continuity::RuntimeKind::Browser) {
+            task.context = orch8_types::worker::browser_safe_context(&task.context);
+        }
+    }
+    tasks
+}
+
 fn poll_response(state: &AppState, tasks: Vec<orch8_types::worker::WorkerTask>) -> Response {
+    let tasks = prepare_claimed_tasks(state, tasks);
     let poll_after_ms = if tasks.is_empty() { 1_000 } else { 0 };
     let mut response = Json(PollTasksResponse {
         tasks,

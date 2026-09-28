@@ -211,6 +211,15 @@ pub(crate) async fn enqueue_worker_task(
             Ok(split) => split,
             Err(message) => return Ok(Err(RemoteDispatchRejected(message))),
         };
+    // A browser never receives secrets. A step placed only on browser
+    // runtimes (or targeted at a registered browser runtime) that references
+    // credentials can never run safely: fail it permanently now instead of
+    // leaving a task no eligible node may claim.
+    if carries_credentials && placed_on_browser(storage, instance, &requirements).await? {
+        return Ok(Err(RemoteDispatchRejected(
+            BROWSER_CREDENTIALS_REJECTION.to_owned(),
+        )));
+    }
     let attempt_u16 = u16::try_from(attempt).map_err(|_| {
         tracing::warn!(
             instance_id = %instance.id,
@@ -304,6 +313,35 @@ pub(crate) async fn enqueue_worker_task(
     .await;
 
     Ok(Ok(task))
+}
+
+/// Permanent failure for a credential-bearing step placed on browsers.
+pub(crate) const BROWSER_CREDENTIALS_REJECTION: &str =
+    "steps placed on browser runtimes cannot receive credentials";
+
+/// Whether only browser runtimes can execute a step with these requirements:
+/// its kinds are browser-only, or it targets a runtime registered as a
+/// browser. (Unregistered targets are still protected at claim time: a
+/// browser claimant never receives a credential-bearing task.)
+async fn placed_on_browser(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    requirements: &orch8_types::continuity::CapsuleRequirements,
+) -> Result<bool, EngineError> {
+    if requirements.is_browser_only() {
+        return Ok(true);
+    }
+    let Some(target) = requirements.runtime_id else {
+        return Ok(false);
+    };
+    Ok(storage
+        .list_runtime_capabilities(&instance.tenant_id, chrono::Utc::now(), 1_000)
+        .await?
+        .iter()
+        .any(|runtime| {
+            runtime.runtime_id == target
+                && runtime.kind == orch8_types::continuity::RuntimeKind::Browser
+        }))
 }
 
 /// Dispatch a step within the execution tree to the external worker queue.

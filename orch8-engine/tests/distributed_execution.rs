@@ -547,3 +547,118 @@ async fn export_is_refused_while_a_worker_task_is_in_flight() {
         );
     }
 }
+
+async fn seed_credential(storage: &Arc<dyn StorageBackend>, id: &str) {
+    let now = Utc::now();
+    storage
+        .create_credential(&orch8_types::credential::CredentialDef {
+            id: id.into(),
+            tenant_id: "t".into(),
+            name: id.into(),
+            kind: orch8_types::credential::CredentialKind::default(),
+            value: orch8_types::config::SecretString::from("\"sk_live_secret\"".to_owned()),
+            expires_at: None,
+            refresh_url: None,
+            refresh_token: None,
+            enabled: true,
+            description: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn browser_placed_step_with_credentials_fails_permanently_at_dispatch() {
+    for (backend, storage) in backends().await {
+        let credential = format!("cred-{}", uuid::Uuid::now_v7().simple());
+        seed_credential(&storage, &credential).await;
+        let handler = unique_handler("ext.form");
+        let (_, inst) = start(
+            &storage,
+            vec![common::mk_step_with_params(
+                "form",
+                &handler,
+                json!({
+                    "$runtime": {"runtime_kinds": ["browser"]},
+                    "api_key": format!("credentials://{credential}")
+                }),
+            )],
+        )
+        .await;
+        assert!(
+            tasks_of(&storage, inst.id).await.is_empty(),
+            "{backend}: nothing was enqueued"
+        );
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        assert_eq!(
+            common::node_state(&tree, "form"),
+            NodeState::Failed,
+            "{backend}"
+        );
+        let output = storage
+            .get_block_output(inst.id, &orch8_types::ids::BlockId::new("form"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            output.output["message"], "steps placed on browser runtimes cannot receive credentials",
+            "{backend}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn browser_claimants_never_receive_credential_bearing_tasks() {
+    for (backend, storage) in backends().await {
+        let credential = format!("cred-{}", uuid::Uuid::now_v7().simple());
+        seed_credential(&storage, &credential).await;
+        let handler = unique_handler("ext.sync");
+        let (_, inst) = start(
+            &storage,
+            vec![common::mk_step_with_params(
+                "sync",
+                &handler,
+                json!({"api_key": format!("credentials://{credential}")}),
+            )],
+        )
+        .await;
+        let task = only_task(&storage, inst.id).await;
+        assert!(task.carries_credentials, "{backend}");
+
+        let browser = RuntimeId::new();
+        let claimed = storage
+            .claim_worker_tasks_matching(
+                &handler,
+                &browser.to_string(),
+                None,
+                None,
+                &browser_caps(browser, &handler),
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(claimed.is_empty(), "{backend}: browser must not claim it");
+
+        let mut mobile = browser_caps(RuntimeId::new(), &handler);
+        mobile.kind = RuntimeKind::Mobile;
+        let claimed = storage
+            .claim_worker_tasks_matching(
+                &handler,
+                &mobile.runtime_id.to_string(),
+                None,
+                None,
+                &mobile,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            claimed.len(),
+            1,
+            "{backend}: other kinds still receive credentials"
+        );
+        assert_eq!(claimed[0].lease_secs, Some(120), "{backend}: mobile lease");
+    }
+}
