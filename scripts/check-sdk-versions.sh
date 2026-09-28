@@ -17,6 +17,7 @@ fi
 
 version_checks=(
   "packages/android/gradle.properties|VERSION_NAME=$sdk_version"
+  "packages/kmp/gradle.properties|VERSION_NAME=$sdk_version"
   "packages/flutter/android/src/main/kotlin/io/orch8/flutter/Orch8FlutterPlugin.kt|?: \"$sdk_version\""
   "$flutter_swift_path|?? \"$sdk_version\""
   "packages/flutter/ios/orch8_flutter.podspec|s.version          = '$sdk_version'"

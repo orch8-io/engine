@@ -55,9 +55,17 @@ kotlin {
 }
 ```
 
-> The `orch8-kmp` artifact is not published yet. Until it is, build it locally
-> with `gradle publishToMavenLocal` from this directory and add `mavenLocal()`,
-> or use `includeBuild("path/to/engine/packages/kmp")`.
+> `io.orch8:orch8-kmp` is published to Orch8's Maven repository by the engine
+> release workflow (`.github/workflows/mobile-distribution.yml`), starting
+> with the first release after `0.7.1`. For `0.7.1` itself, build it locally
+> with `gradle publishToMavenLocal -Porch8.kmp.targets=android,ios` from this
+> directory and add `mavenLocal()`, or use
+> `includeBuild("path/to/engine/packages/kmp")`.
+>
+> The published artifacts are `orch8-kmp` (root, Gradle module metadata),
+> `orch8-kmp-android`, `orch8-kmp-iosarm64`, `orch8-kmp-iossimulatorarm64` and
+> `orch8-kmp-iosx64`. The JVM target is only for this repository's tests and
+> is not published.
 
 The Android variant pulls in `io.orch8:orch8-mobile` (the AAR with
 `liborch8_mobile.so` for all ABIs), so Android needs no extra setup.
@@ -74,9 +82,23 @@ code and could drift from it. The bridge works like this instead:
    exact `0.7.1`) to the iOS app.
 2. Link the `Orch8Kmp` framework (or your shared framework that depends on
    this library). The framework is static, and its base name is `Orch8Kmp`.
-3. Copy [`ios-bridge/Orch8KmpBridge.swift`](ios-bridge/Orch8KmpBridge.swift)
-   into the app target. If your shared module re-exports this library under
-   another framework name, change `import Orch8Kmp` to match.
+3. Install [`ios-bridge/Orch8KmpBridge.swift`](ios-bridge/Orch8KmpBridge.swift)
+   into the app target with
+   [`ios-bridge/install-bridge.sh`](ios-bridge/install-bridge.sh):
+
+   ```bash
+   bash install-bridge.sh iosApp/iosApp Shared <version>
+   ```
+
+   It downloads `Orch8KmpBridge-v<version>.swift` from the engine release,
+   verifies its SHA-256 against the published `.sha256`, and rewrites
+   `import Orch8Kmp` to your shared framework's module name (`Shared` here;
+   omit it if you link `Orch8Kmp` directly). The bridge ships as a source
+   file rather than a Swift package or pod on purpose: it implements Kotlin
+   protocols (`Orch8JsonBridgeFactory`) exported by *your* framework, whose
+   module name is only known in your project. A prebuilt package would link
+   a second Kotlin/Native runtime, and its types would not be the ones your
+   shared code checks for.
 4. Install the bridge once at launch, before any Kotlin code opens the engine:
 
 ```swift

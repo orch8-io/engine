@@ -52,6 +52,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Swift**: `Orch8RuntimeNode` wraps the Rust node/worker API;
   `DistributedWorkerClient` gains `heartbeat`, `fail`, `release` and decodes
   `effectId` / `continuityEpoch` / `leaseSecs`.
+- **Automated mobile distribution**: after the GitHub release,
+  `release.yml` calls the new `mobile-distribution.yml`, which publishes the
+  release's XCFramework and AAR to every install channel: it commits, tags
+  and releases `orch8-io/orch8-mobile-swift` (Package.swift url + checksum,
+  CocoaPods source archive), runs `pod trunk push Orch8Mobile`, and adds
+  `io.orch8:orch8-mobile` (AAR + POM) and `io.orch8:orch8-kmp` to
+  `orch8-io/maven`. Each channel is gated on its own secret
+  (`ORCH8_MOBILE_SWIFT_TOKEN`, `COCOAPODS_TRUNK_TOKEN`, `ORCH8_MAVEN_TOKEN`)
+  and skips cleanly without it; every step is idempotent and never replaces a
+  published version. It can be re-run by hand with `workflow_dispatch` to
+  recover a partial release. See `docs/MOBILE_RELEASING.md`.
+- **Kotlin Multiplatform is publishable**: `packages/kmp` publishes its
+  Android and iOS variants to a file-based Maven repository
+  (`-Porch8.dist.repo=...`, task `publishAllPublicationsToOrch8DistRepository`),
+  resolves a just-published `orch8-mobile` from the same repository, and can
+  drop its test-only JVM target (`-Porch8.kmp.targets=android,ios`). Its
+  version is checked by `scripts/check-sdk-versions.sh`. The iOS bridge is
+  attached to each GitHub release as `Orch8KmpBridge-vX.Y.Z.swift` (+ `.sha256`),
+  and `packages/kmp/ios-bridge/install-bridge.sh` downloads, verifies and
+  installs it with the app's framework name.
+- **Mobile docs**: a "10-minute install" section in `docs/MOBILE_SDK.md` for
+  SwiftPM, CocoaPods, Gradle, React Native, Expo and KMP, each ending with a
+  check that the native engine resolved. It also documents that React Native
+  apps must declare Orch8's Maven repository in the app's own Gradle build.
+- `scripts/publish-maven-aar.py` (POM generated from
+  `packages/android/orch8-mobile/build.gradle.kts`; byte-identical to the
+  published `0.7.1` POM) and `scripts/sync-swift-distribution.sh`.
+
 - **Background jobs**: `POST/GET/DELETE /jobs` and keyset-paginated `GET /jobs`
   enqueue a handler without authoring a sequence (each job is an instance of a
   managed `_job.<handler>` sequence, so retries, DLQ and workers are unchanged);

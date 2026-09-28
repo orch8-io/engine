@@ -8,9 +8,9 @@ This document describes the `0.7.1` SDK family. Engine and SDK releases use
 unified versioning: Swift, Android, Flutter, and React Native packages at
 `0.7.1` embed or resolve Orch8 Engine `0.7.1`.
 
-> **Building with Expo or React Native?** Start with
-> [Expo (recommended)](#expo-recommended). `@orch8.io/expo` bundles the native
-> engine for iOS and Android, a REST client, and React hooks in one package.
+> **Building with Expo or React Native?** Start with [Expo](#expo).
+> `@orch8.io/expo` wires the native engine for iOS and Android, a REST client,
+> and React hooks into one package.
 > **Sharing workflow code across Android and iOS in Kotlin?** See
 > [Kotlin Multiplatform](#kotlin-multiplatform).
 
@@ -35,20 +35,146 @@ unified versioning: Swift, Android, Flutter, and React Native packages at
 
 The SDK embeds the full orch8 engine compiled as a native library. Sequences are synced from your server, verified with Ed25519 signatures, stored in a local SQLite database, and executed entirely on-device.
 
-## Installation
+## 10-minute install
 
-### Expo (recommended)
+Every channel resolves the same native engine, pinned to the same version
+(`0.7.1` below). Pick your platform, add one dependency, build once, and make
+the first call. Each section ends with a check that proves the native engine
+was resolved rather than left for a runtime crash.
 
-[`@orch8.io/expo`](https://github.com/orch8-io/sdk-expo) is an Expo module.
-Expo autolinking finds it through its `expo-module.config.json`, so no config
-plugin or `app.json` change is needed. It contains native code, so it runs in
-a [development build](https://docs.expo.dev/develop/development-builds/introduction/)
+| Platform | Package | Registry |
+|---|---|---|
+| iOS, Swift Package Manager | `Orch8Mobile` | [`orch8-io/orch8-mobile-swift`](https://github.com/orch8-io/orch8-mobile-swift) |
+| iOS, CocoaPods | `Orch8Mobile` | CocoaPods trunk |
+| Android, Gradle | `io.orch8:orch8-mobile` | `https://raw.githubusercontent.com/orch8-io/maven/main` |
+| React Native | `@orch8.io/react-native-orch8` | npm (+ the two native registries above) |
+| Expo | `@orch8.io/expo` | npm (+ the two native registries above) |
+| Kotlin Multiplatform | `io.orch8:orch8-kmp` | `https://raw.githubusercontent.com/orch8-io/maven/main` |
+
+Requirements everywhere: iOS 16.0+ with Xcode 16+, Android API 24+ with JDK 17.
+
+### iOS: Swift Package Manager
+
+1. Xcode → **File → Add Package Dependencies…** →
+   `https://github.com/orch8-io/orch8-mobile-swift`, rule **Exact Version**
+   `0.7.1`. Or in `Package.swift`:
+
+   ```swift
+   dependencies: [
+       .package(url: "https://github.com/orch8-io/orch8-mobile-swift", exact: "0.7.1"),
+   ],
+   targets: [
+       .target(name: "App", dependencies: [.product(name: "Orch8Mobile", package: "orch8-mobile-swift")]),
+   ]
+   ```
+
+2. Set the app's deployment target to iOS 16.0 or later.
+3. Check: `import Orch8Mobile` compiles and `print(orch8MobileVersion)` prints
+   `0.7.1`. SwiftPM verifies the XCFramework checksum pinned in
+   `Package.swift`, so a tampered or mismatched binary fails to resolve.
+
+During engine development you can point at the checkout instead:
+`.package(path: "../packages/swift")` (requires a locally built
+XCFramework, see `scripts/build-xcframework.sh`).
+
+### iOS: CocoaPods
+
+```ruby
+# Podfile
+platform :ios, '16.0'
+
+target 'App' do
+  pod 'Orch8Mobile', '0.7.1'
+end
+```
+
+Run `pod install`, then open the `.xcworkspace`. Check: `Podfile.lock`
+contains `Orch8Mobile (0.7.1)` and `import Orch8Mobile` compiles.
+
+### Android: Gradle
+
+Add Orch8's Maven repository once, where your build declares repositories
+(usually `settings.gradle.kts`):
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven("https://raw.githubusercontent.com/orch8-io/maven/main")
+    }
+}
+```
+
+```kotlin
+// app/build.gradle.kts
+dependencies {
+    implementation("io.orch8:orch8-mobile:0.7.1")
+}
+```
+
+The AAR carries `liborch8_mobile.so` for `arm64-v8a`, `armeabi-v7a` and
+`x86_64`, and its POM brings JNA and kotlinx-coroutines. Check:
+`./gradlew :app:dependencies --configuration releaseRuntimeClasspath | grep orch8-mobile`
+shows `io.orch8:orch8-mobile:0.7.1`, and the built APK contains
+`lib/arm64-v8a/liborch8_mobile.so`.
+
+For engine development, `implementation(project(":orch8-mobile"))` against
+`packages/android` works after `scripts/build-android-aar.sh`.
+
+### React Native
+
+```bash
+npm install @orch8.io/react-native-orch8@0.7.1
+cd ios && pod install     # resolves the Orch8Mobile pod (iOS 16.0+)
+```
+
+On Android, add Orch8's Maven repository to the **app's** root
+`android/build.gradle`. Gradle resolves a library's transitive dependencies
+with the consuming app's repositories, so the one declared inside the
+library is not enough:
+
+```groovy
+allprojects {
+    repositories {
+        maven { url "https://raw.githubusercontent.com/orch8-io/maven/main" }
+    }
+}
+```
+
+Check: `Podfile.lock` contains `Orch8Mobile (0.7.1)`, and
+`./gradlew :app:assembleDebug` succeeds.
+
+### Expo
+
+[`@orch8.io/expo`](https://github.com/orch8-io/sdk-expo) is an Expo module
+with a config plugin. It contains native code, so it runs in a
+[development build](https://docs.expo.dev/develop/development-builds/introduction/)
 or a prebuilt app, not in Expo Go.
 
 ```bash
 npx expo install @orch8.io/expo
+```
+
+```jsonc
+// app.json
+{ "expo": { "plugins": ["@orch8.io/expo"] } }
+```
+
+```bash
 npx expo prebuild        # or: eas build --profile development
 ```
+
+The package does not vendor the engine. Its podspec depends on the
+`Orch8Mobile` pod and its Gradle build on `io.orch8:orch8-mobile`, both
+pinned to `orch8NativeVersion` in its `package.json`. On prebuild the config
+plugin adds Orch8's Maven repository to `android.extraMavenRepos` in
+`android/gradle.properties` and raises the iOS deployment target to 16.0 when
+it is lower. Check: `ios/Podfile.lock` contains `Orch8Mobile (0.7.1)` and
+`Orch8Expo`, and `android/gradle.properties` contains the Maven URL.
+
+> `@orch8.io/expo` 0.7.0 shipped without its podspec and with an unresolvable
+> Android dependency. Use 0.7.1 or later.
 
 Quick start: load a sequence, start it offline, and answer its
 `wait_for_input` step from React:
@@ -87,9 +213,10 @@ rejected, and the step stays waiting.
 Expo-specific behavior (as of `@orch8.io/expo` 0.7):
 
 - `engine.registerHandler(name)` registers a **fire-and-forget** handler. The
-  native side emits a `handlerInvoked` event and returns `{}` right away. For
-  anything that needs user input or async JS work, give the step a
-  `wait_for_input` gate and resume it with `completeStep()`.
+  native side emits a `handlerInvoked` event (`stepName`, `handlerName`,
+  `params`) and returns `{}` right away. For anything that needs user input
+  or async JS work, give the step a `wait_for_input` gate and resume it with
+  `completeStep()`.
 - Set `syncUrl`, `deviceId`, and `syncApiKey` in `nativeConfig` to report
   status and approval requests to your server. For OS background windows,
   call `engine.runUntilIdle(maxTicks, timeBudgetMs)` from an Expo
@@ -99,49 +226,6 @@ Expo-specific behavior (as of `@orch8.io/expo` 0.7):
   [`field-inspection`](https://github.com/orch8-io/mobile-examples/tree/main/field-inspection)
   reference app in `mobile-examples`.
 
-### iOS (Swift Package Manager)
-
-Add the package dependency in Xcode or `Package.swift`:
-
-```swift
-dependencies: [
-    .package(
-        url: "https://github.com/orch8-io/orch8-mobile-swift",
-        exact: "0.7.1"
-    ),
-]
-```
-
-Or use the local path during development:
-
-```swift
-.package(path: "../packages/swift")
-```
-
-**Requirements:** iOS 16+, Xcode 16+.
-
-### Android (Gradle)
-
-Add Orch8's public Maven repository and the AAR dependency:
-
-```kotlin
-repositories {
-    maven("https://raw.githubusercontent.com/orch8-io/maven/main")
-}
-
-dependencies {
-    implementation("io.orch8:orch8-mobile:0.7.1")
-}
-```
-
-Or use a local project reference during development:
-
-```kotlin
-implementation(project(":orch8-mobile"))
-```
-
-**Requirements:** Android API 24+ (Android 7.0), JDK 17.
-
 ### Flutter
 
 ```yaml
@@ -149,36 +233,58 @@ dependencies:
   orch8_flutter: ^0.7.1
 ```
 
-### React Native
-
-```bash
-npm install react-native-orch8@0.7.1
-```
-
-Run `pod install` after installation on iOS. Both wrappers resolve the native
-SDK at exactly `0.7.1`.
-
 ### Kotlin Multiplatform
 
-[`packages/kmp`](../packages/kmp) (`io.orch8:orch8-kmp`, preview, not
-published yet) gives shared KMP code one coroutine/Flow API over the same
-native runtime:
+[`packages/kmp`](../packages/kmp) (`io.orch8:orch8-kmp`, preview) gives
+shared KMP code one coroutine/Flow API over the same native runtime. It is
+published to Orch8's Maven repository by the release workflow starting with
+the first engine release after `0.7.1`; for `0.7.1` itself use
+`includeBuild("path/to/engine/packages/kmp")`.
 
-- **Android:** `androidMain` calls the UniFFI Kotlin bindings from the
-  `io.orch8:orch8-mobile` AAR above.
-- **iOS:** `iosMain` reaches the `Orch8Mobile` Swift package through a small
-  Swift adapter that you compile into the app
-  (`packages/kmp/ios-bridge/Orch8KmpBridge.swift`).
+1. Gradle (shared module):
 
-```kotlin
-commonMain.dependencies { implementation("io.orch8:orch8-kmp:0.7.1") }
-```
+   ```kotlin
+   // settings.gradle.kts
+   dependencyResolutionManagement {
+       repositories {
+           google()
+           mavenCentral()
+           maven("https://raw.githubusercontent.com/orch8-io/maven/main")
+       }
+   }
 
-```swift
-// iOS app launch, before shared code opens the engine
-import Orch8Kmp
-Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
-```
+   // shared/build.gradle.kts
+   kotlin {
+       sourceSets {
+           commonMain.dependencies { implementation("io.orch8:orch8-kmp:<version>") }
+       }
+   }
+   ```
+
+   Android needs nothing else: `androidMain` depends on
+   `io.orch8:orch8-mobile` at the same version.
+
+2. iOS: add the `Orch8Mobile` Swift package or pod (same version, see above),
+   then install the Swift bridge into the app target:
+
+   ```bash
+   curl -fsSLO https://raw.githubusercontent.com/orch8-io/engine/v<version>/packages/kmp/ios-bridge/install-bridge.sh
+   bash install-bridge.sh iosApp/iosApp Shared <version>   # Shared = your shared framework's baseName
+   ```
+
+   The script downloads `Orch8KmpBridge-v<version>.swift` from the engine
+   release, verifies its SHA-256, and rewrites `import Orch8Kmp` to your
+   framework's module name. The bridge is a source file, not a package,
+   because it implements Kotlin protocols exported by *your* shared
+   framework; a prebuilt package would carry a second Kotlin runtime whose
+   types your shared code would not recognise.
+
+3. Install the bridge once at launch, before shared code opens the engine:
+
+   ```swift
+   import Shared   // or Orch8Kmp
+   Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
+   ```
 
 ```kotlin
 // shared code
@@ -199,6 +305,9 @@ arrive as one `Orch8Exception(kind)`. `exportContinuityCapsule`
 trusted-handoff helpers are not wrapped. Call them through the platform SDKs.
 See [`packages/kmp/README.md`](../packages/kmp/README.md) for setup, the
 iOS bridge design, and the full API map.
+
+Maintainers: how each channel is published is described in
+[Mobile releasing](MOBILE_RELEASING.md).
 
 ## Quick Start
 
