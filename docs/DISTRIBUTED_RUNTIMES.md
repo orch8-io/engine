@@ -57,6 +57,7 @@ should pass it downstream as an idempotency key.
 | Event | Pure task | Side-effecting task |
 |-------|-----------|---------------------|
 | Lease expired (no heartbeat within `lease_secs`) | back to `pending` | receipt → `unknown`; retryable failure (retry policy: new attempt + new `effect_id`, else fail node/instance) |
+| Lease expired after the activity checkpointed (`checkpoint_seq > 0`) | back to `pending` | receipt → `unknown`; requeued so the next claimant resumes from `resume_checkpoint` (completion commits the receipt) |
 | `release` with `started: false` | back to `pending` | back to `pending`, receipt untouched |
 | `release` with `started: true` | back to `pending` | same as lease expiry |
 | `timeout_ms` elapsed | instance advances (retry/fail) | receipt → `unknown` (claimed) or `abandoned` (never claimed); instance advances |
