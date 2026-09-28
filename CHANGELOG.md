@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handles id-only wake envelopes. New contract fields (`effect_id`,
   `continuity_epoch`, `lease_secs`) are optional, so the SDK works against
   older servers.
+- **Android AAR consumable from Kotlin 1.9**: `io.orch8:orch8-mobile` is now
+  compiled at Kotlin language/API level 1.9 (class metadata 1.9.0) and depends
+  on kotlinx-coroutines 1.8.1, so Expo SDK 52 and React Native 0.76 apps no
+  longer need `-Xskip-metadata-version-check` to call it. Verified by compiling
+  a consumer against the AAR's classes with `kotlinc` 1.9.24.
 - **Mobile builtins**: the embedded engine registers `noop`, `log`, `sleep`,
   `fail`, `transform`, `assert`, `set_state`, `get_state`, `delete_state`,
   `merge_state` by default; `http_request` is opt-in via `enableBuiltin`.

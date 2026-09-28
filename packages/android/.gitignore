@@ -1,0 +1,7 @@
+build/
+.gradle/
+.kotlin/
+local.properties
+# Produced by scripts/build-android-aar.sh and the release workflow.
+orch8-mobile/src/main/jniLibs/
+orch8-mobile/src/main/java/io/orch8/mobile/orch8_mobile.kt

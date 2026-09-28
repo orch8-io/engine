@@ -119,10 +119,14 @@ The AAR carries `liborch8_mobile.so` for `arm64-v8a`, `armeabi-v7a` and
 shows `io.orch8:orch8-mobile:0.7.1`, and the built APK contains
 `lib/arm64-v8a/liborch8_mobile.so`.
 
-Kotlin: the AAR's classes are compiled with Kotlin 2.1. A module that calls
-them must build with Kotlin 2.0 or later, or add
-`freeCompilerArgs += "-Xskip-metadata-version-check"` to that module's Kotlin
-options (what `@orch8.io/expo` does for Expo SDK 52 apps on Kotlin 1.9).
+Kotlin: starting with the first engine release after `0.7.1`, the AAR is
+compiled at Kotlin language/API level 1.9 (class metadata 1.9.0) and its POM
+pins `kotlin-stdlib` 1.9.24 and `kotlinx-coroutines` 1.8.1, so apps on Kotlin
+1.9 (Expo SDK 52, React Native 0.76) and on Kotlin 2.x both consume it
+unchanged. The `0.7.1` AAR itself was compiled with Kotlin 2.1: a Kotlin 1.9
+module that calls it must add
+`freeCompilerArgs += "-Xskip-metadata-version-check"` to its Kotlin options
+(what `@orch8.io/expo` and `@orch8.io/react-native-orch8` do).
 
 For engine development, `implementation(project(":orch8-mobile"))` against
 `packages/android` works after `scripts/build-android-aar.sh`.
