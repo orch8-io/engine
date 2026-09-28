@@ -40,6 +40,7 @@ async fn approvals_pagination_advances_by_scanned_instances_even_without_decisio
     for index in 0..1001 {
         srv.storage
             .create_instance(&TaskInstance {
+                sub_tenant: None,
                 id: InstanceId::new(),
                 sequence_id,
                 tenant_id: TenantId::unchecked("tenant-a"),

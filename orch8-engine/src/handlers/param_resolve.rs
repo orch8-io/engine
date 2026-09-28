@@ -301,6 +301,7 @@ mod tests {
     fn mk_instance(id: InstanceId) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),

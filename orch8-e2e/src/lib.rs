@@ -124,6 +124,7 @@ impl Cloud {
             TestServerOptions {
                 root_api_key: Some(ROOT_KEY.into()),
                 mobile_sync_enabled: true,
+                ..TestServerOptions::default()
             },
         ));
 

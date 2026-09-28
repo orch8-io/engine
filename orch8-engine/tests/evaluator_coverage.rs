@@ -492,6 +492,8 @@ async fn evaluate_after_cancel_signal_returns_done_cancelled() {
 async fn evaluate_waiting_node_returns_more_work_with_waiting() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -512,6 +514,8 @@ async fn evaluate_waiting_node_returns_more_work_with_waiting() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -766,6 +770,8 @@ async fn ensure_tree_cancellation_scope_nodes() {
 async fn ensure_tree_sub_sequence_node() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -786,6 +792,8 @@ async fn ensure_tree_sub_sequence_node() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1279,6 +1287,8 @@ async fn sla_deadline_only_checks_running_nodes() {
 async fn sla_deadline_only_checks_waiting_nodes() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1299,6 +1309,8 @@ async fn sla_deadline_only_checks_waiting_nodes() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1616,6 +1628,8 @@ async fn dispatch_step_with_interceptor_before() {
     use orch8_types::interceptor::{InterceptorAction, InterceptorDef};
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1660,6 +1674,8 @@ async fn dispatch_step_with_interceptor_after() {
     use orch8_types::interceptor::{InterceptorAction, InterceptorDef};
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1857,6 +1873,8 @@ async fn dispatch_cancellation_scope_normal() {
 async fn dispatch_sub_sequence_creates_child() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1877,6 +1895,8 @@ async fn dispatch_sub_sequence_creates_child() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1915,6 +1935,8 @@ async fn dispatch_sub_sequence_creates_child() {
 async fn dispatch_sub_sequence_waits_for_child() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1935,6 +1957,8 @@ async fn dispatch_sub_sequence_waits_for_child() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1973,6 +1997,8 @@ async fn dispatch_sub_sequence_waits_for_child() {
 async fn dispatch_sub_sequence_child_completed_completes_node() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1993,6 +2019,8 @@ async fn dispatch_sub_sequence_child_completed_completes_node() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -2046,6 +2074,8 @@ async fn dispatch_sub_sequence_child_completed_completes_node() {
 async fn dispatch_sub_sequence_child_failed_fails_node() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -2066,6 +2096,8 @@ async fn dispatch_sub_sequence_child_failed_fails_node() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -2201,6 +2233,8 @@ async fn eval_outcome_more_work_some_pending() {
 async fn eval_outcome_more_work_has_waiting_true() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -2221,6 +2255,8 @@ async fn eval_outcome_more_work_has_waiting_true() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -2334,6 +2370,8 @@ async fn instance_stays_running_on_more_work() {
     // causing evaluate() to return MoreWork while the instance remains Running.
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -2354,6 +2392,8 @@ async fn instance_stays_running_on_more_work() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -2394,6 +2434,8 @@ async fn instance_stays_running_on_more_work() {
 async fn instance_transitions_to_waiting_when_all_nodes_waiting() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -2414,6 +2456,8 @@ async fn instance_transitions_to_waiting_when_all_nodes_waiting() {
     storage.create_sequence(&child_seq).await.unwrap();
 
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),

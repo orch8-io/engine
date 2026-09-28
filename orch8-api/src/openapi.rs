@@ -370,9 +370,32 @@ impl Modify for ContinuityOpenApi {
     }
 }
 
+/// Registers the `embed_token` bearer scheme (`Authorization: Bearer o8e1…`)
+/// referenced by the `/embed/*` operations.
+pub(crate) struct EmbedSecurity;
+
+impl Modify for EmbedSecurity {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "embed_token",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("o8e1")
+                    .description(Some(
+                        "Scoped embed token minted by POST /embed/tokens (tenant API key)",
+                    ))
+                    .build(),
+            ),
+        );
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(
-    modifiers(&ContinuityOpenApi),
+    modifiers(&ContinuityOpenApi, &EmbedSecurity),
     info(
         title = "Orch8.io API",
         description = "Durable task sequencing engine — REST API.\n\n\
@@ -470,6 +493,22 @@ impl Modify for ContinuityOpenApi {
         crate::releases::promote_release,
         crate::releases::pause_release,
         crate::releases::rollback_release,
+        crate::releases::set_release_target,
+        crate::sub_tenants::get_limits,
+        crate::sub_tenants::put_limits,
+        crate::sub_tenants::usage,
+        crate::license::get_license,
+        crate::embed::token::issue_token,
+        crate::embed::runs::list_runs,
+        crate::embed::runs::get_run,
+        crate::embed::runs::start_run,
+        crate::embed::runs::list_approvals,
+        crate::embed::runs::resolve_approval,
+        crate::embed::sequences::list_sequences,
+        crate::embed::sequences::get_sequence,
+        crate::embed::sequences::put_sequence,
+        crate::embed::get_theme,
+        crate::embed::put_theme,
         // Cron
         crate::cron::create_cron,
         crate::cron::get_cron,
@@ -660,6 +699,30 @@ impl Modify for ContinuityOpenApi {
         orch8_types::release::DiffSeverity,
         crate::releases::CreateReleaseRequest,
         crate::releases::DiffRequest,
+        orch8_types::release::ReleaseTarget,
+        orch8_types::sub_tenant::SubTenantLimits,
+        orch8_types::sub_tenant::SubTenantUsage,
+        orch8_types::sub_tenant::SequenceEmbed,
+        orch8_types::sub_tenant::EmbedTheme,
+        crate::sub_tenants::SubTenantLimitsResponse,
+        crate::sub_tenants::SubTenantUsageResponse,
+        crate::license::LicenseInfo,
+        crate::license::LicenseStatus,
+        crate::embed::EmbedScope,
+        crate::embed::ThemeResponse,
+        crate::embed::token::IssueTokenRequest,
+        crate::embed::token::IssueTokenResponse,
+        crate::embed::runs::EmbedRunSummary,
+        crate::embed::runs::EmbedRunList,
+        crate::embed::runs::EmbedStep,
+        crate::embed::runs::EmbedRunDetail,
+        crate::embed::runs::StartRunRequest,
+        crate::embed::runs::EmbedApproval,
+        crate::embed::runs::EmbedApprovalList,
+        crate::embed::runs::ResolveApprovalRequest,
+        crate::embed::sequences::EmbedSequenceSummary,
+        crate::embed::sequences::EmbedSequenceList,
+        crate::embed::sequences::EmbedHandler,
         orch8_types::event_correlation::EventEnvelope,
         orch8_types::event_correlation::EventStatus,
         orch8_types::event_correlation::EventWait,
@@ -882,6 +945,9 @@ impl Modify for ContinuityOpenApi {
         (name = "approvals", description = "Human-in-the-loop approvals, including public Slack/Teams/email approval actions"),
         (name = "alerts", description = "Built-in alert rules (DLQ growth, circuit breakers, budget breaches, empty worker pools)"),
         (name = "public", description = "Unauthenticated, token-addressed public progress links"),
+        (name = "sub-tenants", description = "End customers inside a tenant: X-Orch8-Sub-Tenant scoping, per-sub-tenant caps and metering"),
+        (name = "embed", description = "Embedded surface: scoped o8e1 embed tokens, sub-tenant run/approval/sequence views, theme"),
+        (name = "license", description = "Offline-verified license status (soft enforcement only)"),
         (name = "continuity-product", description = "Framework-neutral handoff protocol, profiles, receipts, conformance, and commercial deployment validation"),
     )
 )]

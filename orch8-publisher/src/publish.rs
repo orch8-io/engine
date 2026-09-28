@@ -342,6 +342,8 @@ mod tests {
     async fn publish_sequence_creates_entry() {
         let (publisher, key) = setup();
         let seq = SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: orch8_types::ids::SequenceId::new(),
@@ -397,6 +399,8 @@ mod tests {
                 .expect("valid tenant_id");
 
         let seq = SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: orch8_types::ids::SequenceId::new(),
@@ -480,6 +484,8 @@ mod tests {
     async fn publish_sequence_deduplicates_required_handlers() {
         let (publisher, key) = setup();
         let seq = SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: orch8_types::ids::SequenceId::new(),
@@ -551,6 +557,8 @@ mod tests {
 
     fn make_seq(name: &str, version: i32, tenant_id: &str) -> SequenceDefinition {
         SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: orch8_types::ids::SequenceId::new(),

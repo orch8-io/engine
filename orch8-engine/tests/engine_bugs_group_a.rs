@@ -73,6 +73,7 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
 fn mk_instance(ctx_data: serde_json::Value, seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked("t"),
@@ -113,6 +114,8 @@ async fn setup_tree(
     let storage = SqliteStorage::in_memory().await.unwrap();
 
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1369,6 +1372,8 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
 
     // FK constraint requires a parent task_instance row.
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1668,6 +1673,8 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
     //     so both sequences must share tenant/namespace — see
     //     evaluator.rs:738-744.
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1695,6 +1702,8 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
         input: json!({"from_parent": 42}),
     }));
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1939,6 +1948,8 @@ async fn a11_sla_breach_records_block_output() {
     // Re-build the sequence the evaluator will see. `evaluate` loads it by
     // reference; we pass the same shape we persisted in `setup_tree`.
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: instance.sequence_id,
@@ -2243,6 +2254,8 @@ async fn a15_workers_receive_fair_share_under_load() {
     let storage = SqliteStorage::in_memory().await.unwrap();
 
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -2264,6 +2277,7 @@ async fn a15_workers_receive_fair_share_under_load() {
 
     for i in 0..20 {
         let inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
             tenant_id: TenantId::unchecked(format!("t{}", i % 2)),

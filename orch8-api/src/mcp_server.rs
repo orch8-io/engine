@@ -236,6 +236,7 @@ async fn tool_create_sequence(
         crate::sequences::create_sequence(
             State(state),
             tenant_ctx,
+            crate::sub_tenants::SubTenantHeader::default(),
             Query(crate::sequences::DraftDecodeOptions { strict: true }),
             crate::sequences::SequenceDocument(sequence),
         )
@@ -352,7 +353,16 @@ async fn tool_create_instance(
     }
 
     let req: crate::instances::CreateInstanceRequest = parse_args(body)?;
-    rest_json(crate::instances::create_instance(State(state), tenant_ctx, Json(req)).await).await
+    rest_json(
+        crate::instances::create_instance(
+            State(state),
+            tenant_ctx,
+            crate::sub_tenants::SubTenantHeader::default(),
+            Json(req),
+        )
+        .await,
+    )
+    .await
 }
 
 /// `get_instance_status`: condensed view of one instance — state, timestamps,
@@ -363,8 +373,16 @@ async fn tool_get_instance_status(
     args: &Value,
 ) -> ToolResult {
     let id = arg_uuid(args, "instance_id")?;
-    let instance =
-        rest_json(crate::instances::get_instance(State(state), tenant_ctx, Path(id)).await).await?;
+    let instance = rest_json(
+        crate::instances::get_instance(
+            State(state),
+            tenant_ctx,
+            crate::sub_tenants::SubTenantHeader::default(),
+            Path(id),
+        )
+        .await,
+    )
+    .await?;
     let mut status = json!({
         "id": instance["id"],
         "state": instance["state"],

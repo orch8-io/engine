@@ -585,6 +585,7 @@ use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 async fn seed_instance_ev(s: &SqliteStorage, id: InstanceId) {
     let now = Utc::now();
     let inst = TaskInstance {
+        sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
@@ -752,6 +753,8 @@ async fn merged_blocks_no_injection_borrows() {
     let inst_id = InstanceId::new();
     seed_instance_ev(&s, inst_id).await;
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -782,6 +785,8 @@ async fn merged_blocks_with_injection_owns() {
     let inst_id = InstanceId::new();
     seed_instance_ev(&s, inst_id).await;
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -816,6 +821,8 @@ async fn merged_blocks_empty_injection_still_borrows() {
     let inst_id = InstanceId::new();
     seed_instance_ev(&s, inst_id).await;
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),

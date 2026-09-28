@@ -343,6 +343,7 @@ async fn collect_failures(
     sequence_id: Option<Uuid>,
 ) -> Result<Vec<InstanceFailure>, ApiError> {
     let filter = InstanceFilter {
+        sub_tenant: None,
         tenant_id: tenant.cloned(),
         namespace: None,
         sequence_id: sequence_id.map(SequenceId::from_uuid),

@@ -54,6 +54,7 @@ fn mk_step(id: &str, handler: &str) -> StepDef {
 fn mk_instance(seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked("t"),
@@ -82,6 +83,8 @@ fn mk_instance(seq_id: SequenceId) -> TaskInstance {
 
 async fn seed_instance(storage: &SqliteStorage, instance_id: InstanceId) {
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -118,6 +121,8 @@ async fn setup_single_step(
     let storage = SqliteStorage::in_memory().await.unwrap();
     let step_id = step.id.clone();
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -336,6 +341,8 @@ async fn circuit_breaker_records_success_and_resets_failures() {
 async fn save_output_complete_node_and_transition_is_atomic() {
     let storage = SqliteStorage::in_memory().await.unwrap();
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -420,6 +427,8 @@ async fn save_output_complete_node_and_transition_is_atomic() {
 async fn save_output_complete_node_and_transition_rejects_terminal_instance() {
     let storage = SqliteStorage::in_memory().await.unwrap();
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),

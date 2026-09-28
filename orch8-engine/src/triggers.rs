@@ -372,6 +372,7 @@ pub(crate) fn build_trigger_instance(
 ) -> TaskInstance {
     let now = chrono::Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: id.unwrap_or_default(),
         sequence_id,
         tenant_id: trigger.tenant_id.clone(),
@@ -724,6 +725,8 @@ mod tests {
     async fn seed_sequence(storage: &SqliteStorage, name: &str) -> SequenceId {
         let id = SequenceId::new();
         let seq = SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id,
@@ -916,6 +919,8 @@ mod tests {
         let v2_id = SequenceId::new();
         let now = chrono::Utc::now();
         let mk_seq = |id: SequenceId, version: i32| SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id,
@@ -998,6 +1003,8 @@ mod tests {
         let seq_id = SequenceId::new();
         storage
             .create_sequence(&SequenceDefinition {
+                embed: None,
+                sub_tenant: None,
                 schema: None,
                 schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                 id: seq_id,

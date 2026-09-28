@@ -908,6 +908,7 @@ mod tests {
 
     fn instance(state: InstanceState) -> TaskInstance {
         TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),

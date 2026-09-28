@@ -74,6 +74,8 @@ fn build_sequence() -> SequenceDefinition {
         retain_iterations: None,
     }));
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -96,6 +98,7 @@ fn build_sequence() -> SequenceDefinition {
 fn mk_instance(seq_id: SequenceId, items: &serde_json::Value) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked("t"),

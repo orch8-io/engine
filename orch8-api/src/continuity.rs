@@ -6182,6 +6182,7 @@ async fn accept_optimization(
         // "optimization_accepted" entry.
         let now = Utc::now().trunc_subsecs(6);
         let release = WorkflowRelease {
+            target: None,
             id: deterministic_id,
             tenant_id: tenant_id.clone(),
             namespace: source.namespace.clone(),

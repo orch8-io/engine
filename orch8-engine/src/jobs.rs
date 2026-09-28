@@ -120,6 +120,8 @@ impl JobSpec {
             compensation: None,
         };
         SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -210,6 +212,7 @@ pub fn build_job_instance(job: NewJob, sequence_id: SequenceId) -> TaskInstance 
     marker["run_at"] = serde_json::Value::String(job.run_at.to_rfc3339());
     metadata.insert(JOB_METADATA_KEY.into(), marker);
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id,
         tenant_id: job.tenant_id,

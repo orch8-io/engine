@@ -55,6 +55,8 @@ async fn setup(
     let block = BlockDefinition::TryCatch(Box::new(tc));
 
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -76,6 +78,7 @@ async fn setup(
 
     let now = Utc::now();
     let instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq.id,
         tenant_id: TenantId::unchecked("t"),

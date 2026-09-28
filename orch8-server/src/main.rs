@@ -341,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_token.clone(),
         )
     });
-    let cors = build_cors_layer(&config.api.cors_origins);
+    let cors = build_cors_layer(&config.api.cors_origins, &config.embed.allowed_origins);
     let require_tenant = config.api.require_tenant_header;
     let has_api_key = !config.api.api_key.is_empty();
 
@@ -517,6 +517,26 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Embed tokens + license. An invalid embed secret refuses to start (never
+/// a silent disable); a bad license only logs (soft enforcement).
+fn build_embedded_runtime(
+    config: &EngineConfig,
+) -> anyhow::Result<Arc<orch8_api::embed::EmbeddedRuntime>> {
+    let embedded = Arc::new(
+        orch8_api::embed::EmbeddedRuntime::from_config(&config.embed, &config.license)
+            .map_err(|error| anyhow::anyhow!("invalid embed configuration: {error}"))?,
+    );
+    let license = embedded.license.info(chrono::Utc::now());
+    tracing::info!(
+        embed = embedded.signer.is_some(),
+        embed_origins = embedded.allowed_origins.len(),
+        license = ?license.status,
+        edition = license.edition.as_deref().unwrap_or("-"),
+        "embedded surface configured"
+    );
+    Ok(embedded)
+}
+
 fn build_app_state(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
@@ -594,6 +614,8 @@ fn build_app_state(
         }
     }
 
+    let embedded = build_embedded_runtime(config)?;
+
     Ok(AppState {
         storage,
         shutdown,
@@ -627,6 +649,7 @@ fn build_app_state(
             ),
         ),
         browser_output_max_bytes: browser_output_max_bytes(),
+        embedded,
     })
 }
 
@@ -1395,6 +1418,15 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_CORS_ORIGINS") {
         config.api.cors_origins = val;
     }
+    if let Ok(val) = std::env::var(orch8_api::embed::token::SECRET_ENV) {
+        config.embed.token_secret = val.into();
+    }
+    if let Ok(val) = std::env::var(orch8_api::embed::token::ALLOWED_ORIGINS_ENV) {
+        config.embed.allowed_origins = val;
+    }
+    if let Ok(val) = std::env::var(orch8_api::license::LICENSE_KEY_ENV) {
+        config.license.key = val.into();
+    }
     if let Some(n) = env_parse("ORCH8_TICK_INTERVAL_MS") {
         config.engine.tick_interval_ms = n;
     }
@@ -1574,7 +1606,32 @@ fn print_startup_banner(config: &EngineConfig, insecure_auth: bool, insecure_sto
     tracing::info!("© Oleksii Vasylenko Tecnologia LTDA — BUSL-1.1 — https://orch8.io");
 }
 
-fn build_cors_layer(origins: &str) -> CorsLayer {
+fn parse_cors_origins(origins: &str) -> Vec<http::HeaderValue> {
+    origins
+        .split(',')
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+        .filter_map(|o| match o.trim_end_matches('/').parse() {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!(origin = %o, %error, "Ignoring unparseable CORS origin");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Browser-callable embed paths (token minting stays server-to-server).
+fn is_embed_cors_path(path: &str) -> bool {
+    let path = path.strip_prefix(API_V1_PREFIX).unwrap_or(path);
+    path.starts_with("/embed/") && !path.starts_with("/embed/tokens")
+}
+
+/// CORS for the API. `origins` (`api.cors_origins`) apply to every route;
+/// `embed_origins` (`[embed] allowed_origins`) are admitted only on the
+/// embed-token routes, so an embedding site never gains CORS access to the
+/// management API.
+fn build_cors_layer(origins: &str, embed_origins: &str) -> CorsLayer {
     use http::Method;
     use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
 
@@ -1600,6 +1657,7 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
             // response strip it from the actual request and the API returns
             // 400 BAD_REQUEST, which looks like an auth bug to the SPA.
             HeaderName::from_static("x-tenant-id"),
+            HeaderName::from_static("x-orch8-sub-tenant"),
             // Trigger secret + replay-protection headers — webhooks called
             // from browsers (dashboard test fire, SaaS-embedded widgets) need
             // these to survive the preflight.
@@ -1607,25 +1665,25 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
             HeaderName::from_static("x-trigger-timestamp"),
             HeaderName::from_static("x-trigger-nonce"),
             HeaderName::from_static("x-orch8-signature"),
-        ]);
+        ])
+        .expose_headers([HeaderName::from_static(orch8_api::license::LICENSE_HEADER)]);
 
-    if origins.trim() == "*" {
-        layer.allow_origin(AllowOrigin::any())
-    } else {
-        let parsed: Vec<http::HeaderValue> = origins
-            .split(',')
-            .map(str::trim)
-            .filter(|o| !o.is_empty())
-            .filter_map(|o| match o.parse() {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    tracing::warn!(origin = %o, %error, "Ignoring unparseable CORS origin");
-                    None
-                }
-            })
-            .collect();
-        layer.allow_origin(parsed)
+    let api_any = origins.trim() == "*";
+    if embed_origins.trim().is_empty() {
+        return if api_any {
+            layer.allow_origin(AllowOrigin::any())
+        } else {
+            layer.allow_origin(parse_cors_origins(origins))
+        };
     }
+    let api_list = parse_cors_origins(origins);
+    let embed_any = embed_origins.trim() == "*";
+    let embed_list = parse_cors_origins(embed_origins);
+    layer.allow_origin(AllowOrigin::predicate(move |origin, parts| {
+        api_any
+            || api_list.contains(origin)
+            || (is_embed_cors_path(parts.uri.path()) && (embed_any || embed_list.contains(origin)))
+    }))
 }
 
 #[cfg(test)]
@@ -1640,7 +1698,7 @@ mod tests {
                 "/api/v1/workers/tasks/{id}/release",
                 axum::routing::post(|| async { http::StatusCode::NO_CONTENT }),
             )
-            .layer(build_cors_layer("https://shop.example"));
+            .layer(build_cors_layer("https://shop.example", ""));
         let response = app
             .call(
                 http::Request::builder()
@@ -1664,6 +1722,63 @@ mod tests {
         assert!(allowed.contains("x-api-key") && allowed.contains("content-type"));
         assert!(allowed.contains("authorization"));
         assert_eq!(headers.get("access-control-max-age").unwrap(), "7200");
+    }
+
+    #[tokio::test]
+    async fn embed_origins_are_admitted_only_on_embed_routes() {
+        use tower::Service as _;
+        let mut app: axum::Router = axum::Router::new()
+            .route("/api/v1/embed/runs", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/api/v1/embed/tokens",
+                axum::routing::post(|| async { "ok" }),
+            )
+            .route("/api/v1/instances", axum::routing::get(|| async { "ok" }))
+            .layer(build_cors_layer(
+                "https://admin.example",
+                "https://app.vendor.example",
+            ));
+        let mut preflight = |path: &'static str, origin: &'static str| {
+            app.call(
+                http::Request::builder()
+                    .method(http::Method::OPTIONS)
+                    .uri(path)
+                    .header("origin", origin)
+                    .header("access-control-request-method", "GET")
+                    .header("access-control-request-headers", "authorization")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+        };
+        let allowed = |response: &http::Response<axum::body::Body>| {
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+        let embed = preflight("/api/v1/embed/runs", "https://app.vendor.example")
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed(&embed).as_deref(),
+            Some("https://app.vendor.example")
+        );
+        let mgmt = preflight("/api/v1/instances", "https://app.vendor.example")
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed(&mgmt),
+            None,
+            "embed origins must not reach the management API"
+        );
+        let mint = preflight("/api/v1/embed/tokens", "https://app.vendor.example")
+            .await
+            .unwrap();
+        assert_eq!(allowed(&mint), None, "token minting is server-to-server");
+        let admin = preflight("/api/v1/instances", "https://admin.example")
+            .await
+            .unwrap();
+        assert_eq!(allowed(&admin).as_deref(), Some("https://admin.example"));
     }
 
     #[test]

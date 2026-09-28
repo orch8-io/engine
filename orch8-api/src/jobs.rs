@@ -276,6 +276,7 @@ pub async fn list_jobs(
     let limit = q.limit.clamp(1, 500);
 
     let filter = InstanceFilter {
+        sub_tenant: None,
         tenant_id,
         namespace: q.namespace.filter(|n| !n.is_empty()).map(Namespace::new),
         sequence_id: None,

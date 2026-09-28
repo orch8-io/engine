@@ -751,6 +751,7 @@ async fn get_children_returns_child_instances() {
     // Seed two children directly in storage (the engine sets parent_instance_id
     // for sub-sequences; here we link them explicitly).
     let mk_child = || TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::from_uuid(seq_id),
         tenant_id: TenantId::unchecked("t1"),

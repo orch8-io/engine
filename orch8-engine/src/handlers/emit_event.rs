@@ -269,6 +269,7 @@ mod tests {
     fn mk_instance(tenant: &str, state: InstanceState) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked(tenant),
@@ -298,6 +299,8 @@ mod tests {
     async fn seed_sequence(storage: &SqliteStorage, tenant: &str, name: &str) -> SequenceId {
         let id = SequenceId::new();
         let seq = SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id,

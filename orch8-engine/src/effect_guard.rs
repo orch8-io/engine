@@ -565,6 +565,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("tenant-effect"),
@@ -605,6 +606,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("tenant-effect"),
@@ -635,6 +637,8 @@ mod tests {
     ) -> InvariantId {
         storage
             .create_sequence(&SequenceDefinition {
+                embed: None,
+                sub_tenant: None,
                 schema: None,
                 schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                 id: instance.sequence_id,

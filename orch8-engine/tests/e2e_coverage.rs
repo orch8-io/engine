@@ -235,6 +235,8 @@ async fn sub_sequence_spawns_child_and_enters_waiting() {
 
     // Create the child sequence first.
     let child_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -256,6 +258,8 @@ async fn sub_sequence_spawns_child_and_enters_waiting() {
 
     // Parent sequence with SubSequence block.
     let parent_seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1367,6 +1371,8 @@ fn mk_sequence_with_interceptors(
     interceptors: InterceptorDef,
 ) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),

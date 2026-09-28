@@ -123,6 +123,8 @@ pub struct TestServerOptions {
     pub root_api_key: Option<String>,
     /// Mount the `/mobile/*` device endpoints.
     pub mobile_sync_enabled: bool,
+    /// Embedded runtime (embed signer, license); `None` = disabled.
+    pub embedded: Option<Arc<crate::embed::EmbeddedRuntime>>,
 }
 
 /// Spawn the router over `storage` with [`TestServerOptions`] (auth exactly
@@ -139,13 +141,16 @@ pub async fn spawn_test_server_with(
         .as_deref()
         .map(orch8_types::auth::precompute_secret_digest);
     let shutdown = CancellationToken::new();
-    let state = test_state(
+    let mut state = test_state(
         storage.clone(),
         shutdown.clone(),
         options.mobile_sync_enabled,
         0,
         root_key_digest,
     );
+    if let Some(embedded) = options.embedded {
+        state.embedded = embedded;
+    }
     let base_url = serve(state, storage.clone(), root_key_digest, shutdown.clone()).await;
     BackendTestServer {
         base_url,
@@ -189,6 +194,7 @@ fn test_state(
             crate::browser_sessions::BrowserSessionSigner::configured(root_key_digest),
         ),
         browser_output_max_bytes: crate::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
+        embedded: std::sync::Arc::default(),
     }
 }
 

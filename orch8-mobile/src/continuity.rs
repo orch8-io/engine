@@ -432,6 +432,7 @@ mod tests {
         destination.create_sequence(&sequence).await.unwrap();
         let now = Utc::now();
         let source_instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: sequence.id,
             tenant_id: sequence.tenant_id.clone(),

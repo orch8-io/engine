@@ -54,6 +54,8 @@ fn mk_credential(id: &str, tenant_id: &str, value: &str, enabled: bool) -> Crede
 
 fn mk_seq(name: &str) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -116,6 +118,7 @@ fn mk_cron_schedule(expr: &str, tz: &str) -> CronSchedule {
 async fn seed_instance(storage: &dyn StorageBackend, id: InstanceId) {
     let now = Utc::now();
     let inst = TaskInstance {
+        sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
@@ -141,6 +144,7 @@ async fn seed_instance(storage: &dyn StorageBackend, id: InstanceId) {
 fn mk_handler_instance(tenant: &str, state: InstanceState) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked(tenant),
@@ -1519,6 +1523,7 @@ async fn recovery_83_stale_instance_recovered() {
     storage.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
     let inst = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq.id,
         tenant_id: TenantId::unchecked("t"),
@@ -1553,6 +1558,7 @@ async fn recovery_84_fresh_instance_untouched() {
     storage.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
     let inst = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq.id,
         tenant_id: TenantId::unchecked("t"),
@@ -1588,6 +1594,7 @@ async fn recovery_85_multiple_stale() {
     let now = Utc::now();
     for _ in 0..3 {
         let inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
             tenant_id: TenantId::unchecked("t"),
@@ -1731,6 +1738,8 @@ async fn handler_91_emit_event_creates_child() {
     let caller = mk_handler_instance("T1", InstanceState::Running);
     storage.create_instance(&caller).await.unwrap();
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1810,6 +1819,8 @@ async fn handler_94_emit_event_cross_tenant() {
     let caller = mk_handler_instance("T1", InstanceState::Running);
     storage.create_instance(&caller).await.unwrap();
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1858,6 +1869,8 @@ async fn handler_95_emit_event_disabled_trigger() {
     let caller = mk_handler_instance("T1", InstanceState::Running);
     storage.create_instance(&caller).await.unwrap();
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),

@@ -89,6 +89,7 @@ async fn cooperative_preemption_reschedules_lower_priority_instance() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let now = Utc::now();
     let make = |priority, state, fire_at| TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("tenant-a"),
@@ -144,6 +145,7 @@ async fn seed_instance_with_context(
 ) {
     let now = Utc::now();
     let inst = TaskInstance {
+        sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
@@ -513,6 +515,8 @@ use orch8_types::sequence::{BlockDefinition, DelaySpec, SequenceDefinition, Sequ
 
 fn mk_sequence(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -577,6 +581,7 @@ async fn seed_instance_in_state(
 ) {
     let now = Utc::now();
     let inst = TaskInstance {
+        sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
@@ -857,6 +862,7 @@ async fn seed_instance_with_concurrency(
 ) {
     let now = Utc::now();
     let inst = TaskInstance {
+        sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
@@ -1246,6 +1252,8 @@ fn backoff_formula_doubles_with_cap() {
 fn mk_sla_sequence(name: &str, max_runtime: std::time::Duration) -> SequenceDefinition {
     use orch8_types::sequence::{BlockDefinition, SequenceStatus, SlaPolicy};
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -1281,6 +1289,7 @@ fn mk_waiting_instance(
     updated_at: chrono::DateTime<Utc>,
 ) -> TaskInstance {
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked("t"),
@@ -1914,6 +1923,7 @@ async fn jev_step_output_drives_router_and_when_guard() {
     storage.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
     let instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq.id,
         tenant_id: TenantId::unchecked("t"),
@@ -2070,6 +2080,7 @@ async fn seed_fenced_instance(
     let now = Utc::now();
     storage
         .create_instance(&TaskInstance {
+            sub_tenant: None,
             id: instance_id,
             sequence_id: sequence.id,
             tenant_id: TenantId::unchecked("t"),

@@ -29,6 +29,13 @@ pub struct AdminContext;
 /// Extract the admin marker from request extensions (if present).
 pub type OptionalAdmin = Option<axum::Extension<AdminContext>>;
 
+/// Marker for a request carrying an `o8e1` embed bearer on an embed-token
+/// route. Grants nothing by itself: the request carries no tenant, admin or
+/// principal context, and every embed handler verifies the token through
+/// [`crate::embed::EmbedPrincipal`].
+#[derive(Clone, Debug)]
+pub struct EmbedBearer;
+
 /// Authenticated tenant principal and its immutable capability grant.
 #[derive(Clone, Debug)]
 pub struct PrincipalContext {
@@ -118,6 +125,18 @@ pub async fn api_key_middleware(
     // so a tab is always bound to its runtime identity and route allowlist).
     if let Some(token) = browser_session_token(&request) {
         return authenticate_browser_session(root_key_digest, &token, request, next).await;
+    }
+
+    // Embed tokens are verified by the embed handlers themselves (they own
+    // the signing secret); here they are only let through, context-free, on
+    // the explicit embed-token route allowlist. Anywhere else an `o8e1`
+    // bearer is not a credential and the request falls through to API-key
+    // authentication below.
+    if crate::embed::token::bearer_token(request.headers()).is_some()
+        && crate::embed::is_token_route(request.method(), request.uri().path())
+    {
+        request.extensions_mut().insert(EmbedBearer);
+        return Ok(next.run(request).await);
     }
 
     let Some(expected_digest) = root_key_digest else {
@@ -306,6 +325,11 @@ pub async fn tenant_middleware(
     // exemption: the root key is *not* exempt, so `require_tenant` applies to it
     // uniformly (it must still present an `X-Tenant-Id`, scoping the operation).
     if request.extensions().get::<TenantContext>().is_some() {
+        return Ok(next.run(request).await);
+    }
+    // Embed-token requests bind their tenant from the verified token, never
+    // from `X-Tenant-Id`, so the header is neither required nor honoured.
+    if request.extensions().get::<EmbedBearer>().is_some() {
         return Ok(next.run(request).await);
     }
 

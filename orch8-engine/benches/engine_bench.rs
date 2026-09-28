@@ -22,6 +22,8 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus,
 
 fn make_sequence() -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -64,6 +66,7 @@ fn make_sequence() -> SequenceDefinition {
 fn make_instance(seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked("bench"),
@@ -282,6 +285,7 @@ fn bench_expression_throughput(c: &mut Criterion) {
 fn mk_instance(data: serde_json::Value) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("bench"),
@@ -511,6 +515,8 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
             || {
                 let s = rt.block_on(SqliteStorage::in_memory()).unwrap();
                 let seq = SequenceDefinition {
+                    embed: None,
+                    sub_tenant: None,
                     schema: None,
                     schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                     id: SequenceId::new(),
@@ -589,6 +595,8 @@ fn bench_parallel_in_process_latency(c: &mut Criterion) {
                     tokio::runtime::Handle::current().block_on(async {
                         let storage = SqliteStorage::in_memory().await.unwrap();
                         let sequence = SequenceDefinition {
+                            embed: None,
+                            sub_tenant: None,
                             schema: None,
                             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                             id: SequenceId::new(),

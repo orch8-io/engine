@@ -15,6 +15,7 @@ pub mod cron;
 pub mod dataflow;
 pub mod diagnosis;
 pub mod dlq_groups;
+pub mod embed;
 pub mod entitlements;
 pub mod error;
 pub mod events;
@@ -23,6 +24,7 @@ pub mod input_schema;
 pub mod inspect;
 pub mod instances;
 pub mod jobs;
+pub mod license;
 pub mod mcp_server;
 pub mod metrics;
 pub mod mobile_sync;
@@ -45,6 +47,7 @@ pub mod sequences;
 pub mod sessions;
 pub mod stream_limits;
 pub mod streaming;
+pub mod sub_tenants;
 pub mod telemetry;
 pub mod test_harness;
 pub mod triggers;
@@ -150,6 +153,9 @@ pub struct AppState {
     /// Upper bound (bytes of serialized JSON) on a step output reported by a
     /// browser runtime. Browser output is untrusted page data.
     pub browser_output_max_bytes: usize,
+    /// Embed-token signer, embed CORS origins and the offline-verified
+    /// license (soft enforcement). Default: embedding disabled, unlicensed.
+    pub embedded: Arc<embed::EmbeddedRuntime>,
 }
 
 /// Default bound on browser-reported step output (1 MiB).
@@ -272,6 +278,9 @@ fn api_routes() -> Router<AppState> {
         .merge(queue_dispatch::routes())
         .merge(mcp_server::routes())
         .merge(browser_sessions::routes())
+        .merge(sub_tenants::routes())
+        .merge(embed::routes())
+        .merge(license::routes())
 }
 
 /// Build the axum router with all routes.
@@ -286,6 +295,11 @@ pub fn build_router(state: AppState) -> Router {
     if state.mobile_sync_enabled {
         api = api.merge(mobile_sync::routes());
     }
+    // Soft license enforcement: annotates responses, never blocks.
+    let api = api.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        license::soft_enforcement,
+    ));
 
     Router::new()
         // Canonical versioned mount — clients should migrate to these paths.
