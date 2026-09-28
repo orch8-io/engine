@@ -1,6 +1,10 @@
 Orch8 {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" (mode: {{ .Values.mode }}, storage: {{ .Values.storage.backend }}).
 
+{{- if eq .Values.mode "executor" }}
+Hybrid executor: joins the managed control plane from Secret {{ .Values.hybrid.joinToken.existingSecret }} (ORCH8_JOIN_TOKEN). HTTP is health only; watch it appear in the Orch8 Cloud fleet view.
+{{- else }}
 API service: {{ include "orch8.apiServiceName" . }}:{{ .Values.service.httpPort }} (REST under /api/v1, health at /health/live and /health/ready)
+{{- end }}
 {{- if eq .Values.mode "split" }}
 Executor gRPC service: {{ include "orch8.fullname" . }}-executor:{{ .Values.service.grpcPort }} (worker lifecycle surface only; HTTP is health only)
 {{- end }}

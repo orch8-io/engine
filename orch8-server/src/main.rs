@@ -278,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
             tenant_id: config.node.managed_control_tenant_id.clone(),
             worker_id: config.node.managed_control_worker_id.clone(),
             runtime_id,
+            region: (!config.node.region.trim().is_empty()).then(|| config.node.region.clone()),
             kind: if config.node.role == NodeRole::Edge {
                 orch8_types::continuity::RuntimeKind::Edge
             } else {
@@ -310,6 +311,14 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_token = CancellationToken::new();
     let managed_control_handle =
         managed_control.map(|managed| managed_control::spawn(managed, shutdown_token.clone()));
+    // Metadata-only run export to a managed cloud; bounded and non-blocking.
+    let _cloud_observability = orch8_engine::cloud_observability::spawn(
+        &config.cloud_observability,
+        storage.clone(),
+        shutdown_token.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("invalid [cloud_observability] config: {e}"))?;
+    config.cloud_observability.api_key = orch8_types::SecretString::default();
 
     // Inject storage so `Open` transitions survive process restarts, then
     // rehydrate any previously persisted rows. Load failures are non-fatal —
@@ -1302,6 +1311,25 @@ fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
     }
 }
 
+/// Decode an executor join token into `[node]`: role `executor` (unless the
+/// operator explicitly chose `edge`), managed-control identity, labels and
+/// region. The worker id suffix is the container/host name so every replica
+/// gets a distinct, stable identity.
+fn apply_join_token(config: &mut EngineConfig, raw: &str) -> anyhow::Result<()> {
+    let token = orch8_types::join_token::JoinToken::parse(raw)
+        .map_err(|e| anyhow::anyhow!("ORCH8_JOIN_TOKEN is invalid: {e}"))?;
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_default();
+    let keep_edge = config.node.role == NodeRole::Edge;
+    token.apply_to(&mut config.node, &host);
+    if keep_edge {
+        config.node.role = NodeRole::Edge;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_ARTIFACT_BACKEND") {
@@ -1365,6 +1393,13 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
         config.node.role = serde_json::from_value(serde_json::Value::String(val))
             .context("ORCH8_NODE_ROLE must be all_in_one, control, executor, gateway, or edge")?;
     }
+    // Executor join token (contract: `o8x1.<b64url(json)>`). Applied before
+    // the individual ORCH8_MANAGED_CONTROL_* variables so those still win.
+    if let Ok(raw) = std::env::var("ORCH8_JOIN_TOKEN")
+        && !raw.trim().is_empty()
+    {
+        apply_join_token(config, &raw)?;
+    }
     if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_ENDPOINT") {
         config.node.managed_control_endpoint = val;
     }
@@ -1379,6 +1414,18 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     }
     if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_RUNTIME_ID") {
         config.node.managed_control_runtime_id = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_CLOUD_OBSERVABILITY_ENDPOINT") {
+        config.cloud_observability.endpoint = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_CLOUD_OBSERVABILITY_API_KEY") {
+        config.cloud_observability.api_key = val.into();
+    }
+    if let Ok(val) = std::env::var("ORCH8_CLOUD_OBSERVABILITY_ENGINE_ID") {
+        config.cloud_observability.engine_id = val;
+    }
+    if let Some(n) = env_parse("ORCH8_CLOUD_OBSERVABILITY_INTERVAL_MS") {
+        config.cloud_observability.interval_ms = n;
     }
     if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_CERT_PATH") {
         config.api.grpc_tls_cert_path = val;
@@ -1838,6 +1885,45 @@ mod tests {
         let insecure_storage = cli.insecure || cli.insecure_storage;
         assert!(insecure_auth);
         assert!(insecure_storage);
+    }
+
+    #[test]
+    fn join_token_configures_executor_managed_control() {
+        let token = orch8_types::join_token::JoinToken {
+            v: 1,
+            endpoint: "https://control.orch8.example".into(),
+            api_key: "o8k_join".into(),
+            tenant_id: "acme".into(),
+            runtime_id: uuid::Uuid::now_v7(),
+            worker_id_prefix: "acme-dc1".into(),
+            labels: std::collections::BTreeMap::from([("gpu".into(), "a10".into())]),
+            region: Some("eu-west-1".into()),
+        };
+        let mut config = EngineConfig::default();
+        apply_join_token(&mut config, &token.encode()).unwrap();
+        assert_eq!(config.node.role, NodeRole::Executor);
+        assert_eq!(config.node.managed_control_endpoint, token.endpoint);
+        assert_eq!(config.node.managed_control_tenant_id, "acme");
+        assert!(
+            config
+                .node
+                .managed_control_worker_id
+                .starts_with("acme-dc1")
+        );
+        assert_eq!(config.node.region, "eu-west-1");
+        let errors = config.validate().err().unwrap_or_default();
+        assert!(
+            errors.iter().all(|e| !e.contains("managed_control")),
+            "{errors:?}"
+        );
+
+        let mut edge = EngineConfig::default();
+        edge.node.role = NodeRole::Edge;
+        apply_join_token(&mut edge, &token.encode()).unwrap();
+        assert_eq!(edge.node.role, NodeRole::Edge);
+
+        let error = apply_join_token(&mut EngineConfig::default(), "o8x1.nope").unwrap_err();
+        assert!(error.to_string().contains("ORCH8_JOIN_TOKEN"));
     }
 
     #[test]

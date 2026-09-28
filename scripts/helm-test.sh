@@ -57,6 +57,11 @@ assert_contains sqlite-values 'kind: PersistentVolumeClaim' "sqlite PVC"
 assert_absent sqlite-values 'kind: PodDisruptionBudget' "no PDB on single sqlite pod"
 assert_contains gateway-values 'value: "gateway"' "gateway role"
 assert_contains gateway-values 'value: "127.0.0.1:8080"' "gateway loopback HTTP"
+assert_contains hybrid-executor-values 'value: "executor"' "hybrid executor role"
+assert_contains hybrid-executor-values 'name: ORCH8_JOIN_TOKEN' "join token from Secret"
+assert_contains hybrid-executor-values 'name: ORCH8_CLOUD_OBSERVABILITY_API_KEY' "cloud observability key from Secret"
+assert_absent hybrid-executor-values 'value: "control"' "no control deployment in executor mode"
+assert_absent hybrid-executor-values 'kind: Ingress' "no ingress in executor mode"
 assert_contains monitoring-values 'kind: ServiceMonitor' "ServiceMonitor"
 assert_contains monitoring-values 'kind: PrometheusRule' "PrometheusRule"
 assert_contains monitoring-values 'up{job="orch8"}' "rule job label templated"
@@ -81,6 +86,10 @@ expect_failure "malformed encryption key" "${PG[@]}" --set secrets.encryptionKey
 expect_failure "gateway without TLS secret" "${PG[@]}" --set gateway.enabled=true
 expect_failure "wildcard CORS with auth" "${PG[@]}" --set 'config.corsOrigins=*'
 expect_failure "bad migrations mode" "${PG[@]}" --set migrations.mode=sometimes
+expect_failure "executor mode without join token secret" "${PG[@]}" --set mode=executor
+expect_failure "executor mode with ingress" "${PG[@]}" --set mode=executor --set hybrid.joinToken.existingSecret=j --set ingress.enabled=true
+expect_failure "cloud observability without key secret" "${PG[@]}" --set cloudObservability.enabled=true
+expect_failure "cloud observability over plain http" "${PG[@]}" --set cloudObservability.enabled=true --set cloudObservability.existingSecret=k --set cloudObservability.endpoint=http://x
 
 echo
 if [ "$failures" -ne 0 ]; then

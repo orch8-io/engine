@@ -24,6 +24,9 @@ pub(crate) struct ManagedControlConfig {
     pub tenant_id: String,
     pub worker_id: String,
     pub runtime_id: RuntimeId,
+    /// Operator-chosen coarse region (e.g. from a join token); advertised so
+    /// the control plane can place by region. Never workload data.
+    pub region: Option<String>,
     pub kind: RuntimeKind,
 }
 
@@ -42,7 +45,7 @@ fn safe_capabilities(config: &ManagedControlConfig, draining: bool) -> RuntimeCa
         handlers: vec!["managed-control".into()],
         plugins: Vec::new(),
         credentials: Vec::new(),
-        regions: Vec::new(),
+        regions: config.region.iter().cloned().collect(),
         hardware: Vec::new(),
         offline_capable: false,
         connectivity: Some(RuntimeConnectivity::Ethernet),
@@ -251,6 +254,7 @@ mod tests {
             tenant_id: "acme".into(),
             worker_id: "edge-1".into(),
             runtime_id: RuntimeId::new(),
+            region: None,
             kind: RuntimeKind::Edge,
         };
         let value = serde_json::to_value(safe_capabilities(&config, false)).unwrap();

@@ -73,8 +73,9 @@ managed_control_runtime_id = "018f5f2d-58ef-7a61-9b4f-21f77aa1f005"
 ```
 
 The session authenticates outbound, advertises only coarse runtime identity
-and connectivity with empty plugin, credential, region, hardware, and signing
-key lists, then refreshes a 45-second lease. It never sends task demand and
+and connectivity with empty plugin, credential, hardware, and signing key
+lists (and the operator-set `[node] region`, if any), then refreshes a
+45-second lease. It never sends task demand and
 therefore never exports workflow contexts, params, outputs, artifacts, logs,
 or credential bindings. `ping` and `reload` commands are acknowledged; a
 `drain` command triggers local graceful shutdown. Placement commands remain
@@ -86,6 +87,12 @@ task receives it. Environment equivalents are
 `ORCH8_MANAGED_CONTROL_ENDPOINT`, `ORCH8_MANAGED_CONTROL_API_KEY`,
 `ORCH8_MANAGED_CONTROL_TENANT_ID`, `ORCH8_MANAGED_CONTROL_WORKER_ID`, and
 `ORCH8_MANAGED_CONTROL_RUNTIME_ID`.
+
+A cloud-issued join token (`o8x1.…`) fills all of these at once:
+`orch8 executor join <token>` writes them to `orch8.toml`, and
+`ORCH8_JOIN_TOKEN` applies them at server startup (individual
+`ORCH8_MANAGED_CONTROL_*` variables still win). The token also sets
+`[node] labels` and `[node] region`. See [HYBRID.md](HYBRID.md).
 
 ## Auditable fleet draining
 
