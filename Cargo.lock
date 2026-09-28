@@ -3316,6 +3316,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch8-e2e"
+version = "0.7.1"
+dependencies = [
+ "chrono",
+ "orch8",
+ "orch8-api",
+ "orch8-engine",
+ "orch8-grpc",
+ "orch8-mobile",
+ "orch8-storage",
+ "orch8-types",
+ "reqwest",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "orch8-engine"
 version = "0.7.1"
 dependencies = [
@@ -3372,6 +3396,7 @@ version = "0.7.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "orch8-engine",
  "orch8-storage",
  "orch8-types",
  "prost",

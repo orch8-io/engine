@@ -297,7 +297,7 @@ impl NodeClient {
         runtime_id: RuntimeId,
         advertisement: Advertisement,
     ) -> Result<Arc<Self>, MobileError> {
-        crate::validate_https_url(&api_base)?;
+        validate_api_base(&api_base)?;
         Ok(Self::new_unchecked(
             api_base,
             api_key,
@@ -555,6 +555,21 @@ impl NodeClient {
             }
         }
     }
+}
+
+/// The control-plane base must be a public HTTPS URL. Test builds that
+/// enable the `loopback-control-plane` feature (end-to-end suites running a
+/// real server on `127.0.0.1`) may also use plain `http://` on a loopback
+/// host; release builds never enable it.
+fn validate_api_base(api_base: &str) -> Result<(), MobileError> {
+    #[cfg(feature = "loopback-control-plane")]
+    if reqwest::Url::parse(api_base).is_ok_and(|url| {
+        url.scheme() == "http"
+            && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+    }) {
+        return Ok(());
+    }
+    crate::validate_https_url(api_base)
 }
 
 pub(crate) fn classify_lease_status(

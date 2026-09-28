@@ -134,6 +134,11 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Includes the cross-crate distributed-execution suites in `orch8-e2e`
+      # (cloud -> phone -> cloud round trip, worker-protocol guarantees over
+      # HTTP and gRPC): each scenario runs the real API + scheduler on SQLite
+      # and, via DATABASE_URL above, on Postgres in a throwaway schema, with
+      # a real MobileEngine as the phone.
       - name: Test
         run: cargo test --locked --workspace
 

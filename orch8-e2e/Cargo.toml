@@ -1,0 +1,35 @@
+[package]
+name = "orch8-e2e"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Cross-crate end-to-end suites: real API + scheduler + runtime nodes"
+publish = false
+
+# The harness lives in `src/` (shared by every suite in `tests/`). It links
+# the server stack (API router, scheduler, gRPC) and the on-device engine
+# together, which no product crate may do: the dependency direction is
+# server ← e2e → mobile.
+[dependencies]
+orch8-api = { path = "../orch8-api" }
+orch8-engine = { path = "../orch8-engine", default-features = false }
+orch8-grpc = { path = "../orch8-grpc" }
+orch8-mobile = { path = "../orch8-mobile", features = ["loopback-control-plane"] }
+orch8-storage = { path = "../orch8-storage" }
+orch8-types = { path = "../orch8-types" }
+orch8 = { path = "../orch8", default-features = false }
+tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["postgres"] }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

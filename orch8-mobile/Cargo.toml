@@ -45,6 +45,10 @@ required-features = ["bindgen"]
 
 [features]
 bindgen = ["uniffi/cli"]
+# Test-only: let `register_node` target a plain-http control plane on a
+# loopback host (the cloud round-trip suite in `orch8-e2e`). Never enable it
+# in an app build.
+loopback-control-plane = []
 
 [lints]
 workspace = true

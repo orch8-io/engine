@@ -116,6 +116,44 @@ pub async fn spawn_test_server_on(
     }
 }
 
+/// Options for [`spawn_test_server_with`].
+#[derive(Debug, Clone, Default)]
+pub struct TestServerOptions {
+    /// Root API key; `None` runs the server in insecure mode.
+    pub root_api_key: Option<String>,
+    /// Mount the `/mobile/*` device endpoints.
+    pub mobile_sync_enabled: bool,
+}
+
+/// Spawn the router over `storage` with [`TestServerOptions`] (auth exactly
+/// like `orch8-server` when a root key is set).
+///
+/// # Panics
+/// Panics if the TCP listener fails to bind.
+pub async fn spawn_test_server_with(
+    storage: Arc<dyn orch8_storage::StorageBackend>,
+    options: TestServerOptions,
+) -> BackendTestServer {
+    let root_key_digest = options
+        .root_api_key
+        .as_deref()
+        .map(orch8_types::auth::precompute_secret_digest);
+    let shutdown = CancellationToken::new();
+    let state = test_state(
+        storage.clone(),
+        shutdown.clone(),
+        options.mobile_sync_enabled,
+        0,
+        root_key_digest,
+    );
+    let base_url = serve(state, storage.clone(), root_key_digest, shutdown.clone()).await;
+    BackendTestServer {
+        base_url,
+        shutdown,
+        storage,
+    }
+}
+
 fn test_state(
     storage: Arc<dyn orch8_storage::StorageBackend>,
     shutdown: CancellationToken,
