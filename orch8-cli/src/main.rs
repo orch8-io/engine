@@ -198,9 +198,9 @@ enum Commands {
     },
     /// Generate, strictly validate, and repair a sequence with an LLM.
     Generate(GenerateCmd),
-    /// Convert an n8n / Zapier export or an AWS Step Functions state machine
-    /// into an Orch8 sequence (JSON or YAML) with a conversion report of TODOs,
-    /// triggers and unmapped constructs.
+    /// Convert an n8n / Zapier export, an AWS Step Functions state machine, or
+    /// Temporal / Inngest / `BullMQ` TypeScript into an Orch8 sequence (JSON or
+    /// YAML) with a conversion report of TODOs, triggers and unmapped constructs.
     #[command(subcommand)]
     Import(commands::import::ImportCmd),
     /// Interactive tutorial: walk through docs/quick-starts step by step,

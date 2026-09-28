@@ -440,6 +440,7 @@ fn run_writes_sequence_and_report_files() {
             namespace: "sales".into(),
             report: Some(report.clone()),
             zap: None,
+            workflow: None,
         }),
         Some("tenant-a"),
     )

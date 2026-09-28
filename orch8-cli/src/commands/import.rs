@@ -1,10 +1,12 @@
-//! `orch8 import n8n|zapier|stepfunctions <file>` — convert an exported
-//! workflow into an Orch8 sequence document (JSON or YAML) plus a conversion
+//! `orch8 import n8n|zapier|stepfunctions|temporal|inngest|bullmq <path>` —
+//! convert an exported workflow (or, for the code-first engines, the workflow
+//! source) into an Orch8 sequence document (JSON or YAML) plus a conversion
 //! report.
 //!
 //! Step Functions state machines are translated structurally (see
-//! `import_sfn.rs`); constructs that cannot be translated are listed as
-//! `unmapped` entries with their location.
+//! `import_sfn.rs`); Temporal / Inngest / `BullMQ` TypeScript is scanned
+//! statically for the common durable-step patterns (see `import_code.rs`),
+//! producing a sequence skeleton plus `unmapped` entries with `file:line`.
 //!
 //! The converters are deliberately conservative: node types with a clear
 //! Orch8 equivalent are mapped (HTTP → `http_request`, IF/Switch/Filter/Paths
@@ -47,11 +49,21 @@ pub enum ImportCmd {
     /// JSON, or a `describe-state-machine` response) to a sequence.
     #[command(name = "stepfunctions", visible_aliases = ["step-functions", "sfn"])]
     StepFunctions(ImportArgs),
+    /// Extract a sequence skeleton from a Temporal TypeScript workflow file
+    /// or directory (`proxyActivities`, `sleep`, `condition`, child workflows).
+    Temporal(ImportArgs),
+    /// Extract a sequence skeleton from an Inngest TypeScript function file
+    /// or directory (`step.run`, `step.sleep`, `step.waitForEvent`, ...).
+    Inngest(ImportArgs),
+    /// Extract a sequence from a `BullMQ` `FlowProducer` tree in a TypeScript /
+    /// JavaScript file or directory.
+    #[command(name = "bullmq")]
+    BullMq(ImportArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    /// Exported workflow file.
+    /// Exported workflow file (code importers also accept a directory).
     pub file: PathBuf,
     /// Output sequence file (`.json`, `.yaml`, `.yml`); prints to stdout when omitted.
     #[arg(long)]
@@ -71,6 +83,10 @@ pub struct ImportArgs {
     /// Zapier only: zap id or title to convert when the file holds several.
     #[arg(long)]
     pub zap: Option<String>,
+    /// Temporal / Inngest / `BullMQ` only: workflow function, Inngest function
+    /// id, or flow root name to convert when the source holds several.
+    #[arg(long)]
+    pub workflow: Option<String>,
 }
 
 /// One converted node.
@@ -150,25 +166,41 @@ pub fn run(cmd: ImportCmd, tenant_id: Option<&str>) -> Result<()> {
         ImportCmd::N8n(args) => ("n8n", args),
         ImportCmd::Zapier(args) => ("zapier", args),
         ImportCmd::StepFunctions(args) => ("stepfunctions", args),
+        ImportCmd::Temporal(args) => ("temporal", args),
+        ImportCmd::Inngest(args) => ("inngest", args),
+        ImportCmd::BullMq(args) => ("bullmq", args),
     };
     let options = ConvertOptions {
         tenant_id: tenant_id.unwrap_or("default").to_string(),
         namespace: args.namespace.clone(),
         name: args.name.clone(),
         zap: args.zap.clone(),
+        workflow: args.workflow.clone(),
     };
-    let raw = std::fs::read_to_string(&args.file)
-        .with_context(|| format!("failed to read {}", args.file.display()))?;
-    let export: Value = serde_json::from_str(&raw)
-        .with_context(|| format!("{} is not valid JSON", args.file.display()))?;
     let conversion = match source {
-        "n8n" => convert_n8n(&export, &options)?,
-        "stepfunctions" => sfn::convert_stepfunctions(
-            &export,
-            Some((&args.file.display().to_string(), &raw)),
-            &options,
-        )?,
-        _ => convert_zapier(&export, &options)?,
+        "temporal" | "inngest" | "bullmq" => {
+            let files = code::load_sources(&args.file)?;
+            match source {
+                "temporal" => code::convert_temporal(&files, &options)?,
+                "inngest" => code::convert_inngest(&files, &options)?,
+                _ => code::convert_bullmq(&files, &options)?,
+            }
+        }
+        _ => {
+            let raw = std::fs::read_to_string(&args.file)
+                .with_context(|| format!("failed to read {}", args.file.display()))?;
+            let export: Value = serde_json::from_str(&raw)
+                .with_context(|| format!("{} is not valid JSON", args.file.display()))?;
+            match source {
+                "n8n" => convert_n8n(&export, &options)?,
+                "stepfunctions" => sfn::convert_stepfunctions(
+                    &export,
+                    Some((&args.file.display().to_string(), &raw)),
+                    &options,
+                )?,
+                _ => convert_zapier(&export, &options)?,
+            }
+        }
     };
 
     match &args.out {
@@ -247,6 +279,8 @@ pub struct ConvertOptions {
     pub namespace: String,
     pub name: Option<String>,
     pub zap: Option<String>,
+    /// Code importers: which workflow / function / flow to convert.
+    pub workflow: Option<String>,
 }
 
 impl Default for ConvertOptions {
@@ -256,6 +290,7 @@ impl Default for ConvertOptions {
             namespace: "default".into(),
             name: None,
             zap: None,
+            workflow: None,
         }
     }
 }
@@ -2218,6 +2253,8 @@ impl Zapier {
     }
 }
 
+#[path = "import_code.rs"]
+pub mod code;
 #[path = "import_sfn.rs"]
 pub mod sfn;
 
