@@ -1,4 +1,6 @@
+#[cfg(feature = "providers")]
 mod apns;
+#[cfg(feature = "providers")]
 mod fcm;
 mod governance;
 mod outbox;
@@ -58,7 +60,9 @@ impl PushProvider for NoopPushProvider {
     }
 }
 
+#[cfg(feature = "providers")]
 pub use apns::ApnsProvider;
+#[cfg(feature = "providers")]
 pub use fcm::FcmProvider;
 pub use governance::{
     CollapsibleWake, CredentialRouter, EncryptedPushCredentialSource, PushCredentialRoute,
@@ -118,6 +122,7 @@ pub struct FcmConfig {
     pub service_account_json: PushSecret,
 }
 
+#[cfg(feature = "providers")]
 pub(crate) fn safe_prefix(value: &str, max_bytes: usize) -> &str {
     let mut end = max_bytes.min(value.len());
     while !value.is_char_boundary(end) {
@@ -130,11 +135,13 @@ pub(crate) fn safe_prefix(value: &str, max_bytes: usize) -> &str {
 /// `ApnsProvider` nor `FcmProvider` looks at the `platform` argument, so
 /// without this dispatch a single configured provider would happily send iOS
 /// tokens to FCM (or vice versa) and misclassify the resulting vendor error.
+#[cfg(feature = "providers")]
 struct DispatchingPushProvider {
     apns: Option<ApnsProvider>,
     fcm: Option<FcmProvider>,
 }
 
+#[cfg(feature = "providers")]
 impl DispatchingPushProvider {
     fn provider_for(&self, platform: &str) -> Result<&dyn PushProvider, PushError> {
         match platform.to_ascii_lowercase().as_str() {
@@ -159,6 +166,7 @@ impl DispatchingPushProvider {
     }
 }
 
+#[cfg(feature = "providers")]
 #[async_trait]
 impl PushProvider for DispatchingPushProvider {
     async fn send_silent_push(&self, token: &str, platform: &str) -> Result<(), PushError> {
@@ -179,6 +187,7 @@ impl PushProvider for DispatchingPushProvider {
     }
 }
 
+#[cfg(feature = "providers")]
 pub fn create_provider(
     apns: Option<ApnsConfig>,
     fcm: Option<FcmConfig>,
@@ -272,7 +281,7 @@ fn configs_from_lookup(
     Ok((apns, fcm))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "providers"))]
 mod tests {
     use super::*;
 

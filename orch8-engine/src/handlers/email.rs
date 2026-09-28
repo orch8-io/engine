@@ -55,7 +55,6 @@ const MAX_RECIPIENTS: usize = 50;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 20;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-const MAX_ERROR_BODY_BYTES: usize = 512;
 const RESEND_DEFAULT_BASE: &str = "https://api.resend.com";
 
 fn permanent(message: impl Into<String>) -> StepError {
@@ -72,18 +71,9 @@ fn retryable(message: impl Into<String>) -> StepError {
     }
 }
 
-/// Classify a non-2xx provider status: 408/429/5xx are transient, every
-/// other 4xx is a permanent request error. Shared with `notify`.
-pub(crate) fn status_error(context: &str, status: u16, body: &[u8]) -> StepError {
-    let snippet_len = body.len().min(MAX_ERROR_BODY_BYTES);
-    let snippet = String::from_utf8_lossy(&body[..snippet_len]);
-    let message = format!("{context}: provider returned HTTP {status}: {snippet}");
-    if status == 408 || status == 429 || status >= 500 {
-        retryable(message)
-    } else {
-        permanent(message)
-    }
-}
+// Provider status classification lives in `notify` (always built) so that
+// `notify` keeps working in builds without the SMTP-backed `email` feature.
+use super::notify::status_error;
 
 /// Accept a single string or an array of strings.
 fn string_list(params: &Value, key: &str) -> Result<Vec<String>, StepError> {

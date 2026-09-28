@@ -41,6 +41,24 @@ fn permanent(message: impl Into<String>) -> StepError {
     }
 }
 
+const MAX_ERROR_BODY_BYTES: usize = 512;
+
+/// Classify a non-2xx provider status: 408/429/5xx are transient, every
+/// other 4xx is a permanent request error. Shared with `email`.
+pub(crate) fn status_error(context: &str, status: u16, body: &[u8]) -> StepError {
+    let snippet_len = body.len().min(MAX_ERROR_BODY_BYTES);
+    let snippet = String::from_utf8_lossy(&body[..snippet_len]);
+    let message = format!("{context}: provider returned HTTP {status}: {snippet}");
+    if status == 408 || status == 429 || status >= 500 {
+        StepError::Retryable {
+            message,
+            details: None,
+        }
+    } else {
+        permanent(message)
+    }
+}
+
 /// Provider-neutral notification input.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Notification {
@@ -342,7 +360,7 @@ pub(crate) async fn post_webhook(
     let bytes = crate::outbound::read_body_capped(resp, 4096)
         .await
         .unwrap_or_default();
-    Err(super::email::status_error(context, status, &bytes))
+    Err(status_error(context, status, &bytes))
 }
 
 pub async fn handle_notify(ctx: StepContext) -> Result<Value, StepError> {

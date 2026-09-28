@@ -1,12 +1,18 @@
 pub mod api_key_cache;
+#[cfg(feature = "artifacts")]
+pub mod artifacts;
+#[cfg(not(feature = "artifacts"))]
+#[path = "artifacts_disabled.rs"]
 pub mod artifacts;
 pub mod compression;
 pub mod conformance;
 pub mod encrypting;
 pub mod externalizing;
 pub mod lifecycle;
+#[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod sqlite;
+#[cfg(feature = "postgres")]
 pub mod tenant_partition;
 
 use async_trait::async_trait;

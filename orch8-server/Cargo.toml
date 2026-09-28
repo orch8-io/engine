@@ -20,11 +20,11 @@ orch8-storage = { path = "../orch8-storage" }
 # they reuse reqwest/hmac/jsonwebtoken/sqlx that the server already links, so
 # they add no crates. Kafka and Redis Streams pull in new client crates and
 # are opt-in via the `trigger-kafka` / `trigger-redis-streams` features below.
-orch8-engine = { path = "../orch8-engine", default-features = false, features = ["compression", "file-watch", "nats", "wasm", "sqs", "pubsub", "postgres-rows"] }
+orch8-engine = { path = "../orch8-engine", default-features = false, features = ["compression", "email", "file-watch", "nats", "wasm", "sqs", "pubsub", "postgres-rows"] }
 orch8-api = { path = "../orch8-api" }
 orch8-grpc = { path = "../orch8-grpc" }
 orch8-push = { path = "../orch8-push" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["full"] }
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

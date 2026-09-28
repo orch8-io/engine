@@ -458,6 +458,8 @@ fn html_escape(s: &str) -> String {
     out
 }
 
+// Without the `email` feature this only reports that email is unavailable.
+#[cfg_attr(not(feature = "email"), allow(clippy::unused_async))]
 async fn send_email(
     ctx: &StepContext,
     email_cfg: &Value,
@@ -499,7 +501,17 @@ async fn send_email(
         params: Value::Object(params),
         ..ctx.clone()
     };
-    super::email::handle_email(email_ctx).await.map(|_| ())
+    #[cfg(feature = "email")]
+    {
+        super::email::handle_email(email_ctx).await.map(|_| ())
+    }
+    #[cfg(not(feature = "email"))]
+    {
+        drop(email_ctx);
+        Err(permanent(
+            "human_review: approvals.email requires the `email` feature",
+        ))
+    }
 }
 
 #[cfg(test)]
