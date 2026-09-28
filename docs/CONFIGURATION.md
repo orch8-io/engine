@@ -246,6 +246,21 @@ mount a config file for those settings.
 | `ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON` | — | JSON object mapping historical signing-key IDs to base64 Ed25519 public keys for provenance verification during key rotation. Never include private keys. |
 | `ORCH8_FEDERATION_PEERS` | — | Bounded JSON array of explicitly trusted federation peers. Invalid configuration disables federation rather than accepting a partial trust set. See [Continuity operations](CONTINUITY_OPERATIONS.md#enforce-sovereign-edge-boundaries-from-registered-facts). |
 
+
+### Federation transport, BYOK, and failover
+
+All of these are opt-in. See [Federation and BYOK](FEDERATION.md) and [Multi-region failover](FAILOVER.md).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCH8_FEDERATION_ALLOW_HTTP` | `false` | Accept `http://` peer endpoints in the trust registry. Loopback testing only. |
+| `ORCH8_BYOK_BUCKET` / `ORCH8_BYOK_LOCAL_PATH` | — | Send every externalized payload to this customer bucket (or to a local directory, for development). Requires the encryption key. |
+| `ORCH8_BYOK_PREFIX`, `ORCH8_BYOK_REGION`, `ORCH8_BYOK_ENDPOINT`, `ORCH8_BYOK_ACCESS_KEY_ID`, `ORCH8_BYOK_SECRET_ACCESS_KEY`, `ORCH8_BYOK_ALLOW_HTTP` | `orch8`, AWS default chain | Bucket addressing and credentials. |
+| `ORCH8_BYOK_KMS_KEY_ARN` (+ `ORCH8_BYOK_KMS_REGION`, `ORCH8_BYOK_KMS_ENDPOINT`) | — | Wrap DEKs with this AWS KMS key. Credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`. |
+| `ORCH8_BYOK_STATIC_KEY`, `ORCH8_BYOK_STATIC_KEY_ID` | — | Wrap DEKs with a local 64-hex key instead of KMS. |
+| `ORCH8_FAILOVER_REGION` | — | This node's region. The scheduler runs only while the database region fence names this region. |
+| `ORCH8_FAILOVER_POLL_SECS` | `5` | Fence poll interval (1–60). A node fails closed after 3 intervals without a successful read. |
+
 ### Logging
 
 | Variable | Default | Description |
