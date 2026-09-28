@@ -211,14 +211,10 @@ pub(crate) async fn enqueue_worker_task(
             Ok(split) => split,
             Err(message) => return Ok(Err(RemoteDispatchRejected(message))),
         };
-    // A browser never receives secrets. A step placed only on browser
-    // runtimes (or targeted at a registered browser runtime) that references
-    // credentials can never run safely: fail it permanently now instead of
-    // leaving a task no eligible node may claim.
-    if carries_credentials && placed_on_browser(storage, instance, &requirements).await? {
-        return Ok(Err(RemoteDispatchRejected(
-            BROWSER_CREDENTIALS_REJECTION.to_owned(),
-        )));
+    if let Some(message) =
+        placement_rejection(storage, instance, &requirements, carries_credentials).await?
+    {
+        return Ok(Err(RemoteDispatchRejected(message)));
     }
     let attempt_u16 = u16::try_from(attempt).map_err(|_| {
         tracing::warn!(
@@ -313,6 +309,61 @@ pub(crate) async fn enqueue_worker_task(
     .await;
 
     Ok(Ok(task))
+}
+
+/// Validate a step's placement before anything is persisted: `$runtime`
+/// facts and policy are well-formed, a credential-bearing step is not placed
+/// on browsers, and (for placed steps) locality allows it — recording the
+/// placement decision. `Some(message)` = permanent rejection.
+async fn placement_rejection(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    requirements: &orch8_types::continuity::CapsuleRequirements,
+    carries_credentials: bool,
+) -> Result<Option<String>, EngineError> {
+    if let Err(error) = crate::placement::validate_requirements(requirements) {
+        return Ok(Some(format!("invalid $runtime placement: {error}")));
+    }
+    if let Some(policy) = &requirements.policy
+        && let Err(error) = crate::placement::validate_policy(policy)
+    {
+        return Ok(Some(format!("invalid $runtime locality policy: {error}")));
+    }
+    // A browser never receives secrets. A step placed only on browser
+    // runtimes (or targeted at a registered browser runtime) that references
+    // credentials can never run safely: fail it permanently now instead of
+    // leaving a task no eligible node may claim.
+    if carries_credentials && placed_on_browser(storage, instance, requirements).await? {
+        return Ok(Some(BROWSER_CREDENTIALS_REJECTION.to_owned()));
+    }
+    // Placed steps: evaluate residency/locality now and record the decision
+    // as placement evidence; a definitive denial fails the step permanently.
+    if requirements.is_remote_placement() || requirements.has_locality_policy() {
+        let execution =
+            crate::effect_guard::ensure_effect_scope(storage, &instance.tenant_id, instance.id)
+                .await?;
+        let now = chrono::Utc::now();
+        let candidates = storage
+            .list_runtime_capabilities(&instance.tenant_id, now, 1_000)
+            .await?;
+        let placement = crate::placement::evaluate_dispatch_placement(
+            instance.tenant_id.clone(),
+            execution.continuity_id,
+            execution.epoch,
+            requirements,
+            &candidates,
+            now,
+        );
+        storage.save_placement_decision(&placement.decision).await?;
+        if !placement.denial_codes.is_empty() {
+            return Ok(Some(format!(
+                "placement denied by locality policy ({}); decision {}",
+                placement.denial_codes.join(", "),
+                placement.decision.id
+            )));
+        }
+    }
+    Ok(None)
 }
 
 /// Permanent failure for a credential-bearing step placed on browsers.

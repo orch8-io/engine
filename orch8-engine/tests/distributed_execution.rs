@@ -662,3 +662,273 @@ async fn browser_claimants_never_receive_credential_bearing_tasks() {
         assert_eq!(claimed[0].lease_secs, Some(120), "{backend}: mobile lease");
     }
 }
+
+fn caps_of(kind: RuntimeKind, handler: &str) -> RuntimeCapabilities {
+    let mut caps = browser_caps(RuntimeId::new(), handler);
+    caps.kind = kind;
+    caps
+}
+
+#[tokio::test]
+async fn placed_step_dispatches_remotely_even_when_handler_is_local() {
+    for (backend, storage) in backends().await {
+        // `noop` is registered in-process; placement on mobile wins.
+        let (_, inst) = start(
+            &storage,
+            vec![common::mk_step_with_params(
+                "on-phone",
+                "noop",
+                json!({"$runtime": {"runtime_kinds": ["mobile"]}, "note": "x"}),
+            )],
+        )
+        .await;
+        let task = only_task(&storage, inst.id).await;
+        assert_eq!(
+            task.requirements.runtime_kinds,
+            [RuntimeKind::Mobile],
+            "{backend}"
+        );
+        assert!(task.params.get("$runtime").is_none(), "{backend}: stripped");
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        assert_eq!(
+            common::node_state(&tree, "on-phone"),
+            NodeState::Waiting,
+            "{backend}"
+        );
+
+        // Only a mobile node may claim it; a server worker never sees it.
+        let server = caps_of(RuntimeKind::Server, "noop");
+        assert!(
+            storage
+                .claim_worker_tasks_matching(
+                    "noop",
+                    &server.runtime_id.to_string(),
+                    None,
+                    None,
+                    &server,
+                    10
+                )
+                .await
+                .unwrap()
+                .iter()
+                .all(|t| t.id != task.id),
+            "{backend}"
+        );
+        let phone = caps_of(RuntimeKind::Mobile, "noop");
+        let claimed = storage
+            .claim_worker_tasks_matching(
+                "noop",
+                &phone.runtime_id.to_string(),
+                None,
+                None,
+                &phone,
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(claimed.iter().any(|t| t.id == task.id), "{backend}");
+    }
+}
+
+#[tokio::test]
+async fn targeted_task_is_a_per_node_mailbox() {
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.capture");
+        let device = caps_of(RuntimeKind::Mobile, &handler);
+        let (_, inst) = start(
+            &storage,
+            vec![common::mk_step_with_params(
+                "capture",
+                &handler,
+                json!({"$runtime": {"runtime_id": device.runtime_id}}),
+            )],
+        )
+        .await;
+        let task = only_task(&storage, inst.id).await;
+        assert_eq!(
+            task.requirements.runtime_id,
+            Some(device.runtime_id),
+            "{backend}"
+        );
+
+        let other = caps_of(RuntimeKind::Mobile, &handler);
+        assert!(
+            storage
+                .claim_worker_tasks_matching(
+                    &handler,
+                    &other.runtime_id.to_string(),
+                    None,
+                    None,
+                    &other,
+                    10
+                )
+                .await
+                .unwrap()
+                .is_empty(),
+            "{backend}: another device cannot take the mailbox task"
+        );
+        // Pending mailbox tasks are never touched by the lease reaper.
+        reap_worker_tasks(storage.as_ref(), Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_worker_task(task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkerTaskState::Pending,
+            "{backend}"
+        );
+        let claimed = storage
+            .claim_worker_tasks_matching(
+                &handler,
+                &device.runtime_id.to_string(),
+                None,
+                None,
+                &device,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1, "{backend}: the target device polls it");
+    }
+}
+
+#[tokio::test]
+async fn locality_denial_at_dispatch_fails_permanently_with_recorded_decision() {
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.pii");
+        let (_, inst) = start(
+            &storage,
+            vec![common::mk_step_with_params(
+                "pii",
+                &handler,
+                json!({"$runtime": {
+                    "runtime_kinds": ["browser"],
+                    "classification": "confidential",
+                    "policy": {"version": 1, "rules": [{
+                        "classification": "confidential",
+                        "allowed_runtime_kinds": ["mobile"],
+                        "minimum_trust": null, "require_offline": null,
+                        "require_hardware": null, "minimum_battery_percent": null,
+                        "maximum_cost_microunits": null, "maximum_latency_ms": null
+                    }]}
+                }}),
+            )],
+        )
+        .await;
+        assert!(tasks_of(&storage, inst.id).await.is_empty(), "{backend}");
+        let output = storage
+            .get_block_output(inst.id, &orch8_types::ids::BlockId::new("pii"))
+            .await
+            .unwrap()
+            .unwrap();
+        let message = output.output["message"].as_str().unwrap().to_owned();
+        assert!(
+            message.contains("RUNTIME_KIND_DENIED"),
+            "{backend}: {message}"
+        );
+        let decision_id: uuid::Uuid = message.rsplit("decision ").next().unwrap().parse().unwrap();
+        let decision = storage
+            .get_placement_decision(
+                &inst.tenant_id,
+                orch8_types::continuity::PlacementDecisionId::from_uuid(decision_id),
+            )
+            .await
+            .unwrap()
+            .expect("placement decision recorded");
+        assert!(decision.selected_runtime_id.is_none(), "{backend}");
+        assert_eq!(
+            decision.classification,
+            orch8_types::continuity::DataClassification::Confidential
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_placement_is_rejected_at_dispatch() {
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.bad");
+        let (_, inst) = start(
+            &storage,
+            vec![common::mk_step_with_params(
+                "bad",
+                &handler,
+                json!({"$runtime": {"runtime_kinds": ["mobile"], "hardware": [""]}}),
+            )],
+        )
+        .await;
+        assert!(tasks_of(&storage, inst.id).await.is_empty(), "{backend}");
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        assert_eq!(
+            common::node_state(&tree, "bad"),
+            NodeState::Failed,
+            "{backend}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn release_before_start_requeues_and_after_start_goes_unknown() {
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.upload");
+        let (_, inst) = start(&storage, vec![mk_step_with_retry("upload", &handler, 3)]).await;
+        let task = only_task(&storage, inst.id).await;
+        let claimed = claim(&storage, &task).await;
+        let claim_proof = orch8_types::worker::WorkerClaim::new("worker-a", claimed.claim_epoch);
+
+        // Not started: straight back to pending, receipt untouched.
+        assert!(
+            orch8_engine::worker_lease::release_worker_task(
+                storage.as_ref(),
+                &inst,
+                &claimed,
+                &claim_proof,
+                false
+            )
+            .await
+            .unwrap(),
+            "{backend}"
+        );
+        let after = storage.get_worker_task(task.id).await.unwrap().unwrap();
+        assert_eq!(after.state, WorkerTaskState::Pending, "{backend}");
+        assert_eq!(
+            receipt_state(&storage, &task).await,
+            EffectState::Dispatched
+        );
+        // A stale release is refused.
+        assert!(
+            !orch8_engine::worker_lease::release_worker_task(
+                storage.as_ref(),
+                &inst,
+                &claimed,
+                &claim_proof,
+                false
+            )
+            .await
+            .unwrap(),
+            "{backend}"
+        );
+
+        // Started: side effect may have happened → unknown + next attempt.
+        let reclaimed = claim(&storage, &after).await;
+        let proof = orch8_types::worker::WorkerClaim::new("worker-a", reclaimed.claim_epoch);
+        assert!(
+            orch8_engine::worker_lease::release_worker_task(
+                storage.as_ref(),
+                &inst,
+                &reclaimed,
+                &proof,
+                true
+            )
+            .await
+            .unwrap(),
+            "{backend}"
+        );
+        assert_eq!(receipt_state(&storage, &task).await, EffectState::Unknown);
+        let retry = only_task(&storage, inst.id).await;
+        assert_eq!(retry.attempt, task.attempt + 1, "{backend}");
+    }
+}

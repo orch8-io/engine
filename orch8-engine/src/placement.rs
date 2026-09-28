@@ -33,6 +33,9 @@ pub enum RequirementsValidationError {
 pub fn validate_requirements(
     requirements: &CapsuleRequirements,
 ) -> Result<(), RequirementsValidationError> {
+    if requirements.runtime_kinds.len() > MAX_REQUIREMENT_FACTS_PER_KIND {
+        return Err(RequirementsValidationError::TooManyFacts);
+    }
     let fact_groups = [
         requirements.handlers.as_slice(),
         requirements.plugins.as_slice(),
@@ -200,6 +203,120 @@ pub fn validate_policy(policy: &LocalityPolicy) -> Result<(), PolicyValidationEr
 }
 
 pub use orch8_types::locality::{PolicyEvaluation, evaluate_locality};
+
+/// Dispatch-time placement evaluation of a placed step (`$runtime` with a
+/// target runtime, placed kinds, or a locality policy).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchPlacement {
+    /// Explainable decision over the currently registered candidates; saved
+    /// as placement evidence whether or not dispatch proceeds.
+    pub decision: PlacementDecision,
+    /// Finding codes that make the placement impossible; empty = dispatch.
+    pub denial_codes: Vec<String>,
+}
+
+/// Evaluate a placed step at dispatch. Only *definitive* policy denials stop
+/// dispatch: the policy contradicts the placement itself (targeted runtime id
+/// or placed kinds outside the rule), the classification has no rule and can
+/// therefore never be satisfied, or the registered target runtime is denied
+/// by locality. Anything merely unknown (target not registered yet, missing
+/// region facts) dispatches, because every claimant is re-checked against the
+/// same policy atomically at claim time (fail closed).
+#[must_use]
+pub fn evaluate_dispatch_placement(
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
+    epoch: ExecutionEpoch,
+    requirements: &CapsuleRequirements,
+    candidates: &[RuntimeCapabilities],
+    now: DateTime<Utc>,
+) -> DispatchPlacement {
+    let classification = requirements.classification.unwrap_or_default();
+    let policy = requirements.policy.as_ref();
+    let pool: Vec<RuntimeCapabilities> = match requirements.runtime_id {
+        Some(target) => candidates
+            .iter()
+            .filter(|runtime| runtime.runtime_id == target)
+            .cloned()
+            .collect(),
+        None => candidates.to_vec(),
+    };
+    let mut decision = choose_runtime(
+        tenant_id,
+        continuity_id,
+        epoch,
+        requirements,
+        policy,
+        classification,
+        &pool,
+        None,
+        now,
+    );
+    let mut denial_codes = static_policy_denials(requirements, classification);
+    if denial_codes.is_empty()
+        && requirements.has_locality_policy()
+        && let Some(target) = pool.first().filter(|_| requirements.runtime_id.is_some())
+    {
+        let locality = evaluate_locality(policy, classification, target);
+        if locality.outcome == PolicyOutcome::Deny {
+            denial_codes = locality
+                .finding_codes
+                .into_iter()
+                .filter(|code| code.ends_with("_DENIED") || code.ends_with("_MISSING"))
+                .collect();
+        }
+    }
+    denial_codes.sort();
+    denial_codes.dedup();
+    if !denial_codes.is_empty() {
+        decision.selected_runtime_id = None;
+    }
+    DispatchPlacement {
+        decision,
+        denial_codes,
+    }
+}
+
+fn static_policy_denials(
+    requirements: &CapsuleRequirements,
+    classification: DataClassification,
+) -> Vec<String> {
+    if !requirements.has_locality_policy() {
+        return Vec::new();
+    }
+    let rules: Vec<_> = requirements
+        .policy
+        .iter()
+        .flat_map(|policy| policy.rules.iter())
+        .filter(|rule| rule.classification == classification)
+        .collect();
+    if rules.is_empty() {
+        return match classification {
+            DataClassification::Confidential => vec!["CONFIDENTIAL_POLICY_MISSING".into()],
+            DataClassification::Restricted => vec!["RESTRICTED_POLICY_MISSING".into()],
+            DataClassification::Public | DataClassification::Internal => Vec::new(),
+        };
+    }
+    let mut codes = Vec::new();
+    for rule in rules {
+        if let Some(target) = requirements.runtime_id
+            && !rule.allowed_runtime_ids.is_empty()
+            && !rule.allowed_runtime_ids.contains(&target)
+        {
+            codes.push("RUNTIME_ID_DENIED".into());
+        }
+        if !requirements.runtime_kinds.is_empty()
+            && !rule.allowed_runtime_kinds.is_empty()
+            && !requirements
+                .runtime_kinds
+                .iter()
+                .any(|kind| rule.allowed_runtime_kinds.contains(kind))
+        {
+            codes.push("RUNTIME_KIND_DENIED".into());
+        }
+    }
+    codes
+}
 
 fn trust_score(trust: RuntimeTrustLevel) -> i64 {
     match trust {

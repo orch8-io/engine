@@ -119,6 +119,25 @@ fn assess_declared_requirements(
             summary: "runtime is not in any allowed region".into(),
         });
     }
+    if !requirements.runtime_kinds.is_empty()
+        && !requirements.runtime_kinds.contains(&capabilities.kind)
+    {
+        findings.push(CompatibilityFinding {
+            code: "RUNTIME_KIND_NOT_PLACED",
+            status: CompatibilityStatus::Fail,
+            summary: format!("runtime kind {:?} is not a placed kind", capabilities.kind),
+        });
+    }
+    if requirements
+        .runtime_id
+        .is_some_and(|target| target != capabilities.runtime_id)
+    {
+        findings.push(CompatibilityFinding {
+            code: "RUNTIME_NOT_TARGETED",
+            status: CompatibilityStatus::Fail,
+            summary: "the step is targeted at another runtime".into(),
+        });
+    }
     if let Some(minimum) = requirements.minimum_trust
         && capabilities.trust < minimum
     {

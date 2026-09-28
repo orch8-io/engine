@@ -25,10 +25,26 @@ const MAX_WORKER_ARTIFACT_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(serde::Serialize, ToSchema)]
 pub(crate) struct PollTasksResponse {
-    tasks: Vec<orch8_types::worker::WorkerTask>,
+    tasks: Vec<ClaimedWorkerTask>,
+    /// Server-wide default lease; each task's own `lease_secs` wins.
     lease_secs: u64,
     heartbeat_interval_secs: u64,
     poll_after_ms: u64,
+}
+
+/// A claimed task as delivered to a runtime node: the task (with its
+/// `effect_id`, `continuity_epoch`, and effective `lease_secs`) plus its
+/// placement echoed at the top level for debugging.
+#[derive(serde::Serialize, ToSchema)]
+pub(crate) struct ClaimedWorkerTask {
+    #[serde(flatten)]
+    task: orch8_types::worker::WorkerTask,
+    /// `$runtime.runtime_id`: the only node allowed to claim (mailbox).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_runtime_id: Option<orch8_types::continuity::RuntimeId>,
+    /// `$runtime.runtime_kinds`: kinds allowed to claim (empty = any).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    runtime_kinds: Vec<orch8_types::continuity::RuntimeKind>,
 }
 
 /// Shape claimed tasks for the wire: every task reports its effective lease,
@@ -51,7 +67,14 @@ fn prepare_claimed_tasks(
 }
 
 fn poll_response(state: &AppState, tasks: Vec<orch8_types::worker::WorkerTask>) -> Response {
-    let tasks = prepare_claimed_tasks(state, tasks);
+    let tasks: Vec<_> = prepare_claimed_tasks(state, tasks)
+        .into_iter()
+        .map(|task| ClaimedWorkerTask {
+            target_runtime_id: task.requirements.runtime_id,
+            runtime_kinds: task.requirements.runtime_kinds.clone(),
+            task,
+        })
+        .collect();
     let poll_after_ms = if tasks.is_empty() { 1_000 } else { 0 };
     let mut response = Json(PollTasksResponse {
         tasks,
@@ -84,6 +107,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/workers/tasks/{id}/fail", post(fail_task))
         .route("/workers/tasks/{id}/heartbeat", post(heartbeat_task))
+        .route("/workers/tasks/{id}/release", post(release_task))
         .route("/workers/commands", post(enqueue_command))
         .route("/workers/commands/{id}", axum::routing::delete(ack_command))
         .route("/workers/{worker_id}/commands", get(list_commands))
@@ -1387,10 +1411,15 @@ pub(crate) async fn fail_task(
         &format!("worker_task {task_id}"),
     )?;
     let claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
-    if pre_task.state != WorkerTaskState::Claimed
-        || pre_task.worker_id.as_deref() != Some(claim.worker_id.as_str())
-        || pre_task.claim_epoch != claim.claim_epoch
-    {
+    let same_lease = pre_task.worker_id.as_deref() == Some(claim.worker_id.as_str())
+        && pre_task.claim_epoch == claim.claim_epoch;
+    // Idempotent re-report (e.g. a device resending recorded outcomes after
+    // a restart): the same lease holder failing an already-failed task is a
+    // no-op success, mirroring the completion retry path.
+    if pre_task.state == WorkerTaskState::Failed && same_lease {
+        return Ok(StatusCode::OK);
+    }
+    if pre_task.state != WorkerTaskState::Claimed || !same_lease {
         record_stale_rejection(&state, task_id, &claim, "fail rejected: lease changed").await;
         return Err(ApiError::Conflict("worker task lease changed".into()));
     }
@@ -1841,6 +1870,83 @@ pub(crate) async fn heartbeat_task(
     Ok(Json(
         serde_json::json!({ "checkpoint_seq": checkpoint_seq }),
     ))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ReleaseRequest {
+    worker_id: String,
+    claim_epoch: u64,
+    /// Whether the handler already started. `false`: the task goes straight
+    /// back to `pending` and its effect receipt is untouched. `true`: treated
+    /// like a lease expiry after start (a side-effecting step's receipt
+    /// becomes `unknown` and the step's retry policy decides).
+    #[serde(default)]
+    started: bool,
+}
+
+/// Voluntarily give a claimed task back (tab closing, app backgrounding).
+/// Safe to call from `fetch(url, {keepalive: true})` during `pagehide`.
+#[utoipa::path(post, path = "/workers/tasks/{id}/release", tag = "workers",
+    params(("id" = Uuid, Path, description = "Worker task ID")),
+    request_body = ReleaseRequest,
+    responses(
+        (status = 204, description = "Task released"),
+        (status = 404, description = "Worker task not found"),
+        (status = 409, description = "Caller no longer holds this lease (or ownership changed)"),
+    )
+)]
+pub(crate) async fn release_task(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(task_id): Path<Uuid>,
+    Json(req): Json<ReleaseRequest>,
+) -> Result<StatusCode, ApiError> {
+    let task = state
+        .storage
+        .get_worker_task(task_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?
+        .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
+    let inst = state
+        .storage
+        .get_instance(task.instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {}", task.instance_id)))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &inst.tenant_id,
+        &format!("worker_task {task_id}"),
+    )?;
+    let claim = WorkerClaim::new(req.worker_id, req.claim_epoch);
+    if task.state != WorkerTaskState::Claimed
+        || task.worker_id.as_deref() != Some(claim.worker_id.as_str())
+        || task.claim_epoch != claim.claim_epoch
+    {
+        record_stale_rejection(&state, task_id, &claim, "release rejected: lease changed").await;
+        return Err(ApiError::Conflict("worker task lease changed".into()));
+    }
+    enforce_ownership_fence(&state, &inst.tenant_id, &task, &claim, "release").await?;
+    let released = orch8_engine::worker_lease::release_worker_task(
+        state.storage.as_ref(),
+        &inst,
+        &task,
+        &claim,
+        req.started,
+    )
+    .await
+    .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    if !released {
+        record_stale_rejection(
+            &state,
+            task_id,
+            &claim,
+            "release rejected: lease changed during commit",
+        )
+        .await;
+        return Err(ApiError::Conflict("worker task lease changed".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

@@ -746,3 +746,71 @@ async fn browser_claimant_receives_filtered_context_and_per_task_lease() {
         .unwrap();
     assert_eq!(stored.context["config"]["stripe"], "sk_live_x");
 }
+
+#[tokio::test]
+async fn release_endpoint_gives_the_task_back_and_fences_stale_callers() {
+    let server = spawn_test_server_with_artifacts().await;
+    let client = Client::new();
+    let tenant = "release-tenant";
+    let task = seed_claimed_task(&server, &client, tenant, "tab-1", 3).await;
+    let url = format!("{}/workers/tasks/{}/release", server.v1_url(), task.id);
+
+    let wrong = client
+        .post(&url)
+        .header("X-Tenant-Id", tenant)
+        .json(&json!({"worker_id": "tab-1", "claim_epoch": 2, "started": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        wrong.status(),
+        StatusCode::CONFLICT,
+        "stale claim is 409, not 404"
+    );
+
+    let released = client
+        .post(&url)
+        .header("X-Tenant-Id", tenant)
+        .json(&json!({"worker_id": "tab-1", "claim_epoch": 3, "started": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), StatusCode::NO_CONTENT);
+    let stored = server
+        .storage
+        .get_worker_task(task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, WorkerTaskState::Pending);
+    assert!(stored.worker_id.is_none());
+
+    let again = client
+        .post(&url)
+        .header("X-Tenant-Id", tenant)
+        .json(&json!({"worker_id": "tab-1", "claim_epoch": 3, "started": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn repeated_fail_by_the_same_lease_is_idempotent() {
+    let server = spawn_test_server_with_artifacts().await;
+    let client = Client::new();
+    let tenant = "idempotent-tenant";
+    let task = seed_claimed_task(&server, &client, tenant, "phone-1", 1).await;
+    let url = format!("{}/workers/tasks/{}/fail", server.v1_url(), task.id);
+    let body = json!({"worker_id": "phone-1", "claim_epoch": 1, "message": "no camera"});
+    for _ in 0..2 {
+        let response = client
+            .post(&url)
+            .header("X-Tenant-Id", tenant)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
