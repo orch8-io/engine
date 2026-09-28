@@ -314,6 +314,11 @@ pub async fn register_wait_before_park(
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
 ) {
+    if step_def.handler == crate::federation::FEDERATE_HANDLER {
+        // Same gate contract: persist the outbound call before parking.
+        crate::federation::register_call_before_park(storage, instance, step_def).await;
+        return;
+    }
     if step_def.handler != "wait_for_event" {
         return;
     }

@@ -1394,6 +1394,7 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "blob_put",
     "blob_get",
     "wait_for_event",
+    "federate",
     "jev",
     "email",
     "notify",
