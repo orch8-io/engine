@@ -1,0 +1,11 @@
+# Give Ollama the host's NVIDIA GPUs (requires the NVIDIA Container Toolkit).
+# Without this override Ollama runs on CPU, which is fine for a smoke test.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
