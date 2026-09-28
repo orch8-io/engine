@@ -7,7 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 orch8-types = { path = "../orch8-types" }
-orch8-push = { path = "../orch8-push" }
+# Only the outbox/governance traits; APNs/FCM senders stay in the server.
+orch8-push = { path = "../orch8-push", default-features = false }
 sqlx.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
@@ -16,22 +17,29 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
-object_store.workspace = true
+object_store = { workspace = true, optional = true }
 futures.workspace = true
 bytes.workspace = true
 moka.workspace = true
 rand.workspace = true
 # Already in the graph via sqlx; needed here for `tokio::spawn` of the
 # fire-and-forget `last_used_at` touch on the auth hot path.
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 zstd = { version = "0.14", optional = true }
 
 [features]
-default = ["compression"]
+# Server builds keep every backend. `orch8-mobile` (and `orch8-engine`, which
+# re-enables what it needs) use `default-features = false` so the on-device
+# library links only SQLite.
+default = ["compression", "postgres", "artifacts"]
 compression = ["dep:zstd"]
+# Postgres backend (`postgres` module, tenant partitioning) + sqlx TLS.
+postgres = ["sqlx/postgres", "sqlx/runtime-tokio-rustls", "artifacts"]
+# Object-store backed artifact store (local FS / S3 / in-memory).
+artifacts = ["dep:object_store"]
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 criterion.workspace = true
 
 [[bench]]

@@ -9,6 +9,9 @@ import io.orch8.kmp.FlushResult
 import io.orch8.kmp.InstanceSnapshot
 import io.orch8.kmp.InstanceState
 import io.orch8.kmp.InstanceSummary
+import io.orch8.kmp.NodeCapabilities
+import io.orch8.kmp.NodeConnectivity
+import io.orch8.kmp.NodeRegistration
 import io.orch8.kmp.Orch8ErrorKind
 import io.orch8.kmp.Orch8Exception
 import io.orch8.kmp.Orch8HandlerException
@@ -17,6 +20,9 @@ import io.orch8.kmp.PowerState
 import io.orch8.kmp.SequenceInfo
 import io.orch8.kmp.SyncResult
 import io.orch8.kmp.TickResult
+import io.orch8.kmp.WorkerOptions
+import io.orch8.kmp.WorkerStats
+import io.orch8.kmp.WorkerWindowResult
 import io.orch8.kmp.bridge.ORCH8_BRIDGE_PROTOCOL
 import io.orch8.kmp.bridge.Orch8BridgeCallbacks
 import io.orch8.kmp.bridge.Orch8JsonBridge
@@ -35,6 +41,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.add
 
 /** Encodes/decodes the bridge envelope. Pure; shared by backend and callbacks. */
 internal object BridgeCodec {
@@ -178,6 +186,57 @@ internal object BridgeCodec {
 
     fun flush(v: JsonElement): FlushResult = v.obj("flushTelemetry").let {
         FlushResult(sent = it.long("flushTelemetry", "sent"), dropped = it.long("flushTelemetry", "dropped"))
+    }
+
+    fun capabilitiesJson(c: NodeCapabilities): JsonObject = buildJsonObject {
+        putJsonArray("handlers") { c.handlers.forEach { add(it) } }
+        putJsonArray("regions") { c.regions.forEach { add(it) } }
+        putJsonArray("hardware") { c.hardware.forEach { add(it) } }
+        putJsonArray("plugins") { c.plugins.forEach { add(it) } }
+        putJsonArray("credentials") { c.credentials.forEach { add(it) } }
+        put("offlineCapable", c.offlineCapable)
+        put("connectivity", c.connectivity?.wire)
+        put("batteryPercent", c.batteryPercent)
+        put("platform", c.platform)
+        put("pushToken", c.pushToken)
+        put("appVersion", c.appVersion)
+        put("apiBaseUrl", c.apiBaseUrl)
+        put("capsuleSigningPublicKey", c.capsuleSigningPublicKey)
+    }
+
+    fun registration(v: JsonElement): NodeRegistration = v.obj("registerNode").let {
+        val m = "registerNode"
+        NodeRegistration(
+            runtimeId = it.str(m, "runtimeId"),
+            deviceId = it.str(m, "deviceId"),
+            handlers = (it["handlers"] as? JsonArray ?: throw malformed(m, "missing array 'handlers'"))
+                .map { h -> (h as? JsonPrimitive)?.contentOrNull ?: throw malformed(m, "non-string handler") },
+            expiresAt = it.str(m, "expiresAt"),
+        )
+    }
+
+    fun workerWindow(v: JsonElement): WorkerWindowResult = v.obj("runWorkerWindow").let {
+        val m = "runWorkerWindow"
+        WorkerWindowResult(
+            claimed = it.long(m, "claimed"),
+            completed = it.long(m, "completed"),
+            failed = it.long(m, "failed"),
+            stillRunning = it.int(m, "stillRunning"),
+            budgetExhausted = it.bool(m, "budgetExhausted"),
+        )
+    }
+
+    fun workerStats(v: JsonElement): WorkerStats = v.obj("workerStats").let {
+        val m = "workerStats"
+        WorkerStats(
+            running = it.bool(m, "running"),
+            inFlight = it.int(m, "inFlight"),
+            claimed = it.long(m, "claimed"),
+            completed = it.long(m, "completed"),
+            failed = it.long(m, "failed"),
+            released = it.long(m, "released"),
+            lost = it.long(m, "lost"),
+        )
     }
 
     fun continuityImport(v: JsonElement): ContinuityImportResult = v.obj("importContinuityCapsule").let {
@@ -369,6 +428,49 @@ internal class JsonBridgeBackend private constructor(
             put("destinationRuntimeId", destinationRuntimeId)
             put("destinationInstanceId", destinationInstanceId)
         }
+    }
+
+    override fun nodeRuntimeId(): String =
+        (call("nodeRuntimeId") as? JsonPrimitive)?.contentOrNull
+            ?: throw Orch8Exception(Orch8ErrorKind.ENGINE, "bridge nodeRuntimeId returned no id")
+
+    override fun registerNode(capabilities: NodeCapabilities): NodeRegistration =
+        BridgeCodec.registration(call("registerNode") { put("capabilities", BridgeCodec.capabilitiesJson(capabilities)) })
+
+    override fun updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: Int?) {
+        call("updateNodeStatus") {
+            put("connectivity", connectivity?.wire)
+            put("batteryPercent", batteryPercent)
+        }
+    }
+
+    override fun unregisterNode() {
+        call("unregisterNode")
+    }
+
+    override fun startWorker(options: WorkerOptions) {
+        call("startWorker") {
+            put("maxConcurrentTasks", options.maxConcurrentTasks)
+            put("idlePollIntervalMs", options.idlePollInterval.inWholeMilliseconds)
+            put("version", options.version)
+        }
+    }
+
+    override fun stopWorker() {
+        call("stopWorker")
+    }
+
+    override fun runWorkerWindow(timeBudgetMs: Long): WorkerWindowResult =
+        BridgeCodec.workerWindow(call("runWorkerWindow") { put("timeBudgetMs", timeBudgetMs) })
+
+    override fun workerStats(): WorkerStats = BridgeCodec.workerStats(call("workerStats"))
+
+    override fun onPushWake(envelopeJson: String): Boolean =
+        (call("onPushWake") { put("envelopeJson", envelopeJson) } as? JsonPrimitive)?.booleanOrNull
+            ?: throw Orch8Exception(Orch8ErrorKind.ENGINE, "bridge onPushWake returned no boolean")
+
+    override fun enableBuiltin(name: String) {
+        call("enableBuiltin") { put("name", name) }
     }
 
     companion object {

@@ -102,6 +102,14 @@ public struct DistributedWorkerTask: Codable, Equatable, Sendable {
     public let params: Orch8JSON
     public let context: Orch8JSON
     public let claimEpoch: UInt64
+    /// Deterministic idempotency key of the step's effect receipt. Pass it to
+    /// downstream APIs (e.g. an `Idempotency-Key` header). `nil` on servers
+    /// that predate the distributed-execution contract.
+    public let effectId: String?
+    /// Owner epoch at dispatch (fencing), when the server provides it.
+    public let continuityEpoch: UInt64?
+    /// Lease the server expects between heartbeats, when provided.
+    public let leaseSecs: UInt32?
 
     enum CodingKeys: String, CodingKey {
         case id, params, context
@@ -110,6 +118,9 @@ public struct DistributedWorkerTask: Codable, Equatable, Sendable {
         case handlerName = "handler_name"
         case queueName = "queue_name"
         case claimEpoch = "claim_epoch"
+        case effectId = "effect_id"
+        case continuityEpoch = "continuity_epoch"
+        case leaseSecs = "lease_secs"
     }
 }
 
@@ -178,6 +189,41 @@ private struct DistributedPollResponse: Decodable {
     }
 }
 
+private struct DistributedLeaseRequest: Encodable {
+    let workerId: String
+    let claimEpoch: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case workerId = "worker_id"
+        case claimEpoch = "claim_epoch"
+    }
+}
+
+private struct DistributedFailRequest: Encodable {
+    let workerId: String
+    let claimEpoch: UInt64
+    let message: String
+    let retryable: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case message, retryable
+        case workerId = "worker_id"
+        case claimEpoch = "claim_epoch"
+    }
+}
+
+private struct DistributedReleaseRequest: Encodable {
+    let workerId: String
+    let claimEpoch: UInt64
+    let started: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case started
+        case workerId = "worker_id"
+        case claimEpoch = "claim_epoch"
+    }
+}
+
 private struct DistributedCompleteRequest: Encodable {
     let workerId: String
     let claimEpoch: UInt64
@@ -190,8 +236,15 @@ private struct DistributedCompleteRequest: Encodable {
     }
 }
 
-/// HTTP client for capability-aware task pickup, resumable file upload, and
-/// completion. Keep a stable runtime UUID and upload UUID across app launches.
+/// Low-level HTTP client for the worker lease protocol: capability-aware
+/// poll, heartbeat, resumable file upload, complete, fail, and release. Keep a
+/// stable runtime UUID and upload UUID across app launches.
+///
+/// Most apps should not drive this by hand: `Orch8RuntimeNode` (backed by the
+/// Rust worker loop in `MobileEngine.registerNode` / `startWorker`) polls,
+/// heartbeats per lease, journals claims so an OS kill releases them on the
+/// next launch, and wakes on push. Use this client when a task needs an
+/// artifact upload or other custom settlement.
 public actor DistributedWorkerClient {
     private let baseURL: URL
     private let tenantId: String?
@@ -277,6 +330,68 @@ public actor DistributedWorkerClient {
             method: "POST",
             body: encoder.encode(body)
         )
+    }
+
+    /// Extend the lease. Call at least every `leaseSecs / 3` seconds while the
+    /// task runs; `DistributedWorkerError.server(status: 404 or 409, …)` means
+    /// the lease was lost and the task must be abandoned.
+    public func heartbeat(task: DistributedWorkerTask, runtimeId: UUID) async throws {
+        let body = DistributedLeaseRequest(
+            workerId: runtimeId.uuidString.lowercased(),
+            claimEpoch: task.claimEpoch
+        )
+        _ = try await send(
+            path: "workers/tasks/\(task.id.uuidString)/heartbeat",
+            method: "POST",
+            body: encoder.encode(body)
+        )
+    }
+
+    /// Report a failed attempt. `retryable: true` lets the server retry the
+    /// step under its retry policy.
+    public func fail(
+        task: DistributedWorkerTask,
+        runtimeId: UUID,
+        message: String,
+        retryable: Bool
+    ) async throws {
+        let body = DistributedFailRequest(
+            workerId: runtimeId.uuidString.lowercased(),
+            claimEpoch: task.claimEpoch,
+            message: message,
+            retryable: retryable
+        )
+        _ = try await send(
+            path: "workers/tasks/\(task.id.uuidString)/fail",
+            method: "POST",
+            body: encoder.encode(body)
+        )
+    }
+
+    /// Give the task back (app backgrounding, user cancelled). `started:
+    /// false` returns it to the queue untouched; `started: true` tells the
+    /// server the effect may have happened. Servers without the release
+    /// endpoint (404/405) get a retryable `fail` instead.
+    public func release(task: DistributedWorkerTask, runtimeId: UUID, started: Bool) async throws {
+        let body = DistributedReleaseRequest(
+            workerId: runtimeId.uuidString.lowercased(),
+            claimEpoch: task.claimEpoch,
+            started: started
+        )
+        do {
+            _ = try await send(
+                path: "workers/tasks/\(task.id.uuidString)/release",
+                method: "POST",
+                body: encoder.encode(body)
+            )
+        } catch DistributedWorkerError.server(let status, _) where status == 404 || status == 405 {
+            try await fail(
+                task: task,
+                runtimeId: runtimeId,
+                message: started ? "mobile node stopped before finishing" : "released by mobile node",
+                retryable: true
+            )
+        }
     }
 
     private func url(_ path: String) -> URL {

@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -178,6 +180,72 @@ class Orch8Engine internal constructor(
 
     suspend fun activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) =
         offload { backend.activateContinuityCapsule(capsuleId, destinationRuntimeId, destinationInstanceId) }
+
+    // -- Runtime node / worker ---------------------------------------------
+    //
+    // Needs the engine release after 0.7.1. Handlers registered with
+    // [registerHandler] serve remote tasks; their input carries a reserved
+    // `__orch8` member, see [Orch8TaskContext.fromInput] (`effectId` is the
+    // idempotency key for downstream side effects).
+
+    /** Stable runtime UUID of this installation (the lease `worker_id`). */
+    suspend fun nodeRuntimeId(): String = offload { backend.nodeRuntimeId() }
+
+    /**
+     * Join the runtime mesh: registers the device and its capabilities with
+     * `EngineConfig.syncUrl` + `syncApiKey`, then re-advertises before the
+     * five-minute capability TTL. Safe to call on every launch.
+     */
+    suspend fun registerNode(capabilities: NodeCapabilities = NodeCapabilities()): NodeRegistration =
+        offload { backend.registerNode(capabilities) }
+
+    /** Push fresh liveness facts (battery 0..100, connectivity). */
+    suspend fun updateNodeStatus(connectivity: NodeConnectivity? = null, batteryPercent: Int? = null) {
+        require(batteryPercent == null || batteryPercent in 0..100) { "batteryPercent must be in 0..100" }
+        offload { backend.updateNodeStatus(connectivity, batteryPercent) }
+    }
+
+    /** Stop the worker, advertise `draining`, stop re-advertising. */
+    suspend fun unregisterNode() = offload { backend.unregisterNode() }
+
+    /**
+     * Start the Rust worker loop: polls as kind `mobile`, runs registered
+     * handlers, heartbeats per lease, completes / fails / releases tasks.
+     * Register handlers first.
+     */
+    suspend fun startWorker(options: WorkerOptions = WorkerOptions()) = offload { backend.startWorker(options) }
+
+    suspend fun stopWorker() = offload { backend.stopWorker() }
+
+    /**
+     * Claim and run remote tasks inside an OS-granted background window
+     * (BGTask, WorkManager, push-wake handler). Claims even while paused.
+     */
+    suspend fun runWorkerWindow(timeBudget: Duration = 25.seconds): WorkerWindowResult {
+        require(timeBudget.isPositive()) { "timeBudget must be greater than zero" }
+        return offload { backend.runWorkerWindow(timeBudget.inWholeMilliseconds.coerceAtLeast(1)) }
+    }
+
+    suspend fun workerStats(): WorkerStats = offload { backend.workerStats() }
+
+    /**
+     * Forward an id-only wake push (`{task_id?, runtime_id?, reason?}`); the
+     * worker polls immediately. Returns false when the push is addressed to
+     * another runtime.
+     */
+    fun onPushWake(envelopeJson: String): Boolean = backend.onPushWake(envelopeJson)
+
+    fun onPushWake(taskId: String? = null, runtimeId: String? = null, reason: String? = null): Boolean =
+        onPushWake(
+            buildJsonObject {
+                taskId?.let { put("task_id", it) }
+                runtimeId?.let { put("runtime_id", it) }
+                reason?.let { put("reason", it) }
+            }.toString(),
+        )
+
+    /** Enable an opt-in builtin handler (`http_request`) before [resume]. */
+    fun enableBuiltin(name: String) = backend.enableBuiltin(name)
 
     /**
      * Cold flow of distinct snapshots of one instance, polled every

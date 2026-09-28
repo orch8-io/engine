@@ -13,7 +13,7 @@ orch8-engine = { path = "../orch8-engine", default-features = false }
 orch8-publisher = { path = "../orch8-publisher" }
 orch8-storage = { path = "../orch8-storage" }
 orch8-types = { path = "../orch8-types" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,8 +25,10 @@ url = { workspace = true }
 ed25519-dalek = { workspace = true }
 
 [features]
-default = ["compression"]
+default = ["compression", "email"]
 compression = ["orch8-engine/compression"]
+# `email` builtin (SMTP/Resend/SES).
+email = ["orch8-engine/email"]
 nats = ["orch8-engine/nats"]
 kafka = ["orch8-engine/kafka"]
 sqs = ["orch8-engine/sqs"]

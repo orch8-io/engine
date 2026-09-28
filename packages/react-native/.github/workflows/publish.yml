@@ -22,6 +22,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typescript
+      - run: npm test
       - name: Read and validate package version
         id: package
         shell: bash

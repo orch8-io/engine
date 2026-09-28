@@ -70,6 +70,62 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
 
 ### Added
 
+- **Mobile runtime node** (`orch8-mobile`): `MobileEngine.registerNode`
+  registers the device and its runtime capabilities
+  (`/mobile/devices/register` + `/mobile/devices/{id}/runtime`) with a
+  persistent runtime UUID and re-advertises before the 5-minute capability
+  TTL. `startWorker` / `stopWorker` / `runWorkerWindow` run a Rust worker loop
+  (so Swift, Kotlin, RN and Expo share it) that polls as kind `mobile`, runs
+  app-native `StepHandler`s, heartbeats per `lease_secs`, and completes / fails
+  / releases tasks. Handlers receive `__orch8.effect_id` (plus task/instance
+  ids and `continuity_epoch`) for downstream idempotency. Claims are journaled
+  locally; after an OS kill the next launch releases unstarted/started tasks
+  (`started` flag) or re-delivers recorded outcomes, falling back to a
+  retryable `fail` on servers without `/release`. `pause()` stops claiming and
+  releases unstarted claims; critical battery stops claiming; `onPushWake`
+  handles id-only wake envelopes. New contract fields (`effect_id`,
+  `continuity_epoch`, `lease_secs`) are optional, so the SDK works against
+  older servers.
+- **Android AAR consumable from Kotlin 1.9**: `io.orch8:orch8-mobile` is now
+  compiled at Kotlin language/API level 1.9 (class metadata 1.9.0) and depends
+  on kotlinx-coroutines 1.8.1, so Expo SDK 52 and React Native 0.76 apps no
+  longer need `-Xskip-metadata-version-check` to call it. Verified by compiling
+  a consumer against the AAR's classes with `kotlinc` 1.9.24.
+- **Mobile builtins**: the embedded engine registers `noop`, `log`, `sleep`,
+  `fail`, `transform`, `assert`, `set_state`, `get_state`, `delete_state`,
+  `merge_state` by default; `http_request` is opt-in via `enableBuiltin`.
+  Host handlers with the same name take precedence.
+- **Swift**: `Orch8RuntimeNode` wraps the Rust node/worker API;
+  `DistributedWorkerClient` gains `heartbeat`, `fail`, `release` and decodes
+  `effectId` / `continuityEpoch` / `leaseSecs`.
+- **Automated mobile distribution**: after the GitHub release,
+  `release.yml` calls the new `mobile-distribution.yml`, which publishes the
+  release's XCFramework and AAR to every install channel: it commits, tags
+  and releases `orch8-io/orch8-mobile-swift` (Package.swift url + checksum,
+  CocoaPods source archive), runs `pod trunk push Orch8Mobile`, and adds
+  `io.orch8:orch8-mobile` (AAR + POM) and `io.orch8:orch8-kmp` to
+  `orch8-io/maven`. Each channel is gated on its own secret
+  (`ORCH8_MOBILE_SWIFT_TOKEN`, `COCOAPODS_TRUNK_TOKEN`, `ORCH8_MAVEN_TOKEN`)
+  and skips cleanly without it; every step is idempotent and never replaces a
+  published version. It can be re-run by hand with `workflow_dispatch` to
+  recover a partial release. See `docs/MOBILE_RELEASING.md`.
+- **Kotlin Multiplatform is publishable**: `packages/kmp` publishes its
+  Android and iOS variants to a file-based Maven repository
+  (`-Porch8.dist.repo=...`, task `publishAllPublicationsToOrch8DistRepository`),
+  resolves a just-published `orch8-mobile` from the same repository, and can
+  drop its test-only JVM target (`-Porch8.kmp.targets=android,ios`). Its
+  version is checked by `scripts/check-sdk-versions.sh`. The iOS bridge is
+  attached to each GitHub release as `Orch8KmpBridge-vX.Y.Z.swift` (+ `.sha256`),
+  and `packages/kmp/ios-bridge/install-bridge.sh` downloads, verifies and
+  installs it with the app's framework name.
+- **Mobile docs**: a "10-minute install" section in `docs/MOBILE_SDK.md` for
+  SwiftPM, CocoaPods, Gradle, React Native, Expo and KMP, each ending with a
+  check that the native engine resolved. It also documents that React Native
+  apps must declare Orch8's Maven repository in the app's own Gradle build.
+- `scripts/publish-maven-aar.py` (POM generated from
+  `packages/android/orch8-mobile/build.gradle.kts`; byte-identical to the
+  published `0.7.1` POM) and `scripts/sync-swift-distribution.sh`.
+
 - **Background jobs**: `POST/GET/DELETE /jobs` and keyset-paginated `GET /jobs`
   enqueue a handler without authoring a sequence (each job is an instance of a
   managed `_job.<handler>` sequence, so retries, DLQ and workers are unchanged);
@@ -155,11 +211,32 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
 
 ### Fixed
 
+- **Mobile crash recovery (P0)**: an app killed mid-step left its instance
+  `Running` forever unless a previous `pause()` had timed out. Engine
+  construction now reschedules every instance left `Running` by a dead
+  process; replay-safe steps finish exactly once and app-native effects stay
+  at-most-once (the effect guard fails the instance instead of replaying).
+
 - Render, the root `docker-compose.yml` and the Kubernetes manifest now set
   `ORCH8_RUN_MIGRATIONS=true`; a fresh Postgres previously never became ready.
 - Dashboard timeline and fork calls now match the engine's API.
 - Quick starts used `orch8 dev --context`, which the global fleet-context flag
   swallowed; they now use `--input`.
+
+### Changed
+
+- **Mobile binary size**: `orch8-mobile` no longer links sqlx-postgres,
+  object_store, lettre/SMTP, the APNs/FCM push senders (jsonwebtoken +
+  aws-lc JWT signing), or Tokio process/signal support. New cargo features —
+  `orch8-storage/{postgres,artifacts}`, `orch8-engine/email`,
+  `orch8-push/providers` — are on by default and enabled explicitly by the
+  server crates, whose dependency/feature sets are unchanged. The workspace
+  `tokio` and `sqlx` dependencies no longer carry `full` / `postgres`; crates
+  opt in. aarch64-apple-ios `mobile-release` static library: 266.2 MB →
+  212.8 MB from the gating alone (216.9 MB including the new worker loop);
+  the mobile dependency graph drops from 438 to 284 crates.
+- `orch8-mobile` no longer carries the unused `queue_step_delegation` outbox
+  path; remote steps run through the leased worker loop instead.
 
 ## [0.7.1] — 2026-07-30
 

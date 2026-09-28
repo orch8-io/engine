@@ -19,3 +19,29 @@ CocoaPods as a compatibility fallback. Android resolves the native AAR from
 Orch8's public, read-only Maven repository.
 
 Requires Dart 3.12+, Flutter 3.44+, iOS 16+, Xcode 16+, and Android API 24+.
+
+## Step handlers
+
+`registerHandler` runs your Dart handler for each step: the native engine
+thread waits for the returned future (up to `handlerTimeoutMs`). Throw
+`PermanentHandlerException` to fail without retry; any other error is
+retryable.
+
+## Runtime node (engine release after 0.7.1)
+
+The device can join the distributed-execution mesh as a runtime of kind
+`mobile` and run server-placed steps with its Dart handlers. These calls need
+the native engine release that follows `0.7.1`.
+
+```dart
+await orch8.initialize(Orch8Config(syncUrl: syncUrl, deviceId: deviceId, syncApiKey: apiKey));
+await orch8.registerHandler('scan_document', (step, input) async {
+  final task = Orch8TaskContext.fromInput(input); // null for local steps
+  return await scan(input, idempotencyKey: task?.effectId);
+});
+await orch8.registerNode(const NodeCapabilities(hardware: ['camera']));
+await orch8.startWorker();
+
+await orch8.onPushWake(message.data);                      // id-only wake hint
+await orch8.runWorkerWindow(const Duration(seconds: 25)); // background window
+```

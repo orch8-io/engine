@@ -134,6 +134,54 @@ final class DistributedWorkerClientTests: XCTestCase {
         }
     }
 
+    func testTaskDecodesDistributedContractFieldsWhenPresent() throws {
+        let task = try JSONDecoder().decode(DistributedWorkerTask.self, from: Data("""
+        {"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","instance_id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","block_id":"b","handler_name":"h","params":{},"context":{},"claim_epoch":3,"effect_id":"eff-1","continuity_epoch":4,"lease_secs":120}
+        """.utf8))
+        XCTAssertEqual(task.effectId, "eff-1")
+        XCTAssertEqual(task.continuityEpoch, 4)
+        XCTAssertEqual(task.leaseSecs, 120)
+        XCTAssertNil(fixtureTask(claimEpoch: 1).effectId)
+    }
+
+    func testHeartbeatFailAndReleaseCarryLeaseCoordinates() async throws {
+        let runtimeId = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let task = fixtureTask(claimEpoch: 5)
+        let client = try makeClient()
+
+        WorkerURLProtocol.respond(status: 200, json: "{}")
+        try await client.heartbeat(task: task, runtimeId: runtimeId)
+        var request = try XCTUnwrap(WorkerURLProtocol.lastRequest())
+        XCTAssertEqual(request.url?.path, "/api/v1/workers/tasks/\(task.id.uuidString)/heartbeat")
+        XCTAssertEqual(try jsonBody(request)["claim_epoch"] as? Int, 5)
+
+        WorkerURLProtocol.respond(status: 200, json: "{}")
+        try await client.fail(task: task, runtimeId: runtimeId, message: "busy", retryable: true)
+        request = try XCTUnwrap(WorkerURLProtocol.lastRequest())
+        XCTAssertEqual(request.url?.path, "/api/v1/workers/tasks/\(task.id.uuidString)/fail")
+        XCTAssertEqual(try jsonBody(request)["retryable"] as? Bool, true)
+        XCTAssertEqual(try jsonBody(request)["message"] as? String, "busy")
+
+        WorkerURLProtocol.respond(status: 200, json: "{}")
+        try await client.release(task: task, runtimeId: runtimeId, started: false)
+        request = try XCTUnwrap(WorkerURLProtocol.lastRequest())
+        XCTAssertEqual(request.url?.path, "/api/v1/workers/tasks/\(task.id.uuidString)/release")
+        XCTAssertEqual(try jsonBody(request)["started"] as? Bool, false)
+        XCTAssertEqual(try jsonBody(request)["worker_id"] as? String, runtimeId.uuidString.lowercased())
+    }
+
+    func testReleaseFallsBackToRetryableFailOnPreContractServers() async throws {
+        let task = fixtureTask(claimEpoch: 2)
+        WorkerURLProtocol.respondSequence([(404, ""), (200, "{}")])
+        let client = try makeClient()
+
+        try await client.release(task: task, runtimeId: UUID(), started: true)
+
+        let request = try XCTUnwrap(WorkerURLProtocol.lastRequest())
+        XCTAssertEqual(request.url?.path, "/api/v1/workers/tasks/\(task.id.uuidString)/fail")
+        XCTAssertEqual(try jsonBody(request)["retryable"] as? Bool, true)
+    }
+
     private func makeClient() throws -> DistributedWorkerClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [WorkerURLProtocol.self]
@@ -163,11 +211,25 @@ private final class WorkerURLProtocol: URLProtocol, @unchecked Sendable {
     private static var responseStatus = 200
     private static var responseData = Data()
     private static var capturedRequest: URLRequest?
+    private static var queued: [(Int, Data)] = []
 
     static func respond(status: Int, json: String) {
         lock.lock()
         responseStatus = status
         responseData = Data(json.utf8)
+        queued = []
+        capturedRequest = nil
+        lock.unlock()
+    }
+
+    /// Answer successive requests with these responses, then the last one.
+    static func respondSequence(_ responses: [(Int, String)]) {
+        lock.lock()
+        queued = responses.map { ($0.0, Data($0.1.utf8)) }
+        if let last = queued.last {
+            responseStatus = last.0
+            responseData = last.1
+        }
         capturedRequest = nil
         lock.unlock()
     }
@@ -188,8 +250,11 @@ private final class WorkerURLProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         Self.lock.lock()
         Self.capturedRequest = request
-        let status = Self.responseStatus
-        let data = Self.responseData
+        var status = Self.responseStatus
+        var data = Self.responseData
+        if !Self.queued.isEmpty {
+            (status, data) = Self.queued.removeFirst()
+        }
         Self.lock.unlock()
         let response = HTTPURLResponse(
             url: request.url!,

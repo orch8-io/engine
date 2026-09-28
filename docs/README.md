@@ -78,7 +78,8 @@ release notes.
 - `beta` [API entitlements and generated-client gate](API_ENTITLEMENTS_AND_CLIENT_GATE.md) — plan admission limits and OpenAPI compatibility enforcement.
 - `stable` [Configuration](CONFIGURATION.md) — TOML and environment variables.
 - `stable` [CLI productization commands](CLI_PRODUCTIZATION.md) — contexts, deploy gates, and bounded debugging.
-- `beta` [Mobile SDK](MOBILE_SDK.md) — iOS/Android API and build reference.
+- `beta` [Mobile SDK](MOBILE_SDK.md) — 10-minute install per platform (SPM, CocoaPods, Gradle, React Native, Expo, KMP), iOS/Android API and build reference.
+- `beta` [Mobile releasing](MOBILE_RELEASING.md) — how a release reaches SwiftPM, CocoaPods and Maven, required secrets, and recovery.
 - `beta` [Mobile protected fields and device tools](MOBILE_PRIVACY_AND_TOOLS.md) — capability descriptors, opaque handles, redaction, and field-key rotation.
 - `beta` [Typed dataflow](TYPED_DATAFLOW.md) — static reference checking and generated bindings.
 - `beta` [Storage backend conformance](STORAGE_BACKEND_CONFORMANCE.md) — reusable minimum behavioral suite for third-party backends.

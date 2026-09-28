@@ -23,12 +23,16 @@ rust-version = "1.97"
 license = "BUSL-1.1"
 
 [workspace.dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
+# Async runtime. No features here: server crates opt into "full", while the
+# on-device crates (orch8-mobile and the libraries it embeds) request only
+# what they use so the mobile binary does not carry process/signal support.
+tokio = { version = "1" }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "sqlite", "uuid", "chrono", "json", "migrate"] }
+# Postgres + TLS are opted into by `orch8-storage/postgres` (default on) and the
+# server-side crates, so the mobile build links only the SQLite driver.
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono", "json", "migrate"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

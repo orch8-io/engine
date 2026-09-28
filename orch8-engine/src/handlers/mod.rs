@@ -5,6 +5,7 @@ pub mod approval_links;
 pub mod blob;
 pub mod builtin;
 pub mod cancellation_scope;
+#[cfg(feature = "email")]
 pub mod email;
 pub mod emit_event;
 pub mod for_each;
@@ -165,6 +166,13 @@ impl HandlerRegistry {
     {
         self.handlers
             .insert(Arc::from(name), Box::new(move |ctx| Box::pin(handler(ctx))));
+    }
+
+    /// Keep only the real handlers whose name satisfies `keep`. Embedded
+    /// runtimes use this to trim [`builtin::register_builtins`] down to an
+    /// allow-listed subset.
+    pub fn retain_handlers(&mut self, keep: impl Fn(&str) -> bool) {
+        self.handlers.retain(|name, _| keep(name));
     }
 
     /// Look up a handler by name. Mocks take precedence over real handlers.

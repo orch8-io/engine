@@ -74,7 +74,7 @@ let id = try engine.start(sequenceName: "onboarding_v2",
                           input: "{\"user_id\": \"abc123\"}", dedupKey: "onboarding:abc123")
 ```
 
-Kotlin, React Native (`npm install react-native-orch8@0.7.1`), and Expo
+Kotlin, React Native (`npm install @orch8.io/react-native-orch8@0.7.1`), and Expo
 (`npx expo install @orch8.io/expo`) are also supported. Next: [Mobile SDK](docs/MOBILE_SDK.md)
 and [mobile-examples](https://github.com/orch8-io/mobile-examples).
 
