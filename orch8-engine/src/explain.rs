@@ -157,6 +157,9 @@ fn headline_for(primary: &Diagnosis, state: &str) -> String {
         "WORKER_NOT_CLAIMING" => "has a task that live workers are not claiming",
         "STALE_WORKER_CLAIM" => "has a task claimed by a worker that went silent",
         "NO_COMPATIBLE_WORKER" => "cannot progress: no compatible worker is running",
+        "PLACEMENT_UNSATISFIED" => {
+            "is waiting: no live runtime satisfies its step placement (placement_unsatisfied)"
+        }
         "WORKER_BELOW_VERSION_PIN" => "cannot progress: workers are older than the version pin",
         "OPEN_CIRCUIT_BREAKER" => "is held back by an open circuit breaker",
         "WAITING_CHILD" => "is waiting for a child workflow",

@@ -260,8 +260,17 @@ pub(crate) async fn enqueue_worker_task(
         .await?
         .map(|execution| execution.epoch.get());
 
+    // W3C trace context for the worker: the dispatching span's context when
+    // OpenTelemetry is active, else a deterministic per-instance context.
+    let task_id = uuid::Uuid::now_v7();
+    let mut worker_context = step_context.clone();
+    worker_context.runtime.traceparent = Some(crate::trace_context::dispatch_traceparent(
+        instance.id.into_uuid(),
+        task_id,
+    ));
+
     let task = WorkerTask {
-        id: uuid::Uuid::now_v7(),
+        id: task_id,
         instance_id: instance.id,
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
@@ -271,7 +280,7 @@ pub(crate) async fn enqueue_worker_task(
         // Context already had `context_access` filtering and externalization
         // markers inflated upstream — the remote process can't be trusted to
         // filter on its own.
-        context: serde_json::to_value(step_context)
+        context: serde_json::to_value(&worker_context)
             .map_err(orch8_types::error::StorageError::Serialization)?,
         attempt: attempt_u16,
         timeout_ms: step_def
@@ -297,6 +306,10 @@ pub(crate) async fn enqueue_worker_task(
     };
 
     storage.create_worker_task(&task).await?;
+    Box::pin(crate::step_placement::record_placement_status(
+        storage, instance, &task,
+    ))
+    .await;
 
     // Push-mode queues: POST an id-only wake-up hint (best-effort; the
     // durable row above is the source of truth).
@@ -953,6 +966,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -1011,6 +1026,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -1041,6 +1058,7 @@ mod tests {
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + chrono::Duration::minutes(4),
         };

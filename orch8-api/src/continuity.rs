@@ -599,6 +599,8 @@ fn validate_runtime_facts(capabilities: &RuntimeCapabilities) -> Result<(), ApiE
             "runtime capability facts must be non-empty and at most {MAX_RUNTIME_FACT_LENGTH} bytes"
         )));
     }
+    orch8_types::placement::validate_runtime_labels(&capabilities.labels)
+        .map_err(ApiError::InvalidArgument)?;
     Ok(())
 }
 

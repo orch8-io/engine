@@ -10,6 +10,11 @@ pub const STEPS_FAILED: &str = "orch8_steps_failed_total";
 pub const STEPS_RETRIED: &str = "orch8_steps_retried_total";
 pub const SIGNALS_DELIVERED: &str = "orch8_signals_delivered_total";
 pub const RATE_LIMITS_EXCEEDED: &str = "orch8_rate_limits_exceeded_total";
+/// Steps deferred because their global `rate_budget` token bucket was empty.
+pub const RATE_BUDGET_DEFERRED: &str = "orch8_rate_budget_deferred_total";
+/// Placed steps enqueued while no live runtime satisfied their hard
+/// placement (the instance waits with reason `placement_unsatisfied`).
+pub const PLACEMENT_UNSATISFIED_TOTAL: &str = "orch8_placement_unsatisfied_total";
 pub const RECOVERY_STALE: &str = "orch8_recovery_stale_instances_total";
 pub const WEBHOOKS_SENT: &str = "orch8_webhooks_sent_total";
 pub const WEBHOOKS_FAILED: &str = "orch8_webhooks_failed_total";
@@ -77,7 +82,12 @@ pub const INSTANCE_DURATION: &str = "orch8_instance_processing_seconds";
 pub const PRELOAD_BATCH_DURATION: &str = "orch8_preload_batch_duration_seconds";
 
 // === Gauge names ===
+/// Unlabeled: instances claimed in the current scheduler tick. Labeled
+/// `{capability,region,priority_lane}`: pending worker-task backlog for
+/// KEDA/HPA autoscaling (see `docs/PLACEMENT.md`).
 pub const QUEUE_DEPTH: &str = "orch8_queue_depth";
+/// Pending placed tasks no live runtime satisfies, `{capability,region}`.
+pub const PLACEMENT_UNSATISFIED: &str = "orch8_placement_unsatisfied";
 pub const ACTIVE_TASKS: &str = "orch8_active_tasks";
 
 /// Record a counter increment.

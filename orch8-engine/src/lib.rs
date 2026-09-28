@@ -48,11 +48,13 @@ pub mod scheduling;
 pub mod sequence_cache;
 pub mod signals;
 pub mod step_logs;
+pub mod step_placement;
 pub mod stream_bus;
 pub mod stream_windows;
 pub mod template;
 pub mod template_trace;
 pub mod tenant_budgets;
+pub mod trace_context;
 pub mod trigger_sources;
 pub mod triggers;
 pub mod webhooks;
@@ -382,6 +384,19 @@ impl Engine {
             )
             .await;
             tracing::info!("externalized gc loop exited");
+        });
+
+        // Autoscaling backlog gauges (`orch8_queue_depth{capability,region,
+        // priority_lane}`, `orch8_placement_unsatisfied`) for KEDA/HPA.
+        let backlog_storage = Arc::clone(&self.storage);
+        let backlog_cancel = self.cancel.clone();
+        set.spawn(async move {
+            step_placement::run_backlog_metrics_loop(
+                backlog_storage,
+                step_placement::BACKLOG_METRICS_INTERVAL,
+                backlog_cancel,
+            )
+            .await;
         });
 
         set

@@ -154,9 +154,11 @@ pub(super) async fn dispatch_block(
                 )
                 .await;
             }
-            let result = crate::handlers::step_block::execute_step_node_with_clock(
+            // Boxed: the step-dispatch future (templating, placement,
+            // effect guard, worker enqueue) is large; keep `evaluate` small.
+            let result = Box::pin(crate::handlers::step_block::execute_step_node_with_clock(
                 storage, handlers, instance, node, step_def, outputs, clock,
-            )
+            ))
             .await;
             // Interceptor: after_step
             if let Some(ic) = interceptors {

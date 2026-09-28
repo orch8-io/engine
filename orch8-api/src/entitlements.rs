@@ -21,6 +21,11 @@ pub struct PlanEntitlements {
     pub allowed_namespaces: BTreeSet<String>,
     #[serde(default)]
     pub features: BTreeSet<String>,
+    /// Lane new instances of this tenant run in when neither the request nor
+    /// the sequence names one (maps onto instance priority and therefore
+    /// cooperative preemption).
+    #[serde(default)]
+    pub default_priority_lane: Option<orch8_types::placement::PriorityLane>,
 }
 
 impl PlanEntitlements {
@@ -33,6 +38,7 @@ impl PlanEntitlements {
             max_context_bytes: u32::MAX,
             allowed_namespaces: BTreeSet::new(),
             features: BTreeSet::new(),
+            default_priority_lane: None,
         }
     }
 
@@ -84,6 +90,26 @@ impl EntitlementProvider for StaticEntitlementCatalog {
     fn entitlements_for(&self, tenant_id: &TenantId) -> PlanEntitlements {
         self.plans.get(tenant_id).unwrap_or(&self.fallback).clone()
     }
+}
+
+/// Effective instance priority: explicit priority, else the request lane,
+/// else the sequence's `placement.priority_lane`, else the plan's default
+/// lane, else `normal`.
+#[must_use]
+pub fn effective_priority(
+    explicit: Option<orch8_types::instance::Priority>,
+    request_lane: Option<orch8_types::placement::PriorityLane>,
+    sequence_lane: Option<orch8_types::placement::PriorityLane>,
+    plan: &PlanEntitlements,
+) -> orch8_types::instance::Priority {
+    explicit
+        .or_else(|| {
+            request_lane
+                .or(sequence_lane)
+                .or(plan.default_priority_lane)
+                .map(orch8_types::placement::PriorityLane::priority)
+        })
+        .unwrap_or_default()
 }
 
 pub fn admit_instances(
@@ -143,6 +169,7 @@ mod tests {
             max_context_bytes: 1024,
             allowed_namespaces: BTreeSet::from(["prod".into()]),
             features: BTreeSet::from(["continuity".into()]),
+            default_priority_lane: None,
         };
         let catalog = StaticEntitlementCatalog::new(
             HashMap::from([(tenant.clone(), plan)]),
