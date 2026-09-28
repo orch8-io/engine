@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Placement: residency, labels, affinity, lanes, budgets
+
+See [docs/PLACEMENT.md](docs/PLACEMENT.md). Everything compiles into the
+existing capability requirements (`$runtime`) and claim predicate; there is no
+second scheduler.
+
+- **Data residency**: step/sequence `placement.residency` (and tenant policy
+  `require.residency`) only lets runtimes advertising `residency=<zone>` claim.
+  Placed work is never handed to a non-matching or capability-less runtime;
+  when nothing matches, the task waits and the instance shows
+  `metadata.placement.status = "placement_unsatisfied"`, an audit event,
+  `orch8_placement_unsatisfied_total`, and diagnosis `PLACEMENT_UNSATISFIED`
+  (`ORCH8-D021`).
+- **Capability labels and placement policies**: runtimes advertise
+  `capabilities.labels`; steps and sequences take
+  `placement: {region, labels, residency, affinity, priority_lane}`, validated
+  at sequence create (conflicts with the sequence placement, `priority_lane`
+  on a step, and hard placement on built-in handlers are rejected). New
+  `GET|PUT /placement/policies` holds per-tenant policies
+  (`match {sequence, handler, tag}` → `require` hard facts, `prefer` soft
+  labels). Hard-placed steps always go to the worker queue.
+- **Sticky affinity**: `placement.affinity: "instance"` prefers the runtime
+  that completed the instance's previous worker step for `affinity_wait_ms`
+  (default 15 s), then falls back to any eligible runtime. Legacy polls
+  honour the window in SQL.
+- **Priority lanes**: `premium`/`standard`/`batch` map onto instance priority
+  (and so cooperative preemption). `POST /instances` accepts `priority_lane`;
+  otherwise the sequence's `placement.priority_lane`, then the plan's
+  `default_priority_lane` (entitlements) apply. `priority` in the create body
+  is now optional.
+- **Global rate budgets**: durable token buckets per `(tenant, key)`
+  (`rate_budgets` table, migration 097) shared by every node, managed with
+  `GET /rate-budgets` and `PUT|DELETE /rate-budgets/{key}`. Steps declaring
+  `"rate_budget": "<key>"` are deferred (never failed) while the bucket is
+  empty (`orch8_rate_budget_deferred_total`).
+- **Autoscaling metrics**: `orch8_queue_depth{capability,region,priority_lane}`
+  and `orch8_placement_unsatisfied{capability,region}` publish the pending
+  worker backlog every 15 s; a KEDA `ScaledObject` example is in
+  `deploy/keda/scaledobject.yaml`. The unlabeled `orch8_queue_depth` series is
+  unchanged.
+- **Trace propagation**: worker tasks carry a W3C `traceparent` in
+  `context.runtime.traceparent` (the dispatch span when OTLP export is on,
+  else a deterministic per-instance context); completions accept
+  `traceparent` (HTTP header/body, gRPC metadata) and parent the
+  `orch8.worker_task.complete` span on it.
+- gRPC worker sessions that negotiated `runtime_capabilities` now claim
+  through the capability predicate, so they receive placed work.
+
 ### Distributed execution (runtime nodes)
 
 See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).

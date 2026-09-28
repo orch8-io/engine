@@ -4420,6 +4420,79 @@
         }
       }
     },
+    "/placement/policies": {
+      "get": {
+        "tags": [
+          "placement"
+        ],
+        "operationId": "get_policies",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (root key only; defaults to the X-Tenant-Id principal)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tenant's placement policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlacementPolicies"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "placement"
+        ],
+        "operationId": "put_policies",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (root key only; defaults to the X-Tenant-Id principal)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlacementPolicies"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Policies replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlacementPolicies"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid policies"
+          }
+        }
+      }
+    },
     "/pools": {
       "get": {
         "tags": [
@@ -5198,6 +5271,124 @@
         "responses": {
           "204": {
             "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/rate-budgets": {
+      "get": {
+        "tags": [
+          "placement"
+        ],
+        "operationId": "list_budgets",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (root key only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tenant's rate budgets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateBudgetList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rate-budgets/{key}": {
+      "put": {
+        "tags": [
+          "placement"
+        ],
+        "operationId": "put_budget",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Budget key, e.g. `stripe-api`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (root key only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RateBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Budget created (full) or reshaped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateBudget"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid key or bucket parameters"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "placement"
+        ],
+        "operationId": "delete_budget",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Budget key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (root key only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not found"
           }
         }
       }
@@ -7984,6 +8175,14 @@
           }
         }
       },
+      "Affinity": {
+        "type": "string",
+        "description": "Sticky-affinity mode.",
+        "enum": [
+          "instance",
+          "none"
+        ]
+      },
       "AlertCondition": {
         "oneOf": [
           {
@@ -9406,6 +9605,16 @@
               "type": "string"
             }
           },
+          "labels": {
+            "type": "object",
+            "description": "Placement: every label must be advertised with exactly this value.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "minimum_trust": {
             "oneOf": [
               {
@@ -9433,6 +9642,17 @@
               }
             ]
           },
+          "prefer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PlacementPreference",
+                "description": "Soft preference (sticky affinity / preferred labels) with a bounded\nwait. Never widens eligibility; see\n[`crate::placement::PlacementPreference`]."
+              }
+            ]
+          },
           "regions": {
             "type": "array",
             "items": {
@@ -9444,6 +9664,13 @@
           },
           "requires_network": {
             "type": "boolean"
+          },
+          "residency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Placement: data-residency zone; only runtimes advertising the label\n`residency=<zone>` may claim. Never relaxed."
           },
           "runtime_id": {
             "oneOf": [
@@ -9830,6 +10057,13 @@
             "description": "Optional log lines the worker captured while running this task."
           },
           "output": {},
+          "traceparent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "W3C `traceparent` of the worker's span (alternatively sent as the\n`traceparent` HTTP header) so the completion joins the dispatch trace."
+          },
           "worker_id": {
             "type": "string"
           }
@@ -10218,7 +10452,26 @@
             "format": "date-time"
           },
           "priority": {
-            "$ref": "#/components/schemas/Priority"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Priority",
+                "description": "Explicit priority. When omitted, the lane decides: `priority_lane`,\nthen the sequence's `placement.priority_lane`, then the tenant plan's\n`default_priority_lane`, else `normal`."
+              }
+            ]
+          },
+          "priority_lane": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PriorityLane",
+                "description": "Priority lane (`premium` → high, `standard` → normal, `batch` → low).\nIgnored when `priority` is set."
+              }
+            ]
           },
           "sequence_id": {
             "$ref": "#/components/schemas/SequenceId"
@@ -13260,6 +13513,167 @@
         },
         "additionalProperties": false
       },
+      "Placement": {
+        "type": "object",
+        "description": "Step- or sequence-level `placement`.",
+        "properties": {
+          "affinity": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Affinity",
+                "description": "`instance`: prefer the runtime that ran the previous worker step."
+              }
+            ]
+          },
+          "affinity_wait_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bounded wait for `affinity` before any eligible runtime may claim.\nDefault 15000, maximum 600000.",
+            "minimum": 0
+          },
+          "labels": {
+            "type": "object",
+            "description": "Every label must be advertised with exactly this value.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "priority_lane": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PriorityLane",
+                "description": "Priority lane. Sequence-level (sets the instance priority at\ncreation); rejected on steps because priority is per instance."
+              }
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only runtimes advertising this region may claim the step."
+          },
+          "residency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Data-residency zone: only runtimes advertising the label\n`residency=<zone>` may claim. Never relaxed; the step waits\n(`placement_unsatisfied`) instead."
+          }
+        }
+      },
+      "PlacementPolicies": {
+        "type": "object",
+        "description": "`GET|PUT /api/v1/placement/policies` body.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlacementPolicy"
+            }
+          }
+        }
+      },
+      "PlacementPolicy": {
+        "type": "object",
+        "description": "One tenant placement policy.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "match": {
+            "$ref": "#/components/schemas/PolicyMatch"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PolicyPreference"
+              }
+            ]
+          },
+          "require": {
+            "$ref": "#/components/schemas/PolicyRequirement"
+          }
+        }
+      },
+      "PlacementPreference": {
+        "type": "object",
+        "description": "Soft preference window compiled into [`CapsuleRequirements::prefer`].\nUntil `until_ms` (unix epoch milliseconds) only a preferred claimant may\ntake the task; afterwards any claimant satisfying the hard requirements\nmay. A preference never widens eligibility.",
+        "required": [
+          "until_ms"
+        ],
+        "properties": {
+          "labels": {
+            "type": "object",
+            "description": "Preferred labels (from tenant policies).",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "until_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "worker_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sticky affinity: the worker id (== runtime id for capability polls)\nthat ran the instance's previous worker step."
+          }
+        }
+      },
+      "PolicyMatch": {
+        "type": "object",
+        "description": "Selector of a tenant placement policy. Every present field must match;\nan empty selector matches every worker-dispatched step of the tenant.",
+        "properties": {
+          "handler": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Step handler name."
+          },
+          "sequence": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sequence name."
+          },
+          "tag": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Instance tag: an entry of the instance's `metadata.tags` array."
+          }
+        }
+      },
       "PolicyOutcome": {
         "type": "string",
         "enum": [
@@ -13267,6 +13681,48 @@
           "deny",
           "unknown"
         ]
+      },
+      "PolicyPreference": {
+        "type": "object",
+        "description": "Soft preference a matching policy adds: runtimes with these labels get\nthe task first for a bounded wait, then any eligible runtime may claim.",
+        "properties": {
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PolicyRequirement": {
+        "type": "object",
+        "description": "Hard constraints a matching policy adds.",
+        "properties": {
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "residency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "PollRequest": {
         "type": "object",
@@ -13569,6 +14025,15 @@
           "Normal",
           "High",
           "Critical"
+        ]
+      },
+      "PriorityLane": {
+        "type": "string",
+        "description": "Plan/tenant priority lane. Lanes map onto the engine's existing instance\n[`Priority`], which drives claim order and cooperative preemption.",
+        "enum": [
+          "premium",
+          "standard",
+          "batch"
         ]
       },
       "ProfileContract": {
@@ -14323,6 +14788,82 @@
           "first_to_succeed"
         ]
       },
+      "RateBudget": {
+        "type": "object",
+        "description": "A durable token bucket per `(tenant, key)`. Steps declaring\n`\"rate_budget\": \"<key>\"` take one token before dispatch; with no token\nthe instance is deferred (never failed) until one refills.",
+        "required": [
+          "tenant_id",
+          "key",
+          "capacity",
+          "refill_per_sec",
+          "tokens",
+          "updated_at"
+        ],
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bucket size (maximum burst).",
+            "minimum": 0
+          },
+          "key": {
+            "type": "string"
+          },
+          "refill_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Tokens added per second."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "tokens": {
+            "type": "number",
+            "format": "double",
+            "description": "Tokens currently available (as of `updated_at`)."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RateBudgetList": {
+        "type": "object",
+        "description": "`GET /rate-budgets` response.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RateBudget"
+            }
+          }
+        }
+      },
+      "RateBudgetRequest": {
+        "type": "object",
+        "description": "`PUT /rate-budgets/{key}` body.",
+        "required": [
+          "capacity",
+          "refill_per_sec"
+        ],
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bucket size: the maximum burst.",
+            "minimum": 0
+          },
+          "refill_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Tokens refilled per second (e.g. `25` for 25 req/s, `0.5` for 30/min)."
+          }
+        }
+      },
       "RedeliverPreview": {
         "type": "object",
         "description": "What a redelivery *would* send, without sending it. Secrets never\nappear: the signature is described, not exposed.",
@@ -15046,6 +15587,16 @@
           "kind": {
             "$ref": "#/components/schemas/RuntimeKind"
           },
+          "labels": {
+            "type": "object",
+            "description": "Free-form capability labels (`gpu=a100`, `residency=eu`, ...) matched\nby step `placement.labels`, `placement.residency`, and tenant\nplacement policies. Bounded to 32 entries.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "observed_at": {
             "type": "string",
             "format": "date-time"
@@ -15152,6 +15703,13 @@
             "format": "int32",
             "description": "Total number of step executions for this instance (including retries).\nUsed by mobile SDK to enforce `max_steps_per_instance`.",
             "minimum": 0
+          },
+          "traceparent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "W3C `traceparent` of the dispatching engine span, set only on the\nper-step context handed to external workers so their spans join the\ncontrol-plane trace (see `docs/PLACEMENT.md#tracing`). Never persisted\non the instance."
           }
         }
       },
@@ -15382,6 +15940,17 @@
               "$ref": "#/components/schemas/BlockDefinition"
             },
             "description": "Best-effort cleanup blocks run when the instance reaches terminal\n`Failed`. Each top-level step block is dispatched once; errors are\nswallowed (the instance is already failing). Use to release resources,\nsend a death notification, etc. — so a failed run doesn't \"just die\"."
+          },
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "Sequence-level placement default (region, labels, residency,\naffinity, priority lane) applied to every worker-dispatched step;\nsee `docs/PLACEMENT.md`."
+              }
+            ]
           },
           "schema_version": {
             "type": "integer",
@@ -15775,12 +16344,30 @@
             "description": "Optional JSON Schema that the handler output must conform to.\nValidated after handler returns; schema violation is a permanent failure."
           },
           "params": {},
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "Step placement (region, labels, residency, affinity). Hard facts\nroute the step to the worker queue; see `docs/PLACEMENT.md`."
+              }
+            ]
+          },
           "queue_name": {
             "type": [
               "string",
               "null"
             ],
             "description": "Named task queue for routing to dedicated worker pools.\nIf omitted, uses the default queue."
+          },
+          "rate_budget": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Global rate budget key (durable token bucket shared by every node,\nconfigured via `PUT /rate-budgets/{key}`). Over budget, the instance\nis deferred until a token refills — never failed."
           },
           "rate_limit_key": {
             "type": [
@@ -17573,6 +18160,10 @@
     {
       "name": "budgets",
       "description": "Tenant LLM spend budgets: hard caps and threshold alerts"
+    },
+    {
+      "name": "placement",
+      "description": "Placement policies (residency, labels, affinity, lanes) and global rate budgets"
     },
     {
       "name": "usage",
