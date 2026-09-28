@@ -64,11 +64,36 @@ should pass it downstream as an idempotency key.
 | `complete` | — | receipt → `committed` (by stored id) |
 | `fail` | retry policy | receipt → `unknown`, retry policy |
 
+`fail` (HTTP and gRPC) is resolved in the same single fenced transaction as
+lease expiry, timeouts and release: the receipt becomes `unknown`, then the
+task is either replaced by the next attempt (retry policy), or marked failed
+together with its tree node (or flat instance). A repeated `fail` from the
+same lease is `200`; once the task was superseded by a retry it is `404`. A
+delegation task, or a task whose instance is terminal or paused, only has the
+task marked failed.
+
+A retry row inserted by any of these resolutions is **not claimable until
+the scheduler re-dispatched it**: the re-dispatch creates the attempt's
+receipt and binds its `effect_id` in the same statement that makes the row
+claimable, so no worker ever holds an attempt without its effect id and
+settlement never recomputes one.
+
 Per-claim `lease_secs`: browser 30 s, mobile 120 s, others the server default
 (`engine.worker_reaper_stale_secs`). Heartbeat every `lease_secs / 3`.
 
 All transitions are fenced compare-and-swaps: a racing completion wins, and a
 late call from a stale claim gets `409`.
+
+gRPC workers get the same behaviour: `CompleteTask` commits the receipt by its
+stored id (and integrates delegation results), `FailTask` uses the fenced
+resolution above, and `ReleaseTask {task_id, worker_id, claim_epoch, started}`
+is the twin of `POST /workers/tasks/{id}/release`. A stale claim is
+`FAILED_PRECONDITION`; an effect-receipt conflict is `ABORTED`.
+
+A placement rejected at dispatch (invalid `$runtime`, locality denial,
+credentials placed on browsers) fails the step with an `__error__` block
+output carrying the reason and a `remote_dispatch_rejected` audit event, on
+both the tree and the flat (step-only) path.
 
 ## Handoff fencing
 
@@ -109,9 +134,12 @@ POST /runtimes/browser-sessions
 - Polls must use `worker_id = runtime_id`, `kind: browser`, and a granted
   handler (and queue); conflicts are `403`. Advertised trust is capped at
   `registered`; the advertisement is synthesized when omitted.
-- Tokens are signed with a key derived from the root API key, so every
-  replica sharing it verifies them. Set `ORCH8_CORS_ORIGINS` to the origins
-  that host browser runtimes.
+- Tokens are signed with `ORCH8_BROWSER_SESSION_SECRET` (≥ 32 bytes, the
+  same on every replica) when set, otherwise with a key derived from the root
+  API key — either way every replica verifies every token. With neither
+  (`--insecure`), a process-random key is used and a token only verifies on
+  the replica that minted it; the server warns at startup. Set
+  `ORCH8_CORS_ORIGINS` to the origins that host browser runtimes.
 
 ### Browsers never receive secrets
 

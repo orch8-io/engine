@@ -290,6 +290,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize OTLP trace export (no-op unless ORCH8_OTLP_ENDPOINT /
     // [telemetry] otlp_endpoint is set) and logging.
     let otel = init_observability(&config)?;
+    check_browser_session_signer(&config)?;
 
     print_startup_banner(&config, insecure_auth, insecure_storage);
 
@@ -615,13 +616,16 @@ fn build_app_state(
         federation_peers: Arc::new(federation_peers),
         continuity_lab_enabled: std::env::var("ORCH8_CONTINUITY_LAB_ENABLED")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
-        // Same derivation as the auth middleware, which receives the same
-        // root-key digest: every replica sharing the root key verifies
-        // every browser-session token.
-        browser_sessions: Arc::new(orch8_api::browser_sessions::BrowserSessionSigner::for_root(
-            (!config.api.api_key.is_empty())
-                .then(|| orch8_types::auth::precompute_secret_digest(config.api.api_key.expose())),
-        )),
+        // Same resolution as the auth middleware (shared secret, else the
+        // root-key derivation), validated at startup by
+        // `check_browser_session_signer`.
+        browser_sessions: Arc::new(
+            orch8_api::browser_sessions::BrowserSessionSigner::configured(
+                (!config.api.api_key.is_empty()).then(|| {
+                    orch8_types::auth::precompute_secret_digest(config.api.api_key.expose())
+                }),
+            ),
+        ),
         browser_output_max_bytes: browser_output_max_bytes(),
     })
 }
@@ -751,6 +755,33 @@ fn validate_auth_config(
              to enable authentication, or pass --insecure-auth (or --insecure) to explicitly \
              run without auth."
         );
+    }
+    Ok(())
+}
+
+/// Refuse an invalid `ORCH8_BROWSER_SESSION_SECRET` and say where the
+/// browser-session signing key comes from. Without a shared secret or a root
+/// key (`--insecure`), tokens only verify on the replica that minted them.
+fn check_browser_session_signer(config: &EngineConfig) -> anyhow::Result<()> {
+    use orch8_api::browser_sessions::{BrowserSessionSigner, SECRET_ENV, SignerSource};
+    let root = (!config.api.api_key.is_empty())
+        .then(|| orch8_types::auth::precompute_secret_digest(config.api.api_key.expose()));
+    let (_, source) =
+        BrowserSessionSigner::resolve(root).map_err(|error| anyhow::anyhow!(error))?;
+    match source {
+        SignerSource::SharedSecret => {
+            tracing::info!("browser-session tokens are signed with {SECRET_ENV}");
+        }
+        SignerSource::RootKey => {
+            tracing::info!(
+                "browser-session tokens are signed with a key derived from the root API key"
+            );
+        }
+        SignerSource::ProcessRandom => tracing::warn!(
+            "neither {SECRET_ENV} nor a root API key is set: browser-session tokens verify \
+             only on the replica that minted them. Set {SECRET_ENV} (>= 32 bytes, same on \
+             every replica) for multi-replica deployments."
+        ),
     }
     Ok(())
 }

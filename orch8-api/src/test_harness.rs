@@ -186,7 +186,7 @@ fn test_state(
         federation_peers: Arc::new(Vec::new()),
         continuity_lab_enabled: false,
         browser_sessions: std::sync::Arc::new(
-            crate::browser_sessions::BrowserSessionSigner::for_root(root_key_digest),
+            crate::browser_sessions::BrowserSessionSigner::configured(root_key_digest),
         ),
         browser_output_max_bytes: crate::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
     }

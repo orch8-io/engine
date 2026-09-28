@@ -213,7 +213,7 @@ async fn authenticate_browser_session(
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let signer = crate::browser_sessions::BrowserSessionSigner::for_root(root_key_digest);
+    let signer = crate::browser_sessions::BrowserSessionSigner::configured(root_key_digest);
     let Some(binding) = signer.verify(token, chrono::Utc::now()) else {
         return Err(ApiError::Unauthorized);
     };

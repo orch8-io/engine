@@ -12,9 +12,14 @@
 //! * expires after `ttl_secs` (default 900, max 3600) — there is no refresh:
 //!   the backend mints a new token.
 //!
-//! The signing key is derived from the root API key digest, so every replica
-//! sharing the root key verifies every token. In `--insecure` mode a
-//! process-random key is used (tokens then only verify on that process).
+//! Signing key, in order of preference:
+//! 1. `ORCH8_BROWSER_SESSION_SECRET` (at least 32 bytes) — every replica
+//!    configured with the same secret verifies every token, independent of
+//!    the root API key (rotating the root key does not invalidate sessions);
+//! 2. derived from the root API key digest — every replica sharing the root
+//!    key verifies every token;
+//! 3. neither (`--insecure` without a secret): a process-random key, so a
+//!    token only verifies on the replica that minted it (logged at startup).
 
 use std::sync::{Arc, OnceLock};
 
@@ -44,6 +49,21 @@ pub const MAX_TTL_SECS: u32 = 3_600;
 const MAX_HANDLERS: usize = 64;
 const MAX_QUEUES: usize = 16;
 const MAX_NAME_BYTES: usize = 256;
+/// Shared browser-session signing secret (all replicas, ≥ 32 bytes).
+pub const SECRET_ENV: &str = "ORCH8_BROWSER_SESSION_SECRET";
+/// Minimum length of [`SECRET_ENV`].
+pub const MIN_SECRET_BYTES: usize = 32;
+
+/// Where the process's browser-session signing key comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignerSource {
+    /// `ORCH8_BROWSER_SESSION_SECRET`.
+    SharedSecret,
+    /// Derived from the root API key.
+    RootKey,
+    /// Process-random: tokens verify only on the minting process.
+    ProcessRandom,
+}
 
 /// Verified identity a browser-session token binds a request to. Inserted
 /// into request extensions by the auth middleware; worker handlers reject any
@@ -133,6 +153,69 @@ impl BrowserSessionSigner {
         Self {
             key: hasher.finalize().into(),
         }
+    }
+
+    /// Signer keyed by a shared secret (at least [`MIN_SECRET_BYTES`]).
+    pub fn from_secret(secret: &[u8]) -> Result<Self, String> {
+        if secret.len() < MIN_SECRET_BYTES {
+            return Err(format!(
+                "{SECRET_ENV} must be at least {MIN_SECRET_BYTES} bytes (got {})",
+                secret.len()
+            ));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"orch8-browser-session-secret-v1\0");
+        hasher.update(secret);
+        Ok(Self {
+            key: hasher.finalize().into(),
+        })
+    }
+
+    /// The signer for an optional shared `secret`, else the root key (see
+    /// the module docs for the order). An invalid secret is an error, never
+    /// a silent fallback.
+    pub fn resolve_from(
+        secret: Option<&str>,
+        root_key_digest: Option<[u8; 32]>,
+    ) -> Result<(Self, SignerSource), String> {
+        match secret.filter(|secret| !secret.is_empty()) {
+            Some(secret) => Ok((
+                Self::from_secret(secret.as_bytes())?,
+                SignerSource::SharedSecret,
+            )),
+            None => Ok((
+                Self::for_root(root_key_digest),
+                if root_key_digest.is_some() {
+                    SignerSource::RootKey
+                } else {
+                    SignerSource::ProcessRandom
+                },
+            )),
+        }
+    }
+
+    /// [`Self::resolve_from`] with `ORCH8_BROWSER_SESSION_SECRET` from the
+    /// environment. The server calls it at startup (refusing an invalid
+    /// secret) and logs the source.
+    pub fn resolve(root_key_digest: Option<[u8; 32]>) -> Result<(Self, SignerSource), String> {
+        Self::resolve_from(std::env::var(SECRET_ENV).ok().as_deref(), root_key_digest)
+    }
+
+    /// The process signer used to mint and verify: the shared secret when
+    /// configured (and valid — the server refuses to start otherwise), else
+    /// the root-key derivation. The secret is read once per process.
+    #[must_use]
+    pub fn configured(root_key_digest: Option<[u8; 32]>) -> Self {
+        static SECRET: OnceLock<Option<BrowserSessionSigner>> = OnceLock::new();
+        SECRET
+            .get_or_init(|| {
+                std::env::var(SECRET_ENV)
+                    .ok()
+                    .filter(|secret| !secret.is_empty())
+                    .and_then(|secret| Self::from_secret(secret.as_bytes()).ok())
+            })
+            .clone()
+            .unwrap_or_else(|| Self::for_root(root_key_digest))
     }
 
     fn mac(&self, payload: &[u8]) -> Hmac<Sha256> {
@@ -380,6 +463,38 @@ mod tests {
         );
         assert!(signer.verify(&tampered, now).is_none(), "claims are signed");
         assert!(signer.verify("sk_live_x", now).is_none());
+    }
+
+    #[test]
+    fn shared_secret_signs_across_replicas_and_is_validated() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        let (replica_a, source) = BrowserSessionSigner::resolve_from(Some(secret), None).unwrap();
+        assert_eq!(source, SignerSource::SharedSecret);
+        // Another replica with the same secret but a different root key.
+        let (replica_b, _) =
+            BrowserSessionSigner::resolve_from(Some(secret), Some([9; 32])).unwrap();
+        let now = Utc::now();
+        let token = replica_a.mint(&claims(now.timestamp() + 60)).unwrap();
+        assert!(replica_b.verify(&token, now).is_some(), "shared secret");
+        assert!(
+            BrowserSessionSigner::for_root(Some([9; 32]))
+                .verify(&token, now)
+                .is_none(),
+            "the secret, not the root key, signs"
+        );
+        assert!(BrowserSessionSigner::resolve_from(Some("too-short"), Some([9; 32])).is_err());
+        assert_eq!(
+            BrowserSessionSigner::resolve_from(None, Some([9; 32]))
+                .unwrap()
+                .1,
+            SignerSource::RootKey
+        );
+        assert_eq!(
+            BrowserSessionSigner::resolve_from(Some(""), None)
+                .unwrap()
+                .1,
+            SignerSource::ProcessRandom
+        );
     }
 
     #[test]
