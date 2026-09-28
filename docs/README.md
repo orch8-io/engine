@@ -45,6 +45,7 @@ release notes.
 
 - `beta` [Dashboard](DASHBOARD.md) — connect the operator console and use its current surfaces.
 - `stable` [Safe releases](RELEASES.md) — diff, validate, canary, evaluate, promote, and roll back.
+- `beta` [Embedded Orch8](EMBEDDED.md) — sub-tenants, per-sub-tenant caps and metering, scoped embed tokens, theme, per-sub-tenant rollouts, and offline license keys.
 - `beta` [Prompt registry](PROMPTS.md) — versioned, tenant-scoped prompts with labels, canaries, and replay-safe resolution in `llm_call`.
 - `beta` [LLM response cache](LLM_CACHE.md) — opt-in exact/semantic `llm_call` caching, what is never cached, and savings reporting.
 - `beta` [Tenant spend budgets](BUDGETS.md) — daily/monthly USD caps, threshold alerts, and fail-closed hard caps.

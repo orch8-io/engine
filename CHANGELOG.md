@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Embedded: sub-tenants, embed tokens, rollouts, licensing
+
+See [docs/EMBEDDED.md](docs/EMBEDDED.md).
+
+- **Sub-tenants**: `X-Orch8-Sub-Tenant` (or `sub_tenant` in the body) scopes
+  instances and sequences to a vendor's end customer; instances carry a
+  nullable `sub_tenant` (children and forks inherit it) and `GET /instances`
+  filters with `?sub_tenant=`. Migration `097_sub_tenants` adds the column,
+  caps, an append-only execution ledger, embed themes and release targets
+  (SQLite reconciles the same shape, schema version 48).
+- **Pooled limits**: `GET|PUT /sub-tenants/{sub}/limits`
+  (`max_executions_per_month`, `max_concurrent`) are enforced atomically
+  inside the tenant's plan pool; violations are `429` with the new error code
+  `sub_tenant_quota_exceeded`.
+- **Metering**: `GET /usage/sub-tenants?from=&to=` reports per-sub-tenant
+  executions started/completed, steps and last activity, plus
+  `active_sub_tenants` (the Embedded billing number). Started executions come
+  from a ledger that survives instance pruning.
+- **Scoped embed tokens**: `POST /embed/tokens` mints `o8e1.` HMAC tokens
+  (≤ 1 h, one tenant + sub-tenant, scopes `runs:read`, `runs:start`,
+  `approvals:resolve`, `sequences:read`, `builder:edit`, optional sequence
+  allowlist). New embed routes: runs (list/detail/start), approvals
+  (list/resolve), sequences (list/read/builder write, gallery templates) and
+  theme. They return no context or metadata and only the step outputs a
+  sequence opts into via `embed.visible_outputs`. Missing scopes are `403
+  embed_scope_denied`. Routes are 404 until `[embed] token_secret` /
+  `ORCH8_EMBED_TOKEN_SECRET` is set; `[embed] allowed_origins` grants CORS on
+  the embed routes only.
+- **Theme**: `PUT /embed/theme` stores `css_vars`, `logo_url` and
+  `hide_badge`. Values are validated against CSS injection, and `hide_badge`
+  takes effect only with a `white_label` license.
+- **Staged rollouts per sub-tenant**: releases accept
+  `target: { sub_tenants, percentage }` (also `PUT /releases/{id}/target`).
+  Sub-tenant instances are routed by listed sub-tenant or by a stable
+  per-sub-tenant bucket; tenant-level instances stay on the baseline until
+  promotion.
+- **License keys**: `[license] key` / `ORCH8_LICENSE_KEY` (`o8l1.`, ed25519,
+  verified offline) and `GET /license`. Enforcement is soft only: more than 3
+  active sub-tenants without a `sub_tenants` license adds
+  `X-Orch8-License: unlicensed` (or `over_limit` above `max_sub_tenants`) and
+  a warning logged at most once an hour. Executions are never blocked. The
+  compiled-in verification key is a placeholder until the production key is
+  rotated in.
+
 ### Distributed execution (runtime nodes)
 
 See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).

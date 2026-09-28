@@ -108,6 +108,25 @@ Controls the HTTP and gRPC servers, authentication, CORS, and rate limiting.
 
 ---
 
+## [embed]
+
+Embedded surface for vendors; see [Embedded Orch8](EMBEDDED.md).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `token_secret` | string | `""` | Hex HMAC secret (≥ 32 bytes decoded) that signs `o8e1.` embed tokens. Empty = every `/api/v1/embed/*` route answers 404. An invalid value refuses startup |
+| `allowed_origins` | string | `""` | Comma-separated browser origins granted CORS on the embed-token routes only (`*` = any) |
+
+---
+
+## [license]
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `key` | string | `""` | `o8l1.` license key, verified offline (ed25519). Soft enforcement only: never blocks executions. See [License keys](EMBEDDED.md#license-keys) |
+
+---
+
 ## [alerts]
 
 Built-in operational alerts evaluated on engine nodes; see [Alerts](ALERTS.md). Rules can also be managed per tenant via `/alerts/rules`.
@@ -212,6 +231,10 @@ mount a config file for those settings.
 | `ORCH8_BROWSER_OUTPUT_MAX_BYTES` | `1048576` | Largest serialized step output a browser runtime may report (larger completions get `413`). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
 | `ORCH8_BROWSER_SESSION_SECRET` | — | Shared key (≥ 32 bytes, identical on every replica) that signs browser-session tokens. When unset the key is derived from the root API key; with neither (`--insecure`), a process-random key is used and tokens only verify on the replica that minted them (warned at startup). A shorter value refuses startup. Changing it invalidates outstanding tokens (they live ≤ 1 h). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
 | `ORCH8_REQUIRE_TENANT_HEADER` | `true` | Enforce `X-Tenant-Id` header (secure by default) |
+| `ORCH8_EMBED_TOKEN_SECRET` | — | Sets `embed.token_secret` (hex, ≥ 32 bytes decoded); enables `/api/v1/embed/*` |
+| `ORCH8_EMBED_ALLOWED_ORIGINS` | — | Sets `embed.allowed_origins` (CORS on embed-token routes only) |
+| `ORCH8_LICENSE_KEY` | — | Sets `license.key` |
+| `ORCH8_LICENSE_PUBLIC_KEY` | — | Overrides the compiled-in license verification key (base64 of the raw 32-byte ed25519 key). For tests and private deployments |
 | `ORCH8_ALLOW_NO_TENANT_ISOLATION` | — | Set to `1` to allow `require_tenant_header=false` while API-key auth is on (explicit opt-out of tenant isolation; the server warns loudly) |
 | `ORCH8_MAX_CONCURRENT_REQUESTS` | `0` | Global in-flight request cap (0 = unlimited). Legacy `ORCH8_RATE_LIMIT_RPS` still accepted. |
 | `ORCH8_PUBLIC_URL` | — | Sets `api.public_url` (base for approval magic links and public progress URLs) |

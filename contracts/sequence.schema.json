@@ -35,6 +35,17 @@
       "type": "boolean",
       "description": "If true, this version is deprecated. New instances should use a newer version.\nRunning instances bound to this version continue unaffected."
     },
+    "embed": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/SequenceEmbed",
+          "description": "Embedding opt-ins (which step outputs embedded viewers may see)."
+        }
+      ]
+    },
     "id": {
       "$ref": "#/$defs/SequenceId"
     },
@@ -96,6 +107,13 @@
     },
     "status": {
       "$ref": "#/$defs/SequenceStatus"
+    },
+    "sub_tenant": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Owning sub-tenant (embedded builder); `None` = tenant-level."
     },
     "tenant_id": {
       "$ref": "#/$defs/TenantId"
@@ -1012,6 +1030,40 @@
           "format": "int32",
           "description": "Start hour (0-23). Defaults to 9.",
           "minimum": 0
+        }
+      }
+    },
+    "SequenceEmbed": {
+      "type": "object",
+      "description": "Per-sequence embedding settings. Nothing from a run's context or outputs\nis shown to embedded (end-customer) viewers unless the sequence lists the\nstep in `visible_outputs`.",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display description."
+        },
+        "gallery": {
+          "type": "boolean",
+          "description": "Gallery template (tenant-level, namespace `embed-gallery`): listed\nto every sub-tenant, read-only, copyable by the embedded builder."
+        },
+        "template": {
+          "description": "Gallery template descriptor (opaque to the engine)."
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display title."
+        },
+        "visible_outputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Step ids whose outputs embedded viewers may see."
         }
       }
     },
