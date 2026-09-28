@@ -41,6 +41,8 @@ fn make_sequence() -> SequenceDefinition {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -59,6 +61,7 @@ fn make_sequence() -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }
@@ -421,6 +424,8 @@ fn make_nested_blocks(depth: usize, breadth: usize) -> Vec<orch8_types::sequence
                         retry: None,
                         timeout: None,
                         rate_limit_key: None,
+                        rate_budget: None,
+                        placement: None,
                         send_window: None,
                         context_access: None,
                         cancellable: true,
@@ -539,6 +544,8 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
                                         retry: None,
                                         timeout: None,
                                         rate_limit_key: None,
+                                        rate_budget: None,
+                                        placement: None,
                                         send_window: None,
                                         context_access: None,
                                         cancellable: true,
@@ -561,6 +568,7 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
                     sla: None,
                     on_failure: None,
                     on_cancel: None,
+                    placement: None,
                     created_at: Utc::now(),
                 };
                 rt.block_on(s.create_sequence(&seq)).unwrap();
@@ -620,6 +628,8 @@ fn bench_parallel_in_process_latency(c: &mut Criterion) {
                                                 retry: None,
                                                 timeout: None,
                                                 rate_limit_key: None,
+                                                rate_budget: None,
+                                                placement: None,
                                                 send_window: None,
                                                 context_access: None,
                                                 cancellable: true,
@@ -642,6 +652,7 @@ fn bench_parallel_in_process_latency(c: &mut Criterion) {
                             sla: None,
                             on_failure: None,
                             on_cancel: None,
+                            placement: None,
                             created_at: Utc::now(),
                         };
                         storage.create_sequence(&sequence).await.unwrap();

@@ -118,6 +118,7 @@ impl Default for NodeCapabilities {
             app_version: None,
             api_base_url: None,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -381,6 +382,7 @@ impl NodeClient {
             estimated_latency_ms: None,
             draining: ad.draining,
             capsule_signing_public_key: ad.caps.capsule_signing_public_key,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + ttl,
         }

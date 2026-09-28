@@ -55,6 +55,8 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -131,6 +133,7 @@ async fn setup_tree(
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
@@ -1389,6 +1392,7 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
@@ -1690,6 +1694,7 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
 
@@ -1719,6 +1724,7 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
 
@@ -1912,6 +1918,8 @@ async fn a11_sla_breach_records_block_output() {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1965,6 +1973,7 @@ async fn a11_sla_breach_records_block_output() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
 
@@ -2271,6 +2280,7 @@ async fn a15_workers_receive_fair_share_under_load() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();

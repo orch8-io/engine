@@ -36,6 +36,22 @@ pub fn validate_requirements(
     if requirements.runtime_kinds.len() > MAX_REQUIREMENT_FACTS_PER_KIND {
         return Err(RequirementsValidationError::TooManyFacts);
     }
+    if requirements.labels.len() > MAX_REQUIREMENT_FACTS_PER_KIND {
+        return Err(RequirementsValidationError::TooManyFacts);
+    }
+    let placement_facts = requirements
+        .labels
+        .iter()
+        .flat_map(|(key, value)| [key, value])
+        .chain(requirements.residency.iter());
+    for fact in placement_facts {
+        if fact.trim().is_empty() {
+            return Err(RequirementsValidationError::EmptyFact);
+        }
+        if fact.len() > MAX_REQUIREMENT_FACT_LENGTH {
+            return Err(RequirementsValidationError::FactTooLong);
+        }
+    }
     let fact_groups = [
         requirements.handlers.as_slice(),
         requirements.plugins.as_slice(),
@@ -494,6 +510,7 @@ mod tests {
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + Duration::minutes(1),
         }

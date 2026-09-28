@@ -1555,6 +1555,15 @@ pub trait WorkerStore: Send + Sync + 'static {
         tenant_id: Option<&orch8_types::ids::TenantId>,
     ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
 
+    /// Claimable pending worker tasks of live instances, grouped by tenant,
+    /// handler, requirements, and instance priority (largest groups first,
+    /// at most `limit` groups). Feeds `orch8_queue_depth{capability,region,
+    /// priority_lane}` and `orch8_placement_unsatisfied`.
+    async fn pending_worker_task_depth(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError>;
+
     // === Task Queue Routing ===
 
     /// Claim worker tasks from a specific named queue.
@@ -1929,6 +1938,48 @@ pub trait SchedulingStore: Send + Sync + 'static {
     ) -> Result<RateLimitCheck, StorageError>;
 
     async fn upsert_rate_limit(&self, limit: &RateLimit) -> Result<(), StorageError>;
+
+    // === Placement policies & global rate budgets (docs/PLACEMENT.md) ===
+
+    /// The tenant's placement policies (empty when none were stored).
+    async fn get_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<orch8_types::placement::PlacementPolicies, StorageError>;
+
+    /// Replace the tenant's placement policies.
+    async fn put_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+        policies: &orch8_types::placement::PlacementPolicies,
+    ) -> Result<(), StorageError>;
+
+    /// Create a rate budget (full bucket) or change its capacity/refill
+    /// (tokens clamped to the new capacity). Returns the stored bucket.
+    async fn upsert_rate_budget(
+        &self,
+        budget: &orch8_types::placement::RateBudget,
+    ) -> Result<orch8_types::placement::RateBudget, StorageError>;
+
+    async fn list_rate_budgets(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::placement::RateBudget>, StorageError>;
+
+    /// `true` when a budget was deleted.
+    async fn delete_rate_budget(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// Atomically refill and take one token from the shared bucket.
+    async fn take_rate_budget_token(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<orch8_types::placement::RateBudgetCheck, StorageError>;
 }
 
 // ============================================================================

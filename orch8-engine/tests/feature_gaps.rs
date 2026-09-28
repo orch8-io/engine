@@ -36,6 +36,8 @@ fn mk_step(id: &str, handler: &str) -> StepDef {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -100,6 +102,7 @@ async fn seed_instance(storage: &SqliteStorage, instance_id: InstanceId) {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
@@ -138,6 +141,7 @@ async fn setup_single_step(
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
@@ -358,6 +362,7 @@ async fn save_output_complete_node_and_transition_is_atomic() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
@@ -444,6 +449,7 @@ async fn save_output_complete_node_and_transition_rejects_terminal_instance() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();

@@ -583,8 +583,37 @@ pub(crate) async fn execute_step_node_with_clock(
     // If the handler is not registered in-process — or the step is placed on
     // specific remote runtimes (`$runtime.runtime_id`, or kinds excluding
     // `server`) — dispatch to the external worker queue.
-    let placed_remotely = orch8_types::worker::peek_runtime_requirements(&resolved_params)
-        .is_ok_and(|requirements| requirements.is_remote_placement());
+    //
+    // Step/sequence placement and tenant placement policies compile into
+    // `$runtime` first; hard placement (region, labels, residency) always
+    // goes to the worker queue so the claim predicate enforces it.
+    let mut resolved_params = resolved_params;
+    let hard_placed = match Box::pin(crate::step_placement::apply_step_placement(
+        storage.as_ref(),
+        instance,
+        step_def,
+        &mut resolved_params,
+        clock.now(),
+    ))
+    .await?
+    {
+        Ok(resolved) => resolved.is_some_and(|placement| placement.has_hard_constraints()),
+        Err(message) => {
+            super::step_dispatch::record_remote_dispatch_rejection(
+                storage.as_ref(),
+                instance,
+                step_def,
+                attempt,
+                &message,
+            )
+            .await;
+            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            return Ok(false);
+        }
+    };
+    let placed_remotely = hard_placed
+        || orch8_types::worker::peek_runtime_requirements(&resolved_params)
+            .is_ok_and(|requirements| requirements.is_remote_placement());
     if placed_remotely || !handlers.contains(&step_def.handler) {
         return dispatch_step_to_external_worker(
             storage.as_ref(),
@@ -1008,6 +1037,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,

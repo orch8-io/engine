@@ -72,6 +72,8 @@ otlp = [
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
     "dep:tracing-opentelemetry",
+    # Propagate the dispatching span's context into worker tasks.
+    "orch8-engine/otel",
 ]
 
 [lints]

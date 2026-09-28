@@ -302,6 +302,18 @@ pub fn claim_allowed(
     if carries_credentials && capabilities.kind == crate::continuity::RuntimeKind::Browser {
         return false;
     }
+    // A soft preference (sticky affinity, preferred labels) holds the task
+    // for its preferred claimants until the bounded wait elapses. It never
+    // widens eligibility: the hard requirements below still apply.
+    if let Some(prefer) = &requirements.prefer
+        && !prefer.admits(
+            &capabilities.runtime_id.to_string(),
+            &capabilities.labels,
+            now,
+        )
+    {
+        return false;
+    }
     requirements.is_satisfied_by(capabilities, now)
 }
 
@@ -716,6 +728,7 @@ mod distribution_tests {
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + chrono::Duration::minutes(4),
         }

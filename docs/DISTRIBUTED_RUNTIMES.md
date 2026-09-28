@@ -23,6 +23,8 @@ the handler sees and stored on the task.
 | `runtime_id` | Only this node may claim. The task is that node's **mailbox**: it stays `pending` until the node polls (no lease reaping while pending; the step `timeout` still applies). |
 | `policy`, `classification` | A `LocalityPolicy` and data classification (default `internal`) evaluated at dispatch and re-evaluated against every claimant. |
 | `handlers`, `plugins`, `credentials`, `regions`, `hardware`, `requires_network`, `requires_human_ui`, `minimum_trust` | Capability facts the claimant must advertise (unchanged). |
+| `labels`, `residency` | Every label must be advertised with the same value; `residency` requires the label `residency=<zone>`. Usually compiled from step `placement` and tenant policies ([Placement](PLACEMENT.md)). |
+| `prefer` | Soft preference (sticky affinity / preferred labels) with a bounded wait; never widens eligibility. |
 
 ```json
 { "id": "scan", "handler": "scan_receipt",

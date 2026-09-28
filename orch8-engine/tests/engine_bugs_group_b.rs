@@ -66,6 +66,8 @@ fn mk_step_with_retry(id: &str, handler: &str, retry: Option<RetryPolicy>) -> St
         retry,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -142,6 +144,7 @@ async fn setup_single_step(
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
@@ -365,6 +368,7 @@ async fn b28_apply_self_modify_append_preserves_prior_blocks() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage_dyn.create_sequence(&seq).await.unwrap();
@@ -452,6 +456,7 @@ async fn b28_apply_self_modify_position_still_preserves_prior() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage_dyn.create_sequence(&seq).await.unwrap();

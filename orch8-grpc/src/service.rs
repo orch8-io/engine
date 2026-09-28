@@ -335,6 +335,7 @@ fn prepare_runtime_capabilities(
         || !bounded_runtime_list(&capabilities.credentials)
         || !bounded_runtime_list(&capabilities.regions)
         || !bounded_runtime_list(&capabilities.hardware)
+        || orch8_types::placement::validate_runtime_labels(&capabilities.labels).is_err()
         || capabilities
             .capsule_signing_public_key
             .as_ref()
@@ -568,12 +569,40 @@ impl Orch8GrpcService {
                 let mut remaining = usize::try_from(demand.capacity)
                     .unwrap_or(usize::MAX)
                     .min(available);
+                // A session that advertised runtime capabilities claims
+                // through the capability predicate, so placed steps (region,
+                // labels, residency, affinity) can reach it; others claim
+                // unplaced work only.
+                let advertised = match (tenant, *runtime_id) {
+                    (Some(tenant), Some(id)) => self
+                        .storage
+                        .list_runtime_capabilities(tenant, chrono::Utc::now(), 1_000)
+                        .await
+                        .map_err(storage_err)?
+                        .into_iter()
+                        .find(|capabilities| capabilities.runtime_id == id),
+                    _ => None,
+                };
                 for handler in &open.handler_names {
                     if remaining == 0 {
                         break;
                     }
                     let limit = u32::try_from(remaining).unwrap_or(u32::MAX);
-                    let tasks = if let Some(tenant) = tenant {
+                    let tasks = if let (Some(tenant), Some(capabilities)) =
+                        (tenant, advertised.as_ref())
+                    {
+                        self.storage
+                            .claim_worker_tasks_matching(
+                                handler,
+                                &open.worker_id,
+                                Some(tenant),
+                                None,
+                                capabilities,
+                                limit,
+                            )
+                            .await
+                            .map_err(storage_err)?
+                    } else if let Some(tenant) = tenant {
                         self.storage
                             .claim_worker_tasks_for_tenant(handler, &open.worker_id, tenant, limit)
                             .await
@@ -585,6 +614,11 @@ impl Orch8GrpcService {
                             .map_err(storage_err)?
                     };
                     for task in tasks {
+                        orch8_engine::step_placement::record_placement_claimed(
+                            self.storage.as_ref(),
+                            &task,
+                        )
+                        .await;
                         let task_json = to_json_string(&task)?;
                         if task_json.len()
                             > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
@@ -1836,6 +1870,19 @@ impl Orch8Service for Orch8GrpcService {
         let caller_tenant = caller_tenant(&req).cloned();
         let (pre_task, pre_instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
+        // W3C trace context echoed by the worker (gRPC metadata `traceparent`)
+        // continues the dispatch trace into the completion.
+        let traceparent = req
+            .metadata()
+            .get("traceparent")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        orch8_engine::trace_context::completion_span(
+            task_id,
+            pre_task.instance_id.into_uuid(),
+            traceparent.as_deref(),
+        )
+        .in_scope(|| tracing::info!(block_id = %pre_task.block_id, "worker completion received"));
         let inner = req.into_inner();
         let claim = WorkerClaim::new(inner.worker_id.clone(), inner.claim_epoch);
         ensure_worker_claim(&self.storage, &pre_task, &claim, "complete").await?;

@@ -142,7 +142,7 @@ pub(super) async fn claim(
           WHERE id IN (
               SELECT id FROM worker_tasks
               WHERE handler_name = $1 AND state = 'pending' AND NOT awaiting_dispatch
-                AND requirements = '{}'::jsonb
+                AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $2 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))
               ORDER BY created_at
               LIMIT $3
@@ -202,7 +202,7 @@ pub(super) async fn claim_for_tenant(
               WHERE wt.handler_name = $1
                 AND wt.state = 'pending'
                 AND NOT wt.awaiting_dispatch
-                AND wt.requirements = '{}'::jsonb
+                AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND ti.tenant_id = $4
                 AND ti.state NOT IN ('completed', 'failed', 'cancelled')
               ORDER BY wt.created_at

@@ -65,6 +65,7 @@ release notes.
 - `beta` [Background jobs](JOBS.md) — enqueue a handler with one call (`POST /jobs`), no sequence required.
 - `beta` [End-user WASM steps](WASM_USER_STEPS.md) — accept untrusted WASM modules from your users: sandbox limits, upload validation, ABI, and threat model.
 - `stable` [External workers](WORKERS.md) — poll, heartbeat, complete, and fail work from any language.
+- `beta` [Placement](PLACEMENT.md) — data residency, capability labels, placement policies, sticky affinity, priority lanes, global rate budgets, KEDA autoscaling, and trace propagation.
 - `beta` [Triggers](TRIGGERS.md) — start workflows from webhooks, NATS, Kafka, SQS, Pub/Sub, Redis Streams, and Postgres row changes.
 - `beta` [Negotiated gRPC worker stream](GRPC_WORKER_STREAM.md) — worker sessions, control, resumable artifacts, telemetry, and mTLS identity.
 - `stable` [Webhooks](WEBHOOKS.md) — delivery, signatures, replay protection, and receiver example.

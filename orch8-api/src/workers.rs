@@ -66,6 +66,14 @@ fn prepare_claimed_tasks(
     tasks
 }
 
+/// Record `placement.status = placed` on instances whose placed tasks were
+/// just claimed (clears a previous `placement_unsatisfied`).
+async fn note_placed_claims(state: &AppState, tasks: &[orch8_types::worker::WorkerTask]) {
+    for task in tasks {
+        orch8_engine::step_placement::record_placement_claimed(state.storage.as_ref(), task).await;
+    }
+}
+
 fn poll_response(state: &AppState, tasks: Vec<orch8_types::worker::WorkerTask>) -> Response {
     let tasks: Vec<_> = prepare_claimed_tasks(state, tasks)
         .into_iter()
@@ -578,6 +586,7 @@ fn bind_poll_identity(
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + chrono::Duration::minutes(4),
         },
@@ -692,6 +701,7 @@ pub(crate) async fn poll_tasks(
         scoped.as_ref(),
     )
     .await;
+    note_placed_claims(&state, &tasks).await;
 
     Ok(poll_response(&state, tasks))
 }
@@ -807,6 +817,7 @@ pub(crate) async fn poll_tasks_from_queue(
         scoped.as_ref(),
     )
     .await;
+    note_placed_claims(&state, &tasks).await;
 
     Ok(poll_response(&state, tasks))
 }
@@ -972,6 +983,10 @@ pub(crate) struct CompleteRequest {
     /// Optional log lines the worker captured while running this task.
     #[serde(default)]
     logs: Vec<orch8_types::step_log::StepLogEntry>,
+    /// W3C `traceparent` of the worker's span (alternatively sent as the
+    /// `traceparent` HTTP header) so the completion joins the dispatch trace.
+    #[serde(default)]
+    traceparent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1164,6 +1179,7 @@ pub(crate) async fn complete_task(
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<CompleteRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
@@ -1188,6 +1204,19 @@ pub(crate) async fn complete_task(
         &inst.tenant_id,
         &format!("worker_task {task_id}"),
     )?;
+    // W3C trace context echoed by the worker continues the dispatch trace.
+    let traceparent = req.traceparent.clone().or_else(|| {
+        headers
+            .get("traceparent")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    });
+    orch8_engine::trace_context::completion_span(
+        task_id,
+        pre_task.instance_id.into_uuid(),
+        traceparent.as_deref(),
+    )
+    .in_scope(|| tracing::info!(block_id = %pre_task.block_id, "worker completion received"));
     let claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
     let same_lease = pre_task.worker_id.as_deref() == Some(claim.worker_id.as_str())
         && pre_task.claim_epoch == claim.claim_epoch;

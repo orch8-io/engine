@@ -32,6 +32,7 @@ pub mod mobile_sync;
 pub mod model_pricing;
 #[allow(clippy::needless_for_each)]
 pub mod openapi;
+pub(crate) mod placement;
 pub mod plugins;
 pub mod pools;
 pub mod preflight;
@@ -277,6 +278,7 @@ fn api_routes() -> Router<AppState> {
         .merge(budgets::routes())
         .merge(webhook_outbox::routes())
         .merge(queue_routing::routes())
+        .merge(placement::routes())
         .merge(queue_dispatch::routes())
         .merge(mcp_server::routes())
         .merge(browser_sessions::routes())

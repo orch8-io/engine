@@ -42,6 +42,11 @@ impl SequenceRow {
             .and_then(|v| serde_json::from_value(v.clone()).ok());
         // Support both old format (array of blocks) and new format
         // ({blocks, interceptors, input_schema}).
+        let placement = self
+            .definition
+            .get("placement")
+            .filter(|v| !v.is_null())
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         let (blocks, interceptors, input_schema, sla, on_failure, on_cancel) =
             if self.definition.is_array() {
                 (
@@ -118,6 +123,7 @@ impl SequenceRow {
             on_cancel,
             sub_tenant,
             embed,
+            placement,
             created_at: self.created_at,
         })
     }

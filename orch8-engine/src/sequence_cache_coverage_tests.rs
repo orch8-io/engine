@@ -33,6 +33,8 @@ fn mk_seq(name: &str) -> SequenceDefinition {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -51,6 +53,7 @@ fn mk_seq(name: &str) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }

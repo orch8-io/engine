@@ -379,6 +379,7 @@ fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }
@@ -746,6 +747,7 @@ async fn capability_aware_postgres_claim_skips_incompatible_work_atomically() {
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + chrono::Duration::minutes(5),
     };

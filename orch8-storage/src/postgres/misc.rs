@@ -182,7 +182,7 @@ pub(super) async fn claim_worker_tasks_from_queue(
             SELECT id FROM worker_tasks
             WHERE handler_name = $1 AND state = 'pending' AND NOT awaiting_dispatch
               AND queue_name = $5
-              AND requirements = '{}'::jsonb
+              AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $4 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
             ORDER BY created_at ASC
             LIMIT $3
             FOR UPDATE SKIP LOCKED
@@ -241,7 +241,7 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
             WHERE wt.handler_name = $1
               AND wt.state = 'pending'
               AND NOT wt.awaiting_dispatch
-              AND wt.requirements = '{}'::jsonb
+              AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
               AND wt.queue_name = $3
               AND ti.tenant_id = $5
             ORDER BY wt.created_at ASC

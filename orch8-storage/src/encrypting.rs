@@ -1856,6 +1856,7 @@ passthrough_impl! {
         Ok(tasks)
     }
     async fn worker_task_stats(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
+    async fn pending_worker_task_depth(&self, limit: u32) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError>;
 
     async fn claim_worker_tasks_from_queue(
         &self,
@@ -1998,6 +1999,12 @@ passthrough_impl! {
         async fn active_instance_ids_for_cron(&self, cron_id: Uuid, limit: u32) -> Result<Vec<orch8_types::ids::InstanceId>, StorageError>;
         async fn check_rate_limit(&self, tenant_id: &orch8_types::ids::TenantId, resource_key: &orch8_types::ids::ResourceKey, now: DateTime<Utc>) -> Result<orch8_types::rate_limit::RateLimitCheck, StorageError>;
         async fn upsert_rate_limit(&self, limit: &orch8_types::rate_limit::RateLimit) -> Result<(), StorageError>;
+        async fn get_placement_policies(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<orch8_types::placement::PlacementPolicies, StorageError>;
+        async fn put_placement_policies(&self, tenant_id: &orch8_types::ids::TenantId, policies: &orch8_types::placement::PlacementPolicies) -> Result<(), StorageError>;
+        async fn upsert_rate_budget(&self, budget: &orch8_types::placement::RateBudget) -> Result<orch8_types::placement::RateBudget, StorageError>;
+        async fn list_rate_budgets(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<Vec<orch8_types::placement::RateBudget>, StorageError>;
+        async fn delete_rate_budget(&self, tenant_id: &orch8_types::ids::TenantId, key: &str) -> Result<bool, StorageError>;
+        async fn take_rate_budget_token(&self, tenant_id: &orch8_types::ids::TenantId, key: &str, now: DateTime<Utc>) -> Result<orch8_types::placement::RateBudgetCheck, StorageError>;
     }
 }
 

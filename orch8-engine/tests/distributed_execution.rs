@@ -139,6 +139,7 @@ fn browser_caps(runtime_id: RuntimeId, handler: &str) -> RuntimeCapabilities {
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + chrono::Duration::minutes(4),
     }

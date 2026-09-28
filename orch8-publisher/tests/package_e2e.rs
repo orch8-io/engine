@@ -42,6 +42,8 @@ fn step(id: &str, handler: &str) -> BlockDefinition {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -87,6 +89,7 @@ fn sequence_definition(name: &str, handlers: &[&str]) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(),
     }
 }

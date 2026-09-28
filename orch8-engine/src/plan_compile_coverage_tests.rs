@@ -25,6 +25,8 @@ fn step(id: &str) -> BlockDefinition {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -59,6 +61,7 @@ fn sequence_with(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }

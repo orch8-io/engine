@@ -2653,6 +2653,7 @@ async fn sub_sequence_calls_child_sequence() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2695,6 +2696,7 @@ async fn sub_sequence_inherits_parent_context() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2737,6 +2739,7 @@ async fn sub_sequence_failure_propagates_to_parent() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2780,6 +2783,7 @@ async fn sub_sequence_output_available_to_parent() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2822,6 +2826,7 @@ async fn sub_sequence_with_custom_input() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2865,6 +2870,7 @@ async fn sub_sequence_nested_two_levels() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&grandchild_seq).await.unwrap();
@@ -2892,6 +2898,7 @@ async fn sub_sequence_nested_two_levels() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2935,6 +2942,7 @@ async fn sub_sequence_in_parallel_branch() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2984,6 +2992,7 @@ async fn sub_sequence_with_retry() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -3026,6 +3035,7 @@ async fn sub_sequence_timeout() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -3068,6 +3078,7 @@ async fn sub_sequence_cancel_propagates() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -3140,6 +3151,8 @@ async fn step_with_context_access_restriction() {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: Some(orch8_types::sequence::ContextAccess {
             data: orch8_types::sequence::FieldAccess::Fields {
@@ -3733,6 +3746,7 @@ async fn sequence_with_interceptors_on_start() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
@@ -3772,6 +3786,7 @@ async fn sequence_with_interceptors_on_complete() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
@@ -3811,6 +3826,7 @@ async fn sequence_with_interceptors_on_error() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());

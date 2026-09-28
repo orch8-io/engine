@@ -2160,466 +2160,6 @@
         }
       }
     },
-    "/embed/approvals": {
-      "get": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_list_approvals",
-        "responses": {
-          "200": {
-            "description": "Pending approvals of the sub-tenant's runs",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EmbedApprovalList"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Token lacks approvals:resolve"
-          }
-        },
-        "security": [
-          {
-            "embed_token": []
-          }
-        ]
-      }
-    },
-    "/embed/approvals/{id}": {
-      "post": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_resolve_approval",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Approval id from GET /embed/approvals",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ResolveApprovalRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "Decision recorded",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "400": {
-            "description": "Choice is not offered by the approval"
-          },
-          "404": {
-            "description": "Unknown or foreign approval"
-          },
-          "409": {
-            "description": "Already resolved, or the run already finished"
-          }
-        },
-        "security": [
-          {
-            "embed_token": []
-          }
-        ]
-      }
-    },
-    "/embed/runs": {
-      "get": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_list_runs",
-        "parameters": [
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Page size (default 20, max 100).",
-            "required": false,
-            "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int32",
-              "minimum": 0
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "Opaque cursor from a previous page.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The sub-tenant's runs, newest first",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EmbedRunList"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing/invalid embed token"
-          },
-          "403": {
-            "description": "Token lacks runs:read"
-          },
-          "404": {
-            "description": "Embedding is disabled"
-          }
-        },
-        "security": [
-          {
-            "embed_token": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_start_run",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/StartRunRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Run started for the token's sub-tenant",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "403": {
-            "description": "Token lacks runs:start or the sequence"
-          },
-          "404": {
-            "description": "Unknown/invisible sequence, or embedding disabled"
-          },
-          "429": {
-            "description": "Tenant pool or sub-tenant cap reached (`sub_tenant_quota_exceeded`)"
-          }
-        },
-        "security": [
-          {
-            "embed_token": []
-          }
-        ]
-      }
-    },
-    "/embed/runs/{id}": {
-      "get": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_get_run",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Run (instance) id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Run timeline; outputs only for opted-in steps",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EmbedRunDetail"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Unknown, foreign, or embedding disabled"
-          }
-        },
-        "security": [
-          {
-            "embed_token": []
-          }
-        ]
-      }
-    },
-    "/embed/sequences": {
-      "get": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_list_sequences",
-        "responses": {
-          "200": {
-            "description": "Latest version of every sequence visible to the sub-tenant",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/EmbedSequenceList"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Token lacks sequences:read / builder:edit / runs:start"
-          }
-        },
-        "security": [
-          {
-            "embed_token": []
-          }
-        ]
-      }
-    },
-    "/embed/sequences/{name}": {
-      "get": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_get_sequence",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "description": "Sequence name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "namespace",
-            "in": "query",
-            "description": "Namespace (default `default`).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Summary + `definition`. Owned sequences and gallery templates carry the full definition; other tenant-level sequences a redacted one (step `params` emptied, `redacted: true`)",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "404": {
-            "description": "Unknown or not visible"
-          }
-        },
-        "security": [
-          {
-            "embed_token": []
-          }
-        ]
-      },
-      "put": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_put_sequence",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "description": "Sequence name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "namespace",
-            "in": "query",
-            "description": "Namespace (default `default`).",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "Sequence document (blocks, input_schema, embed, …); identity fields are server-assigned",
-          "content": {
-            "application/json": {
-              "schema": {}
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "New version created, owned by the token's sub-tenant",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "403": {
-            "description": "Token lacks builder:edit or the sequence"
-          },
-          "409": {
-            "description": "The name belongs to the tenant or another sub-tenant"
-          }
-        },
-        "security": [
-          {
-            "embed_token": []
-          }
-        ]
-      }
-    },
-    "/embed/theme": {
-      "get": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_get_theme",
-        "responses": {
-          "200": {
-            "description": "Tenant embed theme (embed token or tenant API key)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ThemeResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing/invalid embed token"
-          },
-          "404": {
-            "description": "Embedding is disabled"
-          }
-        },
-        "security": [
-          {
-            "embed_token": []
-          }
-        ]
-      },
-      "put": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_put_theme",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/EmbedTheme"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Stored; `hide_badge` reports the effective (license-gated) value",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ThemeResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid theme"
-          },
-          "404": {
-            "description": "Embedding is disabled"
-          }
-        }
-      }
-    },
-    "/embed/tokens": {
-      "post": {
-        "tags": [
-          "embed"
-        ],
-        "operationId": "embed_issue_token",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/IssueTokenRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Scoped embed token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IssueTokenResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid sub-tenant, scopes, sequences or TTL"
-          },
-          "404": {
-            "description": "Embedding is disabled (no token secret)"
-          }
-        }
-      }
-    },
     "/events": {
       "get": {
         "tags": [
@@ -2904,15 +2444,6 @@
             "name": "state",
             "in": "query",
             "description": "Comma-separated states",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "sub_tenant",
-            "in": "query",
-            "description": "Filter by sub-tenant (X-Orch8-Sub-Tenant overrides)",
             "required": false,
             "schema": {
               "type": "string"
@@ -4048,53 +3579,6 @@
         }
       }
     },
-    "/instances/{id}/receipts/export": {
-      "get": {
-        "tags": [
-          "receipts"
-        ],
-        "summary": "Export the effect-receipt ledger of one instance as a signed JSONL bundle.",
-        "operationId": "export_instance_receipts",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Instance ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "tenant_id",
-            "in": "query",
-            "description": "Tenant (unscoped callers only)",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Signed JSONL bundle: header, one line per effect receipt, signature trailer. At-most-once dispatch evidence, not an exactly-once claim.",
-            "content": {
-              "application/x-ndjson": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Instance not found"
-          },
-          "503": {
-            "description": "Signing key not configured"
-          }
-        }
-      }
-    },
     "/instances/{id}/remediations": {
       "get": {
         "tags": [
@@ -4904,26 +4388,6 @@
         }
       }
     },
-    "/license": {
-      "get": {
-        "tags": [
-          "license"
-        ],
-        "operationId": "get_license",
-        "responses": {
-          "200": {
-            "description": "Offline-verified license status (soft enforcement only)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LicenseInfo"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/llm-cache": {
       "delete": {
         "tags": [
@@ -4956,39 +4420,75 @@
         }
       }
     },
-    "/migrations/import": {
-      "post": {
+    "/placement/policies": {
+      "get": {
         "tags": [
-          "migrations"
+          "placement"
         ],
-        "summary": "Import a migration batch.",
-        "operationId": "import",
+        "operationId": "get_policies",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (root key only; defaults to the X-Tenant-Id principal)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tenant's placement policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlacementPolicies"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "placement"
+        ],
+        "operationId": "put_policies",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (root key only; defaults to the X-Tenant-Id principal)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
-          "description": "MigrationImportRequest: { migration_id, source_engine_id, sequences: [SequenceDefinition], instances: [{ instance, execution_tree, block_outputs, effect_receipts, pending_signals, continuity }] } (at most 100 instances and 500 sequences)",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/PlacementPolicies"
+              }
             }
           },
           "required": true
         },
         "responses": {
           "200": {
-            "description": "MigrationImportResponse: per-instance status (`imported` | `already_present`), owned epoch, and the target runtime id",
+            "description": "Policies replaced",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PlacementPolicies"
+                }
               }
             }
           },
           "400": {
-            "description": "Invalid batch (limits, unknown sequence, inconsistent ids)"
-          },
-          "403": {
-            "description": "Batch contains another tenant's records"
-          },
-          "409": {
-            "description": "An instance id exists but was not created by this migration"
+            "description": "Invalid policies"
           }
         }
       }
@@ -5775,36 +5275,17 @@
         }
       }
     },
-    "/receipts/export": {
+    "/rate-budgets": {
       "get": {
         "tags": [
-          "receipts"
+          "placement"
         ],
-        "summary": "Export every effect receipt created in `[from, to)` for a tenant.",
-        "operationId": "export_window_receipts",
+        "operationId": "list_budgets",
         "parameters": [
-          {
-            "name": "from",
-            "in": "query",
-            "description": "Window start (RFC 3339, inclusive)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "description": "Window end (RFC 3339, exclusive)",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
           {
             "name": "tenant_id",
             "in": "query",
-            "description": "Tenant (unscoped callers only)",
+            "description": "Tenant (root key only)",
             "required": false,
             "schema": {
               "type": "string"
@@ -5813,44 +5294,101 @@
         ],
         "responses": {
           "200": {
-            "description": "Signed JSONL bundle for the window. `scope.truncated=true` when more than 10000 instances were touched in the window.",
+            "description": "The tenant's rate budgets",
             "content": {
-              "application/x-ndjson": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/RateBudgetList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rate-budgets/{key}": {
+      "put": {
+        "tags": [
+          "placement"
+        ],
+        "operationId": "put_budget",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Budget key, e.g. `stripe-api`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (root key only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RateBudgetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Budget created (full) or reshaped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RateBudget"
                 }
               }
             }
           },
           "400": {
-            "description": "Invalid window or missing tenant"
-          },
-          "503": {
-            "description": "Signing key not configured"
+            "description": "Invalid key or bucket parameters"
           }
         }
-      }
-    },
-    "/receipts/signing-key": {
-      "get": {
+      },
+      "delete": {
         "tags": [
-          "receipts"
+          "placement"
         ],
-        "summary": "The public half of the key that signs receipt bundles.",
-        "operationId": "signing_key",
-        "responses": {
-          "200": {
-            "description": "Engine receipt-signing public key",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SigningKeyResponse"
-                }
-              }
+        "operationId": "delete_budget",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Budget key",
+            "required": true,
+            "schema": {
+              "type": "string"
             }
           },
-          "503": {
-            "description": "Signing key not configured"
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (root key only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Not found"
           }
         }
       }
@@ -6218,61 +5756,6 @@
                 }
               }
             }
-          }
-        }
-      }
-    },
-    "/releases/{id}/target": {
-      "put": {
-        "tags": [
-          "releases"
-        ],
-        "operationId": "set_release_target",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Release id",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "Sub-tenant rollout target, or null to return to per-instance cohorts",
-          "content": {
-            "application/json": {
-              "schema": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/ReleaseTarget"
-                  }
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Target replaced (audited)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkflowRelease"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid target"
-          },
-          "409": {
-            "description": "Release is promoted or rolled back"
           }
         }
       }
@@ -7241,82 +6724,6 @@
         }
       }
     },
-    "/sub-tenants/{sub}/limits": {
-      "get": {
-        "tags": [
-          "sub-tenants"
-        ],
-        "operationId": "get_sub_tenant_limits",
-        "parameters": [
-          {
-            "name": "sub",
-            "in": "path",
-            "description": "Sub-tenant id ([A-Za-z0-9._:-]{1,128})",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Caps (null = uncapped; unset sub-tenants are uncapped)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SubTenantLimitsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid sub-tenant id or no tenant"
-          }
-        }
-      },
-      "put": {
-        "tags": [
-          "sub-tenants"
-        ],
-        "operationId": "put_sub_tenant_limits",
-        "parameters": [
-          {
-            "name": "sub",
-            "in": "path",
-            "description": "Sub-tenant id ([A-Za-z0-9._:-]{1,128})",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SubTenantLimits"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Caps replaced",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SubTenantLimitsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid sub-tenant id, body or no tenant"
-          }
-        }
-      }
-    },
     "/tenants/{tenant_id}/circuit-breakers": {
       "get": {
         "tags": [
@@ -7677,57 +7084,6 @@
           },
           "400": {
             "description": "No tenant resolvable"
-          }
-        }
-      }
-    },
-    "/usage/sub-tenants": {
-      "get": {
-        "tags": [
-          "sub-tenants"
-        ],
-        "operationId": "get_sub_tenant_usage",
-        "parameters": [
-          {
-            "name": "from",
-            "in": "query",
-            "description": "Window start (RFC 3339, inclusive). Defaults to the start of the\ncurrent UTC month.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "format": "date-time"
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "description": "Window end (RFC 3339, exclusive). Defaults to now.",
-            "required": false,
-            "schema": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "format": "date-time"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Per-sub-tenant activity in [from, to)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SubTenantUsageResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid window or no tenant"
           }
         }
       }
@@ -8818,6 +8174,14 @@
             "minimum": 0
           }
         }
+      },
+      "Affinity": {
+        "type": "string",
+        "description": "Sticky-affinity mode.",
+        "enum": [
+          "instance",
+          "none"
+        ]
       },
       "AlertCondition": {
         "oneOf": [
@@ -10241,6 +9605,16 @@
               "type": "string"
             }
           },
+          "labels": {
+            "type": "object",
+            "description": "Placement: every label must be advertised with exactly this value.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "minimum_trust": {
             "oneOf": [
               {
@@ -10268,6 +9642,17 @@
               }
             ]
           },
+          "prefer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PlacementPreference",
+                "description": "Soft preference (sticky affinity / preferred labels) with a bounded\nwait. Never widens eligibility; see\n[`crate::placement::PlacementPreference`]."
+              }
+            ]
+          },
           "regions": {
             "type": "array",
             "items": {
@@ -10279,6 +9664,13 @@
           },
           "requires_network": {
             "type": "boolean"
+          },
+          "residency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Placement: data-residency zone; only runtimes advertising the label\n`residency=<zone>` may claim. Never relaxed."
           },
           "runtime_id": {
             "oneOf": [
@@ -10665,6 +10057,13 @@
             "description": "Optional log lines the worker captured while running this task."
           },
           "output": {},
+          "traceparent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "W3C `traceparent` of the worker's span (alternatively sent as the\n`traceparent` HTTP header) so the completion joins the dispatch trace."
+          },
           "worker_id": {
             "type": "string"
           }
@@ -11053,17 +10452,29 @@
             "format": "date-time"
           },
           "priority": {
-            "$ref": "#/components/schemas/Priority"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Priority",
+                "description": "Explicit priority. When omitted, the lane decides: `priority_lane`,\nthen the sequence's `placement.priority_lane`, then the tenant plan's\n`default_priority_lane`, else `normal`."
+              }
+            ]
+          },
+          "priority_lane": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PriorityLane",
+                "description": "Priority lane (`premium` → high, `standard` → normal, `batch` → low).\nIgnored when `priority` is set."
+              }
+            ]
           },
           "sequence_id": {
             "$ref": "#/components/schemas/SequenceId"
-          },
-          "sub_tenant": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "End customer inside the tenant. The `X-Orch8-Sub-Tenant` header is\nauthoritative; a body value must match it."
           },
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
@@ -11115,17 +10526,6 @@
           },
           "in_flight_policy": {
             "$ref": "#/components/schemas/InFlightPolicy"
-          },
-          "target": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ReleaseTarget",
-                "description": "Optional sub-tenant staged rollout: sub-tenant scoped instances are\nrouted by sub-tenant instead of per-instance cohorts; unscoped\ninstances stay on the baseline until promotion."
-              }
-            ]
           },
           "tenant_id": {
             "type": "string"
@@ -12004,321 +11404,6 @@
           "compensated",
           "abandoned"
         ]
-      },
-      "EmbedApproval": {
-        "type": "object",
-        "required": [
-          "id",
-          "instance_id",
-          "step_id",
-          "prompt",
-          "choices",
-          "created_at"
-        ],
-        "properties": {
-          "choices": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/HumanChoice"
-            }
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "id": {
-            "type": "string"
-          },
-          "instance_id": {
-            "$ref": "#/components/schemas/InstanceId"
-          },
-          "prompt": {
-            "type": "string"
-          },
-          "step_id": {
-            "type": "string"
-          }
-        }
-      },
-      "EmbedApprovalList": {
-        "type": "object",
-        "required": [
-          "items"
-        ],
-        "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EmbedApproval"
-            }
-          }
-        }
-      },
-      "EmbedHandler": {
-        "type": "object",
-        "description": "A handler the embedded builder may place in a step.",
-        "required": [
-          "name"
-        ],
-        "properties": {
-          "default_params": {},
-          "description": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "label": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "name": {
-            "type": "string"
-          }
-        }
-      },
-      "EmbedRunDetail": {
-        "type": "object",
-        "required": [
-          "id",
-          "sequence",
-          "state",
-          "created_at",
-          "updated_at",
-          "steps"
-        ],
-        "properties": {
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "id": {
-            "$ref": "#/components/schemas/InstanceId"
-          },
-          "sequence": {
-            "type": "string"
-          },
-          "state": {
-            "type": "string"
-          },
-          "steps": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EmbedStep"
-            }
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        }
-      },
-      "EmbedRunList": {
-        "type": "object",
-        "required": [
-          "items"
-        ],
-        "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EmbedRunSummary"
-            }
-          },
-          "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      },
-      "EmbedRunSummary": {
-        "type": "object",
-        "required": [
-          "id",
-          "sequence",
-          "state",
-          "created_at",
-          "updated_at"
-        ],
-        "properties": {
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "current_step": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "id": {
-            "$ref": "#/components/schemas/InstanceId"
-          },
-          "sequence": {
-            "type": "string"
-          },
-          "state": {
-            "type": "string"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        }
-      },
-      "EmbedScope": {
-        "type": "string",
-        "description": "What an embed token may do.",
-        "enum": [
-          "runs:read",
-          "runs:start",
-          "approvals:resolve",
-          "sequences:read",
-          "builder:edit"
-        ]
-      },
-      "EmbedSequenceList": {
-        "type": "object",
-        "required": [
-          "items",
-          "handlers"
-        ],
-        "properties": {
-          "handlers": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EmbedHandler"
-            },
-            "description": "Handlers available to the builder (empty without `builder:edit`)."
-          },
-          "items": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EmbedSequenceSummary"
-            }
-          }
-        }
-      },
-      "EmbedSequenceSummary": {
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "namespace",
-          "version",
-          "owned",
-          "gallery"
-        ],
-        "properties": {
-          "description": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Display description (`embed.description`)."
-          },
-          "gallery": {
-            "type": "boolean",
-            "description": "Read-only gallery template (copy it to customise)."
-          },
-          "id": {
-            "$ref": "#/components/schemas/SequenceId"
-          },
-          "input_schema": {
-            "description": "JSON Schema of the run input (`context.data`), if the sequence has one."
-          },
-          "name": {
-            "type": "string"
-          },
-          "namespace": {
-            "type": "string"
-          },
-          "owned": {
-            "type": "boolean",
-            "description": "Whether the token's sub-tenant owns (and may edit) the sequence."
-          },
-          "template": {
-            "description": "Opaque gallery template descriptor (`embed.template`)."
-          },
-          "title": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Display title (`embed.title`)."
-          },
-          "version": {
-            "type": "integer",
-            "format": "int32"
-          }
-        }
-      },
-      "EmbedStep": {
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "state"
-        ],
-        "properties": {
-          "finished_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "output": {
-            "description": "Present only for steps listed in the sequence's\n`embed.visible_outputs`."
-          },
-          "started_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "state": {
-            "type": "string"
-          }
-        }
-      },
-      "EmbedTheme": {
-        "type": "object",
-        "description": "Tenant-wide embed theme served to embed-kit components.",
-        "properties": {
-          "css_vars": {
-            "type": "object",
-            "description": "CSS custom properties (`--orch8-*`), name → value.",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "hide_badge": {
-            "type": "boolean",
-            "description": "Requested badge removal. Only honoured with a `white_label` license."
-          },
-          "logo_url": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "additionalProperties": false
       },
       "EnqueueCommandRequest": {
         "type": "object",
@@ -13967,59 +13052,6 @@
           }
         }
       },
-      "IssueTokenRequest": {
-        "type": "object",
-        "required": [
-          "sub_tenant",
-          "scopes"
-        ],
-        "properties": {
-          "scopes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EmbedScope"
-            }
-          },
-          "sequences": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string"
-            },
-            "description": "Sequence-name allowlist; null = every sequence visible to the\nsub-tenant."
-          },
-          "sub_tenant": {
-            "type": "string"
-          },
-          "ttl_seconds": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Lifetime (default 900, max 3600)."
-          }
-        },
-        "additionalProperties": false
-      },
-      "IssueTokenResponse": {
-        "type": "object",
-        "required": [
-          "token",
-          "expires_at"
-        ],
-        "properties": {
-          "expires_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "token": {
-            "type": "string"
-          }
-        }
-      },
       "Job": {
         "type": "object",
         "description": "Job representation returned by every `/jobs` endpoint.",
@@ -14206,61 +13238,6 @@
           }
         ],
         "description": "Join policies for multi-event waits."
-      },
-      "LicenseInfo": {
-        "type": "object",
-        "description": "`GET /license` body.",
-        "required": [
-          "status",
-          "features"
-        ],
-        "properties": {
-          "edition": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "expires_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "features": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "licensee": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "max_sub_tenants": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "status": {
-            "$ref": "#/components/schemas/LicenseStatus"
-          }
-        }
-      },
-      "LicenseStatus": {
-        "type": "string",
-        "enum": [
-          "licensed",
-          "unlicensed",
-          "expired",
-          "invalid"
-        ]
       },
       "LlmNarrative": {
         "type": "object",
@@ -14536,6 +13513,167 @@
         },
         "additionalProperties": false
       },
+      "Placement": {
+        "type": "object",
+        "description": "Step- or sequence-level `placement`.",
+        "properties": {
+          "affinity": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Affinity",
+                "description": "`instance`: prefer the runtime that ran the previous worker step."
+              }
+            ]
+          },
+          "affinity_wait_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bounded wait for `affinity` before any eligible runtime may claim.\nDefault 15000, maximum 600000.",
+            "minimum": 0
+          },
+          "labels": {
+            "type": "object",
+            "description": "Every label must be advertised with exactly this value.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "priority_lane": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PriorityLane",
+                "description": "Priority lane. Sequence-level (sets the instance priority at\ncreation); rejected on steps because priority is per instance."
+              }
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only runtimes advertising this region may claim the step."
+          },
+          "residency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Data-residency zone: only runtimes advertising the label\n`residency=<zone>` may claim. Never relaxed; the step waits\n(`placement_unsatisfied`) instead."
+          }
+        }
+      },
+      "PlacementPolicies": {
+        "type": "object",
+        "description": "`GET|PUT /api/v1/placement/policies` body.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlacementPolicy"
+            }
+          }
+        }
+      },
+      "PlacementPolicy": {
+        "type": "object",
+        "description": "One tenant placement policy.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "match": {
+            "$ref": "#/components/schemas/PolicyMatch"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefer": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PolicyPreference"
+              }
+            ]
+          },
+          "require": {
+            "$ref": "#/components/schemas/PolicyRequirement"
+          }
+        }
+      },
+      "PlacementPreference": {
+        "type": "object",
+        "description": "Soft preference window compiled into [`CapsuleRequirements::prefer`].\nUntil `until_ms` (unix epoch milliseconds) only a preferred claimant may\ntake the task; afterwards any claimant satisfying the hard requirements\nmay. A preference never widens eligibility.",
+        "required": [
+          "until_ms"
+        ],
+        "properties": {
+          "labels": {
+            "type": "object",
+            "description": "Preferred labels (from tenant policies).",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "until_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "worker_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sticky affinity: the worker id (== runtime id for capability polls)\nthat ran the instance's previous worker step."
+          }
+        }
+      },
+      "PolicyMatch": {
+        "type": "object",
+        "description": "Selector of a tenant placement policy. Every present field must match;\nan empty selector matches every worker-dispatched step of the tenant.",
+        "properties": {
+          "handler": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Step handler name."
+          },
+          "sequence": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sequence name."
+          },
+          "tag": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Instance tag: an entry of the instance's `metadata.tags` array."
+          }
+        }
+      },
       "PolicyOutcome": {
         "type": "string",
         "enum": [
@@ -14543,6 +13681,48 @@
           "deny",
           "unknown"
         ]
+      },
+      "PolicyPreference": {
+        "type": "object",
+        "description": "Soft preference a matching policy adds: runtimes with these labels get\nthe task first for a bounded wait, then any eligible runtime may claim.",
+        "properties": {
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PolicyRequirement": {
+        "type": "object",
+        "description": "Hard constraints a matching policy adds.",
+        "properties": {
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "residency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "PollRequest": {
         "type": "object",
@@ -14845,6 +14025,15 @@
           "Normal",
           "High",
           "Critical"
+        ]
+      },
+      "PriorityLane": {
+        "type": "string",
+        "description": "Plan/tenant priority lane. Lanes map onto the engine's existing instance\n[`Priority`], which drives claim order and cooperative preemption.",
+        "enum": [
+          "premium",
+          "standard",
+          "batch"
         ]
       },
       "ProfileContract": {
@@ -15599,6 +14788,82 @@
           "first_to_succeed"
         ]
       },
+      "RateBudget": {
+        "type": "object",
+        "description": "A durable token bucket per `(tenant, key)`. Steps declaring\n`\"rate_budget\": \"<key>\"` take one token before dispatch; with no token\nthe instance is deferred (never failed) until one refills.",
+        "required": [
+          "tenant_id",
+          "key",
+          "capacity",
+          "refill_per_sec",
+          "tokens",
+          "updated_at"
+        ],
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bucket size (maximum burst).",
+            "minimum": 0
+          },
+          "key": {
+            "type": "string"
+          },
+          "refill_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Tokens added per second."
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "tokens": {
+            "type": "number",
+            "format": "double",
+            "description": "Tokens currently available (as of `updated_at`)."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RateBudgetList": {
+        "type": "object",
+        "description": "`GET /rate-budgets` response.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RateBudget"
+            }
+          }
+        }
+      },
+      "RateBudgetRequest": {
+        "type": "object",
+        "description": "`PUT /rate-budgets/{key}` body.",
+        "required": [
+          "capacity",
+          "refill_per_sec"
+        ],
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bucket size: the maximum burst.",
+            "minimum": 0
+          },
+          "refill_per_sec": {
+            "type": "number",
+            "format": "double",
+            "description": "Tokens refilled per second (e.g. `25` for 25 req/s, `0.5` for 30/min)."
+          }
+        }
+      },
       "RedeliverPreview": {
         "type": "object",
         "description": "What a redelivery *would* send, without sending it. Secrets never\nappear: the signature is described, not exposed.",
@@ -15775,32 +15040,6 @@
           "rolled_back",
           "failed"
         ]
-      },
-      "ReleaseTarget": {
-        "type": "object",
-        "description": "Sub-tenant staged-rollout target of a release.",
-        "properties": {
-          "percentage": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Percentage (0–100) of the remaining sub-tenants that receive the\ncandidate, bucketed by a stable hash of the sub-tenant id.",
-            "minimum": 0
-          },
-          "sub_tenants": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "type": "string"
-            },
-            "description": "Sub-tenants that always receive the candidate."
-          }
-        },
-        "additionalProperties": false
       },
       "Remediation": {
         "type": "object",
@@ -16012,25 +15251,6 @@
             "description": "The block's params with every template resolved, redacted. `None`\nwhen whole-params resolution failed (see `entries` for the error)."
           }
         }
-      },
-      "ResolveApprovalRequest": {
-        "type": "object",
-        "required": [
-          "choice"
-        ],
-        "properties": {
-          "choice": {
-            "type": "string",
-            "description": "One of the approval's `choices[].value`."
-          },
-          "comment": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "additionalProperties": false
       },
       "ResourceKey": {
         "type": "string",
@@ -16367,6 +15587,16 @@
           "kind": {
             "$ref": "#/components/schemas/RuntimeKind"
           },
+          "labels": {
+            "type": "object",
+            "description": "Free-form capability labels (`gpu=a100`, `residency=eu`, ...) matched\nby step `placement.labels`, `placement.residency`, and tenant\nplacement policies. Bounded to 32 entries.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "observed_at": {
             "type": "string",
             "format": "date-time"
@@ -16473,6 +15703,13 @@
             "format": "int32",
             "description": "Total number of step executions for this instance (including retries).\nUsed by mobile SDK to enforce `max_steps_per_instance`.",
             "minimum": 0
+          },
+          "traceparent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "W3C `traceparent` of the dispatching engine span, set only on the\nper-step context handed to external workers so their spans join the\ncontrol-plane trace (see `docs/PLACEMENT.md#tracing`). Never persisted\non the instance."
           }
         }
       },
@@ -16661,17 +15898,6 @@
             "type": "boolean",
             "description": "If true, this version is deprecated. New instances should use a newer version.\nRunning instances bound to this version continue unaffected."
           },
-          "embed": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/SequenceEmbed",
-                "description": "Embedding opt-ins (which step outputs embedded viewers may see)."
-              }
-            ]
-          },
           "id": {
             "$ref": "#/components/schemas/SequenceId"
           },
@@ -16715,6 +15941,17 @@
             },
             "description": "Best-effort cleanup blocks run when the instance reaches terminal\n`Failed`. Each top-level step block is dispatched once; errors are\nswallowed (the instance is already failing). Use to release resources,\nsend a death notification, etc. — so a failed run doesn't \"just die\"."
           },
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "Sequence-level placement default (region, labels, residency,\naffinity, priority lane) applied to every worker-dispatched step;\nsee `docs/PLACEMENT.md`."
+              }
+            ]
+          },
           "schema_version": {
             "type": "integer",
             "format": "int32",
@@ -16734,53 +15971,12 @@
           "status": {
             "$ref": "#/components/schemas/SequenceStatus"
           },
-          "sub_tenant": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Owning sub-tenant (embedded builder); `None` = tenant-level."
-          },
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
           },
           "version": {
             "type": "integer",
             "format": "int32"
-          }
-        }
-      },
-      "SequenceEmbed": {
-        "type": "object",
-        "description": "Per-sequence embedding settings. Nothing from a run's context or outputs\nis shown to embedded (end-customer) viewers unless the sequence lists the\nstep in `visible_outputs`.",
-        "properties": {
-          "description": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Display description."
-          },
-          "gallery": {
-            "type": "boolean",
-            "description": "Gallery template (tenant-level, namespace `embed-gallery`): listed\nto every sub-tenant, read-only, copyable by the embedded builder."
-          },
-          "template": {
-            "description": "Gallery template descriptor (opaque to the engine)."
-          },
-          "title": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Display title."
-          },
-          "visible_outputs": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Step ids whose outputs embedded viewers may see."
           }
         }
       },
@@ -17015,28 +16211,6 @@
           }
         ]
       },
-      "SigningKeyResponse": {
-        "type": "object",
-        "required": [
-          "signing_key_id",
-          "algorithm",
-          "public_key"
-        ],
-        "properties": {
-          "algorithm": {
-            "type": "string",
-            "description": "Always `ed25519`."
-          },
-          "public_key": {
-            "type": "string",
-            "description": "Base64 of the raw 32-byte Ed25519 public key. Pin it when verifying."
-          },
-          "signing_key_id": {
-            "type": "string",
-            "description": "Stable identifier of the engine's continuity signing key."
-          }
-        }
-      },
       "SlaPolicy": {
         "type": "object",
         "description": "Alert-only service-level-agreement policy for a sequence. A breach is a\nsignal, not a state change: it fires one webhook + metric per breach kind\nand leaves the instance running. Both bounds are optional.",
@@ -17060,36 +16234,6 @@
             "minimum": 0
           }
         }
-      },
-      "StartRunRequest": {
-        "type": "object",
-        "required": [
-          "sequence"
-        ],
-        "properties": {
-          "idempotency_key": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Optional dedupe key (scoped to the tenant)."
-          },
-          "input": {
-            "description": "Becomes the run's `context.data`."
-          },
-          "namespace": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Defaults to `default`."
-          },
-          "sequence": {
-            "type": "string",
-            "description": "Sequence name (latest version in `namespace`)."
-          }
-        },
-        "additionalProperties": false
       },
       "StepCompensation": {
         "type": "object",
@@ -17200,12 +16344,30 @@
             "description": "Optional JSON Schema that the handler output must conform to.\nValidated after handler returns; schema violation is a permanent failure."
           },
           "params": {},
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "Step placement (region, labels, residency, affinity). Hard facts\nroute the step to the worker queue; see `docs/PLACEMENT.md`."
+              }
+            ]
+          },
           "queue_name": {
             "type": [
               "string",
               "null"
             ],
             "description": "Named task queue for routing to dedicated worker pools.\nIf omitted, uses the default queue."
+          },
+          "rate_budget": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Global rate budget key (durable token bucket shared by every node,\nconfigured via `PUT /rate-budgets/{key}`). Over budget, the instance\nis deferred until a token refills — never failed."
           },
           "rate_limit_key": {
             "type": [
@@ -17338,130 +16500,6 @@
           }
         }
       },
-      "SubTenantLimits": {
-        "type": "object",
-        "description": "Per-sub-tenant caps. `None` = uncapped (the tenant pool still applies).",
-        "properties": {
-          "max_concurrent": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "Non-terminal instances the sub-tenant may hold at once.",
-            "minimum": 0
-          },
-          "max_executions_per_month": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Executions (top-level instances) the sub-tenant may start per\ncalendar month (UTC).",
-            "minimum": 0
-          }
-        },
-        "additionalProperties": false
-      },
-      "SubTenantLimitsResponse": {
-        "type": "object",
-        "description": "Limits as stored/returned. Absent fields are uncapped.",
-        "required": [
-          "sub_tenant"
-        ],
-        "properties": {
-          "max_concurrent": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          },
-          "max_executions_per_month": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "sub_tenant": {
-            "type": "string"
-          }
-        }
-      },
-      "SubTenantUsage": {
-        "type": "object",
-        "description": "Metered activity of one sub-tenant over a window.",
-        "required": [
-          "sub_tenant",
-          "executions_started",
-          "executions_completed",
-          "steps_executed"
-        ],
-        "properties": {
-          "executions_completed": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Instances of the sub-tenant that completed in the window.",
-            "minimum": 0
-          },
-          "executions_started": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Executions started in the window (durable counter; survives instance\nretention/pruning).",
-            "minimum": 0
-          },
-          "last_active_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "steps_executed": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Steps (block outputs) recorded in the window for the sub-tenant.",
-            "minimum": 0
-          },
-          "sub_tenant": {
-            "type": "string"
-          }
-        }
-      },
-      "SubTenantUsageResponse": {
-        "type": "object",
-        "required": [
-          "items",
-          "active_sub_tenants",
-          "from",
-          "to"
-        ],
-        "properties": {
-          "active_sub_tenants": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Sub-tenants that started at least one execution in the window.",
-            "minimum": 0
-          },
-          "from": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "items": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SubTenantUsage"
-            }
-          },
-          "to": {
-            "type": "string",
-            "format": "date-time"
-          }
-        }
-      },
       "TaskInstance": {
         "type": "object",
         "required": [
@@ -17561,13 +16599,6 @@
           "state": {
             "$ref": "#/components/schemas/InstanceState"
           },
-          "sub_tenant": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "End customer (sub-tenant) inside `tenant_id`; `None` = tenant-level."
-          },
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
           },
@@ -17639,35 +16670,6 @@
       },
       "TenantId": {
         "type": "string"
-      },
-      "ThemeResponse": {
-        "type": "object",
-        "description": "Theme as served to embed components.",
-        "required": [
-          "css_vars",
-          "hide_badge"
-        ],
-        "properties": {
-          "css_vars": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "hide_badge": {
-            "type": "boolean",
-            "description": "Effective: `true` only when requested *and* licensed for `white_label`."
-          },
-          "logo_url": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
       },
       "TimelineEntry": {
         "type": "object",
@@ -19104,17 +18106,6 @@
           "state": {
             "$ref": "#/components/schemas/ReleaseState"
           },
-          "target": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ReleaseTarget",
-                "description": "Optional sub-tenant staged-rollout target. When set, sub-tenant\nscoped instances are routed by sub-tenant (list membership, then a\nstable per-sub-tenant percentage bucket) instead of per-instance\ncohorts, and unscoped instances follow the default (baseline until\npromotion)."
-              }
-            ]
-          },
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
           },
@@ -19126,14 +18117,6 @@
             "description": "Result summary of the last historical validation run, if any."
           }
         }
-      }
-    },
-    "securitySchemes": {
-      "embed_token": {
-        "type": "http",
-        "scheme": "bearer",
-        "bearerFormat": "o8e1",
-        "description": "Scoped embed token minted by POST /embed/tokens (tenant API key)"
       }
     }
   },
@@ -19179,16 +18162,12 @@
       "description": "Tenant LLM spend budgets: hard caps and threshold alerts"
     },
     {
+      "name": "placement",
+      "description": "Placement policies (residency, labels, affinity, lanes) and global rate budgets"
+    },
+    {
       "name": "usage",
       "description": "LLM usage, estimated cost, cache savings and budget status"
-    },
-    {
-      "name": "receipts",
-      "description": "Signed effect-receipt bundles: at-most-once dispatch evidence (not an exactly-once claim)"
-    },
-    {
-      "name": "migrations",
-      "description": "Import sequences and in-flight instances from another engine (orch8 migrate --to)"
     },
     {
       "name": "cluster",
@@ -19221,18 +18200,6 @@
     {
       "name": "public",
       "description": "Unauthenticated, token-addressed public progress links"
-    },
-    {
-      "name": "sub-tenants",
-      "description": "End customers inside a tenant: X-Orch8-Sub-Tenant scoping, per-sub-tenant caps and metering"
-    },
-    {
-      "name": "embed",
-      "description": "Embedded surface: scoped o8e1 embed tokens, sub-tenant run/approval/sequence views, theme"
-    },
-    {
-      "name": "license",
-      "description": "Offline-verified license status (soft enforcement only)"
     },
     {
       "name": "continuity-product",

@@ -16,8 +16,15 @@ pub struct CreateInstanceRequest {
     pub(crate) sequence_id: SequenceId,
     pub(crate) tenant_id: TenantId,
     pub(crate) namespace: Namespace,
+    /// Explicit priority. When omitted, the lane decides: `priority_lane`,
+    /// then the sequence's `placement.priority_lane`, then the tenant plan's
+    /// `default_priority_lane`, else `normal`.
     #[serde(default)]
-    pub(crate) priority: Priority,
+    pub(crate) priority: Option<Priority>,
+    /// Priority lane (`premium` → high, `standard` → normal, `batch` → low).
+    /// Ignored when `priority` is set.
+    #[serde(default)]
+    pub(crate) priority_lane: Option<orch8_types::placement::PriorityLane>,
     #[serde(default = "default_timezone")]
     pub(crate) timezone: String,
     #[serde(default)]

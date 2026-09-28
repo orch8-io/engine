@@ -45,13 +45,20 @@ jsonwebtoken = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
+# W3C trace-context propagation into external worker tasks (`otel`).
+opentelemetry = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 
 [features]
 # `email` (SMTP via lettre) is a server-side builtin; the embedded mobile
 # engine builds with `default-features = false` and never links it.
-default = ["compression", "email"]
+default = ["compression", "email", "otel"]
 compression = ["orch8-storage/compression"]
 email = ["dep:lettre"]
+# Propagate the dispatching span's OpenTelemetry context (traceparent) to
+# external workers. Without it a deterministic per-instance traceparent is
+# still issued.
+otel = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
 nats = ["dep:async-nats"]
 # Trigger sources. Each pulls its own client so the default build stays lean.
 kafka = ["dep:rskafka", "dep:rustls", "dep:webpki-roots"]

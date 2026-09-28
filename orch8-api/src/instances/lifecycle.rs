@@ -272,7 +272,15 @@ pub(crate) async fn create_instance_scoped(
         namespace: req.namespace,
         state: InstanceState::Scheduled,
         next_fire_at: Some(req.next_fire_at.unwrap_or(now)),
-        priority: req.priority,
+        priority: crate::entitlements::effective_priority(
+            req.priority,
+            req.priority_lane,
+            sequence
+                .placement
+                .as_ref()
+                .and_then(|placement| placement.priority_lane),
+            &entitlement_plan,
+        ),
         timezone: req.timezone,
         metadata,
         context,
@@ -431,6 +439,7 @@ pub async fn create_instances_batch(
         entry.2.insert(item.namespace.clone());
     }
     let mut entitlement_limits = std::collections::HashMap::new();
+    let mut entitlement_plans = std::collections::HashMap::new();
     for (tenant, (count, largest_context, namespaces)) in admission_groups {
         let plan = crate::entitlements::admit_instances(
             &state,
@@ -439,7 +448,8 @@ pub async fn create_instances_batch(
             count,
             largest_context,
         )?;
-        entitlement_limits.insert(tenant, plan.max_active_instances);
+        entitlement_limits.insert(tenant.clone(), plan.max_active_instances);
+        entitlement_plans.insert(tenant, plan);
     }
 
     // Fetch every referenced sequence in one storage query instead of one
@@ -450,6 +460,10 @@ pub async fn create_instances_batch(
         std::collections::HashMap::new();
     let mut sequence_tenants: std::collections::HashMap<_, TenantId> =
         std::collections::HashMap::new();
+    let mut sequence_lanes: std::collections::HashMap<
+        _,
+        Option<orch8_types::placement::PriorityLane>,
+    > = std::collections::HashMap::new();
     let sequence_ids: Vec<_> = sequence_ids.into_iter().collect();
     for seq in state
         .storage
@@ -459,6 +473,10 @@ pub async fn create_instances_batch(
     {
         sequence_tenants.insert(seq.id, seq.tenant_id);
         input_schemas.insert(seq.id, seq.input_schema);
+        sequence_lanes.insert(
+            seq.id,
+            seq.placement.and_then(|placement| placement.priority_lane),
+        );
     }
 
     // Validate each item's data against its sequence's input_schema (422) and
@@ -502,6 +520,14 @@ pub async fn create_instances_batch(
             let tenant_id = authoritative_tenants.remove(&i).ok_or_else(|| {
                 ApiError::Internal(format!("instances[{i}]: tenant not resolved"))
             })?;
+            let priority = crate::entitlements::effective_priority(
+                r.priority,
+                r.priority_lane,
+                sequence_lanes.get(&r.sequence_id).copied().flatten(),
+                entitlement_plans
+                    .get(&tenant_id)
+                    .unwrap_or(&crate::entitlements::PlanEntitlements::unlimited()),
+            );
             Ok::<_, ApiError>(TaskInstance {
                 id: InstanceId::new(),
                 sub_tenant: sub_tenants.remove(&i).flatten(),
@@ -510,7 +536,7 @@ pub async fn create_instances_batch(
                 namespace: r.namespace,
                 state: InstanceState::Scheduled,
                 next_fire_at: Some(r.next_fire_at.unwrap_or(now)),
-                priority: r.priority,
+                priority,
                 timezone: r.timezone,
                 metadata: r.metadata,
                 context,

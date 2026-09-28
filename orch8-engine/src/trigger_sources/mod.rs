@@ -362,6 +362,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         };
         storage.create_sequence(&seq).await.unwrap();

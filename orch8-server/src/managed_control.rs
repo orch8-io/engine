@@ -54,6 +54,7 @@ fn safe_capabilities(config: &ManagedControlConfig, draining: bool) -> RuntimeCa
         estimated_latency_ms: None,
         draining,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + chrono::Duration::seconds(45),
     }

@@ -33,6 +33,8 @@ fn make_step(id: &str, handler: &str) -> BlockDefinition {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -67,6 +69,7 @@ fn make_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }
@@ -95,6 +98,8 @@ fn full_step(id: &str) -> StepDef {
         }),
         timeout: Some(Duration::from_secs(30)),
         rate_limit_key: Some("api:send".into()),
+        rate_budget: None,
+        placement: None,
         send_window: Some(SendWindow {
             start_hour: 8,
             end_hour: 20,

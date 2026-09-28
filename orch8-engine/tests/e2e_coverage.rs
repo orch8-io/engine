@@ -252,6 +252,7 @@ async fn sub_sequence_spawns_child_and_enters_waiting() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -280,6 +281,7 @@ async fn sub_sequence_spawns_child_and_enters_waiting() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -1387,6 +1389,7 @@ fn mk_sequence_with_interceptors(
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
         status: orch8_types::sequence::SequenceStatus::Production,
     }
@@ -1522,6 +1525,8 @@ async fn self_modify_injects_blocks_and_evaluator_executes_them() {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,

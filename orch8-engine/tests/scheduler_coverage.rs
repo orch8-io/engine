@@ -838,6 +838,8 @@ async fn tick_unregistered_handler_dispatches_external() {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1268,6 +1270,8 @@ async fn tick_delay_checked_before_send_window() {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: Some(SendWindow {
             start_hour: 0,
             end_hour: 0,
