@@ -185,6 +185,11 @@ mount a config file for those settings.
 | `ORCH8_ENCRYPTION_KEY` | — | 64 hex chars for AES-256-GCM encryption at rest (required unless `--insecure-storage`) |
 | `ORCH8_OLD_ENCRYPTION_KEY` | — | Previous encryption key, for rotation: new writes use `ORCH8_ENCRYPTION_KEY`, this key is retained as a decryption fallback for rows written before the rotation |
 | `ORCH8_WASM_PLUGIN_DIR` | — | When set, WASM plugin `source` paths must resolve (after canonicalization) inside this directory |
+| `ORCH8_WASM_FUEL` | `10000000` | Fuel (≈ Wasm instructions) per WASM plugin invocation. See [End-user WASM steps](WASM_USER_STEPS.md) |
+| `ORCH8_WASM_TIMEOUT_MS` | `2000` | Wall-clock limit per WASM plugin invocation (epoch interruption, 10 ms granularity) |
+| `ORCH8_WASM_MAX_MEMORY_BYTES` | `67108864` | Linear-memory ceiling per WASM plugin instance |
+| `ORCH8_WASM_MAX_MODULE_BYTES` | `33554432` | Largest WASM module file the engine will read and compile |
+| `ORCH8_WASM_MAX_OUTPUT_BYTES` | `4194304` | Largest output a WASM plugin may return |
 | `ORCH8_CRON_TICK_SECS` | `10` | Cron loop check interval (seconds) |
 | `ORCH8_WORKER_REAPER_TICK_SECS` | `30` | How often the stale worker-task reaper runs (seconds) |
 | `ORCH8_WORKER_REAPER_STALE_SECS` | `60` | Claimed task is reclaimed after this long without a heartbeat (seconds) |
