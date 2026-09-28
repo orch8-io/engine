@@ -45,8 +45,40 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
   result is integrated into the parent (`context.data.delegations.<id>`).
 - Poll responses echo `target_runtime_id` / `runtime_kinds`; re-sending a
   failure for an already-failed task (same lease) is idempotent.
-- Schema: Postgres migration `095_distributed_worker_tasks.sql`; bundled SQLite
-  schema v46 (columns reconciled additively on boot).
+- **Worker `fail` is one fenced transaction** (HTTP and gRPC), shared with the
+  reaper, timeouts and release: receipt → `unknown`, then retry (new attempt,
+  new effect id), fail node / flat instance, or — for a delegation or a
+  terminal/paused instance — fail only the task. Same-lease re-reports stay
+  `200`; a task superseded by its retry is `404`.
+- **A retry attempt is claimable only once its effect id is bound**: rows
+  pre-inserted by a resolution wait (`awaiting_dispatch`) for the scheduler's
+  re-dispatch, which binds `effect_id` in the same statement that makes them
+  claimable. Settlement never recomputes an effect id.
+- **gRPC worker parity**: `CompleteTask` commits the effect receipt (and
+  integrates delegation results), `FailTask` uses the fenced resolution, and a
+  new `ReleaseTask` RPC mirrors `POST /workers/tasks/{id}/release`.
+- **Mobile device-side timeouts** release the task as started (effect
+  `unknown`, retry policy) instead of failing it, and the worker claims no new
+  work for a handler while its timed-out native call is still running.
+- **Placement rejections on the flat path are observable**: an `__error__`
+  step output with the reason and a `remote_dispatch_rejected` audit event
+  (previously only the `instance.failed` webhook carried it).
+- A delegation completion re-delivered after a lost response is integrated
+  once; completing a flat instance's worker step no longer logs a
+  "falling back to non-atomic transition" warning.
+- `ORCH8_BROWSER_SESSION_SECRET` (≥ 32 bytes) signs browser-session tokens
+  across replicas independently of the root API key (root-key derivation
+  remains the fallback; startup warns when tokens can only verify on the
+  minting replica and refuses a short secret).
+- Scheduler ownership lookup uses two indexed queries instead of `OR EXISTS`.
+- **End-to-end suite** `orch8-e2e`: cloud → phone → cloud with a real
+  `MobileEngine` against the real API (API-key auth) and scheduler, on SQLite
+  and Postgres — happy path, offline mailbox + push wake, kill mid-step, lease
+  loss, handoff fencing, phone → desktop delegation across disconnects, and
+  browser-session secret isolation.
+- Schema: Postgres migrations `095_distributed_worker_tasks.sql` and
+  `096_worker_task_dispatch_binding.sql`; bundled SQLite schema v47 (columns
+  reconciled additively on boot).
 
 ### Security
 

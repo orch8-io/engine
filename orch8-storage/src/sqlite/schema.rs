@@ -1254,4 +1254,4 @@ CREATE INDEX IF NOT EXISTS idx_tenant_budget_alerts_tenant
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 46;
+pub(super) const SCHEMA_VERSION: i64 = 47;
