@@ -1149,6 +1149,81 @@ impl crate::ContinuityStore for PostgresStorage {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn upsert_federation_peer(
+        &self,
+        peer: &orch8_types::federation::FederationPeerRecord,
+    ) -> Result<(), StorageError> {
+        super::federation::upsert_peer(self, peer).await
+    }
+
+    async fn get_federation_peer(
+        &self,
+        tenant_id: &TenantId,
+        peer_id: orch8_types::continuity_advanced::FederationPeerId,
+    ) -> Result<Option<orch8_types::federation::FederationPeerRecord>, StorageError> {
+        super::federation::get_peer(self, tenant_id, peer_id).await
+    }
+
+    async fn list_federation_peers(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::federation::FederationPeerRecord>, StorageError> {
+        super::federation::list_peers(self, tenant_id).await
+    }
+
+    async fn delete_federation_peer(
+        &self,
+        tenant_id: &TenantId,
+        peer_id: orch8_types::continuity_advanced::FederationPeerId,
+    ) -> Result<bool, StorageError> {
+        super::federation::delete_peer(self, tenant_id, peer_id).await
+    }
+
+    async fn create_federation_call(
+        &self,
+        call: &orch8_types::federation::FederationCall,
+    ) -> Result<bool, StorageError> {
+        super::federation::create_call(self, call).await
+    }
+
+    async fn get_federation_call(
+        &self,
+        tenant_id: &TenantId,
+        call_id: uuid::Uuid,
+    ) -> Result<Option<orch8_types::federation::FederationCall>, StorageError> {
+        super::federation::get_call(self, tenant_id, call_id).await
+    }
+
+    async fn cas_federation_call(
+        &self,
+        expected_version: u64,
+        next: &orch8_types::federation::FederationCall,
+    ) -> Result<bool, StorageError> {
+        super::federation::cas_call(self, expected_version, next).await
+    }
+
+    async fn list_due_federation_calls(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::federation::FederationCall>, StorageError> {
+        super::federation::list_due_calls(self, now, limit).await
+    }
+
+    async fn get_region_fence(
+        &self,
+    ) -> Result<Option<orch8_types::federation::RegionFence>, StorageError> {
+        super::federation::get_fence(self).await
+    }
+
+    async fn advance_region_fence(
+        &self,
+        expected_epoch: Option<u64>,
+        next: &orch8_types::federation::RegionFence,
+    ) -> Result<bool, StorageError> {
+        super::federation::advance_fence(self, expected_epoch, next).await
+    }
+
     async fn save_incident_reproduction(
         &self,
         reproduction: &DlqIncidentReproduction,

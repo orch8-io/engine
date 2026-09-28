@@ -27,6 +27,7 @@ pub mod event_correlation;
 pub mod execution;
 pub mod explain;
 pub mod failure;
+pub mod federation;
 pub mod filter;
 pub mod finding;
 pub mod ids;

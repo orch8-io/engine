@@ -15,6 +15,8 @@ pub mod postgres;
 pub mod sqlite;
 #[cfg(feature = "postgres")]
 pub mod tenant_partition;
+#[cfg(feature = "byok")]
+pub mod vault;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -3388,6 +3390,75 @@ pub trait ContinuityStore: Send + Sync + 'static {
         envelope: &FederationEnvelope,
         envelope_sha256: &str,
         accepted_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    // --- Federation transport (trust registry, outbound calls, region fence) ---
+
+    /// Insert or replace a tenant's trust-registry entry for one peer.
+    async fn upsert_federation_peer(
+        &self,
+        peer: &orch8_types::federation::FederationPeerRecord,
+    ) -> Result<(), StorageError>;
+
+    async fn get_federation_peer(
+        &self,
+        tenant_id: &TenantId,
+        peer_id: orch8_types::continuity_advanced::FederationPeerId,
+    ) -> Result<Option<orch8_types::federation::FederationPeerRecord>, StorageError>;
+
+    async fn list_federation_peers(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::federation::FederationPeerRecord>, StorageError>;
+
+    /// Returns `false` when no such entry existed.
+    async fn delete_federation_peer(
+        &self,
+        tenant_id: &TenantId,
+        peer_id: orch8_types::continuity_advanced::FederationPeerId,
+    ) -> Result<bool, StorageError>;
+
+    /// Insert an outbound call unless `(tenant_id, call_id)` already exists.
+    /// Returns `true` when this call inserted the row.
+    async fn create_federation_call(
+        &self,
+        call: &orch8_types::federation::FederationCall,
+    ) -> Result<bool, StorageError>;
+
+    async fn get_federation_call(
+        &self,
+        tenant_id: &TenantId,
+        call_id: Uuid,
+    ) -> Result<Option<orch8_types::federation::FederationCall>, StorageError>;
+
+    /// Compare-and-swap on `version`: persists `next` (whose `version` must
+    /// be `expected_version + 1`) only if the stored row is still at
+    /// `expected_version`.
+    async fn cas_federation_call(
+        &self,
+        expected_version: u64,
+        next: &orch8_types::federation::FederationCall,
+    ) -> Result<bool, StorageError>;
+
+    /// Calls that are not yet terminal-and-notified and whose `next_poll_at`
+    /// is due, oldest first, across all tenants (poller input).
+    async fn list_due_federation_calls(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::federation::FederationCall>, StorageError>;
+
+    async fn get_region_fence(
+        &self,
+    ) -> Result<Option<orch8_types::federation::RegionFence>, StorageError>;
+
+    /// Install or advance the singleton region fence. `expected_epoch = None`
+    /// only succeeds when no fence exists; otherwise the stored epoch must
+    /// equal `expected_epoch` and `next.epoch` must be exactly one greater.
+    async fn advance_region_fence(
+        &self,
+        expected_epoch: Option<u64>,
+        next: &orch8_types::federation::RegionFence,
     ) -> Result<bool, StorageError>;
 
     async fn save_incident_reproduction(
