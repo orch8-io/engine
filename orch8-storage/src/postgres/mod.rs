@@ -22,6 +22,7 @@ mod kv_state;
 mod misc;
 mod mobile_sync;
 mod outputs;
+mod placement;
 mod plugins;
 mod pools;
 mod progress_shares;
@@ -1257,6 +1258,13 @@ impl crate::WorkerStore for PostgresStorage {
         workers::stats(self, tenant_id).await
     }
 
+    async fn pending_worker_task_depth(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError> {
+        placement::pending_depth(self, limit).await
+    }
+
     async fn claim_worker_tasks_from_queue(
         &self,
         queue_name: &str,
@@ -1614,6 +1622,52 @@ impl crate::SchedulingStore for PostgresStorage {
 
     async fn upsert_rate_limit(&self, limit: &RateLimit) -> Result<(), StorageError> {
         rate_limits::upsert_rate_limit(self, limit).await
+    }
+
+    async fn get_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<orch8_types::placement::PlacementPolicies, StorageError> {
+        placement::get_policies(self, tenant_id).await
+    }
+
+    async fn put_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+        policies: &orch8_types::placement::PlacementPolicies,
+    ) -> Result<(), StorageError> {
+        placement::put_policies(self, tenant_id, policies).await
+    }
+
+    async fn upsert_rate_budget(
+        &self,
+        budget: &orch8_types::placement::RateBudget,
+    ) -> Result<orch8_types::placement::RateBudget, StorageError> {
+        placement::upsert_budget(self, budget).await
+    }
+
+    async fn list_rate_budgets(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::placement::RateBudget>, StorageError> {
+        placement::list_budgets(self, tenant_id).await
+    }
+
+    async fn delete_rate_budget(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+    ) -> Result<bool, StorageError> {
+        placement::delete_budget(self, tenant_id, key).await
+    }
+
+    async fn take_rate_budget_token(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<orch8_types::placement::RateBudgetCheck, StorageError> {
+        placement::take_budget_token(self, tenant_id, key, now).await
     }
 }
 

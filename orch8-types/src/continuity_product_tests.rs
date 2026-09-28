@@ -20,6 +20,7 @@ fn capabilities(kind: RuntimeKind, trust: RuntimeTrustLevel) -> RuntimeCapabilit
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: Some("key".into()),
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + Duration::hours(1),
     }

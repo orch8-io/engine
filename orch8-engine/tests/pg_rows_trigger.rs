@@ -40,6 +40,7 @@ async fn orch8_storage(config: Value) -> (Arc<dyn StorageBackend>, TriggerDef) {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         })
         .await

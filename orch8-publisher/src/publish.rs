@@ -360,6 +360,8 @@ mod tests {
                     retry: None,
                     timeout: None,
                     rate_limit_key: None,
+                    rate_budget: None,
+                    placement: None,
                     send_window: None,
                     context_access: None,
                     cancellable: true,
@@ -379,6 +381,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         };
 
@@ -412,6 +415,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         };
 
@@ -499,6 +503,8 @@ mod tests {
                         retry: None,
                         timeout: None,
                         rate_limit_key: None,
+                        rate_budget: None,
+                        placement: None,
                         send_window: None,
                         context_access: None,
                         cancellable: true,
@@ -522,6 +528,8 @@ mod tests {
                         retry: None,
                         timeout: None,
                         rate_limit_key: None,
+                        rate_budget: None,
+                        placement: None,
                         send_window: None,
                         context_access: None,
                         cancellable: true,
@@ -542,6 +550,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         };
 
@@ -569,6 +578,8 @@ mod tests {
                     retry: None,
                     timeout: None,
                     rate_limit_key: None,
+                    rate_budget: None,
+                    placement: None,
                     send_window: None,
                     context_access: None,
                     cancellable: true,
@@ -588,6 +599,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
                 .unwrap()
                 .with_timezone(&chrono::Utc),

@@ -296,6 +296,7 @@ fn worker_capabilities(
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + Duration::minutes(4),
     }

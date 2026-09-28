@@ -19,6 +19,7 @@ async fn create_on(
         "sla": seq.sla,
         "on_failure": seq.on_failure,
         "on_cancel": seq.on_cancel,
+        "placement": seq.placement,
     });
     sqlx::query(
         r"

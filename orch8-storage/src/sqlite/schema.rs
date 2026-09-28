@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS sequences (
     sla TEXT,
     on_failure TEXT,
     on_cancel TEXT,
+    placement TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -1249,9 +1250,25 @@ CREATE TABLE IF NOT EXISTS tenant_budget_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_budget_alerts_tenant
     ON tenant_budget_alerts(tenant_id, created_at);
+
+-- Placement policies + global rate budgets (Postgres migration 097).
+CREATE TABLE IF NOT EXISTS placement_policies (
+    tenant_id TEXT PRIMARY KEY,
+    policies TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rate_budgets (
+    tenant_id TEXT NOT NULL,
+    budget_key TEXT NOT NULL,
+    capacity INTEGER NOT NULL CHECK(capacity > 0),
+    refill_per_sec REAL NOT NULL CHECK(refill_per_sec > 0),
+    tokens REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, budget_key)
+);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 47;
+pub(super) const SCHEMA_VERSION: i64 = 48;

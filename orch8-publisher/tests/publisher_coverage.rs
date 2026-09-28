@@ -134,6 +134,8 @@ fn make_sequence_definition_with_tenant(
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -152,6 +154,7 @@ fn make_sequence_definition_with_tenant(
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc),
@@ -1200,6 +1203,8 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -1221,6 +1226,8 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -1242,6 +1249,8 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -1261,6 +1270,7 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
 

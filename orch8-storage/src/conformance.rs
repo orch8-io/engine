@@ -346,6 +346,7 @@ fn conformance_sequence(tenant: &TenantId, run_id: Uuid) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
         status: SequenceStatus::Draft,
     }

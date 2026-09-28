@@ -255,6 +255,11 @@ pub struct RuntimeCapabilities {
     /// Base64 Ed25519 key authorized to sign capsules emitted by this runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule_signing_public_key: Option<String>,
+    /// Free-form capability labels (`gpu=a100`, `residency=eu`, ...) matched
+    /// by step `placement.labels`, `placement.residency`, and tenant
+    /// placement policies. Bounded to 32 entries.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
     pub observed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -309,6 +314,18 @@ pub struct CapsuleRequirements {
     /// Data classification the `policy` is evaluated for (default `internal`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classification: Option<DataClassification>,
+    /// Placement: every label must be advertised with exactly this value.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// Placement: data-residency zone; only runtimes advertising the label
+    /// `residency=<zone>` may claim. Never relaxed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residency: Option<String>,
+    /// Soft preference (sticky affinity / preferred labels) with a bounded
+    /// wait. Never widens eligibility; see
+    /// [`crate::placement::PlacementPreference`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefer: Option<crate::placement::PlacementPreference>,
 }
 
 impl CapsuleRequirements {
@@ -321,6 +338,13 @@ impl CapsuleRequirements {
         self.runtime_id.is_some()
             || (!self.runtime_kinds.is_empty()
                 && !self.runtime_kinds.contains(&RuntimeKind::Server))
+    }
+
+    /// Whether the requirements carry hard placement facts (regions, labels,
+    /// residency). Such steps always go to the worker queue.
+    #[must_use]
+    pub fn has_placement_facts(&self) -> bool {
+        !self.regions.is_empty() || !self.labels.is_empty() || self.residency.is_some()
     }
 
     /// Whether only browser runtimes may execute the step.
@@ -363,6 +387,9 @@ impl CapsuleRequirements {
                 .iter()
                 .any(|region| capabilities.regions.contains(region))
         {
+            return false;
+        }
+        if !crate::placement::placement_facts_satisfied(self, capabilities) {
             return false;
         }
         if self
@@ -1009,6 +1036,7 @@ mod tests {
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + chrono::Duration::minutes(4),
         }
@@ -1223,6 +1251,7 @@ mod placement_requirement_tests {
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + chrono::Duration::minutes(4),
         }

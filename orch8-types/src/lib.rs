@@ -36,6 +36,7 @@ pub mod job;
 pub mod locality;
 pub mod net;
 pub mod output;
+pub mod placement;
 pub mod plugin;
 pub mod pool;
 pub mod preflight;

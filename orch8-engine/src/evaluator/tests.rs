@@ -13,6 +13,8 @@ fn find_block_in_flat_list() {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -47,6 +49,8 @@ fn find_block_nested_in_parallel() {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -77,6 +81,8 @@ fn block_meta_returns_correct_types() {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -104,6 +110,8 @@ fn mk_step(id: &str) -> BlockDefinition {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -767,6 +775,7 @@ async fn merged_blocks_no_injection_borrows() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     let merged = merged_blocks(&s, inst_id, &seq).await.unwrap();
@@ -797,6 +806,7 @@ async fn merged_blocks_with_injection_owns() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     let injected = vec![mk_step("inj")];
@@ -831,6 +841,7 @@ async fn merged_blocks_empty_injection_still_borrows() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     s.inject_blocks(inst_id, &serde_json::json!([]))

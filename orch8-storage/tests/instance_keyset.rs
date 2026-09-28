@@ -53,6 +53,7 @@ async fn exercise(storage: &dyn StorageBackend) {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();

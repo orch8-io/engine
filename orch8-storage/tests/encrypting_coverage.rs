@@ -242,6 +242,7 @@ async fn seed_sequence(storage: &dyn StorageBackend, seq_id: SequenceId, tenant:
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
@@ -849,6 +850,7 @@ async fn delegated_sequence_crud_passes_through_encryption_layer() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: chrono::Utc::now(),
     };
 

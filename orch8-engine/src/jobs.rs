@@ -106,6 +106,8 @@ impl JobSpec {
             retry: self.retry_policy(),
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -135,6 +137,7 @@ impl JobSpec {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: Utc::now(),
         }
     }

@@ -537,6 +537,7 @@ async fn sub_sequence_inside_for_each_iteration() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -570,6 +571,7 @@ async fn sub_sequence_inside_for_each_iteration() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -813,6 +815,8 @@ async fn retry_with_timeout_per_step() {
         }),
         timeout: Some(Duration::from_secs(5)),
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1208,6 +1212,7 @@ async fn sub_sequence_output_propagates_to_parent() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -1233,6 +1238,7 @@ async fn sub_sequence_output_propagates_to_parent() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -2199,6 +2205,7 @@ async fn waiting_instance_not_terminal() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2224,6 +2231,7 @@ async fn waiting_instance_not_terminal() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();

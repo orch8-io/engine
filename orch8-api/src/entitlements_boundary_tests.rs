@@ -12,6 +12,7 @@ fn valid_plan() -> PlanEntitlements {
         max_context_bytes: 4096,
         allowed_namespaces: BTreeSet::new(),
         features: BTreeSet::new(),
+        default_priority_lane: None,
     }
 }
 

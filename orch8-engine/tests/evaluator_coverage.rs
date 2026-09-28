@@ -507,6 +507,7 @@ async fn evaluate_waiting_node_returns_more_work_with_waiting() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -532,6 +533,7 @@ async fn evaluate_waiting_node_returns_more_work_with_waiting() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -781,6 +783,7 @@ async fn ensure_tree_sub_sequence_node() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -806,6 +809,7 @@ async fn ensure_tree_sub_sequence_node() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -893,6 +897,8 @@ async fn ensure_tree_handles_injected_blocks() {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1095,6 +1101,8 @@ async fn sla_deadline_breached_fails_node() {
         }),
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1145,6 +1153,8 @@ async fn sla_deadline_with_escalation_handler_called() {
         }),
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1185,6 +1195,8 @@ async fn sla_deadline_escalation_handler_not_found_still_fails() {
         }),
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1236,6 +1248,8 @@ async fn sla_deadline_escalation_handler_fails_still_fails_node() {
         }),
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1294,6 +1308,7 @@ async fn sla_deadline_only_checks_waiting_nodes() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -1319,6 +1334,7 @@ async fn sla_deadline_only_checks_waiting_nodes() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -1368,6 +1384,8 @@ async fn sla_deadline_multiple_nodes_some_breached() {
                 }),
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -1409,6 +1427,8 @@ async fn sla_deadline_zero_duration_immediately_breaches() {
         }),
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1462,6 +1482,8 @@ async fn sla_deadline_records_block_output_on_breach() {
         }),
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1506,6 +1528,8 @@ async fn sla_deadline_breach_metadata_in_output() {
         }),
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -1637,6 +1661,7 @@ async fn dispatch_step_with_interceptor_before() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
         status: SequenceStatus::Production,
     };
@@ -1681,6 +1706,7 @@ async fn dispatch_step_with_interceptor_after() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
         status: SequenceStatus::Production,
     };
@@ -1872,6 +1898,7 @@ async fn dispatch_sub_sequence_creates_child() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -1897,6 +1924,7 @@ async fn dispatch_sub_sequence_creates_child() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -1930,6 +1958,7 @@ async fn dispatch_sub_sequence_waits_for_child() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -1955,6 +1984,7 @@ async fn dispatch_sub_sequence_waits_for_child() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -1988,6 +2018,7 @@ async fn dispatch_sub_sequence_child_completed_completes_node() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2013,6 +2044,7 @@ async fn dispatch_sub_sequence_child_completed_completes_node() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -2061,6 +2093,7 @@ async fn dispatch_sub_sequence_child_failed_fails_node() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2086,6 +2119,7 @@ async fn dispatch_sub_sequence_child_failed_fails_node() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -2216,6 +2250,7 @@ async fn eval_outcome_more_work_has_waiting_true() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2241,6 +2276,7 @@ async fn eval_outcome_more_work_has_waiting_true() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -2349,6 +2385,7 @@ async fn instance_stays_running_on_more_work() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2374,6 +2411,7 @@ async fn instance_stays_running_on_more_work() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();
@@ -2409,6 +2447,7 @@ async fn instance_transitions_to_waiting_when_all_nodes_waiting() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&child_seq).await.unwrap();
@@ -2434,6 +2473,7 @@ async fn instance_transitions_to_waiting_when_all_nodes_waiting() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&parent_seq).await.unwrap();

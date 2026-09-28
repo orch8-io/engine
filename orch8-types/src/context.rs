@@ -183,6 +183,12 @@ pub struct RuntimeContext {
     /// Ignored outside dry-run. Engine-managed.
     #[serde(default)]
     pub dry_run_auto_approve: bool,
+    /// W3C `traceparent` of the dispatching engine span, set only on the
+    /// per-step context handed to external workers so their spans join the
+    /// control-plane trace (see `docs/PLACEMENT.md#tracing`). Never persisted
+    /// on the instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traceparent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -217,6 +223,7 @@ mod tests {
                 run_id: None,
                 dry_run: false,
                 dry_run_auto_approve: false,
+                traceparent: None,
             },
         }
     }

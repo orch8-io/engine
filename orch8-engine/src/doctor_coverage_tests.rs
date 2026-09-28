@@ -54,6 +54,7 @@ fn full_ctx(inst: TaskInstance) -> InstanceDiagnosticContext {
         children: Some(vec![]),
         pending_approval_blocks: Some(vec![]),
         event_waits: Some(vec![]),
+        runtime_capabilities: None,
     }
 }
 
