@@ -191,6 +191,75 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
                 destinationInstanceId: try a.string("destinationInstanceId")
             )
             return nil
+        // Runtime node / worker (Orch8Mobile after 0.7.1).
+        case "nodeRuntimeId":
+            return try engine.nodeRuntimeId()
+        case "registerNode":
+            guard let c = a["capabilities"] as? [String: Any] else {
+                throw BridgeFailure(kind: "InvalidInput", message: "missing capabilities")
+            }
+            let r = try engine.registerNode(capabilities: NodeCapabilities(
+                handlers: c["handlers"] as? [String] ?? [],
+                regions: c["regions"] as? [String] ?? [],
+                hardware: c["hardware"] as? [String] ?? [],
+                plugins: c["plugins"] as? [String] ?? [],
+                credentials: c["credentials"] as? [String] ?? [],
+                offlineCapable: (c["offlineCapable"] as? Bool) ?? true,
+                connectivity: try Self.connectivity(c.optionalString("connectivity")),
+                batteryPercent: try c.optionalByte("batteryPercent"),
+                platform: c.optionalString("platform") ?? "ios",
+                pushToken: c.optionalString("pushToken"),
+                appVersion: c.optionalString("appVersion"),
+                apiBaseUrl: c.optionalString("apiBaseUrl"),
+                capsuleSigningPublicKey: c.optionalString("capsuleSigningPublicKey")
+            ))
+            return [
+                "runtimeId": r.runtimeId,
+                "deviceId": r.deviceId,
+                "handlers": r.handlers,
+                "expiresAt": r.expiresAt,
+            ] as [String: Any]
+        case "updateNodeStatus":
+            try engine.updateNodeStatus(
+                connectivity: try Self.connectivity(a.optionalString("connectivity")),
+                batteryPercent: try a.optionalByte("batteryPercent")
+            )
+            return nil
+        case "unregisterNode":
+            engine.unregisterNode(); return nil
+        case "startWorker":
+            try engine.startWorker(options: WorkerOptions(
+                maxConcurrentTasks: UInt32(clamping: try a.uint("maxConcurrentTasks")),
+                idlePollIntervalMs: try a.uint("idlePollIntervalMs"),
+                version: a.optionalString("version")
+            ))
+            return nil
+        case "stopWorker":
+            engine.stopWorker(); return nil
+        case "runWorkerWindow":
+            let r = try engine.runWorkerWindow(timeBudgetMs: try a.uint("timeBudgetMs"))
+            return [
+                "claimed": NSNumber(value: r.claimed),
+                "completed": NSNumber(value: r.completed),
+                "failed": NSNumber(value: r.failed),
+                "stillRunning": Int(r.stillRunning),
+                "budgetExhausted": r.budgetExhausted,
+            ]
+        case "workerStats":
+            let s = engine.workerStats()
+            return [
+                "running": s.running,
+                "inFlight": Int(s.inFlight),
+                "claimed": NSNumber(value: s.claimed),
+                "completed": NSNumber(value: s.completed),
+                "failed": NSNumber(value: s.failed),
+                "released": NSNumber(value: s.released),
+                "lost": NSNumber(value: s.lost),
+            ]
+        case "onPushWake":
+            return engine.onPushWake(envelopeJson: try a.string("envelopeJson"))
+        case "enableBuiltin":
+            try engine.enableBuiltin(name: try a.string("name")); return nil
         default:
             throw BridgeFailure(kind: "InvalidInput", message: "unknown bridge method \(method)")
         }
@@ -312,6 +381,17 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         }
     }
 
+    private static func connectivity(_ wire: String?) throws -> NodeConnectivity? {
+        switch wire {
+        case nil: return nil
+        case "offline": return .offline
+        case "metered": return .metered
+        case "wifi": return .wifi
+        case "ethernet": return .ethernet
+        case let other?: throw BridgeFailure(kind: "InvalidInput", message: "unknown connectivity \(other)")
+        }
+    }
+
     /// Decode a callback envelope produced by Kotlin (`BridgeCodec`).
     fileprivate static func unwrapCallback(_ envelope: String) -> Result<String, BridgeFailure> {
         guard let object = try? parseObject(envelope) else {
@@ -408,6 +488,14 @@ private extension Dictionary where Key == String, Value == Any {
 
     func optionalString(_ key: String) -> String? {
         self[key] as? String
+    }
+
+    func optionalByte(_ key: String) throws -> UInt8? {
+        guard let value = self[key], !(value is NSNull) else { return nil }
+        guard let number = value as? NSNumber, (0...255).contains(number.intValue) else {
+            throw BridgeFailure(kind: "InvalidInput", message: "'\(key)' must be 0...255")
+        }
+        return number.uint8Value
     }
 
     func uint(_ key: String) throws -> UInt64 {

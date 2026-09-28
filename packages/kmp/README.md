@@ -162,6 +162,30 @@ if (result.budgetExhausted) scheduleAnotherWindow()
 On a silent push, call `engine.onPushReceived()`. The next tick then syncs
 approvals and commands with the server.
 
+## Runtime node (engine release after 0.7.1)
+
+The device can join the distributed-execution mesh as a runtime of kind
+`mobile`; the Rust worker loop runs the handlers you registered for tasks the
+server places on this device. These calls need the Orch8 engine release that
+follows `0.7.1` (on iOS, an `Orch8KmpBridge.swift` from the same release).
+
+```kotlin
+engine.registerHandler("scan_document") { _, input ->
+    val task = Orch8TaskContext.fromInput(input)          // null for local steps
+    scanner.scan(input, idempotencyKey = task?.effectId)  // effectId: server idempotency key
+}
+engine.registerNode(NodeCapabilities(hardware = listOf("camera"), pushToken = fcmToken))
+engine.startWorker(WorkerOptions(maxConcurrentTasks = 1))
+
+// Silent push: id-only wake hint, the worker polls a leased task at once.
+engine.onPushWake(taskId = data["task_id"], runtimeId = data["runtime_id"], reason = data["reason"])
+
+// WorkManager / BGTask window: claims even while paused, returns when idle or out of budget.
+val window = engine.runWorkerWindow(25.seconds)
+
+engine.unregisterNode() // advertise draining
+```
+
 ## API map
 
 | `MobileEngine` (Swift / Android) | `Orch8Engine` (KMP) |
@@ -177,7 +201,9 @@ approvals and commands with the server.
 | `flushTelemetry` / `setDeviceContext` / `reportPowerState` / `onPushReceived` | same, plus `PowerState.fromBattery(level, charging)` |
 | `importContinuityCapsule` / `activateContinuityCapsule` | same |
 | `exportContinuityCapsule(..., signer)` | Not wrapped. It needs a Secure Enclave/KeyStore signer, so call it from the platform SDK (same boundary as `@orch8.io/expo`) |
-| `registerNode` / `startWorker` / `stopWorker` / `runWorkerWindow` / `onPushWake` / `enableBuiltin` (runtime node + remote worker) | Not wrapped yet. Available on the generated UniFFI `io.orch8.mobile.MobileEngine` on Android/JVM; see `docs/MOBILE_SDK.md#the-phone-as-a-runtime-node` |
+| `nodeRuntimeId` / `registerNode` / `updateNodeStatus` / `unregisterNode` | same names, `suspend`, common `NodeCapabilities` / `NodeRegistration` / `NodeConnectivity` |
+| `startWorker(WorkerOptions)` / `stopWorker` / `runWorkerWindow(timeBudgetMs)` / `workerStats` | `suspend startWorker(WorkerOptions)` / `stopWorker()` / `runWorkerWindow(Duration)` / `workerStats()` |
+| `onPushWake(envelopeJson)` / `enableBuiltin(name)` | same, plus `onPushWake(taskId, runtimeId, reason)` |
 | Swift-only `DistributedWorkerClient`, `TrustedDeviceHandoffCoordinator` | Not wrapped. Use `packages/swift` directly |
 
 ## Development

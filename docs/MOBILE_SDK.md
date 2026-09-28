@@ -312,9 +312,12 @@ engine.observeInstance(id).collect { showState(it.state) } // completes at a ter
 
 Every call is `suspend` and runs on `Dispatchers.IO`. Listener callbacks
 arrive as `events: SharedFlow<EngineEvent>`. Errors from both platforms
-arrive as one `Orch8Exception(kind)`. `exportContinuityCapsule`
-(it needs a Secure Enclave or KeyStore signer) and the Swift-only distributed-worker and
-trusted-handoff helpers are not wrapped. Call them through the platform SDKs.
+arrive as one `Orch8Exception(kind)`. The runtime node / worker calls
+(`registerNode`, `startWorker`, `runWorkerWindow`, `onPushWake`, …) are
+wrapped as `suspend` functions for the release after `0.7.1`.
+`exportContinuityCapsule` (it needs a Secure Enclave or KeyStore signer) and
+the Swift-only `DistributedWorkerClient` and trusted-handoff helpers are not
+wrapped. Call them through the platform SDKs.
 See [`packages/kmp/README.md`](../packages/kmp/README.md) for setup, the
 iOS bridge design, and the full API map.
 

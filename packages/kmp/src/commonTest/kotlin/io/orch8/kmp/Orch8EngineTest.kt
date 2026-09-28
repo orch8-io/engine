@@ -14,6 +14,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 private class FakeBackend : EngineBackend {
     val handlers = mutableMapOf<String, BlockingStepHandler>()
@@ -89,6 +90,45 @@ private class FakeBackend : EngineBackend {
     ) = ContinuityImportResult("c", "k", destinationInstanceId, 1, "paused")
 
     override fun activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) = Unit
+
+    var registered: NodeCapabilities? = null
+    var workerOptions: WorkerOptions? = null
+    var windowBudgetMs: Long? = null
+    val wakes = mutableListOf<String>()
+    val builtins = mutableListOf<String>()
+
+    override fun nodeRuntimeId() = "rt-1"
+
+    override fun registerNode(capabilities: NodeCapabilities): NodeRegistration {
+        registered = capabilities
+        return NodeRegistration("rt-1", "dev-1", capabilities.handlers, "2026-01-01T00:05:00Z")
+    }
+
+    override fun updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: Int?) = Unit
+
+    override fun unregisterNode() = Unit
+
+    override fun startWorker(options: WorkerOptions) {
+        workerOptions = options
+    }
+
+    override fun stopWorker() = Unit
+
+    override fun runWorkerWindow(timeBudgetMs: Long): WorkerWindowResult {
+        windowBudgetMs = timeBudgetMs
+        return WorkerWindowResult(1, 1, 0, 0, false)
+    }
+
+    override fun workerStats() = WorkerStats(true, 0, 1, 1, 0, 0, 0)
+
+    override fun onPushWake(envelopeJson: String): Boolean {
+        wakes += envelopeJson
+        return true
+    }
+
+    override fun enableBuiltin(name: String) {
+        builtins += name
+    }
 }
 
 class Orch8EngineTest {
@@ -173,6 +213,51 @@ class Orch8EngineTest {
             listOf(InstanceState.RUNNING, InstanceState.WAITING, InstanceState.RUNNING, InstanceState.COMPLETED),
             seen,
         )
+    }
+
+    @Test
+    fun runtimeNodeCallsReachTheBackend() = runTest {
+        val backend = FakeBackend()
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        val reg = engine.registerNode(NodeCapabilities(handlers = listOf("scan"), hardware = listOf("camera")))
+        assertEquals("rt-1", reg.runtimeId)
+        assertEquals(listOf("camera"), backend.registered!!.hardware)
+
+        engine.startWorker(WorkerOptions(maxConcurrentTasks = 2))
+        assertEquals(2, backend.workerOptions!!.maxConcurrentTasks)
+        assertEquals(1L, engine.runWorkerWindow(20.seconds).completed)
+        assertEquals(20_000L, backend.windowBudgetMs)
+        assertTrue(engine.workerStats().running)
+
+        assertTrue(engine.onPushWake(taskId = "t1", reason = "work"))
+        assertEquals("""{"task_id":"t1","reason":"work"}""", backend.wakes.single())
+        engine.enableBuiltin("http_request")
+        assertEquals(listOf("http_request"), backend.builtins)
+    }
+
+    @Test
+    fun runtimeNodeArgumentsAreValidated() = runTest {
+        val engine = Orch8Engine(FakeBackend(), UnconfinedTestDispatcher(testScheduler))
+        assertFailsWith<IllegalArgumentException> { NodeCapabilities(batteryPercent = 101) }
+        assertFailsWith<IllegalArgumentException> { WorkerOptions(maxConcurrentTasks = 0) }
+        assertFailsWith<IllegalArgumentException> { engine.updateNodeStatus(batteryPercent = -1) }
+        assertFailsWith<IllegalArgumentException> { engine.runWorkerWindow(0.milliseconds) }
+    }
+
+    @Test
+    fun taskContextIsParsedFromHandlerInput() {
+        val ctx = Orch8TaskContext.fromInput(
+            """{"doc":"passport","__orch8":{"effect_id":"eff-1","task_id":"t","instance_id":"i",
+               "block_id":"b","attempt":2,"runtime_id":"r","continuity_epoch":3,"resume_checkpoint":null}}""",
+        )!!
+        assertEquals("eff-1", ctx.effectId)
+        assertEquals(2, ctx.attempt)
+        assertEquals(3L, ctx.continuityEpoch)
+        assertEquals(null, ctx.resumeCheckpoint)
+        assertEquals(null, Orch8TaskContext.fromInput("{}"))
+        assertEquals(null, Orch8TaskContext.fromInput("[]"))
+        assertEquals(null, Orch8TaskContext.fromInput("nope"))
+        assertEquals(null, Orch8TaskContext.fromInput("""{"__orch8":{"effect_id":null}}""")!!.effectId)
     }
 
     @Test
