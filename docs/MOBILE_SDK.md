@@ -138,10 +138,13 @@ npm install @orch8.io/react-native-orch8@0.7.1
 cd ios && pod install     # resolves the Orch8Mobile pod (iOS 16.0+)
 ```
 
-On Android, add Orch8's Maven repository to the **app's** root
-`android/build.gradle`. Gradle resolves a library's transitive dependencies
-with the consuming app's repositories, so the one declared inside the
-library is not enough:
+On Android, Gradle resolves the app's dependency graph with the **app's**
+repositories, so a repository declared only inside the library is not enough.
+Starting with the release after `0.7.1`, the package adds Orch8's Maven
+repository to every project of the build itself; with `0.7.1`, or when your
+settings use `RepositoriesMode.FAIL_ON_PROJECT_REPOS` (set
+`orch8.addMavenRepository=false` in `android/gradle.properties`), declare it in
+the app's root `android/build.gradle`:
 
 ```groovy
 allprojects {
