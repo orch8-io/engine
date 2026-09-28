@@ -1288,6 +1288,20 @@ pub(crate) async fn complete_task(
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
 
+    // Device-mesh delegation: integrate the result into the parent (block
+    // output + `context.data.delegations.<id>` + wake) instead of treating
+    // the mailbox task as one of the parent's own steps.
+    if orch8_engine::delegation::is_delegation_task(&task) {
+        orch8_engine::delegation::integrate_delegation_outcome(
+            state.storage.as_ref(),
+            &task,
+            Ok(&req.output),
+        )
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        return Ok(StatusCode::OK);
+    }
+
     let output_json = serde_json::to_string(&req.output).map_err(|e| {
         ApiError::InvalidArgument(format!("failed to serialize worker output: {e}"))
     })?;
@@ -1649,6 +1663,19 @@ pub(crate) async fn fail_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
+
+    // A failed delegation never fails or retries its parent: integrate the
+    // failed outcome and wake the parent instead.
+    if orch8_engine::delegation::is_delegation_task(&task) {
+        orch8_engine::delegation::integrate_delegation_outcome(
+            state.storage.as_ref(),
+            &task,
+            Err(&req.message),
+        )
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        return Ok(StatusCode::OK);
+    }
 
     // Guard: if the instance has already reached a terminal state (completed,
     // failed, cancelled), accept the failure report but skip state mutation.

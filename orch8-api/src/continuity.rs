@@ -6651,13 +6651,27 @@ struct ClaimDelegationRequest {
     delegation: DeviceDelegation,
     signed_grant: SignedContinuationGrant,
     token: String,
+    /// Explicit input handed to the delegated sub-sequence (the delegation
+    /// never shares mutable execution state with its parent).
+    #[serde(default)]
+    input: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct ClaimDelegationResponse {
+    #[serde(flatten)]
+    delegation: DeviceDelegation,
+    /// Mailbox task targeted at the destination runtime, when the parent
+    /// instance is hosted by this server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mailbox_task_id: Option<uuid::Uuid>,
 }
 
 async fn claim_delegation(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<ClaimDelegationRequest>,
-) -> Result<Json<DeviceDelegation>, ApiError> {
+) -> Result<Json<ClaimDelegationResponse>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
     if body.delegation.tenant_id != tenant_id {
         return Err(ApiError::NotFound("delegation".into()));
@@ -6701,6 +6715,37 @@ async fn claim_delegation(
             "delegation grant is expired, revoked, invalid, or already consumed".into(),
         ));
     }
+    // Route through the server mailbox: a task targeted at the destination
+    // runtime, claimable only by it, settled through the regular fenced
+    // lease protocol. Parents hosted by an external runtime keep the
+    // validation-only contract (their result travels on the source device).
+    let parent = state
+        .storage
+        .get_instance(execution.current_instance_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegation parent"))?
+        .filter(|instance| instance.tenant_id == tenant_id);
+    let mailbox_task_id = match parent {
+        Some(parent) => {
+            let sub_sequence = state
+                .storage
+                .get_sequence(body.delegation.sub_sequence_id)
+                .await
+                .map_err(|error| ApiError::from_storage(error, "delegated sub-sequence"))?
+                .ok_or_else(|| ApiError::NotFound("delegated sub-sequence".into()))?;
+            let task = orch8_engine::delegation::enqueue_delegation_task(
+                state.storage.as_ref(),
+                &parent,
+                &body.delegation,
+                &sub_sequence,
+                body.input,
+            )
+            .await
+            .map_err(|error| ApiError::Conflict(error.to_string()))?;
+            Some(task.id)
+        }
+        None => None,
+    };
     append_provenance_boundary(
         &state,
         &execution,
@@ -6709,7 +6754,10 @@ async fn claim_delegation(
         &body.delegation,
     )
     .await?;
-    Ok(Json(body.delegation))
+    Ok(Json(ClaimDelegationResponse {
+        delegation: body.delegation,
+        mailbox_task_id,
+    }))
 }
 
 async fn validate_delegation_control_plane(

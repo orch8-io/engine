@@ -8,6 +8,7 @@ pub mod continuity_advanced;
 pub mod credentials;
 pub mod cron;
 pub mod dataflow;
+pub mod delegation;
 /// Virtual time for scheduling decisions — re-exported from `orch8-types` so
 /// engine users can write `orch8_engine::clock::ManualClock`.
 pub mod clock {

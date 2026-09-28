@@ -737,20 +737,22 @@ pub(super) async fn resolve(
             .execute(&mut *conn)
             .await?
             .rows_affected(),
-        Action::FailNode { .. } | Action::FailInstance => sqlx::query(&format!(
-            "UPDATE worker_tasks SET state='failed', error_message=?5, error_retryable=?6, \
+        Action::FailNode { .. } | Action::FailInstance | Action::FailTaskOnly => {
+            sqlx::query(&format!(
+                "UPDATE worker_tasks SET state='failed', error_message=?5, error_retryable=?6, \
              completed_at=?7{fence}"
-        ))
-        .bind(resolution.task_id.to_string())
-        .bind(resolution.expected_state.to_string())
-        .bind(expected_epoch)
-        .bind(resolution.expected_worker_id.as_deref())
-        .bind(&resolution.reason)
-        .bind(i64::from(resolution.retryable))
-        .bind(&now)
-        .execute(&mut *conn)
-        .await?
-        .rows_affected(),
+            ))
+            .bind(resolution.task_id.to_string())
+            .bind(resolution.expected_state.to_string())
+            .bind(expected_epoch)
+            .bind(resolution.expected_worker_id.as_deref())
+            .bind(&resolution.reason)
+            .bind(i64::from(resolution.retryable))
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected()
+        }
     };
     if affected != 1 {
         conn.rollback().await?;
@@ -758,7 +760,7 @@ pub(super) async fn resolve(
     }
     let instance_id = resolution.instance_id.into_uuid().to_string();
     match &resolution.action {
-        Action::Requeue => {}
+        Action::Requeue | Action::FailTaskOnly => {}
         Action::Retry {
             retry_task,
             node_id,

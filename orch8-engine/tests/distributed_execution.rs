@@ -932,3 +932,177 @@ async fn release_before_start_requeues_and_after_start_goes_unknown() {
         assert_eq!(retry.attempt, task.attempt + 1, "{backend}");
     }
 }
+
+fn delegation_for(
+    parent: &orch8_types::instance::TaskInstance,
+    execution: &orch8_types::continuity::ContinuityExecution,
+    destination: RuntimeId,
+    sub_sequence: orch8_types::ids::SequenceId,
+    ttl: chrono::Duration,
+) -> orch8_types::continuity_advanced::DeviceDelegation {
+    orch8_types::continuity_advanced::DeviceDelegation {
+        id: orch8_types::continuity_advanced::DelegationId::new(),
+        tenant_id: parent.tenant_id.clone(),
+        parent_continuity_id: execution.continuity_id,
+        parent_epoch: execution.epoch,
+        source_runtime_id: RuntimeId::new(),
+        destination_runtime_id: destination,
+        sub_sequence_id: sub_sequence,
+        grant_id: orch8_types::continuity::ContinuationGrantId::new(),
+        expires_at: Utc::now() + ttl,
+    }
+}
+
+#[tokio::test]
+async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
+    use orch8_engine::delegation::{
+        DELEGATION_HANDLER, enqueue_delegation_task, integrate_delegation_outcome,
+    };
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.parent");
+        let (seq, parent) = start(&storage, vec![mk_step("wait", &handler)]).await;
+        let execution = storage
+            .get_continuity_execution_by_instance(&parent.tenant_id, parent.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let destination = caps_of(RuntimeKind::Desktop, DELEGATION_HANDLER);
+        let delegation = delegation_for(
+            &parent,
+            &execution,
+            destination.runtime_id,
+            seq.id,
+            chrono::Duration::minutes(5),
+        );
+        let task = enqueue_delegation_task(
+            storage.as_ref(),
+            &parent,
+            &delegation,
+            &seq,
+            json!({"photo": "p1"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            task.requirements.runtime_id,
+            Some(destination.runtime_id),
+            "{backend}"
+        );
+        assert!(task.effect_id.is_some(), "{backend}");
+        assert_eq!(
+            task.context,
+            json!({}),
+            "{backend}: no shared mutable state"
+        );
+
+        // Only the destination runtime can take it from the mailbox.
+        let phone = caps_of(RuntimeKind::Mobile, DELEGATION_HANDLER);
+        assert!(
+            storage
+                .claim_worker_tasks_matching(
+                    DELEGATION_HANDLER,
+                    &phone.runtime_id.to_string(),
+                    None,
+                    None,
+                    &phone,
+                    10
+                )
+                .await
+                .unwrap()
+                .iter()
+                .all(|t| t.id != task.id),
+            "{backend}"
+        );
+        let claimed = storage
+            .claim_worker_tasks_matching(
+                DELEGATION_HANDLER,
+                &destination.runtime_id.to_string(),
+                None,
+                None,
+                &destination,
+                100,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == task.id)
+            .expect("destination claims its mailbox task");
+
+        let output = json!({"labels": ["cat"]});
+        commit_external_worker_effect(storage.as_ref(), &parent.tenant_id, &claimed, &output)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .complete_worker_task(
+                    claimed.id,
+                    &orch8_types::worker::WorkerClaim::new(
+                        destination.runtime_id.to_string(),
+                        claimed.claim_epoch,
+                    ),
+                    &output,
+                )
+                .await
+                .unwrap()
+        );
+        integrate_delegation_outcome(storage.as_ref(), &claimed, Ok(&output))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            receipt_state(&storage, &claimed).await,
+            EffectState::Committed
+        );
+        let after = storage.get_instance(parent.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            InstanceState::Scheduled,
+            "{backend}: parent woken"
+        );
+        let result = &after.context.data["delegations"][delegation.id.to_string()];
+        assert_eq!(result["status"], "completed", "{backend}");
+        assert_eq!(result["output"], output, "{backend}");
+    }
+}
+
+#[tokio::test]
+async fn expired_delegation_integrates_a_failure_without_failing_the_parent() {
+    use orch8_engine::delegation::enqueue_delegation_task;
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.parent");
+        let (seq, parent) = start(&storage, vec![mk_step("wait", &handler)]).await;
+        let execution = storage
+            .get_continuity_execution_by_instance(&parent.tenant_id, parent.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let delegation = delegation_for(
+            &parent,
+            &execution,
+            RuntimeId::new(),
+            seq.id,
+            chrono::Duration::milliseconds(500),
+        );
+        let task =
+            enqueue_delegation_task(storage.as_ref(), &parent, &delegation, &seq, json!(null))
+                .await
+                .unwrap();
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        reap_worker_tasks(storage.as_ref(), Duration::from_secs(3600))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            receipt_state(&storage, &task).await,
+            EffectState::Abandoned,
+            "{backend}: never claimed"
+        );
+        let after = storage.get_instance(parent.id).await.unwrap().unwrap();
+        assert_ne!(after.state, InstanceState::Failed, "{backend}");
+        assert_eq!(
+            after.context.data["delegations"][delegation.id.to_string()]["status"],
+            "failed",
+            "{backend}"
+        );
+    }
+}

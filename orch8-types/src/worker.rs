@@ -471,6 +471,9 @@ pub enum WorkerTaskResolutionAction {
     },
     /// Flat (tree-less) execution: mark the task and the instance failed.
     FailInstance,
+    /// Mark only the task failed; the caller integrates the outcome into the
+    /// instance itself (device-mesh delegation results).
+    FailTaskOnly,
 }
 
 /// One fenced, atomic worker-task resolution. Storage applies `action` only

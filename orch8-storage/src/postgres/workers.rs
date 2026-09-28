@@ -713,19 +713,21 @@ pub(super) async fn resolve(
             .execute(&mut *tx)
             .await?
             .rows_affected(),
-        Action::FailNode { .. } | Action::FailInstance => sqlx::query(&format!(
-            "UPDATE worker_tasks SET state = 'failed', error_message = $5, \
+        Action::FailNode { .. } | Action::FailInstance | Action::FailTaskOnly => {
+            sqlx::query(&format!(
+                "UPDATE worker_tasks SET state = 'failed', error_message = $5, \
                  error_retryable = $6, completed_at = NOW(){fence}"
-        ))
-        .bind(resolution.task_id)
-        .bind(resolution.expected_state.to_string())
-        .bind(expected_epoch)
-        .bind(resolution.expected_worker_id.as_deref())
-        .bind(&resolution.reason)
-        .bind(resolution.retryable)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected(),
+            ))
+            .bind(resolution.task_id)
+            .bind(resolution.expected_state.to_string())
+            .bind(expected_epoch)
+            .bind(resolution.expected_worker_id.as_deref())
+            .bind(&resolution.reason)
+            .bind(resolution.retryable)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+        }
     };
     if affected != 1 {
         tx.rollback().await?;
@@ -733,7 +735,7 @@ pub(super) async fn resolve(
     }
     let instance_id = resolution.instance_id.into_uuid();
     match &resolution.action {
-        Action::Requeue => {}
+        Action::Requeue | Action::FailTaskOnly => {}
         Action::Retry {
             retry_task,
             node_id,

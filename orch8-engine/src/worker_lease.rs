@@ -144,6 +144,7 @@ async fn resolve_expired_lease(
     };
     let applied = storage.resolve_worker_task(&resolution).await?;
     if applied {
+        integrate_if_delegation(storage, task, &resolution).await?;
         tracing::info!(
             task_id = %task.id,
             instance_id = %task.instance_id,
@@ -179,6 +180,7 @@ async fn resolve_timed_out(
     );
     let applied = storage.resolve_worker_task(&resolution).await?;
     if applied {
+        integrate_if_delegation(storage, task, &resolution).await?;
         tracing::info!(task_id = %task.id, instance_id = %task.instance_id, "worker task timed out");
     }
     Ok(applied)
@@ -233,7 +235,23 @@ pub async fn release_worker_task(
             WorkerTaskResolutionAction::Requeue,
         )
     };
-    Ok(storage.resolve_worker_task(&resolution).await?)
+    let applied = storage.resolve_worker_task(&resolution).await?;
+    if applied {
+        integrate_if_delegation(storage, task, &resolution).await?;
+    }
+    Ok(applied)
+}
+
+async fn integrate_if_delegation(
+    storage: &dyn StorageBackend,
+    task: &WorkerTask,
+    resolution: &WorkerTaskResolution,
+) -> Result<(), EngineError> {
+    if matches!(resolution.action, WorkerTaskResolutionAction::FailTaskOnly) {
+        crate::delegation::integrate_delegation_outcome(storage, task, Err(&resolution.reason))
+            .await?;
+    }
+    Ok(())
 }
 
 fn fence(
@@ -270,6 +288,11 @@ pub async fn plan_failure_action(
     message: &str,
 ) -> Result<WorkerTaskResolutionAction, EngineError> {
     let now = Utc::now();
+    // A delegation never fails or retries its parent: the failed outcome is
+    // integrated into the parent's context instead.
+    if crate::delegation::is_delegation_task(task) {
+        return Ok(WorkerTaskResolutionAction::FailTaskOnly);
+    }
     let tree = storage.get_execution_tree(task.instance_id).await?;
     let live_node = tree
         .iter()
