@@ -1231,6 +1231,14 @@ pub(super) async fn execute_step_block(
         {
             Ok(outcome) => Ok(outcome),
             Err(message) => {
+                crate::handlers::step_dispatch::record_remote_dispatch_rejection(
+                    storage.as_ref(),
+                    instance,
+                    step_def,
+                    attempt,
+                    &message,
+                )
+                .await;
                 fail_instance_with_error(
                     storage.as_ref(),
                     instance,

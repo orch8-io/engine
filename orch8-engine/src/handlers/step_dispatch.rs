@@ -366,6 +366,64 @@ async fn placement_rejection(
     Ok(None)
 }
 
+/// Make a permanent remote-dispatch rejection (invalid placement, locality
+/// denial, credentials placed on a browser) observable before the step is
+/// failed: an error log, an `__error__` block output carrying the reason
+/// (visible through `GET /instances/{id}/outputs`), and a
+/// `remote_dispatch_rejected` audit event. Shared by the tree evaluator and
+/// the flat fast path so neither can drop the reason. Best-effort: a
+/// persistence failure is logged and never masks the rejection itself.
+pub(crate) async fn record_remote_dispatch_rejection(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    step_def: &StepDef,
+    attempt: u32,
+    message: &str,
+) {
+    tracing::error!(
+        instance_id = %instance.id,
+        block_id = %step_def.id,
+        handler = %step_def.handler,
+        error = %message,
+        "remote dispatch rejected — failing the step permanently"
+    );
+    let err_output = serde_json::json!({
+        "__error__": true,
+        "retryable": false,
+        "message": message,
+    });
+    let output_size =
+        serde_json::to_vec(&err_output).map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
+    if let Err(error) = storage
+        .save_block_output(&orch8_types::output::BlockOutput {
+            id: uuid::Uuid::now_v7(),
+            instance_id: instance.id,
+            block_id: step_def.id.clone(),
+            output: err_output,
+            output_ref: Some("__error__".into()),
+            output_size,
+            attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+    {
+        tracing::warn!(%error, "failed to persist remote-dispatch rejection marker");
+    }
+    crate::lifecycle::audit_event(
+        storage,
+        instance.id,
+        &instance.tenant_id,
+        "remote_dispatch_rejected",
+        Some(step_def.id.as_str()),
+        serde_json::json!({
+            "handler": step_def.handler,
+            "attempt": attempt,
+            "error": message,
+        }),
+    )
+    .await;
+}
+
 /// Permanent failure for a credential-bearing step placed on browsers.
 pub(crate) const BROWSER_CREDENTIALS_REJECTION: &str =
     "steps placed on browser runtimes cannot receive credentials";
@@ -425,34 +483,7 @@ pub(crate) async fn dispatch_step_to_external_worker(
     {
         Ok(_) => {}
         Err(RemoteDispatchRejected(message)) => {
-            tracing::error!(
-                instance_id = %instance.id,
-                block_id = %step_def.id,
-                error = %message,
-                "remote dispatch rejected — failing node permanently"
-            );
-            let err_output = serde_json::json!({
-                "__error__": true,
-                "retryable": false,
-                "message": message,
-            });
-            let output_size = serde_json::to_vec(&err_output)
-                .map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
-            if let Err(error) = storage
-                .save_block_output(&orch8_types::output::BlockOutput {
-                    id: uuid::Uuid::now_v7(),
-                    instance_id: instance.id,
-                    block_id: step_def.id.clone(),
-                    output: err_output,
-                    output_ref: Some("__error__".into()),
-                    output_size,
-                    attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
-                    created_at: chrono::Utc::now(),
-                })
-                .await
-            {
-                tracing::warn!(%error, "failed to persist remote-dispatch rejection marker");
-            }
+            record_remote_dispatch_rejection(storage, instance, step_def, attempt, &message).await;
             evaluator::fail_node(storage, node.id).await?;
             return Ok(false);
         }
