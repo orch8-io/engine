@@ -232,6 +232,7 @@ pub(super) async fn claim_for_tenant(
 /// Upper bound on pending rows one `claim_matching` poll inspects.
 const CLAIM_MATCHING_MAX_SCAN: usize = 4096;
 
+#[allow(clippy::too_many_lines)] // two-phase scan + fenced claim reads best as one unit
 pub(super) async fn claim_matching(
     store: &PostgresStorage,
     handler_name: &str,
@@ -654,7 +655,7 @@ pub(super) async fn list_expired_leases(
            LIMIT $2"
     ))
     .bind(default_lease.as_secs_f64())
-    .bind(i64::from(limit.min(REAPER_BATCH_SIZE as u32)))
+    .bind(i64::from(limit).min(REAPER_BATCH_SIZE))
     .fetch_all(&store.pool)
     .await?;
     rows.into_iter().map(WorkerTaskRow::into_task).collect()
@@ -674,7 +675,7 @@ pub(super) async fn list_timed_out(
            ORDER BY created_at ASC
            LIMIT $1"
     ))
-    .bind(i64::from(limit.min(REAPER_BATCH_SIZE as u32)))
+    .bind(i64::from(limit).min(REAPER_BATCH_SIZE))
     .fetch_all(&store.pool)
     .await?;
     rows.into_iter().map(WorkerTaskRow::into_task).collect()

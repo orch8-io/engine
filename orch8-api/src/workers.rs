@@ -142,6 +142,38 @@ async fn record_stale_rejection(
     }
 }
 
+/// Ownership half of the lease fence: a task dispatched under an older
+/// continuity owner (or whose execution is mid-export) cannot mutate its
+/// lease, even with a current `claim_epoch`. 409, like a lost lease.
+async fn enforce_ownership_fence(
+    state: &AppState,
+    tenant_id: &orch8_types::ids::TenantId,
+    task: &orch8_types::worker::WorkerTask,
+    claim: &WorkerClaim,
+    operation: &str,
+) -> Result<(), ApiError> {
+    let current = orch8_engine::ownership::worker_task_ownership_current(
+        state.storage.as_ref(),
+        tenant_id,
+        task,
+    )
+    .await
+    .map_err(|error| ApiError::Internal(format!("ownership fence: {error}")))?;
+    if current {
+        return Ok(());
+    }
+    record_stale_rejection(
+        state,
+        task.id,
+        claim,
+        &format!("{operation} rejected: continuity ownership changed"),
+    )
+    .await;
+    Err(ApiError::Conflict(
+        "worker task ownership changed (continuity handoff); the lease is stale".into(),
+    ))
+}
+
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct SetVersionPinRequest {
     tenant_id: String,
@@ -839,6 +871,7 @@ pub(crate) struct WorkerArtifactReceipt {
         (status = 409, description = "Lease changed or upload ID reused with other bytes"),
     )
 )]
+#[allow(clippy::too_many_lines)] // lease + ownership fence + bounded upload in one handler
 pub(crate) async fn upload_task_artifact(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -879,6 +912,14 @@ pub(crate) async fn upload_task_artifact(
         .await;
         return Err(ApiError::Conflict("worker task lease changed".into()));
     }
+    enforce_ownership_fence(
+        &state,
+        &instance.tenant_id,
+        &task,
+        &claim,
+        "artifact upload",
+    )
+    .await?;
     let content_type = request
         .headers()
         .get(header::CONTENT_TYPE)
@@ -1015,6 +1056,9 @@ pub(crate) async fn complete_task(
     if !completion_retry && (pre_task.state != WorkerTaskState::Claimed || !same_lease) {
         record_stale_rejection(&state, task_id, &claim, "complete rejected: lease changed").await;
         return Err(ApiError::Conflict("worker task lease changed".into()));
+    }
+    if !completion_retry {
+        enforce_ownership_fence(&state, &inst.tenant_id, &pre_task, &claim, "complete").await?;
     }
     // The committed output wins on a retry (the worker may resend a
     // regenerated payload); a first completion uses the request's.
@@ -1330,6 +1374,7 @@ pub(crate) async fn fail_task(
         record_stale_rejection(&state, task_id, &claim, "fail rejected: lease changed").await;
         return Err(ApiError::Conflict("worker task lease changed".into()));
     }
+    enforce_ownership_fence(&state, &inst.tenant_id, &pre_task, &claim, "fail").await?;
     let tenant_id = inst.tenant_id.clone();
     let tenant_for_cb = Some(inst.tenant_id);
 
@@ -1731,6 +1776,7 @@ pub(crate) async fn heartbeat_task(
     )?;
 
     let claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+    enforce_ownership_fence(&state, &inst.tenant_id, &task, &claim, "heartbeat").await?;
 
     let next_checkpoint_seq = if let Some(checkpoint) = req.checkpoint {
         const MAX_ACTIVITY_CHECKPOINT_BYTES: usize = 256 * 1024;

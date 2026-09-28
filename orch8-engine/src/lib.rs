@@ -32,6 +32,7 @@ pub mod metrics;
 pub mod model_pricing;
 pub mod optimizer;
 pub mod outbound;
+pub mod ownership;
 pub mod placement;
 pub mod preflight;
 pub mod preload;

@@ -1155,6 +1155,16 @@ async fn export_handoff(
             "source instance must be paused or durably waiting before export".into(),
         ));
     }
+    let in_flight =
+        orch8_engine::capsule::open_worker_task_count(state.storage.as_ref(), instance.id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "worker tasks"))?;
+    if in_flight > 0 {
+        return Err(ApiError::Conflict(format!(
+            "source instance has {in_flight} pending or claimed worker task(s); \
+             wait for them to settle (or cancel them) before export"
+        )));
+    }
     let now = Utc::now();
     let mut quiescing = handoff.clone();
     quiescing.state = HandoffState::Quiescing;

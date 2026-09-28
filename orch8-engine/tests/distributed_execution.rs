@@ -1,6 +1,6 @@
 //! Distributed execution (runtime nodes) — engine-level regression tests.
 //!
-//! Every scenario runs against SQLite and, when `DATABASE_URL` is set,
+//! Every scenario runs against `SQLite` and, when `DATABASE_URL` is set,
 //! against Postgres too (skipped otherwise, like the storage PG suite).
 //! Postgres rows are shared across parallel tests, so assertions look at the
 //! scenario's own instance/task only — never at global reaper counters.
@@ -437,6 +437,113 @@ async fn legacy_reaper_never_requeues_an_ambiguous_side_effect() {
             after.state,
             WorkerTaskState::Claimed,
             "{backend}: the storage-level reaper skips dispatched receipts"
+        );
+    }
+}
+
+async fn move_ownership(
+    storage: &Arc<dyn StorageBackend>,
+    instance_id: orch8_types::ids::InstanceId,
+    next_state: OwnershipState,
+    bump_epoch: bool,
+) {
+    let tenant = orch8_types::ids::TenantId::unchecked("t");
+    let execution = storage
+        .get_continuity_execution_by_instance(&tenant, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut next = execution.clone();
+    next.state = next_state;
+    if bump_epoch {
+        next.epoch = execution.epoch.checked_next().unwrap();
+    }
+    assert!(
+        storage
+            .cas_continuity_owner(
+                &tenant,
+                execution.continuity_id,
+                execution.epoch,
+                execution.owner_runtime_id,
+                &next,
+            )
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn worker_lease_mutations_are_fenced_on_ownership_epoch() {
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.charge");
+        let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
+        let task = only_task(&storage, inst.id).await;
+        let tenant = inst.tenant_id.clone();
+        assert!(
+            orch8_engine::ownership::worker_task_ownership_current(
+                storage.as_ref(),
+                &tenant,
+                &task
+            )
+            .await
+            .unwrap(),
+            "{backend}"
+        );
+
+        move_ownership(&storage, inst.id, OwnershipState::Transferring, false).await;
+        assert!(
+            !orch8_engine::ownership::worker_task_ownership_current(
+                storage.as_ref(),
+                &tenant,
+                &task
+            )
+            .await
+            .unwrap(),
+            "{backend}: no lease mutation while the execution is being exported"
+        );
+
+        move_ownership(&storage, inst.id, OwnershipState::Owned, true).await;
+        assert!(
+            !orch8_engine::ownership::worker_task_ownership_current(
+                storage.as_ref(),
+                &tenant,
+                &task
+            )
+            .await
+            .unwrap(),
+            "{backend}: a task dispatched under an older owner epoch is stale"
+        );
+    }
+}
+
+#[tokio::test]
+async fn export_is_refused_while_a_worker_task_is_in_flight() {
+    use orch8_engine::capsule::{CapsuleExportRequest, CapsuleServiceError};
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.charge");
+        let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
+        let continuity = storage
+            .get_continuity_execution_by_instance(&inst.tenant_id, inst.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let result = orch8_engine::capsule::export_paused_capsule(
+            storage.as_ref(),
+            CapsuleExportRequest {
+                continuity,
+                destination_runtime_id: Some(RuntimeId::new()),
+                requirements: orch8_types::continuity::CapsuleRequirements::default(),
+                expires_at: Utc::now() + chrono::Duration::minutes(5),
+                signing_key_id: "k".into(),
+                encryption_key_id: "e".into(),
+            },
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            &orch8_types::encryption::FieldEncryptor::from_bytes(&[9; 32]),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CapsuleServiceError::WorkerTasksInFlight(1))),
+            "{backend}: {result:?}"
         );
     }
 }

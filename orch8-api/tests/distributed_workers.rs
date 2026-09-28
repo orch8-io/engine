@@ -584,3 +584,99 @@ async fn uploaded_receipt_can_complete_task_and_resume_server_workflow() {
         .unwrap();
     assert_eq!(stored_output.output, output);
 }
+
+#[tokio::test]
+async fn worker_completion_is_fenced_on_continuity_ownership_epoch() {
+    use orch8_types::continuity::{
+        ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState, RuntimeId,
+    };
+    let server = spawn_test_server_with_artifacts().await;
+    let client = Client::new();
+    let tenant = "fence-tenant";
+    let instance = create_instance(&server, &client, tenant).await;
+    let execution = ContinuityExecution {
+        continuity_id: ContinuityId::new(),
+        tenant_id: TenantId::unchecked(tenant),
+        current_instance_id: InstanceId::from_uuid(instance),
+        owner_runtime_id: RuntimeId::new(),
+        epoch: ExecutionEpoch::initial(),
+        state: OwnershipState::Owned,
+        updated_at: Utc::now(),
+    };
+    server
+        .storage
+        .create_continuity_execution(&execution)
+        .await
+        .unwrap();
+    let mut task = worker_task(
+        instance,
+        "fenced",
+        CapsuleRequirements::default(),
+        None,
+        WorkerTaskState::Pending,
+        None,
+        0,
+    );
+    task.continuity_epoch = Some(0);
+    server.storage.create_worker_task(&task).await.unwrap();
+
+    let claimed = poll_tasks(
+        client
+            .post(format!("{}/workers/tasks/poll", server.v1_url()))
+            .header("X-Tenant-Id", tenant)
+            .json(&json!({"handler_name": "device_file", "worker_id": "w1"}))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(claimed.len(), 1);
+    let epoch = claimed[0]["claim_epoch"].as_u64().unwrap();
+
+    // A handoff advanced the owner epoch while the node was working.
+    let mut moved = execution.clone();
+    moved.epoch = ExecutionEpoch::from_u64(1);
+    assert!(
+        server
+            .storage
+            .cas_continuity_owner(
+                &execution.tenant_id,
+                execution.continuity_id,
+                execution.epoch,
+                execution.owner_runtime_id,
+                &moved,
+            )
+            .await
+            .unwrap()
+    );
+    for op in ["heartbeat", "complete", "fail"] {
+        let response = client
+            .post(format!(
+                "{}/workers/tasks/{}/{op}",
+                server.v1_url(),
+                task.id
+            ))
+            .header("X-Tenant-Id", tenant)
+            .json(&json!({
+                "worker_id": "w1",
+                "claim_epoch": epoch,
+                "output": {"ok": true},
+                "message": "boom"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{op}");
+    }
+    let stored = server
+        .storage
+        .get_worker_task(task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.state,
+        WorkerTaskState::Claimed,
+        "stale result never landed"
+    );
+}

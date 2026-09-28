@@ -4,6 +4,7 @@ pub mod compression;
 pub mod conformance;
 pub mod encrypting;
 pub mod externalizing;
+pub mod fencing;
 pub mod lifecycle;
 pub mod postgres;
 pub mod sqlite;

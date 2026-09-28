@@ -60,7 +60,7 @@ pub(super) async fn insert_task(
     .bind(t.continuity_epoch.map(|epoch| i64::try_from(epoch).unwrap_or(i64::MAX)))
     .bind(t.lease_secs.map(i64::from))
     .bind(i64::from(t.carries_credentials))
-    .bind(t.claimed_runtime_kind.map(|kind| kind.as_str()))
+    .bind(t.claimed_runtime_kind.map(orch8_types::continuity::RuntimeKind::as_str))
     .execute(conn)
     .await?;
     Ok(())

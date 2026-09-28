@@ -2000,3 +2000,188 @@ async fn jev_step_output_drives_router_and_when_guard() {
         .unwrap();
     assert_eq!(billing_out.output["output"]["model"], "billing");
 }
+
+// ------------------------------------------------------------------
+// Continuity fencing: the scheduler never advances an instance whose
+// execution is transferring or owned elsewhere. SQLite always; Postgres
+// too when DATABASE_URL is set.
+// ------------------------------------------------------------------
+
+async fn fencing_backends() -> Vec<(&'static str, Arc<dyn StorageBackend>)> {
+    let mut out: Vec<(&'static str, Arc<dyn StorageBackend>)> = vec![(
+        "sqlite",
+        Arc::new(SqliteStorage::in_memory().await.unwrap()),
+    )];
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        let pg = orch8_storage::postgres::PostgresStorage::new(&url, 5, None)
+            .await
+            .unwrap();
+        pg.run_migrations().await.unwrap();
+        out.push(("postgres", Arc::new(pg)));
+    }
+    out
+}
+
+async fn run_process_instance(storage: &Arc<dyn StorageBackend>, instance: TaskInstance) {
+    let registry = HandlerRegistry::new();
+    let webhook_config = WebhookConfig::default();
+    let cache = crate::sequence_cache::SequenceCache::new(16, Duration::from_secs(60));
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+    let lease_lost = std::sync::atomic::AtomicBool::new(false);
+    let ctx = InstanceRunCtx {
+        storage,
+        handlers: &registry,
+        webhook_config: &webhook_config,
+        sequence_cache: &cache,
+        externalize_threshold: 0,
+        max_steps_per_instance: 0,
+        cancel: &cancel,
+        clock: &clock,
+        lease_lost: &lease_lost,
+    };
+    process_instance(
+        &ctx,
+        instance,
+        PrefetchedData {
+            signals: Vec::new(),
+            completed_block_ids: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+async fn seed_fenced_instance(
+    storage: &Arc<dyn StorageBackend>,
+    state: orch8_types::continuity::OwnershipState,
+    superseded: bool,
+) -> (InstanceId, SequenceDefinition) {
+    use orch8_types::continuity::{ContinuityExecution, ContinuityId, ExecutionEpoch, RuntimeId};
+    let blocks = vec![BlockDefinition::Step(Box::new(mk_step_def(
+        "s1",
+        "noop",
+        serde_json::json!({}),
+    )))];
+    let mut sequence = mk_sequence(blocks);
+    sequence.name = format!("fenced-{}", Uuid::now_v7());
+    storage.create_sequence(&sequence).await.unwrap();
+    let instance_id = InstanceId::new();
+    let now = Utc::now();
+    storage
+        .create_instance(&TaskInstance {
+            id: instance_id,
+            sequence_id: sequence.id,
+            tenant_id: TenantId::unchecked("t"),
+            namespace: Namespace::new("ns"),
+            state: InstanceState::Running,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let tenant = TenantId::unchecked("t");
+    let execution = ContinuityExecution {
+        continuity_id: ContinuityId::new(),
+        tenant_id: tenant.clone(),
+        current_instance_id: instance_id,
+        owner_runtime_id: RuntimeId::new(),
+        epoch: ExecutionEpoch::initial(),
+        state: orch8_types::continuity::OwnershipState::Owned,
+        updated_at: now,
+    };
+    storage
+        .create_continuity_execution(&execution)
+        .await
+        .unwrap();
+    let mut next = execution.clone();
+    next.state = state;
+    if superseded {
+        // Another instance (the imported destination) now owns it.
+        let mut destination_instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+        let destination = InstanceId::new();
+        destination_instance.id = destination;
+        destination_instance.state = InstanceState::Paused;
+        storage
+            .create_instance(&destination_instance)
+            .await
+            .unwrap();
+        next.current_instance_id = destination;
+        next.epoch = ExecutionEpoch::from_u64(1);
+        next.owner_runtime_id = RuntimeId::new();
+    }
+    assert!(
+        storage
+            .cas_continuity_owner(
+                &tenant,
+                execution.continuity_id,
+                execution.epoch,
+                execution.owner_runtime_id,
+                &next,
+            )
+            .await
+            .unwrap()
+    );
+    (instance_id, sequence)
+}
+
+#[tokio::test]
+async fn scheduler_defers_instance_whose_execution_is_transferring() {
+    for (backend, storage) in fencing_backends().await {
+        let (instance_id, _) = seed_fenced_instance(
+            &storage,
+            orch8_types::continuity::OwnershipState::Transferring,
+            false,
+        )
+        .await;
+        let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+        Box::pin(run_process_instance(&storage, instance)).await;
+        let after = storage.get_instance(instance_id).await.unwrap().unwrap();
+        assert_eq!(after.state, InstanceState::Scheduled, "{backend}");
+        assert!(after.next_fire_at.unwrap() > Utc::now(), "{backend}");
+        assert!(
+            storage
+                .get_block_output(instance_id, &BlockId::new("s1"))
+                .await
+                .unwrap()
+                .is_none(),
+            "{backend}: no step ran while transferring"
+        );
+    }
+}
+
+#[tokio::test]
+async fn scheduler_parks_instance_superseded_by_a_handoff() {
+    for (backend, storage) in fencing_backends().await {
+        let (instance_id, _) = seed_fenced_instance(
+            &storage,
+            orch8_types::continuity::OwnershipState::Owned,
+            true,
+        )
+        .await;
+        let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+        Box::pin(run_process_instance(&storage, instance)).await;
+        let after = storage.get_instance(instance_id).await.unwrap().unwrap();
+        assert_eq!(after.state, InstanceState::Waiting, "{backend}");
+        assert!(
+            storage
+                .get_block_output(instance_id, &BlockId::new("s1"))
+                .await
+                .unwrap()
+                .is_none(),
+            "{backend}: superseded source never advances"
+        );
+    }
+}

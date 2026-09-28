@@ -834,10 +834,30 @@ async fn ensure_worker_claim(
     claim: &WorkerClaim,
     operation: &str,
 ) -> Result<(), Status> {
-    if task.state == WorkerTaskState::Claimed
+    let lease_held = task.state == WorkerTaskState::Claimed
         && task.worker_id.as_deref() == Some(claim.worker_id.as_str())
-        && task.claim_epoch == claim.claim_epoch
-    {
+        && task.claim_epoch == claim.claim_epoch;
+    // Ownership half of the fence: a task dispatched under an older
+    // continuity owner (or mid-export) cannot mutate its lease.
+    let ownership_current = if lease_held {
+        match storage
+            .get_instance(task.instance_id)
+            .await
+            .map_err(storage_err)?
+        {
+            Some(instance) => orch8_storage::fencing::worker_task_ownership_current(
+                storage.as_ref(),
+                &instance.tenant_id,
+                task,
+            )
+            .await
+            .map_err(storage_err)?,
+            None => false,
+        }
+    } else {
+        false
+    };
+    if lease_held && ownership_current {
         return Ok(());
     }
     let event = WorkerTaskAttemptEvent {
@@ -846,7 +866,11 @@ async fn ensure_worker_claim(
         claim_epoch: claim.claim_epoch,
         worker_id: Some(claim.worker_id.clone()),
         event: WorkerAttemptEventKind::StaleMutationRejected,
-        reason: Some(format!("{operation} rejected: lease changed")),
+        reason: Some(if lease_held {
+            format!("{operation} rejected: continuity ownership changed")
+        } else {
+            format!("{operation} rejected: lease changed")
+        }),
         created_at: chrono::Utc::now(),
     };
     if let Err(error) = storage.record_worker_task_attempt_event(&event).await {
