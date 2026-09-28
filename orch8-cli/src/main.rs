@@ -243,6 +243,9 @@ enum Commands {
         #[command(flatten)]
         to_cloud: commands::cloud_migrate::MigrateToArgs,
     },
+    /// Active-passive region fence: inspect it or promote a region
+    /// (operates on the database directly; see docs/FAILOVER.md).
+    Failover(commands::failover::FailoverCmd),
     /// Export sequences, triggers, cron schedules, queue routing rules, and
     /// credentials (and optionally instances) to a versioned, checksummed
     /// .tar.gz, reading the storage database directly.
@@ -729,6 +732,10 @@ async fn main() -> Result<()> {
         return commands::triggers::run(cmd).await;
     }
 
+    if let Commands::Failover(cmd) = cli.command {
+        return commands::failover::run(cmd).await;
+    }
+
     if let Commands::Migrate { database_url, .. } = cli.command {
         let database_url = database_url.context(
             "--database-url / ORCH8_DATABASE_URL is required (or pass --to <url> --source <sqlite> to move an embedded engine)",
@@ -809,6 +816,7 @@ async fn main() -> Result<()> {
         | Commands::Drill(..)
         | Commands::Executor(..)
         | Commands::Migrate { .. }
+        | Commands::Failover(_)
         | Commands::Triggers(_)
         | Commands::Completions { .. } => {
             anyhow::bail!("internal error: command should have been handled before dispatch")

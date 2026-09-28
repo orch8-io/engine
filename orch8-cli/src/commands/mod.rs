@@ -18,6 +18,7 @@ pub mod doctor;
 pub mod drill;
 pub mod executor;
 pub mod explain;
+pub mod failover;
 pub mod generate;
 pub mod health;
 pub mod import;

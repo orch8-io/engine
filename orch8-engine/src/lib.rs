@@ -24,6 +24,8 @@ pub mod event_correlation;
 pub mod explain;
 pub mod expression;
 pub mod externalized;
+pub mod failover;
+pub mod federation;
 pub mod gc;
 pub mod handlers;
 pub mod interceptors;

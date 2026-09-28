@@ -16,7 +16,7 @@ See [docs/EMBEDDED.md](docs/EMBEDDED.md).
   nullable `sub_tenant` (children and forks inherit it) and `GET /instances`
   filters with `?sub_tenant=`. Migration `097_sub_tenants` adds the column,
   caps, an append-only execution ledger, embed themes and release targets
-  (SQLite reconciles the same shape, schema version 49, together with placement).
+  (SQLite reconciles the same shape, schema version 50, together with placement and federation).
 - **Pooled limits**: `GET|PUT /sub-tenants/{sub}/limits`
   (`max_executions_per_month`, `max_concurrent`) are enforced atomically
   inside the tenant's plan pool; violations are `429` with the new error code
@@ -168,6 +168,45 @@ second scheduler.
   `orch8.worker_task.complete` span on it.
 - gRPC worker sessions that negotiated `runtime_capabilities` now claim
   through the capability predicate, so they receive placed work.
+
+### Federation transport, BYOK externalization, region failover
+
+See [docs/FEDERATION.md](docs/FEDERATION.md) and [docs/FAILOVER.md](docs/FAILOVER.md).
+All three are opt-in; nothing changes for deployments that do not configure them.
+
+- **Cross-organization federation**: an explicit HTTPS transport for the
+  existing signed federation envelopes. Adds a per-tenant trust registry
+  (`GET|POST /api/v1/federation/peers`, `GET|PUT|DELETE /api/v1/federation/peers/{peer_id}`;
+  writes require the root key), `GET /api/v1/federation/identity`, and
+  `GET /api/v1/federation/calls/{call_id}`. The new signature-authenticated
+  inbound route `POST /api/v1/federation/inbound` sits outside API-key auth
+  and is also mounted on `gateway` nodes. Access requires mutual sequence
+  allowlists (plus an optional inbound handler allowlist). Only declared
+  input fields and declared block outputs cross the boundary. Idempotency
+  comes from the instance idempotency key and the existing
+  `federation_receipts`.
+- **`federate` step handler**: runs a sequence at a peer, parks on
+  `wait_for_input`, and resumes with the peer's declared outputs through the
+  `human_input:<block>` resume signal that `wait_for_event` also uses. A
+  background federation poller owns all network I/O, retrying with bounded
+  backoff. Lint warns when `wait_for_input` is missing.
+- **Cross-cluster child workflows**: peers with `relationship: "cluster"`
+  (same organization) may disclose `"*"` and link the child to its parent.
+  Cancelling or failing the parent propagates a signed `cancel` to the child.
+- **BYOK externalization**: `ORCH8_BYOK_*` sends every externalized payload to
+  a customer-owned S3-compatible bucket under AES-256-GCM envelope encryption.
+  DEKs are wrapped by AWS KMS (SigV4-signed, no AWS SDK added) or by a static
+  key provider. The database then stores only `{"_o8vault": …}` references,
+  and nodes without the vault see those references and nothing else. Requires
+  `ORCH8_ENCRYPTION_KEY`.
+- **Active-passive multi-region failover**: `ORCH8_FAILOVER_REGION` keeps
+  standby nodes out of the scheduler until their region holds the
+  database-resident region fence. Active nodes fence themselves (and fail
+  closed) when the fence moves. `orch8 failover status|promote` performs
+  epoch-CAS promotion directly against a database. Data replication remains
+  the operator's PostgreSQL responsibility.
+- **Migration** `099_federation_transport.sql` adds the `federation_peers`,
+  `federation_calls` and `region_fence` tables (the SQLite schema adds them too).
 
 ### Distributed execution (runtime nodes)
 

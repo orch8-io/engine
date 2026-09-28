@@ -41,6 +41,7 @@ mod events;
 mod evidence;
 mod execution_tree;
 mod externalized;
+mod federation;
 mod helpers;
 mod instances;
 mod kv_state;

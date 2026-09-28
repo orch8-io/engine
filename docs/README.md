@@ -61,6 +61,8 @@ release notes.
 - `stable` [Authentication and SSO](AUTHENTICATION.md) — engine keys and the Cloud OIDC boundary.
 - `stable` [Secure production bootstrap](SECURE_BOOTSTRAP.md) — scaffold, validate, start, and readiness-check a secure node.
 - `beta` [Node roles](NODE_ROLES.md) — assemble all-in-one, control, executor, gateway, and edge processes; operate managed-control sessions and fleet draining.
+- `beta` [Federation and BYOK](FEDERATION.md): cross-organization federation, cross-cluster child workflows, and customer-owned payload vaults.
+- `beta` [Multi-region failover](FAILOVER.md): the active-passive region fence, the promotion procedure, and the RPO/RTO it gives.
 - `stable` [Operator support bundle](SUPPORT_BUNDLE.md) — collect bounded, redacted diagnostics atomically.
 - `beta` [Background jobs](JOBS.md) — enqueue a handler with one call (`POST /jobs`), no sequence required.
 - `beta` [End-user WASM steps](WASM_USER_STEPS.md) — accept untrusted WASM modules from your users: sandbox limits, upload validation, ABI, and threat model.

@@ -198,6 +198,32 @@ fn test_state(
     }
 }
 
+/// Spawn a test server whose continuity/federation identity is derived
+/// from `master_key_hex` (64 hex chars), so two servers in one test have
+/// distinct federation identities.
+///
+/// # Panics
+/// Panics on an invalid key or a broken test environment.
+pub async fn spawn_federation_test_server(master_key_hex: &str) -> TestServer {
+    crate::federation::allow_http_peers_for_loopback_tests();
+    let storage = Arc::new(
+        SqliteStorage::in_memory()
+            .await
+            .expect("in-memory sqlite storage must initialise for tests"),
+    );
+    let shutdown = CancellationToken::new();
+    let mut state = test_state(storage.clone(), shutdown.clone(), false, 0, None);
+    state.continuity_crypto = Some(Arc::new(
+        crate::ContinuityCrypto::from_master_key(master_key_hex).expect("valid test master key"),
+    ));
+    let base_url = serve(state, storage.clone(), None, shutdown.clone()).await;
+    TestServer {
+        base_url,
+        shutdown,
+        storage,
+    }
+}
+
 async fn spawn_test_server_inner(
     mobile_sync_enabled: bool,
     artifacts_enabled: bool,
@@ -255,6 +281,7 @@ async fn serve(
         .merge(crate::health::routes().with_state(state.clone()))
         .merge(webhooks::public_routes().with_state(state.clone()))
         .merge(crate::public_routes().with_state(state.clone()))
+        .merge(crate::federation::inbound_routes().with_state(state.clone()))
         .layer(axum::middleware::from_fn(
             crate::request_id::request_id_middleware,
         ));

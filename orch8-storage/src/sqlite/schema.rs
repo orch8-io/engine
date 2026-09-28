@@ -1129,6 +1129,41 @@ CREATE TABLE IF NOT EXISTS tenant_storage_placements (
 CREATE INDEX IF NOT EXISTS idx_tenant_storage_placements_backend
     ON tenant_storage_placements(backend_id);
 
+-- Federation transport: per-tenant trust registry, outbound calls, and the
+-- singleton active-region fence (see migrations/099_federation_transport.sql).
+CREATE TABLE IF NOT EXISTS federation_peers (
+    tenant_id TEXT NOT NULL,
+    peer_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    record TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, peer_id),
+    UNIQUE (tenant_id, name)
+);
+CREATE TABLE IF NOT EXISTS federation_calls (
+    tenant_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    notified INTEGER NOT NULL DEFAULT 0,
+    next_poll_at TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version >= 0),
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, call_id)
+);
+CREATE INDEX IF NOT EXISTS idx_federation_calls_due
+    ON federation_calls(next_poll_at) WHERE notified = 0;
+CREATE INDEX IF NOT EXISTS idx_federation_calls_instance
+    ON federation_calls(tenant_id, instance_id);
+CREATE TABLE IF NOT EXISTS region_fence (
+    singleton INTEGER PRIMARY KEY DEFAULT 1 CHECK(singleton = 1),
+    active_region TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK(epoch >= 1),
+    record TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- human_review interactive approval actions (hash of token only).
 CREATE TABLE IF NOT EXISTS approval_action_tokens (
     token_hash TEXT PRIMARY KEY,
@@ -1304,4 +1339,4 @@ CREATE TABLE IF NOT EXISTS rate_budgets (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 49;
+pub(super) const SCHEMA_VERSION: i64 = 50;
