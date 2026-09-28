@@ -544,6 +544,12 @@ impl Modify for ContinuityOpenApi {
         crate::alerts::get_rule,
         crate::alerts::update_rule,
         crate::alerts::delete_rule,
+        // Signed effect receipts (at-most-once dispatch evidence)
+        crate::receipts::export_instance_receipts,
+        crate::receipts::export_window_receipts,
+        crate::receipts::signing_key,
+        // Embedded -> remote migration
+        crate::migrations::import,
         // Usage
         crate::usage::get_usage,
         crate::usage::purge_llm_cache,
@@ -672,6 +678,7 @@ impl Modify for ContinuityOpenApi {
         crate::workbench::BlockOutputSummary,
         crate::workbench::RunComparison,
         crate::workbench::ForkPreview,
+        crate::receipts::SigningKeyResponse,
         // IDs
         orch8_types::ids::InstanceId,
         orch8_types::ids::SequenceId,
@@ -874,6 +881,8 @@ impl Modify for ContinuityOpenApi {
         (name = "prompts", description = "Versioned, tenant-scoped prompt registry with labels and canaries"),
         (name = "budgets", description = "Tenant LLM spend budgets: hard caps and threshold alerts"),
         (name = "usage", description = "LLM usage, estimated cost, cache savings and budget status"),
+        (name = "receipts", description = "Signed effect-receipt bundles: at-most-once dispatch evidence (not an exactly-once claim)"),
+        (name = "migrations", description = "Import sequences and in-flight instances from another engine (orch8 migrate --to)"),
         (name = "cluster", description = "Multi-node cluster management"),
         (name = "credentials", description = "Shared secrets referenced by step params via credentials://<id>"),
         (name = "jobs", description = "Background jobs: enqueue a handler invocation without authoring a sequence"),

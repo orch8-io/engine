@@ -25,6 +25,7 @@ pub mod instances;
 pub mod jobs;
 pub mod mcp_server;
 pub mod metrics;
+pub mod migrations;
 pub mod mobile_sync;
 pub mod model_pricing;
 #[allow(clippy::needless_for_each)]
@@ -37,6 +38,7 @@ pub(crate) mod prompts;
 pub(crate) mod public_http;
 pub mod queue_dispatch;
 pub mod queue_routing;
+pub mod receipts;
 pub mod releases;
 pub mod request_id;
 pub mod rollback;
@@ -272,6 +274,8 @@ fn api_routes() -> Router<AppState> {
         .merge(queue_dispatch::routes())
         .merge(mcp_server::routes())
         .merge(browser_sessions::routes())
+        .merge(receipts::routes())
+        .merge(migrations::routes())
 }
 
 /// Build the axum router with all routes.

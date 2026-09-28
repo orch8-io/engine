@@ -3579,6 +3579,53 @@
         }
       }
     },
+    "/instances/{id}/receipts/export": {
+      "get": {
+        "tags": [
+          "receipts"
+        ],
+        "summary": "Export the effect-receipt ledger of one instance as a signed JSONL bundle.",
+        "operationId": "export_instance_receipts",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Signed JSONL bundle: header, one line per effect receipt, signature trailer. At-most-once dispatch evidence, not an exactly-once claim.",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Instance not found"
+          },
+          "503": {
+            "description": "Signing key not configured"
+          }
+        }
+      }
+    },
     "/instances/{id}/remediations": {
       "get": {
         "tags": [
@@ -4420,6 +4467,43 @@
         }
       }
     },
+    "/migrations/import": {
+      "post": {
+        "tags": [
+          "migrations"
+        ],
+        "summary": "Import a migration batch.",
+        "operationId": "import",
+        "requestBody": {
+          "description": "MigrationImportRequest: { migration_id, source_engine_id, sequences: [SequenceDefinition], instances: [{ instance, execution_tree, block_outputs, effect_receipts, pending_signals, continuity }] } (at most 100 instances and 500 sequences)",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "MigrationImportResponse: per-instance status (`imported` | `already_present`), owned epoch, and the target runtime id",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid batch (limits, unknown sequence, inconsistent ids)"
+          },
+          "403": {
+            "description": "Batch contains another tenant's records"
+          },
+          "409": {
+            "description": "An instance id exists but was not created by this migration"
+          }
+        }
+      }
+    },
     "/pools": {
       "get": {
         "tags": [
@@ -5198,6 +5282,86 @@
         "responses": {
           "204": {
             "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/receipts/export": {
+      "get": {
+        "tags": [
+          "receipts"
+        ],
+        "summary": "Export every effect receipt created in `[from, to)` for a tenant.",
+        "operationId": "export_window_receipts",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Window start (RFC 3339, inclusive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Window end (RFC 3339, exclusive)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (unscoped callers only)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Signed JSONL bundle for the window. `scope.truncated=true` when more than 10000 instances were touched in the window.",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid window or missing tenant"
+          },
+          "503": {
+            "description": "Signing key not configured"
+          }
+        }
+      }
+    },
+    "/receipts/signing-key": {
+      "get": {
+        "tags": [
+          "receipts"
+        ],
+        "summary": "The public half of the key that signs receipt bundles.",
+        "operationId": "signing_key",
+        "responses": {
+          "200": {
+            "description": "Engine receipt-signing public key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SigningKeyResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Signing key not configured"
           }
         }
       }
@@ -15642,6 +15806,28 @@
           }
         ]
       },
+      "SigningKeyResponse": {
+        "type": "object",
+        "required": [
+          "signing_key_id",
+          "algorithm",
+          "public_key"
+        ],
+        "properties": {
+          "algorithm": {
+            "type": "string",
+            "description": "Always `ed25519`."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Base64 of the raw 32-byte Ed25519 public key. Pin it when verifying."
+          },
+          "signing_key_id": {
+            "type": "string",
+            "description": "Stable identifier of the engine's continuity signing key."
+          }
+        }
+      },
       "SlaPolicy": {
         "type": "object",
         "description": "Alert-only service-level-agreement policy for a sequence. A breach is a\nsignal, not a state change: it fires one webhook + metric per breach kind\nand leaves the instance running. Both bounds are optional.",
@@ -17577,6 +17763,14 @@
     {
       "name": "usage",
       "description": "LLM usage, estimated cost, cache savings and budget status"
+    },
+    {
+      "name": "receipts",
+      "description": "Signed effect-receipt bundles: at-most-once dispatch evidence (not an exactly-once claim)"
+    },
+    {
+      "name": "migrations",
+      "description": "Import sequences and in-flight instances from another engine (orch8 migrate --to)"
     },
     {
       "name": "cluster",
