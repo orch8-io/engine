@@ -18,6 +18,7 @@ pub mod dlq_groups;
 pub mod entitlements;
 pub mod error;
 pub mod events;
+pub mod federation;
 pub mod health;
 pub mod input_schema;
 pub mod inspect;
@@ -272,6 +273,7 @@ fn api_routes() -> Router<AppState> {
         .merge(queue_dispatch::routes())
         .merge(mcp_server::routes())
         .merge(browser_sessions::routes())
+        .merge(federation::routes())
 }
 
 /// Build the axum router with all routes.
@@ -320,7 +322,10 @@ pub fn public_routes() -> Router<AppState> {
 /// Operational health is attached by `orch8-server` outside this router.
 pub fn build_continuity_gateway_router(state: AppState) -> Router {
     Router::new()
-        .nest(API_V1_PREFIX, continuity::routes())
+        .nest(
+            API_V1_PREFIX,
+            continuity::routes().merge(federation::routes()),
+        )
         .with_state(state)
 }
 

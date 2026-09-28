@@ -561,6 +561,15 @@ impl Modify for ContinuityOpenApi {
         crate::budgets::delete_budget,
         crate::budgets::list_budgets,
         crate::budgets::list_alerts,
+        // Federation transport
+        crate::federation::get_identity,
+        crate::federation::list_peers,
+        crate::federation::create_peer,
+        crate::federation::get_peer,
+        crate::federation::update_peer,
+        crate::federation::delete_peer,
+        crate::federation::get_call,
+        crate::federation::inbound,
         // Streaming
         crate::streaming::stream_instance,
         // Cluster
@@ -811,6 +820,17 @@ impl Modify for ContinuityOpenApi {
         crate::prompts::PromptDetail,
         crate::prompts::SetLabelRequest,
         crate::budgets::BudgetRequest,
+        // Federation transport
+        crate::federation::PeerRequest,
+        orch8_types::federation::FederationIdentity,
+        orch8_types::federation::FederationPeerRecord,
+        orch8_types::federation::PeerRelationship,
+        orch8_types::federation::PeerOutboundPolicy,
+        orch8_types::federation::PeerInboundPolicy,
+        orch8_types::federation::FederationCall,
+        orch8_types::federation::FederationCallState,
+        orch8_types::federation::SignedFederationMessage,
+        orch8_types::continuity_advanced::FederationEnvelope,
         // Credentials
         crate::credentials::CredentialResponse,
         orch8_types::credential::CredentialKind,
@@ -873,6 +893,7 @@ impl Modify for ContinuityOpenApi {
         (name = "pools", description = "Resource pool management"),
         (name = "prompts", description = "Versioned, tenant-scoped prompt registry with labels and canaries"),
         (name = "budgets", description = "Tenant LLM spend budgets: hard caps and threshold alerts"),
+        (name = "federation", description = "Opt-in federation transport: trust registry, outbound calls, and the signature-authenticated inbound endpoint"),
         (name = "usage", description = "LLM usage, estimated cost, cache savings and budget status"),
         (name = "cluster", description = "Multi-node cluster management"),
         (name = "credentials", description = "Shared secrets referenced by step params via credentials://<id>"),

@@ -2340,6 +2340,326 @@
         }
       }
     },
+    "/federation/calls/{call_id}": {
+      "get": {
+        "tags": [
+          "federation"
+        ],
+        "operationId": "get_call",
+        "parameters": [
+          {
+            "name": "call_id",
+            "in": "path",
+            "description": "Outbound call id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (ignored when the caller is bound to a tenant by its key/header).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FederationCall"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
+    "/federation/identity": {
+      "get": {
+        "tags": [
+          "federation"
+        ],
+        "operationId": "get_identity",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FederationIdentity"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No engine encryption key configured"
+          }
+        }
+      }
+    },
+    "/federation/inbound": {
+      "post": {
+        "tags": [
+          "federation"
+        ],
+        "operationId": "inbound",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignedFederationMessage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed response envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignedFederationMessage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Unknown/revoked/expired peer, bad signature, stale envelope, or policy denial"
+          },
+          "404": {
+            "description": "Allowed sequence is not deployed"
+          },
+          "503": {
+            "description": "Federation disabled (no engine encryption key)"
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/federation/peers": {
+      "get": {
+        "tags": [
+          "federation"
+        ],
+        "operationId": "list_peers",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (ignored when the caller is bound to a tenant by its key/header).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FederationPeerRecord"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "federation"
+        ],
+        "operationId": "create_peer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PeerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FederationPeerRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid peer (identity/key mismatch, non-HTTPS endpoint, wildcard disclosure for an organization peer)"
+          },
+          "403": {
+            "description": "Requires the root/admin API key"
+          },
+          "409": {
+            "description": "Peer already registered"
+          }
+        }
+      }
+    },
+    "/federation/peers/{peer_id}": {
+      "get": {
+        "tags": [
+          "federation"
+        ],
+        "operationId": "get_peer",
+        "parameters": [
+          {
+            "name": "peer_id",
+            "in": "path",
+            "description": "Peer federation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (ignored when the caller is bound to a tenant by its key/header).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FederationPeerRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "federation"
+        ],
+        "operationId": "update_peer",
+        "parameters": [
+          {
+            "name": "peer_id",
+            "in": "path",
+            "description": "Peer federation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PeerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FederationPeerRecord"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Requires the root/admin API key"
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "federation"
+        ],
+        "operationId": "delete_peer",
+        "parameters": [
+          {
+            "name": "peer_id",
+            "in": "path",
+            "description": "Peer federation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant (ignored when the caller is bound to a tenant by its key/header).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "403": {
+            "description": "Requires the root/admin API key"
+          },
+          "404": {
+            "description": ""
+          }
+        }
+      }
+    },
     "/handlers": {
       "get": {
         "tags": [
@@ -11929,6 +12249,264 @@
           }
         }
       },
+      "FederationCall": {
+        "type": "object",
+        "description": "Durable record of one outbound call. `version` is the CAS token.",
+        "required": [
+          "call_id",
+          "tenant_id",
+          "instance_id",
+          "block_id",
+          "peer_id",
+          "sequence",
+          "input",
+          "state",
+          "next_poll_at",
+          "created_at",
+          "updated_at",
+          "version"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Consecutive transport failures (drives backoff).",
+            "minimum": 0
+          },
+          "block_id": {
+            "$ref": "#/components/schemas/BlockId"
+          },
+          "call_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input": {
+            "description": "Minimized input: only the peer's `disclosed_fields`."
+          },
+          "instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "next_poll_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "notified": {
+            "type": "boolean",
+            "description": "Local instance was told about the terminal state (resume signal sent)."
+          },
+          "peer_id": {
+            "$ref": "#/components/schemas/FederationPeerId"
+          },
+          "remote_instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "result": {},
+          "sequence": {
+            "type": "string"
+          },
+          "sequence_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "state": {
+            "$ref": "#/components/schemas/FederationCallState"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "withheld_sha256": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "SHA-256 of each withheld top-level field (evidence, never the value)."
+          }
+        }
+      },
+      "FederationCallState": {
+        "type": "string",
+        "description": "Lifecycle of an outbound federated call.",
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "FederationEnvelope": {
+        "type": "object",
+        "required": [
+          "id",
+          "peer_id",
+          "tenant_id",
+          "continuity_id",
+          "epoch",
+          "destination_runtime_id",
+          "payload_sha256",
+          "issued_at",
+          "expires_at",
+          "signature"
+        ],
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "destination_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "epoch": {
+            "$ref": "#/components/schemas/ExecutionEpoch"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/FederationMessageId"
+          },
+          "issued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "payload_sha256": {
+            "type": "string"
+          },
+          "peer_id": {
+            "$ref": "#/components/schemas/FederationPeerId"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "FederationIdentity": {
+        "type": "object",
+        "description": "Public identity other engines register us under.",
+        "required": [
+          "peer_id",
+          "public_key",
+          "trust_root_sha256"
+        ],
+        "properties": {
+          "peer_id": {
+            "$ref": "#/components/schemas/FederationPeerId"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "trust_root_sha256": {
+            "type": "string"
+          }
+        }
+      },
+      "FederationMessageId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "FederationPeerId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "FederationPeerRecord": {
+        "type": "object",
+        "description": "One entry of the per-tenant federation trust registry.",
+        "required": [
+          "tenant_id",
+          "peer_id",
+          "name",
+          "endpoint",
+          "public_key",
+          "remote_tenant_id",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "HTTPS base URL of the peer's gateway (no trailing path)."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "inbound": {
+            "$ref": "#/components/schemas/PeerInboundPolicy"
+          },
+          "name": {
+            "type": "string"
+          },
+          "outbound": {
+            "$ref": "#/components/schemas/PeerOutboundPolicy"
+          },
+          "peer_id": {
+            "$ref": "#/components/schemas/FederationPeerId",
+            "description": "The peer's federation identity (derived from its public key; see\n[`peer_id_from_public_key`])."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Base64 raw 32-byte ed25519 verifying key of the peer."
+          },
+          "relationship": {
+            "$ref": "#/components/schemas/PeerRelationship"
+          },
+          "remote_tenant_id": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Tenant at the peer that this relationship is bound to: our calls\ntarget it, and its calls must come from it."
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId",
+            "description": "Local tenant that owns this trust relationship."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "Finding": {
         "type": "object",
         "description": "One read-only diagnostic statement with its evidence and suggested\nremediations.",
@@ -13259,6 +13837,125 @@
           }
         },
         "additionalProperties": false
+      },
+      "PeerInboundPolicy": {
+        "type": "object",
+        "description": "What the peer may do here.",
+        "properties": {
+          "handlers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "When set, an inbound start is refused unless every step handler of\nthe target sequence is in this list."
+          },
+          "returned_outputs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Block ids whose outputs are returned to the peer on completion. No\nother instance data (context, errors, logs) ever leaves."
+          },
+          "sequences": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Local sequence names the peer may start in this tenant."
+          }
+        }
+      },
+      "PeerOutboundPolicy": {
+        "type": "object",
+        "description": "What this engine may send to the peer.",
+        "properties": {
+          "disclosed_fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Top-level input fields allowed to leave. Everything else is withheld\n(only its SHA-256 is kept locally as evidence)."
+          },
+          "sequences": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Remote sequence names this tenant may start at the peer."
+          }
+        }
+      },
+      "PeerRelationship": {
+        "type": "string",
+        "description": "Trust relationship with a peer.",
+        "enum": [
+          "organization",
+          "cluster"
+        ]
+      },
+      "PeerRequest": {
+        "type": "object",
+        "description": "Create/replace body for a trust-registry entry.",
+        "required": [
+          "peer_id",
+          "name",
+          "endpoint",
+          "public_key",
+          "remote_tenant_id"
+        ],
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "HTTPS base URL of the peer's gateway."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "inbound": {
+            "$ref": "#/components/schemas/PeerInboundPolicy"
+          },
+          "name": {
+            "type": "string"
+          },
+          "outbound": {
+            "$ref": "#/components/schemas/PeerOutboundPolicy"
+          },
+          "peer_id": {
+            "$ref": "#/components/schemas/FederationPeerId",
+            "description": "Peer federation identity from the peer's `GET /federation/identity`.\nMust match `public_key`."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Base64 raw 32-byte ed25519 public key of the peer."
+          },
+          "relationship": {
+            "$ref": "#/components/schemas/PeerRelationship"
+          },
+          "remote_tenant_id": {
+            "type": "string",
+            "description": "Tenant at the peer this relationship binds to."
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "tenant_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "PolicyOutcome": {
         "type": "string",
@@ -15642,6 +16339,22 @@
           }
         ]
       },
+      "SignedFederationMessage": {
+        "type": "object",
+        "description": "HTTP body in both directions: an envelope plus the exact payload bytes.",
+        "required": [
+          "envelope",
+          "payload_base64"
+        ],
+        "properties": {
+          "envelope": {
+            "$ref": "#/components/schemas/FederationEnvelope"
+          },
+          "payload_base64": {
+            "type": "string"
+          }
+        }
+      },
       "SlaPolicy": {
         "type": "object",
         "description": "Alert-only service-level-agreement policy for a sequence. A breach is a\nsignal, not a state change: it fires one webhook + metric per breach kind\nand leaves the instance running. Both bounds are optional.",
@@ -17573,6 +18286,10 @@
     {
       "name": "budgets",
       "description": "Tenant LLM spend budgets: hard caps and threshold alerts"
+    },
+    {
+      "name": "federation",
+      "description": "Opt-in federation transport: trust registry, outbound calls, and the signature-authenticated inbound endpoint"
     },
     {
       "name": "usage",
