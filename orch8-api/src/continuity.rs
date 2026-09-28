@@ -237,7 +237,7 @@ fn query_tenant(
     crate::auth::enforce_tenant_create(tenant_ctx, &requested)
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
+pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut encoded = String::with_capacity(64);
     for byte in digest {
@@ -262,7 +262,7 @@ async fn append_provenance_boundary<T: Serialize + ?Sized>(
     append_provenance_digest(state, execution, kind, summary, &payload_sha256).await
 }
 
-async fn append_provenance_digest(
+pub(crate) async fn append_provenance_digest(
     state: &AppState,
     execution: &ContinuityExecution,
     kind: &str,

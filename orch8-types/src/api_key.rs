@@ -29,6 +29,11 @@ pub enum ApiCapability {
     Publisher,
     Approver,
     Auditor,
+    /// Short-lived browser-session principal (`POST
+    /// /runtimes/browser-sessions`): poll/complete/fail/heartbeat/release on
+    /// `/workers/tasks*` only, bound to one browser runtime. Never granted
+    /// to stored API keys and never part of [`Self::all`].
+    BrowserWorker,
 }
 
 impl ApiCapability {

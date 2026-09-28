@@ -213,6 +213,10 @@ mod tests {
             continuity_trusted_signing_keys: Arc::new(std::collections::BTreeMap::new()),
             federation_peers: Arc::new(Vec::new()),
             continuity_lab_enabled: false,
+            browser_sessions: std::sync::Arc::new(
+                crate::browser_sessions::BrowserSessionSigner::for_root(None),
+            ),
+            browser_output_max_bytes: crate::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
         };
         let response = stream_changes(
             State(state),

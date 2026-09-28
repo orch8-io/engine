@@ -517,6 +517,88 @@ async fn validate_and_record_capabilities(
     Ok(())
 }
 
+/// Bind a poll to the caller's credential. A browser-session principal may
+/// only poll as its own `runtime_id`, with `kind = browser`, for handlers and
+/// queues its token grants; a conflicting self-assertion is refused (403).
+/// Its capability advertisement is clamped (trust at most `registered`,
+/// handlers limited to the allowlist, no credential bindings, expiry at most
+/// the token's) and synthesized when absent, so browser claims always go
+/// through capability matching (and the browser no-secrets claim filter).
+fn bind_poll_identity(
+    binding: &crate::browser_sessions::OptionalBinding,
+    worker_id: &str,
+    handler_name: &str,
+    queue_name: Option<&str>,
+    capabilities: Option<orch8_types::continuity::RuntimeCapabilities>,
+) -> Result<Option<orch8_types::continuity::RuntimeCapabilities>, ApiError> {
+    use orch8_types::continuity::{RuntimeCapabilities, RuntimeTrustLevel};
+
+    let Some(axum::Extension(binding)) = binding else {
+        return Ok(capabilities);
+    };
+    crate::browser_sessions::enforce_bound_worker(
+        &Some(axum::Extension(binding.clone())),
+        worker_id,
+    )?;
+    if !binding.allows_handler(handler_name) {
+        return Err(ApiError::Forbidden(format!(
+            "handler {handler_name} is not granted to this browser session"
+        )));
+    }
+    if let Some(queue) = queue_name
+        && !binding.allows_queue(queue)
+    {
+        return Err(ApiError::Forbidden(format!(
+            "queue {queue} is not granted to this browser session"
+        )));
+    }
+    let now = chrono::Utc::now();
+    let mut capabilities = match capabilities {
+        Some(capabilities) => {
+            if capabilities.kind != binding.kind || capabilities.runtime_id != binding.runtime_id {
+                return Err(ApiError::Forbidden(
+                    "capabilities kind/runtime_id conflict with the browser session binding".into(),
+                ));
+            }
+            capabilities
+        }
+        None => RuntimeCapabilities {
+            runtime_id: binding.runtime_id,
+            kind: binding.kind,
+            trust: RuntimeTrustLevel::Registered,
+            handlers: Vec::new(),
+            plugins: Vec::new(),
+            credentials: Vec::new(),
+            regions: Vec::new(),
+            hardware: Vec::new(),
+            offline_capable: false,
+            connectivity: None,
+            battery_percent: None,
+            estimated_cost_microunits: None,
+            estimated_latency_ms: None,
+            draining: false,
+            capsule_signing_public_key: None,
+            observed_at: now,
+            expires_at: now + chrono::Duration::minutes(4),
+        },
+    };
+    capabilities.trust = capabilities.trust.min(RuntimeTrustLevel::Registered);
+    capabilities
+        .handlers
+        .retain(|handler| binding.allows_handler(handler));
+    if !capabilities
+        .handlers
+        .iter()
+        .any(|handler| handler == handler_name)
+    {
+        capabilities.handlers.push(handler_name.to_owned());
+    }
+    capabilities.credentials.clear();
+    capabilities.capsule_signing_public_key = None;
+    capabilities.expires_at = capabilities.expires_at.min(binding.expires_at);
+    Ok(Some(capabilities))
+}
+
 #[utoipa::path(post, path = "/workers/tasks/poll", tag = "workers",
     request_body = PollRequest,
     responses((status = 200, description = "Claimed worker tasks and lease hints", body = PollTasksResponse))
@@ -524,8 +606,16 @@ async fn validate_and_record_capabilities(
 pub(crate) async fn poll_tasks(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
-    Json(req): Json<PollRequest>,
+    binding: crate::browser_sessions::OptionalBinding,
+    Json(mut req): Json<PollRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    req.capabilities = bind_poll_identity(
+        &binding,
+        &req.worker_id,
+        &req.handler_name,
+        None,
+        req.capabilities.take(),
+    )?;
     let limit = req.limit.min(1000);
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
     validate_and_record_capabilities(
@@ -627,8 +717,16 @@ pub(crate) struct QueuePollRequest {
 pub(crate) async fn poll_tasks_from_queue(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
-    Json(req): Json<QueuePollRequest>,
+    binding: crate::browser_sessions::OptionalBinding,
+    Json(mut req): Json<QueuePollRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    req.capabilities = bind_poll_identity(
+        &binding,
+        &req.worker_id,
+        &req.handler_name,
+        Some(&req.queue_name),
+        req.capabilities.take(),
+    )?;
     let limit = req.limit.min(1000);
     // Tenant-scoped claim path — see `poll_tasks` comment for the rationale.
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
@@ -1064,9 +1162,11 @@ async fn persist_reported_logs(
 pub(crate) async fn complete_task(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
     Json(req): Json<CompleteRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
     // Fetch task first to verify tenant access via its instance.
     let pre_task = state
         .storage
@@ -1103,6 +1203,21 @@ pub(crate) async fn complete_task(
     }
     if !completion_retry {
         enforce_ownership_fence(&state, &inst.tenant_id, &pre_task, &claim, "complete").await?;
+    }
+    // Browser output is untrusted page data (DOM, forms, user input): bound
+    // its size before anything is committed.
+    let from_browser = binding.is_some()
+        || pre_task.claimed_runtime_kind == Some(orch8_types::continuity::RuntimeKind::Browser);
+    if from_browser && !completion_retry {
+        let bytes = serde_json::to_vec(&req.output)
+            .map_err(|error| ApiError::InvalidArgument(error.to_string()))?
+            .len();
+        if bytes > state.browser_output_max_bytes {
+            return Err(ApiError::PayloadTooLarge(format!(
+                "browser step output is {bytes} bytes; the maximum is {}",
+                state.browser_output_max_bytes
+            )));
+        }
     }
     // The committed output wins on a retry (the worker may resend a
     // regenerated payload); a first completion uses the request's.
@@ -1163,6 +1278,7 @@ pub(crate) async fn complete_task(
     // retry already persisted them on the first attempt).
     if !completion_retry {
         persist_reported_logs(&state, pre_task.instance_id, &pre_task.block_id, &req.logs).await;
+        record_output_provenance(&state, &tenant_id, &pre_task, &req.output).await;
     }
 
     let task = state
@@ -1362,6 +1478,76 @@ pub(crate) async fn complete_task(
     Ok(StatusCode::OK)
 }
 
+/// Record which runtime produced a step output (kind + id) in the audit
+/// trail and, for continuity-enrolled instances, the provenance chain — as
+/// evidence alongside the output, never by mutating the output JSON.
+/// Best-effort: provenance failures are logged, never fail the completion.
+async fn record_output_provenance(
+    state: &AppState,
+    tenant_id: &orch8_types::ids::TenantId,
+    task: &orch8_types::worker::WorkerTask,
+    output: &serde_json::Value,
+) {
+    let Some(kind) = task.claimed_runtime_kind else {
+        return;
+    };
+    let encoded = serde_json::to_vec(output).unwrap_or_default();
+    let output_sha256 = crate::continuity::hex_sha256(&encoded);
+    let runtime_id = task.worker_id.clone().unwrap_or_default();
+    let details = serde_json::json!({
+        "task_id": task.id,
+        "runtime_kind": kind,
+        "runtime_id": runtime_id,
+        "claim_epoch": task.claim_epoch,
+        "effect_id": task.effect_id,
+        "output_sha256": output_sha256,
+        "output_bytes": encoded.len(),
+        "untrusted_page_data": kind == orch8_types::continuity::RuntimeKind::Browser,
+    });
+    let entry = orch8_types::audit::AuditLogEntry {
+        id: Uuid::now_v7(),
+        instance_id: task.instance_id,
+        tenant_id: tenant_id.clone(),
+        event_type: "worker_output_provenance".into(),
+        from_state: None,
+        to_state: None,
+        block_id: Some(task.block_id.as_str().to_owned()),
+        details: details.clone(),
+        created_at: chrono::Utc::now(),
+    };
+    if let Err(error) = state.storage.append_audit_log(&entry).await {
+        tracing::warn!(task_id = %task.id, %error, "failed to record worker output provenance");
+    }
+    match state
+        .storage
+        .get_continuity_execution_by_instance(tenant_id, task.instance_id)
+        .await
+    {
+        Ok(Some(execution)) => {
+            let digest = crate::continuity::hex_sha256(details.to_string().as_bytes());
+            if let Err(error) = crate::continuity::append_provenance_digest(
+                state,
+                &execution,
+                "remote_step_output",
+                &format!(
+                    "step {} output from {} runtime {runtime_id}",
+                    task.block_id,
+                    kind.as_str()
+                ),
+                &digest,
+            )
+            .await
+            {
+                tracing::warn!(task_id = %task.id, ?error, "failed to append output provenance");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(task_id = %task.id, %error, "provenance lookup failed");
+        }
+    }
+}
+
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct FailRequest {
     worker_id: String,
@@ -1386,9 +1572,11 @@ pub(crate) struct FailRequest {
 pub(crate) async fn fail_task(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
     Json(req): Json<FailRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
     // Fetch task first to verify tenant access via its instance.
     let pre_task = state
         .storage
@@ -1802,9 +1990,11 @@ pub(crate) struct HeartbeatRequest {
 pub(crate) async fn heartbeat_task(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
     // Fetch task first to verify tenant access via its instance.
     let task = state
         .storage
@@ -1898,9 +2088,11 @@ pub(crate) struct ReleaseRequest {
 pub(crate) async fn release_task(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
     Json(req): Json<ReleaseRequest>,
 ) -> Result<StatusCode, ApiError> {
+    crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
     let task = state
         .storage
         .get_worker_task(task_id)

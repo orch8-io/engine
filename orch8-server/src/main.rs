@@ -615,7 +615,27 @@ fn build_app_state(
         federation_peers: Arc::new(federation_peers),
         continuity_lab_enabled: std::env::var("ORCH8_CONTINUITY_LAB_ENABLED")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
+        // Same derivation as the auth middleware, which receives the same
+        // root-key digest: every replica sharing the root key verifies
+        // every browser-session token.
+        browser_sessions: Arc::new(orch8_api::browser_sessions::BrowserSessionSigner::for_root(
+            (!config.api.api_key.is_empty())
+                .then(|| orch8_types::auth::precompute_secret_digest(config.api.api_key.expose())),
+        )),
+        browser_output_max_bytes: browser_output_max_bytes(),
     })
+}
+
+/// `ORCH8_BROWSER_OUTPUT_MAX_BYTES` (default 1 MiB): bound on the serialized
+/// output a browser runtime may report for one step.
+fn browser_output_max_bytes() -> usize {
+    match std::env::var("ORCH8_BROWSER_OUTPUT_MAX_BYTES") {
+        Ok(value) => value.trim().parse::<usize>().unwrap_or_else(|error| {
+            tracing::error!(%error, value, "invalid ORCH8_BROWSER_OUTPUT_MAX_BYTES; using the default");
+            orch8_api::DEFAULT_BROWSER_OUTPUT_MAX_BYTES
+        }),
+        Err(_) => orch8_api::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
+    }
 }
 
 fn configured_federation_peers() -> Vec<orch8_types::continuity_advanced::FederationPeer> {
@@ -1528,6 +1548,10 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
     use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
 
     let layer = CorsLayer::new()
+        // Cache preflights (browsers cap this at ~2h) so a browser runtime's
+        // `fetch(…, {keepalive: true})` release during `pagehide` is not
+        // blocked on a fresh preflight round-trip.
+        .max_age(std::time::Duration::from_secs(7_200))
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -1576,6 +1600,40 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cors_preflight_admits_browser_session_tokens_and_is_cached() {
+        use tower::Service as _;
+        let mut app: axum::Router = axum::Router::new()
+            .route(
+                "/api/v1/workers/tasks/{id}/release",
+                axum::routing::post(|| async { http::StatusCode::NO_CONTENT }),
+            )
+            .layer(build_cors_layer("https://shop.example"));
+        let response = app
+            .call(
+                http::Request::builder()
+                    .method(http::Method::OPTIONS)
+                    .uri("/api/v1/workers/tasks/0190f5a0-0000-7000-8000-000000000001/release")
+                    .header("origin", "https://shop.example")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "x-api-key,content-type")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let headers = response.headers();
+        let allowed = headers
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(allowed.contains("x-api-key") && allowed.contains("content-type"));
+        assert!(allowed.contains("authorization"));
+        assert_eq!(headers.get("access-control-max-age").unwrap(), "7200");
+    }
 
     #[test]
     fn node_roles_select_disjoint_hardened_surfaces() {
