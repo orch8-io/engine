@@ -141,15 +141,20 @@ impl crate::ContinuityStore for SqliteStorage {
         tenant_id: &TenantId,
         instance_id: InstanceId,
     ) -> Result<Option<ContinuityExecution>, StorageError> {
+        // Current owner first (indexed on the current-instance expression),
+        // then the location history (indexed on tenant + instance); see the
+        // Postgres twin for why these are two lookups rather than `OR EXISTS`.
+        if let Some(current) = self
+            .get_continuity_execution_by_instance(tenant_id, instance_id)
+            .await?
+        {
+            return Ok(Some(current));
+        }
         let row = sqlx::query(
-            "SELECT ce.record FROM continuity_executions ce
-             WHERE ce.tenant_id = ?1
-               AND (json_extract(ce.record, '$.current_instance_id') = ?2
-                    OR EXISTS (SELECT 1 FROM continuity_locations cl
-                               WHERE cl.tenant_id = ce.tenant_id
-                                 AND cl.continuity_id = ce.continuity_id
-                                 AND cl.instance_id = ?2))
-             ORDER BY (json_extract(ce.record, '$.current_instance_id') = ?2) DESC
+            "SELECT ce.record FROM continuity_locations cl
+             JOIN continuity_executions ce
+               ON ce.tenant_id = cl.tenant_id AND ce.continuity_id = cl.continuity_id
+             WHERE cl.tenant_id = ?1 AND cl.instance_id = ?2
              LIMIT 1",
         )
         .bind(tenant_id.as_str())

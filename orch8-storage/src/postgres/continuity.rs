@@ -139,20 +139,24 @@ impl crate::ContinuityStore for PostgresStorage {
         instance_id: InstanceId,
     ) -> Result<Option<ContinuityExecution>, StorageError> {
         // Current owner first, then any execution whose location history
-        // contains this instance (a handed-off source).
+        // contains this instance (a handed-off source). Two separate lookups
+        // so each uses its own index — `idx_continuity_executions_current_instance`
+        // then `idx_continuity_locations_instance` — instead of an `OR EXISTS`
+        // that forces a scan of the tenant's executions on every tick.
+        if let Some(current) = self
+            .get_continuity_execution_by_instance(tenant_id, instance_id)
+            .await?
+        {
+            return Ok(Some(current));
+        }
         let row = sqlx::query(
-            "SELECT ce.record FROM continuity_executions ce
-             WHERE ce.tenant_id = $1
-               AND (ce.record->>'current_instance_id' = $2
-                    OR EXISTS (SELECT 1 FROM continuity_locations cl
-                               WHERE cl.tenant_id = ce.tenant_id
-                                 AND cl.continuity_id = ce.continuity_id
-                                 AND cl.instance_id = $3))
-             ORDER BY (ce.record->>'current_instance_id' = $2) DESC
+            "SELECT ce.record FROM continuity_locations cl
+             JOIN continuity_executions ce
+               ON ce.tenant_id = cl.tenant_id AND ce.continuity_id = cl.continuity_id
+             WHERE cl.tenant_id = $1 AND cl.instance_id = $2
              LIMIT 1",
         )
         .bind(tenant_id.as_str())
-        .bind(instance_id.to_string())
         .bind(instance_id.into_uuid())
         .fetch_optional(&self.pool)
         .await

@@ -1292,13 +1292,25 @@ pub(crate) async fn complete_task(
     // output + `context.data.delegations.<id>` + wake) instead of treating
     // the mailbox task as one of the parent's own steps.
     if orch8_engine::delegation::is_delegation_task(&task) {
-        orch8_engine::delegation::integrate_delegation_outcome(
-            state.storage.as_ref(),
-            &task,
-            Ok(&req.output),
-        )
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        // A completion retry (the first response was lost) integrates only
+        // when the first attempt did not get that far: the result block
+        // output is the integration's first write.
+        let integrated = completion_retry
+            && state
+                .storage
+                .get_block_output(task.instance_id, &task.block_id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "block_output"))?
+                .is_some();
+        if !integrated {
+            orch8_engine::delegation::integrate_delegation_outcome(
+                state.storage.as_ref(),
+                &task,
+                Ok(&req.output),
+            )
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        }
         return Ok(StatusCode::OK);
     }
 
@@ -1434,15 +1446,24 @@ pub(crate) async fn complete_task(
             Err(e) => return Err(ApiError::from_storage(e, "worker_task")),
         }
     } else {
-        // Node not found or already terminal — fall back to the non-atomic
-        // path so the instance is still transitioned. This mirrors the
-        // fail_task handler which always transitions the instance regardless
-        // of whether the node is found in the tree.
-        tracing::warn!(
-            instance_id = %task.instance_id,
-            block_id = %task_block_id,
-            "worker completion: execution node not in Running/Waiting state — falling back to non-atomic transition"
-        );
+        // No live node. Flat (step-only) sequences run on the scheduler's
+        // fast path and never build an execution tree: saving the output and
+        // re-scheduling the instance *is* their completion path. Only a tree
+        // instance without a live node for this step is unexpected (the node
+        // was cancelled or already settled concurrently).
+        if tree.is_empty() {
+            tracing::debug!(
+                instance_id = %task.instance_id,
+                block_id = %task_block_id,
+                "worker completion for a flat (tree-less) instance"
+            );
+        } else {
+            tracing::warn!(
+                instance_id = %task.instance_id,
+                block_id = %task_block_id,
+                "worker completion: execution node not in Running/Waiting state — falling back to non-atomic transition"
+            );
+        }
         let result = if merged_context {
             state
                 .storage
@@ -1626,27 +1647,31 @@ pub(crate) async fn fail_task(
         return Err(ApiError::Conflict("worker task lease changed".into()));
     }
     enforce_ownership_fence(&state, &inst.tenant_id, &pre_task, &claim, "fail").await?;
-    let tenant_id = inst.tenant_id.clone();
-    let tenant_for_cb = Some(inst.tenant_id);
 
-    orch8_engine::effect_guard::mark_external_worker_effect_unknown(
+    // One fenced transaction (shared with the reaper, timeouts and release):
+    // receipt → `unknown`, then the task fails and the instance advances per
+    // the step's retry policy — or only the task fails for a delegation or a
+    // terminal/paused instance. A racing lease change applies nothing.
+    let failed = orch8_engine::worker_lease::fail_worker_task(
         state.storage.as_ref(),
-        &tenant_id,
+        &inst,
         &pre_task,
+        &claim,
+        &req.message,
+        req.retryable,
     )
     .await
-    .map_err(|error| ApiError::Conflict(error.to_string()))?;
-
-    let updated = state
-        .storage
-        .fail_worker_task(task_id, &claim, &req.message, req.retryable)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+    .map_err(|error| match error {
+        orch8_engine::error::EngineError::Storage(error) => {
+            ApiError::from_storage(error, "worker_task")
+        }
+        other => ApiError::Conflict(other.to_string()),
+    })?;
 
     // Persist any worker-reported logs for this step (best-effort).
     persist_reported_logs(&state, pre_task.instance_id, &pre_task.block_id, &req.logs).await;
 
-    if !updated {
+    if !failed {
         record_stale_rejection(
             &state,
             task_id,
@@ -1657,339 +1682,15 @@ pub(crate) async fn fail_task(
         return Err(ApiError::Conflict("worker task lease changed".into()));
     }
 
-    let task = state
-        .storage
-        .get_worker_task(task_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-        .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
-
-    // A failed delegation never fails or retries its parent: integrate the
-    // failed outcome and wake the parent instead.
-    if orch8_engine::delegation::is_delegation_task(&task) {
-        orch8_engine::delegation::integrate_delegation_outcome(
-            state.storage.as_ref(),
-            &task,
-            Err(&req.message),
-        )
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-        return Ok(StatusCode::OK);
-    }
-
-    // Guard: if the instance has already reached a terminal state (completed,
-    // failed, cancelled), accept the failure report but skip state mutation.
-    // Without this, a late worker failure can resurrect or overwrite a terminal
-    // instance — the same race that `complete_task` guards against.
-    if let Ok(Some(inst)) = state.storage.get_instance(task.instance_id).await
-        && (inst.state.is_terminal() || inst.state == InstanceState::Paused)
-    {
-        tracing::info!(
-            instance_id = %task.instance_id,
-            state = %inst.state,
-            block_id = %task.block_id,
-            "external worker failure arrived for terminal/paused instance — task accepted, transition skipped"
-        );
-        if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
-            && orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name)
-        {
-            cb.record_failure(tenant, &task.handler_name);
-        }
-        return Ok(StatusCode::OK);
-    }
-
-    let tree = state
-        .storage
-        .get_execution_tree(task.instance_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
-    let has_tree = !tree.is_empty();
-
-    if req.retryable && has_tree {
-        // Tree-based execution: look up the step's retry policy to decide
-        // whether to retry (reset node to Pending) or exhaust (fail node).
-        let can_retry = 'retry_check: {
-            let instance = match state.storage.get_instance(task.instance_id).await {
-                Ok(Some(v)) => v,
-                Ok(None) => break 'retry_check false,
-                Err(e) => {
-                    return Err(ApiError::from_storage(e, "worker_task_retry_lookup"));
-                }
-            };
-            let seq = match state.storage.get_sequence(instance.sequence_id).await {
-                Ok(Some(v)) => v,
-                Ok(None) => break 'retry_check false,
-                Err(e) => {
-                    return Err(ApiError::from_storage(e, "worker_task_retry_lookup"));
-                }
-            };
-            let block = orch8_engine::evaluator::find_block(&seq.blocks, &task.block_id);
-            match block {
-                Some(orch8_types::sequence::BlockDefinition::Step(step_def)) => {
-                    if let Some(retry) = &step_def.retry {
-                        u32::from(task.attempt) + 1 < retry.max_attempts
-                    } else {
-                        false // no retry policy → fail immediately
-                    }
-                }
-                _ => false,
-            }
-        };
-
-        if can_retry {
-            // Persist a retry marker BEFORE creating the new task. Both the
-            // tree evaluator and the fast path derive the next dispatch
-            // attempt from `compute_attempt`, which reads the most recent
-            // `block_outputs` row — and an external-worker retryable
-            // failure otherwise never writes one. Without this marker the
-            // re-dispatch on the next tick recomputes the SAME (just
-            // failed) attempt number, which collides with that attempt's
-            // now-`unknown` effect receipt and gets wrongly blocked by
-            // `EffectGuard::begin`'s per-attempt lookup. Mirrors the
-            // in-process retry marker in
-            // `scheduler::step_exec::handle_retryable_failure` /
-            // `handlers::step_block`.
-            let retry_marker_output = serde_json::json!({
-                "_retry_marker": true,
-                "error": req.message,
-            });
-            let retry_marker_size = serde_json::to_vec(&retry_marker_output)
-                .map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
-            let retry_marker = orch8_types::output::BlockOutput {
-                id: Uuid::now_v7(),
-                instance_id: task.instance_id,
-                block_id: task.block_id.clone(),
-                output: retry_marker_output,
-                output_ref: Some("__retry__".into()),
-                output_size: retry_marker_size,
-                attempt: task.attempt,
-                created_at: chrono::Utc::now(),
-            };
-            state
-                .storage
-                .save_block_output(&retry_marker)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
-
-            // Reset for retry: delete old task, create a new pending task
-            // with incremented attempt, and reset the node to Pending so
-            // the evaluator re-dispatches on the next tick.
-            let retry_task = orch8_types::worker::WorkerTask {
-                id: Uuid::now_v7(),
-                instance_id: task.instance_id,
-                block_id: task.block_id.clone(),
-                handler_name: task.handler_name.clone(),
-                queue_name: task.queue_name.clone(),
-                requirements: task.requirements.clone(),
-                params: task.params.clone(),
-                context: task.context.clone(),
-                attempt: task.attempt + 1,
-                timeout_ms: task.timeout_ms,
-                state: WorkerTaskState::Pending,
-                worker_id: None,
-                claimed_at: None,
-                heartbeat_at: None,
-                claim_epoch: 0,
-                resume_checkpoint: task.resume_checkpoint.clone(),
-                checkpoint_seq: task.checkpoint_seq,
-                completed_at: None,
-                output: None,
-                error_message: None,
-                error_retryable: None,
-                created_at: chrono::Utc::now(),
-                effect_id: None,
-                continuity_epoch: None,
-                lease_secs: None,
-                carries_credentials: false,
-                claimed_runtime_kind: None,
-            };
-            let node_id = tree
-                .iter()
-                .find(|n| {
-                    n.block_id == task.block_id
-                        && matches!(n.state, NodeState::Running | NodeState::Waiting)
-                })
-                .map(|n| n.id);
-            state
-                .storage
-                .retry_worker_task(
-                    task_id,
-                    &retry_task,
-                    node_id,
-                    task.instance_id,
-                    chrono::Utc::now(),
-                )
-                .await
-                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-        } else {
-            // Retries exhausted or no retry policy: fail the node.
-            if let Some(node) = tree.iter().find(|n| {
-                n.block_id == task.block_id
-                    && matches!(n.state, NodeState::Running | NodeState::Waiting)
-            }) {
-                state
-                    .storage
-                    .update_node_state(node.id, NodeState::Failed)
-                    .await
-                    .map_err(|e| ApiError::from_storage(e, "execution_node"))?;
-            }
-            state
-                .storage
-                .update_instance_state(
-                    task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-        }
-    } else if req.retryable {
-        // No tree (fast path): look up the step's retry policy and either
-        // create a new pending worker task with incremented attempt or fail
-        // the instance directly when retries are exhausted / no policy.
-        let can_retry = 'fp_retry: {
-            let Ok(Some(instance)) = state.storage.get_instance(task.instance_id).await else {
-                break 'fp_retry false;
-            };
-            let Ok(Some(seq)) = state.storage.get_sequence(instance.sequence_id).await else {
-                break 'fp_retry false;
-            };
-            let block = orch8_engine::evaluator::find_block(&seq.blocks, &task.block_id);
-            match block {
-                Some(orch8_types::sequence::BlockDefinition::Step(step_def)) => {
-                    if let Some(retry) = &step_def.retry {
-                        u32::from(task.attempt) + 1 < retry.max_attempts
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            }
-        };
-
-        if can_retry {
-            // See the has_tree branch above for why this marker is required
-            // — same `compute_attempt`/`EffectGuard` collision applies to
-            // the fast path.
-            let retry_marker_output = serde_json::json!({
-                "_retry_marker": true,
-                "error": req.message,
-            });
-            let retry_marker_size = serde_json::to_vec(&retry_marker_output)
-                .map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
-            let retry_marker = orch8_types::output::BlockOutput {
-                id: Uuid::now_v7(),
-                instance_id: task.instance_id,
-                block_id: task.block_id.clone(),
-                output: retry_marker_output,
-                output_ref: Some("__retry__".into()),
-                output_size: retry_marker_size,
-                attempt: task.attempt,
-                created_at: chrono::Utc::now(),
-            };
-            state
-                .storage
-                .save_block_output(&retry_marker)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
-
-            let retry_task = orch8_types::worker::WorkerTask {
-                id: Uuid::now_v7(),
-                instance_id: task.instance_id,
-                block_id: task.block_id.clone(),
-                handler_name: task.handler_name.clone(),
-                queue_name: task.queue_name.clone(),
-                requirements: task.requirements.clone(),
-                params: task.params.clone(),
-                context: task.context.clone(),
-                attempt: task.attempt + 1,
-                timeout_ms: task.timeout_ms,
-                state: WorkerTaskState::Pending,
-                worker_id: None,
-                claimed_at: None,
-                heartbeat_at: None,
-                claim_epoch: 0,
-                resume_checkpoint: task.resume_checkpoint.clone(),
-                checkpoint_seq: task.checkpoint_seq,
-                completed_at: None,
-                output: None,
-                error_message: None,
-                error_retryable: None,
-                created_at: chrono::Utc::now(),
-                effect_id: None,
-                continuity_epoch: None,
-                lease_secs: None,
-                carries_credentials: false,
-                claimed_runtime_kind: None,
-            };
-            state
-                .storage
-                .delete_worker_task(task_id)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-            state
-                .storage
-                .create_worker_task(&retry_task)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-            state
-                .storage
-                .update_instance_state(
-                    task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-        } else {
-            // Retries exhausted or no retry policy: fail immediately.
-            state
-                .storage
-                .delete_worker_task(task_id)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-            state
-                .storage
-                .update_instance_state(task.instance_id, InstanceState::Failed, None)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-        }
-    } else if has_tree {
-        if let Some(node) = tree.iter().find(|n| {
-            n.block_id == task.block_id
-                && matches!(n.state, NodeState::Running | NodeState::Waiting)
-        }) {
-            state
-                .storage
-                .update_node_state(node.id, NodeState::Failed)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "execution_node"))?;
-        }
-        state
-            .storage
-            .update_instance_state(
-                task.instance_id,
-                InstanceState::Scheduled,
-                Some(chrono::Utc::now()),
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-    } else {
-        state
-            .storage
-            .update_instance_state(task.instance_id, InstanceState::Failed, None)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-    }
-
     // Roll external-worker failure into the breaker. Done unconditionally (for
     // both retryable and non-retryable) to mirror in-process step-exec, which
     // records a failure on every Err arm. Control-flow built-ins stay
     // skip-listed.
-    if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
-        && orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name)
+    if let Some(cb) = state.circuit_breakers.as_ref()
+        && !orch8_engine::delegation::is_delegation_task(&pre_task)
+        && orch8_engine::circuit_breaker::is_breaker_tracked(&pre_task.handler_name)
     {
-        cb.record_failure(tenant, &task.handler_name);
+        cb.record_failure(&inst.tenant_id, &pre_task.handler_name);
     }
 
     Ok(StatusCode::OK)

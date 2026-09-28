@@ -260,6 +260,66 @@ pub async fn release_worker_task(
     Ok(applied)
 }
 
+/// A failure reported by the lease holder (`POST /workers/tasks/{id}/fail`,
+/// gRPC `FailTask`). The effect receipt becomes `unknown` (a reported
+/// failure never proves the effect did not happen), then one fenced
+/// transaction marks the task failed and advances the instance:
+///
+/// * retryable + the step's retry policy allows another attempt → the task is
+///   replaced by the next attempt (bound to a fresh effect id at re-dispatch);
+/// * otherwise → the tree node (or a flat instance) fails;
+/// * a delegation mailbox task → only the task fails and the failed outcome
+///   is integrated into the parent;
+/// * a terminal or paused instance → only the task fails (a late report never
+///   resurrects or advances it).
+///
+/// Returns `false` when the caller no longer holds `claim` (nothing changed).
+pub async fn fail_worker_task(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    task: &WorkerTask,
+    claim: &WorkerClaim,
+    message: &str,
+    retryable: bool,
+) -> Result<bool, EngineError> {
+    if task.state != WorkerTaskState::Claimed
+        || task.claim_epoch != claim.claim_epoch
+        || task.worker_id.as_deref() != Some(claim.worker_id.as_str())
+    {
+        return Ok(false);
+    }
+    settle_worker_task_effect(
+        storage,
+        &instance.tenant_id,
+        task,
+        WorkerEffectSettlement::Unknown,
+        None,
+    )
+    .await?;
+    let delegation = crate::delegation::is_delegation_task(task);
+    let action = if delegation
+        || instance.state.is_terminal()
+        || instance.state == orch8_types::instance::InstanceState::Paused
+    {
+        WorkerTaskResolutionAction::FailTaskOnly
+    } else {
+        plan_failure_action(storage, instance, task, retryable, message).await?
+    };
+    let resolution = fence(
+        task,
+        Some(claim.worker_id.clone()),
+        WorkerAttemptEventKind::Failed,
+        message,
+        retryable,
+        action,
+    );
+    let applied = storage.resolve_worker_task(&resolution).await?;
+    if applied && delegation {
+        crate::delegation::integrate_delegation_outcome(storage, task, Err(message)).await?;
+    }
+    Ok(applied)
+}
+
 async fn integrate_if_delegation(
     storage: &dyn StorageBackend,
     task: &WorkerTask,
@@ -360,7 +420,8 @@ pub async fn plan_failure_action(
             error_retryable: None,
             created_at: now,
             // The re-dispatch of the next attempt creates that attempt's
-            // receipt and binds its id/epoch onto this pending row.
+            // receipt and binds its id/epoch onto this pending row; storage
+            // keeps the row unclaimable (`awaiting_dispatch`) until then.
             effect_id: None,
             continuity_epoch: None,
             lease_secs: None,

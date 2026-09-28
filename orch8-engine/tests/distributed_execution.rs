@@ -245,11 +245,43 @@ async fn lease_expiry_with_retry_policy_schedules_a_fresh_attempt() {
         assert_ne!(retry.id, first.id, "{backend}");
         assert_eq!(retry.attempt, first.attempt + 1, "{backend}");
         assert_eq!(retry.state, WorkerTaskState::Pending, "{backend}");
+        assert!(retry.effect_id.is_none(), "{backend}: not dispatched yet");
+
+        // The retry row is not claimable before its re-dispatch bound an
+        // effect id — a worker racing the scheduler gets nothing, so no
+        // settlement can ever run against a missing (recomputed) id.
+        for claimed in [
+            storage
+                .claim_worker_tasks(&handler, "racer", 10)
+                .await
+                .unwrap(),
+            storage
+                .claim_worker_tasks_matching(
+                    &handler,
+                    "racer",
+                    None,
+                    None,
+                    &caps_of(RuntimeKind::Server, &handler),
+                    10,
+                )
+                .await
+                .unwrap(),
+        ] {
+            assert!(
+                claimed.iter().all(|task| task.id != retry.id),
+                "{backend}: a retry row must not be claimable before re-dispatch"
+            );
+        }
 
         // Re-dispatch binds the next attempt's own receipt onto the row.
         dispatch(&storage, inst.id, &seq).await;
         let rebound = only_task(&storage, inst.id).await;
         assert_eq!(rebound.id, retry.id, "{backend}");
+        assert_eq!(
+            claim(&storage, &rebound).await.effect_id,
+            rebound.effect_id,
+            "{backend}: claimable once bound, with the bound effect id"
+        );
         let new_effect = rebound.effect_id.expect("next attempt bound to a receipt");
         assert_ne!(
             Some(new_effect),
@@ -512,6 +544,194 @@ async fn worker_lease_mutations_are_fenced_on_ownership_epoch() {
             .await
             .unwrap(),
             "{backend}: a task dispatched under an older owner epoch is stale"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reported_failure_is_one_fenced_resolution() {
+    use orch8_engine::worker_lease::fail_worker_task;
+    use orch8_types::worker::WorkerClaim;
+    for (backend, storage) in backends().await {
+        // Retry policy: receipt unknown, next attempt replaces the task.
+        let handler = unique_handler("ext.charge");
+        let (_, inst) = start(&storage, vec![mk_step_with_retry("charge", &handler, 2)]).await;
+        let first = only_task(&storage, inst.id).await;
+        let claimed = claim(&storage, &first).await;
+        let instance = storage.get_instance(inst.id).await.unwrap().unwrap();
+        let stale = WorkerClaim::new("worker-a", claimed.claim_epoch + 1);
+        assert!(
+            !fail_worker_task(storage.as_ref(), &instance, &claimed, &stale, "boom", true)
+                .await
+                .unwrap(),
+            "{backend}: a stale claim changes nothing"
+        );
+        assert_eq!(
+            receipt_state(&storage, &first).await,
+            EffectState::Dispatched
+        );
+        let holder = WorkerClaim::new("worker-a", claimed.claim_epoch);
+        assert!(
+            fail_worker_task(storage.as_ref(), &instance, &claimed, &holder, "boom", true)
+                .await
+                .unwrap(),
+            "{backend}"
+        );
+        assert_eq!(receipt_state(&storage, &first).await, EffectState::Unknown);
+        assert!(
+            storage.get_worker_task(first.id).await.unwrap().is_none(),
+            "{backend}: superseded by the retry"
+        );
+        let retry = only_task(&storage, inst.id).await;
+        assert_eq!(retry.attempt, first.attempt + 1, "{backend}");
+        let events = storage
+            .list_worker_task_attempt_events(first.id, 10)
+            .await
+            .unwrap();
+        assert!(
+            events.iter().any(|event| event.event
+                == orch8_types::worker::WorkerAttemptEventKind::Failed
+                && event.reason.as_deref() == Some("boom")),
+            "{backend}: {events:?}"
+        );
+
+        // No retry policy: the task is marked failed, the node fails.
+        let handler = unique_handler("ext.charge");
+        let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
+        let task = only_task(&storage, inst.id).await;
+        let claimed = claim(&storage, &task).await;
+        let instance = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert!(
+            fail_worker_task(
+                storage.as_ref(),
+                &instance,
+                &claimed,
+                &WorkerClaim::new("worker-a", claimed.claim_epoch),
+                "fatal",
+                false,
+            )
+            .await
+            .unwrap()
+        );
+        let after = storage.get_worker_task(task.id).await.unwrap().unwrap();
+        assert_eq!(after.state, WorkerTaskState::Failed, "{backend}");
+        assert_eq!(after.error_message.as_deref(), Some("fatal"), "{backend}");
+        assert_eq!(receipt_state(&storage, &task).await, EffectState::Unknown);
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        assert_eq!(common::node_state(&tree, "charge"), NodeState::Failed);
+
+        // Paused instance: only the task fails; the instance is untouched.
+        let handler = unique_handler("ext.charge");
+        let (_, inst) = start(&storage, vec![mk_step_with_retry("charge", &handler, 3)]).await;
+        let task = only_task(&storage, inst.id).await;
+        let claimed = claim(&storage, &task).await;
+        storage
+            .update_instance_state(inst.id, InstanceState::Paused, None)
+            .await
+            .unwrap();
+        let instance = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert!(
+            fail_worker_task(
+                storage.as_ref(),
+                &instance,
+                &claimed,
+                &WorkerClaim::new("worker-a", claimed.claim_epoch),
+                "late",
+                true,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            storage
+                .get_worker_task(task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkerTaskState::Failed,
+            "{backend}"
+        );
+        assert_eq!(
+            storage.get_instance(inst.id).await.unwrap().unwrap().state,
+            InstanceState::Paused,
+            "{backend}"
+        );
+        assert_eq!(
+            tasks_of(&storage, inst.id).await.len(),
+            1,
+            "{backend}: no retry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn handed_off_source_resolves_its_execution_through_location_history() {
+    use orch8_engine::ownership::{LocalOwnership, local_ownership};
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.charge");
+        let (seq, source) = start(&storage, vec![mk_step("charge", &handler)]).await;
+        let tenant = source.tenant_id.clone();
+        let execution = storage
+            .get_continuity_execution_by_instance(&tenant, source.id)
+            .await
+            .unwrap()
+            .unwrap();
+        // Hand the execution to a new instance (epoch bump records the
+        // destination's location; the source keeps its epoch-0 location).
+        let destination = mk_instance(seq.id);
+        storage.create_instance(&destination).await.unwrap();
+        let mut next = execution.clone();
+        next.current_instance_id = destination.id;
+        next.epoch = execution.epoch.checked_next().unwrap();
+        assert!(
+            storage
+                .cas_continuity_owner(
+                    &tenant,
+                    execution.continuity_id,
+                    execution.epoch,
+                    execution.owner_runtime_id,
+                    &next,
+                )
+                .await
+                .unwrap()
+        );
+
+        // The source is found through the location history (second lookup),
+        // the destination through the current-owner index (first lookup).
+        let via_history = storage
+            .get_continuity_execution_touching_instance(&tenant, source.id)
+            .await
+            .unwrap()
+            .expect("source resolves through its location");
+        assert_eq!(
+            via_history.continuity_id, execution.continuity_id,
+            "{backend}"
+        );
+        assert_eq!(
+            local_ownership(storage.as_ref(), &tenant, source.id)
+                .await
+                .unwrap(),
+            LocalOwnership::Superseded,
+            "{backend}"
+        );
+        assert_eq!(
+            local_ownership(storage.as_ref(), &tenant, destination.id)
+                .await
+                .unwrap(),
+            LocalOwnership::Owned,
+            "{backend}"
+        );
+        // Never enrolled: no execution at all.
+        let stranger = mk_instance(seq.id);
+        storage.create_instance(&stranger).await.unwrap();
+        assert!(
+            storage
+                .get_continuity_execution_touching_instance(&tenant, stranger.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{backend}"
         );
     }
 }
