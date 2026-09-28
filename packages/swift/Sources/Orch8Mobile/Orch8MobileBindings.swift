@@ -471,6 +471,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -1195,6 +1211,13 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func completeStep(instanceId: String, stepName: String, output: String) throws 
     
     /**
+     * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
+     * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
+     * registered. Must be called before `resume()` / `start_worker()`.
+     */
+    func enableBuiltin(name: String) throws 
+    
+    /**
      * Export a paused or waiting device-owned execution for a destination
      * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
      * never receives the private signing key.
@@ -1238,13 +1261,33 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func loadedSequences() throws  -> [SequenceInfo]
     
     /**
+     * This device's stable runtime id (a UUID persisted in the local
+     * database). It is the `worker_id` for task leases and the target for
+     * `$runtime.runtime_id` step placement.
+     */
+    func nodeRuntimeId() throws  -> String
+    
+    /**
      * Notify the engine that a silent push notification was received.
-     * Triggers an immediate sync cycle on the next tick.
+     * Triggers an immediate sync cycle on the next tick and an immediate
+     * worker poll.
      */
     func onPushReceived() 
     
     /**
-     * Pause the foreground tick loop.
+     * Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
+     * "reason"?}`, the push `data`/`userInfo` payload as JSON). A wake that
+     * names a different runtime is ignored; otherwise the worker polls
+     * immediately and a sync is triggered. Pushes never carry task params:
+     * the task arrives through a leased poll. Returns whether it was
+     * accepted.
+     */
+    func onPushWake(envelopeJson: String)  -> Bool
+    
+    /**
+     * Pause the foreground tick loop. The remote worker stops claiming new
+     * tasks and gives back any task claimed but not yet started; tasks that
+     * are already executing run to completion while the process lives.
      */
     func pause() 
     
@@ -1254,6 +1297,18 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func registerHandler(name: String, handler: StepHandler) throws 
     
     /**
+     * Join the distributed runtime mesh: registers the device
+     * (`/mobile/devices/register`) and its runtime capabilities
+     * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
+     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * background before its five-minute TTL (that refresh is the node's
+     * liveness signal) until `unregister_node` / `shutdown`. Calling it again
+     * updates the advertised facts. Also settles any remote task a previous
+     * process left claimed.
+     */
+    func registerNode(capabilities: NodeCapabilities) throws  -> NodeRegistration
+    
+    /**
      * Report current device power state. The engine adapts tick frequency based
      * on battery level: `Charging`/`Unplugged` = normal, `LowBattery` = 2x interval,
      * `CriticalBattery` = 4x interval.
@@ -1261,7 +1316,8 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func reportPowerState(state: PowerState) 
     
     /**
-     * Start a foreground tick loop.
+     * Start a foreground tick loop. Also lets the remote worker (if started)
+     * claim tasks again.
      */
     func resume() 
     
@@ -1274,6 +1330,14 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * `BGTaskScheduler`/`WorkManager` job.
      */
     func runUntilIdle(maxTicks: UInt32, timeBudgetMs: UInt64) throws  -> BackgroundRunResult
+    
+    /**
+     * Run the worker for an OS-granted background window (`BGTask` /
+     * `WorkManager` / push-wake handler): claims tasks even while paused,
+     * until the queue is idle and nothing is in flight or `time_budget_ms`
+     * elapses. Requires `start_worker`.
+     */
+    func runWorkerWindow(timeBudgetMs: UInt64) throws  -> WorkerWindowResult
     
     /**
      * Set device context for telemetry.
@@ -1296,6 +1360,20 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func start(sequenceName: String, input: String, dedupKey: String?) throws  -> String
     
     /**
+     * Start the remote worker loop: poll the control plane as this `mobile`
+     * runtime, run claimed tasks with the registered handlers, heartbeat
+     * per the task lease, and complete / fail / release them. Requires
+     * `register_node` first. Handlers must be registered before this call.
+     */
+    func startWorker(options: WorkerOptions) throws 
+    
+    /**
+     * Stop claiming remote tasks. Tasks already executing finish and are
+     * settled in the background.
+     */
+    func stopWorker() 
+    
+    /**
      * Sync sequences from the remote manifest.
      */
     func sync(manifestUrl: String, tokenProvider: TokenProvider?) throws  -> SyncResult
@@ -1304,6 +1382,23 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * Execute a single tick.
      */
     func tickOnce() throws  -> TickResult
+    
+    /**
+     * Leave the mesh: stops the worker, advertises the node as draining
+     * (best effort), and stops the background re-advertisement.
+     */
+    func unregisterNode() 
+    
+    /**
+     * Update the liveness facts advertised by a registered node (battery,
+     * connectivity) and push them to the control plane now.
+     */
+    func updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: UInt8?) throws 
+    
+    /**
+     * Counters for the remote worker (zeros when it is not running).
+     */
+    func workerStats()  -> WorkerStats
     
 }
 /**
@@ -1436,6 +1531,20 @@ open func completeStep(instanceId: String, stepName: String, output: String)thro
 }
     
     /**
+     * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
+     * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
+     * registered. Must be called before `resume()` / `start_worker()`.
+     */
+open func enableBuiltin(name: String)throws   {try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_enable_builtin(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(name),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Export a paused or waiting device-owned execution for a destination
      * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
      * never receives the private signing key.
@@ -1541,8 +1650,23 @@ open func loadedSequences()throws  -> [SequenceInfo]  {
 }
     
     /**
+     * This device's stable runtime id (a UUID persisted in the local
+     * database). It is the `worker_id` for task leases and the target for
+     * `$runtime.runtime_id` step placement.
+     */
+open func nodeRuntimeId()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_node_runtime_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Notify the engine that a silent push notification was received.
-     * Triggers an immediate sync cycle on the next tick.
+     * Triggers an immediate sync cycle on the next tick and an immediate
+     * worker poll.
      */
 open func onPushReceived()  {try! rustCall() {
         uniffiCallStatus in
@@ -1553,7 +1677,27 @@ open func onPushReceived()  {try! rustCall() {
 }
     
     /**
-     * Pause the foreground tick loop.
+     * Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
+     * "reason"?}`, the push `data`/`userInfo` payload as JSON). A wake that
+     * names a different runtime is ignored; otherwise the worker polls
+     * immediately and a sync is triggered. Pushes never carry task params:
+     * the task arrives through a leased poll. Returns whether it was
+     * accepted.
+     */
+open func onPushWake(envelopeJson: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_on_push_wake(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(envelopeJson),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Pause the foreground tick loop. The remote worker stops claiming new
+     * tasks and gives back any task claimed but not yet started; tasks that
+     * are already executing run to completion while the process lives.
      */
 open func pause()  {try! rustCall() {
         uniffiCallStatus in
@@ -1577,6 +1721,26 @@ open func registerHandler(name: String, handler: StepHandler)throws   {try rustC
 }
     
     /**
+     * Join the distributed runtime mesh: registers the device
+     * (`/mobile/devices/register`) and its runtime capabilities
+     * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
+     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * background before its five-minute TTL (that refresh is the node's
+     * liveness signal) until `unregister_node` / `shutdown`. Calling it again
+     * updates the advertised facts. Also settles any remote task a previous
+     * process left claimed.
+     */
+open func registerNode(capabilities: NodeCapabilities)throws  -> NodeRegistration  {
+    return try  FfiConverterTypeNodeRegistration_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_register_node(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeNodeCapabilities_lower(capabilities),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Report current device power state. The engine adapts tick frequency based
      * on battery level: `Charging`/`Unplugged` = normal, `LowBattery` = 2x interval,
      * `CriticalBattery` = 4x interval.
@@ -1591,7 +1755,8 @@ open func reportPowerState(state: PowerState)  {try! rustCall() {
 }
     
     /**
-     * Start a foreground tick loop.
+     * Start a foreground tick loop. Also lets the remote worker (if started)
+     * claim tasks again.
      */
 open func resume()  {try! rustCall() {
         uniffiCallStatus in
@@ -1615,6 +1780,22 @@ open func runUntilIdle(maxTicks: UInt32, timeBudgetMs: UInt64)throws  -> Backgro
     uniffi_orch8_mobile_fn_method_mobileengine_run_until_idle(
             self.uniffiCloneHandle(),
         FfiConverterUInt32.lower(maxTicks),
+        FfiConverterUInt64.lower(timeBudgetMs),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Run the worker for an OS-granted background window (`BGTask` /
+     * `WorkManager` / push-wake handler): claims tasks even while paused,
+     * until the queue is idle and nothing is in flight or `time_budget_ms`
+     * elapses. Requires `start_worker`.
+     */
+open func runWorkerWindow(timeBudgetMs: UInt64)throws  -> WorkerWindowResult  {
+    return try  FfiConverterTypeWorkerWindowResult_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_run_worker_window(
+            self.uniffiCloneHandle(),
         FfiConverterUInt64.lower(timeBudgetMs),uniffiCallStatus
     )
 })
@@ -1671,6 +1852,33 @@ open func start(sequenceName: String, input: String, dedupKey: String?)throws  -
 }
     
     /**
+     * Start the remote worker loop: poll the control plane as this `mobile`
+     * runtime, run claimed tasks with the registered handlers, heartbeat
+     * per the task lease, and complete / fail / release them. Requires
+     * `register_node` first. Handlers must be registered before this call.
+     */
+open func startWorker(options: WorkerOptions)throws   {try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_start_worker(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeWorkerOptions_lower(options),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Stop claiming remote tasks. Tasks already executing finish and are
+     * settled in the background.
+     */
+open func stopWorker()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_stop_worker(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Sync sequences from the remote manifest.
      */
 open func sync(manifestUrl: String, tokenProvider: TokenProvider?)throws  -> SyncResult  {
@@ -1691,6 +1899,44 @@ open func tickOnce()throws  -> TickResult  {
     return try  FfiConverterTypeTickResult_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
         uniffiCallStatus in
     uniffi_orch8_mobile_fn_method_mobileengine_tick_once(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Leave the mesh: stops the worker, advertises the node as draining
+     * (best effort), and stops the background re-advertisement.
+     */
+open func unregisterNode()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_unregister_node(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Update the liveness facts advertised by a registered node (battery,
+     * connectivity) and push them to the control plane now.
+     */
+open func updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: UInt8?)throws   {try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_update_node_status(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionTypeNodeConnectivity.lower(connectivity),
+        FfiConverterOptionUInt8.lower(batteryPercent),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Counters for the remote worker (zeros when it is not running).
+     */
+open func workerStats() -> WorkerStats  {
+    return try!  FfiConverterTypeWorkerStats_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_worker_stats(
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
@@ -2754,6 +3000,10 @@ public func FfiConverterTypeInstanceSummary_lower(_ value: InstanceSummary) -> R
 
 /**
  * Configuration for the mobile engine, exposed to host apps via `UniFFI`.
+ *
+ * `Debug` is implemented by hand: `sync_api_key` is a credential and URLs
+ * may carry signed-URL tokens in their query strings, so neither may reach
+ * logs or crash reports verbatim.
  */
 public struct MobileEngineConfig: Equatable, Hashable {
     /**
@@ -2761,7 +3011,7 @@ public struct MobileEngineConfig: Equatable, Hashable {
      */
     public let tickIntervalMs: UInt64
     /**
-     * Maximum concurrent step executions (default: 4).
+     * Maximum concurrent step executions; must be positive (default: 4).
      */
     public let maxConcurrentSteps: UInt32
     /**
@@ -2769,7 +3019,7 @@ public struct MobileEngineConfig: Equatable, Hashable {
      */
     public let maxStepsPerInstance: UInt32
     /**
-     * Maximum concurrent running instances (default: 10).
+     * Maximum concurrent running instances; must be positive (default: 10).
      */
     public let maxConcurrentInstances: UInt32
     /**
@@ -2852,13 +3102,13 @@ public struct MobileEngineConfig: Equatable, Hashable {
          * Tick interval in milliseconds for the foreground loop (default: 500).
          */tickIntervalMs: UInt64, 
         /**
-         * Maximum concurrent step executions (default: 4).
+         * Maximum concurrent step executions; must be positive (default: 4).
          */maxConcurrentSteps: UInt32, 
         /**
          * Maximum steps per instance before forced failure (default: 1000).
          */maxStepsPerInstance: UInt32, 
         /**
-         * Maximum concurrent running instances (default: 10).
+         * Maximum concurrent running instances; must be positive (default: 10).
          */maxConcurrentInstances: UInt32, 
         /**
          * Maximum tick duration in milliseconds before yielding (default: 5000).
@@ -3014,6 +3264,243 @@ public func FfiConverterTypeMobileEngineConfig_lift(_ buf: RustBuffer) throws ->
 #endif
 public func FfiConverterTypeMobileEngineConfig_lower(_ value: MobileEngineConfig) -> RustBuffer {
     return FfiConverterTypeMobileEngineConfig.lower(value)
+}
+
+
+/**
+ * What this device advertises to the control plane when it joins the
+ * runtime mesh. Every field has a default, so hosts only set what they know.
+ */
+public struct NodeCapabilities: Equatable, Hashable {
+    /**
+     * Handler names this node serves. Empty = every app-native handler
+     * registered with `register_handler`. Built-in handlers are only served
+     * remotely when listed here explicitly.
+     */
+    public let handlers: [String]
+    public let regions: [String]
+    /**
+     * Free-form hardware facts (`camera`, `nfc`, `secure-enclave`, …).
+     * `device:<device_id>` is always added.
+     */
+    public let hardware: [String]
+    public let plugins: [String]
+    /**
+     * Credential binding *names* available on the device (never secrets).
+     */
+    public let credentials: [String]
+    public let offlineCapable: Bool
+    public let connectivity: NodeConnectivity?
+    public let batteryPercent: UInt8?
+    /**
+     * `ios` / `android`; inferred from the build target when absent.
+     */
+    public let platform: String?
+    /**
+     * APNs/FCM token used for id-only wake-up hints.
+     */
+    public let pushToken: String?
+    public let appVersion: String?
+    /**
+     * Control-plane API base (e.g. `https://api.orch8.io/api/v1`). When
+     * absent it is derived from `sync_url` by stripping `/mobile/sync`.
+     */
+    public let apiBaseUrl: String?
+    /**
+     * Base64 Ed25519 key that signs capsules exported by this device.
+     */
+    public let capsuleSigningPublicKey: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Handler names this node serves. Empty = every app-native handler
+         * registered with `register_handler`. Built-in handlers are only served
+         * remotely when listed here explicitly.
+         */handlers: [String] = [], regions: [String] = [], 
+        /**
+         * Free-form hardware facts (`camera`, `nfc`, `secure-enclave`, …).
+         * `device:<device_id>` is always added.
+         */hardware: [String] = [], plugins: [String] = [], 
+        /**
+         * Credential binding *names* available on the device (never secrets).
+         */credentials: [String] = [], offlineCapable: Bool = true, connectivity: NodeConnectivity? = nil, batteryPercent: UInt8? = nil, 
+        /**
+         * `ios` / `android`; inferred from the build target when absent.
+         */platform: String? = nil, 
+        /**
+         * APNs/FCM token used for id-only wake-up hints.
+         */pushToken: String? = nil, appVersion: String? = nil, 
+        /**
+         * Control-plane API base (e.g. `https://api.orch8.io/api/v1`). When
+         * absent it is derived from `sync_url` by stripping `/mobile/sync`.
+         */apiBaseUrl: String? = nil, 
+        /**
+         * Base64 Ed25519 key that signs capsules exported by this device.
+         */capsuleSigningPublicKey: String? = nil) {
+        self.handlers = handlers
+        self.regions = regions
+        self.hardware = hardware
+        self.plugins = plugins
+        self.credentials = credentials
+        self.offlineCapable = offlineCapable
+        self.connectivity = connectivity
+        self.batteryPercent = batteryPercent
+        self.platform = platform
+        self.pushToken = pushToken
+        self.appVersion = appVersion
+        self.apiBaseUrl = apiBaseUrl
+        self.capsuleSigningPublicKey = capsuleSigningPublicKey
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NodeCapabilities: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNodeCapabilities: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeCapabilities {
+        return
+            try NodeCapabilities(
+                handlers: FfiConverterSequenceString.read(from: &buf), 
+                regions: FfiConverterSequenceString.read(from: &buf), 
+                hardware: FfiConverterSequenceString.read(from: &buf), 
+                plugins: FfiConverterSequenceString.read(from: &buf), 
+                credentials: FfiConverterSequenceString.read(from: &buf), 
+                offlineCapable: FfiConverterBool.read(from: &buf), 
+                connectivity: FfiConverterOptionTypeNodeConnectivity.read(from: &buf), 
+                batteryPercent: FfiConverterOptionUInt8.read(from: &buf), 
+                platform: FfiConverterOptionString.read(from: &buf), 
+                pushToken: FfiConverterOptionString.read(from: &buf), 
+                appVersion: FfiConverterOptionString.read(from: &buf), 
+                apiBaseUrl: FfiConverterOptionString.read(from: &buf), 
+                capsuleSigningPublicKey: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NodeCapabilities, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.handlers, into: &buf)
+        FfiConverterSequenceString.write(value.regions, into: &buf)
+        FfiConverterSequenceString.write(value.hardware, into: &buf)
+        FfiConverterSequenceString.write(value.plugins, into: &buf)
+        FfiConverterSequenceString.write(value.credentials, into: &buf)
+        FfiConverterBool.write(value.offlineCapable, into: &buf)
+        FfiConverterOptionTypeNodeConnectivity.write(value.connectivity, into: &buf)
+        FfiConverterOptionUInt8.write(value.batteryPercent, into: &buf)
+        FfiConverterOptionString.write(value.platform, into: &buf)
+        FfiConverterOptionString.write(value.pushToken, into: &buf)
+        FfiConverterOptionString.write(value.appVersion, into: &buf)
+        FfiConverterOptionString.write(value.apiBaseUrl, into: &buf)
+        FfiConverterOptionString.write(value.capsuleSigningPublicKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeCapabilities_lift(_ buf: RustBuffer) throws -> NodeCapabilities {
+    return try FfiConverterTypeNodeCapabilities.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeCapabilities_lower(_ value: NodeCapabilities) -> RustBuffer {
+    return FfiConverterTypeNodeCapabilities.lower(value)
+}
+
+
+/**
+ * Result of `register_node`.
+ */
+public struct NodeRegistration: Equatable, Hashable {
+    /**
+     * Stable runtime UUID (also the `worker_id` used for task leases).
+     */
+    public let runtimeId: String
+    public let deviceId: String
+    /**
+     * Handlers advertised to the control plane.
+     */
+    public let handlers: [String]
+    /**
+     * RFC 3339 expiry of the advertisement just sent; the engine refreshes
+     * it automatically before then.
+     */
+    public let expiresAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Stable runtime UUID (also the `worker_id` used for task leases).
+         */runtimeId: String, deviceId: String, 
+        /**
+         * Handlers advertised to the control plane.
+         */handlers: [String], 
+        /**
+         * RFC 3339 expiry of the advertisement just sent; the engine refreshes
+         * it automatically before then.
+         */expiresAt: String) {
+        self.runtimeId = runtimeId
+        self.deviceId = deviceId
+        self.handlers = handlers
+        self.expiresAt = expiresAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension NodeRegistration: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNodeRegistration: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeRegistration {
+        return
+            try NodeRegistration(
+                runtimeId: FfiConverterString.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf), 
+                handlers: FfiConverterSequenceString.read(from: &buf), 
+                expiresAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NodeRegistration, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.runtimeId, into: &buf)
+        FfiConverterString.write(value.deviceId, into: &buf)
+        FfiConverterSequenceString.write(value.handlers, into: &buf)
+        FfiConverterString.write(value.expiresAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeRegistration_lift(_ buf: RustBuffer) throws -> NodeRegistration {
+    return try FfiConverterTypeNodeRegistration.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeRegistration_lower(_ value: NodeRegistration) -> RustBuffer {
+    return FfiConverterTypeNodeRegistration.lower(value)
 }
 
 
@@ -3262,6 +3749,249 @@ public func FfiConverterTypeTickResult_lift(_ buf: RustBuffer) throws -> TickRes
 #endif
 public func FfiConverterTypeTickResult_lower(_ value: TickResult) -> RustBuffer {
     return FfiConverterTypeTickResult.lower(value)
+}
+
+
+/**
+ * Options for `start_worker`.
+ */
+public struct WorkerOptions: Equatable, Hashable {
+    /**
+     * Remote tasks executed concurrently on the device (default 1).
+     */
+    public let maxConcurrentTasks: UInt32
+    /**
+     * Poll cadence while idle, before power-state scaling (default 15 s).
+     * Push wake-ups and `on_push_received` poll immediately regardless.
+     */
+    public let idlePollIntervalMs: UInt64
+    /**
+     * Worker build/version reported to the server's version pins.
+     */
+    public let version: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Remote tasks executed concurrently on the device (default 1).
+         */maxConcurrentTasks: UInt32 = UInt32(1), 
+        /**
+         * Poll cadence while idle, before power-state scaling (default 15 s).
+         * Push wake-ups and `on_push_received` poll immediately regardless.
+         */idlePollIntervalMs: UInt64 = UInt64(15000), 
+        /**
+         * Worker build/version reported to the server's version pins.
+         */version: String? = nil) {
+        self.maxConcurrentTasks = maxConcurrentTasks
+        self.idlePollIntervalMs = idlePollIntervalMs
+        self.version = version
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WorkerOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWorkerOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WorkerOptions {
+        return
+            try WorkerOptions(
+                maxConcurrentTasks: FfiConverterUInt32.read(from: &buf), 
+                idlePollIntervalMs: FfiConverterUInt64.read(from: &buf), 
+                version: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WorkerOptions, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.maxConcurrentTasks, into: &buf)
+        FfiConverterUInt64.write(value.idlePollIntervalMs, into: &buf)
+        FfiConverterOptionString.write(value.version, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkerOptions_lift(_ buf: RustBuffer) throws -> WorkerOptions {
+    return try FfiConverterTypeWorkerOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkerOptions_lower(_ value: WorkerOptions) -> RustBuffer {
+    return FfiConverterTypeWorkerOptions.lower(value)
+}
+
+
+/**
+ * Counters exposed through `worker_stats`.
+ */
+public struct WorkerStats: Equatable, Hashable {
+    public let running: Bool
+    public let inFlight: UInt32
+    public let claimed: UInt64
+    public let completed: UInt64
+    public let failed: UInt64
+    public let released: UInt64
+    /**
+     * Tasks whose lease was lost (reclaimed by the server) mid-execution.
+     */
+    public let lost: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(running: Bool, inFlight: UInt32, claimed: UInt64, completed: UInt64, failed: UInt64, released: UInt64, 
+        /**
+         * Tasks whose lease was lost (reclaimed by the server) mid-execution.
+         */lost: UInt64) {
+        self.running = running
+        self.inFlight = inFlight
+        self.claimed = claimed
+        self.completed = completed
+        self.failed = failed
+        self.released = released
+        self.lost = lost
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WorkerStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWorkerStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WorkerStats {
+        return
+            try WorkerStats(
+                running: FfiConverterBool.read(from: &buf), 
+                inFlight: FfiConverterUInt32.read(from: &buf), 
+                claimed: FfiConverterUInt64.read(from: &buf), 
+                completed: FfiConverterUInt64.read(from: &buf), 
+                failed: FfiConverterUInt64.read(from: &buf), 
+                released: FfiConverterUInt64.read(from: &buf), 
+                lost: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WorkerStats, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.running, into: &buf)
+        FfiConverterUInt32.write(value.inFlight, into: &buf)
+        FfiConverterUInt64.write(value.claimed, into: &buf)
+        FfiConverterUInt64.write(value.completed, into: &buf)
+        FfiConverterUInt64.write(value.failed, into: &buf)
+        FfiConverterUInt64.write(value.released, into: &buf)
+        FfiConverterUInt64.write(value.lost, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkerStats_lift(_ buf: RustBuffer) throws -> WorkerStats {
+    return try FfiConverterTypeWorkerStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkerStats_lower(_ value: WorkerStats) -> RustBuffer {
+    return FfiConverterTypeWorkerStats.lower(value)
+}
+
+
+/**
+ * Result of a bounded background window (`run_worker_window`).
+ */
+public struct WorkerWindowResult: Equatable, Hashable {
+    public let claimed: UInt64
+    public let completed: UInt64
+    public let failed: UInt64
+    /**
+     * Tasks still executing when the budget ran out. They keep running
+     * while the process lives; if it is suspended, the lease lapses and the
+     * next launch releases them.
+     */
+    public let stillRunning: UInt32
+    public let budgetExhausted: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(claimed: UInt64, completed: UInt64, failed: UInt64, 
+        /**
+         * Tasks still executing when the budget ran out. They keep running
+         * while the process lives; if it is suspended, the lease lapses and the
+         * next launch releases them.
+         */stillRunning: UInt32, budgetExhausted: Bool) {
+        self.claimed = claimed
+        self.completed = completed
+        self.failed = failed
+        self.stillRunning = stillRunning
+        self.budgetExhausted = budgetExhausted
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension WorkerWindowResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWorkerWindowResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WorkerWindowResult {
+        return
+            try WorkerWindowResult(
+                claimed: FfiConverterUInt64.read(from: &buf), 
+                completed: FfiConverterUInt64.read(from: &buf), 
+                failed: FfiConverterUInt64.read(from: &buf), 
+                stillRunning: FfiConverterUInt32.read(from: &buf), 
+                budgetExhausted: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WorkerWindowResult, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.claimed, into: &buf)
+        FfiConverterUInt64.write(value.completed, into: &buf)
+        FfiConverterUInt64.write(value.failed, into: &buf)
+        FfiConverterUInt32.write(value.stillRunning, into: &buf)
+        FfiConverterBool.write(value.budgetExhausted, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkerWindowResult_lift(_ buf: RustBuffer) throws -> WorkerWindowResult {
+    return try FfiConverterTypeWorkerWindowResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWorkerWindowResult_lower(_ value: WorkerWindowResult) -> RustBuffer {
+    return FfiConverterTypeWorkerWindowResult.lower(value)
 }
 
 
@@ -3662,6 +4392,89 @@ public func FfiConverterTypeMobileError_lower(_ value: MobileError) -> RustBuffe
 
 
 /**
+ * Current network path, reported with the node's capabilities.
+ */
+
+public enum NodeConnectivity: Equatable, Hashable {
+    
+    case offline
+    case metered
+    case wifi
+    case ethernet
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension NodeConnectivity: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNodeConnectivity: FfiConverterRustBuffer {
+    typealias SwiftType = NodeConnectivity
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeConnectivity {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .offline
+        
+        case 2: return .metered
+        
+        case 3: return .wifi
+        
+        case 4: return .ethernet
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: NodeConnectivity, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .offline:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .metered:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .wifi:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .ethernet:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeConnectivity_lift(_ buf: RustBuffer) throws -> NodeConnectivity {
+    return try FfiConverterTypeNodeConnectivity.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeConnectivity_lower(_ value: NodeConnectivity) -> RustBuffer {
+    return FfiConverterTypeNodeConnectivity.lower(value)
+}
+
+
+
+/**
  * Device power state reported by the host app. Used to adapt tick frequency.
  */
 
@@ -3852,6 +4665,30 @@ public func FfiConverterTypeSyncError_lower(_ value: SyncError) -> RustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt8: FfiConverterRustBuffer {
+    typealias SwiftType = UInt8?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt8.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt8.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -3892,6 +4729,30 @@ fileprivate struct FfiConverterOptionTypeTokenProvider: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeTokenProvider.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeNodeConnectivity: FfiConverterRustBuffer {
+    typealias SwiftType = NodeConnectivity?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeNodeConnectivity.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeNodeConnectivity.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3999,6 +4860,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_complete_step() != 37083) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_enable_builtin() != 55786) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule() != 28196) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4020,22 +4884,34 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_loaded_sequences() != 59070) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_orch8_mobile_checksum_method_mobileengine_on_push_received() != 47207) {
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_node_runtime_id() != 72) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_orch8_mobile_checksum_method_mobileengine_pause() != 23724) {
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_on_push_received() != 6849) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_on_push_wake() != 35857) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_pause() != 32240) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_register_handler() != 16855) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_register_node() != 1315) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state() != 30406) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_orch8_mobile_checksum_method_mobileengine_resume() != 35126) {
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_resume() != 52748) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_run_until_idle() != 59390) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_run_worker_window() != 64477) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_set_device_context() != 20572) {
@@ -4050,10 +4926,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_start() != 15754) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_start_worker() != 51564) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_stop_worker() != 30469) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_sync() != 63648) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_tick_once() != 40919) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_unregister_node() != 24105) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_update_node_status() != 43143) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_worker_stats() != 54173) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_capsulesigner_key_id() != 14959) {

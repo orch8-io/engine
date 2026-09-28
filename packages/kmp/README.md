@@ -155,6 +155,7 @@ approvals and commands with the server.
 | `flushTelemetry` / `setDeviceContext` / `reportPowerState` / `onPushReceived` | same, plus `PowerState.fromBattery(level, charging)` |
 | `importContinuityCapsule` / `activateContinuityCapsule` | same |
 | `exportContinuityCapsule(..., signer)` | Not wrapped. It needs a Secure Enclave/KeyStore signer, so call it from the platform SDK (same boundary as `@orch8.io/expo`) |
+| `registerNode` / `startWorker` / `stopWorker` / `runWorkerWindow` / `onPushWake` / `enableBuiltin` (runtime node + remote worker) | Not wrapped yet. Available on the generated UniFFI `io.orch8.mobile.MobileEngine` on Android/JVM; see `docs/MOBILE_SDK.md#the-phone-as-a-runtime-node` |
 | Swift-only `DistributedWorkerClient`, `TrustedDeviceHandoffCoordinator` | Not wrapped. Use `packages/swift` directly |
 
 ## Development

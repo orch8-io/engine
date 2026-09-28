@@ -73,7 +73,29 @@ the capsule, claims server-side ownership, activates the local instance, and
 records resume evidence. A return is allowed only while the local instance is
 paused or waiting, preventing ownership transfer in the middle of an effect.
 
-## Distributed work pickup
+## Runtime node (remote worker)
+
+`Orch8RuntimeNode` joins the distributed-execution mesh as a `mobile` runtime
+and runs server-placed steps with your registered `StepHandler`s. The loop
+itself runs in Rust (`MobileEngine.registerNode` / `startWorker`): it
+heartbeats per lease, journals claims so tasks held when iOS kills the app are
+released on the next launch, and polls immediately on push.
+
+```swift
+try engine.registerHandler(name: "scan_document", handler: ScanHandler())
+let node = Orch8RuntimeNode(engine: engine)
+try await node.join(capabilities: NodeCapabilities(hardware: ["camera"], pushToken: apnsToken))
+try node.startWorker()
+
+// AppDelegate silent push:
+node.handlePush(userInfo: userInfo)
+_ = try await node.runBackgroundWindow(seconds: 25)
+```
+
+Handlers get the task params plus `__orch8.effect_id`, the idempotency key to
+forward to downstream APIs.
+
+## Distributed work pickup (low level)
 
 `DistributedWorkerClient` lets the phone participate as a leased worker
 without moving the whole embedded execution. It advertises current runtime
