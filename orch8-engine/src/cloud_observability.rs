@@ -356,7 +356,7 @@ impl Enricher {
                 duration_ms,
                 // Only a coarse, data-free classification is allowed here.
                 error_kind: (event.state == InstanceState::Failed).then(|| "failed".to_owned()),
-                sub_tenant: None,
+                sub_tenant: instance.as_ref().and_then(|i| i.sub_tenant.clone()),
             });
         }
         out
@@ -701,6 +701,7 @@ mod tests {
             session_id: None,
             parent_instance_id: None,
             budget: None,
+            sub_tenant: Some("acme".into()),
             created_at: now - chrono::Duration::seconds(2),
             updated_at: now,
         };
@@ -719,6 +720,7 @@ mod tests {
             .await;
         assert_eq!(out[0].sequence_name, "billing");
         assert_eq!(out[0].sequence_version, Some(3));
+        assert_eq!(out[0].sub_tenant.as_deref(), Some("acme"));
         assert!(out[0].duration_ms.unwrap() >= 1_900);
         let json = serde_json::to_string(&out).unwrap();
         assert!(!json.contains("do-not-export"));

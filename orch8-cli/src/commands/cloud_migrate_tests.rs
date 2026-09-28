@@ -44,6 +44,7 @@ fn instance(seq: &SequenceDefinition, state: InstanceState) -> TaskInstance {
         session_id: None,
         parent_instance_id: None,
         budget: None,
+        sub_tenant: Some("acme".into()),
         created_at: now,
         updated_at: now,
     }
@@ -122,6 +123,7 @@ async fn migrates_in_flight_state_fences_source_and_is_idempotent() {
         .unwrap();
     assert_eq!(moved.state, InstanceState::Waiting);
     assert_eq!(moved.metadata["customer"], "c-1");
+    assert_eq!(moved.sub_tenant.as_deref(), Some("acme"));
     assert_eq!(moved.metadata[MIGRATION_METADATA_KEY]["phase"], "imported");
     assert_eq!(
         target

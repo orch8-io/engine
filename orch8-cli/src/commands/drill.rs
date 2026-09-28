@@ -362,6 +362,7 @@ async fn start_control(db: &std::path::Path) -> Result<Control> {
             None,
         )),
         browser_output_max_bytes: orch8_api::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
+        embedded: std::sync::Arc::default(),
     };
     let auth_storage = storage.clone();
     let app = orch8_api::build_router(app_state)
