@@ -1346,6 +1346,20 @@ pub fn all_terminal(nodes: &[&ExecutionNode]) -> bool {
     nodes.iter().all(|n| n.state.is_terminal())
 }
 
+/// Check if all children of a parent are in a terminal state without collecting them into a Vec.
+pub fn all_children_terminal(
+    tree: &[ExecutionNode],
+    parent_id: ExecutionNodeId,
+    branch_index: Option<i16>,
+) -> bool {
+    // Return false immediately if any child is not terminal.
+    !tree.iter().any(|n| {
+        n.parent_id == Some(parent_id)
+            && (branch_index.is_none() || n.branch_index == branch_index)
+            && !n.state.is_terminal()
+    })
+}
+
 /// Check if any node in a set has completed.
 pub fn any_completed(nodes: &[&ExecutionNode]) -> bool {
     nodes.iter().any(|n| n.state == NodeState::Completed)
@@ -1359,6 +1373,19 @@ pub fn all_completed(nodes: &[&ExecutionNode]) -> bool {
 /// Check if any node failed.
 pub fn any_failed(nodes: &[&ExecutionNode]) -> bool {
     nodes.iter().any(|n| n.state == NodeState::Failed)
+}
+
+/// Check if any child of a parent has failed without collecting them into a Vec.
+pub fn any_child_failed(
+    tree: &[ExecutionNode],
+    parent_id: ExecutionNodeId,
+    branch_index: Option<i16>,
+) -> bool {
+    tree.iter().any(|n| {
+        n.parent_id == Some(parent_id)
+            && (branch_index.is_none() || n.branch_index == branch_index)
+            && n.state == NodeState::Failed
+    })
 }
 
 /// Check if the tree has any nodes waiting for external work.

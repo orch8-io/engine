@@ -1,9 +1,7 @@
 ## 2025-11-05 - [Replace HashMap Allocation with Flat Vec for Block Lookup]
 **Learning:** In the `flatten_blocks` function within `orch8-engine/src/evaluator.rs`, allocating a `HashMap<&BlockId, &BlockDefinition>` to map execution blocks introduces significant hashing and memory allocation overhead on the evaluation hot path, which is called every tick. Since the tree size is typically bounded and small, building a `Vec` and sorting it by `BlockId` allows for O(log N) lookups via `.binary_search_by_key()`, completely avoiding `HashMap` overhead.
 **Action:** In execution hot paths where a lookup map is created from a slice on every iteration, always prefer a flat `Vec` initialized with `Vec::with_capacity()`, sorted by key, and queried via `.binary_search_by_key()` over a `HashMap` to eliminate hashing and heap allocation costs.
-## 2025-11-05 - [Replace HashMap Allocation with Flat Vec for Block Lookup]
-**Learning:** In the `flatten_blocks` function within `orch8-engine/src/evaluator.rs`, allocating a `HashMap<&BlockId, &BlockDefinition>` to map execution blocks introduces significant hashing and memory allocation overhead on the evaluation hot path, which is called every tick. Since the tree size is typically bounded and small, building a `Vec` and sorting it by `BlockId` allows for O(log N) lookups via `.binary_search_by_key()`, completely avoiding `HashMap` overhead.
-**Action:** In execution hot paths where a lookup map is created from a slice on every iteration, always prefer a flat `Vec` initialized with `Vec::with_capacity()`, sorted by key, and queried via `.binary_search_by_key()` over a `HashMap` to eliminate hashing and heap allocation costs.
+
 ## 2026-09-19 - [Replace HashMap with Vec chunking]
 **Learning:** When grouping elements by a key, using `slice::chunk_by` on a flat `Vec` sorted by that key eliminates the hashing overhead and intermediate allocations of building a `HashMap<Key, Vec<T>>`. If secondary ordering within chunks is required, a composite sort before chunking ensures the data is ready to consume without further manipulation.
 **Action:** When grouping elements in hot paths, prefer `slice::chunk_by` over `HashMap` to improve cache locality and minimize memory allocations.
@@ -11,9 +9,15 @@
 ## 2025-11-06 - [Optimize children_of using Vec::with_capacity]
 **Learning:** In `orch8-engine/src/evaluator.rs`, the `children_of` function is called heavily on the hot path for all execution node evaluations. It previously chained `.filter(...).collect()` on the execution tree slice. Because `.filter()` creates an iterator of unknown size, `.collect()` causes the resulting `Vec` to allocate and potentially reallocate multiple times as elements are found.
 **Action:** Replace `.filter(...).collect()` chains in hot paths with a manual `for` loop pushing to a `Vec` instantiated with `Vec::with_capacity(N)` when a reasonable small bound (like 8 for most child node scenarios) is known. This significantly eliminates redundant iterator and allocator overhead.
+
 ## 2025-02-12 - Eliminate HashMap Allocation in Concurrency Scheduler
 **Learning:** In the task scheduler hot path (`enforce_concurrency_limits`), grouping concurrency keys was previously implemented using a `HashMap`. This resulted in unnecessary string allocation and hashing overhead on every tick.
 **Action:** When grouping slices into buckets for iterative logic on hot paths where preserving original indices is required, map the structure into a flat `Vec<(Key, usize)>`, sort it by key first (and original index second for priority preservation), and utilize the stable `slice::chunk_by` method to eliminate `HashMap` construction entirely. This leverages flat arrays and avoids dynamic hashing overhead.
+
 ## 2025-11-06 - [Replace HashMap with Vec in DeadlineOutputs]
 **Learning:** In the `prefetch_deadline_outputs` phase of the scheduler (`orch8-engine/src/scheduler.rs`), building a `HashMap` of references incurred unnecessary hashing and allocation overhead on every tick.
 **Action:** When creating a lookup table from a batch of pre-fetched results on a hot path, replace the `HashMap` with a flat `Vec` initialized with `Vec::with_capacity()`, sort it by a composite key, and use `.binary_search_by()` for O(log N) zero-allocation lookups.
+
+## 2025-11-08 - [Avoid intermediate Vec allocations for node checks]
+**Learning:** Collecting child nodes via `children_of` into an intermediate `Vec` just to run `all_terminal` or `any_failed` adds unnecessary memory allocations on the evaluation hot path, especially when nodes are frequently checked (e.g. in loops or sagas).
+**Action:** When checking child node states in `orch8-engine` hot paths, avoid collecting node references via `children_of` followed by `all_terminal` or `any_failed`. Instead, use the allocation-free helper functions `all_children_terminal` and `any_child_failed` directly on the `tree` slice.
