@@ -1,0 +1,59 @@
+{
+  "name": "create-orch8-embed",
+  "version": "0.1.0",
+  "description": "Scaffold a Next.js SaaS starter that embeds Orch8 runs, approvals and a workflow builder for your customers",
+  "license": "BUSL-1.1",
+  "type": "module",
+  "bin": {
+    "create-orch8-embed": "bin/create-orch8-embed.mjs"
+  },
+  "files": [
+    "bin",
+    "app",
+    "components",
+    "lib",
+    "orch8",
+    "scripts",
+    "public",
+    ".env.example",
+    ".gitignore",
+    "eslint.config.mjs",
+    "next.config.ts",
+    "tsconfig.json",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "seed": "node --env-file=.env.local scripts/seed.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "orch8": {
+    "embedVersion": "^0.1.0"
+  },
+  "dependencies": {
+    "@orch8/embed": "file:../../packages/embed",
+    "next": "^16.3.6",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "eslint": "^10.11.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.12.0",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.2"
+  },
+  "engines": {
+    "node": ">=20.9"
+  }
+}

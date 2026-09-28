@@ -7,6 +7,7 @@ Examples are grouped by the question they answer:
 | [Safe release](safe-release/README.md) | Immutable versions, preflight, semantic diff, historical validation, and a canary gate | repository root |
 | [Portable agent product](portable-agent-product/README.md) | Placement policy, local worker wrapper, profile offer, conformance score, and OEM contract | repository root |
 | [Email classifier](email-classifier/README.md) | Webhook ingestion, TypeScript worker steps, LLM classification, Activepieces, Slack, and Resend | `examples/email-classifier` |
+| [Embed starter](create-orch8-embed/README.md) | Next.js SaaS app embedding runs, approvals and a step builder per customer (sub-tenant) with server-minted embed tokens; runs on a built-in mock engine | `examples/create-orch8-embed` |
 | [iOS app](ios/) | Swift package integration and an observable mobile sequence | `examples/ios` |
 | [Android app](android/) | Gradle integration for the mobile engine | `examples/android` |
 | [Hybrid GPU executor](hybrid-gpu-executor/README.md) | Local Ollama/vLLM steps on your GPU host, placed by hardware capability, with a remote or local control plane | `examples/hybrid-gpu-executor` |
