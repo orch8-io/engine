@@ -438,7 +438,9 @@ pub(crate) async fn start_run(
         sequence_id: sequence.id,
         tenant_id: principal.tenant_id.clone(),
         namespace,
-        priority: orch8_types::instance::Priority::default(),
+        // Resolved from the sequence / plan priority lane (docs/PLACEMENT.md).
+        priority: None,
+        priority_lane: None,
         timezone: "UTC".to_string(),
         metadata: serde_json::json!({ "started_via": "embed" }),
         context,

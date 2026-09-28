@@ -44,6 +44,7 @@ async fn sequence(
     sub: Option<&str>,
 ) -> SequenceDefinition {
     let seq = SequenceDefinition {
+        placement: None,
         sub_tenant: sub.map(ToString::to_string),
         embed: Some(SequenceEmbed {
             visible_outputs: vec!["summary".into()],

@@ -118,7 +118,6 @@ impl Default for NodeCapabilities {
             app_version: None,
             api_base_url: None,
             capsule_signing_public_key: None,
-            labels: std::collections::BTreeMap::new(),
         }
     }
 }
