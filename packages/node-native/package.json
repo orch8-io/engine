@@ -1,11 +1,16 @@
 {
   "name": "@orch8/engine-native",
   "version": "0.7.1",
-  "description": "napi-rs bindings for Orch8 sequence validation",
+  "description": "In-process Orch8: durable SQLite-backed workflows, validation and dry runs (napi-rs)",
   "main": "index.js",
   "types": "index.d.ts",
-  "napi": { "name": "orch8_engine_native", "triples": { "defaults": true } },
-  "scripts": { "build": "napi build --platform --release" },
+  "files": ["index.js", "index.d.ts", "binding.js", "*.node"],
+  "napi": { "binaryName": "orch8_engine_native", "targets": ["x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"] },
+  "scripts": {
+    "build": "napi build --platform --release --no-js --dts native.d.ts",
+    "build:debug": "napi build --platform --no-js --dts native.d.ts",
+    "test": "node --test test/*.test.js"
+  },
   "devDependencies": { "@napi-rs/cli": "^3.0.0" },
   "license": "BUSL-1.1"
 }

@@ -1,0 +1,3 @@
+# Build outputs (napi build / cargo build copies)
+*.node
+native.d.ts

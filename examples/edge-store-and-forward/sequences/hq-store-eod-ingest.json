@@ -1,0 +1,15 @@
+{
+  "name": "hq-store-eod-ingest",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "received",
+      "handler": "log",
+      "params": {
+        "message": "store end-of-day export received",
+        "store_id": "{{context.data.store_id}}",
+        "edge_instance_id": "{{context.data.edge_instance_id}}"
+      }
+    }
+  ]
+}

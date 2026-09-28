@@ -13,6 +13,22 @@ fn fixture(name: &str) -> Value {
     serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
 }
 
+/// Every `sub_sequence` target in a sequence document.
+fn sub_sequences(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("sub_sequence")
+                && let Some(name) = map.get("sequence_name").and_then(Value::as_str)
+            {
+                out.push(name.to_string());
+            }
+            map.values().for_each(|v| sub_sequences(v, out));
+        }
+        Value::Array(items) => items.iter().for_each(|v| sub_sequences(v, out)),
+        _ => {}
+    }
+}
+
 fn inventory(workers: &[String]) -> RuntimeInventory {
     RuntimeInventory {
         worker_registrations: Some(
@@ -53,7 +69,7 @@ fn conditions(value: &Value, out: &mut Vec<String>) {
 
 /// Strict decode + structural validation + preflight: ready once the stub
 /// workers exist, and without them only the worker check fails.
-fn assert_passes_preflight(conversion: &Conversion) {
+pub(super) fn assert_passes_preflight(conversion: &Conversion) {
     let mut value = conversion.sequence.clone();
     value["id"] = json!(uuid::Uuid::now_v7());
     value["created_at"] = json!(chrono::Utc::now());
@@ -75,14 +91,36 @@ fn assert_passes_preflight(conversion: &Conversion) {
     }
 
     let now = chrono::Utc::now();
-    let report = run_preflight(&seq, &inventory(&conversion.report.worker_handlers), now);
+    // Importers reference child sequences that are imported separately:
+    // treat them as published.
+    let mut children = Vec::new();
+    sub_sequences(&value, &mut children);
+    let with_children = |mut inv: RuntimeInventory| {
+        inv.sequences = Some(
+            children
+                .iter()
+                .map(|name| orch8_engine::preflight::SubSequenceInfo {
+                    name: name.clone(),
+                    namespace: seq.namespace.as_str().to_string(),
+                    version: 1,
+                    status: orch8_types::sequence::SequenceStatus::Production,
+                })
+                .collect(),
+        );
+        inv
+    };
+    let report = run_preflight(
+        &seq,
+        &with_children(inventory(&conversion.report.worker_handlers)),
+        now,
+    );
     assert!(
         report.is_ready(),
         "preflight not ready: {:#}",
         serde_json::to_value(&report).unwrap()
     );
 
-    let bare = run_preflight(&seq, &inventory(&[]), now);
+    let bare = run_preflight(&seq, &with_children(inventory(&[])), now);
     for check in &bare.checks {
         if check.id == "handlers_have_workers" {
             let flagged: Vec<String> = check
@@ -111,7 +149,7 @@ fn assert_passes_preflight(conversion: &Conversion) {
     }
 }
 
-fn find_block<'a>(value: &'a Value, id: &str) -> Option<&'a Value> {
+pub(super) fn find_block<'a>(value: &'a Value, id: &str) -> Option<&'a Value> {
     match value {
         Value::Object(map) => {
             if map.get("id").and_then(Value::as_str) == Some(id) && map.contains_key("type") {
@@ -402,6 +440,7 @@ fn run_writes_sequence_and_report_files() {
             namespace: "sales".into(),
             report: Some(report.clone()),
             zap: None,
+            workflow: None,
         }),
         Some("tenant-a"),
     )

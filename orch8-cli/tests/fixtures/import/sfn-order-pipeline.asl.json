@@ -1,0 +1,121 @@
+{
+  "Comment": "Order pipeline",
+  "StartAt": "Validate Order",
+  "States": {
+    "Validate Order": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:ValidateOrder:$LATEST",
+        "Payload": {
+          "orderId.$": "$.order.id",
+          "customer.$": "$.customer",
+          "source": "sfn"
+        }
+      },
+      "ResultSelector": { "Payload.$": "$.Payload" },
+      "ResultPath": "$.validation",
+      "TimeoutSeconds": 30,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "MaxDelaySeconds": 20
+        }
+      ],
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "Notify Failure" }
+      ],
+      "Next": "Is Express?"
+    },
+    "Is Express?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "And": [
+            { "Variable": "$.validation.Payload.valid", "BooleanEquals": true },
+            { "Variable": "$.order.shipping", "StringEquals": "express" }
+          ],
+          "Next": "Prioritize"
+        },
+        { "Variable": "$.order.total", "NumericGreaterThan": 1000, "Next": "Manual Review Wait" }
+      ],
+      "Default": "Reserve And Charge"
+    },
+    "Prioritize": {
+      "Type": "Pass",
+      "Result": { "priority": "high" },
+      "ResultPath": "$.meta",
+      "Next": "Reserve And Charge"
+    },
+    "Manual Review Wait": {
+      "Type": "Wait",
+      "Seconds": 3600,
+      "Next": "Reserve And Charge"
+    },
+    "Reserve And Charge": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "Reserve Inventory",
+          "States": {
+            "Reserve Inventory": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:us-east-1:123456789012:activity:reserve-inventory",
+              "Parameters": { "items.$": "$.order.items" },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "Charge Card",
+          "States": {
+            "Charge Card": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:123456789012:function:ChargeCard",
+              "Parameters": { "amount.$": "$.order.total", "customer.$": "$.customer.id" },
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": "$.fulfilment",
+      "Next": "Ship Items"
+    },
+    "Ship Items": {
+      "Type": "Map",
+      "ItemsPath": "$.order.items",
+      "MaxConcurrency": 1,
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "Ship One",
+        "States": {
+          "Ship One": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:123456789012:function:ShipItem",
+            "Parameters": { "sku.$": "$.sku", "qty.$": "$.qty" },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": null,
+      "Next": "Done"
+    },
+    "Notify Failure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": { "TopicArn": "arn:aws:sns:us-east-1:123456789012:orders", "Message.$": "$.order.id" },
+      "Next": "Order Failed"
+    },
+    "Order Failed": {
+      "Type": "Fail",
+      "Error": "OrderFailed",
+      "Cause": "validation failed"
+    },
+    "Done": {
+      "Type": "Succeed"
+    }
+  }
+}

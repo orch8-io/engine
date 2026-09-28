@@ -1,0 +1,4 @@
+# Build outputs (maturin develop / cargo rustc copies)
+python/orch8_engine/_native*.so
+python/orch8_engine/_native*.pyd
+__pycache__/

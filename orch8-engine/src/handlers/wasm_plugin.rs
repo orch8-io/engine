@@ -71,6 +71,118 @@ pub async fn handle_wasm_plugin(ctx: StepContext, wasm_path: &str) -> Result<Val
     Ok(result)
 }
 
+/// Sandbox limits applied to every WASM plugin invocation.
+///
+/// Read once from the environment ([`limits::current`]); every knob has a
+/// safe default so an unconfigured server is still bounded. Invalid or zero
+/// values fall back to the default with a warning — a typo must never turn a
+/// limit off.
+#[cfg(feature = "wasm")]
+pub mod limits {
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    /// Fuel per invocation (`ORCH8_WASM_FUEL`).
+    pub const FUEL_ENV: &str = "ORCH8_WASM_FUEL";
+    /// Linear-memory ceiling in bytes (`ORCH8_WASM_MAX_MEMORY_BYTES`).
+    pub const MAX_MEMORY_ENV: &str = "ORCH8_WASM_MAX_MEMORY_BYTES";
+    /// Wall-clock limit per invocation in milliseconds (`ORCH8_WASM_TIMEOUT_MS`).
+    pub const TIMEOUT_ENV: &str = "ORCH8_WASM_TIMEOUT_MS";
+    /// Largest module file the loader accepts (`ORCH8_WASM_MAX_MODULE_BYTES`).
+    pub const MAX_MODULE_ENV: &str = "ORCH8_WASM_MAX_MODULE_BYTES";
+    /// Largest output a module may return (`ORCH8_WASM_MAX_OUTPUT_BYTES`).
+    pub const MAX_OUTPUT_ENV: &str = "ORCH8_WASM_MAX_OUTPUT_BYTES";
+
+    /// Resolved limits. See `docs/WASM_USER_STEPS.md` for the rationale
+    /// behind each default.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct WasmSandboxLimits {
+        /// CPU budget: 1 fuel unit ~ 1 Wasm instruction. Deterministic.
+        pub fuel: u64,
+        /// Linear-memory ceiling per instance (initial size and every `memory.grow`).
+        pub max_memory_bytes: usize,
+        /// Function-table ceiling per instance.
+        pub max_table_elements: usize,
+        /// Wall-clock ceiling per invocation (epoch interruption). Catches work
+        /// fuel undercounts, e.g. a single `memory.fill` over 64 MiB.
+        pub timeout: Duration,
+        /// Module file size cap, enforced before the file is read or compiled.
+        pub max_module_bytes: u64,
+        /// Output size cap, enforced before the output is parsed.
+        pub max_output_bytes: usize,
+    }
+
+    /// 10M instructions: ~50–200 ms of dense arithmetic on a modern CPU.
+    pub const DEFAULT_FUEL: u64 = 10_000_000;
+    /// 64 MiB.
+    pub const DEFAULT_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+    /// Function-table entries.
+    pub const DEFAULT_MAX_TABLE_ELEMENTS: usize = 10_000;
+    /// 2 s wall clock.
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+    /// 32 MiB module files.
+    pub const DEFAULT_MAX_MODULE_BYTES: u64 = 32 * 1024 * 1024;
+    /// 4 MiB of output JSON.
+    pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+    impl Default for WasmSandboxLimits {
+        fn default() -> Self {
+            Self {
+                fuel: DEFAULT_FUEL,
+                max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
+                max_table_elements: DEFAULT_MAX_TABLE_ELEMENTS,
+                timeout: DEFAULT_TIMEOUT,
+                max_module_bytes: DEFAULT_MAX_MODULE_BYTES,
+                max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            }
+        }
+    }
+
+    impl WasmSandboxLimits {
+        /// Build limits from a variable lookup (the process env in production).
+        pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+            fn positive<T: std::str::FromStr + PartialEq + Default>(
+                get: &impl Fn(&str) -> Option<String>,
+                key: &str,
+                default: T,
+            ) -> T {
+                let Some(raw) = get(key).filter(|v| !v.trim().is_empty()) else {
+                    return default;
+                };
+                match raw.trim().parse::<T>() {
+                    Ok(v) if v != T::default() => v,
+                    _ => {
+                        tracing::warn!(
+                            key,
+                            value = %raw,
+                            "invalid WASM sandbox limit (must be a positive integer); using the default"
+                        );
+                        default
+                    }
+                }
+            }
+            let d = Self::default();
+            #[allow(clippy::cast_possible_truncation)]
+            let timeout_ms = positive(&get, TIMEOUT_ENV, d.timeout.as_millis() as u64);
+            Self {
+                fuel: positive(&get, FUEL_ENV, d.fuel),
+                max_memory_bytes: positive(&get, MAX_MEMORY_ENV, d.max_memory_bytes),
+                max_table_elements: d.max_table_elements,
+                timeout: Duration::from_millis(timeout_ms),
+                max_module_bytes: positive(&get, MAX_MODULE_ENV, d.max_module_bytes),
+                max_output_bytes: positive(&get, MAX_OUTPUT_ENV, d.max_output_bytes),
+            }
+        }
+    }
+
+    static CURRENT: OnceLock<WasmSandboxLimits> = OnceLock::new();
+
+    /// Process-wide limits, read from the environment on first use.
+    pub fn current() -> &'static WasmSandboxLimits {
+        CURRENT.get_or_init(|| WasmSandboxLimits::from_lookup(|k| std::env::var(k).ok()))
+    }
+}
+
 /// Cached WASM engine (expensive to create) and compiled modules.
 #[cfg(feature = "wasm")]
 pub(crate) mod cache {
@@ -78,41 +190,44 @@ pub(crate) mod cache {
     use std::io::Read;
     use std::path::{Path, PathBuf};
     use std::sync::{OnceLock, RwLock};
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     use wasmtime::{Config, Engine, Module};
 
     use orch8_types::error::StepError;
 
-    /// Hard ceiling on CPU work per invocation. 1 fuel unit ~ 1 Wasm op.
-    /// 10M ops is ~50–200ms of dense arithmetic on a modern CPU — generous for
-    /// transforms, lethal for infinite loops.
-    pub const WASM_FUEL_LIMIT: u64 = 10_000_000;
-
-    /// Hard ceiling on linear-memory growth per instance: 64 MiB.
-    /// Prevents a single plugin from exhausting server RAM.
-    pub const WASM_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
-
-    /// Hard ceiling on table size (function-table entries).
-    pub const WASM_MAX_TABLE_ELEMENTS: usize = 10_000;
+    /// Epoch tick used for wall-clock interruption. The deadline of a store is
+    /// expressed in ticks, so timeouts are accurate to roughly one tick.
+    pub const EPOCH_TICK: Duration = Duration::from_millis(10);
 
     static ENGINE: OnceLock<Result<Engine, StepError>> = OnceLock::new();
 
     fn init_engine() -> Result<Engine, StepError> {
         let mut config = Config::new();
-        // Metered execution — a store out of fuel traps, caller converts to a retryable error.
+        // Metered execution — a store out of fuel traps (deterministic CPU cap).
         config.consume_fuel(true);
-        // Epoch-based interruption: lets us cancel long-running stores cooperatively.
+        // Epoch-based interruption — the wall-clock cap. Driven by the ticker
+        // thread below; each store sets its own deadline in ticks.
         config.epoch_interruption(true);
-        Engine::new(&config).map_err(|e| StepError::Permanent {
+        let engine = Engine::new(&config).map_err(|e| StepError::Permanent {
             message: format!("wasmtime engine init failed: {e}"),
             details: None,
-        })
+        })?;
+        let ticker = engine.clone();
+        if let Err(e) = std::thread::Builder::new()
+            .name("orch8-wasm-epoch".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(EPOCH_TICK);
+                    ticker.increment_epoch();
+                }
+            })
+        {
+            // Fuel still bounds CPU; only the wall-clock cap is lost.
+            tracing::error!(error = %e, "wasm plugin: cannot start epoch ticker; wall-clock timeouts disabled");
+        }
+        Ok(engine)
     }
-
-    /// Largest module file the loader will read: 32 MiB. Bounds memory for a
-    /// misconfigured or hostile `source` (e.g. a huge or device file).
-    pub const WASM_MAX_MODULE_BYTES: u64 = 32 * 1024 * 1024;
 
     /// Most modules kept compiled at once; the cache is cleared when full.
     const MAX_CACHED_MODULES: usize = 256;
@@ -160,10 +275,11 @@ pub(crate) mod cache {
     }
 
     /// Resolve `path` to a canonical regular file, enforcing `plugin_dir`
-    /// containment when configured.
+    /// containment when configured and the `max_bytes` size cap.
     pub(crate) fn resolve_module_path(
         path: &str,
         plugin_dir: Option<&Path>,
+        max_bytes: u64,
     ) -> Result<(PathBuf, std::fs::Metadata), StepError> {
         let canonical = std::fs::canonicalize(path).map_err(|e| {
             tracing::warn!(path, error = %e, "wasm plugin: cannot resolve module path");
@@ -185,10 +301,11 @@ pub(crate) mod cache {
         })?;
         // Rejects directories, FIFOs and devices (`/dev/zero`, `/proc/*` have
         // no meaningful length and would bypass the size cap).
-        if !meta.is_file() || meta.len() > WASM_MAX_MODULE_BYTES {
+        if !meta.is_file() || meta.len() > max_bytes {
             tracing::warn!(
                 path,
                 len = meta.len(),
+                max_bytes,
                 "wasm plugin: module is not a regular file within the size cap"
             );
             return Err(load_failed());
@@ -196,36 +313,37 @@ pub(crate) mod cache {
         Ok((canonical, meta))
     }
 
-    /// Read at most [`WASM_MAX_MODULE_BYTES`] and require the binary magic.
-    pub(crate) fn read_module_bytes(path: &Path) -> Result<Vec<u8>, StepError> {
+    /// Read at most `max_bytes` and require the binary magic.
+    pub(crate) fn read_module_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>, StepError> {
         let file = std::fs::File::open(path).map_err(|e| {
             tracing::warn!(path = %path.display(), error = %e, "wasm plugin: cannot open module");
             load_failed()
         })?;
         let mut bytes = Vec::new();
-        file.take(WASM_MAX_MODULE_BYTES + 1)
+        file.take(max_bytes.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|e| {
                 tracing::warn!(path = %path.display(), error = %e, "wasm plugin: cannot read module");
                 load_failed()
             })?;
-        if bytes.len() as u64 > WASM_MAX_MODULE_BYTES || !bytes.starts_with(WASM_MAGIC) {
+        if bytes.len() as u64 > max_bytes || !bytes.starts_with(WASM_MAGIC) {
             tracing::warn!(path = %path.display(), "wasm plugin: not a binary wasm module (missing \\0asm magic or too large)");
             return Err(load_failed());
         }
         Ok(bytes)
     }
 
-    pub fn get_or_compile(path: &str) -> Result<Module, StepError> {
+    pub fn get_or_compile(path: &str, max_module_bytes: u64) -> Result<Module, StepError> {
         let plugin_dir = std::env::var_os(WASM_PLUGIN_DIR_ENV).filter(|v| !v.is_empty());
-        get_or_compile_in(path, plugin_dir.as_deref().map(Path::new))
+        get_or_compile_in(path, plugin_dir.as_deref().map(Path::new), max_module_bytes)
     }
 
     pub(crate) fn get_or_compile_in(
         path: &str,
         plugin_dir: Option<&Path>,
+        max_module_bytes: u64,
     ) -> Result<Module, StepError> {
-        let (canonical, meta) = resolve_module_path(path, plugin_dir)?;
+        let (canonical, meta) = resolve_module_path(path, plugin_dir, max_module_bytes)?;
         let stamp: Stamp = (meta.len(), meta.modified().ok());
 
         let modules = MODULES.get_or_init(|| RwLock::new(HashMap::new()));
@@ -257,7 +375,7 @@ pub(crate) mod cache {
         }
 
         let engine = engine()?;
-        let bytes = read_module_bytes(&canonical)?;
+        let bytes = read_module_bytes(&canonical, max_module_bytes)?;
         // `from_binary` never falls back to the WAT text parser.
         let module = Module::from_binary(engine, &bytes).map_err(|e| {
             tracing::warn!(path, error = %e, "wasm plugin: module failed to compile");
@@ -285,11 +403,92 @@ pub(crate) mod cache {
     }
 }
 
-/// Resource limiter that caps WASM linear-memory and table growth.
+/// The sandbox grants no host imports: no WASI, no filesystem, no sockets, no
+/// clock, no randomness. A module that declares any import is refused before
+/// instantiation, i.e. before any guest code (including a start function)
+/// runs.
+#[cfg(feature = "wasm")]
+fn reject_imports(module: &wasmtime::Module) -> Result<(), String> {
+    match module.imports().next() {
+        None => Ok(()),
+        Some(import) => Err(format!(
+            "module imports `{}::{}` but the sandbox grants no host imports (no WASI, filesystem, network or clock)",
+            import.module(),
+            import.name()
+        )),
+    }
+}
+
+/// Validate an end-user module before accepting it (e.g. in a hosted upload
+/// endpoint), without running any of its code.
+///
+/// Checks, in order: size cap, `\0asm` magic, compiles under the sandbox
+/// engine config, declares no imports, exports `memory`, `alloc(i32)->i32`
+/// and `handle(i32,i32)->i64` with the right types, and its declared initial
+/// memory fits the memory cap. Returns a tenant-safe reason on rejection.
+///
+/// Passing validation does not make a module trusted: every invocation is
+/// still metered by fuel, memory, table and wall-clock limits.
+#[cfg(feature = "wasm")]
+pub fn validate_module_bytes(
+    bytes: &[u8],
+    limits: &limits::WasmSandboxLimits,
+) -> Result<(), String> {
+    use wasmtime::{ExternType, Module, ValType};
+
+    if bytes.len() as u64 > limits.max_module_bytes {
+        return Err(format!(
+            "module is {} bytes; the limit is {}",
+            bytes.len(),
+            limits.max_module_bytes
+        ));
+    }
+    if !bytes.starts_with(b"\0asm") {
+        return Err("not a binary WebAssembly module (missing \\0asm magic)".into());
+    }
+    let engine = cache::engine().map_err(|_| "wasm engine unavailable".to_string())?;
+    let module = Module::from_binary(engine, bytes).map_err(|e| format!("invalid module: {e}"))?;
+    reject_imports(&module)?;
+
+    let func_sig = |name: &str| -> Result<(Vec<ValType>, Vec<ValType>), String> {
+        match module.get_export(name) {
+            Some(ExternType::Func(f)) => Ok((f.params().collect(), f.results().collect())),
+            Some(_) => Err(format!("export `{name}` must be a function")),
+            None => Err(format!("missing required export `{name}`")),
+        }
+    };
+    let (p, r) = func_sig("alloc")?;
+    if !(p.len() == 1 && p[0].is_i32() && r.len() == 1 && r[0].is_i32()) {
+        return Err("export `alloc` must have type (i32) -> i32".into());
+    }
+    let (p, r) = func_sig("handle")?;
+    if !(p.len() == 2 && p.iter().all(ValType::is_i32) && r.len() == 1 && r[0].is_i64()) {
+        return Err("export `handle` must have type (i32, i32) -> i64".into());
+    }
+    match module.get_export("memory") {
+        Some(ExternType::Memory(m)) => {
+            let initial = m.minimum().saturating_mul(65_536);
+            if initial > limits.max_memory_bytes as u64 {
+                return Err(format!(
+                    "module declares {initial} bytes of initial memory; the limit is {}",
+                    limits.max_memory_bytes
+                ));
+            }
+        }
+        Some(_) => return Err("export `memory` must be a memory".into()),
+        None => return Err("missing required export `memory`".into()),
+    }
+    Ok(())
+}
+
+/// Store state: the resource limiter plus which limit (if any) was hit, so a
+/// denied grow can be reported as a limit error rather than a generic trap.
 #[cfg(feature = "wasm")]
 struct WasmLimits {
     max_memory: usize,
     max_tables: usize,
+    memory_limit_hit: bool,
+    table_limit_hit: bool,
 }
 
 #[cfg(feature = "wasm")]
@@ -300,7 +499,11 @@ impl wasmtime::ResourceLimiter for WasmLimits {
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        Ok(desired <= self.max_memory)
+        // Denying makes `memory.grow` return -1 (spec behaviour) and makes an
+        // over-sized initial memory fail instantiation.
+        let ok = desired <= self.max_memory;
+        self.memory_limit_hit |= !ok;
+        Ok(ok)
     }
 
     fn table_growing(
@@ -309,195 +512,210 @@ impl wasmtime::ResourceLimiter for WasmLimits {
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        Ok(desired <= self.max_tables)
+        let ok = desired <= self.max_tables;
+        self.table_limit_hit |= !ok;
+        Ok(ok)
     }
+}
+
+#[cfg(feature = "wasm")]
+fn permanent(message: String) -> StepError {
+    StepError::Permanent {
+        message,
+        details: None,
+    }
+}
+
+/// Classify a failed guest call. Every limit hit and every guest trap is
+/// permanent: retrying the same input on the same module reproduces it.
+/// Only non-trap host errors are retryable.
+#[cfg(feature = "wasm")]
+fn classify_call_error(what: &str, e: &wasmtime::Error, limits: &WasmLimits) -> StepError {
+    let msg = e.to_string();
+    if limits.memory_limit_hit {
+        return permanent(format!(
+            "wasm plugin: memory limit exceeded (max {} bytes) during {what} — {msg}",
+            limits.max_memory
+        ));
+    }
+    if limits.table_limit_hit {
+        return permanent(format!(
+            "wasm plugin: table limit exceeded during {what} — {msg}"
+        ));
+    }
+    // Classify via `downcast_ref::<Trap>()` rather than substring search:
+    // wasmtime's `Display` for a trapped call only prints the backtrace, not
+    // the trap code.
+    match e.downcast_ref::<wasmtime::Trap>().copied() {
+        Some(wasmtime::Trap::OutOfFuel) => {
+            permanent(format!("wasm plugin: fuel exhausted (cpu limit) — {msg}"))
+        }
+        Some(wasmtime::Trap::Interrupt) => permanent(format!(
+            "wasm plugin: wall-clock timeout exceeded during {what} — {msg}"
+        )),
+        Some(wasmtime::Trap::MemoryOutOfBounds | wasmtime::Trap::HeapMisaligned) => {
+            permanent(format!("wasm plugin: memory fault — {msg}"))
+        }
+        Some(trap) => permanent(format!("wasm plugin: guest trapped ({trap}) — {msg}")),
+        None => {
+            if msg.contains("all fuel consumed") || msg.contains("fuel") {
+                permanent(format!("wasm plugin: fuel exhausted (cpu limit) — {msg}"))
+            } else {
+                StepError::Retryable {
+                    message: format!("wasm plugin: {what} call failed: {e}"),
+                    details: None,
+                }
+            }
+        }
+    }
+}
+
+/// Synchronous WASM execution with the process-wide [`limits::current`].
+#[cfg(feature = "wasm")]
+fn execute_wasm_sync(wasm_path: &str, input_bytes: &[u8]) -> Result<Value, StepError> {
+    execute_wasm_with_limits(wasm_path, input_bytes, limits::current())
 }
 
 /// Synchronous WASM execution using wasmtime.
 ///
-/// Each call creates a fresh `Store` with:
-/// * fuel = [`cache::WASM_FUEL_LIMIT`] — hard CPU ceiling (infinite loops trap)
-/// * `ResourceLimiter` capping memory at [`cache::WASM_MAX_MEMORY_BYTES`] and
-///   tables at [`cache::WASM_MAX_TABLE_ELEMENTS`]
-/// * epoch deadline = 1 tick from current epoch — the caller of
-///   `Engine::increment_epoch()` (not currently wired) can cancel long stores.
+/// Each call creates a fresh `Store` (no state survives between calls) with:
+/// * fuel = `limits.fuel` — deterministic CPU ceiling (infinite loops trap)
+/// * a `ResourceLimiter` capping memory at `limits.max_memory_bytes` and
+///   tables at `limits.max_table_elements`
+/// * an epoch deadline of `limits.timeout` — wall-clock ceiling, driven by
+///   the engine's ticker thread
+/// * an empty `Linker` — no host imports; modules with imports are refused
+///   before instantiation
+/// * output capped at `limits.max_output_bytes`
 #[cfg(feature = "wasm")]
 #[allow(clippy::too_many_lines)]
-fn execute_wasm_sync(wasm_path: &str, input_bytes: &[u8]) -> Result<Value, StepError> {
+fn execute_wasm_with_limits(
+    wasm_path: &str,
+    input_bytes: &[u8],
+    limits: &limits::WasmSandboxLimits,
+) -> Result<Value, StepError> {
     use tracing::warn;
     use wasmtime::{Linker, Store};
 
     let engine = cache::engine()?;
-    let module = cache::get_or_compile(wasm_path)?;
+    let module = cache::get_or_compile(wasm_path, limits.max_module_bytes)?;
+    reject_imports(&module).map_err(|m| permanent(format!("wasm plugin: {m}")))?;
 
-    let limits = WasmLimits {
-        max_memory: cache::WASM_MAX_MEMORY_BYTES,
-        max_tables: cache::WASM_MAX_TABLE_ELEMENTS,
+    let Ok(input_len) = i32::try_from(input_bytes.len()) else {
+        return Err(permanent(format!(
+            "wasm plugin: input of {} bytes exceeds the 2 GiB ABI limit",
+            input_bytes.len()
+        )));
     };
-    let mut store: Store<WasmLimits> = Store::new(engine, limits);
+
+    let state = WasmLimits {
+        max_memory: limits.max_memory_bytes,
+        max_tables: limits.max_table_elements,
+        memory_limit_hit: false,
+        table_limit_hit: false,
+    };
+    let mut store: Store<WasmLimits> = Store::new(engine, state);
     store.limiter(|s| s as &mut dyn wasmtime::ResourceLimiter);
     // Each call starts with a full fuel budget; running out traps the store.
-    if let Err(e) = store.set_fuel(cache::WASM_FUEL_LIMIT) {
-        return Err(StepError::Permanent {
-            message: format!("wasm plugin: set_fuel failed: {e}"),
-            details: None,
-        });
-    }
-    // Bind the store to the next epoch tick — an external ticker calling
-    // `engine.increment_epoch()` will interrupt runaway calls. Set a generous
-    // default here so we don't trap unless a ticker is active.
-    store.set_epoch_deadline(u64::MAX);
+    store
+        .set_fuel(limits.fuel)
+        .map_err(|e| permanent(format!("wasm plugin: set_fuel failed: {e}")))?;
+    // Wall-clock cap: trap once the ticker has advanced past the deadline.
+    // +1 tick so the effective timeout is never shorter than configured.
+    let tick_ms = cache::EPOCH_TICK.as_millis().max(1);
+    #[allow(clippy::cast_possible_truncation)]
+    let ticks = (limits.timeout.as_millis().div_ceil(tick_ms) as u64).saturating_add(1);
+    store.set_epoch_deadline(ticks);
+    store.epoch_deadline_trap();
 
-    let linker = Linker::new(engine);
+    let linker: Linker<WasmLimits> = Linker::new(engine);
 
-    let instance = linker
-        .instantiate(&mut store, &module)
-        .map_err(|e| StepError::Permanent {
-            message: format!("wasm plugin: instantiation failed: {e}"),
-            details: None,
-        })?;
+    let instance = match linker.instantiate(&mut store, &module) {
+        Ok(i) => i,
+        Err(e) if store.data().memory_limit_hit || store.data().table_limit_hit => {
+            return Err(classify_call_error("instantiation", &e, store.data()));
+        }
+        Err(e) if e.downcast_ref::<wasmtime::Trap>().is_some() => {
+            return Err(classify_call_error("instantiation", &e, store.data()));
+        }
+        Err(e) => {
+            return Err(permanent(format!("wasm plugin: instantiation failed: {e}")));
+        }
+    };
 
     // Get exported functions.
     let alloc = instance
         .get_typed_func::<i32, i32>(&mut store, "alloc")
-        .map_err(|e| StepError::Permanent {
-            message: format!("wasm plugin: missing 'alloc' export: {e}"),
-            details: None,
-        })?;
+        .map_err(|e| permanent(format!("wasm plugin: missing 'alloc' export: {e}")))?;
 
     let handle = instance
         .get_typed_func::<(i32, i32), i64>(&mut store, "handle")
-        .map_err(|e| StepError::Permanent {
-            message: format!("wasm plugin: missing 'handle' export: {e}"),
-            details: None,
-        })?;
+        .map_err(|e| permanent(format!("wasm plugin: missing 'handle' export: {e}")))?;
 
     let memory = instance
         .get_memory(&mut store, "memory")
-        .ok_or_else(|| StepError::Permanent {
-            message: "wasm plugin: missing 'memory' export".into(),
-            details: None,
-        })?;
+        .ok_or_else(|| permanent("wasm plugin: missing 'memory' export".into()))?;
 
     // Allocate memory and write input.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let input_len = input_bytes.len() as i32;
     let input_ptr = alloc
         .call(&mut store, input_len)
-        .map_err(|e| StepError::Permanent {
-            message: format!("wasm plugin: alloc failed: {e}"),
-            details: None,
-        })?;
+        .map_err(|e| classify_call_error("alloc", &e, store.data()))?;
 
     // Ref#13: validate the allocator's return value before casting to usize.
     // A malicious or buggy guest can return a negative pointer (→ huge usize
     // after the cast) or a pointer whose end exceeds linear memory — either
     // would panic inside `copy_from_slice` and tear down the executor thread
     // instead of returning a classified step error.
-    if input_ptr < 0 {
-        return Err(StepError::Permanent {
-            message: format!(
-                "wasm plugin: alloc returned negative pointer {input_ptr}; guest is misbehaving"
-            ),
-            details: None,
-        });
-    }
-    #[allow(clippy::cast_sign_loss)]
-    let offset = input_ptr as usize;
-    let end = offset
-        .checked_add(input_bytes.len())
-        .ok_or_else(|| StepError::Permanent {
-            message: format!(
-                "wasm plugin: alloc offset {offset} + input len {} overflows usize",
-                input_bytes.len()
-            ),
-            details: None,
-        })?;
+    let Ok(offset) = usize::try_from(input_ptr) else {
+        return Err(permanent(format!(
+            "wasm plugin: alloc returned negative pointer {input_ptr}; guest is misbehaving"
+        )));
+    };
+    let end = offset.checked_add(input_bytes.len()).ok_or_else(|| {
+        permanent(format!(
+            "wasm plugin: alloc offset {offset} + input len {} overflows usize",
+            input_bytes.len()
+        ))
+    })?;
     let mem_len = memory.data(&store).len();
     if end > mem_len {
-        return Err(StepError::Permanent {
-            message: format!(
-                "wasm plugin: alloc range {offset}..{end} exceeds linear memory size {mem_len}"
-            ),
-            details: None,
-        });
+        return Err(permanent(format!(
+            "wasm plugin: alloc range {offset}..{end} exceeds linear memory size {mem_len}"
+        )));
     }
     memory.data_mut(&mut store)[offset..end].copy_from_slice(input_bytes);
 
-    // Call handle. Fuel exhaustion or resource-limit hits surface as traps here.
+    // Call handle. Fuel, timeout and resource-limit hits surface as errors here.
     let result_packed = handle
         .call(&mut store, (input_ptr, input_len))
-        .map_err(|e| {
-            // Fuel-exhaustion and resource-limit traps are *permanent* for this
-            // input — retrying with the same payload will hit the same limit.
-            // Only true wasmtime-level faults (host traps, I/O) should be retryable.
-            //
-            // Classify via `downcast_ref::<Trap>()` rather than substring search:
-            // wasmtime's `Display` for a trapped call only prints the backtrace,
-            // not the trap code, so "fuel" never appears in `to_string()` for a
-            // `br`-loop out-of-fuel trap — only in the structured `Trap` variant.
-            let trap_code = e.downcast_ref::<wasmtime::Trap>().copied();
-            let msg = e.to_string();
-            match trap_code {
-                Some(wasmtime::Trap::OutOfFuel) => StepError::Permanent {
-                    message: format!("wasm plugin: fuel exhausted (cpu limit) — {msg}"),
-                    details: None,
-                },
-                Some(wasmtime::Trap::MemoryOutOfBounds | wasmtime::Trap::HeapMisaligned) => {
-                    StepError::Permanent {
-                        message: format!("wasm plugin: memory fault — {msg}"),
-                        details: None,
-                    }
-                }
-                _ => {
-                    // Fallback: legacy substring probe for cases where the error
-                    // isn't a typed Trap (e.g. memory-limit hits surface as a
-                    // generic `anyhow::Error` with the message inline).
-                    if msg.contains("all fuel consumed") || msg.contains("fuel") {
-                        StepError::Permanent {
-                            message: format!("wasm plugin: fuel exhausted (cpu limit) — {msg}"),
-                            details: None,
-                        }
-                    } else if msg.contains("memory") && msg.contains("limit") {
-                        StepError::Permanent {
-                            message: format!("wasm plugin: memory limit exceeded — {msg}"),
-                            details: None,
-                        }
-                    } else {
-                        StepError::Retryable {
-                            message: format!("wasm plugin: handle call failed: {e}"),
-                            details: None,
-                        }
-                    }
-                }
-            }
-        })?;
+        .map_err(|e| classify_call_error("handle", &e, store.data()))?;
 
     // Unpack result: high 32 bits = ptr, low 32 bits = len.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let result_ptr = (result_packed >> 32) as usize;
+    let result_ptr = (result_packed >> 32) as u32 as usize;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let result_len = (result_packed & 0xFFFF_FFFF) as usize;
+
+    if result_len > limits.max_output_bytes {
+        return Err(permanent(format!(
+            "wasm plugin: output of {result_len} bytes exceeds the limit of {} bytes",
+            limits.max_output_bytes
+        )));
+    }
 
     let mem_data = memory.data(&store);
     // Bounds-check via `checked_add` + explicit range to prevent any usize overflow
     // from the untrusted packed pointer/length value.
     let Some(end) = result_ptr.checked_add(result_len) else {
-        return Err(StepError::Permanent {
-            message: format!(
-                "wasm plugin: result range overflows usize (ptr={result_ptr}, len={result_len})"
-            ),
-            details: None,
-        });
+        return Err(permanent(format!(
+            "wasm plugin: result range overflows usize (ptr={result_ptr}, len={result_len})"
+        )));
     };
     if end > mem_data.len() {
-        return Err(StepError::Permanent {
-            message: format!(
-                "wasm plugin: result out of bounds (ptr={result_ptr}, len={result_len}, mem={})",
-                mem_data.len()
-            ),
-            details: None,
-        });
+        return Err(permanent(format!(
+            "wasm plugin: result out of bounds (ptr={result_ptr}, len={result_len}, mem={})",
+            mem_data.len()
+        )));
     }
 
     let output_bytes = &mem_data[result_ptr..end];
@@ -835,10 +1053,17 @@ mod tests {
             std::fs::write(&inside, wat::parse_str(ECHO_WAT).unwrap()).unwrap();
             let outside = wat_to_tmp_wasm(ECHO_WAT);
 
-            assert!(cache::get_or_compile_in(inside.to_str().unwrap(), Some(dir.path())).is_ok());
             assert!(
-                cache::get_or_compile_in(outside.path().to_str().unwrap(), Some(dir.path()))
-                    .is_err()
+                cache::get_or_compile_in(inside.to_str().unwrap(), Some(dir.path()), u64::MAX)
+                    .is_ok()
+            );
+            assert!(
+                cache::get_or_compile_in(
+                    outside.path().to_str().unwrap(),
+                    Some(dir.path()),
+                    u64::MAX
+                )
+                .is_err()
             );
             // `..` escapes are resolved before the containment check.
             let escape = dir
@@ -847,7 +1072,8 @@ mod tests {
                 .join(outside.path().file_name().unwrap());
             if escape.exists() {
                 assert!(
-                    cache::get_or_compile_in(escape.to_str().unwrap(), Some(dir.path())).is_err()
+                    cache::get_or_compile_in(escape.to_str().unwrap(), Some(dir.path()), u64::MAX)
+                        .is_err()
                 );
             }
         }
@@ -877,6 +1103,278 @@ mod tests {
                 StepError::Permanent { .. } => {}
                 other => panic!("expected Permanent, got {other:?}"),
             }
+        }
+
+        // ------------------------------------------------------------------
+        // Sandbox limits (docs/WASM_USER_STEPS.md). Each test proves one
+        // limit actually trips for a hostile module.
+        // ------------------------------------------------------------------
+
+        use super::super::limits::WasmSandboxLimits;
+
+        fn permanent_message(err: StepError) -> String {
+            match err {
+                StepError::Permanent { message, .. } => message,
+                other => panic!("expected Permanent, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn infinite_loop_trips_wall_clock_timeout_when_fuel_is_ample() {
+            let wat = r#"
+                (module
+                  (memory (export "memory") 1)
+                  (func (export "alloc") (param i32) (result i32) i32.const 0)
+                  (func (export "handle") (param i32 i32) (result i64)
+                    (loop $l (br $l))
+                    i64.const 0)
+                )
+            "#;
+            let tmp = wat_to_tmp_wasm(wat);
+            let limits = WasmSandboxLimits {
+                fuel: u64::MAX,
+                timeout: std::time::Duration::from_millis(100),
+                ..WasmSandboxLimits::default()
+            };
+            let started = std::time::Instant::now();
+            let err = execute_wasm_with_limits(tmp.path().to_str().unwrap(), b"{}", &limits)
+                .expect_err("infinite loop must be interrupted");
+            let elapsed = started.elapsed();
+            let message = permanent_message(err);
+            assert!(
+                message.contains("wall-clock timeout"),
+                "unexpected: {message}"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(5),
+                "timeout took {elapsed:?}"
+            );
+        }
+
+        #[test]
+        fn infinite_loop_trips_fuel_limit_with_configured_budget() {
+            let wat = r#"
+                (module
+                  (memory (export "memory") 1)
+                  (func (export "alloc") (param i32) (result i32) i32.const 0)
+                  (func (export "handle") (param i32 i32) (result i64)
+                    (loop $l (br $l))
+                    i64.const 0)
+                )
+            "#;
+            let tmp = wat_to_tmp_wasm(wat);
+            let limits = WasmSandboxLimits {
+                fuel: 10_000,
+                timeout: std::time::Duration::from_secs(60),
+                ..WasmSandboxLimits::default()
+            };
+            let message = permanent_message(
+                execute_wasm_with_limits(tmp.path().to_str().unwrap(), b"{}", &limits)
+                    .expect_err("must run out of fuel"),
+            );
+            assert!(message.contains("fuel"), "unexpected: {message}");
+        }
+
+        #[test]
+        fn memory_grow_beyond_cap_is_denied_and_reported() {
+            // Grows by 32 pages (2 MiB) against a 1 MiB cap; traps if denied,
+            // the way a Rust/C guest allocator aborts on OOM.
+            let wat = r#"
+                (module
+                  (memory (export "memory") 1)
+                  (func (export "alloc") (param i32) (result i32) i32.const 0)
+                  (func (export "handle") (param i32 i32) (result i64)
+                    (if (i32.eq (memory.grow (i32.const 32)) (i32.const -1))
+                      (then unreachable))
+                    i64.const 0)
+                )
+            "#;
+            let tmp = wat_to_tmp_wasm(wat);
+            let limits = WasmSandboxLimits {
+                max_memory_bytes: 1024 * 1024,
+                ..WasmSandboxLimits::default()
+            };
+            let message = permanent_message(
+                execute_wasm_with_limits(tmp.path().to_str().unwrap(), b"{}", &limits)
+                    .expect_err("grow past the cap must fail"),
+            );
+            assert!(
+                message.contains("memory limit exceeded"),
+                "unexpected: {message}"
+            );
+
+            // The same module is fine when the cap allows the growth.
+            let roomy = WasmSandboxLimits {
+                max_memory_bytes: 4 * 1024 * 1024,
+                ..WasmSandboxLimits::default()
+            };
+            // Output (ptr 0, len 0) is empty → wrapped as invalid JSON, not an error.
+            assert!(execute_wasm_with_limits(tmp.path().to_str().unwrap(), b"{}", &roomy).is_ok());
+        }
+
+        #[test]
+        fn initial_memory_beyond_cap_fails_instantiation() {
+            let wat = r#"
+                (module
+                  (memory (export "memory") 64)
+                  (func (export "alloc") (param i32) (result i32) i32.const 0)
+                  (func (export "handle") (param i32 i32) (result i64) i64.const 0)
+                )
+            "#;
+            let tmp = wat_to_tmp_wasm(wat);
+            let limits = WasmSandboxLimits {
+                max_memory_bytes: 1024 * 1024,
+                ..WasmSandboxLimits::default()
+            };
+            let message = permanent_message(
+                execute_wasm_with_limits(tmp.path().to_str().unwrap(), b"{}", &limits)
+                    .expect_err("4 MiB initial memory against a 1 MiB cap"),
+            );
+            assert!(
+                message.contains("memory limit exceeded"),
+                "unexpected: {message}"
+            );
+        }
+
+        #[test]
+        fn wasi_filesystem_and_socket_imports_are_rejected_before_instantiation() {
+            for (module, name) in [
+                ("wasi_snapshot_preview1", "path_open"),
+                ("wasi_snapshot_preview1", "fd_write"),
+                ("wasi_snapshot_preview1", "sock_accept"),
+                ("wasi:sockets/tcp", "connect"),
+                ("env", "anything"),
+            ] {
+                // The start function would run at instantiation; it must never run.
+                let wat = format!(
+                    r#"
+                    (module
+                      (import "{module}" "{name}" (func $f (param i32) (result i32)))
+                      (memory (export "memory") 1)
+                      (func $start (drop (call $f (i32.const 0))))
+                      (start $start)
+                      (func (export "alloc") (param i32) (result i32) i32.const 0)
+                      (func (export "handle") (param i32 i32) (result i64) i64.const 0)
+                    )
+                "#
+                );
+                let tmp = wat_to_tmp_wasm(&wat);
+                let message = permanent_message(
+                    execute_wasm_sync(tmp.path().to_str().unwrap(), b"{}")
+                        .expect_err("host imports must be refused"),
+                );
+                assert!(
+                    message.contains("grants no host imports") && message.contains(name),
+                    "unexpected: {message}"
+                );
+                let bytes = wat::parse_str(&wat).unwrap();
+                let why = validate_module_bytes(&bytes, &WasmSandboxLimits::default())
+                    .expect_err("validator must refuse imports");
+                assert!(why.contains("grants no host imports"), "unexpected: {why}");
+            }
+        }
+
+        #[test]
+        fn output_beyond_cap_is_rejected_before_parsing() {
+            // ECHO_WAT returns 13 bytes.
+            let tmp = wat_to_tmp_wasm(ECHO_WAT);
+            let limits = WasmSandboxLimits {
+                max_output_bytes: 8,
+                ..WasmSandboxLimits::default()
+            };
+            let message = permanent_message(
+                execute_wasm_with_limits(tmp.path().to_str().unwrap(), b"{}", &limits)
+                    .expect_err("13-byte output over an 8-byte cap"),
+            );
+            assert!(
+                message.contains("exceeds the limit"),
+                "unexpected: {message}"
+            );
+        }
+
+        #[test]
+        fn module_file_beyond_size_cap_is_not_loaded() {
+            let tmp = wat_to_tmp_wasm(ECHO_WAT);
+            let limits = WasmSandboxLimits {
+                max_module_bytes: 16,
+                ..WasmSandboxLimits::default()
+            };
+            let message = permanent_message(
+                execute_wasm_with_limits(tmp.path().to_str().unwrap(), b"{}", &limits)
+                    .expect_err("module larger than 16 bytes"),
+            );
+            assert_eq!(message, "wasm plugin: failed to load module");
+            let bytes = wat::parse_str(ECHO_WAT).unwrap();
+            assert!(validate_module_bytes(&bytes, &limits).is_err());
+        }
+
+        #[test]
+        fn validator_accepts_abi_conformant_module_and_rejects_shape_errors() {
+            let ok = wat::parse_str(ECHO_WAT).unwrap();
+            let d = WasmSandboxLimits::default();
+            validate_module_bytes(&ok, &d).expect("echo module is valid");
+
+            let wrong_handle = wat::parse_str(
+                r#"(module (memory (export "memory") 1)
+                     (func (export "alloc") (param i32) (result i32) i32.const 0)
+                     (func (export "handle") (param i32 i32) (result i32) i32.const 0))"#,
+            )
+            .unwrap();
+            assert!(
+                validate_module_bytes(&wrong_handle, &d)
+                    .unwrap_err()
+                    .contains("handle")
+            );
+
+            let no_memory = wat::parse_str(
+                r#"(module (memory 1)
+                     (func (export "alloc") (param i32) (result i32) i32.const 0)
+                     (func (export "handle") (param i32 i32) (result i64) i64.const 0))"#,
+            )
+            .unwrap();
+            assert!(
+                validate_module_bytes(&no_memory, &d)
+                    .unwrap_err()
+                    .contains("memory")
+            );
+
+            let small = WasmSandboxLimits {
+                max_memory_bytes: 65_536,
+                ..d
+            };
+            let big_memory = wat::parse_str(
+                r#"(module (memory (export "memory") 2)
+                     (func (export "alloc") (param i32) (result i32) i32.const 0)
+                     (func (export "handle") (param i32 i32) (result i64) i64.const 0))"#,
+            )
+            .unwrap();
+            assert!(
+                validate_module_bytes(&big_memory, &small)
+                    .unwrap_err()
+                    .contains("initial memory")
+            );
+            assert!(validate_module_bytes(b"(module)", &d).is_err());
+        }
+
+        #[test]
+        fn limits_from_env_use_defaults_and_reject_zero_or_garbage() {
+            let d = WasmSandboxLimits::default();
+            assert_eq!(WasmSandboxLimits::from_lookup(|_| None), d);
+
+            let parsed = WasmSandboxLimits::from_lookup(|k| match k {
+                "ORCH8_WASM_FUEL" => Some("5000".into()),
+                "ORCH8_WASM_MAX_MEMORY_BYTES" => Some("1048576".into()),
+                "ORCH8_WASM_TIMEOUT_MS" => Some("250".into()),
+                "ORCH8_WASM_MAX_MODULE_BYTES" => Some("0".into()),
+                "ORCH8_WASM_MAX_OUTPUT_BYTES" => Some("lots".into()),
+                _ => None,
+            });
+            assert_eq!(parsed.fuel, 5000);
+            assert_eq!(parsed.max_memory_bytes, 1_048_576);
+            assert_eq!(parsed.timeout, std::time::Duration::from_millis(250));
+            // Zero and garbage never disable a limit.
+            assert_eq!(parsed.max_module_bytes, d.max_module_bytes);
+            assert_eq!(parsed.max_output_bytes, d.max_output_bytes);
         }
     }
 }

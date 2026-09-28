@@ -1,0 +1,96 @@
+{
+  "system": "orch8",
+  "system_version": {
+    "images": {},
+    "sdk": {}
+  },
+  "harness_version": "0.1.0",
+  "git_sha": "21a4255c7b8388969a0ff456768123e90fb8d708",
+  "scenario": "throughput",
+  "run_index": 1,
+  "workload": {
+    "workflows": 2000,
+    "steps": 3,
+    "activity_ms": 50,
+    "concurrency": 200,
+    "warmup_workflows": 100
+  },
+  "hardware": {
+    "cpu": "Apple M3 Max",
+    "cores": 14,
+    "memory_bytes": 38654705664,
+    "os": "Darwin 25.3.0 arm64",
+    "docker_version": "unknown"
+  },
+  "timings": {
+    "started_at": "2026-09-28T19:12:07.456Z",
+    "ended_at": "2026-09-28T19:12:19.382Z",
+    "total_duration_ms": 11926
+  },
+  "results": {
+    "completed": 2000,
+    "failed": 0,
+    "throughput_wf_per_s": 194.4,
+    "latency_ms": {
+      "p50": 920,
+      "p95": 1152,
+      "p99": 1207,
+      "max": 1232
+    },
+    "latency_source": "server",
+    "errors": []
+  },
+  "crash_recovery": null,
+  "raw_samples_file": "samples.jsonl",
+  "activity_log_file": "activity.jsonl.all",
+  "topology": {
+    "mode": "local",
+    "single_host": true,
+    "label": "single-host smoke, not a distributed result",
+    "executors": 2,
+    "workers": 2,
+    "worker_slots": 100,
+    "engine_build": "/private/tmp/claude-501/-Users-oleksiivasylenko-dev-orch8-io/afa4caad-5fc6-471a-8631-36df81da51dc/scratchpad/orch8-server (orch8 0.7.1)",
+    "database": {
+      "host": "Mac",
+      "os": "Darwin 25.3.0 arm64",
+      "cpu": "Apple M3 Max",
+      "cores": 14,
+      "memory_bytes": 38654705664,
+      "hw_model": "Mac15,11",
+      "processes": 1
+    },
+    "control": {
+      "host": "Mac",
+      "os": "Darwin 25.3.0 arm64",
+      "cpu": "Apple M3 Max",
+      "cores": 14,
+      "memory_bytes": 38654705664,
+      "hw_model": "Mac15,11",
+      "processes": 1
+    },
+    "executor_hosts": [
+      {
+        "host": "Mac",
+        "os": "Darwin 25.3.0 arm64",
+        "cpu": "Apple M3 Max",
+        "cores": 14,
+        "memory_bytes": 38654705664,
+        "hw_model": "Mac15,11",
+        "processes": 2
+      }
+    ],
+    "worker_hosts": [
+      {
+        "host": "Mac",
+        "os": "Darwin 25.3.0 arm64",
+        "cpu": "Apple M3 Max",
+        "cores": 14,
+        "memory_bytes": 38654705664,
+        "hw_model": "Mac15,11",
+        "processes": 2
+      }
+    ]
+  },
+  "notes": "local mode: control, executors, workers, Postgres and driver as processes on ONE host — single-host smoke, not a distributed result. Server binary: /private/tmp/claude-501/-Users-oleksiivasylenko-dev-orch8-io/afa4caad-5fc6-471a-8631-36df81da51dc/scratchpad/orch8-server (orch8 0.7.1)."
+}

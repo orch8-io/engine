@@ -62,6 +62,7 @@ release notes.
 - `beta` [Node roles](NODE_ROLES.md) — assemble all-in-one, control, executor, gateway, and edge processes; operate managed-control sessions and fleet draining.
 - `stable` [Operator support bundle](SUPPORT_BUNDLE.md) — collect bounded, redacted diagnostics atomically.
 - `beta` [Background jobs](JOBS.md) — enqueue a handler with one call (`POST /jobs`), no sequence required.
+- `beta` [End-user WASM steps](WASM_USER_STEPS.md) — accept untrusted WASM modules from your users: sandbox limits, upload validation, ABI, and threat model.
 - `stable` [External workers](WORKERS.md) — poll, heartbeat, complete, and fail work from any language.
 - `beta` [Triggers](TRIGGERS.md) — start workflows from webhooks, NATS, Kafka, SQS, Pub/Sub, Redis Streams, and Postgres row changes.
 - `beta` [Negotiated gRPC worker stream](GRPC_WORKER_STREAM.md) — worker sessions, control, resumable artifacts, telemetry, and mTLS identity.
@@ -95,6 +96,7 @@ release notes.
 - `beta` [Workflow compiler optimization](WORKFLOW_OPTIMIZER.md) — immutable optimization sidecars and equivalence guarantees.
 - `stable` [Database migrations](../migrations/README.md) — immutability and checksum rules.
 - [Licensing](LICENSING.md) — plain-language "Can I use this?" table derived from the LICENSE text.
+- `experimental` [Distributed benchmark](BENCHMARK_DISTRIBUTED.md) — control + N executors + W workers over compose, SSH hosts, or local processes; topology-annotated result files.
 - `experimental` [Benchmarks](BENCHMARKS.md) — reproducible cross-engine harness and methodology (no published results yet).
 - [SchemaStore submission](SCHEMASTORE_SUBMISSION.md) — prepared editor-schema registration steps.
 
