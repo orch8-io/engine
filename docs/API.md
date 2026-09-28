@@ -1498,7 +1498,7 @@ DELETE /webhooks/outbox/{id}             # discard a parked delivery
 
 ## Queue Dispatch Mode (poll / push)
 
-By default workers poll queues. A queue can instead be configured for **push**: when a task is enqueued to it, the engine POSTs a signed task envelope to a target URL. The durable task row is still written (completion is reported the usual way).
+By default workers poll queues. A queue can instead be configured for **push**: when a task is enqueued to it, the engine POSTs a signed **wake-up hint** to a target URL. The hint is id-only — `{"task_id": "…", "runtime_id": "…" | null, "reason": "task_available"}` — and never carries params or context; the receiver reacts by polling (`POST /workers/tasks/poll`), which claims the task under a lease and returns its payload. The durable task row is still written (completion is reported the usual way).
 
 ```
 POST   /queues/dispatch                       # { tenant_id, queue_name, mode: "poll"|"push", push_url?, secret? }

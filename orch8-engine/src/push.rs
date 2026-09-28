@@ -1,10 +1,13 @@
-//! Push-mode task dispatch.
+//! Push-mode task wake-ups.
 //!
-//! A queue configured for `push` has the engine POST a signed task envelope to
-//! its target URL at enqueue, instead of waiting for a worker to poll. The
-//! durable `worker_tasks` row is still written, so completion is reported the
-//! usual way and a push failure only means the task waits (an operator can flip
-//! the queue back to `poll`).
+//! A queue configured for `push` has the engine POST a signed **wake-up hint**
+//! to its target URL at enqueue, instead of waiting for the next poll. The
+//! envelope is id-only — `{task_id, runtime_id, reason}` — and never carries
+//! params or context: no payload leaves the server without a lease. The
+//! receiver reacts by polling (`POST /workers/tasks/poll`), which claims the
+//! task under a lease and returns its payload. The durable `worker_tasks` row
+//! is the source of truth, so a failed push only means the task waits for the
+//! next regular poll (an operator can flip the queue back to `poll`).
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -60,18 +63,7 @@ pub async fn maybe_push_task(
         return;
     };
 
-    let envelope = serde_json::json!({
-        "task_id": task.id,
-        "instance_id": task.instance_id,
-        "block_id": task.block_id,
-        "handler_name": task.handler_name,
-        "queue_name": task.queue_name,
-        "params": task.params,
-        "context": task.context,
-        "attempt": task.attempt,
-        "timeout_ms": task.timeout_ms,
-    });
-    let body = match serde_json::to_vec(&envelope) {
+    let body = match serde_json::to_vec(&wake_envelope(task)) {
         Ok(b) => b,
         Err(e) => {
             warn!(error = %e, "failed to serialize push envelope");
@@ -85,12 +77,27 @@ pub async fn maybe_push_task(
     });
 }
 
+/// Reason carried by a push wake-up for a newly enqueued task.
+pub const WAKE_REASON_TASK_AVAILABLE: &str = "task_available";
+
+/// The id-only wake-up hint: which task became claimable and, for a targeted
+/// (mailbox) task, which runtime should poll. Deliberately excludes params,
+/// context, handler inputs, and any other payload.
+#[must_use]
+pub fn wake_envelope(task: &WorkerTask) -> serde_json::Value {
+    serde_json::json!({
+        "task_id": task.id,
+        "runtime_id": task.requirements.runtime_id,
+        "reason": WAKE_REASON_TASK_AVAILABLE,
+    })
+}
+
 async fn send_push(url: &str, body: &[u8], secret: Option<&str>, cancel: &CancellationToken) {
     const MAX_RETRIES: u32 = 3;
     let shown = crate::outbound::redact_url(url);
     // The API validates `push_url` at configuration time without DNS; re-check
     // at send time so a hostname that resolves to an internal address never
-    // receives the task envelope (params + context).
+    // receives even the id-only wake-up hint.
     if !crate::handlers::builtin::is_url_safe(url).await {
         metrics::inc(metrics::TASKS_PUSH_FAILED);
         warn!(
@@ -256,11 +263,13 @@ mod tests {
         let head = String::from_utf8_lossy(&req[..split]).to_string();
         let body = &req[split + 4..];
 
-        // The envelope carries the task id.
-        assert!(
-            String::from_utf8_lossy(body).contains(&task.id.to_string()),
-            "envelope carries task id"
-        );
+        // The envelope is an id-only wake-up hint: no params, no context.
+        let envelope: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(envelope["task_id"], task.id.to_string());
+        assert_eq!(envelope["reason"], WAKE_REASON_TASK_AVAILABLE);
+        let keys: Vec<_> = envelope.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys.len(), 3, "only task_id/runtime_id/reason: {keys:?}");
+        assert!(envelope.get("params").is_none() && envelope.get("context").is_none());
 
         // The signature is a real HMAC-SHA256 over "{timestamp}.{body}", not just a
         // header that happens to be present — recompute it with the queue secret and
@@ -291,6 +300,19 @@ mod tests {
             let (n, v) = line.split_once(':')?;
             (n.trim().eq_ignore_ascii_case(name_lower)).then(|| v.trim().to_string())
         })
+    }
+
+    #[test]
+    fn wake_envelope_names_the_target_runtime_for_mailbox_tasks() {
+        let mut task = mk_task(Some("q1"));
+        let target = orch8_types::continuity::RuntimeId::new();
+        task.requirements.runtime_id = Some(target);
+        task.params = serde_json::json!({"secret": "never-leaves"});
+        task.context = serde_json::json!({"data": {"pii": "x"}});
+        let envelope = wake_envelope(&task);
+        assert_eq!(envelope["runtime_id"], target.to_string());
+        let text = envelope.to_string();
+        assert!(!text.contains("never-leaves") && !text.contains("pii"));
     }
 
     #[tokio::test]
