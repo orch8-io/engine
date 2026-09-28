@@ -35,8 +35,9 @@ async fn create_on(
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let embed = seq.embed.as_ref().map(serde_json::to_string).transpose()?;
     sqlx::query(
-        "INSERT INTO sequences (id, tenant_id, namespace, name, version, deprecated, status, blocks, interceptors, input_schema, sla, on_failure, on_cancel, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"
+        "INSERT INTO sequences (id, tenant_id, namespace, name, version, deprecated, status, blocks, interceptors, input_schema, sla, on_failure, on_cancel, created_at, sub_tenant, embed) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"
     )
     .bind(seq.id.into_uuid().to_string())
     .bind(seq.tenant_id.as_str())
@@ -52,6 +53,8 @@ async fn create_on(
     .bind(&on_failure)
     .bind(&on_cancel)
     .bind(ts(seq.created_at))
+    .bind(seq.sub_tenant.as_deref())
+    .bind(&embed)
     .execute(conn).await?;
     Ok(())
 }

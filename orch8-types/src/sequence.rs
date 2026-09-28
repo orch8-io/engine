@@ -107,6 +107,12 @@ pub struct SequenceDefinition {
     /// `Cancelled`. Same semantics as `on_failure`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_cancel: Option<Vec<BlockDefinition>>,
+    /// Owning sub-tenant (embedded builder); `None` = tenant-level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_tenant: Option<String>,
+    /// Embedding opt-ins (which step outputs embedded viewers may see).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed: Option<crate::sub_tenant::SequenceEmbed>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -2204,6 +2210,8 @@ mod tests {
 
     fn seq_with(block: BlockDefinition) -> SequenceDefinition {
         SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -2884,6 +2892,8 @@ mod tests {
 
     fn sample_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),

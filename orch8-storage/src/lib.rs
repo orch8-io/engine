@@ -13,6 +13,7 @@ pub mod lifecycle;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod sqlite;
+pub mod tenancy;
 #[cfg(feature = "postgres")]
 pub mod tenant_partition;
 
@@ -59,7 +60,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub(crate) const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 96;
+pub const STORAGE_SCHEMA_VERSION: u32 = 97;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -3796,6 +3797,75 @@ pub trait AiStore: Send + Sync + 'static {
 // StorageBackend supertrait
 // ============================================================================
 
+// ============================================================================
+// Sub-trait: TenancyStore (sub-tenants, embed theme, release targets)
+// ============================================================================
+
+/// Sub-tenant admission/metering, the embed theme, and release rollout
+/// targets. See `docs/EMBEDDED.md`.
+#[async_trait]
+pub trait TenancyStore: Send + Sync + 'static {
+    /// Atomically admit and insert `instances`, which must all share one
+    /// `(tenant_id, sub_tenant)` with `sub_tenant` set. Under the same tenant
+    /// lock as [`InstanceStore::create_instance_admitted`] it enforces the
+    /// tenant pool (`max_active_instances` non-terminal instances), then the
+    /// sub-tenant's stored caps (concurrent, and executions since
+    /// [`orch8_types::sub_tenant::month_start`] of `now`), and appends one
+    /// execution-ledger row per instance in the same transaction.
+    ///
+    /// Cap violations return `StorageError::QuotaExceeded` whose message
+    /// starts with [`orch8_types::sub_tenant::SUB_TENANT_QUOTA_PREFIX`].
+    async fn create_sub_tenant_instances_admitted(
+        &self,
+        instances: &[TaskInstance],
+        max_active_instances: u64,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError>;
+
+    async fn get_sub_tenant_limits(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+    ) -> Result<Option<orch8_types::sub_tenant::SubTenantLimits>, StorageError>;
+
+    async fn put_sub_tenant_limits(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        limits: &orch8_types::sub_tenant::SubTenantLimits,
+    ) -> Result<(), StorageError>;
+
+    /// Per-sub-tenant activity in `[from, to)`, ordered by sub-tenant id.
+    async fn sub_tenant_usage(
+        &self,
+        tenant_id: &TenantId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<orch8_types::sub_tenant::SubTenantUsage>, StorageError>;
+
+    /// Distinct `(tenant, sub_tenant)` pairs that started an execution since
+    /// `since`, across all tenants (license soft-enforcement).
+    async fn count_active_sub_tenants(&self, since: DateTime<Utc>) -> Result<u64, StorageError>;
+
+    async fn get_embed_theme(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Option<orch8_types::sub_tenant::EmbedTheme>, StorageError>;
+
+    async fn put_embed_theme(
+        &self,
+        tenant_id: &TenantId,
+        theme: &orch8_types::sub_tenant::EmbedTheme,
+    ) -> Result<(), StorageError>;
+
+    /// Replace a release's sub-tenant rollout target. `false` if unknown.
+    async fn set_release_target(
+        &self,
+        release_id: Uuid,
+        target: Option<&orch8_types::release::ReleaseTarget>,
+    ) -> Result<bool, StorageError>;
+}
+
 /// The core storage abstraction.
 ///
 /// Object-safe for `dyn StorageBackend` dispatch.
@@ -3822,6 +3892,7 @@ pub trait StorageBackend:
     + EvaluationStore
     + AttentionStore
     + AiStore
+    + TenancyStore
     + orch8_push::PushOutboxStore
     + Send
     + Sync
@@ -3848,6 +3919,7 @@ impl<T> StorageBackend for T where
         + EvaluationStore
         + AttentionStore
         + AiStore
+        + TenancyStore
         + orch8_push::PushOutboxStore
         + Send
         + Sync

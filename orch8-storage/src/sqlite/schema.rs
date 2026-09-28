@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS sequences (
     sla TEXT,
     on_failure TEXT,
     on_cancel TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    sub_tenant TEXT,
+    embed TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_instances (
@@ -34,7 +36,8 @@ CREATE TABLE IF NOT EXISTS task_instances (
     parent_instance_id TEXT,
     budget TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    sub_tenant TEXT
 );
 
 CREATE TABLE IF NOT EXISTS execution_tree (
@@ -707,7 +710,8 @@ CREATE TABLE IF NOT EXISTS workflow_releases (
     validation_summary    TEXT,
     canary_started_at     TEXT,
     created_at            TEXT NOT NULL,
-    updated_at            TEXT NOT NULL
+    updated_at            TEXT NOT NULL,
+    target                TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_releases_tenant ON workflow_releases(tenant_id, state);
 CREATE INDEX IF NOT EXISTS idx_releases_baseline ON workflow_releases(baseline_sequence_id, state);
@@ -1249,9 +1253,39 @@ CREATE TABLE IF NOT EXISTS tenant_budget_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_budget_alerts_tenant
     ON tenant_budget_alerts(tenant_id, created_at);
+
+-- Sub-tenants (Postgres migration 097). Timestamps are fixed-width RFC 3339
+-- (microseconds, `Z`) so text comparison is ordered.
+CREATE INDEX IF NOT EXISTS idx_task_instances_sub_tenant
+    ON task_instances(tenant_id, sub_tenant, state) WHERE sub_tenant IS NOT NULL;
+CREATE TABLE IF NOT EXISTS sub_tenant_limits (
+    tenant_id TEXT NOT NULL,
+    sub_tenant TEXT NOT NULL,
+    max_executions_per_month INTEGER CHECK(max_executions_per_month >= 0),
+    max_concurrent INTEGER CHECK(max_concurrent >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, sub_tenant)
+);
+CREATE TABLE IF NOT EXISTS sub_tenant_executions (
+    instance_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    sub_tenant TEXT NOT NULL,
+    started_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sub_tenant_executions_window
+    ON sub_tenant_executions(tenant_id, started_at, sub_tenant);
+CREATE INDEX IF NOT EXISTS idx_sub_tenant_executions_sub
+    ON sub_tenant_executions(tenant_id, sub_tenant, started_at);
+CREATE INDEX IF NOT EXISTS idx_sub_tenant_executions_started
+    ON sub_tenant_executions(started_at);
+CREATE TABLE IF NOT EXISTS embed_themes (
+    tenant_id TEXT PRIMARY KEY,
+    record TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 47;
+pub(super) const SCHEMA_VERSION: i64 = 48;

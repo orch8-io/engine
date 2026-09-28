@@ -75,6 +75,11 @@ fn parse_json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, StorageError
 pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInstance, StorageError> {
     Ok(TaskInstance {
         id: InstanceId::from_uuid(parse_uuid(row.get::<&str, _>("id"))?),
+        // try_get: tolerate projections that predate the sub-tenant column.
+        sub_tenant: row
+            .try_get::<Option<String>, _>("sub_tenant")
+            .ok()
+            .flatten(),
         sequence_id: SequenceId::from_uuid(parse_uuid(row.get::<&str, _>("sequence_id"))?),
         tenant_id: TenantId::unchecked(row.get::<String, _>("tenant_id")),
         namespace: Namespace::new(row.get::<String, _>("namespace")),
@@ -169,6 +174,15 @@ pub(super) fn row_to_sequence(
             .and_then(|s| serde_json::from_str(&s).ok()),
         on_cancel: row
             .try_get::<Option<String>, _>("on_cancel")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        sub_tenant: row
+            .try_get::<Option<String>, _>("sub_tenant")
+            .ok()
+            .flatten(),
+        embed: row
+            .try_get::<Option<String>, _>("embed")
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str(&s).ok()),
@@ -431,6 +445,10 @@ pub(super) fn apply_filter_sql<'q>(
     if let Some(ref ns) = filter.namespace {
         qb.push(" AND namespace=");
         qb.push_bind(ns.as_str());
+    }
+    if let Some(ref sub) = filter.sub_tenant {
+        qb.push(" AND sub_tenant=");
+        qb.push_bind(sub.as_str());
     }
     if let Some(ref sid) = filter.sequence_id {
         qb.push(" AND sequence_id=");

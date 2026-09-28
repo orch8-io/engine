@@ -763,6 +763,7 @@ async fn live_migration_transition_atomically_advances_and_rolls_back() {
     };
     storage
         .create_instance(&TaskInstance {
+            sub_tenant: None,
             id: instance_id,
             sequence_id: source_sequence,
             tenant_id: tenant_id.clone(),
@@ -1211,6 +1212,7 @@ async fn export_and_accept_commit_ownership_atomically() {
     accepted_execution.epoch = transferring.epoch.checked_next().unwrap();
     accepted_execution.owner_runtime_id = destination;
     let destination_instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: tenant.clone(),

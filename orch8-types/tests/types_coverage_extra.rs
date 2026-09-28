@@ -50,6 +50,8 @@ fn make_step(id: &str, handler: &str) -> BlockDefinition {
 
 fn make_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -386,6 +388,8 @@ fn cfg_35_scheduler_config_max_steps_per_instance() {
 #[test]
 fn cfg_36_config_serde_with_all_sections() {
     let cfg = EngineConfig {
+        embed: orch8_types::config::EmbedConfig::default(),
+        license: orch8_types::config::LicenseConfig::default(),
         node: orch8_types::config::NodeConfig::default(),
         database: orch8_types::config::DatabaseConfig {
             backend: "sqlite".into(),
@@ -502,6 +506,8 @@ fn cfg_43_config_validate_accepts_sqlite_backend() {
 #[test]
 fn cfg_44_secret_string_not_leaked_in_serialized_config() {
     let cfg = EngineConfig {
+        embed: orch8_types::config::EmbedConfig::default(),
+        license: orch8_types::config::LicenseConfig::default(),
         node: orch8_types::config::NodeConfig::default(),
         database: orch8_types::config::DatabaseConfig {
             url: SecretString::from("postgres://user:pass@host/db"),
@@ -539,6 +545,7 @@ fn cfg_45_scheduler_config_max_instances_per_tenant_default() {
 #[test]
 fn inst_46_task_instance_serde_round_trip_all_fields() {
     let instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("tenant-1"),
@@ -580,6 +587,7 @@ fn inst_46_task_instance_serde_round_trip_all_fields() {
 #[test]
 fn inst_47_task_instance_optional_fields_none() {
     let instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
@@ -610,6 +618,7 @@ fn inst_47_task_instance_optional_fields_none() {
 #[test]
 fn inst_48_task_instance_metadata_json() {
     let instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),

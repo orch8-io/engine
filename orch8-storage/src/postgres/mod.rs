@@ -37,6 +37,7 @@ mod sessions;
 mod signals;
 mod step_logs;
 mod telemetry;
+mod tenancy;
 mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;

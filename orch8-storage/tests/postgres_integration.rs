@@ -362,6 +362,8 @@ async fn postgres_memory_batch_deletes_handle_more_than_bind_limit() {
 
 fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: seq_id,
@@ -384,6 +386,7 @@ fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
 fn mk_instance(tenant: &str, seq_id: SequenceId, concurrency_key: Option<&str>) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked(tenant),

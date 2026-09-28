@@ -30,6 +30,16 @@ pub(super) struct SequenceRow {
 
 impl SequenceRow {
     pub fn into_definition(self) -> Result<SequenceDefinition, StorageError> {
+        let sub_tenant = self
+            .definition
+            .get("sub_tenant")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string);
+        let embed = self
+            .definition
+            .get("embed")
+            .filter(|v| !v.is_null())
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         // Support both old format (array of blocks) and new format
         // ({blocks, interceptors, input_schema}).
         let (blocks, interceptors, input_schema, sla, on_failure, on_cancel) =
@@ -106,6 +116,8 @@ impl SequenceRow {
             sla,
             on_failure,
             on_cancel,
+            sub_tenant,
+            embed,
             created_at: self.created_at,
         })
     }
@@ -170,6 +182,7 @@ pub(super) struct InstanceRow {
     pub budget: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub sub_tenant: Option<String>,
 }
 
 impl InstanceRow {
@@ -181,6 +194,7 @@ impl InstanceRow {
 
         Ok(TaskInstance {
             id: InstanceId::from_uuid(self.id),
+            sub_tenant: self.sub_tenant,
             sequence_id: SequenceId::from_uuid(self.sequence_id),
             tenant_id: TenantId::unchecked(self.tenant_id),
             namespace: Namespace::new(self.namespace),

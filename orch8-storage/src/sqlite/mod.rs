@@ -62,6 +62,7 @@ mod sessions;
 mod signals;
 mod step_logs;
 mod telemetry;
+mod tenancy;
 mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
@@ -3365,6 +3366,8 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -3413,6 +3416,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
@@ -3443,6 +3447,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let mut inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("max-concurrency-test"),
@@ -3501,6 +3506,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
@@ -3533,6 +3539,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let mut inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
@@ -3756,6 +3763,7 @@ mod tests {
     fn mk_inst_for_dedupe(id: InstanceId) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
@@ -4153,6 +4161,8 @@ mod tests {
         let now = Utc::now();
 
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -4193,6 +4203,7 @@ mod tests {
         storage.create_sequence(&seq).await.unwrap();
 
         let inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
             tenant_id: TenantId::unchecked("t"),
@@ -4875,6 +4886,8 @@ mod tests {
     async fn update_sequence_status_roundtrip() {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -4933,6 +4946,8 @@ mod tests {
     async fn seed_instances(storage: &SqliteStorage, n: usize) -> Vec<InstanceId> {
         let now = Utc::now();
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -4955,6 +4970,7 @@ mod tests {
         let mut ids = Vec::with_capacity(n);
         for _ in 0..n {
             let inst = TaskInstance {
+                sub_tenant: None,
                 id: InstanceId::new(),
                 sequence_id: seq.id,
                 tenant_id: TenantId::unchecked("t"),

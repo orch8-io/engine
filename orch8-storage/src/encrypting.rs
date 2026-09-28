@@ -945,6 +945,29 @@ passthrough_impl! {
     }
 }
 
+passthrough_impl! {
+    impl crate::TenancyStore for EncryptingStorage {
+        // Encrypt like every other instance-create path before delegating to
+        // the inner backend's atomic admission transaction.
+        async fn create_sub_tenant_instances_admitted(&self, instances: &[TaskInstance], max_active_instances: u64, now: DateTime<Utc>) -> Result<u64, StorageError> {
+            let encrypted: Vec<TaskInstance> = instances
+                .iter()
+                .map(|i| self.encrypt_instance(i).map(Cow::into_owned))
+                .collect::<Result<_, _>>()?;
+            self.inner
+                .create_sub_tenant_instances_admitted(&encrypted, max_active_instances, now)
+                .await
+        }
+        async fn get_sub_tenant_limits(&self, tenant_id: &orch8_types::ids::TenantId, sub_tenant: &str) -> Result<Option<orch8_types::sub_tenant::SubTenantLimits>, StorageError>;
+        async fn put_sub_tenant_limits(&self, tenant_id: &orch8_types::ids::TenantId, sub_tenant: &str, limits: &orch8_types::sub_tenant::SubTenantLimits) -> Result<(), StorageError>;
+        async fn sub_tenant_usage(&self, tenant_id: &orch8_types::ids::TenantId, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<orch8_types::sub_tenant::SubTenantUsage>, StorageError>;
+        async fn count_active_sub_tenants(&self, since: DateTime<Utc>) -> Result<u64, StorageError>;
+        async fn get_embed_theme(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<Option<orch8_types::sub_tenant::EmbedTheme>, StorageError>;
+        async fn put_embed_theme(&self, tenant_id: &orch8_types::ids::TenantId, theme: &orch8_types::sub_tenant::EmbedTheme) -> Result<(), StorageError>;
+        async fn set_release_target(&self, release_id: Uuid, target: Option<&orch8_types::release::ReleaseTarget>) -> Result<bool, StorageError>;
+    }
+}
+
 // ============================================================================
 // Sub-trait 2: InstanceStore -- encryption on create/get/update context paths
 // ============================================================================

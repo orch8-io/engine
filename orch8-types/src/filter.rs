@@ -12,6 +12,9 @@ pub struct InstanceFilter {
     /// JSONB containment query for metadata filtering.
     pub metadata_filter: Option<serde_json::Value>,
     pub priority: Option<Priority>,
+    /// Restrict to one sub-tenant's instances.
+    #[serde(default)]
+    pub sub_tenant: Option<String>,
 }
 
 #[derive(Debug, Clone)]

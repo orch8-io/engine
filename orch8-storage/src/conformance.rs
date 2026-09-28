@@ -332,6 +332,8 @@ fn require(check: &'static str, condition: bool, message: &str) -> Result<(), Co
 
 fn conformance_sequence(tenant: &TenantId, run_id: Uuid) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -354,6 +356,7 @@ fn conformance_sequence(tenant: &TenantId, run_id: Uuid) -> SequenceDefinition {
 fn conformance_instance(tenant: &TenantId, sequence_id: SequenceId, run_id: Uuid) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id,
         tenant_id: tenant.clone(),

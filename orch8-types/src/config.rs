@@ -148,6 +148,35 @@ pub struct EngineConfig {
     /// the `/alerts/rules` API.
     #[serde(default)]
     pub alerts: AlertsConfig,
+    /// Embedded (end-customer) surface: scoped embed tokens + CORS.
+    #[serde(default)]
+    pub embed: EmbedConfig,
+    /// Offline-verified license key (soft enforcement only).
+    #[serde(default)]
+    pub license: LicenseConfig,
+}
+
+/// `[embed]` section. Embed routes are disabled (404) without a secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbedConfig {
+    /// Hex-encoded HMAC secret (at least 32 bytes decoded) signing `o8e1.`
+    /// embed tokens. Env: `ORCH8_EMBED_TOKEN_SECRET`.
+    #[serde(default)]
+    pub token_secret: SecretString,
+    /// Comma-separated browser origins allowed to call `/api/v1/embed/*`.
+    /// Env: `ORCH8_EMBED_ALLOWED_ORIGINS`.
+    #[serde(default)]
+    pub allowed_origins: String,
+}
+
+/// `[license]` section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LicenseConfig {
+    /// `o8l1.` license key. Env: `ORCH8_LICENSE_KEY`.
+    #[serde(default)]
+    pub key: SecretString,
 }
 
 /// `[alerts]` section.

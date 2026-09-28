@@ -815,6 +815,7 @@ fn release_variant_serde_snake_case() {
 
 fn sample_release() -> WorkflowRelease {
     WorkflowRelease {
+        target: None,
         id: Uuid::now_v7(),
         tenant_id: TenantId::unchecked("t1"),
         namespace: Namespace::new("default"),

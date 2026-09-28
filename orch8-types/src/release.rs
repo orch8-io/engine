@@ -163,8 +163,104 @@ pub struct WorkflowRelease {
     /// When the canary started (observation window lower bound).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canary_started_at: Option<DateTime<Utc>>,
+    /// Optional sub-tenant staged-rollout target. When set, sub-tenant
+    /// scoped instances are routed by sub-tenant (list membership, then a
+    /// stable per-sub-tenant percentage bucket) instead of per-instance
+    /// cohorts, and unscoped instances follow the default (baseline until
+    /// promotion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<ReleaseTarget>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Sub-tenant staged-rollout target of a release.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseTarget {
+    /// Sub-tenants that always receive the candidate.
+    #[serde(default)]
+    pub sub_tenants: Option<Vec<String>>,
+    /// Percentage (0–100) of the remaining sub-tenants that receive the
+    /// candidate, bucketed by a stable hash of the sub-tenant id.
+    #[serde(default)]
+    pub percentage: Option<u8>,
+}
+
+/// Upper bound on explicitly listed sub-tenants in one target.
+pub const MAX_TARGET_SUB_TENANTS: usize = 1_000;
+
+impl ReleaseTarget {
+    /// Validate bounds and sub-tenant id syntax.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(p) = self.percentage
+            && p > 100
+        {
+            return Err("target.percentage must be 0-100".into());
+        }
+        if let Some(list) = &self.sub_tenants {
+            if list.len() > MAX_TARGET_SUB_TENANTS {
+                return Err(format!(
+                    "target.sub_tenants may list at most {MAX_TARGET_SUB_TENANTS} ids"
+                ));
+            }
+            for id in list {
+                crate::sub_tenant::validate_sub_tenant(id)
+                    .map_err(|e| format!("target.sub_tenants: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `sub_tenant` receives the candidate under this target.
+    /// Membership wins; otherwise the stable bucket of
+    /// `(release_id, sub_tenant)` is compared against `percentage` (monotone:
+    /// raising the percentage only adds sub-tenants).
+    #[must_use]
+    pub fn selects(&self, release_id: Uuid, sub_tenant: &str) -> bool {
+        if self
+            .sub_tenants
+            .as_ref()
+            .is_some_and(|list| list.iter().any(|s| s == sub_tenant))
+        {
+            return true;
+        }
+        match self.percentage {
+            Some(p) => {
+                assign_variant(release_id, &format!("sub_tenant:{sub_tenant}"), p)
+                    == ReleaseVariant::Candidate
+            }
+            None => false,
+        }
+    }
+}
+
+/// Variant for a new instance of a routing release.
+///
+/// * `Promoted` → everyone gets the candidate.
+/// * With a [`ReleaseTarget`]: sub-tenant scoped instances follow the target;
+///   unscoped instances stay on the baseline (the default release).
+/// * Without a target: the legacy per-instance cohort canary.
+#[must_use]
+pub fn route_instance(
+    release: &WorkflowRelease,
+    sub_tenant: Option<&str>,
+    cohort_key: &str,
+) -> ReleaseVariant {
+    if release.state == ReleaseState::Promoted {
+        return ReleaseVariant::Candidate;
+    }
+    match (&release.target, sub_tenant) {
+        (Some(target), Some(sub)) => {
+            if target.selects(release.id, sub) {
+                ReleaseVariant::Candidate
+            } else {
+                ReleaseVariant::Baseline
+            }
+        }
+        (Some(_), None) => ReleaseVariant::Baseline,
+        (None, _) => assign_variant(release.id, cohort_key, release.canary_percent),
+    }
 }
 
 /// Immutable audit record of one state transition (or attempted one).
@@ -602,6 +698,7 @@ mod tests {
     #[test]
     fn release_round_trips() {
         let r = WorkflowRelease {
+            target: None,
             id: Uuid::now_v7(),
             tenant_id: TenantId::unchecked("t1"),
             namespace: Namespace::new("default"),

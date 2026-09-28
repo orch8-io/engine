@@ -102,6 +102,8 @@ async fn seed_instance(s: &SqliteStorage, inst_id: InstanceId) {
 
 fn make_sequence(tenant: &str) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -210,6 +212,7 @@ fn distributed_task(
 fn make_instance(tenant: &str, seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked(tenant),
