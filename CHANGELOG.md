@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Hybrid executors, drills, receipts, migration
+
+See [docs/HYBRID.md](docs/HYBRID.md) and [docs/MIGRATING_TO_CLOUD.md](docs/MIGRATING_TO_CLOUD.md).
+
+- **Executor join tokens**: `orch8 executor join <token>` writes an
+  `executor` `orch8.toml` (managed-control fields, `[node] labels`, `region`;
+  mode 0600) from a cloud-issued `o8x1.` token, optionally `--run`;
+  `orch8-server` accepts the same token as `ORCH8_JOIN_TOKEN`. The managed
+  control session now advertises the configured region.
+- **Helm `mode: executor`** renders a hybrid executor that takes its join
+  token from a Secret; `cloudObservability.*` values wire run-metadata
+  export. New Compose example: `deploy/hybrid-executor/`.
+- **`orch8 drill kill-executor`**: SIGKILLs one of two executor processes
+  mid-flight, measures detection and time to recovery, reconciles ambiguous
+  receipts against a provider log, and fails unless no effect was recorded
+  twice, no redelivery was silent, and every instance completed.
+- **Signed effect-receipt export** (at-most-once dispatch evidence, not an
+  exactly-once claim): `GET /instances/{id}/receipts/export`,
+  `GET /receipts/export?from=&to=`, `GET /receipts/signing-key`, and
+  `orch8 receipts export|verify|signing-key`. Bundles are JSON Lines signed
+  with the engine's continuity Ed25519 key.
+- **`orch8 migrate --to <url> --source <sqlite>`** moves sequences and
+  in-flight instances (tree, outputs, receipts, pending signals) from an
+  embedded engine to a remote one via the new idempotent
+  `POST /migrations/import`, fencing the source with the continuity
+  ownership record. Busy instances are refused unless `--wait-for-idle`.
+  `orch8 migrate --database-url` is unchanged.
+- **`orch8 generate --pieces-from <catalog>`** restricts generated steps to a
+  vendor catalog of handlers / Activepieces actions and repairs or rejects
+  anything outside it.
+- **`[cloud_observability]`**: bounded, non-blocking export of instance
+  state transitions (metadata only) to `{endpoint}/api/ingest/v1/runs`, at
+  most 500 events per batch, exponential backoff, drop-oldest.
+
 ### Distributed execution (runtime nodes)
 
 See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
