@@ -1106,3 +1106,44 @@ async fn expired_delegation_integrates_a_failure_without_failing_the_parent() {
         );
     }
 }
+
+#[tokio::test]
+async fn checkpointed_activity_resumes_on_lease_expiry_with_unknown_receipt() {
+    for (backend, storage) in backends().await {
+        let handler = unique_handler("ext.batch");
+        let (_, inst) = start(&storage, vec![mk_step("batch", &handler)]).await;
+        let task = only_task(&storage, inst.id).await;
+        let claimed = claim(&storage, &task).await;
+        let proof = orch8_types::worker::WorkerClaim::new("worker-a", claimed.claim_epoch);
+        assert_eq!(
+            storage
+                .checkpoint_worker_task(task.id, &proof, 0, &json!({"cursor": 7}))
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        reap_worker_tasks(storage.as_ref(), Duration::ZERO)
+            .await
+            .unwrap();
+        let after = storage.get_worker_task(task.id).await.unwrap().unwrap();
+        assert_eq!(after.state, WorkerTaskState::Pending, "{backend}: resumes");
+        assert_eq!(
+            after.resume_checkpoint,
+            Some(json!({"cursor": 7})),
+            "{backend}"
+        );
+        assert_eq!(receipt_state(&storage, &task).await, EffectState::Unknown);
+
+        // The replacement attempt reports success: unknown -> committed.
+        let resumed = claim(&storage, &after).await;
+        commit_external_worker_effect(
+            storage.as_ref(),
+            &inst.tenant_id,
+            &resumed,
+            &json!({"ok": 1}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt_state(&storage, &task).await, EffectState::Committed);
+    }
+}

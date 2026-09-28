@@ -41,6 +41,8 @@ use crate::error::EngineError;
 const REAPER_BATCH: u32 = 500;
 
 pub const LEASE_EXPIRED_REASON: &str = "heartbeat lease expired";
+pub const LEASE_EXPIRED_RESUMABLE_REASON: &str =
+    "heartbeat lease expired; checkpointed activity requeued to resume (effect receipt unknown)";
 pub const LEASE_EXPIRED_AMBIGUOUS_REASON: &str =
     "heartbeat lease expired after the side effect may have started (effect receipt unknown)";
 pub const TIMED_OUT_REASON: &str = "task timed out (timeout_ms exceeded)";
@@ -116,22 +118,38 @@ async fn resolve_expired_lease(
             None,
         )
         .await?;
-        let action = plan_failure_action(
-            storage,
-            &instance,
-            task,
-            true,
-            LEASE_EXPIRED_AMBIGUOUS_REASON,
-        )
-        .await?;
-        fence(
-            task,
-            None,
-            WorkerAttemptEventKind::Reclaimed,
-            LEASE_EXPIRED_AMBIGUOUS_REASON,
-            true,
-            action,
-        )
+        if task.checkpoint_seq > 0 {
+            // A resumable activity that durably checkpointed opted into
+            // resumption: the replacement claimant continues from
+            // `resume_checkpoint` under a new claim epoch (the receipt stays
+            // `unknown` until that attempt reports) instead of re-running the
+            // effect from scratch as a new attempt.
+            fence(
+                task,
+                None,
+                WorkerAttemptEventKind::Reclaimed,
+                LEASE_EXPIRED_RESUMABLE_REASON,
+                true,
+                WorkerTaskResolutionAction::Requeue,
+            )
+        } else {
+            let action = plan_failure_action(
+                storage,
+                &instance,
+                task,
+                true,
+                LEASE_EXPIRED_AMBIGUOUS_REASON,
+            )
+            .await?;
+            fence(
+                task,
+                None,
+                WorkerAttemptEventKind::Reclaimed,
+                LEASE_EXPIRED_AMBIGUOUS_REASON,
+                true,
+                action,
+            )
+        }
     } else {
         fence(
             task,
@@ -268,6 +286,7 @@ fn fence(
         expected_state: task.state,
         expected_claim_epoch: task.claim_epoch,
         expected_worker_id,
+        holder_worker_id: task.worker_id.clone(),
         event,
         reason: reason.to_owned(),
         retryable,

@@ -487,6 +487,9 @@ pub struct WorkerTaskResolution {
     pub expected_state: WorkerTaskState,
     pub expected_claim_epoch: u64,
     pub expected_worker_id: Option<String>,
+    /// Lease holder recorded on the attempt event (evidence only, not part
+    /// of the fence).
+    pub holder_worker_id: Option<String>,
     pub event: WorkerAttemptEventKind,
     pub reason: String,
     pub retryable: bool,

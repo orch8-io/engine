@@ -1313,6 +1313,9 @@ describe("Continuity Attention, Residency, Disclosure, Federation", () => {
         token: grant.token,
       });
       assert.equal(claimed.destination_runtime_id, destRuntime);
+      // The parent is hosted by this server, so the delegation is routed
+      // through the server mailbox as a task targeted at the destination.
+      assert.equal(typeof claimed.mailbox_task_id, "string");
     });
 
     it("rejects when source_runtime_id equals destination_runtime_id", async () => {

@@ -110,6 +110,15 @@ export interface WorkerTask {
   resume_checkpoint?: unknown;
   checkpoint_seq: number;
   claim_epoch: number;
+  attempt?: number;
+  /** Idempotency key of this attempt's effect receipt (distributed execution). */
+  effect_id?: string;
+  /** Continuity owner epoch at dispatch; lease mutations are fenced on it. */
+  continuity_epoch?: number;
+  /** Lease for this claim (browser 30, mobile 120, else server default). */
+  lease_secs?: number;
+  target_runtime_id?: string;
+  runtime_kinds?: string[];
   [k: string]: unknown;
 }
 

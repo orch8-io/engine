@@ -683,6 +683,7 @@ pub(super) async fn list_timed_out(
 
 /// Apply one fenced worker-task resolution atomically. See
 /// `WorkerStore::resolve_worker_task`.
+#[allow(clippy::too_many_lines)] // one transaction: fence, action, evidence
 pub(super) async fn resolve(
     store: &PostgresStorage,
     resolution: &orch8_types::worker::WorkerTaskResolution,
@@ -777,7 +778,10 @@ pub(super) async fn resolve(
         &[transition_event(
             resolution.task_id,
             resolution.expected_claim_epoch,
-            resolution.expected_worker_id.clone(),
+            resolution
+                .holder_worker_id
+                .clone()
+                .or_else(|| resolution.expected_worker_id.clone()),
             resolution.event,
             Some(resolution.reason.clone()),
         )],

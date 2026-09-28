@@ -67,6 +67,7 @@ export const SELF_MANAGED_SUITES: readonly SelfManagedSuite[] = [
   { file: "features/continuity_scenario_lab.test.ts", reason: "needs ORCH8_CONTINUITY_LAB_ENABLED=true at boot" },
   { file: "features/continuity_attention_residency_federation.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY set at boot" },
   { file: "features/continuity_handoffs.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY set at boot" },
+  { file: "features/distributed_runtimes.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY set at boot" },
   { file: "features/continuity_integration_isolation.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY set at boot" },
   { file: "features/continuity_migrations_whatif.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY set at boot" },
   { file: "security/credential_encryption_at_rest.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY set at boot" },
