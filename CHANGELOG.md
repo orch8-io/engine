@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Importers: Step Functions, Temporal, Inngest, BullMQ
+
+See [docs/MIGRATION_GUIDES.md](docs/MIGRATION_GUIDES.md).
+
+- `orch8 import stepfunctions` translates ASL state machines structurally
+  (Task/Choice/Parallel/Map/Wait/Pass/Fail, Retry/Catch, polling loops,
+  JSONPath data flow).
+- `orch8 import temporal|inngest|bullmq` statically extracts a sequence
+  skeleton from TypeScript sources; the report's new `unmapped` section lists
+  every untranslated construct with `file:line`.
+
+### Durable functions in Node and Python
+
+- `@orch8/engine-native` and `orch8-engine-native` expose an in-process,
+  SQLite-backed durable engine (`Engine.open(path)`, handlers, deploy/start/run)
+  that survives process restarts. `orch8::EngineBuilder::stale_instance_threshold`
+  lets a single-owner embedder recover interrupted instances on startup.
+
+### WASM sandbox for end-user steps
+
+See [docs/WASM_USER_STEPS.md](docs/WASM_USER_STEPS.md).
+
+- **Wall-clock limit**: WASM plugin calls are interrupted after
+  `ORCH8_WASM_TIMEOUT_MS` (default 2000) by an epoch ticker; previously the
+  epoch deadline was never armed and only fuel bounded a call.
+- **Configurable limits**: `ORCH8_WASM_FUEL`, `ORCH8_WASM_MAX_MEMORY_BYTES`,
+  `ORCH8_WASM_MAX_MODULE_BYTES` and the new `ORCH8_WASM_MAX_OUTPUT_BYTES`
+  (default 4 MiB); zero or unparsable values fall back to the default.
+- **No host imports**: a module that declares any import (WASI or otherwise)
+  is refused with a clear error before instantiation.
+- **Limit errors are classified**: memory/table-cap denials report
+  `memory limit exceeded`; every guest trap is now a permanent step error
+  (previously non-fuel traps were retried).
+- `validate_module_bytes` checks an uploaded module (size, magic, imports,
+  ABI exports, initial memory) without running it.
+
 ### Distributed execution (runtime nodes)
 
 See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
