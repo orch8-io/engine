@@ -7,6 +7,11 @@
 {{ include "orch8.deployment" (dict "root" . "component" "executor" "role" "executor" "cfg" .Values.executor) }}
 ---
 {{ include "orch8.service" (dict "root" . "component" "executor" "http" false "metrics" false) }}
+{{- else if eq .Values.mode "executor" }}
+{{- /* Hybrid executor: joins a managed control plane with ORCH8_JOIN_TOKEN. */}}
+{{ include "orch8.deployment" (dict "root" . "component" "executor" "role" "executor" "cfg" .Values.executor) }}
+---
+{{ include "orch8.service" (dict "root" . "component" "executor" "http" false "metrics" false) }}
 {{- else }}
 {{ include "orch8.deployment" (dict "root" . "component" "all-in-one" "role" "all_in_one" "cfg" .Values.allInOne) }}
 ---

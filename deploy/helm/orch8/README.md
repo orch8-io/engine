@@ -28,6 +28,7 @@ Helm refuses to render a chart whose declared dependencies are missing from
 |---|---|---|
 | `allInOne` (default) | `<release>-all-in-one` running role `all_in_one` | API, metrics, public webhooks, engine, push outbox in one process. |
 | `split` | `<release>-control` (role `control`) + `<release>-executor` (role `executor`) | Control serves the full API and metrics without an engine; executors run the engine and expose only health over HTTP plus the worker-lifecycle gRPC surface. Scale them independently. |
+| `executor` | `<release>-executor` (role `executor`) only | Hybrid executor joining Orch8 Cloud: `ORCH8_JOIN_TOKEN` comes from `hybrid.joinToken.existingSecret`, `HOSTNAME` is the pod name. Postgres only; no ingress. See [docs/HYBRID.md](../../../docs/HYBRID.md). |
 
 `gateway.enabled=true` adds a `<release>-gateway` Deployment (role `gateway`)
 for continuity capsule/handoff traffic. The server refuses to start a gateway
@@ -128,7 +129,9 @@ replica. See [docs/DEPLOYMENT.md](../../../docs/DEPLOYMENT.md#high-availability)
 | Key | Default | Description |
 |---|---|---|
 | `image.repository` / `image.tag` | `ghcr.io/orch8-io/engine` / appVersion | Engine image. |
-| `mode` | `allInOne` | `allInOne` or `split`. |
+| `mode` | `allInOne` | `allInOne`, `split`, or `executor` (hybrid). |
+| `hybrid.joinToken.existingSecret` / `.key` | `""` / `join-token` | Secret with the `o8x1.` join token (required for `mode=executor`). |
+| `cloudObservability.enabled` / `.endpoint` / `.engineId` / `.existingSecret` / `.apiKeyKey` | `false` / `https://cloud.orch8.io` / release name / `""` / `api-key` | Metadata-only run export (`[cloud_observability]`). |
 | `allInOne.*`, `control.*`, `executor.*` | see values.yaml | `replicas`, `resources`, `autoscaling` (HPA, CPU), `pdb`, scheduling, `podAnnotations`, `extraEnv`. |
 | `gateway.enabled` | `false` | Continuity gateway Deployment; needs `gateway.tls.existingSecret`. |
 | `config.logLevel` / `config.logJson` | `info` / `true` | `ORCH8_LOG_LEVEL` / `ORCH8_LOG_JSON`. |

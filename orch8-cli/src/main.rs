@@ -212,6 +212,16 @@ enum Commands {
     /// Run self-contained demonstrations backed by real engine protocols.
     #[command(subcommand)]
     Demo(DemoCmd),
+    /// Measured failure drills (e.g. `kill-executor`) with a pass/fail report.
+    #[command(subcommand)]
+    Drill(commands::drill::DrillCmd),
+    /// Hybrid executor nodes: `join` a managed control plane with a token.
+    #[command(subcommand)]
+    Executor(commands::executor::ExecutorCmd),
+    /// Signed effect-receipt bundles: export and offline verification
+    /// (at-most-once dispatch evidence).
+    #[command(subcommand)]
+    Receipts(commands::receipts::ReceiptsCmd),
     /// Local workflow studio: run sequences with hot reload, optional HTTP
     /// API server, embedded dashboard, directory watching, and virtual time.
     Dev(DevCmd),
@@ -221,10 +231,16 @@ enum Commands {
     /// Run database migrations against Postgres. Use this in CI/CD pipelines
     /// or init containers instead of the server's built-in `run_migrations` flag
     /// so that rolling deployments are safe.
+    ///
+    /// With `--to <url> --source <sqlite>`, instead move sequences and
+    /// in-flight instances from an embedded engine to a remote engine
+    /// without restarting runs (see `docs/MIGRATING_TO_CLOUD.md`).
     Migrate {
         /// Database URL (overrides `ORCH8_DATABASE_URL`).
         #[arg(long, env = "ORCH8_DATABASE_URL")]
-        database_url: String,
+        database_url: Option<String>,
+        #[command(flatten)]
+        to_cloud: commands::cloud_migrate::MigrateToArgs,
     },
     /// Export sequences, triggers, cron schedules, queue routing rules, and
     /// credentials (and optionally instances) to a versioned, checksummed
@@ -676,6 +692,22 @@ async fn main() -> Result<()> {
     if let Commands::Demo(cmd) = cli.command {
         return commands::demo::run(cmd, format).await;
     }
+    if let Commands::Drill(cmd) = cli.command {
+        return commands::drill::run(cmd, format).await;
+    }
+    if let Commands::Executor(cmd) = cli.command {
+        return commands::executor::run(cmd, format);
+    }
+    if let Commands::Migrate {
+        to_cloud: ref args, ..
+    } = cli.command
+        && args.to.is_some()
+    {
+        let Commands::Migrate { to_cloud, .. } = cli.command else {
+            unreachable!("matched above")
+        };
+        return commands::cloud_migrate::run(to_cloud, cli.tenant_id.as_deref(), format).await;
+    }
 
     if let Commands::Bootstrap(cmd) = cli.command {
         return commands::bootstrap::run(cmd).await;
@@ -696,7 +728,10 @@ async fn main() -> Result<()> {
         return commands::triggers::run(cmd).await;
     }
 
-    if let Commands::Migrate { database_url } = cli.command {
+    if let Commands::Migrate { database_url, .. } = cli.command {
+        let database_url = database_url.context(
+            "--database-url / ORCH8_DATABASE_URL is required (or pass --to <url> --source <sqlite> to move an embedded engine)",
+        )?;
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect(&database_url)
@@ -761,6 +796,7 @@ async fn main() -> Result<()> {
         Commands::Generate(cmd) => commands::generate::run(cmd).await?,
         Commands::Templates(cmd) => commands::templates::run(cmd).await?,
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,
+        Commands::Receipts(cmd) => commands::receipts::run(&client, base, cmd, format).await?,
         Commands::Dev(..)
         | Commands::Import(..)
         | Commands::Learn(..)
@@ -769,6 +805,8 @@ async fn main() -> Result<()> {
         | Commands::Upgrade(..)
         | Commands::Bootstrap(..)
         | Commands::Demo(..)
+        | Commands::Drill(..)
+        | Commands::Executor(..)
         | Commands::Migrate { .. }
         | Commands::Triggers(_)
         | Commands::Completions { .. } => {

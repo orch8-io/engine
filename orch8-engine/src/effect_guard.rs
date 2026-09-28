@@ -186,7 +186,7 @@ impl<'a> EffectGuard<'a> {
 /// ordinary local runs that were never explicitly enrolled in portable
 /// continuity. Deriving both IDs from the instance makes concurrent first
 /// effects converge on one scope across processes and runtimes.
-pub(crate) async fn ensure_effect_scope(
+pub async fn ensure_effect_scope(
     storage: &dyn StorageBackend,
     tenant_id: &TenantId,
     instance_id: InstanceId,
