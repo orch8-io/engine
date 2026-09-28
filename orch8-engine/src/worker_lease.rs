@@ -18,7 +18,7 @@
 //!
 //! Every transition is a fenced compare-and-swap on `(state, claim_epoch)`
 //! applied atomically with the instance/node change by
-//! [`StorageBackend::resolve_worker_task`], so a racing completion always
+//! [`orch8_storage::WorkerStore::resolve_worker_task`], so a racing completion always
 //! wins cleanly and two reapers never double-apply.
 
 use std::time::Duration;

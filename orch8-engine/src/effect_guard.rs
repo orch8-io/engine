@@ -364,7 +364,7 @@ async fn bound_effect_receipt_id(
 }
 
 /// Settle the effect receipt bound to a worker task (see
-/// [`bound_effect_receipt_id`]). Idempotent: an already-settled receipt is
+/// `bound_effect_receipt_id`). Idempotent: an already-settled receipt is
 /// left alone.
 pub async fn settle_worker_task_effect(
     storage: &dyn StorageBackend,
