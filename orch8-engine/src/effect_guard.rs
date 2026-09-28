@@ -331,11 +331,41 @@ pub async fn mark_external_worker_effect_unknown(
     .await
 }
 
-/// Settle the effect receipt bound to a worker task. The receipt is found by
-/// the `effect_id` stored on the task at dispatch; only rows written before
-/// that column existed fall back to recomputing the id from the instance's
-/// *current* continuity epoch (which misses after a handoff — the reason the
-/// id is now stored). Idempotent: an already-settled receipt is left alone.
+/// The id of the effect receipt bound to a worker task: the `effect_id`
+/// stored on the task when its attempt was dispatched. The id is never
+/// recomputed (a recomputation uses the *current* owner epoch and misses
+/// after a handoff). Rows written before the column existed carry no id;
+/// for those the attempt's still-open receipt is looked up by its recorded
+/// identity (instance, block, attempt) instead.
+async fn bound_effect_receipt_id(
+    storage: &dyn StorageBackend,
+    tenant_id: &TenantId,
+    task: &orch8_types::worker::WorkerTask,
+) -> Result<Option<EffectId>, EngineError> {
+    if let Some(id) = task.effect_id {
+        return Ok(Some(id));
+    }
+    let Some(execution) = storage
+        .get_continuity_execution_touching_instance(tenant_id, task.instance_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    Ok(storage
+        .find_unresolved_effect_receipt(
+            tenant_id,
+            execution.continuity_id,
+            task.instance_id,
+            &task.block_id,
+            u32::from(task.attempt),
+        )
+        .await?
+        .map(|receipt| receipt.id))
+}
+
+/// Settle the effect receipt bound to a worker task (see
+/// [`bound_effect_receipt_id`]). Idempotent: an already-settled receipt is
+/// left alone.
 pub async fn settle_worker_task_effect(
     storage: &dyn StorageBackend,
     tenant_id: &TenantId,
@@ -343,22 +373,8 @@ pub async fn settle_worker_task_effect(
     settlement: WorkerEffectSettlement,
     output: Option<&Value>,
 ) -> Result<(), EngineError> {
-    let id = if let Some(id) = task.effect_id {
-        id
-    } else {
-        let Some(execution) = storage
-            .get_continuity_execution_by_instance(tenant_id, task.instance_id)
-            .await?
-        else {
-            return Ok(());
-        };
-        deterministic_effect_id(
-            execution.continuity_id,
-            execution.epoch,
-            task.instance_id,
-            &task.block_id,
-            u32::from(task.attempt),
-        )
+    let Some(id) = bound_effect_receipt_id(storage, tenant_id, task).await? else {
+        return Ok(());
     };
     let Some(mut receipt) = storage.get_effect_receipt(tenant_id, id).await? else {
         return Ok(());
@@ -409,25 +425,13 @@ pub async fn worker_task_effect_is_ambiguous(
     tenant_id: &TenantId,
     task: &orch8_types::worker::WorkerTask,
 ) -> Result<bool, EngineError> {
-    let id = if let Some(id) = task.effect_id {
-        id
-    } else {
-        if !crate::release_diff::handler_has_side_effects(&task.handler_name) {
-            return Ok(false);
-        }
-        let Some(execution) = storage
-            .get_continuity_execution_by_instance(tenant_id, task.instance_id)
-            .await?
-        else {
-            return Ok(false);
-        };
-        deterministic_effect_id(
-            execution.continuity_id,
-            execution.epoch,
-            task.instance_id,
-            &task.block_id,
-            u32::from(task.attempt),
-        )
+    if task.effect_id.is_none()
+        && !crate::release_diff::handler_has_side_effects(&task.handler_name)
+    {
+        return Ok(false);
+    }
+    let Some(id) = bound_effect_receipt_id(storage, tenant_id, task).await? else {
+        return Ok(false);
     };
     Ok(storage
         .get_effect_receipt(tenant_id, id)

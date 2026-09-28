@@ -1471,7 +1471,7 @@ impl crate::WorkerStore for SqliteStorage {
             .execute(&mut *tx)
             .await?;
 
-        workers::insert_task(&mut tx, new_task).await?;
+        workers::insert_task(&mut tx, new_task, true).await?;
 
         if let Some(nid) = node_id {
             sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = ?1")

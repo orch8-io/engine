@@ -134,6 +134,8 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     lease_secs INTEGER CHECK(lease_secs > 0),
     carries_credentials INTEGER NOT NULL DEFAULT 0,
     claimed_runtime_kind TEXT,
+    -- Retry row not yet bound by its re-dispatch (Postgres migration 096).
+    awaiting_dispatch INTEGER NOT NULL DEFAULT 0,
     UNIQUE(instance_id, block_id),
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );

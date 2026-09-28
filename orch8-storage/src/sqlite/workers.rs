@@ -15,18 +15,22 @@ use super::helpers::{begin_immediate, row_to_worker_task, ts};
 /// INSERT for one worker task. On an `(instance_id, block_id)` conflict with
 /// a still-pending row of the same attempt (a retry pre-inserted by a
 /// failure/lease resolution) the dispatch-time effect id, ownership epoch,
-/// and credential flag are filled in. Mirrors the Postgres upsert.
+/// and credential flag are filled in. Mirrors the Postgres upsert, including
+/// `awaiting_dispatch`: a retry row stays unclaimable until the re-dispatch
+/// binds its effect id in this same statement.
 pub(super) async fn insert_task(
     conn: &mut sqlx::SqliteConnection,
     t: &WorkerTask,
+    awaiting_dispatch: bool,
 ) -> Result<(), StorageError> {
     sqlx::query(
-        "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,requirements,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,claim_epoch,resume_checkpoint,checkpoint_seq,completed_at,created_at,effect_id,continuity_epoch,lease_secs,carries_credentials,claimed_runtime_kind) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27) \
+        "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,requirements,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,claim_epoch,resume_checkpoint,checkpoint_seq,completed_at,created_at,effect_id,continuity_epoch,lease_secs,carries_credentials,claimed_runtime_kind,awaiting_dispatch) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28) \
          ON CONFLICT(instance_id,block_id) DO UPDATE SET \
              effect_id = COALESCE(worker_tasks.effect_id, excluded.effect_id), \
              continuity_epoch = COALESCE(worker_tasks.continuity_epoch, excluded.continuity_epoch), \
-             carries_credentials = MAX(worker_tasks.carries_credentials, excluded.carries_credentials) \
+             carries_credentials = MAX(worker_tasks.carries_credentials, excluded.carries_credentials), \
+             awaiting_dispatch = excluded.awaiting_dispatch \
          WHERE worker_tasks.state = 'pending' AND worker_tasks.attempt = excluded.attempt"
     )
     .bind(t.id.to_string())
@@ -61,6 +65,7 @@ pub(super) async fn insert_task(
     .bind(t.lease_secs.map(i64::from))
     .bind(i64::from(t.carries_credentials))
     .bind(t.claimed_runtime_kind.map(orch8_types::continuity::RuntimeKind::as_str))
+    .bind(i64::from(awaiting_dispatch))
     .execute(conn)
     .await?;
     Ok(())
@@ -69,7 +74,7 @@ pub(super) async fn insert_task(
 #[instrument(skip(storage, t), fields(task_id = %t.id, handler = %t.handler_name))]
 pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<(), StorageError> {
     let mut conn = storage.pool.acquire().await?;
-    insert_task(&mut conn, t).await
+    insert_task(&mut conn, t, false).await
 }
 
 pub(super) fn transition_event(
@@ -146,7 +151,7 @@ pub(super) async fn claim(
     let mut conn = begin_immediate(&storage.pool).await?;
 
     let select_res = sqlx::query(
-        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND requirements='{}' \
+        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND awaiting_dispatch=0 AND requirements='{}' \
          AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) \
          ORDER BY created_at ASC LIMIT ?2",
     )
@@ -227,7 +232,7 @@ pub(super) async fn claim_for_tenant(
     let select_res = sqlx::query(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
-         WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.requirements='{}' AND ti.tenant_id=?3
+         WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.awaiting_dispatch=0 AND wt.requirements='{}' AND ti.tenant_id=?3
            AND ti.state NOT IN ('completed', 'failed', 'cancelled')
          ORDER BY wt.created_at ASC
          LIMIT ?2",
@@ -323,7 +328,8 @@ pub(super) async fn claim_matching(
         query
             .push(" WHERE wt.handler_name=")
             .push_bind(handler_name);
-        query.push(" AND wt.state='pending'");
+        // Retry rows wait for their re-dispatch to bind the effect id.
+        query.push(" AND wt.state='pending' AND wt.awaiting_dispatch=0");
         // See the Postgres twin: no work for terminal/cancelled instances.
         query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))");
         if let Some(queue) = queue_name {
@@ -766,7 +772,7 @@ pub(super) async fn resolve(
             node_id,
             fire_at,
         } => {
-            insert_task(&mut conn, retry_task).await?;
+            insert_task(&mut conn, retry_task, true).await?;
             if let Some(node_id) = node_id {
                 sqlx::query("UPDATE execution_tree SET state='pending' WHERE id=?1")
                     .bind(node_id.into_uuid().to_string())

@@ -59,19 +59,26 @@ pub(super) fn transition_event(
 /// pre-inserted by a failure/lease resolution), the dispatch-time effect id,
 /// ownership epoch, and credential flag are filled in so the re-dispatch's
 /// receipt binds to the row a worker will actually claim.
+///
+/// `awaiting_dispatch = true` (retry rows only) makes the row unclaimable
+/// until that re-dispatch binds it: the same upsert clears the flag in the
+/// statement that writes `effect_id`, so a worker can never claim a retry
+/// attempt before its effect id is present.
 fn insert_task_query(
     task: &WorkerTask,
+    awaiting_dispatch: bool,
 ) -> Result<sqlx::query::Query<'static, Postgres, sqlx::postgres::PgArguments>, StorageError> {
     Ok(sqlx::query(
         r"INSERT INTO worker_tasks
             (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
              attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at,
-             effect_id, continuity_epoch, carries_credentials)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+             effect_id, continuity_epoch, carries_credentials, awaiting_dispatch)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
           ON CONFLICT (instance_id, block_id) DO UPDATE SET
               effect_id = COALESCE(worker_tasks.effect_id, EXCLUDED.effect_id),
               continuity_epoch = COALESCE(worker_tasks.continuity_epoch, EXCLUDED.continuity_epoch),
-              carries_credentials = worker_tasks.carries_credentials OR EXCLUDED.carries_credentials
+              carries_credentials = worker_tasks.carries_credentials OR EXCLUDED.carries_credentials,
+              awaiting_dispatch = EXCLUDED.awaiting_dispatch
           WHERE worker_tasks.state = 'pending' AND worker_tasks.attempt = EXCLUDED.attempt",
     )
     .bind(task.id)
@@ -97,11 +104,12 @@ fn insert_task_query(
         task.continuity_epoch
             .map(|epoch| i64::try_from(epoch).unwrap_or(i64::MAX)),
     )
-    .bind(task.carries_credentials))
+    .bind(task.carries_credentials)
+    .bind(awaiting_dispatch))
 }
 
 pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result<(), StorageError> {
-    insert_task_query(task)?.execute(&store.pool).await?;
+    insert_task_query(task, false)?.execute(&store.pool).await?;
     Ok(())
 }
 
@@ -133,7 +141,8 @@ pub(super) async fn claim(
               claim_epoch = claim_epoch + 1, lease_secs = NULL, claimed_runtime_kind = NULL
           WHERE id IN (
               SELECT id FROM worker_tasks
-              WHERE handler_name = $1 AND state = 'pending' AND requirements = '{}'::jsonb
+              WHERE handler_name = $1 AND state = 'pending' AND NOT awaiting_dispatch
+                AND requirements = '{}'::jsonb
                 AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))
               ORDER BY created_at
               LIMIT $3
@@ -192,6 +201,7 @@ pub(super) async fn claim_for_tenant(
               JOIN task_instances ti ON ti.id = wt.instance_id
               WHERE wt.handler_name = $1
                 AND wt.state = 'pending'
+                AND NOT wt.awaiting_dispatch
                 AND wt.requirements = '{}'::jsonb
                 AND ti.tenant_id = $4
                 AND ti.state NOT IN ('completed', 'failed', 'cancelled')
@@ -268,7 +278,9 @@ pub(super) async fn claim_matching(
         query
             .push(" WHERE wt.handler_name = ")
             .push_bind(handler_name);
-        query.push(" AND wt.state = 'pending'");
+        // A retry row is claimable only once its re-dispatch bound the
+        // attempt's effect id (see `insert_task_query`).
+        query.push(" AND wt.state = 'pending' AND NOT wt.awaiting_dispatch");
         // Never hand out work for an instance that already finished or was
         // cancelled (its tasks are purged on cancel, but a racing dispatch
         // or an older row may remain).
@@ -325,7 +337,7 @@ pub(super) async fn claim_matching(
              lease_secs=$4, claimed_runtime_kind=$5
            WHERE id IN (
              SELECT id FROM worker_tasks
-             WHERE id = ANY($2) AND state = 'pending'
+             WHERE id = ANY($2) AND state = 'pending' AND NOT awaiting_dispatch
              ORDER BY created_at, id
              LIMIT $3
              FOR UPDATE SKIP LOCKED
@@ -742,7 +754,9 @@ pub(super) async fn resolve(
             node_id,
             fire_at,
         } => {
-            insert_task_query(retry_task)?.execute(&mut *tx).await?;
+            insert_task_query(retry_task, true)?
+                .execute(&mut *tx)
+                .await?;
             if let Some(node_id) = node_id {
                 sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = $1")
                     .bind(node_id.into_uuid())
@@ -825,7 +839,7 @@ pub(super) async fn retry(
         .execute(&mut *tx)
         .await?;
 
-    insert_task_query(new_task)?.execute(&mut *tx).await?;
+    insert_task_query(new_task, true)?.execute(&mut *tx).await?;
 
     if let Some(nid) = node_id {
         sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = $1")
