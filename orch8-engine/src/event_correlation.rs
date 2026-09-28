@@ -220,11 +220,24 @@ async fn resume_waiting_instance(
             InstanceState::Waiting | InstanceState::Scheduled
         )
     {
-        let _ = storage
-            .update_instance_state(instance_id, instance.state, Some(Utc::now()))
-            .await;
+        let _ = wake_if_still_parked(storage, instance_id, instance.state).await;
     }
     Ok(())
+}
+
+async fn wake_if_still_parked(
+    storage: &Arc<dyn StorageBackend>,
+    instance_id: InstanceId,
+    observed_state: InstanceState,
+) -> Result<bool, StorageError> {
+    storage
+        .conditional_update_instance_state(
+            instance_id,
+            observed_state,
+            observed_state,
+            Some(Utc::now()),
+        )
+        .await
 }
 
 /// Parse `wait_for_event` params into an [`EventWait`]. Shared by the
@@ -362,10 +375,37 @@ pub fn envelope(
 mod tests {
     use super::*;
     use orch8_storage::sqlite::SqliteStorage;
+    use orch8_types::context::ExecutionContext;
     use orch8_types::event_correlation::JoinMode;
+    use orch8_types::ids::{Namespace, SequenceId, TenantId};
+    use orch8_types::instance::{Priority, TaskInstance};
 
     async fn store() -> Arc<dyn StorageBackend> {
         Arc::new(SqliteStorage::in_memory().await.unwrap())
+    }
+
+    fn instance(state: InstanceState) -> TaskInstance {
+        let now = Utc::now();
+        TaskInstance {
+            id: InstanceId::new(),
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId::unchecked("t1"),
+            namespace: Namespace::new("default"),
+            state,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: String::new(),
+            metadata: json!({}),
+            context: ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: now,
+            updated_at: now,
+        }
     }
 
     fn wait(names: &[&str], mode: JoinMode) -> EventWait {
@@ -405,6 +445,25 @@ mod tests {
         let events = s.list_events("t1", None, 10).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload, json!({"n": 1}));
+    }
+
+    #[tokio::test]
+    async fn stale_wake_does_not_resurrect_a_cancelled_instance() {
+        let storage = store().await;
+        let parked = instance(InstanceState::Waiting);
+        storage.create_instance(&parked).await.unwrap();
+        storage
+            .update_instance_state(parked.id, InstanceState::Cancelled, None)
+            .await
+            .unwrap();
+
+        assert!(
+            !wake_if_still_parked(&storage, parked.id, InstanceState::Waiting)
+                .await
+                .unwrap()
+        );
+        let stored = storage.get_instance(parked.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Cancelled);
     }
 
     #[tokio::test]

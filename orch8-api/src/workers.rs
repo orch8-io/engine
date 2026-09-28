@@ -681,6 +681,7 @@ pub(crate) async fn list_workers(
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<ListWorkersQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
     let registrations = state
         .storage
         .list_worker_registrations(None)
@@ -688,13 +689,12 @@ pub(crate) async fn list_workers(
         .map_err(|e| ApiError::from_storage(e, "worker_registration"))?;
     let in_flight: std::collections::HashMap<String, i64> = state
         .storage
-        .claimed_task_counts_by_worker()
+        .claimed_task_counts_by_worker(scoped.as_ref())
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .into_iter()
         .collect();
 
-    let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
     let mut by_worker: std::collections::BTreeMap<String, WorkerInfo> =
         std::collections::BTreeMap::new();
     for reg in registrations {

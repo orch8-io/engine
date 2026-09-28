@@ -1560,8 +1560,12 @@ pub trait WorkerStore: Send + Sync + 'static {
         seen_within_secs: Option<i64>,
     ) -> Result<Vec<orch8_types::worker::WorkerRegistration>, StorageError>;
 
-    /// Count currently-claimed worker tasks grouped by claiming worker id.
-    async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError>;
+    /// Count currently-claimed worker tasks grouped by claiming worker id,
+    /// optionally restricted to the owning tenant.
+    async fn claimed_task_counts_by_worker(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<(String, i64)>, StorageError>;
 
     // === Webhook Outbox ===
 
@@ -1976,6 +1980,14 @@ pub trait AdminStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<TriggerDef>, StorageError>;
 
+    /// List every trigger for runtime reconciliation. Unlike the public API
+    /// list operation, this must not silently cap the result because omitted
+    /// rows would never get background listeners.
+    async fn list_all_triggers(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<TriggerDef>, StorageError>;
+
     async fn update_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
 
     /// Update a trigger only if its tenant and modification timestamp match.
@@ -2083,6 +2095,13 @@ pub trait AdminStore: Send + Sync + 'static {
         &self,
         tenant_id: Option<&TenantId>,
         limit: u32,
+    ) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError>;
+
+    /// List every alert rule for runtime evaluation. This deliberately has no
+    /// API page limit: a skipped rule would never be evaluated.
+    async fn list_all_alert_rules(
+        &self,
+        tenant_id: Option<&TenantId>,
     ) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError>;
 
     /// Update a rule in place, scoped to `rule.tenant_id`. Returns whether a

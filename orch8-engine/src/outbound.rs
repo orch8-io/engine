@@ -13,8 +13,8 @@
 //!   A 307/308 re-POSTs the body (e.g. a `refresh_token`) to wherever the
 //!   endpoint points, so token calls must not follow any hop.
 //! - [`Profile::Operator`]: operator-configured targets that may legitimately
-//!   be internal (webhooks). No resolver filter, but redirect hops are still
-//!   re-checked so a trusted target can't bounce us into cloud metadata.
+//!   be internal (webhooks). Redirects are disabled so signed request bodies
+//!   cannot be forwarded to a different destination.
 //! - [`Profile::LocalSidecar`]: operator-configured local services. Proxies
 //!   and redirects are disabled so credential-bearing POSTs stay at the
 //!   configured endpoint.
@@ -38,7 +38,7 @@ pub enum Profile {
     Untrusted,
     /// Credential-bearing token endpoint: SSRF resolver, no redirects, no proxy.
     TokenEndpoint,
-    /// Operator-configured URL: checked redirects only.
+    /// Operator-configured URL: internal destinations allowed, redirects denied.
     Operator,
     /// Operator-configured local service that receives credentials: no proxy
     /// and no redirects, since a 307/308 would forward the POST body.
@@ -69,7 +69,7 @@ pub fn builder(profile: Profile) -> reqwest::ClientBuilder {
             .dns_resolver(std::sync::Arc::new(SsrfGuardResolver))
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none()),
-        Profile::Operator => b.redirect(checked_redirects()),
+        Profile::Operator => b.redirect(reqwest::redirect::Policy::none()),
         Profile::LocalSidecar => b.no_proxy().redirect(reqwest::redirect::Policy::none()),
     }
 }
@@ -217,6 +217,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status().as_u16(), 307);
+    }
+
+    #[tokio::test]
+    async fn operator_profile_does_not_forward_signed_bodies_across_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://example.com/collect\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let response = build(builder(Profile::Operator))
+            .post(format!("http://127.0.0.1:{port}/hook"))
+            .header("X-Orch8-Signature", "sha256=secret")
+            .body("sensitive payload")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(response.url().host_str(), Some("127.0.0.1"));
     }
 
     #[tokio::test]

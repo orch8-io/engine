@@ -90,6 +90,36 @@ fn parse_endpoint(handler: &str) -> Result<(Scheme, &str, &str), StepError> {
     Ok((scheme, addr, method))
 }
 
+fn parse_response(status: u16, bytes: &[u8], url: &str) -> Result<Value, StepError> {
+    if status >= 400 {
+        let body = crate::outbound::truncate_for_error(bytes, MAX_ERROR_BODY_BYTES);
+        let details = Some(json!({ "status": status, "body": body }));
+        return Err(if status >= 500 {
+            StepError::Retryable {
+                message: format!(
+                    "grpc plugin: server error {status} from {}",
+                    crate::outbound::redact_url(url)
+                ),
+                details,
+            }
+        } else {
+            StepError::Permanent {
+                message: format!(
+                    "grpc plugin: client error {status} from {}",
+                    crate::outbound::redact_url(url)
+                ),
+                details,
+            }
+        });
+    }
+
+    let body = String::from_utf8_lossy(bytes).into_owned();
+    Ok(serde_json::from_str(&body).unwrap_or_else(|e| {
+        warn!(error = %e, "grpc plugin: response is not valid JSON, wrapping as string");
+        json!({ "raw": body })
+    }))
+}
+
 /// Execute a step by calling an external gRPC-compatible endpoint.
 ///
 /// Uses reqwest with HTTP/2 to call the endpoint. The request body is JSON
@@ -170,38 +200,22 @@ pub async fn handle_grpc_plugin(ctx: StepContext) -> Result<Value, StepError> {
         .await
         .map_err(|e| match e {
             crate::outbound::BodyReadError::TooLarge(cap) => StepError::Permanent {
-                message: format!("grpc plugin: response body from {url} exceeds {cap} bytes"),
+                message: format!(
+                    "grpc plugin: response body from {} exceeds {cap} bytes",
+                    crate::outbound::redact_url(&url)
+                ),
                 details: None,
             },
             crate::outbound::BodyReadError::Io(e) => StepError::Retryable {
-                message: format!("grpc plugin: failed to read response body from {url}: {e}"),
+                message: format!(
+                    "grpc plugin: failed to read response body from {}: {e}",
+                    crate::outbound::redact_url(&url)
+                ),
                 details: None,
             },
         })?;
 
-    if status >= 400 {
-        let body = crate::outbound::truncate_for_error(&bytes, MAX_ERROR_BODY_BYTES);
-        let details = Some(json!({ "status": status, "body": body }));
-        return Err(if status >= 500 {
-            StepError::Retryable {
-                message: format!("grpc plugin: server error {status} from {url}"),
-                details,
-            }
-        } else {
-            StepError::Permanent {
-                message: format!("grpc plugin: client error {status} from {url}"),
-                details,
-            }
-        });
-    }
-    let body = String::from_utf8_lossy(&bytes).into_owned();
-
-    let output: Value = serde_json::from_str(&body).unwrap_or_else(|e| {
-        warn!(error = %e, "grpc plugin: response is not valid JSON, wrapping as string");
-        json!({ "raw": body })
-    });
-
-    Ok(output)
+    parse_response(status, &bytes, &url)
 }
 
 #[cfg(test)]

@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use tokio::time::interval;
+use tokio::task::JoinSet;
+use tokio::time::{interval, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -50,6 +51,7 @@ pub async fn run_trigger_loop(
     }));
 
     let mut ticker = interval(poll_interval);
+    let mut listener_tasks = JoinSet::new();
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     info!(
@@ -61,22 +63,52 @@ pub async fn run_trigger_loop(
         tokio::select! {
             () = cancel.cancelled() => {
                 info!("trigger processor loop cancelled");
-                // Cancel all active listeners.
-                {
-                    let active = active.read().await;
-                    for (slug, listener) in &active.listeners {
-                        debug!(slug, "cancelling trigger listener");
-                        listener.cancel.cancel();
-                    }
-                }
+                stop_listener_tasks(&active, &mut listener_tasks).await;
                 return;
             }
+            result = listener_tasks.join_next(), if !listener_tasks.is_empty() => {
+                if let Some(Err(error)) = result {
+                    error!(%error, "trigger listener task failed");
+                }
+            }
             _ = ticker.tick() => {
-                if let Err(e) = sync_triggers(&storage, &active, &cancel).await {
+                if let Err(e) = sync_triggers(
+                    &storage,
+                    &active,
+                    &cancel,
+                    &mut listener_tasks,
+                ).await {
                     error!(error = %e, "trigger sync failed");
                 }
             }
         }
+    }
+}
+
+async fn stop_listener_tasks(
+    active: &Arc<RwLock<ActiveTriggers>>,
+    listener_tasks: &mut JoinSet<()>,
+) {
+    {
+        let active = active.read().await;
+        for (slug, listener) in &active.listeners {
+            debug!(slug, "cancelling trigger listener");
+            listener.cancel.cancel();
+        }
+    }
+
+    let drained = timeout(std::time::Duration::from_secs(10), async {
+        while let Some(result) = listener_tasks.join_next().await {
+            if let Err(error) = result {
+                error!(%error, "trigger listener task failed during shutdown");
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        warn!("trigger listeners did not stop within 10 seconds; aborting them");
+        listener_tasks.abort_all();
+        while listener_tasks.join_next().await.is_some() {}
     }
 }
 
@@ -87,13 +119,9 @@ async fn sync_triggers(
     storage: &Arc<dyn StorageBackend>,
     active: &Arc<RwLock<ActiveTriggers>>,
     parent_cancel: &CancellationToken,
+    listener_tasks: &mut JoinSet<()>,
 ) -> Result<(), orch8_types::error::StorageError> {
-    let triggers = storage.list_triggers(None, 1000).await?;
-    if triggers.len() == 1000 {
-        warn!(
-            "trigger list hit the 1000-row page limit — enabled triggers beyond it have no listeners"
-        );
-    }
+    let triggers = storage.list_all_triggers(None).await?;
 
     {
         // Cloned BEFORE the write guard shadows the `active` parameter — the
@@ -163,7 +191,7 @@ async fn sync_triggers(
                 ($run:expr, $kind:literal) => {{
                     let active = Arc::clone(&active_shared);
                     let slug = slug.clone();
-                    tokio::spawn(async move {
+                    listener_tasks.spawn(async move {
                         ($run).await;
                         let mut active = active.write().await;
                         if active
@@ -672,7 +700,7 @@ async fn run_file_watch_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_storage::{InstanceStore, SequenceStore, sqlite::SqliteStorage};
+    use orch8_storage::{AdminStore, InstanceStore, SequenceStore, sqlite::SqliteStorage};
     use orch8_types::ids::SequenceId;
     use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
 
@@ -735,6 +763,19 @@ mod tests {
         };
         // Webhook should not be in the desired set for non-webhook processing.
         assert_eq!(t.trigger_type, TriggerType::Webhook);
+    }
+
+    #[tokio::test]
+    async fn runtime_trigger_listing_is_not_bound_by_api_page_limit() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        for slug in ["first", "second", "third"] {
+            let mut trigger = mk_trigger(slug, "seq", TriggerType::Event);
+            trigger.enabled = false;
+            storage.create_trigger(&trigger).await.unwrap();
+        }
+
+        assert_eq!(storage.list_triggers(None, 1).await.unwrap().len(), 1);
+        assert_eq!(storage.list_all_triggers(None).await.unwrap().len(), 3);
     }
 
     #[tokio::test]
@@ -1006,8 +1047,11 @@ mod tests {
             listeners: HashMap::new(),
         }));
         let cancel = CancellationToken::new();
+        let mut listener_tasks = JoinSet::new();
 
-        sync_triggers(&storage, &active, &cancel).await.unwrap();
+        sync_triggers(&storage, &active, &cancel, &mut listener_tasks)
+            .await
+            .unwrap();
         let token_v1 = {
             let active = active.read().await;
             active.listeners.get("t-m8").unwrap().cancel.clone()
@@ -1021,7 +1065,9 @@ mod tests {
         trigger.config = serde_json::json!({"poll_url": "https://b.example.com"});
         storage.update_trigger(&trigger).await.unwrap();
 
-        sync_triggers(&storage, &active, &cancel).await.unwrap();
+        sync_triggers(&storage, &active, &cancel, &mut listener_tasks)
+            .await
+            .unwrap();
 
         assert!(
             token_v1.is_cancelled(),
@@ -1035,6 +1081,7 @@ mod tests {
             !token_v2.is_cancelled(),
             "a fresh listener must be running with the new config"
         );
+        stop_listener_tasks(&active, &mut listener_tasks).await;
     }
 
     // Contrast case: re-syncing with an UNCHANGED trigger must not restart
@@ -1050,18 +1097,24 @@ mod tests {
             listeners: HashMap::new(),
         }));
         let cancel = CancellationToken::new();
+        let mut listener_tasks = JoinSet::new();
 
-        sync_triggers(&storage, &active, &cancel).await.unwrap();
+        sync_triggers(&storage, &active, &cancel, &mut listener_tasks)
+            .await
+            .unwrap();
         let token_v1 = {
             let active = active.read().await;
             active.listeners.get("t-stable").unwrap().cancel.clone()
         };
 
-        sync_triggers(&storage, &active, &cancel).await.unwrap();
+        sync_triggers(&storage, &active, &cancel, &mut listener_tasks)
+            .await
+            .unwrap();
 
         assert!(
             !token_v1.is_cancelled(),
             "re-syncing an unchanged trigger must not cancel/restart its listener"
         );
+        stop_listener_tasks(&active, &mut listener_tasks).await;
     }
 }

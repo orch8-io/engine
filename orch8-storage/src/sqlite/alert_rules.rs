@@ -96,6 +96,26 @@ pub(super) async fn list(
     rows.iter().map(row_to_rule).collect()
 }
 
+pub(super) async fn list_all(
+    store: &SqliteStorage,
+    tenant_id: Option<&TenantId>,
+) -> Result<Vec<AlertRule>, StorageError> {
+    let rows = match tenant_id {
+        Some(tenant_id) => {
+            sqlx::query("SELECT * FROM alert_rules WHERE tenant_id = ?1 ORDER BY created_at")
+                .bind(tenant_id.as_str())
+                .fetch_all(&store.pool)
+                .await?
+        }
+        None => {
+            sqlx::query("SELECT * FROM alert_rules ORDER BY created_at")
+                .fetch_all(&store.pool)
+                .await?
+        }
+    };
+    rows.iter().map(row_to_rule).collect()
+}
+
 pub(super) async fn update(store: &SqliteStorage, r: &AlertRule) -> Result<bool, StorageError> {
     let res = sqlx::query(
         r"UPDATE alert_rules SET name = ?3, enabled = ?4, condition = ?5, destination = ?6,

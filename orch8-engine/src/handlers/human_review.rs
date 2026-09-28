@@ -138,8 +138,8 @@ pub async fn handle_human_review(ctx: StepContext) -> Result<Value, StepError> {
 
             if let Err(e) = req.send().await {
                 warn!(
-                    url = %notify_url,
-                    error = %e,
+                    url = %crate::outbound::redact_url(notify_url),
+                    error = %crate::outbound::redact_error(&e),
                     "human_review: notification failed (non-blocking)"
                 );
             }

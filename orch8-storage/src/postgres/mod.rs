@@ -1278,8 +1278,11 @@ impl crate::WorkerStore for PostgresStorage {
         workers::list_registrations(self, seen_within_secs).await
     }
 
-    async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError> {
-        workers::claimed_counts_by_worker(self).await
+    async fn claimed_task_counts_by_worker(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<(String, i64)>, StorageError> {
+        workers::claimed_counts_by_worker(self, tenant_id).await
     }
 
     async fn park_webhook(
@@ -1699,6 +1702,13 @@ impl crate::AdminStore for PostgresStorage {
         triggers::list(self, tenant_id, limit).await
     }
 
+    async fn list_all_triggers(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<orch8_types::trigger::TriggerDef>, StorageError> {
+        triggers::list_all(self, tenant_id).await
+    }
+
     async fn update_trigger(
         &self,
         trigger: &orch8_types::trigger::TriggerDef,
@@ -1811,6 +1821,13 @@ impl crate::AdminStore for PostgresStorage {
         limit: u32,
     ) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError> {
         alert_rules::list(self, tenant_id, limit).await
+    }
+
+    async fn list_all_alert_rules(
+        &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
+    ) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError> {
+        alert_rules::list_all(self, tenant_id).await
     }
 
     async fn update_alert_rule(

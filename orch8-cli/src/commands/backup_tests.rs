@@ -369,7 +369,7 @@ fn tampered_or_foreign_archives_are_rejected() {
     let mut extra = members.clone();
     extra.push(("evil.jsonl", b"{}\n".to_vec()));
     let err = read_archive(&rebuild(&extra)).unwrap_err().to_string();
-    assert!(err.contains("not listed"), "{err}");
+    assert!(err.contains("unexpected archive member"), "{err}");
 
     let mut newer = archive.manifest.clone();
     newer.format_version = FORMAT_VERSION + 1;

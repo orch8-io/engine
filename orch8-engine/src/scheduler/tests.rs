@@ -981,6 +981,42 @@ async fn enforce_concurrency_limits_max_zero_blocks_all() {
 }
 
 #[tokio::test]
+async fn deferral_only_reschedules_instances_that_are_still_running() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let running_id = InstanceId::new();
+    let cancelled_id = InstanceId::new();
+    seed_instance_with_concurrency(
+        storage.as_ref(),
+        running_id,
+        None,
+        None,
+        InstanceState::Running,
+    )
+    .await;
+    seed_instance_with_concurrency(
+        storage.as_ref(),
+        cancelled_id,
+        None,
+        None,
+        InstanceState::Cancelled,
+    )
+    .await;
+
+    let fire_at = Utc::now() + chrono::Duration::seconds(5);
+    defer_running_instances(&storage, &[running_id, cancelled_id], fire_at)
+        .await
+        .unwrap();
+
+    let running = storage.get_instance(running_id).await.unwrap().unwrap();
+    assert_eq!(running.state, InstanceState::Scheduled);
+    assert_eq!(running.next_fire_at, Some(fire_at));
+
+    let cancelled = storage.get_instance(cancelled_id).await.unwrap().unwrap();
+    assert_eq!(cancelled.state, InstanceState::Cancelled);
+    assert_eq!(cancelled.next_fire_at, None);
+}
+
+#[tokio::test]
 async fn enforce_concurrency_limits_allows_up_to_cap() {
     // Plan #266/270: max_concurrency=2 with three contenders — two kept,
     // one deferred. Also verifies count-accurate logic (one is kept even

@@ -311,13 +311,14 @@ mod listener {
                 .await
                 .map_err(|e| crate::outbound::redact_error(&e))?;
             let status = resp.status();
-            let bytes = resp
-                .bytes()
+            let bytes = crate::outbound::read_body_capped(resp, MAX_RESPONSE_BYTES)
                 .await
-                .map_err(|e| crate::outbound::redact_error(&e))?;
-            if bytes.len() > MAX_RESPONSE_BYTES {
-                return Err("SQS response too large".into());
-            }
+                .map_err(|error| match error {
+                    crate::outbound::BodyReadError::TooLarge(max) => {
+                        format!("SQS response exceeds {max} byte limit")
+                    }
+                    crate::outbound::BodyReadError::Io(message) => message,
+                })?;
             if !status.is_success() {
                 let text = String::from_utf8_lossy(&bytes);
                 let preview: String = text.chars().take(300).collect();

@@ -852,7 +852,9 @@ pub(super) async fn upsert_registration(
           SET queue_name = EXCLUDED.queue_name,
               version = EXCLUDED.version,
               tenant_id = EXCLUDED.tenant_id,
-              last_seen_at = EXCLUDED.last_seen_at",
+              last_seen_at = EXCLUDED.last_seen_at
+          WHERE COALESCE(worker_registrations.tenant_id, '') =
+                COALESCE(EXCLUDED.tenant_id, '')",
     )
     .bind(&reg.worker_id)
     .bind(&reg.handler_name)
@@ -915,13 +917,28 @@ pub(super) async fn list_registrations(
 
 pub(super) async fn claimed_counts_by_worker(
     store: &PostgresStorage,
+    tenant_id: Option<&orch8_types::ids::TenantId>,
 ) -> Result<Vec<(String, i64)>, StorageError> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        r"SELECT worker_id, COUNT(*) FROM worker_tasks
-          WHERE state = 'claimed' AND worker_id IS NOT NULL
-          GROUP BY worker_id",
-    )
-    .fetch_all(&store.pool)
-    .await?;
+    let rows: Vec<(String, i64)> = if let Some(tenant_id) = tenant_id {
+        sqlx::query_as(
+            r"SELECT wt.worker_id, COUNT(*)
+              FROM worker_tasks wt
+              JOIN task_instances ti ON ti.id = wt.instance_id
+              WHERE wt.state = 'claimed' AND wt.worker_id IS NOT NULL
+                AND ti.tenant_id = $1
+              GROUP BY wt.worker_id",
+        )
+        .bind(tenant_id.as_str())
+        .fetch_all(&store.pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            r"SELECT worker_id, COUNT(*) FROM worker_tasks
+              WHERE state = 'claimed' AND worker_id IS NOT NULL
+              GROUP BY worker_id",
+        )
+        .fetch_all(&store.pool)
+        .await?
+    };
     Ok(rows)
 }

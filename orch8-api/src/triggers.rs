@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use orch8_types::ids::{Namespace, TenantId};
+use orch8_types::redaction::RedactionPolicy;
 use orch8_types::trigger::{TriggerDef, TriggerType};
 
 use crate::AppState;
@@ -38,7 +39,7 @@ pub fn routes() -> Router<AppState> {
         .route("/triggers/{slug}/target", patch(retarget_trigger))
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct CreateTriggerRequest {
     pub slug: String,
     pub sequence_name: String,
@@ -65,6 +66,13 @@ pub struct TriggerQuery {
 
 fn default_limit() -> u32 {
     100
+}
+
+const MAX_TRIGGER_SECRET_BYTES: usize = 256 * 1024;
+
+fn redact_trigger_config(mut trigger: TriggerDef) -> TriggerDef {
+    trigger.config = RedactionPolicy::default().redacted(&trigger.config);
+    trigger
 }
 
 #[utoipa::path(post, path = "/triggers", tag = "triggers",
@@ -98,6 +106,15 @@ pub(crate) async fn create_trigger(
         return Err(ApiError::InvalidArgument(
             "trigger secret cannot be empty; omit the field to leave the trigger unauthenticated"
                 .into(),
+        ));
+    }
+    if body
+        .secret
+        .as_ref()
+        .is_some_and(|secret| secret.len() > MAX_TRIGGER_SECRET_BYTES)
+    {
+        return Err(ApiError::PayloadTooLarge(
+            "trigger secret exceeds 256 KiB".into(),
         ));
     }
     // Provider signature presets must be well-formed and only make sense on
@@ -181,7 +198,7 @@ pub(crate) async fn create_trigger(
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?;
 
-    Ok((StatusCode::CREATED, Json(trigger)))
+    Ok((StatusCode::CREATED, Json(redact_trigger_config(trigger))))
 }
 
 #[utoipa::path(get, path = "/triggers", tag = "triggers",
@@ -199,7 +216,12 @@ pub(crate) async fn list_triggers(
         .list_triggers(tenant_ref.as_ref(), query.limit)
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?;
-    Ok(Json(triggers))
+    Ok(Json(
+        triggers
+            .into_iter()
+            .map(redact_trigger_config)
+            .collect::<Vec<_>>(),
+    ))
 }
 
 #[utoipa::path(get, path = "/triggers/{slug}", tag = "triggers",
@@ -243,19 +265,23 @@ pub(crate) async fn get_trigger(
             .get_trigger_poll_state(&slug)
             .await
             .map_err(|e| ApiError::from_storage(e, "trigger_poll_state"))?;
+        let trigger = redact_trigger_config(trigger);
         let mut body = serde_json::to_value(&trigger)
             .map_err(|e| ApiError::Internal(format!("trigger serialization failed: {e}")))?;
         if let serde_json::Value::Object(map) = &mut body {
-            map.insert(
-                "poll_state".into(),
-                poll_state.map_or(serde_json::Value::Null, |s| {
-                    serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
-                }),
-            );
+            let mut poll_state = poll_state.map_or(serde_json::Value::Null, |s| {
+                serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
+            });
+            if let serde_json::Value::Object(state) = &mut poll_state
+                && let Some(serde_json::Value::String(error)) = state.get_mut("last_error")
+            {
+                *error = RedactionPolicy::default().safe_excerpt(error);
+            }
+            map.insert("poll_state".into(), poll_state);
         }
         return Ok(Json(body).into_response());
     }
-    Ok(Json(trigger).into_response())
+    Ok(Json(redact_trigger_config(trigger)).into_response())
 }
 
 #[utoipa::path(delete, path = "/triggers/{slug}", tag = "triggers",
@@ -369,4 +395,39 @@ pub(crate) async fn fire_trigger(
             "sequence_name": trigger.sequence_name,
         })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_response_redacts_provider_credentials() {
+        let now = chrono::Utc::now();
+        let trigger = TriggerDef {
+            slug: "events".into(),
+            sequence_name: "process".into(),
+            version: None,
+            tenant_id: TenantId::unchecked("tenant-a"),
+            namespace: "default".into(),
+            enabled: true,
+            secret: None,
+            trigger_type: TriggerType::PubSub,
+            config: serde_json::json!({
+                "credentials_json": {"private_key": "secret-key"},
+                "endpoint": "https://user:pass@example.com/pull?api_key=secret"
+            }),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let redacted = redact_trigger_config(trigger);
+        assert_eq!(
+            redacted.config["credentials_json"],
+            orch8_types::redaction::REDACTED
+        );
+        let endpoint = redacted.config["endpoint"].as_str().unwrap();
+        assert!(!endpoint.contains("user:pass"));
+        assert!(!endpoint.contains("api_key=secret"));
+    }
 }

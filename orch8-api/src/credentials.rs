@@ -36,7 +36,7 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct CreateCredentialRequest {
     pub id: String,
     pub name: String,
@@ -56,7 +56,7 @@ pub struct CreateCredentialRequest {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct UpdateCredentialRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -135,6 +135,33 @@ fn default_limit() -> u32 {
 
 const MAX_CREDENTIAL_VALUE_BYTES: usize = 256 * 1024;
 
+fn validate_credential_payload(
+    kind: &CredentialKind,
+    value_len: usize,
+    refresh_url: Option<&str>,
+    refresh_token_len: Option<usize>,
+) -> Result<(), ApiError> {
+    if value_len > MAX_CREDENTIAL_VALUE_BYTES {
+        return Err(ApiError::PayloadTooLarge(
+            "credential value exceeds 256 KiB".into(),
+        ));
+    }
+    if refresh_token_len.is_some_and(|len| len > MAX_CREDENTIAL_VALUE_BYTES) {
+        return Err(ApiError::PayloadTooLarge(
+            "credential refresh_token exceeds 256 KiB".into(),
+        ));
+    }
+    if matches!(kind, CredentialKind::Oauth2)
+        && refresh_url.is_some()
+        && refresh_token_len.is_none()
+    {
+        return Err(ApiError::InvalidArgument(
+            "oauth2 credential with refresh_url requires refresh_token".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn create_credential(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -161,20 +188,12 @@ async fn create_credential(
             "id may only contain alphanumerics, '-', '_', '.'".into(),
         ));
     }
-    if matches!(body.kind, CredentialKind::Oauth2)
-        && body.refresh_url.is_some()
-        && body.refresh_token.is_none()
-    {
-        return Err(ApiError::InvalidArgument(
-            "oauth2 credential with refresh_url requires refresh_token".into(),
-        ));
-    }
-
-    if body.value.len() > MAX_CREDENTIAL_VALUE_BYTES {
-        return Err(ApiError::PayloadTooLarge(
-            "credential value exceeds 256 KiB".into(),
-        ));
-    }
+    validate_credential_payload(
+        &body.kind,
+        body.value.len(),
+        body.refresh_url.as_deref(),
+        body.refresh_token.as_ref().map(String::len),
+    )?;
     if let Some(ref url) = body.refresh_url {
         validate_public_url(url).map_err(|e| ApiError::InvalidArgument(e.to_string()))?;
     }
@@ -299,6 +318,18 @@ async fn update_credential(
     if let Some(description) = body.description {
         credential.description = Some(description);
     }
+    // Apply the same limits and cross-field validation as creation. Without
+    // this final-state check, PATCH could store a multi-megabyte secret or
+    // change an existing credential into an unusable OAuth2 configuration.
+    validate_credential_payload(
+        &credential.kind,
+        credential.value.expose().len(),
+        credential.refresh_url.as_deref(),
+        credential
+            .refresh_token
+            .as_ref()
+            .map(|token| token.expose().len()),
+    )?;
     // CAS on the `updated_at` we read: the OAuth2 refresh loop rotates
     // `value`/`refresh_token` in the background, and a blind full-row write
     // of this (possibly stale) snapshot would put a revoked refresh token
@@ -414,5 +445,49 @@ mod tests {
         cred.enabled = false;
         let resp: CredentialResponse = cred.into();
         assert!(!resp.enabled);
+    }
+
+    #[test]
+    fn credential_payload_limits_value_and_refresh_token() {
+        assert!(matches!(
+            validate_credential_payload(
+                &CredentialKind::ApiKey,
+                MAX_CREDENTIAL_VALUE_BYTES + 1,
+                None,
+                None,
+            ),
+            Err(ApiError::PayloadTooLarge(_))
+        ));
+        assert!(matches!(
+            validate_credential_payload(
+                &CredentialKind::Oauth2,
+                1,
+                Some("https://example.com/token"),
+                Some(MAX_CREDENTIAL_VALUE_BYTES + 1),
+            ),
+            Err(ApiError::PayloadTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn oauth_payload_requires_refresh_token_when_refresh_url_is_set() {
+        assert!(matches!(
+            validate_credential_payload(
+                &CredentialKind::Oauth2,
+                1,
+                Some("https://example.com/token"),
+                None,
+            ),
+            Err(ApiError::InvalidArgument(_))
+        ));
+        assert!(
+            validate_credential_payload(
+                &CredentialKind::Oauth2,
+                1,
+                Some("https://example.com/token"),
+                Some(1),
+            )
+            .is_ok()
+        );
     }
 }

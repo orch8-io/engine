@@ -395,7 +395,20 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
     // instances share a concurrency_key, more than `max_concurrency` may be
     // Running simultaneously. We put the excess back to Scheduled here,
     // synchronously, so the observable Running count never exceeds the limit.
-    let mut instances = enforce_concurrency_limits(ctx.storage, instances, ctx.clock).await?;
+    let claimed_ids: Vec<_> = instances.iter().map(|instance| instance.id).collect();
+    let mut instances = match enforce_concurrency_limits(ctx.storage, instances, ctx.clock).await {
+        Ok(instances) => instances,
+        Err(error) => {
+            reschedule_claimed_after_setup_error(
+                ctx.storage,
+                &claimed_ids,
+                ctx.clock.now(),
+                "concurrency-limit setup",
+            )
+            .await;
+            return Err(error);
+        }
+    };
 
     let count = instances.len();
     tracing::Span::current().record("claimed", count);
@@ -405,7 +418,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
 
     // Batch-fetch signals and completed block IDs for all claimed instances (2 queries total).
     let instance_ids: Vec<InstanceId> = instances.iter().map(|i| i.id).collect();
-    let (signals_map, completed_map) = tokio::try_join!(
+    let prefetch = tokio::try_join!(
         async {
             ctx.storage
                 .get_pending_signals_batch(&instance_ids)
@@ -418,7 +431,21 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                 .await
                 .map_err(EngineError::from)
         },
-    )?;
+    );
+    let (signals_map, completed_map) = match prefetch {
+        Ok(prefetched) => prefetched,
+        Err(error) => {
+            let ids: Vec<_> = instances.iter().map(|instance| instance.id).collect();
+            reschedule_claimed_after_setup_error(
+                ctx.storage,
+                &ids,
+                ctx.clock.now(),
+                "batch prefetch",
+            )
+            .await;
+            return Err(error);
+        }
+    };
 
     // Hydrate externalized `context.data` markers for every claimed
     // instance in one batched fetch. This removes the per-step N+1 that
@@ -661,6 +688,44 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
     Ok(join_handles)
 }
 
+/// Return claimed instances to `Scheduled` without resurrecting a row that a
+/// concurrent signal or operator already moved to another state.
+async fn defer_running_instances(
+    storage: &Arc<dyn StorageBackend>,
+    ids: &[InstanceId],
+    fire_at: chrono::DateTime<Utc>,
+) -> Result<(), EngineError> {
+    let mut first_error = None;
+    for &id in ids {
+        if let Err(error) = storage
+            .conditional_update_instance_state(
+                id,
+                InstanceState::Running,
+                InstanceState::Scheduled,
+                Some(fire_at),
+            )
+            .await
+        {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), |error| Err(error.into()))
+}
+
+/// Best-effort rollback for failures that occur after a batch was claimed but
+/// before per-instance processing tasks were spawned. Preserve the original
+/// setup error while making every claimed row immediately eligible to retry.
+async fn reschedule_claimed_after_setup_error(
+    storage: &Arc<dyn StorageBackend>,
+    ids: &[InstanceId],
+    fire_at: chrono::DateTime<Utc>,
+    phase: &'static str,
+) {
+    if let Err(error) = defer_running_instances(storage, ids, fire_at).await {
+        error!(%error, phase, count = ids.len(), "failed to reschedule claimed instances after scheduler setup error");
+    }
+}
+
 /// Shared failure path for the spawned-task failure arms in `process_tick`
 /// (processing error and panic alike): bump the failure metric, log the
 /// cause, and CAS the instance Running -> Failed as a safety net so it
@@ -777,9 +842,7 @@ async fn enforce_concurrency_limits(
         );
         deferred_ids.push(inst.id);
     }
-    storage
-        .batch_reschedule_instances(&deferred_ids, defer_at)
-        .await?;
+    defer_running_instances(storage, &deferred_ids, defer_at).await?;
 
     // Order-preserving removal: `swap_remove` would pull tail elements into
     // the holes, scrambling the priority order established by

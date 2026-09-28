@@ -112,7 +112,7 @@ pub(crate) async fn redeliver_outbox(
         }
         Err(reason) => Err(ApiError::BadGateway(format!(
             "redelivery to {} failed: {reason}",
-            entry.url
+            orch8_engine::outbound::redact_url(&entry.url)
         ))),
     }
 }

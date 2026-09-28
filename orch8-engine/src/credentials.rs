@@ -84,9 +84,6 @@ const REFRESH_LEASE: chrono::TimeDelta = chrono::TimeDelta::seconds(120);
 
 /// Cap on a token-endpoint response body.
 const MAX_REFRESH_BODY_BYTES: usize = 64 * 1024;
-/// Cap on the error-response body echoed into the refresh error (the body is
-/// attacker-influenced; echoing it in full turns refresh into an SSRF oracle).
-const MAX_REFRESH_ERROR_BODY_BYTES: usize = 256;
 
 /// Recursively walk `value` and replace every `credentials://<id>[/<key>]`
 /// string with the resolved credential material.
@@ -281,7 +278,8 @@ async fn refresh_credential(
     if !crate::handlers::builtin::is_url_safe(&refresh_url).await {
         return Err(format!(
             "credential '{}': refresh_url '{}' targets an internal or non-public address",
-            credential.id, refresh_url
+            credential.id,
+            crate::outbound::redact_url(&refresh_url)
         ));
     }
 
@@ -311,10 +309,12 @@ async fn refresh_credential(
             )
         })?;
     if !status.is_success() {
+        // Token endpoints may echo submitted form fields in error bodies.
+        // Never propagate that body into the refresh loop's warning log: it
+        // can contain the refresh token we just sent.
         return Err(format!(
-            "credential '{}': refresh returned {status}: {}",
-            credential.id,
-            crate::outbound::truncate_for_error(&body, MAX_REFRESH_ERROR_BODY_BYTES)
+            "credential '{}': refresh returned {status}",
+            credential.id
         ));
     }
 

@@ -144,7 +144,7 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
         Some(&headers)
     };
 
-    debug!(url = %url, action = %action, "mcp_call: handshaking");
+    debug!(url = %crate::outbound::redact_url(&url), action = %action, "mcp_call: handshaking");
 
     // 1. initialize — establishes the session and (optionally) returns an
     //    `Mcp-Session-Id` header we must echo on subsequent requests.
@@ -166,7 +166,7 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
     )
     .await;
 
-    debug!(url = %url, action = %action, "mcp_call: dispatching request");
+    debug!(url = %crate::outbound::redact_url(&url), action = %action, "mcp_call: dispatching request");
 
     // 3. the actual request.
     let (status, content_type, body, _) = post_jsonrpc(

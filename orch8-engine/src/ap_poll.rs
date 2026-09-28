@@ -76,6 +76,7 @@ pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 /// Floor for both `interval_secs` and computed cron gaps — protects the
 /// sidecar (and the polled `SaaS` API) from sub-second hot loops.
 const MIN_POLL_DELAY: Duration = Duration::from_secs(1);
+const MAX_SIDECAR_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Shared HTTP client for sidecar poll calls. Mirrors the action handler's
 /// client (`handlers::activepieces`): pooled connections, generous ceiling
@@ -417,7 +418,7 @@ async fn poll_once(
         slug = %trigger.slug,
         piece = %config.piece,
         trigger_name = %config.trigger,
-        url = %crate::outbound::redact_url(&url),
+        url = %crate::outbound::redact_url(url),
         "polling activepieces sidecar"
     );
 
@@ -430,18 +431,24 @@ async fn poll_once(
         .map_err(|e| {
             format!(
                 "sidecar unreachable at {}: {}",
-                crate::outbound::redact_url(&url),
+                crate::outbound::redact_url(url),
                 crate::outbound::redact_error(&e)
             )
         })?;
 
     let status = response.status().as_u16();
-    let text = response
-        .text()
+    let bytes = crate::outbound::read_body_capped(response, MAX_SIDECAR_RESPONSE_BYTES)
         .await
-        .map_err(|e| format!("failed to read sidecar response: {e}"))?;
+        .map_err(|error| match error {
+            crate::outbound::BodyReadError::TooLarge(max) => {
+                format!("sidecar response exceeds {max} byte limit")
+            }
+            crate::outbound::BodyReadError::Io(message) => {
+                format!("failed to read sidecar response: {message}")
+            }
+        })?;
 
-    let parsed: PollResponse = serde_json::from_str(&text)
+    let parsed: PollResponse = serde_json::from_slice(&bytes)
         .map_err(|_| format!("sidecar returned HTTP {status} with non-envelope body"))?;
 
     if !parsed.ok {
@@ -819,6 +826,22 @@ mod tests {
         assert!(state.last_error.is_none());
         assert_eq!(state.consecutive_failures, 0);
         assert!(state.last_poll_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn poll_once_rejects_oversized_sidecar_response() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        seed(&storage, "seq").await;
+        let trigger = mk_poll_trigger("p", "seq", json!({"piece": "x", "trigger": "t"}));
+        let config = parse_config(&trigger.config).unwrap();
+        let oversized = "x".repeat(MAX_SIDECAR_RESPONSE_BYTES + 1);
+        let (url, _, _) = spawn_mock_sidecar(vec![(200, oversized)]).await;
+
+        let error = poll_once(&storage, &trigger, &config, &url)
+            .await
+            .unwrap_err();
+        assert!(error.contains("response exceeds"), "{error}");
+        assert!(list_t1_instances(&storage).await.is_empty());
     }
 
     /// ENG-R-N3: a batch re-delivered by the sidecar (cursor not advanced

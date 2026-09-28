@@ -693,7 +693,7 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
     debug!(
         instance_id = %ctx.instance_id,
         block_id = %ctx.block_id,
-        url = %url,
+        url = %crate::outbound::redact_url(url),
         method = %method,
         "http_request step"
     );
@@ -753,7 +753,10 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
                 details: None,
             },
             BodyReadError::Io(m) => StepError::Retryable {
-                message: format!("HTTP request failed reading body from {url}: {m}"),
+                message: format!(
+                    "HTTP request failed reading body from {}: {m}",
+                    crate::outbound::redact_url(url)
+                ),
                 details: None,
             },
         })?;
@@ -761,13 +764,13 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
 
     if status >= 500 {
         return Err(StepError::Retryable {
-            message: format!("HTTP {status} from {url}"),
+            message: format!("HTTP {status} from {}", crate::outbound::redact_url(url)),
             details: Some(json!({ "status": status, "body": response_body })),
         });
     }
     if status >= 400 {
         return Err(StepError::Permanent {
-            message: format!("HTTP {status} from {url}"),
+            message: format!("HTTP {status} from {}", crate::outbound::redact_url(url)),
             details: Some(json!({ "status": status, "body": response_body })),
         });
     }

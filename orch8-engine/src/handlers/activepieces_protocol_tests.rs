@@ -179,6 +179,24 @@ async fn successful_non_envelope_body_is_preserved_as_raw_output() {
 }
 
 #[tokio::test]
+async fn oversized_sidecar_response_is_rejected_before_unbounded_buffering() {
+    let body = "x".repeat(MAX_SIDECAR_RESPONSE_BYTES + 1);
+    let sidecar = spawn_sidecar(StatusCode::OK, &body).await;
+
+    let result = handle_ap_at(
+        context(json!({}), false).await,
+        "ap://slack.send_message",
+        &sidecar.url,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(StepError::Retryable { message, .. }) if message.contains("response exceeds")
+    ));
+}
+
+#[tokio::test]
 async fn dry_run_validates_handler_without_contacting_the_sidecar() {
     let output = handle_ap_at(
         context(json!({}), true).await,

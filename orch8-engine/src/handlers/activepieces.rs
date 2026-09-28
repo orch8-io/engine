@@ -31,6 +31,7 @@ use super::StepContext;
 
 const DEFAULT_SIDECAR_URL: &str = "http://127.0.0.1:50052/execute";
 const AP_PREFIX: &str = "ap://";
+const MAX_SIDECAR_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Shared HTTP client for all `ActivePieces` sidecar calls. Reusing the client
 /// enables connection pooling and a single shared DNS cache.
@@ -166,14 +167,21 @@ async fn handle_ap_at(ctx: StepContext, handler_name: &str, url: &str) -> Result
         })?;
 
     let status = response.status().as_u16();
-    let text = response.text().await.map_err(|e| StepError::Retryable {
-        message: format!(
-            "activepieces: failed to read response body from {}: {}",
-            crate::outbound::redact_url(url),
-            crate::outbound::redact_error(&e)
-        ),
-        details: None,
-    })?;
+    let bytes = crate::outbound::read_body_capped(response, MAX_SIDECAR_RESPONSE_BYTES)
+        .await
+        .map_err(|error| StepError::Retryable {
+            message: match error {
+                crate::outbound::BodyReadError::TooLarge(max) => {
+                    format!("activepieces: sidecar response exceeds {max} byte limit")
+                }
+                crate::outbound::BodyReadError::Io(message) => format!(
+                    "activepieces: failed to read response body from {}: {message}",
+                    crate::outbound::redact_url(url)
+                ),
+            },
+            details: None,
+        })?;
+    let text = String::from_utf8_lossy(&bytes);
 
     // Prefer the sidecar's own classification when it gave us a structured
     // envelope; fall back to HTTP status only when the body is missing or

@@ -391,7 +391,10 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
         let base = resolve_base_url(&ctx.params, &provider);
 
         if !super::builtin::is_url_safe(&base).await {
-            return Err(permanent(format!("base_url is not allowed: {base}")));
+            return Err(permanent(format!(
+                "base_url is not allowed: {}",
+                crate::outbound::redact_url(&base)
+            )));
         }
         Some((provider, format, api_key, base))
     };
@@ -651,7 +654,10 @@ pub async fn complete_text(
     let key = resolve_api_key(&params, provider)?;
     let base = resolve_base_url(&params, provider);
     if !super::builtin::is_url_safe(&base).await {
-        return Err(permanent(format!("base_url is not allowed: {base}")));
+        return Err(permanent(format!(
+            "base_url is not allowed: {}",
+            crate::outbound::redact_url(&base)
+        )));
     }
     let out = dispatch_provider(&params, &key, &base, provider, format, None).await?;
     emit_gen_ai_telemetry(&params, provider, &out);
@@ -934,9 +940,10 @@ async fn failover_inner(
 
         let base = resolve_base_url(&merged, provider_name);
         if !super::builtin::is_url_safe(&base).await {
-            warn!(provider = %provider_name, base_url = %base, "llm_call: rejected unsafe base_url");
+            warn!(provider = %provider_name, base_url = %crate::outbound::redact_url(&base), "llm_call: rejected unsafe base_url");
             last_error = Some(permanent(format!(
-                "provider {provider_name}: base_url '{base}' targets an internal or non-public address"
+                "provider {provider_name}: base_url '{}' targets an internal or non-public address",
+                crate::outbound::redact_url(&base)
             )));
             continue;
         }

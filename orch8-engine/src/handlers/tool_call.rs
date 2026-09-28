@@ -89,7 +89,7 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
     let upload = parse_body_artifact(&ctx.params);
     let want_response_artifact = wants_response_artifact(&ctx.params);
 
-    debug!(url = %url, tool_name = %tool_name, upload = upload.is_some(), "tool_call: dispatching");
+    debug!(url = %crate::outbound::redact_url(url), tool_name = %tool_name, upload = upload.is_some(), "tool_call: dispatching");
 
     let client = super::llm::http_client();
 

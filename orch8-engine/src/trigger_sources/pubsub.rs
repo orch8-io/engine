@@ -144,6 +144,7 @@ mod listener {
     use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
+    use tokio::io::AsyncReadExt;
     use tokio_util::sync::CancellationToken;
     use tracing::{error, info, warn};
 
@@ -157,6 +158,9 @@ mod listener {
     const SCOPE: &str = "https://www.googleapis.com/auth/pubsub";
     const DEFAULT_ENDPOINT: &str = "https://pubsub.googleapis.com";
     const METADATA_TOKEN_URL: &str = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+    const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
+    const MAX_API_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_CREDENTIALS_FILE_BYTES: usize = 1024 * 1024;
 
     #[derive(serde::Deserialize)]
     struct ServiceAccount {
@@ -260,30 +264,52 @@ mod listener {
             if !resp.status().is_success() {
                 return Err(format!("token endpoint returned {}", resp.status()));
             }
-            let body: TokenResponse = resp.json().await.map_err(|e| {
-                format!(
-                    "token response invalid: {}",
-                    crate::outbound::redact_error(&e)
-                )
-            })?;
+            let bytes = crate::outbound::read_body_capped(resp, MAX_TOKEN_RESPONSE_BYTES)
+                .await
+                .map_err(|error| format!("token response invalid: {error:?}"))?;
+            let body: TokenResponse = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("token response invalid: {error}"))?;
             let ttl = Duration::from_secs(body.expires_in.unwrap_or(3600).saturating_mul(9) / 10);
             self.cached = Some((body.access_token.clone(), Instant::now(), ttl));
             Ok(Some(body.access_token))
         }
     }
 
-    fn auth_for(cfg: &PubSubConfig, emulator: bool) -> Result<Auth, EngineError> {
+    async fn read_credentials_file(path: &str) -> Result<String, EngineError> {
+        let file = tokio::fs::File::open(path).await.map_err(|error| {
+            EngineError::InvalidConfig(format!(
+                "pubsub: cannot open GOOGLE_APPLICATION_CREDENTIALS: {error}"
+            ))
+        })?;
+        let mut bytes = Vec::new();
+        file.take((MAX_CREDENTIALS_FILE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|error| {
+                EngineError::InvalidConfig(format!(
+                    "pubsub: cannot read GOOGLE_APPLICATION_CREDENTIALS: {error}"
+                ))
+            })?;
+        if bytes.len() > MAX_CREDENTIALS_FILE_BYTES {
+            return Err(EngineError::InvalidConfig(format!(
+                "pubsub: GOOGLE_APPLICATION_CREDENTIALS exceeds {MAX_CREDENTIALS_FILE_BYTES} byte limit"
+            )));
+        }
+        String::from_utf8(bytes).map_err(|error| {
+            EngineError::InvalidConfig(format!(
+                "pubsub: GOOGLE_APPLICATION_CREDENTIALS is not UTF-8: {error}"
+            ))
+        })
+    }
+
+    async fn auth_for(cfg: &PubSubConfig, emulator: bool) -> Result<Auth, EngineError> {
         if emulator {
             return Ok(Auth::None);
         }
         let json = match &cfg.credentials_json {
             Some(j) => Some(j.clone()),
             None => match std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-                Ok(path) => Some(std::fs::read_to_string(&path).map_err(|e| {
-                    EngineError::InvalidConfig(format!(
-                        "pubsub: cannot read GOOGLE_APPLICATION_CREDENTIALS: {e}"
-                    ))
-                })?),
+                Ok(path) => Some(read_credentials_file(&path).await?),
                 Err(_) => None,
             },
         };
@@ -317,32 +343,27 @@ mod listener {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             tokens.cached = None;
         }
+        let bytes = crate::outbound::read_body_capped(resp, MAX_API_RESPONSE_BYTES)
+            .await
+            .map_err(|error| format!("pubsub response body invalid: {error:?}"))?;
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes);
             let preview: String = text.chars().take(300).collect();
             return Err(format!("pubsub returned {status}: {preview}"));
         }
-        resp.json()
-            .await
-            .map_err(|e| crate::outbound::redact_error(&e))
+        serde_json::from_slice(&bytes).map_err(|error| format!("pubsub response invalid: {error}"))
     }
 
-    /// Run the Pub/Sub listener until cancelled.
-    pub async fn run(
-        storage: Arc<dyn StorageBackend>,
-        trigger: TriggerDef,
-        cancel: CancellationToken,
-    ) -> Result<(), EngineError> {
-        let config = resolved_config(storage.as_ref(), &trigger).await?;
-        let cfg = PubSubConfig::parse(&config)
-            .map_err(|e| EngineError::InvalidConfig(format!("pubsub: {e}")))?;
+    async fn resolve_endpoint(
+        cfg: &PubSubConfig,
+    ) -> Result<(String, bool, crate::outbound::Profile), EngineError> {
         let emulator_env = std::env::var("PUBSUB_EMULATOR_HOST").ok();
         let emulator = cfg.endpoint.is_some() || emulator_env.is_some();
         let operator_emulator = cfg.endpoint.is_none() && emulator_env.is_some();
         let base = cfg
             .endpoint
             .clone()
-            .or_else(|| emulator_env.map(|h| format!("http://{h}")))
+            .or_else(|| emulator_env.map(|host| format!("http://{host}")))
             .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
         let profile = if operator_emulator {
             crate::outbound::Profile::LocalSidecar
@@ -357,6 +378,19 @@ mod listener {
                 "pubsub: endpoint targets an internal or unreachable address".into(),
             ));
         }
+        Ok((base, emulator, profile))
+    }
+
+    /// Run the Pub/Sub listener until cancelled.
+    pub async fn run(
+        storage: Arc<dyn StorageBackend>,
+        trigger: TriggerDef,
+        cancel: CancellationToken,
+    ) -> Result<(), EngineError> {
+        let config = resolved_config(storage.as_ref(), &trigger).await?;
+        let cfg = PubSubConfig::parse(&config)
+            .map_err(|e| EngineError::InvalidConfig(format!("pubsub: {e}")))?;
+        let (base, emulator, profile) = resolve_endpoint(&cfg).await?;
         let http = crate::outbound::build(
             crate::outbound::builder(profile).timeout(Duration::from_secs(90)),
         );
@@ -366,7 +400,7 @@ mod listener {
                 crate::outbound::builder(crate::outbound::Profile::LocalSidecar)
                     .timeout(Duration::from_secs(10)),
             ),
-            auth: auth_for(&cfg, emulator && cfg.credentials_json.is_none())?,
+            auth: auth_for(&cfg, emulator && cfg.credentials_json.is_none()).await?,
             cached: None,
         };
         let pull_url = format!("{base}/v1/{}:pull", cfg.subscription);
@@ -435,6 +469,24 @@ mod listener {
             if received.is_empty() && sleep_or_cancel(&cancel, Duration::from_millis(200)).await {
                 return Ok(());
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn credentials_file_read_is_capped() {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            tokio::fs::write(file.path(), vec![b'x'; MAX_CREDENTIALS_FILE_BYTES + 1])
+                .await
+                .unwrap();
+
+            let error = read_credentials_file(file.path().to_str().unwrap())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("exceeds"), "{error}");
         }
     }
 }

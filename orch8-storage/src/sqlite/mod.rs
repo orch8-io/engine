@@ -1606,8 +1606,11 @@ impl crate::WorkerStore for SqliteStorage {
         workers::list_registrations(self, seen_within_secs).await
     }
 
-    async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError> {
-        workers::claimed_counts_by_worker(self).await
+    async fn claimed_task_counts_by_worker(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<(String, i64)>, StorageError> {
+        workers::claimed_counts_by_worker(self, tenant_id).await
     }
 
     async fn park_webhook(
@@ -2037,6 +2040,13 @@ impl crate::AdminStore for SqliteStorage {
         triggers::list(self, tenant_id, limit).await
     }
 
+    async fn list_all_triggers(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<orch8_types::trigger::TriggerDef>, StorageError> {
+        triggers::list_all(self, tenant_id).await
+    }
+
     async fn update_trigger(
         &self,
         trigger: &orch8_types::trigger::TriggerDef,
@@ -2149,6 +2159,13 @@ impl crate::AdminStore for SqliteStorage {
         limit: u32,
     ) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError> {
         alert_rules::list(self, tenant_id, limit).await
+    }
+
+    async fn list_all_alert_rules(
+        &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
+    ) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError> {
+        alert_rules::list_all(self, tenant_id).await
     }
 
     async fn update_alert_rule(
@@ -5153,6 +5170,97 @@ mod tests {
 
         drop(guard_a);
         drop(guard_b);
+    }
+
+    #[tokio::test]
+    async fn worker_registration_cannot_be_reassigned_across_tenants() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let first = orch8_types::worker::WorkerRegistration {
+            worker_id: "shared-worker-id".into(),
+            handler_name: "email".into(),
+            queue_name: None,
+            version: Some("tenant-a-version".into()),
+            tenant_id: Some("tenant-a".into()),
+            last_seen_at: Utc::now(),
+        };
+        storage.upsert_worker_registration(&first).await.unwrap();
+
+        let mut hostile = first.clone();
+        hostile.tenant_id = Some("tenant-b".into());
+        hostile.version = Some("tenant-b-version".into());
+        hostile.last_seen_at += chrono::Duration::seconds(1);
+        storage.upsert_worker_registration(&hostile).await.unwrap();
+
+        let registrations = storage.list_worker_registrations(None).await.unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(
+            registrations[0].version.as_deref(),
+            Some("tenant-a-version")
+        );
+    }
+
+    #[tokio::test]
+    async fn claimed_worker_counts_are_tenant_scoped() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let instances = seed_instances(&storage, 2).await;
+        sqlx::query("UPDATE task_instances SET tenant_id = 'tenant-b' WHERE id = ?1")
+            .bind(instances[1].into_uuid().to_string())
+            .execute(storage.pool())
+            .await
+            .unwrap();
+
+        for (index, instance_id) in instances.into_iter().enumerate() {
+            let now = Utc::now();
+            storage
+                .create_worker_task(&WorkerTask {
+                    id: Uuid::now_v7(),
+                    instance_id,
+                    block_id: BlockId::new(format!("step-{index}")),
+                    handler_name: "email".into(),
+                    queue_name: None,
+                    requirements: orch8_types::continuity::CapsuleRequirements::default(),
+                    params: serde_json::json!({}),
+                    context: serde_json::json!({}),
+                    attempt: 0,
+                    timeout_ms: None,
+                    state: orch8_types::worker::WorkerTaskState::Claimed,
+                    worker_id: Some("shared-worker-id".into()),
+                    claimed_at: Some(now),
+                    heartbeat_at: Some(now),
+                    claim_epoch: 1,
+                    resume_checkpoint: None,
+                    checkpoint_seq: 0,
+                    completed_at: None,
+                    output: None,
+                    error_message: None,
+                    error_retryable: None,
+                    created_at: now,
+                })
+                .await
+                .unwrap();
+        }
+
+        let tenant_a = TenantId::unchecked("t");
+        let tenant_b = TenantId::unchecked("tenant-b");
+        assert_eq!(
+            storage
+                .claimed_task_counts_by_worker(Some(&tenant_a))
+                .await
+                .unwrap(),
+            vec![("shared-worker-id".into(), 1)]
+        );
+        assert_eq!(
+            storage
+                .claimed_task_counts_by_worker(Some(&tenant_b))
+                .await
+                .unwrap(),
+            vec![("shared-worker-id".into(), 1)]
+        );
+        assert_eq!(
+            storage.claimed_task_counts_by_worker(None).await.unwrap(),
+            vec![("shared-worker-id".into(), 2)]
+        );
     }
 }
 

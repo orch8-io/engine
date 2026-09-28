@@ -50,8 +50,22 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Storage list calls without offsets cap at this many rows.
 const LIST_CAP: u32 = 1000;
 const PAGE: u32 = 500;
-/// Upper bound for one archive member (defends restore against bombs).
-const MAX_MEMBER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Restore verifies archives in memory, so bound both the compressed input and
+/// the total expanded data before allocating attacker-controlled sizes.
+const MAX_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_MEMBER_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+const KNOWN_ARCHIVE_MEMBERS: &[&str] = &[
+    "manifest.json",
+    "sequences.jsonl",
+    "credentials.jsonl",
+    "triggers.jsonl",
+    "cron.jsonl",
+    "queue_routing.jsonl",
+    "instances.jsonl",
+    "execution_tree.jsonl",
+    "block_outputs.jsonl",
+];
 
 const CREDENTIAL_WARNING: &str = "credential values are exported exactly as stored: encrypted \
      with the source server's ORCH8_ENCRYPTION_KEY when one is configured (the target server \
@@ -473,9 +487,16 @@ impl Archive {
 /// Read and verify an archive: known format/version, only expected regular
 /// files, sizes bounded, every checksum and record count matching.
 pub fn read_archive(bytes: &[u8]) -> Result<Archive> {
+    if bytes.len() > MAX_ARCHIVE_BYTES {
+        bail!(
+            "compressed archive is too large ({} bytes; maximum {MAX_ARCHIVE_BYTES})",
+            bytes.len()
+        );
+    }
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut tar = tar::Archive::new(decoder);
     let mut members = BTreeMap::new();
+    let mut total_uncompressed = 0_u64;
     for entry in tar.entries().context("not a tar.gz archive")? {
         let mut entry = entry.context("corrupt archive entry")?;
         if entry.header().entry_type() != tar::EntryType::Regular {
@@ -485,18 +506,28 @@ pub fn read_archive(bytes: &[u8]) -> Result<Archive> {
         if path.contains('/') || path.contains('\\') || path.starts_with('.') {
             bail!("unexpected archive member '{path}'");
         }
+        if !KNOWN_ARCHIVE_MEMBERS.contains(&path.as_str()) {
+            bail!("unexpected archive member '{path}'");
+        }
+        if members.contains_key(&path) {
+            bail!("duplicate archive member '{path}'");
+        }
         let size = entry.size();
         if size > MAX_MEMBER_BYTES {
             bail!("archive member '{path}' is too large ({size} bytes)");
+        }
+        total_uncompressed = total_uncompressed
+            .checked_add(size)
+            .context("archive expanded size overflow")?;
+        if total_uncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES {
+            bail!("archive expands beyond the {MAX_TOTAL_UNCOMPRESSED_BYTES} byte limit");
         }
         let mut body = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
         entry
             .by_ref()
             .take(MAX_MEMBER_BYTES + 1)
             .read_to_end(&mut body)?;
-        if members.insert(path.clone(), body).is_some() {
-            bail!("duplicate archive member '{path}'");
-        }
+        members.insert(path, body);
     }
     let manifest_bytes = members
         .remove("manifest.json")
@@ -763,8 +794,18 @@ pub async fn run_backup(cmd: BackupCmd, format: OutputFormat) -> Result<()> {
 }
 
 pub async fn run_restore(cmd: RestoreCmd, format: OutputFormat) -> Result<()> {
-    let bytes =
-        std::fs::read(&cmd.archive).with_context(|| format!("read {}", cmd.archive.display()))?;
+    let file = std::fs::File::open(&cmd.archive)
+        .with_context(|| format!("open {}", cmd.archive.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_ARCHIVE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", cmd.archive.display()))?;
+    if bytes.len() > MAX_ARCHIVE_BYTES {
+        bail!(
+            "compressed archive is too large ({} bytes; maximum {MAX_ARCHIVE_BYTES})",
+            bytes.len()
+        );
+    }
     let archive = read_archive(&bytes)?;
     let target = parse_target(&cmd.database_url)?;
     if !cmd.dry_run {

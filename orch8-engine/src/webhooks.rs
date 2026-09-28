@@ -142,7 +142,7 @@ pub async fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &Cancell
             () = cancel.cancelled() => return,
         };
         let Ok(permit) = permit else {
-            warn!(url = %url, "webhook semaphore closed; dropping dispatch");
+            warn!(url = %crate::outbound::redact_url(&url), "webhook semaphore closed; dropping dispatch");
             return;
         };
 
@@ -206,7 +206,7 @@ pub(crate) async fn enqueue_durable(
 ) {
     for entry in pending_entries(config, event) {
         if let Err(error) = storage.park_webhook(&entry).await {
-            warn!(%error, url = %entry.url, event_type = %event.event_type, "failed to enqueue durable webhook");
+            warn!(%error, url = %crate::outbound::redact_url(&entry.url), event_type = %event.event_type, "failed to enqueue durable webhook");
         }
     }
 }
@@ -484,6 +484,7 @@ async fn send_once(
 ) -> SendOutcome {
     let signed = secret.is_some();
     let started = std::time::Instant::now();
+    let log_url = crate::outbound::redact_url(url);
     match send_request(url, body, timeout, secret, delivery_id).await {
         Ok(status) if status < 400 => {
             record_attempt(
@@ -497,7 +498,7 @@ async fn send_once(
             )
             .await;
             metrics::inc(metrics::WEBHOOKS_SENT);
-            debug!(url = %url, event_type = %event.event_type, "webhook delivered");
+            debug!(url = %log_url, event_type = %event.event_type, "webhook delivered");
             SendOutcome::Delivered
         }
         Ok(status) => {
@@ -512,10 +513,10 @@ async fn send_once(
             )
             .await;
             if is_terminal_status(status) {
-                warn!(url = %url, status, attempt_number, "webhook returned terminal client error status — not retrying");
+                warn!(url = %log_url, status, attempt_number, "webhook returned terminal client error status — not retrying");
                 SendOutcome::Terminal(format!("http {status}"))
             } else {
-                warn!(url = %url, status, attempt_number, "webhook returned error status");
+                warn!(url = %log_url, status, attempt_number, "webhook returned error status");
                 SendOutcome::Transient(format!("http {status}"))
             }
         }
@@ -530,7 +531,7 @@ async fn send_once(
                 signed,
             )
             .await;
-            warn!(url = %url, error = %e, attempt_number, "webhook request failed");
+            warn!(url = %log_url, error = %e, attempt_number, "webhook request failed");
             SendOutcome::Transient(e)
         }
     }
@@ -612,7 +613,7 @@ async fn try_send(
         if attempt < max_retries {
             tokio::select! {
                 () = cancel.cancelled() => {
-                    warn!(url = %url, attempt, "webhook retry aborted by shutdown");
+                    warn!(url = %crate::outbound::redact_url(url), attempt, "webhook retry aborted by shutdown");
                     return Err("aborted by shutdown".into());
                 }
                 () = tokio::time::sleep(backoff_duration(attempt)) => {}
@@ -648,7 +649,7 @@ async fn send_with_retry(
 
     metrics::inc(metrics::WEBHOOKS_FAILED);
     error!(
-        url = %url,
+        url = %crate::outbound::redact_url(url),
         event_type = %event.event_type,
         "webhook delivery failed after all retries"
     );
@@ -671,7 +672,9 @@ async fn send_with_retry(
         };
         match storage.park_webhook(&entry).await {
             Ok(()) => metrics::inc(metrics::WEBHOOKS_PARKED),
-            Err(e) => warn!(url = %url, error = %e, "failed to park exhausted webhook"),
+            Err(e) => {
+                warn!(url = %crate::outbound::redact_url(url), error = %e, "failed to park exhausted webhook");
+            }
         }
     }
 }

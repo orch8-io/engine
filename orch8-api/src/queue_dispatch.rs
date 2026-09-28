@@ -48,6 +48,17 @@ enum SecretUpdate {
     Set(String),
 }
 
+const MAX_QUEUE_SECRET_BYTES: usize = 256 * 1024;
+
+fn validate_secret_update(secret: &SecretUpdate) -> Result<(), ApiError> {
+    if matches!(secret, SecretUpdate::Set(value) if value.len() > MAX_QUEUE_SECRET_BYTES) {
+        return Err(ApiError::PayloadTooLarge(
+            "queue dispatch secret exceeds 256 KiB".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn deserialize_secret_update<'de, D>(deserializer: D) -> Result<SecretUpdate, D::Error>
 where
     D: Deserializer<'de>,
@@ -76,6 +87,7 @@ pub(crate) async fn set_dispatch(
     Json(req): Json<SetDispatchRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let tenant_id = enforce_tenant_create(&tenant_ctx, &TenantId::unchecked(req.tenant_id))?;
+    validate_secret_update(&req.secret)?;
 
     if req.queue_name.trim().is_empty() {
         return Err(ApiError::InvalidArgument("queue_name is required".into()));
@@ -159,4 +171,18 @@ pub(crate) async fn delete_dispatch(
         .await
         .map_err(|e| ApiError::from_storage(e, "queue_dispatch"))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_secret_size_is_bounded() {
+        assert!(validate_secret_update(&SecretUpdate::Set("x".into())).is_ok());
+        assert!(matches!(
+            validate_secret_update(&SecretUpdate::Set("x".repeat(MAX_QUEUE_SECRET_BYTES + 1))),
+            Err(ApiError::PayloadTooLarge(_))
+        ));
+    }
 }

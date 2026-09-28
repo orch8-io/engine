@@ -1829,7 +1829,7 @@ passthrough_impl! {
 
     async fn upsert_worker_registration(&self, registration: &orch8_types::worker::WorkerRegistration) -> Result<(), StorageError>;
     async fn list_worker_registrations(&self, seen_within_secs: Option<i64>) -> Result<Vec<orch8_types::worker::WorkerRegistration>, StorageError>;
-    async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError>;
+    async fn claimed_task_counts_by_worker(&self, tenant_id: Option<&orch8_types::TenantId>) -> Result<Vec<(String, i64)>, StorageError>;
     async fn park_webhook(&self, entry: &orch8_types::webhook_outbox::WebhookOutboxEntry) -> Result<(), StorageError>;
     async fn list_webhook_outbox(&self, limit: u32) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
     async fn get_webhook_outbox(&self, id: Uuid) -> Result<Option<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
@@ -1997,6 +1997,16 @@ passthrough_impl! {
         }
         Ok(triggers)
     }
+    async fn list_all_triggers(
+        &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
+    ) -> Result<Vec<orch8_types::trigger::TriggerDef>, StorageError> {
+        let mut triggers = self.inner.list_all_triggers(tenant_id).await?;
+        for trigger in &mut triggers {
+            self.decrypt_trigger(trigger)?;
+        }
+        Ok(triggers)
+    }
     async fn update_trigger(
         &self,
         trigger: &orch8_types::trigger::TriggerDef,
@@ -2027,6 +2037,7 @@ passthrough_impl! {
     async fn create_alert_rule(&self, rule: &orch8_types::alert::AlertRule) -> Result<(), StorageError>;
     async fn get_alert_rule(&self, tenant_id: Option<&orch8_types::ids::TenantId>, id: uuid::Uuid) -> Result<Option<orch8_types::alert::AlertRule>, StorageError>;
     async fn list_alert_rules(&self, tenant_id: Option<&orch8_types::ids::TenantId>, limit: u32) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError>;
+    async fn list_all_alert_rules(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<Vec<orch8_types::alert::AlertRule>, StorageError>;
     async fn update_alert_rule(&self, rule: &orch8_types::alert::AlertRule) -> Result<bool, StorageError>;
     async fn delete_alert_rule(&self, tenant_id: &orch8_types::ids::TenantId, id: uuid::Uuid) -> Result<bool, StorageError>;
     async fn get_alert_rule_state(&self, rule_id: uuid::Uuid) -> Result<Option<orch8_types::alert::AlertRuleState>, StorageError>;

@@ -93,6 +93,34 @@ pub(super) async fn list(
         .collect::<Result<Vec<_>, _>>()
 }
 
+pub(super) async fn list_all(
+    store: &SqliteStorage,
+    tenant_id: Option<&TenantId>,
+) -> Result<Vec<TriggerDef>, StorageError> {
+    let rows: Vec<TriggerRow> = match tenant_id {
+        Some(tid) => {
+            sqlx::query_as(
+                r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
+                  FROM triggers WHERE tenant_id = ?1 ORDER BY created_at",
+            )
+            .bind(tid.as_str())
+            .fetch_all(&store.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
+                  FROM triggers ORDER BY created_at",
+            )
+            .fetch_all(&store.pool)
+            .await?
+        }
+    };
+    rows.into_iter()
+        .map(TriggerRow::into_trigger)
+        .collect::<Result<Vec<_>, _>>()
+}
+
 pub(super) async fn update(
     store: &SqliteStorage,
     trigger: &TriggerDef,

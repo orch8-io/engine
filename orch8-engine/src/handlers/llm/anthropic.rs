@@ -286,7 +286,7 @@ pub(super) async fn call_anthropic(
     let fallbacks = apply_fallbacks(&mut body, params, model, base_url);
     let body = Value::Object(body);
 
-    debug!(url = %url, model = %model, streaming = deltas.is_some(), fallbacks, "llm_call: Anthropic");
+    debug!(url = %crate::outbound::redact_url(&url), model = %model, streaming = deltas.is_some(), fallbacks, "llm_call: Anthropic");
 
     let mut req = http_client()
         .post(&url)

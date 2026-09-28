@@ -156,8 +156,12 @@ impl RedactionPolicy {
                     self.redact_value(item);
                 }
             }
-            Value::String(s) if self.is_secret_shaped(s) => {
-                *s = REDACTED.to_string();
+            Value::String(s) => {
+                if self.is_secret_shaped(s) {
+                    *s = REDACTED.to_string();
+                } else if s.contains("://") {
+                    *s = self.redact_url(s);
+                }
             }
             _ => {}
         }
@@ -546,6 +550,20 @@ mod tests {
         let out = policy().redacted(&original);
         assert_eq!(original["password"], "x");
         assert_eq!(out["password"], REDACTED);
+    }
+
+    #[test]
+    fn redacts_url_credentials_inside_json_strings() {
+        let original = json!({
+            "endpoint": "https://example.com/hook?api_key=secret&safe=yes",
+            "credentialed_endpoint": "https://user:pass@example.com/hook"
+        });
+        let out = policy().redacted(&original);
+        assert_eq!(
+            out["endpoint"],
+            format!("https://example.com/hook?api_key={REDACTED}&safe=yes")
+        );
+        assert_eq!(out["credentialed_endpoint"], REDACTED);
     }
 
     #[test]

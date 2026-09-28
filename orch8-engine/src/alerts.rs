@@ -344,7 +344,7 @@ pub async fn evaluate_once(
     config: &AlertsConfig,
     now: DateTime<Utc>,
 ) -> Result<usize, orch8_types::error::StorageError> {
-    let mut rules = storage.list_alert_rules(None, 1000).await?;
+    let mut rules = storage.list_all_alert_rules(None).await?;
     rules.extend(config_rules(config));
     let mut transitions = 0;
     for rule in rules.into_iter().filter(|r| r.enabled) {
@@ -568,6 +568,22 @@ mod tests {
             fire.get("routing_key").is_none(),
             "routing key injected only at send time"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_alert_listing_is_not_bound_by_api_page_limit() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        for tenant in ["first", "second", "third"] {
+            let alert = rule(
+                tenant,
+                AlertCondition::BudgetBreach { min_instances: 1 },
+                pd(),
+            );
+            storage.create_alert_rule(&alert).await.unwrap();
+        }
+
+        assert_eq!(storage.list_alert_rules(None, 1).await.unwrap().len(), 1);
+        assert_eq!(storage.list_all_alert_rules(None).await.unwrap().len(), 3);
     }
 
     #[tokio::test]

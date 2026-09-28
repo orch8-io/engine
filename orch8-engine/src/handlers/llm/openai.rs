@@ -134,7 +134,7 @@ pub(super) async fn call_openai_compat(
     }
     let body = Value::Object(body);
 
-    debug!(url = %url, model = %model, provider = %provider, streaming = deltas.is_some(), "llm_call: OpenAI-compatible");
+    debug!(url = %crate::outbound::redact_url(&url), model = %model, provider = %provider, streaming = deltas.is_some(), "llm_call: OpenAI-compatible");
 
     let resp = http_client()
         .post(&url)
