@@ -15,6 +15,7 @@ pub mod dev_server;
 pub mod dev_workers;
 pub mod doctor;
 pub mod explain;
+pub mod failover;
 pub mod generate;
 pub mod health;
 pub mod import;

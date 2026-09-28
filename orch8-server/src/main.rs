@@ -31,6 +31,7 @@ use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::config::EngineConfig;
 use orch8_types::config::NodeRole;
 
+mod federation_wiring;
 mod managed_control;
 mod telemetry;
 
@@ -333,6 +334,8 @@ async fn main() -> anyhow::Result<()> {
         cb_registry.clone(),
         engine_ready.clone(),
     )?;
+    let federation_client =
+        federation_wiring::federation_client(app_state.continuity_crypto.as_deref());
     let push_outbox_handle = assembly.push_outbox.then(|| {
         spawn_push_outbox_worker(
             storage.clone(),
@@ -399,6 +402,12 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::api_key_middleware(auth_storage.clone(), root_key_digest, req, next)
         }));
+    if assembly.full_api || assembly.continuity_gateway {
+        // Signature-authenticated federation transport: the peer's envelope
+        // is the credential, so it sits outside API-key/tenant middleware.
+        protected_app = protected_app
+            .merge(orch8_api::federation::inbound_routes().with_state(app_state.clone()));
+    }
     if assembly.public_webhooks {
         protected_app =
             protected_app.merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()));
@@ -471,6 +480,7 @@ async fn main() -> anyhow::Result<()> {
         http_addr
     );
 
+    let failover = federation_wiring::failover_from_env()?;
     let engine_handle = assembly.engine.then(|| {
         spawn_engine(
             storage.clone(),
@@ -478,6 +488,8 @@ async fn main() -> anyhow::Result<()> {
             shutdown_token.clone(),
             cb_registry.clone(),
             engine_ready.clone(),
+            federation_client.clone(),
+            failover.clone(),
         )
     });
 
@@ -914,6 +926,12 @@ fn wrap_encryption(
                  only)."
             );
         }
+        if federation_wiring::payload_vault_from_env()?.is_some() {
+            anyhow::bail!(
+                "ORCH8_BYOK_* is configured but encryption at rest is disabled; the BYOK vault \
+                 is attached to the encrypting storage layer and requires ORCH8_ENCRYPTION_KEY"
+            );
+        }
         tracing::warn!(
             "Running with --insecure-storage (or --insecure): encryption at rest is DISABLED — \
              credentials and context.data are stored in plaintext. Never use this in production."
@@ -944,9 +962,11 @@ fn wrap_encryption(
     }
 
     tracing::info!("Encryption at rest enabled for context.data and credentials");
-    Ok(Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
-        storage, encryptor,
-    )))
+    let mut encrypting = orch8_storage::encrypting::EncryptingStorage::new(storage, encryptor);
+    if let Some(vault) = federation_wiring::payload_vault_from_env()? {
+        encrypting = encrypting.with_vault(vault);
+    }
+    Ok(Arc::new(encrypting))
 }
 
 fn init_prometheus() -> anyhow::Result<MetricsState> {
@@ -1124,7 +1144,84 @@ fn spawn_engine(
     shutdown: CancellationToken,
     cb_registry: Arc<CircuitBreakerRegistry>,
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
+    federation: Option<Arc<orch8_engine::federation::FederationClient>>,
+    failover: Option<federation_wiring::FailoverSettings>,
 ) -> tokio::task::JoinHandle<()> {
+    let Some(failover) = failover else {
+        return spawn_engine_now(
+            storage,
+            config,
+            shutdown,
+            cb_registry,
+            engine_ready,
+            federation,
+        );
+    };
+    // Active-passive: a standby node reports not-ready and never runs the
+    // scheduler until its region holds the fence; once active, losing the
+    // fence (or being unable to read it past the blind window) shuts the
+    // whole process down so the orchestrator restarts it as a standby.
+    let config = config.clone();
+    engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+    tokio::spawn(async move {
+        let Some(epoch) = orch8_engine::failover::wait_until_active(
+            storage.as_ref(),
+            &failover.region,
+            failover.poll,
+            &shutdown,
+        )
+        .await
+        else {
+            return;
+        };
+        engine_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+        let watch_storage = Arc::clone(&storage);
+        let watch_shutdown = shutdown.clone();
+        let watcher = tokio::spawn(async move {
+            orch8_engine::failover::watch(
+                watch_storage.as_ref(),
+                &failover.region,
+                epoch,
+                failover.poll,
+                failover.blind_window,
+                &watch_shutdown,
+            )
+            .await
+        });
+        let engine = spawn_engine_now(
+            storage,
+            &config,
+            shutdown,
+            cb_registry,
+            engine_ready,
+            federation,
+        );
+        let _ = engine.await;
+        let _ = watcher.await;
+    })
+}
+
+fn spawn_engine_now(
+    storage: Arc<dyn StorageBackend>,
+    config: &EngineConfig,
+    shutdown: CancellationToken,
+    cb_registry: Arc<CircuitBreakerRegistry>,
+    engine_ready: Arc<std::sync::atomic::AtomicBool>,
+    federation: Option<Arc<orch8_engine::federation::FederationClient>>,
+) -> tokio::task::JoinHandle<()> {
+    if let Some(client) = federation {
+        let poller_storage = Arc::clone(&storage);
+        let poller_cancel = shutdown.clone();
+        tokio::spawn(async move {
+            orch8_engine::federation::run_poller(
+                poller_storage,
+                client,
+                std::time::Duration::from_secs(1),
+                poller_cancel,
+            )
+            .await;
+        });
+    }
     let mut handlers = HandlerRegistry::new();
     orch8_engine::handlers::builtin::register_builtins(&mut handlers);
     // Share the same breaker registry the HTTP API exposes, so admin resets

@@ -226,6 +226,9 @@ enum Commands {
         #[arg(long, env = "ORCH8_DATABASE_URL")]
         database_url: String,
     },
+    /// Active-passive region fence: inspect it or promote a region
+    /// (operates on the database directly; see docs/FAILOVER.md).
+    Failover(commands::failover::FailoverCmd),
     /// Export sequences, triggers, cron schedules, queue routing rules, and
     /// credentials (and optionally instances) to a versioned, checksummed
     /// .tar.gz, reading the storage database directly.
@@ -696,6 +699,10 @@ async fn main() -> Result<()> {
         return commands::triggers::run(cmd).await;
     }
 
+    if let Commands::Failover(cmd) = cli.command {
+        return commands::failover::run(cmd).await;
+    }
+
     if let Commands::Migrate { database_url } = cli.command {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -770,6 +777,7 @@ async fn main() -> Result<()> {
         | Commands::Bootstrap(..)
         | Commands::Demo(..)
         | Commands::Migrate { .. }
+        | Commands::Failover(_)
         | Commands::Triggers(_)
         | Commands::Completions { .. } => {
             anyhow::bail!("internal error: command should have been handled before dispatch")
