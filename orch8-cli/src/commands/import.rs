@@ -1,5 +1,10 @@
-//! `orch8 import n8n|zapier <file>` — convert an exported workflow into an
-//! Orch8 sequence document (JSON or YAML) plus a conversion report.
+//! `orch8 import n8n|zapier|stepfunctions <file>` — convert an exported
+//! workflow into an Orch8 sequence document (JSON or YAML) plus a conversion
+//! report.
+//!
+//! Step Functions state machines are translated structurally (see
+//! `import_sfn.rs`); constructs that cannot be translated are listed as
+//! `unmapped` entries with their location.
 //!
 //! The converters are deliberately conservative: node types with a clear
 //! Orch8 equivalent are mapped (HTTP → `http_request`, IF/Switch/Filter/Paths
@@ -38,6 +43,10 @@ pub enum ImportCmd {
     N8n(ImportArgs),
     /// Convert an exported Zapier zap (zapfile JSON) to a sequence.
     Zapier(ImportArgs),
+    /// Convert an AWS Step Functions state machine (Amazon States Language
+    /// JSON, or a `describe-state-machine` response) to a sequence.
+    #[command(name = "stepfunctions", visible_aliases = ["step-functions", "sfn"])]
+    StepFunctions(ImportArgs),
 }
 
 #[derive(Debug, Args)]
@@ -108,6 +117,23 @@ pub struct ConversionReport {
     /// External handlers a worker must implement (code / Slack / email stubs).
     pub worker_handlers: Vec<String>,
     pub warnings: Vec<String>,
+    /// Source constructs that could not be (fully) translated, with their
+    /// location — nothing is dropped silently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmapped: Vec<UnmappedConstruct>,
+}
+
+/// A source construct the importer could not translate faithfully.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnmappedConstruct {
+    /// Source file (or state-machine file) the construct lives in.
+    pub file: String,
+    /// 1-based line number (0 when unknown).
+    pub line: usize,
+    /// The construct, e.g. `step.sendEvent`, `if (...)`, `Retry[1]`.
+    pub construct: String,
+    /// What was emitted instead and what to do about it.
+    pub reason: String,
 }
 
 /// Result of a conversion.
@@ -123,19 +149,25 @@ pub fn run(cmd: ImportCmd, tenant_id: Option<&str>) -> Result<()> {
     let (source, args) = match cmd {
         ImportCmd::N8n(args) => ("n8n", args),
         ImportCmd::Zapier(args) => ("zapier", args),
+        ImportCmd::StepFunctions(args) => ("stepfunctions", args),
     };
-    let raw = std::fs::read_to_string(&args.file)
-        .with_context(|| format!("failed to read {}", args.file.display()))?;
-    let export: Value = serde_json::from_str(&raw)
-        .with_context(|| format!("{} is not valid JSON", args.file.display()))?;
     let options = ConvertOptions {
         tenant_id: tenant_id.unwrap_or("default").to_string(),
         namespace: args.namespace.clone(),
         name: args.name.clone(),
         zap: args.zap.clone(),
     };
+    let raw = std::fs::read_to_string(&args.file)
+        .with_context(|| format!("failed to read {}", args.file.display()))?;
+    let export: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("{} is not valid JSON", args.file.display()))?;
     let conversion = match source {
         "n8n" => convert_n8n(&export, &options)?,
+        "stepfunctions" => sfn::convert_stepfunctions(
+            &export,
+            Some((&args.file.display().to_string(), &raw)),
+            &options,
+        )?,
         _ => convert_zapier(&export, &options)?,
     };
 
@@ -198,6 +230,13 @@ pub fn summarize(report: &ConversionReport) -> String {
     for warning in &report.warnings {
         let _ = writeln!(out, "  warning: {warning}");
     }
+    for item in &report.unmapped {
+        let _ = writeln!(
+            out,
+            "  unmapped {}:{} `{}`: {}",
+            item.file, item.line, item.construct, item.reason
+        );
+    }
     out
 }
 
@@ -237,6 +276,21 @@ fn slug(text: &str) -> String {
     }
     let out = out.trim_end_matches('_').to_string();
     if out.is_empty() { "step".into() } else { out }
+}
+
+/// `chargeCard` / `ChargeCard` / `charge-card` → `charge_card`: a slug that
+/// keeps camelCase word boundaries (code identifiers, Lambda names).
+fn snake(text: &str) -> String {
+    let mut out = String::new();
+    let mut prev_lower = false;
+    for c in text.chars() {
+        if c.is_ascii_uppercase() && prev_lower {
+            out.push('_');
+        }
+        prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
+        out.push(c);
+    }
+    slug(&out)
 }
 
 struct Builder {
@@ -2163,6 +2217,9 @@ impl Zapier {
         });
     }
 }
+
+#[path = "import_sfn.rs"]
+pub mod sfn;
 
 #[cfg(test)]
 #[path = "import_tests.rs"]
