@@ -142,6 +142,9 @@ pub async fn audit_transition(
     to: InstanceState,
     block_id: Option<&str>,
 ) {
+    // Metadata-only, non-blocking; a no-op unless `[cloud_observability]`
+    // export is configured.
+    crate::cloud_observability::record_transition(instance_id, to, block_id);
     let entry = AuditLogEntry {
         id: uuid::Uuid::now_v7(),
         instance_id,

@@ -148,6 +148,61 @@ pub struct EngineConfig {
     /// the `/alerts/rules` API.
     #[serde(default)]
     pub alerts: AlertsConfig,
+    /// Optional run-metadata export to a managed cloud (`[cloud_observability]`).
+    /// Disabled unless `endpoint` is set.
+    #[serde(default)]
+    pub cloud_observability: CloudObservabilityConfig,
+}
+
+/// `[cloud_observability]`: batch instance state transitions (metadata only —
+/// never context, payloads, inputs, or outputs) to
+/// `{endpoint}/api/ingest/v1/runs`. Export is bounded and non-blocking: when
+/// the cloud is slow or unreachable the oldest buffered events are dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudObservabilityConfig {
+    /// Base URL of the ingest service. Empty disables export.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Bearer token for the ingest endpoint.
+    #[serde(default)]
+    pub api_key: SecretString,
+    /// Stable identifier of this engine in the cloud fleet view.
+    #[serde(default)]
+    pub engine_id: String,
+    /// Flush cadence. Default 5000 ms, minimum 250 ms.
+    #[serde(default = "default_cloud_observability_interval_ms")]
+    pub interval_ms: u64,
+    /// In-memory buffer bound (events). Default 10 000.
+    #[serde(default = "default_cloud_observability_buffer")]
+    pub max_buffered_events: usize,
+}
+
+impl Default for CloudObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            api_key: SecretString::default(),
+            engine_id: String::new(),
+            interval_ms: default_cloud_observability_interval_ms(),
+            max_buffered_events: default_cloud_observability_buffer(),
+        }
+    }
+}
+
+impl CloudObservabilityConfig {
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        !self.endpoint.trim().is_empty()
+    }
+}
+
+const fn default_cloud_observability_interval_ms() -> u64 {
+    5_000
+}
+
+const fn default_cloud_observability_buffer() -> usize {
+    10_000
 }
 
 /// `[alerts]` section.
@@ -237,6 +292,13 @@ pub struct NodeConfig {
     pub managed_control_worker_id: String,
     #[serde(default)]
     pub managed_control_runtime_id: String,
+    /// Operator placement labels for this node (e.g. from an executor join
+    /// token). Advertised coarsely; never contain workload data.
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// Coarse region label for this node (e.g. `eu-west-1`). Empty = unset.
+    #[serde(default)]
+    pub region: String,
 }
 
 /// Selectable durable artifact backends. In-memory is intentionally absent —

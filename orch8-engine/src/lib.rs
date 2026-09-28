@@ -2,6 +2,7 @@ pub mod alerts;
 pub mod ap_poll;
 pub mod capsule;
 pub mod circuit_breaker;
+pub mod cloud_observability;
 pub mod compensation;
 pub mod continuity;
 pub mod continuity_advanced;
@@ -9,6 +10,7 @@ pub mod credentials;
 pub mod cron;
 pub mod dataflow;
 pub mod delegation;
+pub mod receipt_bundle;
 /// Virtual time for scheduling decisions — re-exported from `orch8-types` so
 /// engine users can write `orch8_engine::clock::ManualClock`.
 pub mod clock {
