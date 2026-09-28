@@ -40,6 +40,7 @@ release notes.
 - `beta` [Agent patterns](agent-patterns/README.md) — run four composable AI workflow examples.
 - [Email classifier](../examples/email-classifier/README.md) — a complete TypeScript worker and webhook application.
 - [Portable agent product](../examples/portable-agent-product/README.md) — compile policy, wrap a local worker, score conformance, and validate an OEM plan.
+- `beta` [Embed kit](EMBED_KIT.md) — put runs, approvals and a step builder inside your product with `@orch8/embed` web components and per-customer embed tokens.
 
 ## Operate
 
