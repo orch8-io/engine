@@ -5762,6 +5762,43 @@
         }
       }
     },
+    "/runtimes/browser-sessions": {
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "Mint a browser-session token. Operator/Admin only — called by the\ncustomer's app backend, never by the browser itself.",
+        "operationId": "create_browser_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBrowserSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Scoped browser-session token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateBrowserSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid handlers, queues, or ttl"
+          },
+          "403": {
+            "description": "Caller is not an operator"
+          }
+        }
+      }
+    },
     "/runtimes/register": {
       "post": {
         "tags": [
@@ -7680,6 +7717,48 @@
         }
       }
     },
+    "/workers/tasks/{id}/release": {
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "Voluntarily give a claimed task back (tab closing, app backgrounding).\nSafe to call from `fetch(url, {keepalive: true})` during `pagehide`.",
+        "operationId": "release_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Worker task ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Task released"
+          },
+          "404": {
+            "description": "Worker task not found"
+          },
+          "409": {
+            "description": "Caller no longer holds this lease (or ownership changed)"
+          }
+        }
+      }
+    },
     "/workers/version-pins": {
       "get": {
         "tags": [
@@ -8263,7 +8342,8 @@
           "device",
           "publisher",
           "approver",
-          "auditor"
+          "auditor",
+          "browser_worker"
         ]
       },
       "ApplyRemediationRequest": {
@@ -9297,6 +9377,17 @@
         "type": "object",
         "description": "Requirements that must be satisfied before accepting a capsule.",
         "properties": {
+          "classification": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DataClassification",
+                "description": "Data classification the `policy` is evaluated for (default `internal`)."
+              }
+            ]
+          },
           "credentials": {
             "type": "array",
             "items": {
@@ -9331,6 +9422,17 @@
               "type": "string"
             }
           },
+          "policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LocalityPolicy",
+                "description": "Locality/residency policy evaluated at dispatch (recorded as a\nplacement decision) and re-evaluated against every claimant."
+              }
+            ]
+          },
           "regions": {
             "type": "array",
             "items": {
@@ -9342,6 +9444,24 @@
           },
           "requires_network": {
             "type": "boolean"
+          },
+          "runtime_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RuntimeId",
+                "description": "Placement: only this runtime may claim. The task then acts as that\nnode's durable mailbox: it stays `pending` until the node polls."
+              }
+            ]
+          },
+          "runtime_kinds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuntimeKind"
+            },
+            "description": "Placement: only runtimes of these kinds may claim. Empty = any kind.\nA list that excludes `server` forces remote dispatch even when the\nserver has the handler registered in-process."
           }
         }
       },
@@ -9491,6 +9611,37 @@
             "description": "Owning tenant — breakers are isolated per-tenant."
           }
         }
+      },
+      "ClaimedWorkerTask": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/WorkerTask"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "runtime_kinds": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RuntimeKind"
+                },
+                "description": "`$runtime.runtime_kinds`: kinds allowed to claim (empty = any)."
+              },
+              "target_runtime_id": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RuntimeId",
+                    "description": "`$runtime.runtime_id`: the only node allowed to claim (mailbox)."
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A claimed task as delivered to a runtime node: the task (with its\n`effect_id`, `continuity_epoch`, and effective `lease_secs`) plus its\nplacement echoed at the top level for debugging."
       },
       "ClusterNode": {
         "type": "object",
@@ -9846,6 +9997,77 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "CreateBrowserSessionRequest": {
+        "type": "object",
+        "required": [
+          "handlers"
+        ],
+        "properties": {
+          "handlers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Handler allowlist: polls for any other handler are refused."
+          },
+          "queues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Named queues the tab may poll with `/workers/tasks/poll/queue`."
+          },
+          "runtime_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Runtime identity to bind (a fresh one is minted when absent)."
+          },
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Token lifetime in seconds (default 900, max 3600).",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateBrowserSessionResponse": {
+        "type": "object",
+        "required": [
+          "token",
+          "runtime_id",
+          "expires_at",
+          "handlers"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "handlers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "queues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "runtime_id": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
           }
         }
       },
@@ -13101,6 +13323,7 @@
           "lease_secs": {
             "type": "integer",
             "format": "int64",
+            "description": "Server-wide default lease; each task's own `lease_secs` wins.",
             "minimum": 0
           },
           "poll_after_ms": {
@@ -13111,7 +13334,7 @@
           "tasks": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/WorkerTask"
+              "$ref": "#/components/schemas/ClaimedWorkerTask"
             }
           }
         }
@@ -14239,6 +14462,27 @@
             "format": "int32",
             "description": "Minimum terminal instances per variant before the gate is\nconclusive.",
             "minimum": 0
+          }
+        }
+      },
+      "ReleaseRequest": {
+        "type": "object",
+        "required": [
+          "worker_id",
+          "claim_epoch"
+        ],
+        "properties": {
+          "claim_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "started": {
+            "type": "boolean",
+            "description": "Whether the handler already started. `false`: the task goes straight\nback to `pending` and its effect receipt is untouched. `true`: treated\nlike a lease expiry after start (a side-effecting step's receipt\nbecomes `unknown` and the step's retry policy decides)."
+          },
+          "worker_id": {
+            "type": "string"
           }
         }
       },
@@ -16933,6 +17177,10 @@
           "block_id": {
             "$ref": "#/components/schemas/BlockId"
           },
+          "carries_credentials": {
+            "type": "boolean",
+            "description": "The step's params referenced `credentials://` material. Such a task is\nnever claimable by a `browser` runtime."
+          },
           "checkpoint_seq": {
             "type": "integer",
             "format": "int64",
@@ -16952,6 +17200,17 @@
             ],
             "format": "date-time"
           },
+          "claimed_runtime_kind": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RuntimeKind",
+                "description": "Runtime kind of the current claimant (from its capability\nadvertisement), recorded for lease sizing, output bounds, and\nprovenance. `None` for legacy capability-less claims."
+              }
+            ]
+          },
           "completed_at": {
             "type": [
               "string",
@@ -16962,9 +17221,29 @@
           "context": {
             "description": "Serialized `ExecutionContext` — kept as raw JSON to avoid coupling workers to Rust types."
           },
+          "continuity_epoch": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Continuity ownership epoch of the instance when the task was\ndispatched. Lease mutations are fenced on it: a task dispatched under\nan older owner cannot complete after a handoff. `None` = the instance\nwas not enrolled in continuity at dispatch.",
+            "minimum": 0
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "effect_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EffectId",
+                "description": "Deterministic idempotency key of this attempt's effect receipt, fixed\nat dispatch. Nodes pass it to handlers and downstream APIs as an\nidempotency key; the server settles the receipt by this stored id\n(never a recomputed one, which would miss after an ownership handoff)."
+              }
+            ]
           },
           "error_message": {
             "type": [
@@ -16994,6 +17273,15 @@
           },
           "instance_id": {
             "$ref": "#/components/schemas/InstanceId"
+          },
+          "lease_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Lease (seconds between heartbeats) for the current claim, chosen from\nthe claimant's runtime kind. `None` = the server-wide default.",
+            "minimum": 0
           },
           "output": {},
           "params": {},

@@ -841,6 +841,7 @@ POST /workers/tasks/poll
 | `worker_id` | string | **required** | Unique worker identifier |
 | `limit` | integer | `1` | Max tasks to claim |
 | `version` | string | null | Worker build/deploy version, recorded on the worker registry and checked against [version pins](#worker-version-pins) |
+| `capabilities` | object | null | `RuntimeCapabilities` advertisement (`runtime_id` must equal `worker_id`, lifetime ≤ 5 min). Required to claim placed steps (`$runtime`); see [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
 
 **Response:** `200 OK`
 
@@ -864,7 +865,10 @@ POST /workers/tasks/poll
     "output": null,
     "error_message": null,
     "error_retryable": null,
-    "created_at": "2024-01-15T13:59:58Z"
+    "created_at": "2024-01-15T13:59:58Z",
+    "effect_id": "0190f5a0-...",
+    "continuity_epoch": 0,
+    "lease_secs": 60
     }
   ],
   "lease_secs": 60,
@@ -879,6 +883,20 @@ the advertised heartbeat and poll intervals instead of hard-coded timing.
 **Mechanics:**
 - Uses `FOR UPDATE SKIP LOCKED` — concurrent workers never get the same task.
 - Sets `state = claimed`, `worker_id`, `claimed_at`, and `heartbeat_at`.
+
+**Distributed-execution fields** (all optional; older workers ignore them):
+
+| Field | Description |
+|-------|-------------|
+| `effect_id` | Deterministic id of this attempt's effect receipt, fixed at dispatch. Pass it to handlers / downstream APIs as an idempotency key. The server settles the receipt by this stored id. |
+| `continuity_epoch` | Owner epoch of the instance when the task was dispatched. Lease mutations are fenced on it (409 after a handoff). |
+| `lease_secs` | Lease for this claim: browser 30, mobile 120, otherwise the server default. Heartbeat well within it (e.g. every `lease_secs / 3`). The top-level `lease_secs` is only the server default. |
+| `target_runtime_id` / `runtime_kinds` | Echo of the step's `$runtime` placement, for debugging. |
+| `claimed_runtime_kind` | Kind from the claimant's capability advertisement. |
+
+A browser claimant receives a filtered `context` (no `config`, no audit
+trail, no credential-bearing entries, redaction policy applied) and is never
+handed a task whose params referenced `credentials://` material.
 
 ---
 
@@ -907,7 +925,14 @@ POST /workers/tasks/{task_id}/complete
 | `claim_epoch` | integer | Must match the claim generation returned by polling |
 | `output` | object | Result JSON (saved as BlockOutput) |
 
-**Response:** `200 OK`
+**Response:** `200 OK`. A retry by the same lease holder of an already
+completed task is idempotent (`200`). `409` when the lease or the continuity
+owner epoch changed. A browser runtime's output larger than
+`ORCH8_BROWSER_OUTPUT_MAX_BYTES` (default 1 MiB) is refused with `413` (the
+lease stays claimed; fail the task). The runtime kind/id that produced a
+remote output is recorded as provenance (audit event
+`worker_output_provenance`, plus a `remote_step_output` continuity provenance
+entry when the instance is enrolled).
 
 **Side effects:**
 1. Worker task marked `completed`
@@ -941,7 +966,9 @@ POST /workers/tasks/{task_id}/fail
 | `message` | string | **required** | Error description |
 | `retryable` | boolean | `false` | Whether the error is transient |
 
-**Response:** `200 OK`
+**Response:** `200 OK`. Re-sending a failure for a task this lease already
+failed is idempotent (`200`); once a retry replaced the task the old id is
+`404`; a changed lease/owner epoch is `409`.
 
 **Retryable failure:**
 - Worker task deleted (allows re-dispatch on next tick)
@@ -970,7 +997,17 @@ POST /workers/tasks/{task_id}/heartbeat
 
 **Response:** `200 OK`
 
-Send heartbeats every 15-30 seconds for long-running tasks. Tasks without a heartbeat for 60 seconds are reclaimed by the reaper and returned to the queue.
+Send heartbeats well within the task's `lease_secs` (browser 30, mobile 120,
+otherwise the server default). When a lease expires the reaper:
+
+- **requeues** a pure task (no unresolved effect receipt), or
+- for a side-effecting task (receipt `dispatched`), moves the receipt to
+  `unknown` and applies the step's retry policy as a retryable failure (a new
+  attempt with a new `effect_id`, else the node/instance fails). It never
+  silently hands the same effect to a second node.
+
+Tasks whose `timeout_ms` elapses always advance the instance (retry or fail);
+a task that was never claimed abandons its receipt.
 
 All complete, fail, heartbeat, and checkpoint requests must echo the
 `claim_epoch` returned by polling. A stale generation receives `409 Conflict`,
@@ -981,6 +1018,48 @@ An activity may make the heartbeat durable and resumable by also sending
 `checkpoint_seq` plus a JSON `checkpoint` (maximum 256 KiB). The response
 returns the incremented sequence. A reclaimed worker receives the latest value
 as `resume_checkpoint` on the polled task; stale writers receive `409`.
+
+---
+
+### Release Task
+
+```
+POST /workers/tasks/{task_id}/release
+```
+
+```json
+{ "worker_id": "tab-7f3c", "claim_epoch": 1, "started": false }
+```
+
+Voluntary give-back (tab closing, app backgrounding); works from
+`fetch(url, {keepalive: true})` during `pagehide`. `started: false` returns
+the task to `pending` immediately with its effect receipt untouched.
+`started: true` is treated like a lease expiry after start (receipt `unknown`
+for a side-effecting step, then the retry policy). **Response:** `204`; `409`
+for a stale claim or changed owner epoch; `404` only if the task no longer
+exists.
+
+---
+
+### Browser Sessions
+
+```
+POST /runtimes/browser-sessions
+```
+
+Operator/Admin only — called by the customer's app backend, never by the
+browser.
+
+```json
+{ "runtime_id": "optional-uuid", "handlers": ["read_dom"], "ttl_secs": 900, "queues": [] }
+```
+
+Returns `201 {token, runtime_id, expires_at, handlers}`. `ttl_secs` defaults
+to 900 (max 3600). The `bst_…` token is sent as `x-api-key` (or
+`Authorization: Bearer`) and may only call poll / poll-queue / complete /
+fail / heartbeat / release; polls must use `worker_id = runtime_id`, kind
+`browser`, and an allowlisted handler/queue (`403` otherwise). See
+[Distributed runtimes](DISTRIBUTED_RUNTIMES.md).
 
 ---
 

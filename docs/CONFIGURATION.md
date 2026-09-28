@@ -207,8 +207,9 @@ mount a config file for those settings.
 | `ORCH8_GRPC_TLS_KEY_PATH` | — | PEM gRPC server private-key path |
 | `ORCH8_GRPC_TLS_CLIENT_CA_PATH` | — | PEM client CA path; causes the listener to require a trusted client certificate |
 | `ORCH8_GRPC_MTLS_IDENTITIES` | — | JSON fingerprint-to-workload mapping; see [gRPC worker stream](GRPC_WORKER_STREAM.md#mtls-workload-identity) |
-| `ORCH8_CORS_ORIGINS` | — | CORS allowed origins (empty = no CORS headers). `*` is rejected at startup while API-key auth is enabled |
+| `ORCH8_CORS_ORIGINS` | — | CORS allowed origins (empty = no CORS headers). `*` is rejected at startup while API-key auth is enabled. List the origins that host browser runtimes; preflights allow `x-api-key`/`Authorization` and are cached for 2 h |
 | `ORCH8_API_KEY` | — | Root API key, sent by clients as `x-api-key`. Required unless `--insecure-auth` is passed |
+| `ORCH8_BROWSER_OUTPUT_MAX_BYTES` | `1048576` | Largest serialized step output a browser runtime may report (larger completions get `413`). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
 | `ORCH8_REQUIRE_TENANT_HEADER` | `true` | Enforce `X-Tenant-Id` header (secure by default) |
 | `ORCH8_ALLOW_NO_TENANT_ISOLATION` | — | Set to `1` to allow `require_tenant_header=false` while API-key auth is on (explicit opt-out of tenant isolation; the server warns loudly) |
 | `ORCH8_MAX_CONCURRENT_REQUESTS` | `0` | Global in-flight request cap (0 = unlimited). Legacy `ORCH8_RATE_LIMIT_RPS` still accepted. |

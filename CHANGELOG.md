@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Distributed execution (runtime nodes)
+
+See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
+
+- **Lease expiry never duplicates side effects**: worker tasks store the
+  dispatch-time `effect_id`, `continuity_epoch`, and a per-claim `lease_secs`
+  (browser 30 s, mobile 120 s). The engine reaper requeues pure tasks but moves
+  a side-effecting task's receipt to `unknown` and applies the retry policy;
+  timed-out tasks now advance the instance (previously they dangled) and settle
+  their receipt (`abandoned` when never claimed). Receipts are settled by the
+  stored id, so settlement no longer misses after a handoff. The legacy storage
+  reaper skips ambiguous effects and honours per-task leases.
+- **Handoff fencing**: worker complete/fail/heartbeat/release/artifact calls
+  (HTTP and gRPC) are fenced on the continuity owner epoch as well as
+  `claim_epoch`; capsule export is refused while worker tasks are open; the
+  scheduler never advances an instance whose execution is transferring or was
+  handed to another runtime.
+- **Push dispatch is an id-only wake-up** (`{task_id, runtime_id, reason}`); no
+  params or context leave the server without a lease.
+- **Browsers never receive secrets**: credential-bearing tasks are unclaimable
+  by browser runtimes, browser-placed credential steps fail at dispatch, and
+  browser claimants get a filtered, redacted context.
+- **Placement**: `$runtime.runtime_kinds`, `$runtime.runtime_id` (per-node
+  mailbox), `$runtime.policy`/`classification`; placed steps dispatch remotely
+  even when the handler is local; placement is validated and locality is
+  evaluated at dispatch with a recorded placement decision, and re-evaluated at
+  claim.
+- **New endpoints**: `POST /workers/tasks/{id}/release` (voluntary give-back)
+  and `POST /runtimes/browser-sessions` (short-lived, scoped browser tokens:
+  bound kind/runtime_id/handler allowlist, lease protocol only). Polls reject
+  identities that conflict with the credential binding. Browser outputs are
+  size-bounded (`ORCH8_BROWSER_OUTPUT_MAX_BYTES`, default 1 MiB) and remote
+  outputs record provenance. CORS preflights are cacheable (2 h).
+- **Device-mesh delegation** (Feature 29): a claimed delegation with a
+  server-hosted parent becomes a mailbox task for the destination runtime whose
+  result is integrated into the parent (`context.data.delegations.<id>`).
+- Poll responses echo `target_runtime_id` / `runtime_kinds`; re-sending a
+  failure for an already-failed task (same lease) is idempotent.
+- Schema: Postgres migration `095_distributed_worker_tasks.sql`; bundled SQLite
+  schema v46 (columns reconciled additively on boot).
+
 ### Security
 
 - **WASM plugin loading** only accepts binary modules (`\0asm` magic, 32 MiB cap,

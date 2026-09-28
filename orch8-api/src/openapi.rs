@@ -501,6 +501,7 @@ impl Modify for ContinuityOpenApi {
         crate::workers::fail_task,
         crate::workers::heartbeat_task,
         crate::workers::release_task,
+        crate::browser_sessions::create_browser_session,
         crate::workers::list_tasks,
         crate::workers::task_stats,
         crate::workers::list_task_attempts,
@@ -737,6 +738,8 @@ impl Modify for ContinuityOpenApi {
         orch8_types::worker::WorkerTaskState,
         crate::workers::ClaimedWorkerTask,
         crate::workers::ReleaseRequest,
+        crate::browser_sessions::CreateBrowserSessionRequest,
+        crate::browser_sessions::CreateBrowserSessionResponse,
         orch8_types::continuity::RuntimeKind,
         // Audit
         orch8_types::audit::AuditLogEntry,
