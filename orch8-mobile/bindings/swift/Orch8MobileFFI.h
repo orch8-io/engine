@@ -502,6 +502,11 @@ void uniffi_orch8_mobile_fn_method_mobileengine_set_device_context(uint64_t ptr,
 void uniffi_orch8_mobile_fn_method_mobileengine_set_listener(uint64_t ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_SET_TOKEN_PROVIDER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_SET_TOKEN_PROVIDER
+void uniffi_orch8_mobile_fn_method_mobileengine_set_token_provider(uint64_t ptr, uint64_t provider, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_SHUTDOWN
 void uniffi_orch8_mobile_fn_method_mobileengine_shutdown(uint64_t ptr, RustCallStatus *_Nonnull out_status
@@ -1087,6 +1092,12 @@ uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_set_device_context(voi
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_LISTENER
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_LISTENER
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_set_listener(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_TOKEN_PROVIDER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_TOKEN_PROVIDER
+uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider(void
     
 );
 #endif

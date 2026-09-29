@@ -1033,6 +1033,8 @@ internal object IntegrityCheckingUniffiLib {
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_set_listener(): Int
 
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider(): Int
+
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_shutdown(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_start(): Int
@@ -1279,6 +1281,12 @@ internal object UniffiLib {
     external fun uniffi_orch8_mobile_fn_method_mobileengine_set_listener(
         `ptr`: Long,
         `listener`: Long,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_set_token_provider(
+        `ptr`: Long,
+        `provider`: Long,
         uniffi_out_err: UniffiRustCallStatus,
     ): Unit
 
@@ -1726,7 +1734,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_register_handler() and 0xFFFF) != 16855) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_register_node() and 0xFFFF) != 1315) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_register_node() and 0xFFFF) != 6344) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state() and 0xFFFF) != 30406) {
@@ -1745,6 +1753,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_set_listener() and 0xFFFF) != 6834) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider() and 0xFFFF) != 808) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_shutdown() and 0xFFFF) != 65418) {
@@ -3227,7 +3238,8 @@ public interface MobileEngineInterface {
      * Join the distributed runtime mesh: registers the device
      * (`/mobile/devices/register`) and its runtime capabilities
      * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
-     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * `device_id`, and the node credential (the token provider's device
+     * session, else `sync_api_key`). The advertisement is refreshed in the
      * background before its five-minute TTL (that refresh is the node's
      * liveness signal) until `unregister_node` / `shutdown`. Calling it again
      * updates the advertised facts. Also settles any remote task a previous
@@ -3278,6 +3290,18 @@ public interface MobileEngineInterface {
      * Set the event listener for engine lifecycle events.
      */
     fun `setListener`(`listener`: EngineListener)
+
+    /**
+     * Authenticate every control-plane call (node registration, worker
+     * leases, delegation, sync) with tokens from `provider` instead of the
+     * static `sync_api_key`. The provider should return a short-lived device
+     * session minted by the app's backend with an operator key
+     * (`POST /runtimes/device-sessions` for this `device_id` and
+     * [`Self::node_runtime_id`]); `refresh_token` is called when the control
+     * plane answers `401` (expired session) and the request is retried once.
+     * Call it before `register_node`. Never ship an operator key in an app.
+     */
+    fun `setTokenProvider`(`provider`: TokenProvider)
 
     /**
      * Shut down the engine.
@@ -3884,7 +3908,8 @@ open class MobileEngine :
      * Join the distributed runtime mesh: registers the device
      * (`/mobile/devices/register`) and its runtime capabilities
      * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
-     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * `device_id`, and the node credential (the token provider's device
+     * session, else `sync_api_key`). The advertisement is refreshed in the
      * background before its five-minute TTL (that refresh is the node's
      * liveness signal) until `unregister_node` / `shutdown`. Calling it again
      * updates the advertised facts. Also settles any remote task a previous
@@ -4003,6 +4028,27 @@ open class MobileEngine :
                 UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_set_listener(
                     it,
                     FfiConverterTypeEngineListener.lower(`listener`),
+                    _status,
+                )
+            }
+        }
+
+    /**
+     * Authenticate every control-plane call (node registration, worker
+     * leases, delegation, sync) with tokens from `provider` instead of the
+     * static `sync_api_key`. The provider should return a short-lived device
+     * session minted by the app's backend with an operator key
+     * (`POST /runtimes/device-sessions` for this `device_id` and
+     * [`Self::node_runtime_id`]); `refresh_token` is called when the control
+     * plane answers `401` (expired session) and the request is retried once.
+     * Call it before `register_node`. Never ship an operator key in an app.
+     */
+    override fun `setTokenProvider`(`provider`: TokenProvider) =
+        callWithHandle {
+            uniffiRustCall { _status ->
+                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_set_token_provider(
+                    it,
+                    FfiConverterTypeTokenProvider.lower(`provider`),
                     _status,
                 )
             }

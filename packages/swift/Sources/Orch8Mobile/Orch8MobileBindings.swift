@@ -1322,7 +1322,8 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * Join the distributed runtime mesh: registers the device
      * (`/mobile/devices/register`) and its runtime capabilities
      * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
-     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * `device_id`, and the node credential (the token provider's device
+     * session, else `sync_api_key`). The advertisement is refreshed in the
      * background before its five-minute TTL (that refresh is the node's
      * liveness signal) until `unregister_node` / `shutdown`. Calling it again
      * updates the advertised facts. Also settles any remote task a previous
@@ -1370,6 +1371,18 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * Set the event listener for engine lifecycle events.
      */
     func setListener(listener: EngineListener) 
+    
+    /**
+     * Authenticate every control-plane call (node registration, worker
+     * leases, delegation, sync) with tokens from `provider` instead of the
+     * static `sync_api_key`. The provider should return a short-lived device
+     * session minted by the app's backend with an operator key
+     * (`POST /runtimes/device-sessions` for this `device_id` and
+     * [`Self::node_runtime_id`]); `refresh_token` is called when the control
+     * plane answers `401` (expired session) and the request is retried once.
+     * Call it before `register_node`. Never ship an operator key in an app.
+     */
+    func setTokenProvider(provider: TokenProvider) 
     
     /**
      * Shut down the engine.
@@ -1819,7 +1832,8 @@ open func registerHandler(name: String, handler: StepHandler)throws   {try rustC
      * Join the distributed runtime mesh: registers the device
      * (`/mobile/devices/register`) and its runtime capabilities
      * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
-     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * `device_id`, and the node credential (the token provider's device
+     * session, else `sync_api_key`). The advertisement is refreshed in the
      * background before its five-minute TTL (that refresh is the node's
      * liveness signal) until `unregister_node` / `shutdown`. Calling it again
      * updates the advertised facts. Also settles any remote task a previous
@@ -1916,6 +1930,25 @@ open func setListener(listener: EngineListener)  {try! rustCall() {
     uniffi_orch8_mobile_fn_method_mobileengine_set_listener(
             self.uniffiCloneHandle(),
         FfiConverterTypeEngineListener_lower(listener),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Authenticate every control-plane call (node registration, worker
+     * leases, delegation, sync) with tokens from `provider` instead of the
+     * static `sync_api_key`. The provider should return a short-lived device
+     * session minted by the app's backend with an operator key
+     * (`POST /runtimes/device-sessions` for this `device_id` and
+     * [`Self::node_runtime_id`]); `refresh_token` is called when the control
+     * plane answers `401` (expired session) and the request is retried once.
+     * Call it before `register_node`. Never ship an operator key in an app.
+     */
+open func setTokenProvider(provider: TokenProvider)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_set_token_provider(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeTokenProvider_lower(provider),uniffiCallStatus
     )
 }
 }
@@ -5425,7 +5458,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_register_handler() != 16855) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_orch8_mobile_checksum_method_mobileengine_register_node() != 1315) {
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_register_node() != 6344) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state() != 30406) {
@@ -5444,6 +5477,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_set_listener() != 6834) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider() != 808) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_shutdown() != 65418) {
