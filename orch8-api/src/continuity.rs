@@ -269,37 +269,16 @@ pub(crate) async fn append_provenance_digest(
     summary: &str,
     payload_sha256: &str,
 ) -> Result<(), ApiError> {
-    for attempt in 0..8 {
-        let previous = state
-            .storage
-            .get_provenance_head(&execution.tenant_id, execution.continuity_id)
-            .await
-            .map_err(|error| ApiError::from_storage(error, "provenance head"))?
-            .map(|entry| entry.entry_sha256);
-        let mut entry = orch8_engine::continuity::build_provenance_entry_with_summary(
-            execution,
-            kind,
-            Some(summary.into()),
-            payload_sha256,
-            previous,
-            Utc::now(),
-        );
-        if let Some(crypto) = &state.continuity_crypto {
-            entry = orch8_engine::continuity::sign_provenance_entry(
-                entry,
-                crypto.signing_key_id.clone(),
-                &crypto.signing_key,
-            );
-        }
-        match state.storage.append_provenance(&entry).await {
-            Ok(()) => return Ok(()),
-            Err(error) if attempt == 7 => {
-                return Err(ApiError::from_storage(error, "provenance append"));
-            }
-            Err(_) => tokio::task::yield_now().await,
-        }
-    }
-    unreachable!("bounded provenance append loop always returns")
+    orch8_engine::provenance::append_provenance_digest(
+        state.storage.as_ref(),
+        state.provenance_signer(),
+        execution,
+        kind,
+        summary,
+        payload_sha256,
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "provenance append"))
 }
 
 #[derive(Debug, Deserialize)]

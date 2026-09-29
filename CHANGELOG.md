@@ -68,6 +68,10 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
   the new columns (explicit column lists) and their pollers may claim a retry
   row before it is bound — its settlement then falls back to the attempt's
   open receipt.
+- **gRPC completions record output provenance**: the runtime kind/id audit
+  event (`worker_output_provenance`) and the `remote_step_output`
+  provenance-chain entry now live in `orch8_engine::provenance`, shared by
+  HTTP and gRPC `CompleteTask` (signed with the continuity key on both).
 - **gRPC worker parity**: `CompleteTask` commits the effect receipt (and
   integrates delegation results), `FailTask` uses the fenced resolution, and a
   new `ReleaseTask` RPC mirrors `POST /workers/tasks/{id}/release`.

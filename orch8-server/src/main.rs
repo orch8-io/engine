@@ -368,6 +368,7 @@ async fn main() -> anyhow::Result<()> {
                 require_tenant,
                 engine_ready.clone(),
                 assembly.grpc,
+                app_state.continuity_crypto.clone(),
             )
             .await?,
         )
@@ -1003,6 +1004,8 @@ const GRPC_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 const GRPC_MAX_CONNECTION_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 const GRPC_MAX_CONNECTION_AGE_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
+// Every argument is an independent piece of process wiring shared with HTTP.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_grpc_server(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
@@ -1011,6 +1014,7 @@ async fn spawn_grpc_server(
     require_tenant: bool,
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
     surface: GrpcSurface,
+    continuity_crypto: Option<Arc<orch8_api::ContinuityCrypto>>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let grpc_addr: std::net::SocketAddr = config
         .api
@@ -1062,10 +1066,16 @@ async fn spawn_grpc_server(
         None
     };
 
-    let grpc_service =
+    let mut grpc_service =
         Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes)
             .with_shutdown(shutdown.clone())
             .with_engine_ready(engine_ready.clone());
+    // Remote-output provenance entries are signed with the same continuity
+    // key the HTTP surface uses.
+    if let Some(crypto) = continuity_crypto {
+        grpc_service = grpc_service
+            .with_provenance_signer(crypto.signing_key_id.clone(), crypto.signing_key.clone());
+    }
     let mut auth_layer =
         orch8_grpc::auth::GrpcAuthLayer::new(storage, root_key_digest, require_tenant)
             .with_workload_identities(workload_identities);
@@ -1934,6 +1944,7 @@ mod tests {
             false,
             engine_ready,
             GrpcSurface::Full,
+            None,
         )
         .await;
         assert!(

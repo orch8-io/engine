@@ -38,6 +38,7 @@ pub mod placement;
 pub mod preflight;
 pub mod preload;
 pub mod prompt_registry;
+pub mod provenance;
 pub mod push;
 pub mod queue_routing;
 pub mod recovery;

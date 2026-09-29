@@ -3396,6 +3396,7 @@ version = "0.7.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "ed25519-dalek 3.0.0",
  "orch8-engine",
  "orch8-storage",
  "orch8-types",

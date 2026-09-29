@@ -152,6 +152,17 @@ pub struct AppState {
     pub browser_output_max_bytes: usize,
 }
 
+impl AppState {
+    /// Signer for provenance entries (the continuity signing key), when
+    /// continuity crypto is configured.
+    #[must_use]
+    pub fn provenance_signer(&self) -> Option<orch8_engine::provenance::ProvenanceSigner<'_>> {
+        self.continuity_crypto
+            .as_deref()
+            .map(ContinuityCrypto::provenance_signer)
+    }
+}
+
 /// Default bound on browser-reported step output (1 MiB).
 pub const DEFAULT_BROWSER_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
 
@@ -176,6 +187,15 @@ impl std::fmt::Debug for ContinuityCrypto {
 }
 
 impl ContinuityCrypto {
+    /// The provenance signer backed by this continuity signing key.
+    #[must_use]
+    pub fn provenance_signer(&self) -> orch8_engine::provenance::ProvenanceSigner<'_> {
+        orch8_engine::provenance::ProvenanceSigner {
+            key_id: &self.signing_key_id,
+            signing_key: &self.signing_key,
+        }
+    }
+
     /// Derive domain-separated capsule keys from the engine master key. The
     /// derivation is stable across restarts; the master key itself is never
     /// stored in this structure or exposed through debug output.

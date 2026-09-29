@@ -239,8 +239,10 @@ fn rolling_upgrade_stranded_retry_row_self_heals() {
             &key,
             "POST",
             &format!("/workers/tasks/{}/complete", retry.id),
-            Some(&json!({"worker_id": "w2", "claim_epoch": reclaimed["claim_epoch"],
-                         "output": {"ok": true}})),
+            Some(
+                &json!({"worker_id": "w2", "claim_epoch": reclaimed["claim_epoch"],
+                         "output": {"ok": true}}),
+            ),
         );
         assert_eq!(status, 200, "{backend}: {body}");
         cloud.wait_state(instance, "completed", LONG);
@@ -416,6 +418,114 @@ fn grpc_complete_fail_release_settle_effects_like_http() {
                 .into_iter()
                 .find(|task| task.attempt == first.attempt + 1 && task.effect_id.is_some())
         });
+
+        // Output provenance: a desktop node claims over HTTP (so the claim
+        // carries its runtime kind) and one task completes over HTTP, the
+        // other over gRPC. Both record the same evidence: the audit event
+        // with runtime kind + id and output digest, and a provenance entry.
+        let key = cloud.mint_key(&["worker"]);
+        let runtime = Uuid::now_v7();
+        for transport in ["http", "grpc"] {
+            let handler = format!("prov.{transport}.{}", Uuid::now_v7().simple());
+            let (instance, _) = dispatched(&cloud, &handler, None);
+            let now = chrono::Utc::now();
+            let (status, body) = cloud.call(
+                &key,
+                "POST",
+                "/workers/tasks/poll",
+                Some(&json!({
+                    "handler_name": handler, "worker_id": runtime.to_string(), "limit": 1,
+                    "capabilities": {
+                        "runtime_id": runtime, "kind": "desktop", "trust": "registered",
+                        "handlers": [handler], "offline_capable": true,
+                        "observed_at": now.to_rfc3339(),
+                        "expires_at": (now + chrono::Duration::seconds(240)).to_rfc3339(),
+                    },
+                })),
+            );
+            assert_eq!(status, 200, "{backend}: {body}");
+            let task = body["tasks"][0].clone();
+            let output = json!({"rendered": transport});
+            if transport == "http" {
+                let (status, body) = cloud.call(
+                    &key,
+                    "POST",
+                    &format!("/workers/tasks/{}/complete", task["id"].as_str().unwrap()),
+                    Some(&json!({"worker_id": runtime.to_string(),
+                                 "claim_epoch": task["claim_epoch"], "output": output})),
+                );
+                assert_eq!(status, 200, "{backend}: {body}");
+            } else {
+                cloud
+                    .block_on(async {
+                        grpc(&cloud)
+                            .await
+                            .complete_task(proto::CompleteTaskRequest {
+                                task_id: task["id"].as_str().unwrap().to_owned(),
+                                worker_id: runtime.to_string(),
+                                output_json: output.to_string(),
+                                claim_epoch: task["claim_epoch"].as_u64().unwrap(),
+                            })
+                            .await
+                    })
+                    .expect("grpc complete");
+            }
+            cloud.wait_state(instance, "completed", LONG);
+            let audit = cloud
+                .block_on(
+                    cloud
+                        .storage
+                        .list_audit_log(orch8_types::ids::InstanceId::from_uuid(instance), 100),
+                )
+                .unwrap();
+            let evidence = audit
+                .iter()
+                .find(|entry| entry.event_type == "worker_output_provenance")
+                .unwrap_or_else(|| panic!("{backend}/{transport}: no provenance: {audit:?}"));
+            assert_eq!(
+                evidence.details["runtime_kind"], "desktop",
+                "{backend}/{transport}"
+            );
+            assert_eq!(
+                evidence.details["runtime_id"],
+                runtime.to_string(),
+                "{backend}/{transport}"
+            );
+            assert_eq!(
+                evidence.details["task_id"], task["id"],
+                "{backend}/{transport}"
+            );
+            assert_eq!(
+                evidence.details["output_sha256"].as_str().map(str::len),
+                Some(64),
+                "{backend}/{transport}"
+            );
+            let tenant = orch8_types::ids::TenantId::unchecked(&cloud.tenant);
+            let chain = cloud.block_on(async {
+                let execution = cloud
+                    .storage
+                    .get_continuity_execution_by_instance(
+                        &tenant,
+                        orch8_types::ids::InstanceId::from_uuid(instance),
+                    )
+                    .await
+                    .unwrap()
+                    .expect("side-effecting steps enroll the instance");
+                cloud
+                    .storage
+                    .list_provenance(&tenant, execution.continuity_id, 100)
+                    .await
+                    .unwrap()
+            });
+            assert!(
+                chain.iter().any(|entry| entry.kind == "remote_step_output"
+                    && entry
+                        .redacted_summary
+                        .as_deref()
+                        .is_some_and(|summary| summary.contains("desktop runtime"))),
+                "{backend}/{transport}: {chain:?}"
+            );
+        }
     }
 }
 

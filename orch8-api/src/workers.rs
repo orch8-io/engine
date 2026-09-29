@@ -1278,7 +1278,14 @@ pub(crate) async fn complete_task(
     // retry already persisted them on the first attempt).
     if !completion_retry {
         persist_reported_logs(&state, pre_task.instance_id, &pre_task.block_id, &req.logs).await;
-        record_output_provenance(&state, &tenant_id, &pre_task, &req.output).await;
+        orch8_engine::provenance::record_worker_output_provenance(
+            state.storage.as_ref(),
+            state.provenance_signer(),
+            &tenant_id,
+            &pre_task,
+            &req.output,
+        )
+        .await;
     }
 
     let task = state
@@ -1511,76 +1518,6 @@ pub(crate) async fn complete_task(
     }
 
     Ok(StatusCode::OK)
-}
-
-/// Record which runtime produced a step output (kind + id) in the audit
-/// trail and, for continuity-enrolled instances, the provenance chain — as
-/// evidence alongside the output, never by mutating the output JSON.
-/// Best-effort: provenance failures are logged, never fail the completion.
-async fn record_output_provenance(
-    state: &AppState,
-    tenant_id: &orch8_types::ids::TenantId,
-    task: &orch8_types::worker::WorkerTask,
-    output: &serde_json::Value,
-) {
-    let Some(kind) = task.claimed_runtime_kind else {
-        return;
-    };
-    let encoded = serde_json::to_vec(output).unwrap_or_default();
-    let output_sha256 = crate::continuity::hex_sha256(&encoded);
-    let runtime_id = task.worker_id.clone().unwrap_or_default();
-    let details = serde_json::json!({
-        "task_id": task.id,
-        "runtime_kind": kind,
-        "runtime_id": runtime_id,
-        "claim_epoch": task.claim_epoch,
-        "effect_id": task.effect_id,
-        "output_sha256": output_sha256,
-        "output_bytes": encoded.len(),
-        "untrusted_page_data": kind == orch8_types::continuity::RuntimeKind::Browser,
-    });
-    let entry = orch8_types::audit::AuditLogEntry {
-        id: Uuid::now_v7(),
-        instance_id: task.instance_id,
-        tenant_id: tenant_id.clone(),
-        event_type: "worker_output_provenance".into(),
-        from_state: None,
-        to_state: None,
-        block_id: Some(task.block_id.as_str().to_owned()),
-        details: details.clone(),
-        created_at: chrono::Utc::now(),
-    };
-    if let Err(error) = state.storage.append_audit_log(&entry).await {
-        tracing::warn!(task_id = %task.id, %error, "failed to record worker output provenance");
-    }
-    match state
-        .storage
-        .get_continuity_execution_by_instance(tenant_id, task.instance_id)
-        .await
-    {
-        Ok(Some(execution)) => {
-            let digest = crate::continuity::hex_sha256(details.to_string().as_bytes());
-            if let Err(error) = crate::continuity::append_provenance_digest(
-                state,
-                &execution,
-                "remote_step_output",
-                &format!(
-                    "step {} output from {} runtime {runtime_id}",
-                    task.block_id,
-                    kind.as_str()
-                ),
-                &digest,
-            )
-            .await
-            {
-                tracing::warn!(task_id = %task.id, ?error, "failed to append output provenance");
-            }
-        }
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(task_id = %task.id, %error, "provenance lookup failed");
-        }
-    }
 }
 
 #[derive(Deserialize, ToSchema)]
