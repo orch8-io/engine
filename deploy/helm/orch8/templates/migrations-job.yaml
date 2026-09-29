@@ -1,5 +1,5 @@
 {{- $v := .Values }}
-{{- if and (eq $v.storage.backend "postgres") (eq $v.migrations.mode "job") }}
+{{- if and (ne $v.mode "executor") (eq $v.storage.backend "postgres") (eq $v.migrations.mode "job") }}
 {{- $inlineUrl := and (not $v.postgresql.enabled) (not $v.externalDatabase.existingSecret) }}
 {{- /* The bundled subchart's Postgres does not exist before install, so run after it. */}}
 {{- $hook := ternary "post-install,pre-upgrade" "pre-install,pre-upgrade" $v.postgresql.enabled }}

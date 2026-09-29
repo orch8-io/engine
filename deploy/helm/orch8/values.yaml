@@ -15,10 +15,11 @@ imagePullSecrets: []
 #   allInOne: one Deployment running role `all_in_one` (API + engine + push outbox).
 #   split:    a `control` Deployment (API, metrics, webhooks, push outbox, no engine)
 #             plus an `executor` Deployment (engine + worker gRPC surface, HTTP health only).
-#   executor: a hybrid executor only (engine + worker gRPC surface, HTTP health
-#             only) that joins a managed Orch8 Cloud control plane with the
-#             join token in hybrid.joinToken (see docs/HYBRID.md). Uses the
-#             `executor` Deployment settings below; needs Postgres.
+#   executor: a hybrid remote executor only: joins Orch8 Cloud with the join
+#             token in hybrid.joinToken, holds no database, dials out only, and
+#             serves HTTP health (see docs/HYBRID.md). Uses the `executor`
+#             Deployment settings below. Needs no Postgres, API key or
+#             encryption key.
 # The `edge` role is intentionally not offered: it targets device/edge hosts
 # that run outside the cluster and talk to a managed control plane.
 mode: allInOne
@@ -30,6 +31,20 @@ hybrid:
     #   kubectl create secret generic orch8-join --from-literal=join-token=o8x1....
     existingSecret: ""
     key: join-token
+  # Executor-local credentials: a Secret whose keys are credential ids,
+  # mounted as ORCH8_CREDENTIALS_DIR. `credentials://<id>` in placed steps
+  # resolves here, never in Orch8 Cloud.
+  credentials:
+    existingSecret: ""
+  # Private CA / TLS-inspecting proxy: Secret with a PEM bundle trusted
+  # instead of the public roots for the Cloud connection.
+  caCert:
+    existingSecret: ""
+    key: ca.crt
+  # Internal networks steps may call (http_request, tool_call, …), e.g.
+  # "10.0.0.0/8,172.16.0.0/12". Cloud metadata endpoints stay blocked unless
+  # listed. Empty = public destinations only.
+  allowedInternalCidrs: ""
 
 # -- Metadata-only run export to Orch8 Cloud ([cloud_observability]).
 # Streams instance state transitions (never context, inputs, or outputs).
@@ -82,7 +97,7 @@ control:
   podAnnotations: {}
   extraEnv: []
 
-# Settings for the executor Deployment (mode=split).
+# Settings for the executor Deployment (mode=split, and mode=executor).
 executor:
   replicas: 2
   resources:
