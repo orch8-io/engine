@@ -45,3 +45,35 @@ await orch8.startWorker();
 await orch8.onPushWake(message.data);                      // id-only wake hint
 await orch8.runWorkerWindow(const Duration(seconds: 25)); // background window
 ```
+
+## Delegating from a phone-local workflow (engine release after 0.7.1)
+
+A step of a workflow running on the device's own engine whose `$runtime`
+places it on another runtime (`runtime_id` of another node, or
+`runtime_kinds` without `mobile`) is handed to that runtime through the server
+mailbox; the local instance parks and resumes exactly once with the result,
+across disconnects and app kills. Handler `orch8.delegation` delegates the
+server-side sequence `params.sequence_id` with `params.input`; any other
+handler delegates just that step. Needs `registerNode` and a node credential
+allowed to call the continuity API.
+
+```dart
+await orch8.registerNode();
+await orch8.startDelegation(const DelegationOptions(tenantId: 'acme')); // every launch
+
+// Explicit delegation from app code (no local step is parked):
+final id = await orch8.delegate(DelegateRequest(
+  instanceId: localInstanceId,
+  destinationRuntimeId: desktopRuntimeId,
+  subSequenceId: classifySequenceId,
+  input: {'photo': {'id': photoId}},
+));
+final status = await orch8.delegationStatus(id);
+// status.state: preparing | delegated | completed (status.output) | failed (status.error) | abandoned
+
+await orch8.listDelegations();  // journal, oldest first
+await orch8.delegationStats();  // running, delegated, completed, failed, abandoned, resumed
+await orch8.stopDelegation();   // pause; journaled delegations resume on the next start
+```
+
+`onPushReceived()` / `onPushWake(...)` advance pending delegations at once.

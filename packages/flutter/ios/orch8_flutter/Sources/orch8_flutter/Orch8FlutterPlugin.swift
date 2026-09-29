@@ -225,6 +225,38 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
             return engine.onPushWake(envelopeJson: try a.string("envelopeJson"))
         case "enableBuiltin":
             try engine.enableBuiltin(name: try a.string("name")); return nil
+
+        // Delegation from phone-local workflows (Orch8Mobile after 0.7.1).
+        case "startDelegation":
+            try engine.startDelegation(options: DelegationOptions(
+                tenantId: try a.string("tenantId"),
+                pollIntervalMs: (a["pollIntervalMs"] as? NSNumber)?.uint64Value ?? 2000,
+                ttlSecs: UInt32(clamping: (a["ttlSecs"] as? NSNumber)?.int64Value ?? 600)
+            ))
+            return nil
+        case "stopDelegation":
+            engine.stopDelegation(); return nil
+        case "delegate":
+            return try engine.delegate(request: DelegateRequest(
+                instanceId: try a.string("instanceId"),
+                destinationRuntimeId: try a.string("destinationRuntimeId"),
+                subSequenceId: try a.string("subSequenceId"),
+                inputJson: a["inputJson"] as? String ?? "{}"
+            ))
+        case "delegationStatus":
+            return Self.delegationStatus(try engine.delegationStatus(delegationId: try a.string("delegationId")))
+        case "listDelegations":
+            return try engine.listDelegations().map(Self.delegationStatus)
+        case "delegationStats":
+            let s = engine.delegationStats()
+            return [
+                "running": s.running,
+                "delegated": Int(clamping: s.delegated),
+                "completed": Int(clamping: s.completed),
+                "failed": Int(clamping: s.failed),
+                "abandoned": Int(clamping: s.abandoned),
+                "resumed": Int(clamping: s.resumed),
+            ]
         default:
             return FlutterMethodNotImplemented
         }
@@ -300,6 +332,18 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
         case .failed: return "failed"
         case .cancelled: return "cancelled"
         }
+    }
+
+    private static func delegationStatus(_ s: DelegationStatus) -> [String: Any] {
+        [
+            "delegationId": s.delegationId,
+            "state": s.state,
+            "localInstanceId": s.localInstanceId,
+            "blockId": s.blockId ?? NSNull(),
+            "destinationRuntimeId": s.destinationRuntimeId ?? NSNull(),
+            "outputJson": s.outputJson ?? NSNull(),
+            "error": s.error ?? NSNull(),
+        ]
     }
 
     private static func connectivity(_ wire: String?) -> NodeConnectivity? {

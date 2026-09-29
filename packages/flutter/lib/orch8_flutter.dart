@@ -186,6 +186,180 @@ class BackgroundRunResult {
       );
 }
 
+// -- Delegation from phone-local workflows (engine release after 0.7.1) ----
+
+/// Maximum lifetime of a delegation and its grant accepted by the control plane.
+const Duration maxDelegationTtl = Duration(seconds: 86400);
+
+/// Options for [Orch8.startDelegation].
+class DelegationOptions {
+  /// Tenant of the node credential; every continuity call is scoped to it.
+  final String tenantId;
+
+  /// How often pending delegations are advanced and polled. Push wakes
+  /// advance them immediately.
+  final Duration pollInterval;
+
+  /// Lifetime of each grant and delegation (whole seconds, at most one day).
+  /// A destination that has not reported by then fails the delegation and
+  /// the parked step follows its retry policy.
+  final Duration ttl;
+
+  const DelegationOptions({
+    required this.tenantId,
+    this.pollInterval = const Duration(seconds: 2),
+    this.ttl = const Duration(seconds: 600),
+  });
+
+  void _validate() {
+    if (tenantId.trim().isEmpty) {
+      throw ArgumentError.value(tenantId, 'tenantId', 'must not be empty');
+    }
+    if (pollInterval <= Duration.zero) {
+      throw ArgumentError.value(pollInterval, 'pollInterval', 'must be positive');
+    }
+    if (ttl < const Duration(seconds: 1) || ttl > maxDelegationTtl) {
+      throw ArgumentError.value(ttl, 'ttl', 'must be between 1s and 86400s');
+    }
+  }
+
+  Map<String, dynamic> toMap() => {
+        'tenantId': tenantId,
+        'pollIntervalMs': pollInterval.inMilliseconds,
+        'ttlSecs': ttl.inSeconds,
+      };
+}
+
+/// An explicit delegation of a server-side sub-sequence ([Orch8.delegate]).
+/// No local step is parked.
+class DelegateRequest {
+  /// Local parent instance the delegation belongs to (must exist).
+  final String instanceId;
+
+  /// Destination runtime id (a live registration of the same tenant).
+  final String destinationRuntimeId;
+
+  /// Server-side sequence the destination runs.
+  final String subSequenceId;
+
+  /// Explicit input handed to the sub-sequence.
+  final Map<String, dynamic> input;
+
+  const DelegateRequest({
+    required this.instanceId,
+    required this.destinationRuntimeId,
+    required this.subSequenceId,
+    this.input = const {},
+  });
+
+  void _validate() {
+    for (final entry in {
+      'instanceId': instanceId,
+      'destinationRuntimeId': destinationRuntimeId,
+      'subSequenceId': subSequenceId,
+    }.entries) {
+      if (entry.value.trim().isEmpty) {
+        throw ArgumentError.value(entry.value, entry.key, 'must not be empty');
+      }
+    }
+  }
+
+  Map<String, dynamic> toMap() => {
+        'instanceId': instanceId,
+        'destinationRuntimeId': destinationRuntimeId,
+        'subSequenceId': subSequenceId,
+        'inputJson': jsonEncode(input),
+      };
+}
+
+/// Where a delegation stands. `preparing`: not yet accepted by the control
+/// plane; `delegated`: in the destination's mailbox or running there;
+/// `abandoned`: never placed before its deadline.
+enum DelegationState {
+  preparing,
+  delegated,
+  completed,
+  failed,
+  abandoned;
+
+  bool get isTerminal => this == completed || this == failed || this == abandoned;
+
+  static DelegationState fromWire(String value) => DelegationState.values.firstWhere(
+        (s) => s.name == value,
+        orElse: () => throw FormatException('unknown delegation state: $value'),
+      );
+}
+
+/// A delegation as journaled on this device.
+class DelegationStatus {
+  final String delegationId;
+  final DelegationState state;
+  final String localInstanceId;
+
+  /// The parked local step, for delegations made by a sequence.
+  final String? blockId;
+  final String? destinationRuntimeId;
+
+  /// The destination's reported output (JSON), once completed.
+  final String? outputJson;
+  final String? error;
+
+  DelegationStatus({
+    required this.delegationId,
+    required this.state,
+    required this.localInstanceId,
+    this.blockId,
+    this.destinationRuntimeId,
+    this.outputJson,
+    this.error,
+  });
+
+  /// [outputJson] decoded, or null.
+  dynamic get output => outputJson == null ? null : jsonDecode(outputJson!);
+
+  factory DelegationStatus.fromMap(Map<String, dynamic> map) => DelegationStatus(
+        delegationId: map['delegationId'] as String,
+        state: DelegationState.fromWire(map['state'] as String),
+        localInstanceId: map['localInstanceId'] as String,
+        blockId: map['blockId'] as String?,
+        destinationRuntimeId: map['destinationRuntimeId'] as String?,
+        outputJson: map['outputJson'] as String?,
+        error: map['error'] as String?,
+      );
+}
+
+/// Counters of the delegation pump (zeros while it is not running).
+class DelegationStats {
+  final bool running;
+
+  /// Delegations accepted by the control plane.
+  final int delegated;
+  final int completed;
+  final int failed;
+  final int abandoned;
+
+  /// Parked local steps resumed with an outcome (exactly once each).
+  final int resumed;
+
+  DelegationStats({
+    required this.running,
+    required this.delegated,
+    required this.completed,
+    required this.failed,
+    required this.abandoned,
+    required this.resumed,
+  });
+
+  factory DelegationStats.fromMap(Map<String, dynamic> map) => DelegationStats(
+        running: map['running'] as bool,
+        delegated: map['delegated'] as int,
+        completed: map['completed'] as int,
+        failed: map['failed'] as int,
+        abandoned: map['abandoned'] as int,
+        resumed: map['resumed'] as int,
+      );
+}
+
 class FlushResult {
   final int sent;
   final int dropped;
@@ -653,6 +827,53 @@ class Orch8 {
   /// Enable an opt-in builtin handler (`http_request`) before [resume].
   Future<void> enableBuiltin(String name) =>
       _channel.invokeMethod('enableBuiltin', {'name': name});
+
+  // -- Delegation from phone-local workflows (engine release after 0.7.1) --
+
+  /// Start the delegation pump: a step of a workflow running on this engine
+  /// whose `$runtime` places it on another runtime is handed to that runtime
+  /// through the server mailbox; the local instance parks and resumes
+  /// exactly once with the result. Requires [registerNode]. Delegations are
+  /// journaled and survive app kills: call again after every launch.
+  Future<void> startDelegation(DelegationOptions options) {
+    options._validate();
+    return _channel.invokeMethod('startDelegation', options.toMap());
+  }
+
+  /// Pause the pump. Journaled delegations resume with the next
+  /// [startDelegation].
+  Future<void> stopDelegation() => _channel.invokeMethod('stopDelegation');
+
+  /// Delegate a server-side sub-sequence on behalf of a local instance
+  /// without parking a step. Returns the delegation id; read the outcome with
+  /// [delegationStatus]. Requires [startDelegation].
+  Future<String> delegate(DelegateRequest request) async {
+    request._validate();
+    return (await _channel.invokeMethod<String>('delegate', request.toMap()))!;
+  }
+
+  /// The locally journaled state of a delegation (a `PlatformException` when
+  /// unknown).
+  Future<DelegationStatus> delegationStatus(String delegationId) async {
+    if (delegationId.trim().isEmpty) {
+      throw ArgumentError.value(delegationId, 'delegationId', 'must not be empty');
+    }
+    final map = await _channel.invokeMapMethod<String, dynamic>(
+        'delegationStatus', {'delegationId': delegationId});
+    return DelegationStatus.fromMap(map!);
+  }
+
+  /// Every journaled delegation, oldest first.
+  Future<List<DelegationStatus>> listDelegations() async {
+    final list = await _channel.invokeListMethod<Map>('listDelegations') ?? const [];
+    return list.map((m) => DelegationStatus.fromMap(Map<String, dynamic>.from(m))).toList();
+  }
+
+  /// Pump counters (zeros while it is not running).
+  Future<DelegationStats> delegationStats() async {
+    final map = await _channel.invokeMapMethod<String, dynamic>('delegationStats');
+    return DelegationStats.fromMap(map!);
+  }
 
   Future<void> shutdown() async {
     await _channel.invokeMethod('shutdown');

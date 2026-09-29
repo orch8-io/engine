@@ -7,6 +7,9 @@ import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import io.orch8.mobile.DelegateRequest
+import io.orch8.mobile.DelegationOptions
+import io.orch8.mobile.DelegationStatus
 import io.orch8.mobile.EngineListener
 import io.orch8.mobile.HandlerException
 import io.orch8.mobile.InstanceStateKind
@@ -279,8 +282,51 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         }
         "onPushWake" -> eng.onPushWake(a.requireStr("envelopeJson"))
         "enableBuiltin" -> eng.enableBuiltin(a.requireStr("name")).let { null }
+
+        // Delegation from phone-local workflows (orch8-mobile after 0.7.1).
+        "startDelegation" -> {
+            eng.startDelegation(
+                DelegationOptions(
+                    tenantId = a.requireStr("tenantId"),
+                    pollIntervalMs = (a.long("pollIntervalMs") ?: 2_000L).toULong(),
+                    ttlSecs = (a.long("ttlSecs") ?: 600L).toUInt(),
+                ),
+            )
+            null
+        }
+        "stopDelegation" -> eng.stopDelegation().let { null }
+        "delegate" -> eng.delegate(
+            DelegateRequest(
+                instanceId = a.requireStr("instanceId"),
+                destinationRuntimeId = a.requireStr("destinationRuntimeId"),
+                subSequenceId = a.requireStr("subSequenceId"),
+                inputJson = a.str("inputJson") ?: "{}",
+            ),
+        )
+        "delegationStatus" -> delegationStatusMap(eng.delegationStatus(a.requireStr("delegationId")))
+        "listDelegations" -> eng.listDelegations().map(::delegationStatusMap)
+        "delegationStats" -> eng.delegationStats().let {
+            mapOf(
+                "running" to it.running,
+                "delegated" to it.delegated.toLong(),
+                "completed" to it.completed.toLong(),
+                "failed" to it.failed.toLong(),
+                "abandoned" to it.abandoned.toLong(),
+                "resumed" to it.resumed.toLong(),
+            )
+        }
         else -> NotImplemented
     }
+
+    private fun delegationStatusMap(s: DelegationStatus): Map<String, Any?> = mapOf(
+        "delegationId" to s.delegationId,
+        "state" to s.state,
+        "localInstanceId" to s.localInstanceId,
+        "blockId" to s.blockId,
+        "destinationRuntimeId" to s.destinationRuntimeId,
+        "outputJson" to s.outputJson,
+        "error" to s.error,
+    )
 
     private fun handleInitialize(args: Map<*, *>, result: MethodChannel.Result) {
         val dbPath = args.str("dbPath")

@@ -17,6 +17,12 @@
   `registerNode`, `updateNodeStatus`, `unregisterNode`, `nodeRuntimeId`,
   `startWorker`, `stopWorker`, `runWorkerWindow`, `workerStats`, `onPushWake`,
   `enableBuiltin`, and `Orch8TaskContext.fromInput` (`effectId`).
+- Delegation from phone-local workflows (needs the engine release after
+  0.7.1): `startDelegation`, `stopDelegation`, `delegate`, `delegationStatus`,
+  `listDelegations`, `delegationStats`, with `DelegationOptions`,
+  `DelegateRequest`, `DelegationState`, `DelegationStatus` and
+  `DelegationStats`. Arguments are validated in Dart before reaching the
+  platform channel.
 - `flushTelemetry` now returns `FlushResult`.
 
 ## 0.7.1
