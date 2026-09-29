@@ -724,14 +724,25 @@ async fn register_runtime(
 async fn list_runtimes(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Query(query): Query<TenantQuery>,
 ) -> Result<Json<Vec<RuntimeCapabilities>>, ApiError> {
     let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let now = Utc::now();
     let runtimes = state
         .storage
-        .list_runtime_capabilities(&tenant_id, Utc::now(), 1_000)
+        .list_runtime_capabilities(&tenant_id, now, 1_000)
         .await
         .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    // A device session gets only live delegation destinations, reduced to
+    // the facts it matches on — never the tenant's runtime inventory.
+    if let Some(binding) = crate::browser_sessions::device_binding(&binding) {
+        return Ok(Json(crate::device_sessions::destination_view(
+            runtimes,
+            binding.runtime_id,
+            now,
+        )));
+    }
     Ok(Json(runtimes))
 }
 

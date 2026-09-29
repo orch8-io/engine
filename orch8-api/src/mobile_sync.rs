@@ -67,6 +67,10 @@ struct ApprovalRequestPayload {
     metadata: Option<serde_json::Value>,
 }
 
+/// Why a `step_delegations` entry fails while credential resolution is off.
+const CREDENTIAL_RESOLUTION_DISABLED: &str = "server-side credential resolution for mobile \
+    step delegations is disabled (ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS)";
+
 #[derive(Deserialize)]
 struct StepDelegationPayload {
     request_id: String,
@@ -200,13 +204,21 @@ async fn handle_sync(
 
     // Process step delegations — device asks server to resolve credentials
     // and execute steps that require secrets. Results come back as commands.
+    //
+    // Opt-in (`ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS`): the caller is a
+    // device credential that ships inside an app, and this would hand it the
+    // plaintext of any tenant secret it names. Disabled, each delegation is
+    // answered with a failed `step_result` and the rest of the sync proceeds.
     for delegation in &req.step_delegations {
         let mut params = delegation.params.clone();
-        // Resolve credentials:// references in the params
-        if let Err(e) =
+        let resolved = if state.mobile_sync_resolve_credentials {
             orch8_engine::credentials::resolve_in_value(storage.as_ref(), &tenant_id, &mut params)
                 .await
-        {
+                .map_err(|e| e.to_string())
+        } else {
+            Err(CREDENTIAL_RESOLUTION_DISABLED.to_owned())
+        };
+        if let Err(e) = resolved {
             warn!(
                 request_id = %delegation.request_id,
                 error = %e,

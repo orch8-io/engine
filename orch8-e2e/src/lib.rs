@@ -130,6 +130,7 @@ impl Cloud {
             TestServerOptions {
                 root_api_key: Some(ROOT_KEY.into()),
                 mobile_sync_enabled: true,
+                mobile_sync_resolve_credentials: false,
             },
         ));
 

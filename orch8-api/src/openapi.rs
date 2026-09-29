@@ -357,6 +357,22 @@ pub(crate) const CONTINUITY_OPERATIONS: &[(&str, HttpMethod, &str)] = &[
     ),
 ];
 
+/// Caller-visible behavior worth stating on an otherwise generic
+/// continuity operation.
+fn continuity_operation_description(operation_id: &str) -> Option<&'static str> {
+    match operation_id {
+        "list_runtimes" => Some(
+            "List the tenant's live runtime advertisements (`RuntimeCapabilities`). \
+             A device-session (`dst_`) caller receives only the runtimes it could \
+             delegate to now — other than itself, not draining, not expired, at least \
+             `registered` trust, advertising `orch8.delegation` — reduced to \
+             `runtime_id`, `kind`, `handlers`, `observed_at` and `expires_at`, with \
+             `trust` reported as `registered` and every other fact omitted.",
+        ),
+        _ => None,
+    }
+}
+
 impl Modify for ContinuityOpenApi {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         for (path, method, operation_id) in CONTINUITY_OPERATIONS {
@@ -366,6 +382,7 @@ impl Modify for ContinuityOpenApi {
             let operation = OperationBuilder::new()
                 .operation_id(Some(*operation_id))
                 .tag("continuity")
+                .description(continuity_operation_description(operation_id))
                 .responses(responses)
                 .build();
             openapi

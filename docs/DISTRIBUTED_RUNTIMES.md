@@ -185,14 +185,14 @@ POST /runtimes/device-sessions
 
   | Route | Object-level check |
   |-------|--------------------|
-  | `POST /mobile/devices/register`, `POST /mobile/sync` | the session's `device_id`; `step_delegations` (server-side credential resolution) refused |
+  | `POST /mobile/devices/register`, `POST /mobile/sync` | the session's `device_id`; `step_delegations` (server-side credential resolution) refused — for stored keys it is off unless `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` |
   | `POST /mobile/devices/{device_id}/runtime` | the session's device and `runtime_id`, kind `mobile`; handlers clamped to the allowlist |
   | `POST /workers/tasks/poll`, `/workers/tasks/{id}/{complete,fail,heartbeat,release}` | `worker_id = runtime_id`, kind `mobile`, a granted handler |
   | `POST /continuity/executions` | `hosted_by_runtime: true`, `runtime_id` = the session's |
   | `POST /continuity/grants` | `allowed_actions: ["accept"]`, execution owned by the session's runtime (else `404`) |
   | `POST /continuity/delegations/claim` | `source_runtime_id` = the session's runtime (which must own the parent) |
   | `GET /continuity/delegations/{id}` | the session's runtime is the source or destination (else `404`) |
-  | `GET /runtimes` | read-only list of live registrations |
+  | `GET /runtimes` | only live delegation destinations (not itself, not draining/expired, ≥ `registered`, advertising `orch8.delegation`), reduced to `runtime_id`, `kind`, `handlers`, `observed_at`, `expires_at` (`trust` reported as `registered`) |
 
 - Refused: task listing and stats, `/workers/tasks/poll/queue`, worker
   commands, other devices' data (`GET /mobile/devices|approvals|status`,

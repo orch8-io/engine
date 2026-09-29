@@ -37,6 +37,7 @@ async fn state_with(provider: Arc<dyn EntitlementProvider>) -> AppState {
         publisher: None,
         push_provider: Arc::new(orch8_push::NoopPushProvider),
         mobile_sync_enabled: false,
+        mobile_sync_resolve_credentials: false,
         entitlements: provider,
         builtin_handlers: Arc::new(Vec::new()),
         engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),

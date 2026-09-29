@@ -42,7 +42,10 @@ describe("mobile sync — command mailbox protocol", () => {
   let server: ServerHandle | undefined;
 
   before(async () => {
-    server = await startServer({ env: { ORCH8_MOBILE_SYNC_ENABLED: "true" } });
+    server = await startServer({
+      // step_delegations credential resolution is opt-in; this suite covers it.
+      env: { ORCH8_MOBILE_SYNC_ENABLED: "true", ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS: "true" },
+    });
   });
 
   after(async () => {

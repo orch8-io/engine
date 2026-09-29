@@ -86,6 +86,21 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
   e2e: every phone scenario (a–f, h–j) now runs on device
   sessions, plus a legacy-key round trip, a refresh-on-expiry round trip, and
   a scope matrix of refused actions on both backends.
+- **Device sessions see only delegation destinations on `GET /runtimes`**:
+  a `dst_` caller gets the runtimes it could delegate to right now (not
+  itself, not draining or expired, at least `registered` trust, advertising
+  `orch8.delegation`), reduced to `runtime_id`, `kind`, `handlers`,
+  `observed_at` and `expires_at`, with `trust` reported as `registered`.
+  Regions, hardware, plugins, credential references, connectivity, battery,
+  cost/latency estimates and capsule keys are no longer exposed to phones.
+  Operator and other callers see the full list as before.
+- **Token providers in every mobile wrapper**: the Swift
+  `Orch8RuntimeNode.setTokenProvider`, React Native, Expo (gated on
+  `orch8RuntimeNodeMinVersion`), KMP and Flutter take an async host callback
+  that fetches a device session from the app's backend and is asked again
+  after a `401`. The UniFFI Swift/Kotlin bindings are regenerated with
+  `MobileEngine.setTokenProvider`. `syncApiKey` is documented as legacy and
+  not for production apps.
 - Fixed a flaky test (`execute_step_dry_emits_orch8_step_span_around_handler`):
   tracing's process-wide callsite-interest cache could record `never` for the
   `orch8.step` span when another test thread registered it while this test's
@@ -147,6 +162,23 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
 
 ### Security
 
+- **Breaking — `/mobile/sync` no longer resolves credentials by default.**
+  `step_delegations` asked the server to resolve `credentials://` references
+  and returned the plaintext in a `step_result` command. Any key with the
+  `device` capability could do it, and that key ships inside the app, so
+  anyone who extracted it could read any tenant secret they could name.
+  Credential resolution is now opt-in with
+  `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` (default off). When it is off,
+  each delegation gets a failed `step_result` (`success: false`, error naming
+  the flag) and the rest of the sync proceeds. Device sessions stay refused
+  either way, and the server logs a warning at startup when the flag is on.
+  **Migration:** no Orch8 mobile SDK sends `step_delegations` (the 0.7.1
+  outbox path had no caller and was removed), so SDK apps need no change.
+  If a custom client relies on it, move the secret-using step to a server
+  or edge runtime (placement / delegation), where credentials resolve at
+  dispatch and never reach the device. If you must keep it for now, set
+  `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` and treat every `device` key
+  as able to read tenant secrets.
 - **WASM plugin loading** only accepts binary modules (`\0asm` magic, 32 MiB cap,
   regular files); WAT text, devices and `/proc` paths are refused and load
   errors no longer echo paths or file contents. `ORCH8_WASM_PLUGIN_DIR` pins

@@ -545,7 +545,7 @@ engine.setListener(listener: MyListener())
 | `sequencesUrl` | String | `""` | Endpoint returning a JSON array of sequences for `loadSequencesFromUrl` |
 | `syncUrl` | String | `""` | Server sync endpoint for status reporting and commands. Empty = disabled |
 | `deviceId` | String | `""` | Unique device identifier sent with each sync request |
-| `syncApiKey` | String | `""` | Static credential for sync and runtime-node calls (legacy). Prefer a device session through `setTokenProvider` — see [Authenticating a phone](#authenticating-a-phone-device-sessions). Never put an operator key here |
+| `syncApiKey` | String | `""` | **Legacy — not for production apps.** A static key compiled into the app is extractable by anyone who has the app. Prefer a device session through `setTokenProvider` — see [Authenticating a phone](#authenticating-a-phone-device-sessions). Never put an operator key here |
 
 ### StepHandler Protocol
 
@@ -775,6 +775,32 @@ engine.setTokenProvider(object : TokenProvider {
 engine.registerNode(NodeCapabilities())
 ```
 
+The wrappers take an **async** callback that fetches a fresh session from
+your backend; they cache the token and call the callback again when the
+engine asks for a refresh:
+
+| Wrapper | Call (before `registerNode`) |
+|---------|------------------------------|
+| Swift | `try await Orch8RuntimeNode(engine:).setTokenProvider { try await backend.deviceSession() }` |
+| React Native | `await orch8.setTokenProvider(() => backend.deviceSession())` |
+| Expo | `await engine.setTokenProvider(() => backend.deviceSession())` on the `NativeEngine` (native engine after 0.7.1) |
+| KMP | `engine.setTokenProvider { backend.deviceSession() }` (suspend) |
+| Flutter | `await orch8.setTokenProvider(() => backend.deviceSession())` |
+
+Your backend keeps the operator key and mints the session, e.g. with
+`@orch8.io/sdk`:
+
+```ts
+// POST /device-session on your backend, after authenticating the user
+const session = await orch8.createDeviceSession({
+  deviceId,                    // the app's MobileEngineConfig.deviceId
+  runtimeId,                   // the app's engine.nodeRuntimeId()
+  handlers: ["scan_document"], // what this phone may serve
+  ttlSecs: 3600,
+});
+return { token: session.token, expiresAt: session.expiresAt };
+```
+
 Every control-plane call — device registration, runtime advertisement, the
 worker lease protocol, delegation, and `/mobile/sync` — carries the current
 token. When the server answers `401` (the session expired), the SDK calls
@@ -787,14 +813,14 @@ handler allowlist, and reaches only:
 
 | Allowed | Object-level check |
 |---------|--------------------|
-| `POST /mobile/devices/register`, `POST /mobile/sync` | `device_id` is the session's; no credential-resolving `step_delegations` |
+| `POST /mobile/devices/register`, `POST /mobile/sync` | `device_id` is the session's; no credential-resolving `step_delegations` (off for stored keys too unless `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true`) |
 | `POST /mobile/devices/{device_id}/runtime` | the session's device and runtime; advertised handlers clamped to the allowlist |
 | `POST /workers/tasks/poll`, `POST /workers/tasks/{id}/complete\|fail\|heartbeat\|release` | `worker_id` is the session's runtime; polled handler is in the allowlist |
 | `POST /continuity/executions` | `hosted_by_runtime: true` for the session's own runtime only |
 | `POST /continuity/grants` | only `accept` grants, for executions the session's runtime owns |
 | `POST /continuity/delegations/claim` | the session's runtime is the delegation source (and owns the parent) |
 | `GET /continuity/delegations/{id}` | the session's runtime is the source or the destination (else 404) |
-| `GET /runtimes` | read-only list of live registrations (destination choice by kind) |
+| `GET /runtimes` | only live delegation destinations (not itself, not draining or expired, ≥ `registered`, advertising `orch8.delegation`), reduced to `runtime_id`, `kind`, `handlers`, `observed_at`, `expires_at` — what destination choice matches on; no regions, hardware, credential references, network/battery state or capsule keys |
 
 Everything else — task listing, worker commands, other devices, sequences,
 credentials, instances, handoffs, API keys, browser/device session minting —

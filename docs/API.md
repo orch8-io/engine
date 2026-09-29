@@ -1087,6 +1087,11 @@ release as its runtime, allowlisted handlers), `POST /continuity/executions`
 executions), `POST /continuity/delegations/claim` (own runtime as source),
 `GET /continuity/delegations/{id}` (source or destination), and
 `GET /runtimes`; everything else is `403`, expired or forged tokens `401`.
+For a device session `GET /runtimes` lists only the runtimes it could
+delegate to now (not itself, not draining or expired, at least `registered`
+trust, advertising `orch8.delegation`) with only `runtime_id`, `kind`,
+`handlers`, `observed_at` and `expires_at` (`trust` reported as
+`registered`); other callers get the full records.
 `POST /continuity/delegations/claim` also accepts
 `"step": {"handler", "block_id"}` to have the control plane publish an
 isolated delegated step's one-step sequence. See
@@ -1559,7 +1564,7 @@ Mobile sync endpoints require `ORCH8_MOBILE_SYNC_ENABLED=true`. All endpoints ar
 | `device_id` | string | Device identifier (required) |
 | `status_updates` | array | Instance status updates from device |
 | `approval_requests` | array | Human-in-the-loop approval requests |
-| `step_delegations` | array | Step delegation requests |
+| `step_delegations` | array | Step delegation requests: the server resolves `credentials://` references in `params` and returns them in a `step_result` command. **Off by default** — enable with `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` (any `device` key could then read tenant secrets); otherwise each gets a failed `step_result`. Always refused for device sessions |
 | `command_acks` | array | Command IDs the device has processed |
 
 **Response:** `{ "commands": [...], "sync_interval_secs": 30 }`

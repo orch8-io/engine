@@ -122,6 +122,12 @@ pub struct AppState {
     pub publisher: Option<Arc<orch8_publisher::SequencePublisher>>,
     pub push_provider: Arc<dyn orch8_push::PushProvider>,
     pub mobile_sync_enabled: bool,
+    /// Resolve `credentials://` references for `/mobile/sync`
+    /// `step_delegations` and hand the plaintext back to the device
+    /// (`ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS`, default off). Device
+    /// credentials live in app binaries, so this is opt-in; device sessions
+    /// are refused regardless.
+    pub mobile_sync_resolve_credentials: bool,
     /// Provider-neutral tenant plan catalog used for API admission.
     pub entitlements: Arc<dyn entitlements::EntitlementProvider>,
     /// Names of handlers the engine executes in-process. Served by

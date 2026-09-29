@@ -5767,6 +5767,7 @@
         "tags": [
           "continuity"
         ],
+        "description": "List the tenant's live runtime advertisements (`RuntimeCapabilities`). A device-session (`dst_`) caller receives only the runtimes it could delegate to now — other than itself, not draining, not expired, at least `registered` trust, advertising `orch8.delegation` — reduced to `runtime_id`, `kind`, `handlers`, `observed_at` and `expires_at`, with `trust` reported as `registered` and every other fact omitted.",
         "operationId": "list_runtimes",
         "responses": {
           "default": {

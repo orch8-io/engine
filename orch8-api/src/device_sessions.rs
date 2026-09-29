@@ -27,7 +27,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use orch8_types::continuity::{RuntimeId, RuntimeKind};
+use orch8_types::continuity::{RuntimeCapabilities, RuntimeId, RuntimeKind, RuntimeTrustLevel};
 use orch8_types::ids::TenantId;
 
 use crate::AppState;
@@ -120,6 +120,58 @@ pub fn clamp_advertisement(
         .retain(|handler| binding.allows_handler(handler));
     capabilities.expires_at = capabilities.expires_at.min(binding.expires_at);
     Ok(())
+}
+
+/// What a device session sees of `GET /runtimes`: only the runtimes it
+/// could delegate to right now, reduced to the facts destination selection
+/// matches on. The full list would hand any phone the tenant's runtime
+/// inventory (regions, hardware, credential references, network and battery
+/// state, capsule keys); a device only needs to pick a live, delegation-
+/// capable destination that advertises the handler it delegates.
+///
+/// Kept: `runtime_id`, `kind`, `handlers`, `observed_at`/`expires_at`
+/// (liveness), and `trust` normalized to `registered` (selection only
+/// requires *at least* registered). Dropped: the caller's own runtime,
+/// draining or expired runtimes, runtimes below registered trust or not
+/// accepting delegations, and every other fact.
+#[must_use]
+pub fn destination_view(
+    runtimes: Vec<RuntimeCapabilities>,
+    caller: RuntimeId,
+    now: DateTime<Utc>,
+) -> Vec<RuntimeCapabilities> {
+    runtimes
+        .into_iter()
+        .filter(|runtime| {
+            runtime.runtime_id != caller
+                && !runtime.draining
+                && runtime.expires_at > now
+                && runtime.trust >= RuntimeTrustLevel::Registered
+                && runtime
+                    .handlers
+                    .iter()
+                    .any(|handler| handler == orch8_engine::delegation::DELEGATION_HANDLER)
+        })
+        .map(|runtime| RuntimeCapabilities {
+            runtime_id: runtime.runtime_id,
+            kind: runtime.kind,
+            trust: RuntimeTrustLevel::Registered,
+            handlers: runtime.handlers,
+            plugins: Vec::new(),
+            credentials: Vec::new(),
+            regions: Vec::new(),
+            hardware: Vec::new(),
+            offline_capable: false,
+            connectivity: None,
+            battery_percent: None,
+            estimated_cost_microunits: None,
+            estimated_latency_ms: None,
+            draining: false,
+            capsule_signing_public_key: None,
+            observed_at: runtime.observed_at,
+            expires_at: runtime.expires_at,
+        })
+        .collect()
 }
 
 pub fn routes() -> Router<AppState> {

@@ -544,6 +544,16 @@ fn build_app_state(
     if mobile_sync_enabled {
         tracing::info!("Mobile sync endpoints enabled");
     }
+    let mobile_sync_resolve_credentials = std::env::var("ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS")
+        .is_ok_and(|v| v == "true" || v == "1");
+    if mobile_sync_enabled && mobile_sync_resolve_credentials {
+        tracing::warn!(
+            "ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS is on: any API key with the `device` \
+             capability — a credential that ships inside mobile apps — can have the server \
+             resolve tenant credentials:// secrets through /mobile/sync step_delegations and \
+             read them back in plaintext. Turn it off unless a legacy client still needs it"
+        );
+    }
 
     let env_key = std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default();
     let master_key = if config.engine.encryption_key.is_empty() {
@@ -609,6 +619,7 @@ fn build_app_state(
         publisher: None,
         push_provider,
         mobile_sync_enabled,
+        mobile_sync_resolve_credentials,
         entitlements: orch8_api::entitlements::unlimited_provider(),
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
         engine_ready,

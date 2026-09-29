@@ -123,6 +123,8 @@ pub struct TestServerOptions {
     pub root_api_key: Option<String>,
     /// Mount the `/mobile/*` device endpoints.
     pub mobile_sync_enabled: bool,
+    /// `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS`.
+    pub mobile_sync_resolve_credentials: bool,
 }
 
 /// Spawn the router over `storage` with [`TestServerOptions`] (auth exactly
@@ -139,13 +141,14 @@ pub async fn spawn_test_server_with(
         .as_deref()
         .map(orch8_types::auth::precompute_secret_digest);
     let shutdown = CancellationToken::new();
-    let state = test_state(
+    let mut state = test_state(
         storage.clone(),
         shutdown.clone(),
         options.mobile_sync_enabled,
         0,
         root_key_digest,
     );
+    state.mobile_sync_resolve_credentials = options.mobile_sync_resolve_credentials;
     let base_url = serve(state, storage.clone(), root_key_digest, shutdown.clone()).await;
     BackendTestServer {
         base_url,
@@ -175,6 +178,7 @@ fn test_state(
         publisher: None,
         push_provider: Arc::new(orch8_push::NoopPushProvider),
         mobile_sync_enabled,
+        mobile_sync_resolve_credentials: false,
         entitlements: crate::entitlements::unlimited_provider(),
         builtin_handlers: Arc::new(crate::builtin_handler_names()),
         engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
