@@ -286,3 +286,52 @@ describe("delegation", () => {
     expect(native.delegationStatus).not.toHaveBeenCalled();
   });
 });
+
+describe("token provider", () => {
+  it("installs the first token and answers refresh events with a fresh one", async () => {
+    const { client, native, emit, listeners } = setup();
+    await client.initialize();
+    const fetchToken = vi.fn().mockResolvedValueOnce("dst_first").mockResolvedValueOnce("dst_second");
+    await client.setTokenProvider(fetchToken);
+    expect(native.setTokenProvider).toHaveBeenCalledWith("dst_first");
+
+    emit(EVENTS.refreshToken, { requestId: "r1" });
+    await flush();
+    expect(native.resolveToken).toHaveBeenCalledWith("r1", "dst_second", null);
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+
+    // Installing again replaces the fetcher without a second subscription.
+    await client.setTokenProvider(async () => "dst_other");
+    expect(listeners.get(EVENTS.refreshToken)?.size).toBe(1);
+
+    await client.shutdown();
+    expect(listeners.get(EVENTS.refreshToken)?.size).toBe(0);
+  });
+
+  it("reports a failed or empty refresh to the native side", async () => {
+    const { client, native, emit } = setup();
+    const fetchToken = vi
+      .fn()
+      .mockResolvedValueOnce("dst_first")
+      .mockRejectedValueOnce(new Error("backend down"))
+      .mockResolvedValueOnce("");
+    await client.setTokenProvider(fetchToken);
+
+    emit(EVENTS.refreshToken, { requestId: "r1" });
+    await flush();
+    expect(native.resolveToken).toHaveBeenCalledWith("r1", null, "backend down");
+
+    emit(EVENTS.refreshToken, { requestId: "r2" });
+    await flush();
+    expect(native.resolveToken).toHaveBeenCalledWith("r2", null, "token provider returned an empty token");
+  });
+
+  it("does not install a provider whose first fetch fails", async () => {
+    const { client, native } = setup();
+    await expect(client.setTokenProvider(async () => Promise.reject(new Error("no session")))).rejects.toThrow(
+      "no session"
+    );
+    await expect(client.setTokenProvider("dst_x" as never)).rejects.toThrow(TypeError);
+    expect(native.setTokenProvider).not.toHaveBeenCalled();
+  });
+});

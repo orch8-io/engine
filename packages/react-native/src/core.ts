@@ -31,7 +31,15 @@ export const EVENTS = {
   instanceFailed: "orch8:instanceFailed",
   stepPending: "orch8:stepPending",
   executeStep: "orch8:executeStep",
+  refreshToken: "orch8:refreshToken",
 } as const;
+
+/**
+ * Returns a fresh device-session token (`dst_…`) for this device. Typically
+ * calls the app's own backend, which mints it with its operator key through
+ * `POST /runtimes/device-sessions`. Never return an operator key.
+ */
+export type TokenFetcher = () => Promise<string>;
 
 /** Throw from a handler to fail the step permanently (no retry). */
 export class PermanentHandlerError extends Error {
@@ -91,6 +99,9 @@ export interface NativeOrch8 {
   delegationStatus(delegationId: string): Promise<DelegationStatus>;
   listDelegations(): Promise<DelegationStatus[]>;
   delegationStats(): Promise<DelegationStats>;
+  // Node credential (engine release after 0.7.1).
+  setTokenProvider(initialToken: string): Promise<void>;
+  resolveToken(requestId: string, token: string | null, error: string | null): void;
 }
 
 /** `DelegateRequest` as it crosses the bridge: the input is already JSON. */
@@ -107,6 +118,10 @@ export interface Subscription {
 
 export interface EventSource {
   addListener(event: string, listener: (event: any) => void): Subscription;
+}
+
+interface RefreshTokenEvent {
+  requestId: string;
 }
 
 interface ExecuteStepEvent {
@@ -214,6 +229,8 @@ function positiveInt(name: string, value: number): number {
 export class Orch8Client {
   private readonly handlers = new Map<string, StepHandler>();
   private stepSubscription: Subscription | null = null;
+  private tokenSubscription: Subscription | null = null;
+  private tokenFetcher: TokenFetcher | null = null;
 
   constructor(
     private readonly native: NativeOrch8,
@@ -315,6 +332,9 @@ export class Orch8Client {
   async shutdown(): Promise<void> {
     this.stepSubscription?.remove();
     this.stepSubscription = null;
+    this.tokenSubscription?.remove();
+    this.tokenSubscription = null;
+    this.tokenFetcher = null;
     await this.native.shutdown();
   }
 
@@ -326,8 +346,50 @@ export class Orch8Client {
   }
 
   /**
+   * Authenticate every control-plane call (node registration, worker leases,
+   * delegation, sync) with device sessions from `fetchToken` instead of the
+   * legacy static `syncApiKey`. `fetchToken` is awaited once now for the
+   * first token and again whenever the control plane answers `401` (expired
+   * session); the request is then retried once. Call it after `initialize`
+   * and before `registerNode`. A rejected or empty refresh leaves the stale
+   * token in place (the call fails with 401).
+   */
+  async setTokenProvider(fetchToken: TokenFetcher): Promise<void> {
+    if (typeof fetchToken !== "function") throw new TypeError("fetchToken must be a function");
+    const initial = await fetchToken();
+    if (typeof initial !== "string") throw new TypeError("fetchToken must resolve a string");
+    this.tokenFetcher = fetchToken;
+    if (!this.tokenSubscription) {
+      this.tokenSubscription = this.events.addListener(EVENTS.refreshToken, (event: RefreshTokenEvent) => {
+        void this.answerTokenRefresh(event);
+      });
+    }
+    await this.native.setTokenProvider(initial);
+  }
+
+  /** @internal exposed for tests */
+  async answerTokenRefresh(event: RefreshTokenEvent): Promise<void> {
+    const fetchToken = this.tokenFetcher;
+    if (!fetchToken) {
+      this.native.resolveToken(event.requestId, null, "no token provider installed");
+      return;
+    }
+    try {
+      const token = await fetchToken();
+      if (typeof token !== "string" || token === "") {
+        this.native.resolveToken(event.requestId, null, "token provider returned an empty token");
+      } else {
+        this.native.resolveToken(event.requestId, token, null);
+      }
+    } catch (e: unknown) {
+      this.native.resolveToken(event.requestId, null, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
    * Join the runtime mesh: registers the device and its capabilities using
-   * `syncUrl` + `syncApiKey`, then re-advertises before the 5-minute TTL.
+   * `syncUrl` and the node credential (the `setTokenProvider` device session,
+   * else the legacy `syncApiKey`), then re-advertises before the 5-minute TTL.
    */
   async registerNode(capabilities: NodeCapabilities = {}): Promise<NodeRegistration> {
     if (

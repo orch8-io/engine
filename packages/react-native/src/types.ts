@@ -32,6 +32,12 @@ export interface Orch8Config {
   /** Server sync endpoint (`…/api/v1/mobile/sync`). Required for `registerNode`. */
   syncUrl?: string;
   deviceId?: string;
+  /**
+   * Legacy static credential for sync and runtime-node calls. Not for
+   * production apps: a key in the app binary is extractable. Use
+   * `orch8.setTokenProvider` with device sessions minted by your backend.
+   * Never put an operator key here.
+   */
   syncApiKey?: string;
 }
 

@@ -9,7 +9,7 @@ export {
   EVENTS,
   MAX_DELEGATION_TTL_SECS,
 } from "./core";
-export type { NativeOrch8, NativeDelegateRequest, EventSource, Subscription } from "./core";
+export type { NativeOrch8, NativeDelegateRequest, EventSource, Subscription, TokenFetcher } from "./core";
 
 const { Orch8Module } = NativeModules as { Orch8Module?: NativeOrch8 };
 

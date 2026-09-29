@@ -18,6 +18,7 @@ import io.orch8.mobile.HandlerException
 import io.orch8.mobile.InstanceStateKind
 import io.orch8.mobile.MobileEngine
 import io.orch8.mobile.MobileEngineConfig
+import io.orch8.mobile.MobileException
 import io.orch8.mobile.NodeCapabilities
 import io.orch8.mobile.NodeConnectivity
 import io.orch8.mobile.PowerState
@@ -237,6 +238,25 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     fun registerHandler(name: String, promise: Promise) = withEngine(promise) { eng ->
         eng.registerHandler(name, RNStepHandler(this, handlerTimeoutMs))
         promise.resolve(null)
+    }
+
+    // -- Node credential -------------------------------------------------------
+
+    /**
+     * Install a device-session token provider: [initialToken] is used now, and
+     * a `401` from the control plane emits `orch8:refreshToken`, which JS
+     * answers through [resolveToken].
+     */
+    @ReactMethod
+    fun setTokenProvider(initialToken: String, promise: Promise) = withEngine(promise) { eng ->
+        eng.setTokenProvider(RNTokenProvider(this, initialToken, handlerTimeoutMs))
+        promise.resolve(null)
+    }
+
+    /** JS answer for an `orch8:refreshToken` event. */
+    @ReactMethod
+    fun resolveToken(requestId: String, token: String?, error: String?) {
+        pending.resolve(requestId, token, error, false)
     }
 
     /** JS answer for an `orch8:executeStep` event. */
@@ -563,6 +583,36 @@ private class RNStepHandler(
             throw if (outcome.permanent) HandlerException.Permanent(message) else HandlerException.Retryable(message)
         }
         return outcome.output ?: "{}"
+    }
+}
+
+/**
+ * Serves the cached device session and, when the control plane answers `401`,
+ * asks JS for a fresh one (`orch8:refreshToken`). [refreshToken] runs on a Rust
+ * blocking thread, so waiting here never blocks JS or the UI.
+ */
+private class RNTokenProvider(
+    private val module: Orch8Module,
+    initialToken: String,
+    private val timeoutMs: Long,
+) : TokenProvider {
+    @Volatile private var token: String = initialToken
+
+    override fun currentToken(): String = token
+
+    override fun refreshToken(): String {
+        val requestId = UUID.randomUUID().toString()
+        module.pending.open(requestId)
+        module.sendEvent("orch8:refreshToken", Arguments.createMap().apply {
+            putString("requestId", requestId)
+        })
+        val outcome = module.pending.await(requestId, timeoutMs)
+            ?: throw MobileException.Engine("JS token provider timed out after $timeoutMs ms")
+        outcome.error?.let { throw MobileException.Engine(it) }
+        val fresh = outcome.output
+        if (fresh.isNullOrEmpty()) throw MobileException.Engine("JS token provider returned an empty token")
+        token = fresh
+        return fresh
     }
 }
 
