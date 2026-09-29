@@ -95,6 +95,27 @@ credentials placed on browsers) fails the step with an `__error__` block
 output carrying the reason and a `remote_dispatch_rejected` audit event, on
 both the tree and the flat (step-only) path.
 
+### Rolling upgrades
+
+During a rolling upgrade from a release without migration 096, an older node
+can re-dispatch a retry attempt: its insert is `ON CONFLICT DO NOTHING`, so
+the pre-inserted row keeps `awaiting_dispatch = true` and no `effect_id`, and
+upgraded pollers would never claim it. The worker reaper heals this: a row
+still awaiting dispatch **two minutes** after it was written, whose step was
+already re-dispatched (a flat instance parked `waiting`, or the step's tree
+node `waiting`), is bound to the attempt's receipt (the one the older
+dispatch created, otherwise a freshly dispatched one) and owner epoch and
+made claimable — one fenced, idempotent update that loses cleanly to a
+concurrent re-dispatch by an upgraded scheduler. Rows whose step was not
+re-dispatched yet (backoff, paused or terminal instance) are left to the
+scheduler.
+
+Older nodes use explicit column lists and ignore the new columns. Their
+pollers do not filter on `awaiting_dispatch`, so they may claim a retry row
+before it is bound; completing or failing such a task settles the attempt's
+still-open receipt (looked up by instance, block and attempt). Once every
+node is upgraded no row is ever left awaiting dispatch.
+
 ## Handoff fencing
 
 - complete / fail / heartbeat / release / artifact upload are fenced on the

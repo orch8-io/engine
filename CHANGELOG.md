@@ -54,6 +54,20 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
   pre-inserted by a resolution wait (`awaiting_dispatch`) for the scheduler's
   re-dispatch, which binds `effect_id` in the same statement that makes them
   claimable. Settlement never recomputes an effect id.
+- **Rolling-upgrade self-healing for retry rows**: a node from before
+  migration 096 re-dispatches a retry attempt with `ON CONFLICT DO NOTHING`,
+  leaving the pre-inserted row `awaiting_dispatch` with no effect id —
+  unclaimable for current pollers. The worker reaper now finalizes such rows
+  once they are older than two minutes and their step was demonstrably
+  re-dispatched (flat instance `waiting`, or the step's tree node `waiting`):
+  it binds the attempt's receipt (the one the older dispatch created, or a
+  fresh one) and the owner epoch and clears the flag in one fenced,
+  idempotent update. **Upgrade note:** during a rolling upgrade, retry
+  attempts dispatched by not-yet-upgraded nodes become claimable by upgraded
+  workers within one reaper pass after that grace period; older nodes ignore
+  the new columns (explicit column lists) and their pollers may claim a retry
+  row before it is bound — its settlement then falls back to the attempt's
+  open receipt.
 - **gRPC worker parity**: `CompleteTask` commits the effect receipt (and
   integrates delegation results), `FailTask` uses the fenced resolution, and a
   new `ReleaseTask` RPC mirrors `POST /workers/tasks/{id}/release`.

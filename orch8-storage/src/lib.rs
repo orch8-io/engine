@@ -1511,6 +1511,31 @@ pub trait WorkerStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError>;
 
+    /// Pending retry rows still flagged `awaiting_dispatch` that were
+    /// created before `created_before`, oldest first. In a mixed-version
+    /// fleet an older scheduler re-dispatches such a row without binding
+    /// its effect id (its insert is `ON CONFLICT DO NOTHING`), which leaves
+    /// the row unclaimable for new pollers; the reaper finalizes it through
+    /// [`Self::finalize_stranded_worker_dispatch`]. Read-only.
+    async fn list_stranded_worker_dispatches(
+        &self,
+        created_before: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    /// Finalize one stranded retry row: fill `effect_id` / `continuity_epoch`
+    /// where still unset and clear `awaiting_dispatch`, fenced on the row
+    /// being the same pending attempt that is still awaiting dispatch.
+    /// Returns `false` (nothing changed) when the row was bound, claimed,
+    /// superseded, or deleted concurrently — the operation is idempotent.
+    async fn finalize_stranded_worker_dispatch(
+        &self,
+        task_id: Uuid,
+        attempt: u16,
+        effect_id: Option<orch8_types::continuity::EffectId>,
+        continuity_epoch: Option<u64>,
+    ) -> Result<bool, StorageError>;
+
     /// Atomically apply a fenced resolution (requeue / retry / fail node /
     /// fail instance) to a worker task and its instance. Returns `false`
     /// without side effects when the task moved on (completed, reclaimed,

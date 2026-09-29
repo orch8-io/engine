@@ -1517,6 +1517,25 @@ impl crate::WorkerStore for SqliteStorage {
         workers::list_timed_out(self, limit).await
     }
 
+    async fn list_stranded_worker_dispatches(
+        &self,
+        created_before: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        workers::list_stranded_dispatches(self, created_before, limit).await
+    }
+
+    async fn finalize_stranded_worker_dispatch(
+        &self,
+        task_id: Uuid,
+        attempt: u16,
+        effect_id: Option<orch8_types::continuity::EffectId>,
+        continuity_epoch: Option<u64>,
+    ) -> Result<bool, StorageError> {
+        workers::finalize_stranded_dispatch(self, task_id, attempt, effect_id, continuity_epoch)
+            .await
+    }
+
     async fn resolve_worker_task(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,

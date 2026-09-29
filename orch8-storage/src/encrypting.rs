@@ -1796,6 +1796,33 @@ passthrough_impl! {
         Ok(tasks)
     }
 
+    async fn list_stranded_worker_dispatches(
+        &self,
+        created_before: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
+        let mut tasks = self
+            .inner
+            .list_stranded_worker_dispatches(created_before, limit)
+            .await?;
+        for t in &mut tasks {
+            self.decrypt_worker_task(t)?;
+        }
+        Ok(tasks)
+    }
+
+    async fn finalize_stranded_worker_dispatch(
+        &self,
+        task_id: uuid::Uuid,
+        attempt: u16,
+        effect_id: Option<orch8_types::continuity::EffectId>,
+        continuity_epoch: Option<u64>,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .finalize_stranded_worker_dispatch(task_id, attempt, effect_id, continuity_epoch)
+            .await
+    }
+
     async fn resolve_worker_task(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,

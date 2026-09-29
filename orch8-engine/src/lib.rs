@@ -271,6 +271,7 @@ impl Engine {
                                 requeued = report.requeued,
                                 ambiguous = report.ambiguous,
                                 timed_out = report.timed_out,
+                                stranded_finalized = report.stranded_finalized,
                                 "resolved expired worker tasks"
                             ),
                             Err(e) => tracing::error!(error = %e, "worker task reaper error"),

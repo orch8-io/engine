@@ -400,6 +400,72 @@ impl Cloud {
     }
 }
 
+impl Cloud {
+    /// Put a dispatched retry row into the state a pre-`awaiting_dispatch`
+    /// node's re-dispatch leaves behind in a mixed-version fleet: the
+    /// attempt's receipt exists, but the row was never bound (its insert was
+    /// `ON CONFLICT DO NOTHING`), so `effect_id` / `continuity_epoch` are
+    /// unset and the row is still `awaiting_dispatch`. `age` backdates the
+    /// row's creation.
+    pub fn strand_dispatch(&self, task: Uuid, age: chrono::Duration) {
+        let created = chrono::Utc::now() - age;
+        self.rt.block_on(async {
+            match &self.raw {
+                RawPool::Postgres(pool) => {
+                    sqlx::query(
+                        "UPDATE worker_tasks SET effect_id = NULL, continuity_epoch = NULL, \
+                         awaiting_dispatch = TRUE, created_at = $2 WHERE id = $1",
+                    )
+                    .bind(task)
+                    .bind(created)
+                    .execute(pool)
+                    .await
+                    .expect("strand dispatch");
+                }
+                RawPool::Sqlite(pool) => {
+                    sqlx::query(
+                        "UPDATE worker_tasks SET effect_id = NULL, continuity_epoch = NULL, \
+                         awaiting_dispatch = 1, created_at = ?2 WHERE id = ?1",
+                    )
+                    .bind(task.to_string())
+                    .bind(created.to_rfc3339())
+                    .execute(pool)
+                    .await
+                    .expect("strand dispatch");
+                }
+            }
+        });
+    }
+
+    /// Whether a worker task row is still `awaiting_dispatch`.
+    #[must_use]
+    pub fn awaiting_dispatch(&self, task: Uuid) -> bool {
+        self.rt.block_on(async {
+            match &self.raw {
+                RawPool::Postgres(pool) => {
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT awaiting_dispatch FROM worker_tasks WHERE id = $1",
+                    )
+                    .bind(task)
+                    .fetch_one(pool)
+                    .await
+                    .expect("awaiting_dispatch")
+                }
+                RawPool::Sqlite(pool) => {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT awaiting_dispatch FROM worker_tasks WHERE id = ?1",
+                    )
+                    .bind(task.to_string())
+                    .fetch_one(pool)
+                    .await
+                    .expect("awaiting_dispatch")
+                        != 0
+                }
+            }
+        })
+    }
+}
+
 impl Drop for Cloud {
     fn drop(&mut self) {
         self.engine_cancel.cancel();

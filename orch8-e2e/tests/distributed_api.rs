@@ -155,6 +155,103 @@ fn http_fail_is_one_fenced_resolution() {
     }
 }
 
+/// Rolling upgrade: an older node re-dispatches a retry attempt with
+/// `ON CONFLICT DO NOTHING`, so the pre-inserted retry row keeps
+/// `awaiting_dispatch` and no effect id — unclaimable for current pollers.
+/// The real reaper finalizes it once it is older than the grace period:
+/// bound to the receipt the older dispatch created, claimable, and settled
+/// normally. Finalization is idempotent and leaves fresh rows alone.
+#[test]
+fn rolling_upgrade_stranded_retry_row_self_heals() {
+    for backend in backends() {
+        let cloud = Cloud::start(&backend, |_| {});
+        let backend = cloud.backend;
+        let key = cloud.mint_key(&["worker"]);
+        let handler = format!("ext.upgrade.{}", Uuid::now_v7().simple());
+        let (instance, first) = dispatched(&cloud, &handler, Some(3));
+        let claimed = poll(&cloud, &key, &handler, "w1").remove(0);
+        assert_eq!(fail(&cloud, &key, &claimed, "w1", true), 200, "{backend}");
+        let retry = wait_for("re-dispatch", LONG, || {
+            cloud
+                .tasks(instance)
+                .into_iter()
+                .find(|task| task.attempt == first.attempt + 1 && task.effect_id.is_some())
+        });
+        cloud.wait_state(instance, "waiting", LONG);
+        let bound_effect = retry.effect_id.unwrap();
+
+        // The older node's re-dispatch: receipt created, row never bound.
+        cloud.strand_dispatch(retry.id, chrono::Duration::zero());
+        let stranded = cloud.task(retry.id).unwrap();
+        assert_eq!(stranded.effect_id, None, "{backend}");
+        assert!(cloud.awaiting_dispatch(retry.id), "{backend}");
+        assert!(
+            poll(&cloud, &key, &handler, "w2").is_empty(),
+            "{backend}: stranded rows are unclaimable"
+        );
+        // Younger than the grace period: the reaper leaves it alone.
+        assert_eq!(
+            cloud
+                .block_on(orch8_engine::worker_lease::finalize_stranded_dispatches(
+                    cloud.storage.as_ref(),
+                    orch8_engine::worker_lease::STRANDED_DISPATCH_GRACE,
+                ))
+                .unwrap(),
+            0,
+            "{backend}"
+        );
+        assert!(cloud.awaiting_dispatch(retry.id), "{backend}");
+
+        // Past the grace period, the running reaper heals it.
+        cloud.strand_dispatch(retry.id, chrono::Duration::hours(1));
+        let healed = wait_for("the reaper's finalization", LONG, || {
+            cloud
+                .task(retry.id)
+                .filter(|task| task.effect_id.is_some() && !cloud.awaiting_dispatch(task.id))
+        });
+        assert_eq!(
+            healed.effect_id,
+            Some(bound_effect),
+            "{backend}: bound to the receipt the older dispatch created"
+        );
+        assert_eq!(healed.continuity_epoch, retry.continuity_epoch, "{backend}");
+        assert_eq!(healed.state, WorkerTaskState::Pending, "{backend}");
+        assert_eq!(
+            cloud
+                .block_on(orch8_engine::worker_lease::finalize_stranded_dispatches(
+                    cloud.storage.as_ref(),
+                    std::time::Duration::ZERO,
+                ))
+                .unwrap(),
+            0,
+            "{backend}: idempotent"
+        );
+
+        // Claimable with that effect id; completion commits it.
+        let reclaimed = poll(&cloud, &key, &handler, "w2").remove(0);
+        assert_eq!(reclaimed["id"], retry.id.to_string(), "{backend}");
+        assert_eq!(
+            reclaimed["effect_id"],
+            bound_effect.to_string(),
+            "{backend}"
+        );
+        let (status, body) = cloud.call(
+            &key,
+            "POST",
+            &format!("/workers/tasks/{}/complete", retry.id),
+            Some(&json!({"worker_id": "w2", "claim_epoch": reclaimed["claim_epoch"],
+                         "output": {"ok": true}})),
+        );
+        assert_eq!(status, 200, "{backend}: {body}");
+        cloud.wait_state(instance, "completed", LONG);
+        assert_eq!(
+            receipt_states(&cloud, instance),
+            [EffectState::Unknown, EffectState::Committed],
+            "{backend}"
+        );
+    }
+}
+
 async fn grpc(cloud: &Cloud) -> Orch8ServiceClient<tonic::transport::Channel> {
     Orch8ServiceClient::connect(format!("http://{}", cloud.grpc_addr))
         .await
