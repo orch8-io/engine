@@ -184,12 +184,45 @@ for continuity-enrolled instances, the provenance chain.
 
 `POST /continuity/delegations/claim` validates a destination-bound delegation
 (registered same-tenant runtimes, owner epoch, destination handlers, one-time
-grant) and — when the parent instance is hosted by this server — enqueues a
-mailbox task targeted at the destination (`handler_name: "orch8.delegation"`,
-params carry the delegation identity, sub-sequence and explicit `input`; the
-response includes `mailbox_task_id`). The destination polls that handler,
-runs the sub-sequence locally, and completes or fails the task. The result is
-integrated into the parent as the `delegation-<id>` block output and
-`context.data.delegations.<id>` (`status: completed | failed`), and a waiting
-parent is woken. Delegation failures, lease loss, and expiry never fail the
-parent.
+grant) and enqueues a mailbox task targeted at the destination
+(`handler_name: "orch8.delegation"`, params carry the delegation identity,
+sub-sequence and explicit `input`; the response includes `mailbox_task_id`).
+The destination polls that handler, runs the sub-sequence locally, and
+completes or fails the task. Delegation failures, lease loss, and expiry never
+fail the parent: they integrate a `failed` outcome.
+
+**Server-hosted parent.** The result is integrated into the parent as the
+`delegation-<id>` block output and `context.data.delegations.<id>`
+(`status: completed | failed`), and a waiting parent is woken.
+
+**Runtime-hosted parent** (a workflow on a phone's local engine). The
+runtime first registers its instance's continuity identity:
+
+```
+POST /continuity/executions
+{ "tenant_id": "…", "instance_id": "<local instance>", "runtime_id": "<phone>",
+  "hosted_by_runtime": true }
+```
+
+The instance must not exist on the server and the runtime must hold a live
+registration; repeating the call for the same owner returns the same
+execution (`200`). A claim against such an execution anchors the mailbox task
+on a **delegation proxy** — a server instance whose id is the delegation id,
+parked in `waiting`, that never runs; it receives the integrated outcome and
+then turns `completed` / `failed`. The hosting runtime reads the outcome:
+
+```
+GET /continuity/delegations/{id}?tenant_id=…
+→ { "delegation_id", "status": "pending|claimed|completed|failed",
+    "delegation": {…}, "parent_instance_id", "parent_owner_runtime_id",
+    "parent_epoch_now", "mailbox_task_id", "result": {status, runtime_id, output | error} }
+```
+
+and resumes its parked step itself — only while it still owns the parent at
+the delegation's epoch (`parent_owner_runtime_id` / `parent_epoch_now`). The
+mobile SDK does all of this automatically for steps placed off the phone (see
+[MOBILE_SDK.md](MOBILE_SDK.md#delegating-from-a-phone-local-workflow)).
+Results are read by polling rather than pushed through the sync `commands`
+channel: the outcome is a durable record keyed by the delegation id, so
+reading it again after any disconnect or kill is idempotent and nothing needs
+acknowledging.

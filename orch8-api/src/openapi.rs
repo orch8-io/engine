@@ -350,6 +350,11 @@ pub(crate) const CONTINUITY_OPERATIONS: &[(&str, HttpMethod, &str)] = &[
         HttpMethod::Post,
         "claim_delegation",
     ),
+    (
+        "/continuity/delegations/{id}",
+        HttpMethod::Get,
+        "get_delegation",
+    ),
 ];
 
 impl Modify for ContinuityOpenApi {

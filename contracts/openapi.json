@@ -932,6 +932,19 @@
         }
       }
     },
+    "/continuity/delegations/{id}": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "operationId": "get_delegation",
+        "responses": {
+          "default": {
+            "description": "Continuity API response"
+          }
+        }
+      }
+    },
     "/continuity/disclosure/minimize": {
       "post": {
         "tags": [
