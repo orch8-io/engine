@@ -15,6 +15,11 @@
   `registerNode`, `updateNodeStatus`, `unregisterNode`, `nodeRuntimeId`,
   `startWorker`, `stopWorker`, `runWorkerWindow`, `workerStats`, `onPushWake`,
   `enableBuiltin`. Handlers receive `ctx.task.effectId` (from `__orch8`).
+- Delegation from phone-local workflows (needs the engine release after
+  0.7.1): `startDelegation`, `stopDelegation`, `delegate`, `delegationStatus`,
+  `listDelegations`, `delegationStats`, with `DelegationOptions`,
+  `DelegateRequest`, `DelegationStatus` and `DelegationStats` types. Options
+  and requests are validated before crossing the bridge.
 - Android adds Orch8's Maven repository to every project of the app build
   (opt out with `orch8.addMavenRepository=false`); the pod and AAR versions
   follow the package version.

@@ -162,6 +162,60 @@ export interface PushWakeEnvelope {
   reason?: string;
 }
 
+// -- Delegation from phone-local workflows (engine release after 0.7.1) ----
+
+export interface DelegationOptions {
+  /** Tenant of the node credential; every continuity call is scoped to it. */
+  tenantId: string;
+  /** How often pending delegations are advanced and polled (default 2000). Push wakes advance them immediately. */
+  pollIntervalMs?: number;
+  /** Lifetime of each grant and delegation in seconds (default 600, max 86400). */
+  ttlSecs?: number;
+}
+
+/** An explicit delegation of a server-side sub-sequence (`delegate`). No local step is parked. */
+export interface DelegateRequest {
+  /** Local parent instance the delegation belongs to (must exist). */
+  instanceId: string;
+  /** Destination runtime id (a live registration of the same tenant). */
+  destinationRuntimeId: string;
+  /** Server-side sequence the destination runs. */
+  subSequenceId: string;
+  /** Explicit input object handed to the sub-sequence (default `{}`). A string must be a JSON object. */
+  input?: Record<string, unknown> | string;
+}
+
+/**
+ * `preparing` (not yet accepted by the control plane), `delegated` (in the
+ * destination's mailbox or running there), `completed`, `failed`, or
+ * `abandoned` (never placed before its deadline).
+ */
+export type DelegationState = "preparing" | "delegated" | "completed" | "failed" | "abandoned";
+
+/** Where a delegation stands, as journaled on this device. */
+export interface DelegationStatus {
+  delegationId: string;
+  state: DelegationState;
+  localInstanceId: string;
+  /** The parked local step, for delegations made by a sequence. */
+  blockId: string | null;
+  destinationRuntimeId: string | null;
+  /** The destination's reported output (JSON), once completed. */
+  outputJson: string | null;
+  error: string | null;
+}
+
+export interface DelegationStats {
+  running: boolean;
+  /** Delegations accepted by the control plane. */
+  delegated: number;
+  completed: number;
+  failed: number;
+  abandoned: number;
+  /** Parked local steps resumed with an outcome (exactly once each). */
+  resumed: number;
+}
+
 /**
  * Remote-task metadata the engine adds to handler params as `__orch8` when a
  * step runs on this device through the worker loop (absent for local steps).

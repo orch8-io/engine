@@ -526,6 +526,87 @@ class Orch8Module: RCTEventEmitter {
     ) {
         withEngine(reject) { try $0.enableBuiltin(name: name); resolve(nil) }
     }
+
+    // MARK: - Delegation from phone-local workflows
+
+    private static func delegationStatus(_ s: DelegationStatus) -> [String: Any] {
+        [
+            "delegationId": s.delegationId,
+            "state": s.state,
+            "localInstanceId": s.localInstanceId,
+            "blockId": s.blockId ?? NSNull(),
+            "destinationRuntimeId": s.destinationRuntimeId ?? NSNull(),
+            "outputJson": s.outputJson ?? NSNull(),
+            "error": s.error ?? NSNull(),
+        ]
+    }
+
+    @objc(startDelegation:resolver:rejecter:)
+    func startDelegation(
+        _ options: NSDictionary,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        let opts = DelegationOptions(
+            tenantId: options["tenantId"] as? String ?? "",
+            pollIntervalMs: Self.u64(options, "pollIntervalMs", 2000),
+            ttlSecs: Self.u32(options, "ttlSecs", 600)
+        )
+        background(reject) { try $0.startDelegation(options: opts); resolve(nil) }
+    }
+
+    @objc(stopDelegation:rejecter:)
+    func stopDelegation(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+        background(reject) { $0.stopDelegation(); resolve(nil) }
+    }
+
+    @objc(delegate:resolver:rejecter:)
+    func delegate(
+        _ request: NSDictionary,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        let req = DelegateRequest(
+            instanceId: request["instanceId"] as? String ?? "",
+            destinationRuntimeId: request["destinationRuntimeId"] as? String ?? "",
+            subSequenceId: request["subSequenceId"] as? String ?? "",
+            inputJson: request["inputJson"] as? String ?? "{}"
+        )
+        background(reject) { resolve(try $0.delegate(request: req)) }
+    }
+
+    @objc(delegationStatus:resolver:rejecter:)
+    func delegationStatus(
+        _ delegationId: String,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        background(reject) { engine in
+            resolve(Self.delegationStatus(try engine.delegationStatus(delegationId: delegationId)))
+        }
+    }
+
+    @objc(listDelegations:rejecter:)
+    func listDelegations(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+        background(reject) { engine in
+            resolve(try engine.listDelegations().map(Self.delegationStatus))
+        }
+    }
+
+    @objc(delegationStats:rejecter:)
+    func delegationStats(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+        withEngine(reject) { engine in
+            let s = engine.delegationStats()
+            resolve([
+                "running": s.running,
+                "delegated": s.delegated,
+                "completed": s.completed,
+                "failed": s.failed,
+                "abandoned": s.abandoned,
+                "resumed": s.resumed,
+            ])
+        }
+    }
 }
 
 // MARK: - Handler bridge

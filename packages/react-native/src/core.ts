@@ -1,5 +1,9 @@
 import type {
   BackgroundRunResult,
+  DelegateRequest,
+  DelegationOptions,
+  DelegationStats,
+  DelegationStatus,
   DeviceContext,
   FlushResult,
   HandlerContext,
@@ -80,6 +84,21 @@ export interface NativeOrch8 {
   workerStats(): Promise<WorkerStats>;
   onPushWake(envelopeJson: string): Promise<boolean>;
   enableBuiltin(name: string): Promise<void>;
+  // Delegation from phone-local workflows.
+  startDelegation(options: DelegationOptions): Promise<void>;
+  stopDelegation(): Promise<void>;
+  delegate(request: NativeDelegateRequest): Promise<string>;
+  delegationStatus(delegationId: string): Promise<DelegationStatus>;
+  listDelegations(): Promise<DelegationStatus[]>;
+  delegationStats(): Promise<DelegationStats>;
+}
+
+/** `DelegateRequest` as it crosses the bridge: the input is already JSON. */
+export interface NativeDelegateRequest {
+  instanceId: string;
+  destinationRuntimeId: string;
+  subSequenceId: string;
+  inputJson: string;
 }
 
 export interface Subscription {
@@ -130,6 +149,59 @@ function toOutputJson(result: unknown): string {
   if (typeof result === "string") return result;
   if (result === undefined) return "{}";
   return JSON.stringify(result);
+}
+
+/** Maximum delegation / grant lifetime the control plane accepts. */
+export const MAX_DELEGATION_TTL_SECS = 86_400;
+
+function nonEmpty(name: string, value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new TypeError(`${name} must be a non-empty string`);
+  }
+  return value;
+}
+
+/** Validates delegation options before they reach the native module. */
+export function validateDelegationOptions(options: DelegationOptions): DelegationOptions {
+  if (!options || typeof options !== "object") throw new TypeError("options must be an object");
+  nonEmpty("tenantId", options.tenantId);
+  if (options.pollIntervalMs !== undefined) positiveInt("pollIntervalMs", options.pollIntervalMs);
+  if (options.ttlSecs !== undefined) {
+    positiveInt("ttlSecs", options.ttlSecs);
+    if (options.ttlSecs > MAX_DELEGATION_TTL_SECS) {
+      throw new RangeError(`ttlSecs must be at most ${MAX_DELEGATION_TTL_SECS}`);
+    }
+  }
+  return options;
+}
+
+/** Serialises a `DelegateRequest` for the bridge; the input must be a JSON object. */
+export function toNativeDelegateRequest(request: DelegateRequest): NativeDelegateRequest {
+  if (!request || typeof request !== "object") throw new TypeError("request must be an object");
+  const input = request.input ?? {};
+  let inputJson: string;
+  if (typeof input === "string") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      throw new TypeError("input must be a JSON object");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new TypeError("input must be a JSON object");
+    }
+    inputJson = input;
+  } else if (typeof input === "object" && !Array.isArray(input)) {
+    inputJson = JSON.stringify(input);
+  } else {
+    throw new TypeError("input must be a JSON object");
+  }
+  return {
+    instanceId: nonEmpty("instanceId", request.instanceId),
+    destinationRuntimeId: nonEmpty("destinationRuntimeId", request.destinationRuntimeId),
+    subSequenceId: nonEmpty("subSequenceId", request.subSequenceId),
+    inputJson,
+  };
 }
 
 function positiveInt(name: string, value: number): number {
@@ -318,6 +390,48 @@ export class Orch8Client {
   /** Enable an opt-in builtin handler (`http_request`) before `resume()`. */
   enableBuiltin(name: string): Promise<void> {
     return this.native.enableBuiltin(name);
+  }
+
+  // -- Delegation from phone-local workflows (engine release after 0.7.1) ---
+
+  /**
+   * Start the delegation pump: a step of a workflow running on this engine
+   * whose `$runtime` places it on another runtime is handed to that runtime
+   * through the server mailbox; the local instance parks and resumes exactly
+   * once with the result. Requires `registerNode`. Journaled delegations
+   * survive app kills: call again after relaunch.
+   */
+  async startDelegation(options: DelegationOptions): Promise<void> {
+    return this.native.startDelegation(validateDelegationOptions(options));
+  }
+
+  /** Pause the pump. Journaled delegations resume with the next `startDelegation`. */
+  stopDelegation(): Promise<void> {
+    return this.native.stopDelegation();
+  }
+
+  /**
+   * Delegate a server-side sub-sequence on behalf of a local instance without
+   * parking a step. Resolves the delegation id; read the outcome with
+   * `delegationStatus`. Requires `startDelegation`.
+   */
+  async delegate(request: DelegateRequest): Promise<string> {
+    return this.native.delegate(toNativeDelegateRequest(request));
+  }
+
+  /** The locally journaled state of a delegation (rejects when unknown). */
+  async delegationStatus(delegationId: string): Promise<DelegationStatus> {
+    return this.native.delegationStatus(nonEmpty("delegationId", delegationId));
+  }
+
+  /** Every journaled delegation, oldest first. */
+  listDelegations(): Promise<DelegationStatus[]> {
+    return this.native.listDelegations();
+  }
+
+  /** Pump counters (zeros while it is not running). */
+  delegationStats(): Promise<DelegationStats> {
+    return this.native.delegationStats();
   }
 
   // -- Events ---------------------------------------------------------------

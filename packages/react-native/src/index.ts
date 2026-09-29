@@ -2,8 +2,14 @@ import { NativeModules, NativeEventEmitter } from "react-native";
 import { Orch8Client, type NativeOrch8 } from "./core";
 
 export * from "./types";
-export { Orch8Client, PermanentHandlerError, parseTaskContext, EVENTS } from "./core";
-export type { NativeOrch8, EventSource, Subscription } from "./core";
+export {
+  Orch8Client,
+  PermanentHandlerError,
+  parseTaskContext,
+  EVENTS,
+  MAX_DELEGATION_TTL_SECS,
+} from "./core";
+export type { NativeOrch8, NativeDelegateRequest, EventSource, Subscription } from "./core";
 
 const { Orch8Module } = NativeModules as { Orch8Module?: NativeOrch8 };
 

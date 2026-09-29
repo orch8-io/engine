@@ -9,6 +9,9 @@ import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import io.orch8.mobile.DelegateRequest
+import io.orch8.mobile.DelegationOptions
+import io.orch8.mobile.DelegationStatus
 import io.orch8.mobile.DeviceContext
 import io.orch8.mobile.EngineListener
 import io.orch8.mobile.HandlerException
@@ -432,6 +435,67 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun enableBuiltin(name: String, promise: Promise) =
         withEngine(promise) { it.enableBuiltin(name); promise.resolve(null) }
+
+    // -- Delegation from phone-local workflows -------------------------------
+
+    private fun delegationStatusMap(s: DelegationStatus): WritableMap = Arguments.createMap().apply {
+        putString("delegationId", s.delegationId)
+        putString("state", s.state)
+        putString("localInstanceId", s.localInstanceId)
+        putString("blockId", s.blockId)
+        putString("destinationRuntimeId", s.destinationRuntimeId)
+        putString("outputJson", s.outputJson)
+        putString("error", s.error)
+    }
+
+    @ReactMethod
+    fun startDelegation(options: ReadableMap, promise: Promise) {
+        val opts = DelegationOptions(
+            tenantId = options.str("tenantId") ?: "",
+            pollIntervalMs = options.ulong("pollIntervalMs", 2000uL),
+            ttlSecs = options.uint("ttlSecs", 600u),
+        )
+        background(promise) { it.startDelegation(opts); promise.resolve(null) }
+    }
+
+    @ReactMethod
+    fun stopDelegation(promise: Promise) = background(promise) { it.stopDelegation(); promise.resolve(null) }
+
+    @ReactMethod
+    fun delegate(request: ReadableMap, promise: Promise) {
+        val req = DelegateRequest(
+            instanceId = request.str("instanceId") ?: "",
+            destinationRuntimeId = request.str("destinationRuntimeId") ?: "",
+            subSequenceId = request.str("subSequenceId") ?: "",
+            inputJson = request.str("inputJson") ?: "{}",
+        )
+        background(promise) { promise.resolve(it.delegate(req)) }
+    }
+
+    @ReactMethod
+    fun delegationStatus(delegationId: String, promise: Promise) = background(promise) { eng ->
+        promise.resolve(delegationStatusMap(eng.delegationStatus(delegationId)))
+    }
+
+    @ReactMethod
+    fun listDelegations(promise: Promise) = background(promise) { eng ->
+        val arr = Arguments.createArray()
+        eng.listDelegations().forEach { arr.pushMap(delegationStatusMap(it)) }
+        promise.resolve(arr)
+    }
+
+    @ReactMethod
+    fun delegationStats(promise: Promise) = withEngine(promise) { eng ->
+        val s = eng.delegationStats()
+        promise.resolve(Arguments.createMap().apply {
+            putBoolean("running", s.running)
+            putDouble("delegated", s.delegated.toDouble())
+            putDouble("completed", s.completed.toDouble())
+            putDouble("failed", s.failed.toDouble())
+            putDouble("abandoned", s.abandoned.toDouble())
+            putDouble("resumed", s.resumed.toDouble())
+        })
+    }
 
     override fun invalidate() {
         pending.failAll("React Native context invalidated")

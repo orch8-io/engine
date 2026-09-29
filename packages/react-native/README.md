@@ -96,3 +96,37 @@ For remote tasks the handler input includes a reserved `__orch8` member;
 `attempt`, `runtimeId`, `continuityEpoch`). Send `effectId` to downstream APIs
 as the idempotency key. See the
 [Mobile SDK guide](https://github.com/orch8-io/engine/blob/main/docs/MOBILE_SDK.md#the-phone-as-a-runtime-node).
+
+## Delegating from a phone-local workflow (engine release after 0.7.1)
+
+A workflow running on the phone's own engine can hand a step placed on
+another runtime (`$runtime.runtime_id`, or `$runtime.runtime_kinds` without
+`mobile`) to that runtime through the server mailbox. The local instance
+parks and resumes exactly once with the result, across disconnects and app
+kills. Handler `orch8.delegation` delegates the server-side sequence
+`params.sequence_id` with `params.input`; any other handler delegates just
+that step. Needs `registerNode` and a node credential allowed to call the
+continuity API.
+
+```ts
+await orch8.registerNode({ hardware: ["camera"] });
+await orch8.startDelegation({ tenantId: "acme" }); // call again after every launch
+
+// Explicit delegation from app code (no local step is parked):
+const delegationId = await orch8.delegate({
+  instanceId,                         // a local instance
+  destinationRuntimeId: desktopRuntimeId,
+  subSequenceId: classifySequenceId,  // server-side sequence
+  input: { photo: { id: photoId } },
+});
+const s = await orch8.delegationStatus(delegationId);
+// s.state: "preparing" | "delegated" | "completed" | "failed" | "abandoned"
+// s.outputJson once completed, s.error once failed
+
+await orch8.listDelegations();   // journal, oldest first
+await orch8.delegationStats();   // { running, delegated, completed, failed, abandoned, resumed }
+await orch8.stopDelegation();    // pause; journaled delegations resume on the next start
+```
+
+`onPushReceived` / `onPushWake` advance pending delegations immediately. See
+the [Mobile SDK guide](https://github.com/orch8-io/engine/blob/main/docs/MOBILE_SDK.md#delegating-from-a-phone-local-workflow).

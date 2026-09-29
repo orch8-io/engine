@@ -225,3 +225,64 @@ describe("engine calls", () => {
     expect(native.loadSequencesFromUrl).toHaveBeenCalledWith("");
   });
 });
+
+describe("delegation", () => {
+  const IDS = {
+    instanceId: "0192a000-0000-7000-8000-000000000001",
+    destinationRuntimeId: "0192a000-0000-7000-8000-000000000002",
+    subSequenceId: "0192a000-0000-7000-8000-000000000003",
+  };
+
+  it("forwards options and serialises the explicit input", async () => {
+    const { client, native } = setup();
+    await client.startDelegation({ tenantId: "acme" });
+    expect(native.startDelegation).toHaveBeenCalledWith({ tenantId: "acme" });
+    await client.startDelegation({ tenantId: "acme", pollIntervalMs: 500, ttlSecs: 86_400 });
+    expect(native.startDelegation).toHaveBeenLastCalledWith({ tenantId: "acme", pollIntervalMs: 500, ttlSecs: 86_400 });
+
+    native.delegate.mockResolvedValue("d-1");
+    await expect(client.delegate({ ...IDS, input: { photo: { id: "p" } } })).resolves.toBe("d-1");
+    expect(native.delegate).toHaveBeenCalledWith({ ...IDS, inputJson: '{"photo":{"id":"p"}}' });
+    await client.delegate(IDS);
+    expect(native.delegate).toHaveBeenLastCalledWith({ ...IDS, inputJson: "{}" });
+    await client.delegate({ ...IDS, input: '{"a":1}' });
+    expect(native.delegate).toHaveBeenLastCalledWith({ ...IDS, inputJson: '{"a":1}' });
+
+    const status = {
+      delegationId: "d-1",
+      state: "completed",
+      localInstanceId: IDS.instanceId,
+      blockId: null,
+      destinationRuntimeId: IDS.destinationRuntimeId,
+      outputJson: '{"labels":["cat"]}',
+      error: null,
+    };
+    native.delegationStatus.mockResolvedValue(status);
+    native.listDelegations.mockResolvedValue([status]);
+    await expect(client.delegationStatus("d-1")).resolves.toEqual(status);
+    expect(native.delegationStatus).toHaveBeenCalledWith("d-1");
+    await expect(client.listDelegations()).resolves.toEqual([status]);
+
+    await client.delegationStats();
+    await client.stopDelegation();
+    expect(native.delegationStats).toHaveBeenCalled();
+    expect(native.stopDelegation).toHaveBeenCalled();
+  });
+
+  it("rejects invalid options and requests before crossing the bridge", async () => {
+    const { client, native } = setup();
+    await expect(client.startDelegation({ tenantId: "" })).rejects.toThrow(TypeError);
+    await expect(client.startDelegation({ tenantId: "t", ttlSecs: 86_401 })).rejects.toThrow(RangeError);
+    await expect(client.startDelegation({ tenantId: "t", ttlSecs: 0 })).rejects.toThrow(RangeError);
+    await expect(client.startDelegation({ tenantId: "t", pollIntervalMs: 1.5 })).rejects.toThrow(RangeError);
+    expect(native.startDelegation).not.toHaveBeenCalled();
+
+    await expect(client.delegate({ ...IDS, input: "[1]" })).rejects.toThrow(TypeError);
+    await expect(client.delegate({ ...IDS, input: "nope" })).rejects.toThrow(TypeError);
+    await expect(client.delegate({ ...IDS, input: [1] as never })).rejects.toThrow(TypeError);
+    await expect(client.delegate({ ...IDS, subSequenceId: "" })).rejects.toThrow(TypeError);
+    await expect(client.delegationStatus("")).rejects.toThrow(TypeError);
+    expect(native.delegate).not.toHaveBeenCalled();
+    expect(native.delegationStatus).not.toHaveBeenCalled();
+  });
+});
