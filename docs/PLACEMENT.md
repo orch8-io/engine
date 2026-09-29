@@ -50,12 +50,33 @@ add labels and set affinity, but it can never escape the sequence's region or
 residency: a contradiction is rejected when the sequence is created
 (`INVALID_BLOCK`). Placement is validated at create time: empty or oversized
 facts (over 128 bytes, over 32 labels), `priority_lane` on a step, and
-`region`/`labels`/`residency` on a built-in handler (built-ins run on the
-engine node, not on a worker) are rejected.
+`region`/`labels`/`residency` on a built-in that manipulates engine state
+(`set_state`, `send_signal`, `human_review`, `wait_for_event`, `memory_*`,
+`blob_*`, …) are rejected.
+
+Remote-executable built-ins (`http_request`, `llm_call`, `tool_call`, `email`,
+`notify`, `transform`, `assert`, `log`, `sleep`, `noop`, `fail`) can be placed:
+they run on a hybrid remote executor that serves them (see
+[HYBRID.md](HYBRID.md)). Sequence-level placement and tenant policies apply to
+every worker step and every remote-executable built-in; engine-state
+built-ins always run on the engine node and ignore them.
 
 A step with `region`, `labels`, or `residency` is **always** dispatched to
 the worker queue, even when the engine has the handler registered
 in-process. Plugin handlers (`ap://`, `grpc://`, `wasm://`) are not placed.
+
+### Credentials of placed steps
+
+The engine does **not** resolve `credentials://<id>[/<field>]` references of
+a step with hard placement (region, labels, residency). The task keeps the
+references, and every referenced id is added to the task's required
+`credentials`, so only a runtime that advertises holding that credential may
+claim it. Hybrid executors resolve the reference from their local
+credentials (`ORCH8_CREDENTIAL_<id>`, `ORCH8_CREDENTIALS_DIR`); the value
+never reaches the engine. External workers that claim placed steps receive
+the reference and must resolve it themselves. Unplaced steps (and `$runtime`
+capability placement without region/labels/residency) keep engine-side
+resolution.
 
 ### Advertising labels
 
@@ -68,8 +89,10 @@ Runtimes advertise labels alongside their other capability facts:
   frame / `RuntimeHeartbeat`. A session that negotiated
   `runtime_capabilities` now claims through the capability predicate, so it
   receives placed work.
-- Executors joined with `orch8 executor join <token> --label residency=eu`
-  advertise the token's labels and region.
+- Executors joined with a token (`ORCH8_JOIN_TOKEN`, or
+  `orch8 executor join <token> --label residency=eu`) advertise the token's
+  labels merged with `[node] labels`, the token region, and the ids of their
+  local credentials.
 
 Legacy capability-less polls only claim unplaced tasks, so placed work never
 leaks to a runtime that cannot prove where it runs.
@@ -126,6 +149,14 @@ PUT /api/v1/placement/policies
 - Limits: 256 policies, unique non-empty names, 32 labels per map.
 - `PUT` replaces the whole list. The writing node applies it immediately;
   other nodes within 5 s (policy cache TTL).
+
+Recommended hybrid policy — every step of instances tagged `vpc` runs on
+executors in your network (join tokens issued with the label `site=vpc`):
+
+```json
+{ "items": [ { "name": "vpc", "match": { "tag": "vpc" },
+               "require": { "labels": { "site": "vpc" } } } ] }
+```
 
 ## Sticky affinity
 

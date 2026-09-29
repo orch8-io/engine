@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Hybrid: remote executors with no database
+
+See [docs/HYBRID.md](docs/HYBRID.md).
+
+- **Remote executor mode**: an `executor` joined with a join token
+  (`ORCH8_JOIN_TOKEN`, `orch8 executor join --run`) and no `database.url`
+  needs nothing else — no database, API key or encryption key. It dials out
+  to the managed engine, advertises a per-replica runtime (handlers, token and
+  `[node]` labels, region, local credential ids), claims leased tasks over the
+  gRPC worker stream (HTTP polling fallback, `ORCH8_EXECUTOR_TRANSPORT`), runs
+  remote-executable built-ins locally, heartbeats, settles with `claim_epoch`,
+  and on SIGTERM or a managed `drain` withdraws, finishes in-flight work within
+  `ORCH8_EXECUTOR_DRAIN_TIMEOUT_SECS`, and releases the rest. New `[executor]`
+  config section.
+- **Executor-local credentials**: the engine no longer resolves
+  `credentials://` references of hard-placed steps (region/labels/residency);
+  tasks keep the reference and require the credential id as a runtime fact.
+  Executors resolve it from `ORCH8_CREDENTIAL_<id>` or `ORCH8_CREDENTIALS_DIR`.
+  **Behavior change** for external workers that claim hard-placed steps: they
+  now receive the reference instead of the value.
+- **Placement on built-ins**: `http_request`, `llm_call`, `tool_call`,
+  `email`, `notify`, `transform`, `assert`, `log`, `sleep`, `noop` and `fail`
+  may be placed; built-ins that manipulate engine state still run on the
+  engine and now ignore sequence placement and policies instead of waiting
+  for a worker that never comes.
+- **BYOK on executors**: with `ORCH8_BYOK_*` configured, an executor seals
+  output fields over `ORCH8_EXECUTOR_EXTERNALIZE_BYTES` into the customer
+  bucket, reports references only, and opens them for later placed steps.
+- **SSRF allow-list**: `ORCH8_ALLOWED_INTERNAL_CIDRS` lets outbound handlers
+  reach listed internal networks without `ORCH8_ALLOW_INTERNAL_URLS`.
+- API keys with the `worker` capability may `POST /runtimes/register`.
+- `orch8_engine::remote_worker` holds the lease-protocol client shared by the
+  mobile runtime node and the executor; `orch8_grpc::worker_client` is the
+  worker-stream client.
+- Helm `mode=executor` renders a DB-less executor (join token, optional
+  `hybrid.credentials`, `hybrid.caCert`, `hybrid.allowedInternalCidrs`) and
+  fails if a database is configured; the Compose example drops Postgres.
+
 ### Embedded: sub-tenants, embed tokens, rollouts, licensing
 
 See [docs/EMBEDDED.md](docs/EMBEDDED.md).
