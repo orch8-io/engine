@@ -3,7 +3,7 @@
 //! used for active-passive failover.
 //!
 //! The cryptographic envelope itself is the pre-existing
-//! [`FederationEnvelope`](crate::continuity_advanced::FederationEnvelope):
+//! [`crate::continuity_advanced::FederationEnvelope`]:
 //! ed25519-signed, short-lived (≤ 300 s), bound to a payload SHA-256 and to
 //! the receiving tenant. This module only adds what is needed to carry those
 //! envelopes over an explicit, opt-in HTTPS transport.
