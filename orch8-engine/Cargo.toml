@@ -11,6 +11,7 @@ orch8-storage = { path = "../orch8-storage", default-features = false }
 orch8-publisher = { path = "../orch8-publisher" }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"] }
 tokio-util.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 uuid.workspace = true
