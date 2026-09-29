@@ -152,19 +152,7 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
     }
 
     override fun sync(manifestUrl: String, tokens: Orch8TokenSource?): SyncResult = mapErrors {
-        val provider = tokens?.let { source ->
-            object : UTokenProvider {
-                override fun currentToken(): String = source.currentToken()
-
-                override fun refreshToken(): String =
-                    try {
-                        source.refreshToken()
-                    } catch (e: Exception) {
-                        throw UMobileException.Engine(e.message ?: "token refresh failed")
-                    }
-            }
-        }
-        engine.sync(manifestUrl, provider).let {
+        engine.sync(manifestUrl, tokens?.toUniffi()).let {
             SyncResult(
                 added = it.added.toInt(),
                 updated = it.updated.toInt(),
@@ -203,6 +191,10 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         mapErrors { engine.activateContinuityCapsule(capsuleId, destinationRuntimeId, destinationInstanceId) }
 
     override fun nodeRuntimeId(): String = mapErrors { engine.nodeRuntimeId() }
+
+    override fun setTokenProvider(tokens: Orch8TokenSource) = mapErrors {
+        engine.setTokenProvider(tokens.toUniffi())
+    }
 
     override fun registerNode(capabilities: NodeCapabilities): NodeRegistration = mapErrors {
         engine.registerNode(capabilities.toUniffi()).let {
@@ -387,4 +379,18 @@ internal fun USyncException.toKind(): Orch8ErrorKind = when (this) {
     is USyncException.Network -> Orch8ErrorKind.NETWORK
     is USyncException.SignatureInvalid -> Orch8ErrorKind.SIGNATURE_INVALID
     is USyncException.InvalidManifest -> Orch8ErrorKind.INVALID_MANIFEST
+}
+
+private fun Orch8TokenSource.toUniffi(): UTokenProvider {
+    val source = this
+    return object : UTokenProvider {
+        override fun currentToken(): String = source.currentToken()
+
+        override fun refreshToken(): String =
+            try {
+                source.refreshToken()
+            } catch (e: Exception) {
+                throw UMobileException.Engine(e.message ?: "token refresh failed")
+            }
+    }
 }

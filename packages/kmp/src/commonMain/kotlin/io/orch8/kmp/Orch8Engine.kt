@@ -192,9 +192,36 @@ class Orch8Engine internal constructor(
     suspend fun nodeRuntimeId(): String = offload { backend.nodeRuntimeId() }
 
     /**
+     * Authenticate every control-plane call (node registration, worker
+     * leases, delegation, sync reporting) with short-lived **device
+     * sessions** instead of the static, legacy `EngineConfig.syncApiKey`.
+     *
+     * [fetchToken] should ask the app's backend for a fresh `dst_…` token;
+     * the backend holds the operator key and mints it with
+     * `POST /runtimes/device-sessions` for this device id and [nodeRuntimeId].
+     * It is awaited once here for the initial token and again whenever the
+     * control plane answers `401` (the request is then retried once); each
+     * refresh is bounded by [refreshTimeout]. Call it before [registerNode].
+     * Never ship an operator key in an app.
+     *
+     * Needs the engine release after 0.7.1.
+     */
+    suspend fun setTokenProvider(
+        refreshTimeout: Duration = 30.seconds,
+        fetchToken: suspend () -> String,
+    ) {
+        require(refreshTimeout.isPositive()) { "refreshTimeout must be greater than zero" }
+        val initial = fetchToken()
+        require(initial.isNotBlank()) { "fetchToken returned an empty token" }
+        val tokens = DeviceSessionTokens(initial, fetchToken, refreshTimeout)
+        offload { backend.setTokenProvider(tokens) }
+    }
+
+    /**
      * Join the runtime mesh: registers the device and its capabilities with
-     * `EngineConfig.syncUrl` + `syncApiKey`, then re-advertises before the
-     * five-minute capability TTL. Safe to call on every launch.
+     * `EngineConfig.syncUrl` and the node credential ([setTokenProvider], or
+     * the legacy `syncApiKey`), then re-advertises before the five-minute
+     * capability TTL. Safe to call on every launch.
      */
     suspend fun registerNode(capabilities: NodeCapabilities = NodeCapabilities()): NodeRegistration =
         offload { backend.registerNode(capabilities) }

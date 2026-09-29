@@ -163,6 +163,44 @@ class JsonBridgeBackendTest {
     }
 
     @Test
+    fun nodeTokenProviderIsInstalledThroughTheBridgeAndOutlivesSync() {
+        val (bridge, backend) = open()
+        var refreshed = 0
+        val tokens = object : Orch8TokenSource {
+            override fun currentToken() = "dst_0"
+
+            override fun refreshToken(): String = "dst_${++refreshed}"
+        }
+        backend.setTokenProvider(tokens)
+        assertEquals("setTokenProvider", bridge.calls.last().first)
+        val callbacks = bridge.installed!!
+        assertEquals("dst_0", callbacks.currentNodeToken())
+        assertEquals("dst_1", Json.parseToJsonElement(callbacks.refreshNodeToken()).jsonObject["ok"]!!.jsonPrimitive.content)
+        // The manifest-sync token source is separate: none is active outside sync.
+        assertEquals("", callbacks.currentToken())
+        bridge.replies["sync"] =
+            """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
+        backend.sync("https://api.example.com/manifest.json", null)
+        assertEquals("dst_0", callbacks.currentNodeToken())
+    }
+
+    @Test
+    fun olderBridgeWithoutTokenProviderLeavesNoNodeCredential() {
+        val (bridge, backend) = open()
+        bridge.replies["setTokenProvider"] =
+            """{"error":{"kind":"InvalidInput","message":"unknown bridge method setTokenProvider"}}"""
+        val tokens = object : Orch8TokenSource {
+            override fun currentToken() = "dst_0"
+
+            override fun refreshToken() = "dst_1"
+        }
+        val e = assertFailsWith<Orch8Exception> { backend.setTokenProvider(tokens) }
+        assertEquals(Orch8ErrorKind.INVALID_INPUT, e.kind)
+        assertEquals("", bridge.installed!!.currentNodeToken())
+        assertTrue("error" in Json.parseToJsonElement(bridge.installed!!.refreshNodeToken()).jsonObject)
+    }
+
+    @Test
     fun runtimeNodeMethodsUseTheBridgeProtocol() {
         val (bridge, backend) = open()
         bridge.replies["registerNode"] =

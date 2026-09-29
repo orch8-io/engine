@@ -130,7 +130,7 @@ val engine = Orch8Engine.open(
     EngineConfig(
         syncUrl = "https://api.example.com/mobile/sync",
         deviceId = deviceId,
-        syncApiKey = apiKey,
+        // No syncApiKey: the node authenticates with device sessions, see below.
     ),
 )
 
@@ -161,6 +161,61 @@ if (result.budgetExhausted) scheduleAnotherWindow()
 
 On a silent push, call `engine.onPushReceived()`. The next tick then syncs
 approvals and commands with the server.
+
+## Authenticating the device: device sessions (engine release after 0.7.1)
+
+**Never ship an operator key (or any long-lived stored API key) in an app**:
+anyone can extract it from the binary. The recommended flow:
+
+1. Your **app backend** holds the operator key. After authenticating the user
+   its own way, it mints a short-lived device session for this device's
+   `deviceId` and `engine.nodeRuntimeId()` with
+   `POST /runtimes/device-sessions`.
+2. The **app** fetches that `dst_…` token from its backend through the token
+   provider. `setTokenProvider` awaits the first token, and the engine calls
+   the same suspend function again whenever the control plane answers `401`
+   (the session expired), then retries the request once.
+
+Backend (Node, [`@orch8.io/sdk`](https://github.com/orch8-io/sdk-node)):
+
+```typescript
+import { Orch8Client } from "@orch8.io/sdk";
+
+const orch8 = new Orch8Client({ baseUrl: "https://api.example.com", tenantId: "acme",
+  headers: { "x-api-key": process.env.ORCH8_OPERATOR_KEY! } });
+
+// POST /device-session  { deviceId, runtimeId }  (behind your own user auth)
+app.post("/device-session", requireUser, async (req, res) => {
+  const session = await orch8.createDeviceSession({
+    deviceId: req.body.deviceId,
+    runtimeId: req.body.runtimeId,          // the app's engine.nodeRuntimeId()
+    handlers: ["scan_document"],            // handler allowlist; [] = delegation-only
+    ttlSecs: 3600,                          // default 3600, max 86400
+  });
+  res.json({ token: session.token, expiresAt: session.expiresAt });
+});
+```
+
+App (common code), **before** `registerNode`:
+
+```kotlin
+val runtimeId = engine.nodeRuntimeId()
+engine.setTokenProvider {
+    myBackend.deviceSession(deviceId = deviceId, runtimeId = runtimeId).token // suspend HTTP call
+}
+engine.registerNode(NodeCapabilities(hardware = listOf("camera")))
+```
+
+A device session is bound to its tenant, device, runtime and handler
+allowlist and reaches only this device's own mobile, worker-lease and
+delegation calls (see `docs/MOBILE_SDK.md`, "Authenticating a phone"). The
+refresh runs on the engine's background thread, bounded by `refreshTimeout`
+(default 30 s). On iOS it needs an `Orch8KmpBridge.swift` from the same
+release; an older bridge answers `setTokenProvider` with `INVALID_INPUT`.
+
+`EngineConfig.syncApiKey` is the **legacy** path and not for production apps:
+it still works, and the SDK logs a warning when the server reports the key is
+operator-capable.
 
 ## Runtime node (engine release after 0.7.1)
 
@@ -236,6 +291,7 @@ engine.stopDelegation()    // pause; journaled delegations resume on the next st
 | `importContinuityCapsule` / `activateContinuityCapsule` | same |
 | `exportContinuityCapsule(..., signer)` | Not wrapped. It needs a Secure Enclave/KeyStore signer, so call it from the platform SDK (same boundary as `@orch8.io/expo`) |
 | `nodeRuntimeId` / `registerNode` / `updateNodeStatus` / `unregisterNode` | same names, `suspend`, common `NodeCapabilities` / `NodeRegistration` / `NodeConnectivity` |
+| `setTokenProvider(TokenProvider)` | `suspend setTokenProvider(refreshTimeout) { fetchToken() }` (suspend fetch of a device session) |
 | `startWorker(WorkerOptions)` / `stopWorker` / `runWorkerWindow(timeBudgetMs)` / `workerStats` | `suspend startWorker(WorkerOptions)` / `stopWorker()` / `runWorkerWindow(Duration)` / `workerStats()` |
 | `startDelegation(DelegationOptions)` / `stopDelegation` / `delegate(DelegateRequest)` / `delegationStatus` / `listDelegations` / `delegationStats` | same names, `suspend`, common types (`pollInterval` / `ttl` as `Duration`, `DelegationState` enum), plus `observeDelegation(id): Flow` |
 | `onPushWake(envelopeJson)` / `enableBuiltin(name)` | same, plus `onPushWake(taskId, runtimeId, reason)` |

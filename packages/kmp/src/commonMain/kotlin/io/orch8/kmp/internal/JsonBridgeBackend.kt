@@ -32,6 +32,7 @@ import io.orch8.kmp.bridge.ORCH8_BRIDGE_PROTOCOL
 import io.orch8.kmp.bridge.Orch8BridgeCallbacks
 import io.orch8.kmp.bridge.Orch8JsonBridge
 import io.orch8.kmp.lenientJson
+import kotlin.concurrent.Volatile
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -303,6 +304,10 @@ internal class JsonBridgeBackend private constructor(
     // Only read while a sync() call is in flight; sync calls are serialized by the engine.
     private var activeTokens: Orch8TokenSource? = null
 
+    // The node credential installed by setTokenProvider; read from engine threads.
+    @Volatile
+    private var nodeTokens: Orch8TokenSource? = null
+
     private val callbacks = object : Orch8BridgeCallbacks {
         override fun executeHandler(handlerName: String, stepName: String, inputJson: String): String {
             val handler = handlers[handlerName]
@@ -327,8 +332,14 @@ internal class JsonBridgeBackend private constructor(
 
         override fun currentToken(): String = activeTokens?.currentToken().orEmpty()
 
-        override fun refreshToken(): String {
-            val tokens = activeTokens ?: return BridgeCodec.error("invalid_input", "no token source")
+        override fun refreshToken(): String = refreshEnvelope(activeTokens)
+
+        override fun currentNodeToken(): String = nodeTokens?.currentToken().orEmpty()
+
+        override fun refreshNodeToken(): String = refreshEnvelope(nodeTokens)
+
+        private fun refreshEnvelope(tokens: Orch8TokenSource?): String {
+            tokens ?: return BridgeCodec.error("invalid_input", "no token source")
             return try {
                 BridgeCodec.ok(JsonPrimitive(tokens.refreshToken()))
             } catch (e: Orch8Exception) {
@@ -510,6 +521,19 @@ internal class JsonBridgeBackend private constructor(
 
     override fun enableBuiltin(name: String) {
         call("enableBuiltin") { put("name", name) }
+    }
+
+    override fun setTokenProvider(tokens: Orch8TokenSource) {
+        val previous = nodeTokens
+        nodeTokens = tokens
+        try {
+            // The bridge installs a provider that reads currentNodeToken() /
+            // refreshNodeToken() through the callbacks.
+            call("setTokenProvider")
+        } catch (e: Exception) {
+            nodeTokens = previous
+            throw e
+        }
     }
 
     override fun startDelegation(options: DelegationOptions) {

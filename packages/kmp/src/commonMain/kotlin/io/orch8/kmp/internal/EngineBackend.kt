@@ -97,6 +97,9 @@ internal interface EngineBackend {
 
     fun nodeRuntimeId(): String
 
+    /** Install the node credential's token source (device sessions). */
+    fun setTokenProvider(tokens: Orch8TokenSource)
+
     fun registerNode(capabilities: NodeCapabilities): NodeRegistration
 
     fun updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: Int?)

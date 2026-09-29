@@ -194,6 +194,11 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         // Runtime node / worker (Orch8Mobile after 0.7.1).
         case "nodeRuntimeId":
             return try engine.nodeRuntimeId()
+        case "setTokenProvider":
+            // Device sessions: the token lives in Kotlin (currentNodeToken /
+            // refreshNodeToken), so a refresh runs the host's suspend fetch.
+            engine.setTokenProvider(provider: NodeTokenAdapter(bridge: self))
+            return nil
         case "registerNode":
             guard let c = a["capabilities"] as? [String: Any] else {
                 throw BridgeFailure(kind: "InvalidInput", message: "missing capabilities")
@@ -512,6 +517,31 @@ private final class TokenAdapter: TokenProvider, @unchecked Sendable {
             throw MobileError.Engine(message: "Kotlin callbacks not installed")
         }
         switch Orch8KmpBridge.unwrapCallback(callbacks.refreshToken()) {
+        case let .success(token): return token
+        case let .failure(failure): throw MobileError.Engine(message: failure.message)
+        }
+    }
+}
+
+/// The node credential (device sessions) for `MobileEngine.setTokenProvider`.
+/// `refreshToken` runs on the engine's blocking thread, where waiting for the
+/// Kotlin suspend fetch is fine.
+private final class NodeTokenAdapter: TokenProvider, @unchecked Sendable {
+    private weak var bridge: Orch8KmpBridge?
+
+    init(bridge: Orch8KmpBridge) {
+        self.bridge = bridge
+    }
+
+    func currentToken() -> String {
+        bridge?.currentCallbacks()?.currentNodeToken() ?? ""
+    }
+
+    func refreshToken() throws -> String {
+        guard let callbacks = bridge?.currentCallbacks() else {
+            throw MobileError.Engine(message: "Kotlin callbacks not installed")
+        }
+        switch Orch8KmpBridge.unwrapCallback(callbacks.refreshNodeToken()) {
         case let .success(token): return token
         case let .failure(failure): throw MobileError.Engine(message: failure.message)
         }
