@@ -247,6 +247,56 @@ class Orch8Engine internal constructor(
     /** Enable an opt-in builtin handler (`http_request`) before [resume]. */
     fun enableBuiltin(name: String) = backend.enableBuiltin(name)
 
+    // -- Delegation from phone-local workflows ------------------------------
+    //
+    // Needs the engine release after 0.7.1. A step of a workflow running on
+    // this engine whose `$runtime` places it on another runtime is handed to
+    // that runtime through the server mailbox; the local instance parks and
+    // resumes exactly once with the result.
+
+    /**
+     * Start the delegation pump. Requires [registerNode] and a node credential
+     * allowed to call the continuity API. Delegations are journaled locally
+     * and survive disconnects and app kills: call again after every launch.
+     */
+    suspend fun startDelegation(options: DelegationOptions) = offload { backend.startDelegation(options) }
+
+    /** Pause the pump. Journaled delegations resume with the next [startDelegation]. */
+    suspend fun stopDelegation() = offload { backend.stopDelegation() }
+
+    /**
+     * Delegate a server-side sub-sequence on behalf of a local instance
+     * without parking a step. Returns the delegation id; read the outcome
+     * with [delegationStatus]. Requires [startDelegation].
+     */
+    suspend fun delegate(request: DelegateRequest): String = offload { backend.delegate(request) }
+
+    /** The locally journaled state of a delegation (NOT_FOUND when unknown). */
+    suspend fun delegationStatus(delegationId: String): DelegationStatus {
+        require(delegationId.isNotBlank()) { "delegationId must not be blank" }
+        return offload { backend.delegationStatus(delegationId) }
+    }
+
+    /** Every journaled delegation, oldest first. */
+    suspend fun listDelegations(): List<DelegationStatus> = offload { backend.listDelegations() }
+
+    /** Pump counters (zeros while it is not running). */
+    suspend fun delegationStats(): DelegationStats = offload { backend.delegationStats() }
+
+    /**
+     * Cold flow of distinct statuses of one delegation, polled every
+     * [pollInterval]. Completes after emitting a terminal state.
+     */
+    fun observeDelegation(delegationId: String, pollInterval: Duration = 1.seconds): Flow<DelegationStatus> =
+        flow {
+            while (true) {
+                val status = backend.delegationStatus(delegationId)
+                emit(status)
+                if (status.state.isTerminal) return@flow
+                delay(pollInterval)
+            }
+        }.distinctUntilChanged().flowOn(ioDispatcher)
+
     /**
      * Cold flow of distinct snapshots of one instance, polled every
      * [pollInterval]. Completes after emitting a terminal state.

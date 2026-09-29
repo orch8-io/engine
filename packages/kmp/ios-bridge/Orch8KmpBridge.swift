@@ -260,6 +260,36 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
             return engine.onPushWake(envelopeJson: try a.string("envelopeJson"))
         case "enableBuiltin":
             try engine.enableBuiltin(name: try a.string("name")); return nil
+        case "startDelegation":
+            try engine.startDelegation(options: DelegationOptions(
+                tenantId: try a.string("tenantId"),
+                pollIntervalMs: try a.uint("pollIntervalMs"),
+                ttlSecs: UInt32(clamping: try a.uint("ttlSecs"))
+            ))
+            return nil
+        case "stopDelegation":
+            engine.stopDelegation(); return nil
+        case "delegate":
+            return try engine.delegate(request: DelegateRequest(
+                instanceId: try a.string("instanceId"),
+                destinationRuntimeId: try a.string("destinationRuntimeId"),
+                subSequenceId: try a.string("subSequenceId"),
+                inputJson: a.optionalString("inputJson") ?? "{}"
+            ))
+        case "delegationStatus":
+            return Self.delegationStatus(try engine.delegationStatus(delegationId: try a.string("delegationId")))
+        case "listDelegations":
+            return try engine.listDelegations().map(Self.delegationStatus)
+        case "delegationStats":
+            let s = engine.delegationStats()
+            return [
+                "running": s.running,
+                "delegated": NSNumber(value: s.delegated),
+                "completed": NSNumber(value: s.completed),
+                "failed": NSNumber(value: s.failed),
+                "abandoned": NSNumber(value: s.abandoned),
+                "resumed": NSNumber(value: s.resumed),
+            ]
         default:
             throw BridgeFailure(kind: "InvalidInput", message: "unknown bridge method \(method)")
         }
@@ -357,6 +387,18 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         case let .SignatureInvalid(message): return ("SignatureInvalid", message)
         case let .InvalidManifest(message): return ("InvalidManifest", message)
         }
+    }
+
+    private static func delegationStatus(_ s: DelegationStatus) -> [String: Any] {
+        [
+            "delegationId": s.delegationId,
+            "state": s.state,
+            "localInstanceId": s.localInstanceId,
+            "blockId": s.blockId ?? NSNull(),
+            "destinationRuntimeId": s.destinationRuntimeId ?? NSNull(),
+            "outputJson": s.outputJson ?? NSNull(),
+            "error": s.error ?? NSNull(),
+        ]
     }
 
     private static func stateWire(_ state: InstanceStateKind) -> String {

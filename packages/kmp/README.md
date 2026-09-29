@@ -186,6 +186,40 @@ val window = engine.runWorkerWindow(25.seconds)
 engine.unregisterNode() // advertise draining
 ```
 
+## Delegating from a phone-local workflow (engine release after 0.7.1)
+
+A step of a workflow running on the device's own engine whose `$runtime`
+places it on another runtime (`runtime_id` of another node, or
+`runtime_kinds` without `mobile`) is handed to that runtime through the server
+mailbox; the local instance parks and resumes exactly once with the result,
+across disconnects and app kills. Handler `orch8.delegation` delegates the
+server-side sequence `params.sequence_id` with `params.input`; any other
+handler delegates just that step. Needs `registerNode` and a node credential
+allowed to call the continuity API.
+
+```kotlin
+engine.registerNode(NodeCapabilities())
+engine.startDelegation(DelegationOptions(tenantId = "acme")) // on every launch
+
+// Explicit delegation from app code (no local step is parked):
+val id = engine.delegate(
+    DelegateRequest(
+        instanceId = localInstanceId,
+        destinationRuntimeId = desktopRuntimeId,
+        subSequenceId = classifySequenceId,
+        inputJson = """{"photo":{"id":"$photoId"}}""",
+    ),
+)
+engine.observeDelegation(id).collect { status ->
+    // PREPARING -> DELEGATED -> COMPLETED (outputJson) | FAILED (error) | ABANDONED
+}
+engine.listDelegations()   // journal, oldest first
+engine.delegationStats()   // running, delegated, completed, failed, abandoned, resumed
+engine.stopDelegation()    // pause; journaled delegations resume on the next start
+```
+
+`onPushReceived()` / `onPushWake(...)` advance pending delegations at once.
+
 ## API map
 
 | `MobileEngine` (Swift / Android) | `Orch8Engine` (KMP) |
@@ -203,6 +237,7 @@ engine.unregisterNode() // advertise draining
 | `exportContinuityCapsule(..., signer)` | Not wrapped. It needs a Secure Enclave/KeyStore signer, so call it from the platform SDK (same boundary as `@orch8.io/expo`) |
 | `nodeRuntimeId` / `registerNode` / `updateNodeStatus` / `unregisterNode` | same names, `suspend`, common `NodeCapabilities` / `NodeRegistration` / `NodeConnectivity` |
 | `startWorker(WorkerOptions)` / `stopWorker` / `runWorkerWindow(timeBudgetMs)` / `workerStats` | `suspend startWorker(WorkerOptions)` / `stopWorker()` / `runWorkerWindow(Duration)` / `workerStats()` |
+| `startDelegation(DelegationOptions)` / `stopDelegation` / `delegate(DelegateRequest)` / `delegationStatus` / `listDelegations` / `delegationStats` | same names, `suspend`, common types (`pollInterval` / `ttl` as `Duration`, `DelegationState` enum), plus `observeDelegation(id): Flow` |
 | `onPushWake(envelopeJson)` / `enableBuiltin(name)` | same, plus `onPushWake(taskId, runtimeId, reason)` |
 | Swift-only `DistributedWorkerClient`, `TrustedDeviceHandoffCoordinator` | Not wrapped. Use `packages/swift` directly |
 
