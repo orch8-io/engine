@@ -33,6 +33,7 @@ use orch8_types::config::NodeRole;
 
 mod federation_wiring;
 mod managed_control;
+mod remote_executor;
 mod telemetry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +254,12 @@ async fn main() -> anyhow::Result<()> {
     let mut config = tokio::task::spawn_blocking(move || load_config(&config_path))
         .await
         .context("config loader panicked")??;
+    // Hybrid: an executor joined to a managed engine without a database of
+    // its own claims work over the worker protocol. It needs neither a
+    // database, an API key, nor an encryption key (it stores nothing).
+    if config.is_remote_executor() {
+        return remote_executor::run(config).await;
+    }
     let assembly = NodeAssembly::for_role(config.node.role);
     automatic_startup_preflight(&config, assembly)?;
     // Reject an unsafe auth configuration before any side effect (storage
@@ -285,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 orch8_types::continuity::RuntimeKind::Server
             },
+            ca_pem: None,
         })
     };
     config.node.managed_control_api_key = orch8_types::SecretString::default();
@@ -1450,6 +1458,47 @@ fn apply_join_token(config: &mut EngineConfig, raw: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// `[executor]` (remote executor mode) environment overrides.
+fn apply_executor_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
+    if let Ok(val) = std::env::var("ORCH8_EXECUTOR_TRANSPORT") {
+        config.executor.transport = serde_json::from_value(serde_json::Value::String(val))
+            .context("ORCH8_EXECUTOR_TRANSPORT must be auto, grpc, or http")?;
+    }
+    if let Ok(val) = std::env::var("ORCH8_EXECUTOR_API_URL") {
+        config.executor.api_url = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_EXECUTOR_CA_CERT") {
+        config.executor.ca_cert_path = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_EXECUTOR_HANDLERS") {
+        config.executor.handlers = val
+            .split(',')
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+    if let Some(n) = env_parse("ORCH8_EXECUTOR_MAX_CONCURRENT_TASKS") {
+        config.executor.max_concurrent_tasks = n;
+    }
+    if let Some(n) = env_parse("ORCH8_EXECUTOR_POLL_INTERVAL_MS") {
+        config.executor.poll_interval_ms = n;
+    }
+    if let Some(n) = env_parse("ORCH8_EXECUTOR_DRAIN_TIMEOUT_SECS") {
+        config.executor.drain_timeout_secs = n;
+    }
+    if let Some(n) = env_parse("ORCH8_EXECUTOR_HEARTBEAT_SECS") {
+        config.executor.heartbeat_secs = n;
+    }
+    if let Some(n) = env_parse("ORCH8_EXECUTOR_EXTERNALIZE_BYTES") {
+        config.executor.externalize_bytes = n;
+    }
+    if let Ok(val) = std::env::var("ORCH8_CREDENTIALS_DIR") {
+        config.executor.credentials_dir = val;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_ARTIFACT_BACKEND") {
@@ -1535,6 +1584,7 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_RUNTIME_ID") {
         config.node.managed_control_runtime_id = val;
     }
+    apply_executor_env_overrides(config)?;
     if let Ok(val) = std::env::var("ORCH8_CLOUD_OBSERVABILITY_ENDPOINT") {
         config.cloud_observability.endpoint = val;
     }

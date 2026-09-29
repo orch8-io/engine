@@ -14,6 +14,7 @@ fn config() -> ManagedControlConfig {
         runtime_id: RuntimeId::new(),
         region: None,
         kind: RuntimeKind::Edge,
+        ca_pem: None,
     }
 }
 
