@@ -13,6 +13,7 @@ mod builtins;
 mod capabilities;
 mod config;
 mod continuity;
+mod delegation;
 mod error;
 mod handlers;
 mod lifecycle;
@@ -55,6 +56,9 @@ pub use crate::capabilities::{
 };
 pub use crate::config::MobileEngineConfig;
 pub use crate::continuity::{CapsuleSigner, ContinuityExportResult, ContinuityImportResult};
+pub use crate::delegation::{
+    DelegateRequest, DelegationOptions, DelegationStats, DelegationStatus,
+};
 pub use crate::error::{HandlerError, MobileError, SyncError, TokenProvider};
 pub use crate::handlers::{EngineListener, StepHandler};
 pub use crate::node::{NodeCapabilities, NodeConnectivity, NodeRegistration};
@@ -240,6 +244,8 @@ pub struct MobileEngine {
     /// Handler calls still running after a device-side timeout; the worker
     /// claims nothing new for their handler until they return.
     stragglers: Arc<stragglers::Stragglers>,
+    /// Device-mesh delegation of placed local steps (`start_delegation`).
+    delegation: StdMutex<Option<Arc<delegation::DelegationPump>>>,
 }
 
 /// A registered runtime node and its re-advertisement task.
@@ -464,6 +470,7 @@ impl MobileEngine {
             node: StdMutex::new(None),
             worker: StdMutex::new(None),
             stragglers: Arc::new(stragglers::Stragglers::default()),
+            delegation: StdMutex::new(None),
         });
         engine.release_orphaned_claims_in_background();
         Ok(engine)
@@ -687,6 +694,9 @@ impl MobileEngine {
             self.tick_controller.wake();
         }
         self.wake_worker();
+        if let Some(pump) = self.current_delegation() {
+            pump.wake();
+        }
     }
 
     /// Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
@@ -1114,6 +1124,7 @@ impl MobileEngine {
     pub fn shutdown(&self) {
         info!("mobile engine shutting down");
         self.stop_worker();
+        self.stop_delegation();
         if let Some(slot) = self
             .node
             .lock()
@@ -1319,6 +1330,135 @@ impl MobileEngine {
         let budget = Duration::from_millis(time_budget_ms.max(1));
         Ok(self.runtime.block_on(worker.run_window(budget)))
     }
+
+    // ------------------------------------------------------------------
+    // Device-mesh delegation (Feature 29)
+    // ------------------------------------------------------------------
+
+    /// Start delegating placed local steps: a step of a workflow running on
+    /// this engine whose `$runtime` places it on another runtime
+    /// (`runtime_id` of another node, or `runtime_kinds` without `mobile`)
+    /// is handed to that runtime through the server mailbox while the local
+    /// instance stays parked, and resumed exactly once with the result. A
+    /// step with handler `orch8.delegation` delegates the server-side
+    /// sequence `params.sequence_id` with input `params.input`; any other
+    /// handler delegates just that step. Requires `register_node` (and a
+    /// credential that may call the continuity API). Survives disconnects
+    /// and app kills: delegations are journaled locally and picked up again
+    /// by the next `start_delegation`.
+    pub fn start_delegation(&self, options: DelegationOptions) -> Result<(), MobileError> {
+        let client = self
+            .node_client()
+            .ok_or_else(|| MobileError::InvalidInput {
+                message: "register_node before start_delegation".into(),
+            })?;
+        let pump = delegation::DelegationPump::new(
+            client,
+            Arc::clone(&self.storage),
+            self.node_pool.clone(),
+            options,
+            self.tick_controller.work_handle(),
+        )?;
+        let previous = self
+            .delegation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(Arc::clone(&pump));
+        if let Some(previous) = previous {
+            previous.stop();
+        }
+        pump.spawn(&self.runtime.handle());
+        Ok(())
+    }
+
+    /// Stop advancing delegations. Journaled delegations resume with the
+    /// next `start_delegation`.
+    pub fn stop_delegation(&self) {
+        if let Some(pump) = self
+            .delegation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            pump.stop();
+        }
+    }
+
+    /// Explicitly delegate a server-side sub-sequence on behalf of a local
+    /// instance, without parking any step. Returns the delegation id; read
+    /// the outcome with `delegation_status`. Requires `start_delegation`.
+    pub fn delegate(&self, request: DelegateRequest) -> Result<String, MobileError> {
+        let pump = self
+            .current_delegation()
+            .ok_or_else(|| MobileError::InvalidInput {
+                message: "start_delegation before delegate".into(),
+            })?;
+        for (value, field) in [
+            (&request.instance_id, "instance_id"),
+            (&request.destination_runtime_id, "destination_runtime_id"),
+            (&request.sub_sequence_id, "sub_sequence_id"),
+        ] {
+            uuid::Uuid::parse_str(value).map_err(|e| MobileError::InvalidInput {
+                message: format!("invalid {field}: {e}"),
+            })?;
+        }
+        let input: serde_json::Value = serde_json::from_str(&request.input_json)?;
+        if !input.is_object() {
+            return Err(MobileError::InvalidInput {
+                message: "delegation input must be a JSON object".into(),
+            });
+        }
+        let id = self.run_with_timeout(async {
+            let local = orch8_types::ids::InstanceId::from_uuid(
+                uuid::Uuid::parse_str(&request.instance_id).map_err(|e| {
+                    MobileError::InvalidInput {
+                        message: format!("invalid instance_id: {e}"),
+                    }
+                })?,
+            );
+            self.storage
+                .get_instance(local)
+                .await?
+                .ok_or_else(|| MobileError::NotFound {
+                    message: format!("instance {}", request.instance_id),
+                })?;
+            delegation::DelegationPump::record_explicit(
+                &self.node_pool,
+                &request,
+                &input,
+                pump.ttl_secs(),
+            )
+            .await
+        })?;
+        pump.wake();
+        Ok(id)
+    }
+
+    /// The locally journaled state of a delegation.
+    pub fn delegation_status(
+        &self,
+        delegation_id: String,
+    ) -> Result<DelegationStatus, MobileError> {
+        self.run_with_timeout(async {
+            delegation::DelegationPump::status(&self.node_pool, &delegation_id)
+                .await?
+                .ok_or_else(|| MobileError::NotFound {
+                    message: format!("delegation {delegation_id}"),
+                })
+        })
+    }
+
+    /// Every journaled delegation, oldest first.
+    pub fn list_delegations(&self) -> Result<Vec<DelegationStatus>, MobileError> {
+        self.run_with_timeout(async { delegation::DelegationPump::list(&self.node_pool).await })
+    }
+
+    /// Counters for the delegation pump (zeros when it is not running).
+    pub fn delegation_stats(&self) -> DelegationStats {
+        self.current_delegation()
+            .map(|pump| pump.stats())
+            .unwrap_or_default()
+    }
 }
 
 impl MobileEngine {
@@ -1389,6 +1529,13 @@ impl MobileEngine {
 
     fn current_worker(&self) -> Option<Arc<worker::Worker>> {
         self.worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn current_delegation(&self) -> Option<Arc<delegation::DelegationPump>> {
+        self.delegation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -1550,6 +1697,9 @@ async fn init_node_tables(pool: &sqlx::SqlitePool, claims: &worker::ClaimStore) 
     }
     if let Err(e) = claims.init_tables().await {
         warn!(error = %e, "failed to create mobile worker claim journal");
+    }
+    if let Err(e) = delegation::init_tables(pool).await {
+        warn!(error = %e, "failed to create mobile delegation journal");
     }
 }
 

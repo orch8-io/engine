@@ -67,6 +67,12 @@ impl TickController {
         Arc::clone(&self.power_state)
     }
 
+    /// The scheduler's work signal, for components outside the engine handle
+    /// (the delegation pump) that make a parked instance runnable.
+    pub fn work_handle(&self) -> Arc<Notify> {
+        Arc::clone(&self.work_available)
+    }
+
     /// Acquire the tick mutex (used by `tick_once` to serialize ticks).
     pub fn tick_mutex(&self) -> &Arc<Mutex<()>> {
         &self.tick_mutex

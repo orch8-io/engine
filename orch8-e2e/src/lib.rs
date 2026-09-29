@@ -442,15 +442,13 @@ impl Cloud {
     pub fn awaiting_dispatch(&self, task: Uuid) -> bool {
         self.rt.block_on(async {
             match &self.raw {
-                RawPool::Postgres(pool) => {
-                    sqlx::query_scalar::<_, bool>(
-                        "SELECT awaiting_dispatch FROM worker_tasks WHERE id = $1",
-                    )
-                    .bind(task)
-                    .fetch_one(pool)
-                    .await
-                    .expect("awaiting_dispatch")
-                }
+                RawPool::Postgres(pool) => sqlx::query_scalar::<_, bool>(
+                    "SELECT awaiting_dispatch FROM worker_tasks WHERE id = $1",
+                )
+                .bind(task)
+                .fetch_one(pool)
+                .await
+                .expect("awaiting_dispatch"),
                 RawPool::Sqlite(pool) => {
                     sqlx::query_scalar::<_, i64>(
                         "SELECT awaiting_dispatch FROM worker_tasks WHERE id = ?1",
@@ -784,6 +782,164 @@ impl Phone {
                 version: Some("e2e".into()),
             })
             .expect("start worker");
+    }
+}
+
+impl Phone {
+    /// Load a phone-local sequence (tenant `mobile`, namespace `default`)
+    /// named `name` with `blocks`.
+    pub fn load_local_sequence(&self, name: &str, blocks: &Value) {
+        self.engine
+            .load_sequence_from_json(
+                json!({
+                    "id": Uuid::now_v7(), "tenant_id": "mobile", "namespace": "default",
+                    "name": name, "version": 1, "deprecated": false, "blocks": blocks,
+                    "created_at": chrono::Utc::now().to_rfc3339(),
+                })
+                .to_string(),
+            )
+            .expect("load local sequence");
+    }
+
+    /// Start a phone-local instance of `name`; returns its id.
+    pub fn start_local(&self, name: &str, input: &Value) -> String {
+        let id = self
+            .engine
+            .start(name.to_owned(), input.to_string(), None)
+            .expect("start local instance");
+        self.engine.resume();
+        id
+    }
+
+    #[must_use]
+    pub fn local_state(&self, id: &str) -> orch8_mobile::InstanceStateKind {
+        self.engine
+            .get_instance(id.to_owned())
+            .expect("local instance")
+            .state
+    }
+
+    /// Wait until the local instance reaches `state`.
+    pub fn wait_local_state(
+        &self,
+        id: &str,
+        state: orch8_mobile::InstanceStateKind,
+        limit: Duration,
+    ) {
+        let mut last = None;
+        let reached = wait_for_opt(limit, || {
+            let now = self.local_state(id);
+            last = Some(now);
+            (now == state).then_some(())
+        });
+        assert!(
+            reached.is_some(),
+            "local instance {id} never reached {state:?}; last: {last:?}"
+        );
+    }
+
+    /// `start_delegation` for this cloud tenant, polling every 150 ms.
+    pub fn start_delegation(&self, tenant: &str) {
+        self.engine
+            .start_delegation(orch8_mobile::DelegationOptions {
+                tenant_id: tenant.to_owned(),
+                poll_interval_ms: 150,
+                ttl_secs: 300,
+            })
+            .expect("start delegation");
+    }
+
+    /// Wait until the delegation journal holds a delegation in `state`
+    /// (`preparing`, `delegated`, `completed`, …); returns it.
+    pub fn wait_delegation(&self, state: &str, limit: Duration) -> orch8_mobile::DelegationStatus {
+        let mut last = Vec::new();
+        wait_for_opt(limit, || {
+            last = self.engine.list_delegations().expect("list delegations");
+            last.iter()
+                .find(|delegation| delegation.state == state)
+                .cloned()
+        })
+        .unwrap_or_else(|| panic!("no delegation reached {state}; journal: {last:?}"))
+    }
+}
+
+/// Read access to a phone's own database next to its running engine (the
+/// file is in WAL mode), for asserting on local outputs and receipts.
+pub struct PhoneDb {
+    rt: tokio::runtime::Runtime,
+    pool: sqlx::SqlitePool,
+}
+
+impl PhoneDb {
+    #[must_use]
+    pub fn open(db_path: &str) -> Self {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("phone db runtime");
+        let pool = rt
+            .block_on(sqlx::SqlitePool::connect(&format!("sqlite:{db_path}")))
+            .expect("open phone db");
+        Self { rt, pool }
+    }
+
+    /// Real outputs of a local block (no in-progress sentinel or retry
+    /// markers), oldest first.
+    #[must_use]
+    pub fn block_outputs(&self, instance: &str, block: &str) -> Vec<Value> {
+        let rows: Vec<String> = self
+            .rt
+            .block_on(
+                sqlx::query_scalar(
+                    "SELECT output FROM block_outputs WHERE instance_id = ?1 AND block_id = ?2 \
+                     AND output_ref IS NULL ORDER BY created_at",
+                )
+                .bind(instance)
+                .bind(block)
+                .fetch_all(&self.pool),
+            )
+            .expect("local outputs");
+        rows.iter()
+            .map(|text| serde_json::from_str(text).expect("output json"))
+            .collect()
+    }
+
+    /// Local effect receipt states of a block, by attempt.
+    #[must_use]
+    pub fn receipt_states(&self, instance: &str, block: &str) -> Vec<String> {
+        let rows: Vec<(String, String)> = self
+            .rt
+            .block_on(
+                sqlx::query_as("SELECT state, record FROM effect_receipts WHERE instance_id = ?1")
+                    .bind(instance)
+                    .fetch_all(&self.pool),
+            )
+            .expect("local receipts");
+        let mut states: Vec<(u64, String)> = rows
+            .into_iter()
+            .filter_map(|(state, record)| {
+                let record: Value = serde_json::from_str(&record).ok()?;
+                (record["block_id"] == block)
+                    .then(|| (record["attempt"].as_u64().unwrap_or_default(), state))
+            })
+            .collect();
+        states.sort();
+        states.into_iter().map(|(_, state)| state).collect()
+    }
+
+    /// Replay a resolved delegation: put its journal row back to `claimed`,
+    /// as if the result had never been applied (a duplicate delivery).
+    pub fn replay_delegation(&self, delegation_id: &str) {
+        self.rt
+            .block_on(
+                sqlx::query(
+                    "UPDATE mobile_delegations SET state = 'claimed', outcome = NULL \
+                     WHERE delegation_id = ?1",
+                )
+                .bind(delegation_id)
+                .execute(&self.pool),
+            )
+            .expect("replay delegation");
     }
 }
 

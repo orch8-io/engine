@@ -985,6 +985,12 @@ internal object IntegrityCheckingUniffiLib {
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_complete_step(): Int
 
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegate(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegation_stats(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegation_status(): Int
+
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_enable_builtin(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule(): Int
@@ -994,6 +1000,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_get_instance(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_list_delegations(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json(): Int
 
@@ -1029,7 +1037,11 @@ internal object IntegrityCheckingUniffiLib {
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_start(): Int
 
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_start_delegation(): Int
+
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_start_worker(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_stop_delegation(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_stop_worker(): Int
 
@@ -1123,6 +1135,23 @@ internal object UniffiLib {
         uniffi_out_err: UniffiRustCallStatus,
     ): Unit
 
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_delegate(
+        `ptr`: Long,
+        `request`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_delegation_stats(
+        `ptr`: Long,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_delegation_status(
+        `ptr`: Long,
+        `delegationId`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+
     external fun uniffi_orch8_mobile_fn_method_mobileengine_enable_builtin(
         `ptr`: Long,
         `name`: RustBuffer.ByValue,
@@ -1158,6 +1187,11 @@ internal object UniffiLib {
         `payloadKeyBase64`: RustBuffer.ByValue,
         `destinationRuntimeId`: RustBuffer.ByValue,
         `destinationInstanceId`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_list_delegations(
+        `ptr`: Long,
         uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
 
@@ -1261,9 +1295,20 @@ internal object UniffiLib {
         uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
 
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_start_delegation(
+        `ptr`: Long,
+        `options`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+
     external fun uniffi_orch8_mobile_fn_method_mobileengine_start_worker(
         `ptr`: Long,
         `options`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_stop_delegation(
+        `ptr`: Long,
         uniffi_out_err: UniffiRustCallStatus,
     ): Unit
 
@@ -1630,6 +1675,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_complete_step() and 0xFFFF) != 37083) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_delegate() and 0xFFFF) != 27416) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_delegation_stats() and 0xFFFF) != 23865) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_delegation_status() and 0xFFFF) != 39993) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_enable_builtin() and 0xFFFF) != 55786) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1643,6 +1697,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule() and 0xFFFF) != 19841) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_list_delegations() and 0xFFFF) != 23937) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json() and 0xFFFF) != 44133) {
@@ -1696,7 +1753,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_start() and 0xFFFF) != 15754) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_start_delegation() and 0xFFFF) != 65279) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_start_worker() and 0xFFFF) != 51564) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_stop_delegation() and 0xFFFF) != 947) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_stop_worker() and 0xFFFF) != 30469) {
@@ -3038,6 +3101,23 @@ public interface MobileEngineInterface {
     )
 
     /**
+     * Explicitly delegate a server-side sub-sequence on behalf of a local
+     * instance, without parking any step. Returns the delegation id; read
+     * the outcome with `delegation_status`. Requires `start_delegation`.
+     */
+    fun `delegate`(`request`: DelegateRequest): kotlin.String
+
+    /**
+     * Counters for the delegation pump (zeros when it is not running).
+     */
+    fun `delegationStats`(): DelegationStats
+
+    /**
+     * The locally journaled state of a delegation.
+     */
+    fun `delegationStatus`(`delegationId`: kotlin.String): DelegationStatus
+
+    /**
      * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
      * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
      * registered. Must be called before `resume()` / `start_worker()`.
@@ -3081,6 +3161,11 @@ public interface MobileEngineInterface {
         `destinationRuntimeId`: kotlin.String,
         `destinationInstanceId`: kotlin.String,
     ): ContinuityImportResult
+
+    /**
+     * Every journaled delegation, oldest first.
+     */
+    fun `listDelegations`(): List<DelegationStatus>
 
     /**
      * Load a sequence directly from a JSON string, bypassing sync.
@@ -3209,12 +3294,33 @@ public interface MobileEngineInterface {
     ): kotlin.String
 
     /**
+     * Start delegating placed local steps: a step of a workflow running on
+     * this engine whose `$runtime` places it on another runtime
+     * (`runtime_id` of another node, or `runtime_kinds` without `mobile`)
+     * is handed to that runtime through the server mailbox while the local
+     * instance stays parked, and resumed exactly once with the result. A
+     * step with handler `orch8.delegation` delegates the server-side
+     * sequence `params.sequence_id` with input `params.input`; any other
+     * handler delegates just that step. Requires `register_node` (and a
+     * credential that may call the continuity API). Survives disconnects
+     * and app kills: delegations are journaled locally and picked up again
+     * by the next `start_delegation`.
+     */
+    fun `startDelegation`(`options`: DelegationOptions)
+
+    /**
      * Start the remote worker loop: poll the control plane as this `mobile`
      * runtime, run claimed tasks with the registered handlers, heartbeat
      * per the task lease, and complete / fail / release them. Requires
      * `register_node` first. Handlers must be registered before this call.
      */
     fun `startWorker`(`options`: WorkerOptions)
+
+    /**
+     * Stop advancing delegations. Journaled delegations resume with the
+     * next `start_delegation`.
+     */
+    fun `stopDelegation`()
 
     /**
      * Stop claiming remote tasks. Tasks already executing finish and are
@@ -3460,6 +3566,57 @@ open class MobileEngine :
     }
 
     /**
+     * Explicitly delegate a server-side sub-sequence on behalf of a local
+     * instance, without parking any step. Returns the delegation id; read
+     * the outcome with `delegation_status`. Requires `start_delegation`.
+     */
+    @Throws(MobileException::class)
+    override fun `delegate`(`request`: DelegateRequest): kotlin.String =
+        FfiConverterString.lift(
+            callWithHandle {
+                uniffiRustCallWithError(MobileException) { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_delegate(
+                        it,
+                        FfiConverterTypeDelegateRequest.lower(`request`),
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
+     * Counters for the delegation pump (zeros when it is not running).
+     */
+    override fun `delegationStats`(): DelegationStats =
+        FfiConverterTypeDelegationStats.lift(
+            callWithHandle {
+                uniffiRustCall { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_delegation_stats(
+                        it,
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
+     * The locally journaled state of a delegation.
+     */
+    @Throws(MobileException::class)
+    override fun `delegationStatus`(`delegationId`: kotlin.String): DelegationStatus =
+        FfiConverterTypeDelegationStatus.lift(
+            callWithHandle {
+                uniffiRustCallWithError(MobileException) { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_delegation_status(
+                        it,
+                        FfiConverterString.lower(`delegationId`),
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
      * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
      * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
      * registered. Must be called before `resume()` / `start_worker()`.
@@ -3564,6 +3721,22 @@ open class MobileEngine :
                         FfiConverterString.lower(`payloadKeyBase64`),
                         FfiConverterString.lower(`destinationRuntimeId`),
                         FfiConverterString.lower(`destinationInstanceId`),
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
+     * Every journaled delegation, oldest first.
+     */
+    @Throws(MobileException::class)
+    override fun `listDelegations`(): List<DelegationStatus> =
+        FfiConverterSequenceTypeDelegationStatus.lift(
+            callWithHandle {
+                uniffiRustCallWithError(MobileException) { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_list_delegations(
+                        it,
                         _status,
                     )
                 }
@@ -3872,6 +4045,31 @@ open class MobileEngine :
         )
 
     /**
+     * Start delegating placed local steps: a step of a workflow running on
+     * this engine whose `$runtime` places it on another runtime
+     * (`runtime_id` of another node, or `runtime_kinds` without `mobile`)
+     * is handed to that runtime through the server mailbox while the local
+     * instance stays parked, and resumed exactly once with the result. A
+     * step with handler `orch8.delegation` delegates the server-side
+     * sequence `params.sequence_id` with input `params.input`; any other
+     * handler delegates just that step. Requires `register_node` (and a
+     * credential that may call the continuity API). Survives disconnects
+     * and app kills: delegations are journaled locally and picked up again
+     * by the next `start_delegation`.
+     */
+    @Throws(MobileException::class)
+    override fun `startDelegation`(`options`: DelegationOptions) =
+        callWithHandle {
+            uniffiRustCallWithError(MobileException) { _status ->
+                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_start_delegation(
+                    it,
+                    FfiConverterTypeDelegationOptions.lower(`options`),
+                    _status,
+                )
+            }
+        }
+
+    /**
      * Start the remote worker loop: poll the control plane as this `mobile`
      * runtime, run claimed tasks with the registered handlers, heartbeat
      * per the task lease, and complete / fail / release them. Requires
@@ -3884,6 +4082,20 @@ open class MobileEngine :
                 UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_start_worker(
                     it,
                     FfiConverterTypeWorkerOptions.lower(`options`),
+                    _status,
+                )
+            }
+        }
+
+    /**
+     * Stop advancing delegations. Journaled delegations resume with the
+     * next `start_delegation`.
+     */
+    override fun `stopDelegation`() =
+        callWithHandle {
+            uniffiRustCall { _status ->
+                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_stop_delegation(
+                    it,
                     _status,
                 )
             }
@@ -4883,6 +5095,236 @@ public object FfiConverterTypeContinuityImportResult : FfiConverterRustBuffer<Co
         FfiConverterString.write(value.`instanceId`, buf)
         FfiConverterULong.write(value.`sourceEpoch`, buf)
         FfiConverterString.write(value.`state`, buf)
+    }
+}
+
+/**
+ * An explicit delegation requested by the host (`delegate`).
+ */
+data class DelegateRequest(
+    /**
+     * Local parent instance the delegation belongs to (must exist).
+     */
+    var `instanceId`: kotlin.String,
+    /**
+     * Destination runtime id (a live registration of the same tenant).
+     */
+    var `destinationRuntimeId`: kotlin.String,
+    /**
+     * Server-side sequence the destination runs.
+     */
+    var `subSequenceId`: kotlin.String,
+    /**
+     * Explicit input (JSON object) handed to the sub-sequence.
+     */
+    var `inputJson`: kotlin.String = "{}",
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDelegateRequest : FfiConverterRustBuffer<DelegateRequest> {
+    override fun read(buf: ByteBuffer): DelegateRequest =
+        DelegateRequest(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+
+    override fun allocationSize(value: DelegateRequest) =
+        (
+            FfiConverterString.allocationSize(value.`instanceId`) +
+                FfiConverterString.allocationSize(value.`destinationRuntimeId`) +
+                FfiConverterString.allocationSize(value.`subSequenceId`) +
+                FfiConverterString.allocationSize(value.`inputJson`)
+        )
+
+    override fun write(
+        value: DelegateRequest,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterString.write(value.`instanceId`, buf)
+        FfiConverterString.write(value.`destinationRuntimeId`, buf)
+        FfiConverterString.write(value.`subSequenceId`, buf)
+        FfiConverterString.write(value.`inputJson`, buf)
+    }
+}
+
+/**
+ * Options for `start_delegation`.
+ */
+data class DelegationOptions(
+    /**
+     * Tenant of the node credential (the control plane scopes every
+     * continuity call to it).
+     */
+    var `tenantId`: kotlin.String,
+    /**
+     * How often pending delegations are advanced and their outcomes read
+     * (default 2 s). Push wake-ups advance them immediately.
+     */
+    var `pollIntervalMs`: kotlin.ULong = 2000uL,
+    /**
+     * Lifetime of each grant and delegation (default 600 s, max 86400). A
+     * destination that has not reported by then fails the delegation, and
+     * the parked step follows its retry policy.
+     */
+    var `ttlSecs`: kotlin.UInt = 600u,
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDelegationOptions : FfiConverterRustBuffer<DelegationOptions> {
+    override fun read(buf: ByteBuffer): DelegationOptions =
+        DelegationOptions(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+
+    override fun allocationSize(value: DelegationOptions) =
+        (
+            FfiConverterString.allocationSize(value.`tenantId`) +
+                FfiConverterULong.allocationSize(value.`pollIntervalMs`) +
+                FfiConverterUInt.allocationSize(value.`ttlSecs`)
+        )
+
+    override fun write(
+        value: DelegationOptions,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterString.write(value.`tenantId`, buf)
+        FfiConverterULong.write(value.`pollIntervalMs`, buf)
+        FfiConverterUInt.write(value.`ttlSecs`, buf)
+    }
+}
+
+/**
+ * Counters exposed through `delegation_stats`.
+ */
+data class DelegationStats(
+    var `running`: kotlin.Boolean,
+    /**
+     * Delegations accepted by the control plane.
+     */
+    var `delegated`: kotlin.ULong,
+    var `completed`: kotlin.ULong,
+    var `failed`: kotlin.ULong,
+    var `abandoned`: kotlin.ULong,
+    /**
+     * Parked local steps resumed with an outcome (exactly once each).
+     */
+    var `resumed`: kotlin.ULong,
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDelegationStats : FfiConverterRustBuffer<DelegationStats> {
+    override fun read(buf: ByteBuffer): DelegationStats =
+        DelegationStats(
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+
+    override fun allocationSize(value: DelegationStats) =
+        (
+            FfiConverterBoolean.allocationSize(value.`running`) +
+                FfiConverterULong.allocationSize(value.`delegated`) +
+                FfiConverterULong.allocationSize(value.`completed`) +
+                FfiConverterULong.allocationSize(value.`failed`) +
+                FfiConverterULong.allocationSize(value.`abandoned`) +
+                FfiConverterULong.allocationSize(value.`resumed`)
+        )
+
+    override fun write(
+        value: DelegationStats,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterBoolean.write(value.`running`, buf)
+        FfiConverterULong.write(value.`delegated`, buf)
+        FfiConverterULong.write(value.`completed`, buf)
+        FfiConverterULong.write(value.`failed`, buf)
+        FfiConverterULong.write(value.`abandoned`, buf)
+        FfiConverterULong.write(value.`resumed`, buf)
+    }
+}
+
+/**
+ * Where a delegation stands, as recorded on this device.
+ */
+data class DelegationStatus(
+    var `delegationId`: kotlin.String,
+    /**
+     * `preparing` (not yet accepted by the control plane), `delegated`
+     * (in the destination's mailbox or running there), `completed`,
+     * `failed`, or `abandoned` (never placed before its deadline).
+     */
+    var `state`: kotlin.String,
+    var `localInstanceId`: kotlin.String,
+    /**
+     * The parked local step, for delegations made by a sequence.
+     */
+    var `blockId`: kotlin.String?,
+    var `destinationRuntimeId`: kotlin.String?,
+    /**
+     * The destination's reported output (JSON), once completed.
+     */
+    var `outputJson`: kotlin.String?,
+    var `error`: kotlin.String?,
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDelegationStatus : FfiConverterRustBuffer<DelegationStatus> {
+    override fun read(buf: ByteBuffer): DelegationStatus =
+        DelegationStatus(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+
+    override fun allocationSize(value: DelegationStatus) =
+        (
+            FfiConverterString.allocationSize(value.`delegationId`) +
+                FfiConverterString.allocationSize(value.`state`) +
+                FfiConverterString.allocationSize(value.`localInstanceId`) +
+                FfiConverterOptionalString.allocationSize(value.`blockId`) +
+                FfiConverterOptionalString.allocationSize(value.`destinationRuntimeId`) +
+                FfiConverterOptionalString.allocationSize(value.`outputJson`) +
+                FfiConverterOptionalString.allocationSize(value.`error`)
+        )
+
+    override fun write(
+        value: DelegationStatus,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterString.write(value.`delegationId`, buf)
+        FfiConverterString.write(value.`state`, buf)
+        FfiConverterString.write(value.`localInstanceId`, buf)
+        FfiConverterOptionalString.write(value.`blockId`, buf)
+        FfiConverterOptionalString.write(value.`destinationRuntimeId`, buf)
+        FfiConverterOptionalString.write(value.`outputJson`, buf)
+        FfiConverterOptionalString.write(value.`error`, buf)
     }
 }
 
@@ -6235,6 +6677,34 @@ public object FfiConverterSequenceString : FfiConverterRustBuffer<List<kotlin.St
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDelegationStatus : FfiConverterRustBuffer<List<DelegationStatus>> {
+    override fun read(buf: ByteBuffer): List<DelegationStatus> {
+        val len = buf.getInt()
+        return List<DelegationStatus>(len) {
+            FfiConverterTypeDelegationStatus.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<DelegationStatus>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeDelegationStatus.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(
+        value: List<DelegationStatus>,
+        buf: ByteBuffer,
+    ) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeDelegationStatus.write(it, buf)
         }
     }
 }

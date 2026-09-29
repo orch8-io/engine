@@ -43,6 +43,26 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
 - **Device-mesh delegation** (Feature 29): a claimed delegation with a
   server-hosted parent becomes a mailbox task for the destination runtime whose
   result is integrated into the parent (`context.data.delegations.<id>`).
+- **Delegation from phone-local parents** (Feature 29): a workflow running on
+  the phone's own engine delegates a step placed off the phone
+  (`$runtime.runtime_id` of another node, or `runtime_kinds` without
+  `mobile`) through the server mailbox, parks, and resumes exactly once with
+  the result — handler `orch8.delegation` delegates the server-side
+  sub-sequence `params.sequence_id` with `params.input`; any other handler
+  delegates just that step (as a published one-step sequence). The mobile SDK
+  adds `startDelegation` / `stopDelegation`, the explicit `delegate` +
+  `delegationStatus` / `listDelegations` / `delegationStats` API, and a
+  crash-safe local journal (`mobile_delegations`); the resume is fenced on
+  the parent's owner epoch and the local claim, and commits the local effect
+  receipt once. Server side: `POST /continuity/executions` accepts
+  `hosted_by_runtime: true` (idempotent per owner), a claim for a
+  runtime-hosted parent anchors its mailbox task on a delegation proxy
+  (instance id = delegation id, terminal once the outcome is integrated), and
+  the new `GET /continuity/delegations/{id}` returns the outcome and the
+  parent's current owner/epoch. The runtime polls it (no sync-command
+  fan-out). e2e: phone-local parent → desktop across repeated disconnects on
+  both sides, duplicate deliveries, and app kills while parked (SQLite and
+  Postgres).
 - Poll responses echo `target_runtime_id` / `runtime_kinds`; re-sending a
   failure for an already-failed task (same lease) is idempotent.
 - **Worker `fail` is one fenced transaction** (HTTP and gRPC), shared with the

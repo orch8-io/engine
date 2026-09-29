@@ -537,6 +537,40 @@ impl NodeClient {
         .await
     }
 
+    /// `POST` a JSON body to a control-plane path with the node credential.
+    /// `Ok((status, body))` for any HTTP answer (the body is `Null` when it
+    /// is not JSON); `Err` only when the control plane is unreachable.
+    pub(crate) async fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<(u16, serde_json::Value), MobileError> {
+        let resp = self
+            .post(path)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| network_err(path, &e))?;
+        json_answer(resp).await
+    }
+
+    /// `GET` a control-plane path with the node credential (see
+    /// [`Self::post_json`]).
+    pub(crate) async fn get_json(
+        &self,
+        path: &str,
+    ) -> Result<(u16, serde_json::Value), MobileError> {
+        let resp = self
+            .http
+            .get(self.url(path))
+            .header("x-api-key", &self.api_key)
+            .header("x-device-id", &self.device_id)
+            .send()
+            .await
+            .map_err(|e| network_err(path, &e))?;
+        json_answer(resp).await
+    }
+
     async fn lease_call(
         &self,
         path: &str,
@@ -617,6 +651,15 @@ async fn expect_success(
     Err(MobileError::Engine {
         message: format!("{what}: HTTP {status}: {snippet}"),
     })
+}
+
+async fn json_answer(resp: reqwest::Response) -> Result<(u16, serde_json::Value), MobileError> {
+    let status = resp.status().as_u16();
+    let body = read_capped(resp).await?;
+    Ok((
+        status,
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, MobileError> {

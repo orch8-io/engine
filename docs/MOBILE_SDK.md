@@ -839,6 +839,89 @@ Handlers that can take longer than the step timeout should either raise the
 step's `timeout` or pass `__orch8.effect_id` downstream as an idempotency key,
 so a retry that reaches the same backend is deduplicated there.
 
+## Delegating from a phone-local workflow
+
+A workflow running on the phone's **own** engine can hand a
+capability-specific step, or a whole sub-sequence, to another registered
+runtime — a desktop with a GPU, an edge box next to a printer — through the
+server mailbox. The local instance parks while the work runs elsewhere and
+resumes exactly once with the result; the phone and the destination can each
+drop off the network, and the app can be killed, at any point.
+
+```swift
+let node = try engine.registerNode(capabilities: NodeCapabilities())
+try engine.startDelegation(options: DelegationOptions(tenantId: "acme"))
+```
+
+```kotlin
+engine.registerNode(NodeCapabilities())
+engine.startDelegation(DelegationOptions(tenantId = "acme"))
+```
+
+Place a step of a local sequence with `$runtime`, as on the server:
+
+```json
+[
+  {"type": "step", "id": "capture", "handler": "take_photo", "params": {}},
+  {"type": "step", "id": "classify", "handler": "orch8.delegation",
+   "retry": {"max_attempts": 3, "initial_backoff": 1000},
+   "params": {
+     "sequence_id": "0192…",
+     "input": {"photo": {"id": "{{outputs.capture.photo.id}}"}},
+     "$runtime": {"runtime_id": "0191…"}}},
+  {"type": "step", "id": "ocr", "handler": "gpu_ocr",
+   "params": {"photo": "{{outputs.capture.photo.id}}",
+              "$runtime": {"runtime_kinds": ["desktop"]}}},
+  {"type": "step", "id": "show", "handler": "show_labels",
+   "params": {"labels": "{{outputs.classify.outputs.classify.labels}}"}}
+]
+```
+
+- **Sub-sequence** — handler `orch8.delegation`: the destination runs the
+  server-side sequence `params.sequence_id` with `params.input` as its
+  context data (explicit input only; nothing else of the local instance is
+  shared). The local step's output is the destination's report.
+- **Isolated step** — any other handler: the SDK publishes (once, with a
+  deterministic id) a one-step sequence running that handler on
+  `{{context.data.params}}` and delegates it with the step's params. The
+  local step's output is that step's output.
+- **Destination** — `$runtime.runtime_id` names it; `$runtime.runtime_kinds`
+  without `mobile` lets the SDK choose a live, registered runtime of those
+  kinds that serves the handlers (and `orch8.delegation`).
+
+The result is also merged at `context.data.delegations.<id>` (`status`,
+`runtime_id`, `output` | `error`), like a server-hosted parent's. A failed or
+expired delegation fails the local step retryably, so its `retry` policy
+starts a new attempt under a fresh delegation (and a fresh effect id).
+
+**How it works.** The local scheduler parks the placed step as a local worker
+task. The delegation pump journals it (`mobile_delegations`, in the same local
+transaction that takes the task) and then, through the node credential:
+registers the local parent's continuity identity
+(`POST /continuity/executions` with `hosted_by_runtime: true`), mints a
+destination-bound grant (`POST /continuity/grants`), and claims the
+delegation (`POST /continuity/delegations/claim`), which puts a mailbox task
+in the destination's queue. It then polls `GET /continuity/delegations/{id}`
+until the destination's outcome is integrated. Every step is persisted before
+the next network call and is idempotent or recoverable, so a disconnect or
+kill anywhere just resumes on the next pass or launch (call
+`startDelegation` again after relaunch). The resume is fenced twice — the
+parent must still be owned by this phone at the delegation's epoch, and the
+local task must still be held by the pump — so a duplicate delivery never
+resumes a step twice. Push wakes (`onPushReceived` / `onPushWake`) advance the
+pump immediately.
+
+The node credential needs the `operator` capability for the continuity
+calls (and to publish isolated-step sequences).
+
+**Explicit API.** Hosts that prefer to delegate from app code call
+`delegate(request:)` with a local instance id, a destination runtime id, a
+server-side sequence id and an input object; the returned delegation id is
+read with `delegationStatus(delegationId:)` (`preparing`, `delegated`,
+`completed` with `outputJson`, `failed` with `error`, or `abandoned`). No step
+is parked. `listDelegations()` and `delegationStats()` report the journal and
+the pump counters; `stopDelegation()` pauses the pump.
+
 ## Capability-routed distributed work
 
 External steps may reserve the `$runtime` param for durable placement
