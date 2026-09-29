@@ -60,17 +60,88 @@ fn flag_is_truthy(v: Option<&str>) -> bool {
     matches!(v.map(str::trim), Some(s) if s == "1" || s.eq_ignore_ascii_case("true"))
 }
 
+/// Environment variable listing internal networks outbound handlers may
+/// reach although they are private (comma-separated CIDRs, e.g.
+/// `10.20.0.0/16,fd00:1::/64`). Meant for hybrid executors calling internal
+/// APIs: unlike `ORCH8_ALLOW_INTERNAL_URLS=true` it opens only the listed
+/// networks, never loopback or cloud metadata unless listed explicitly.
+pub const ALLOWED_INTERNAL_CIDRS_ENV: &str = "ORCH8_ALLOWED_INTERNAL_CIDRS";
+
+/// Parse a comma-separated CIDR list (`addr/len`; a bare address is a
+/// single host).
+///
+/// # Errors
+/// The first malformed entry.
+pub fn parse_cidr_list(raw: &str) -> Result<Vec<(std::net::IpAddr, u8)>, String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (addr, len) = entry.split_once('/').unwrap_or((entry, ""));
+            let ip: std::net::IpAddr = addr
+                .parse()
+                .map_err(|_| format!("`{entry}` is not an IP network"))?;
+            let max = if ip.is_ipv4() { 32 } else { 128 };
+            let len = if len.is_empty() {
+                max
+            } else {
+                len.parse::<u8>()
+                    .ok()
+                    .filter(|l| *l <= max)
+                    .ok_or_else(|| format!("`{entry}` has an invalid prefix length"))?
+            };
+            Ok((ip, len))
+        })
+        .collect()
+}
+
+fn network_contains(network: (std::net::IpAddr, u8), ip: std::net::IpAddr) -> bool {
+    match (network.0, ip) {
+        (std::net::IpAddr::V4(net), std::net::IpAddr::V4(ip)) => {
+            let mask = u32::MAX.checked_shl(32 - u32::from(network.1)).unwrap_or(0);
+            u32::from(net) & mask == u32::from(ip) & mask
+        }
+        (std::net::IpAddr::V6(net), std::net::IpAddr::V6(ip)) => {
+            let mask = u128::MAX
+                .checked_shl(128 - u32::from(network.1))
+                .unwrap_or(0);
+            u128::from(net) & mask == u128::from(ip) & mask
+        }
+        _ => false,
+    }
+}
+
+/// Operator-allowed internal networks (`ORCH8_ALLOWED_INTERNAL_CIDRS`),
+/// parsed once. A malformed list allows nothing (fail closed).
+fn allowed_internal_networks() -> &'static [(std::net::IpAddr, u8)] {
+    static NETWORKS: OnceLock<Vec<(std::net::IpAddr, u8)>> = OnceLock::new();
+    NETWORKS.get_or_init(|| {
+        let raw = std::env::var(ALLOWED_INTERNAL_CIDRS_ENV).unwrap_or_default();
+        parse_cidr_list(&raw).unwrap_or_else(|error| {
+            tracing::error!(%error, "{ALLOWED_INTERNAL_CIDRS_ENV} is invalid; no internal network is allowed");
+            Vec::new()
+        })
+    })
+}
+
+fn allowed_internal(ip: std::net::IpAddr) -> bool {
+    allowed_internal_networks()
+        .iter()
+        .any(|network| network_contains(*network, ip))
+}
+
 /// `true` if an IPv4 literal is a private/internal/metadata target that
 /// outbound requests must never reach. Delegates to the workspace-wide
-/// classifier so engine, API, and mobile guards cannot drift apart.
+/// classifier so engine, API, and mobile guards cannot drift apart; networks
+/// in `ORCH8_ALLOWED_INTERNAL_CIDRS` are exempt.
 fn ipv4_is_blocked(v4: std::net::Ipv4Addr) -> bool {
-    orch8_types::net::is_non_public_ipv4(v4)
+    orch8_types::net::is_non_public_ipv4(v4) && !allowed_internal(std::net::IpAddr::V4(v4))
 }
 
 /// `true` if an IPv6 literal is a private/internal target (including every
 /// v4-in-v6 transition form that embeds a blocked IPv4 address).
 fn ipv6_is_blocked(v6: std::net::Ipv6Addr) -> bool {
-    orch8_types::net::is_non_public_ipv6(v6)
+    orch8_types::net::is_non_public_ipv6(v6) && !allowed_internal(std::net::IpAddr::V6(v6))
 }
 
 /// Check whether a resolved `host:port` address is safe to contact
@@ -980,6 +1051,27 @@ mod tests {
         assert!(!flag_is_truthy(Some("0")));
         assert!(!flag_is_truthy(Some("false")));
         assert!(!flag_is_truthy(Some("yes")));
+    }
+
+    #[test]
+    fn cidr_allow_list_parses_and_matches() {
+        let nets = parse_cidr_list(" 10.20.0.0/16, 127.0.0.1 ,fd00:1::/64").unwrap();
+        let has = |ip: &str| {
+            nets.iter()
+                .any(|n| network_contains(*n, ip.parse().unwrap()))
+        };
+        assert!(has("10.20.3.4"));
+        assert!(!has("10.21.0.1"));
+        assert!(has("127.0.0.1"));
+        assert!(!has("127.0.0.2"));
+        assert!(has("fd00:1::5"));
+        assert!(!has("fd00:2::5"));
+        assert!(!has("169.254.169.254"));
+        assert_eq!(parse_cidr_list("").unwrap(), Vec::new());
+        assert!(parse_cidr_list("10.0.0.0/33").is_err());
+        assert!(parse_cidr_list("internal.corp").is_err());
+        let all = parse_cidr_list("0.0.0.0/0").unwrap();
+        assert!(network_contains(all[0], "8.8.8.8".parse().unwrap()));
     }
 
     #[test]

@@ -191,9 +191,11 @@ pub(crate) struct RemoteDispatchRejected(pub String);
 ///
 /// Shared by the tree evaluator and the fast path so placement, effect, and
 /// ownership bookkeeping cannot drift between them. `resolved_params` must
-/// already have been through template + credential resolution;
-/// `carries_credentials` says whether the unresolved params referenced
-/// `credentials://` material.
+/// already have been through template + credential resolution, except for a
+/// hard-placed step, whose `credentials://` references are kept for the
+/// claiming executor to resolve locally (hybrid mode; the task then requires
+/// those credential ids as runtime facts). `carries_credentials` says whether
+/// the unresolved params referenced `credentials://` material.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn enqueue_worker_task(
     storage: &dyn StorageBackend,

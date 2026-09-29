@@ -119,6 +119,67 @@ async fn last_worker(
         .and_then(|task| task.worker_id))
 }
 
+/// The step's effective placement (step + sequence + tenant policies),
+/// without touching params. `Ok(None)` when nothing applies — including every
+/// built-in that manipulates engine state
+/// ([`orch8_types::sequence::is_engine_only_builtin`]): those always run on
+/// the engine node. `Err(message)` is a contradictory placement.
+async fn resolve_step_placement(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    step_def: &StepDef,
+) -> Result<Result<Option<ResolvedPlacement>, String>, EngineError> {
+    if orch8_types::sequence::is_engine_only_builtin(&step_def.handler) {
+        return Ok(Ok(None));
+    }
+    let sequence = sequence_placement(storage, instance.sequence_id).await?;
+    let policies = tenant_policies(storage, &instance.tenant_id).await?;
+    if step_def.placement.is_none() && sequence.1.is_none() && policies.items.is_empty() {
+        return Ok(Ok(None));
+    }
+    let tags = instance_tags(instance);
+    let target = PlacementTarget {
+        sequence_name: &sequence.0,
+        handler: &step_def.handler,
+        tags: &tags,
+    };
+    match orch8_types::placement::resolve(
+        step_def.placement.as_ref(),
+        sequence.1.as_ref(),
+        &policies.items,
+        &target,
+    ) {
+        Ok(resolved) if resolved.is_empty() => Ok(Ok(None)),
+        Ok(resolved) => Ok(Ok(Some(resolved))),
+        Err(message) => Ok(Err(message)),
+    }
+}
+
+/// Whether the engine must leave this step's `credentials://` references
+/// unresolved for the executor (hybrid mode).
+///
+/// A step with hard placement (region, labels, residency — from the step,
+/// its sequence, or a tenant policy) is always dispatched to remote
+/// runtimes. Its credential references are resolved **on the claiming
+/// executor** from the executor's local credentials, so secrets never pass
+/// through (or are stored by) the control plane; the task requires the
+/// referenced ids as runtime credential facts. Every other step keeps
+/// engine-side resolution. A contradictory placement returns `false`: the
+/// step is rejected before dispatch anyway.
+pub async fn defers_credentials(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    step_def: &StepDef,
+) -> Result<bool, EngineError> {
+    if crate::handlers::PluginKind::detect(&step_def.handler).is_some() {
+        return Ok(false);
+    }
+    Ok(matches!(
+        resolve_step_placement(storage, instance, step_def).await?,
+        Ok(Some(resolved)) if resolved.has_hard_constraints()
+    ))
+}
+
 /// Resolve the step's effective placement (step + sequence + tenant
 /// policies) and merge it into `params.$runtime`.
 ///
@@ -133,29 +194,10 @@ pub async fn apply_step_placement(
     params: &mut serde_json::Value,
     now: DateTime<Utc>,
 ) -> Result<Result<Option<ResolvedPlacement>, String>, EngineError> {
-    let sequence = sequence_placement(storage, instance.sequence_id).await?;
-    let policies = tenant_policies(storage, &instance.tenant_id).await?;
-    if step_def.placement.is_none() && sequence.1.is_none() && policies.items.is_empty() {
-        return Ok(Ok(None));
-    }
-    let tags = instance_tags(instance);
-    let target = PlacementTarget {
-        sequence_name: &sequence.0,
-        handler: &step_def.handler,
-        tags: &tags,
+    let resolved = match resolve_step_placement(storage, instance, step_def).await? {
+        Ok(Some(resolved)) => resolved,
+        other => return Ok(other),
     };
-    let resolved = match orch8_types::placement::resolve(
-        step_def.placement.as_ref(),
-        sequence.1.as_ref(),
-        &policies.items,
-        &target,
-    ) {
-        Ok(resolved) => resolved,
-        Err(message) => return Ok(Err(message)),
-    };
-    if resolved.is_empty() {
-        return Ok(Ok(None));
-    }
     // An unparsable `$runtime` is rejected by the regular dispatch path with
     // its precise message; leave it alone here.
     let Ok(mut requirements) = orch8_types::worker::peek_runtime_requirements(params) else {
@@ -165,6 +207,17 @@ pub async fn apply_step_placement(
         orch8_types::placement::apply_hard_constraints(&resolved, &mut requirements)
     {
         return Ok(Err(message));
+    }
+    if resolved.has_hard_constraints() {
+        // Hybrid: a hard-placed step's `credentials://` references are
+        // resolved on the executor that claims it (see
+        // [`defers_credentials`]), so only an executor that holds every
+        // referenced credential may claim the task.
+        for id in orch8_types::worker::credential_reference_ids(params) {
+            if !requirements.credentials.contains(&id) {
+                requirements.credentials.push(id);
+            }
+        }
     }
     let affinity_worker = if resolved.affinity == Affinity::Instance {
         last_worker(storage, instance.id).await?
