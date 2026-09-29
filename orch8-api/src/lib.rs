@@ -13,6 +13,7 @@ pub mod continuity;
 pub mod credentials;
 pub mod cron;
 pub mod dataflow;
+pub mod device_sessions;
 pub mod diagnosis;
 pub mod dlq_groups;
 pub mod entitlements;
@@ -292,6 +293,7 @@ fn api_routes() -> Router<AppState> {
         .merge(queue_dispatch::routes())
         .merge(mcp_server::routes())
         .merge(browser_sessions::routes())
+        .merge(device_sessions::routes())
 }
 
 /// Build the axum router with all routes.

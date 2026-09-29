@@ -1061,6 +1061,43 @@ fail / heartbeat / release; polls must use `worker_id = runtime_id`, kind
 `browser`, and an allowlisted handler/queue (`403` otherwise). See
 [Distributed runtimes](DISTRIBUTED_RUNTIMES.md).
 
+### Device Sessions
+
+```
+POST /runtimes/device-sessions
+```
+
+Operator/Admin only — called by the customer's app backend, never by the
+phone. The phone must not ship an operator (or any stored) API key.
+
+```json
+{ "device_id": "iphone-7F3A", "runtime_id": "uuid", "handlers": ["scan_document"], "ttl_secs": 3600 }
+```
+
+Returns `201 {token, device_id, runtime_id, expires_at, handlers}`.
+`runtime_id` is the phone's persisted runtime id (`MobileEngine.nodeRuntimeId()`);
+`handlers` may be empty (a delegation-only node); `ttl_secs` defaults to 3600
+(max 86400). `400` for an empty `device_id`, a blank handler, or a ttl out of
+range; `409` when the device is registered to another tenant. The `dst_…`
+token (`x-api-key` or `Authorization: Bearer`) reaches only the device's own
+`/mobile/devices/register`, `/mobile/devices/{device_id}/runtime` and
+`/mobile/sync`, the lease protocol (poll / complete / fail / heartbeat /
+release as its runtime, allowlisted handlers), `POST /continuity/executions`
+(runtime-hosted, own runtime), `POST /continuity/grants` (accept, own
+executions), `POST /continuity/delegations/claim` (own runtime as source),
+`GET /continuity/delegations/{id}` (source or destination), and
+`GET /runtimes`; everything else is `403`, expired or forged tokens `401`.
+`POST /continuity/delegations/claim` also accepts
+`"step": {"handler", "block_id"}` to have the control plane publish an
+isolated delegated step's one-step sequence. See
+[Distributed runtimes](DISTRIBUTED_RUNTIMES.md#phone-runtimes-device-sessions).
+
+`device_node` (like `browser_worker`) is a session-only capability: `POST
+/api-keys` refuses it (`400`). Stored keys with Operator capability (and the
+root key) calling `/mobile/*` get the response header
+`x-orch8-principal-scope: operator|root`, which the mobile SDK reports as a
+warning.
+
 ---
 
 ## Metrics

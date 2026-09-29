@@ -517,12 +517,13 @@ async fn validate_and_record_capabilities(
     Ok(())
 }
 
-/// Bind a poll to the caller's credential. A browser-session principal may
-/// only poll as its own `runtime_id`, with `kind = browser`, for handlers and
-/// queues its token grants; a conflicting self-assertion is refused (403).
-/// Its capability advertisement is clamped (trust at most `registered`,
-/// handlers limited to the allowlist, no credential bindings, expiry at most
-/// the token's) and synthesized when absent, so browser claims always go
+/// Bind a poll to the caller's credential. A browser- or device-session
+/// principal may only poll as its own `runtime_id`, with its session's kind
+/// (`browser` / `mobile`), for handlers and queues its token grants; a
+/// conflicting self-assertion is refused (403). Its capability advertisement
+/// is clamped (trust at most `registered`, handlers limited to the allowlist,
+/// expiry at most the token's; a browser also advertises no credential
+/// bindings) and synthesized when absent, so session claims always go
 /// through capability matching (and the browser no-secrets claim filter).
 fn bind_poll_identity(
     binding: &crate::browser_sessions::OptionalBinding,
@@ -542,14 +543,14 @@ fn bind_poll_identity(
     )?;
     if !binding.allows_handler(handler_name) {
         return Err(ApiError::Forbidden(format!(
-            "handler {handler_name} is not granted to this browser session"
+            "handler {handler_name} is not granted to this session"
         )));
     }
     if let Some(queue) = queue_name
         && !binding.allows_queue(queue)
     {
         return Err(ApiError::Forbidden(format!(
-            "queue {queue} is not granted to this browser session"
+            "queue {queue} is not granted to this session"
         )));
     }
     let now = chrono::Utc::now();
@@ -557,7 +558,7 @@ fn bind_poll_identity(
         Some(capabilities) => {
             if capabilities.kind != binding.kind || capabilities.runtime_id != binding.runtime_id {
                 return Err(ApiError::Forbidden(
-                    "capabilities kind/runtime_id conflict with the browser session binding".into(),
+                    "capabilities kind/runtime_id conflict with the session binding".into(),
                 ));
             }
             capabilities
@@ -593,8 +594,10 @@ fn bind_poll_identity(
     {
         capabilities.handlers.push(handler_name.to_owned());
     }
-    capabilities.credentials.clear();
-    capabilities.capsule_signing_public_key = None;
+    if !binding.is_device() {
+        capabilities.credentials.clear();
+        capabilities.capsule_signing_public_key = None;
+    }
     capabilities.expires_at = capabilities.expires_at.min(binding.expires_at);
     Ok(Some(capabilities))
 }
@@ -1206,7 +1209,9 @@ pub(crate) async fn complete_task(
     }
     // Browser output is untrusted page data (DOM, forms, user input): bound
     // its size before anything is committed.
-    let from_browser = binding.is_some()
+    let from_browser = binding
+        .as_ref()
+        .is_some_and(|axum::Extension(binding)| !binding.is_device())
         || pre_task.claimed_runtime_kind == Some(orch8_types::continuity::RuntimeKind::Browser);
     if from_browser && !completion_retry {
         let bytes = serde_json::to_vec(&req.output)

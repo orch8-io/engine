@@ -302,9 +302,18 @@ struct IssueGrantResponse {
 async fn issue_continuation_grant(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(body): Json<IssueGrantRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let device = crate::browser_sessions::device_binding(&binding);
+    // A device session only grants a destination the right to accept a
+    // delegation of an execution its own runtime owns (checked below).
+    if device.is_some() && body.allowed_actions != [GrantAction::Accept] {
+        return Err(ApiError::Forbidden(
+            "device sessions may only issue accept grants".into(),
+        ));
+    }
     if !(1..=86_400).contains(&body.ttl_seconds) {
         return Err(ApiError::InvalidArgument(
             "grant ttl_seconds must be between 1 and 86400".into(),
@@ -339,6 +348,11 @@ async fn issue_continuation_grant(
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    if let Some(device) = device
+        && execution.owner_runtime_id != device.runtime_id
+    {
+        return Err(ApiError::NotFound("continuity execution".into()));
+    }
     let now = Utc::now();
     let destination_is_known = state
         .storage
@@ -461,9 +475,20 @@ struct CreateExecutionRequest {
 async fn create_execution(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(body): Json<CreateExecutionRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    // A device session registers only executions its own runtime hosts; it
+    // can never attach a continuity identity to a server-hosted instance.
+    if crate::browser_sessions::device_binding(&binding).is_some() {
+        if !body.hosted_by_runtime {
+            return Err(ApiError::Forbidden(
+                "device sessions may only register runtime-hosted executions".into(),
+            ));
+        }
+        crate::device_sessions::enforce_bound_runtime(&binding, body.runtime_id)?;
+    }
     let instance = state
         .storage
         .get_instance(body.instance_id)
@@ -6679,6 +6704,71 @@ struct ClaimDelegationRequest {
     /// never shares mutable execution state with its parent).
     #[serde(default)]
     input: serde_json::Value,
+    /// An isolated step delegated as a one-step sequence: the control plane
+    /// publishes it (idempotently) under the deterministic id
+    /// `delegation.sub_sequence_id` must carry, so the delegating runtime
+    /// needs no sequence-authoring rights.
+    #[serde(default)]
+    step: Option<DelegatedStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DelegatedStep {
+    handler: String,
+    block_id: String,
+}
+
+/// Publish the one-step sequence of an isolated delegated step, if it does
+/// not exist yet. Its id must be the deterministic one the delegation names.
+async fn ensure_delegated_step_sequence(
+    state: &AppState,
+    tenant_id: &TenantId,
+    delegation: &DeviceDelegation,
+    step: &DelegatedStep,
+) -> Result<(), ApiError> {
+    const MAX_NAME_BYTES: usize = 256;
+    if [&step.handler, &step.block_id]
+        .iter()
+        .any(|name| name.trim().is_empty() || name.len() > MAX_NAME_BYTES)
+    {
+        return Err(ApiError::InvalidArgument(format!(
+            "delegated step handler and block_id must be non-empty and at most {MAX_NAME_BYTES} bytes"
+        )));
+    }
+    let id = orch8_engine::delegation::step_sequence_id(
+        tenant_id.as_str(),
+        &step.handler,
+        &step.block_id,
+    );
+    if delegation.sub_sequence_id.into_uuid() != id {
+        return Err(ApiError::InvalidArgument(
+            "delegation.sub_sequence_id is not the delegated step's sequence id".into(),
+        ));
+    }
+    if state
+        .storage
+        .get_sequence(delegation.sub_sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegated step sequence"))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let sequence: orch8_types::sequence::SequenceDefinition =
+        serde_json::from_value(orch8_engine::delegation::step_sequence_document(
+            tenant_id.as_str(),
+            &step.handler,
+            &step.block_id,
+        ))
+        .map_err(|error| ApiError::InvalidArgument(format!("delegated step sequence: {error}")))?;
+    sequence
+        .validate()
+        .map_err(|error| ApiError::validation(error.catalog_key(), error.to_string()))?;
+    match state.storage.create_sequence(&sequence).await {
+        // A concurrent claim may have published it first.
+        Ok(()) | Err(orch8_types::error::StorageError::Conflict(_)) => Ok(()),
+        Err(error) => Err(ApiError::from_storage(error, "delegated step sequence")),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -6691,31 +6781,50 @@ struct ClaimDelegationResponse {
     mailbox_task_id: Option<uuid::Uuid>,
 }
 
+/// The claim's grant is signed by this control plane and authorizes exactly
+/// this delegation, now.
+fn verify_delegation_grant(
+    trusted_key: &str,
+    body: &ClaimDelegationRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), ApiError> {
+    verify_signed_continuation_grant(&body.signed_grant, &[trusted_key.to_owned()])
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    orch8_engine::continuity_advanced::validate_device_delegation(
+        &body.delegation,
+        &body.signed_grant.grant,
+        now,
+    )
+    .map_err(|error| ApiError::Conflict(error.to_string()))
+}
+
 async fn claim_delegation(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(body): Json<ClaimDelegationRequest>,
 ) -> Result<Json<ClaimDelegationResponse>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
     if body.delegation.tenant_id != tenant_id {
         return Err(ApiError::NotFound("delegation".into()));
     }
-    let execution = validate_delegation_control_plane(&state, &tenant_id, &body.delegation).await?;
+    // A device session delegates only as the source runtime; the control
+    // plane check below then requires that runtime to own the parent.
+    crate::device_sessions::enforce_bound_runtime(&binding, body.delegation.source_runtime_id)?;
     let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
         ApiError::Unavailable(
             "device delegation is disabled without a configured engine encryption key".into(),
         )
     })?;
     let trusted_key = BASE64.encode(crypto.signing_key.verifying_key().to_bytes());
-    verify_signed_continuation_grant(&body.signed_grant, &[trusted_key])
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
     let now = Utc::now();
-    orch8_engine::continuity_advanced::validate_device_delegation(
-        &body.delegation,
-        &body.signed_grant.grant,
-        now,
-    )
-    .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    if let Some(step) = &body.step {
+        // Publish the step's sequence only for an authentic, live grant.
+        verify_delegation_grant(&trusted_key, &body, now)?;
+        ensure_delegated_step_sequence(&state, &tenant_id, &body.delegation, step).await?;
+    }
+    let execution = validate_delegation_control_plane(&state, &tenant_id, &body.delegation).await?;
+    verify_delegation_grant(&trusted_key, &body, now)?;
     let token = BASE64
         .decode(&body.token)
         .map_err(|_| ApiError::InvalidArgument("delegation token is not valid base64".into()))?;
@@ -6823,6 +6932,7 @@ struct DelegationStatusResponse {
 async fn get_delegation(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Path(id): Path<uuid::Uuid>,
     Query(query): Query<TenantQuery>,
 ) -> Result<Json<DelegationStatusResponse>, ApiError> {
@@ -6840,6 +6950,14 @@ async fn get_delegation(
     let marker = &proxy.metadata[orch8_engine::delegation::DELEGATION_PROXY_KEY];
     let delegation: DeviceDelegation = serde_json::from_value(marker["delegation"].clone())
         .map_err(|error| ApiError::Internal(format!("corrupt delegation proxy: {error}")))?;
+    // A device session reads only delegations its runtime is the source or
+    // the destination of; any other is indistinguishable from a missing one.
+    if let Some(device) = crate::browser_sessions::device_binding(&binding)
+        && delegation.source_runtime_id != device.runtime_id
+        && delegation.destination_runtime_id != device.runtime_id
+    {
+        return Err(ApiError::NotFound(format!("delegation {id}")));
+    }
     let block_id = orch8_engine::delegation::delegation_block_id(&delegation);
     let result = state
         .storage

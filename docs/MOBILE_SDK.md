@@ -512,7 +512,8 @@ engine.setListener(listener: MyListener())
 | `onPushReceived()` | Trigger an immediate sync and worker poll after a push notification |
 | `onPushWake(envelopeJson)` | Handle an id-only wake envelope (`{task_id?, runtime_id?, reason?}`); ignored when addressed to another runtime |
 | `enableBuiltin(name)` | Enable an opt-in builtin handler (`http_request`); see [Built-in handlers](#built-in-handlers) |
-| `nodeRuntimeId()` | Stable runtime UUID of this installation (lease `worker_id`) |
+| `nodeRuntimeId()` | Stable runtime UUID of this installation (lease `worker_id`); your backend binds device sessions to it |
+| `setTokenProvider(provider)` | Authenticate node, worker, delegation and sync calls with device sessions from `provider` (refreshed on `401`); call before `registerNode` |
 | `registerNode(capabilities)` | Join the runtime mesh (device + capability registration, auto re-advertise) |
 | `updateNodeStatus(connectivity, batteryPercent)` | Push fresh liveness facts |
 | `unregisterNode()` | Stop the worker, advertise `draining`, stop re-advertising |
@@ -544,7 +545,7 @@ engine.setListener(listener: MyListener())
 | `sequencesUrl` | String | `""` | Endpoint returning a JSON array of sequences for `loadSequencesFromUrl` |
 | `syncUrl` | String | `""` | Server sync endpoint for status reporting and commands. Empty = disabled |
 | `deviceId` | String | `""` | Unique device identifier sent with each sync request |
-| `syncApiKey` | String | `""` | API key authenticating sync requests |
+| `syncApiKey` | String | `""` | Static credential for sync and runtime-node calls (legacy). Prefer a device session through `setTokenProvider` — see [Authenticating a phone](#authenticating-a-phone-device-sessions). Never put an operator key here |
 
 ### StepHandler Protocol
 
@@ -581,8 +582,8 @@ and receives commands back (`complete_step`, `cancel_instance`, `start_workflow`
   command runs, so a command redelivered after the app was killed mid-sync is not executed
   twice. Old records are pruned automatically.
 - **Commands are authenticated by transport, not signed.** Unlike sequences (Ed25519-verified
-  end-to-end), commands rely on TLS plus your `syncApiKey`. Protect the sync endpoint
-  accordingly.
+  end-to-end), commands rely on TLS plus the node credential (a device session, or
+  `syncApiKey`). Protect the sync endpoint accordingly.
 - **Device ownership is enforced server-side.** The `/mobile/sync` and device-registration
   endpoints verify that `deviceId` belongs to the calling tenant.
 
@@ -738,6 +739,75 @@ A handler registered with `registerHandler` under a builtin's name replaces
 the builtin. Only app-native handlers are advertised to the control plane by
 default; list a builtin in `NodeCapabilities.handlers` to serve it remotely.
 
+## Authenticating a phone: device sessions
+
+**Never ship an operator key (or any long-lived stored API key) inside an
+app.** Anyone can extract it from the app binary and act on your tenant. A
+phone authenticates with a **device session** instead: a short-lived,
+signed `dst_…` token that your own backend mints with its operator key, for
+one device and the phone's runtime id:
+
+```http
+POST /api/v1/runtimes/device-sessions        (x-api-key: <operator key>, on your backend)
+{"device_id": "iphone-7F3A…", "runtime_id": "<engine.nodeRuntimeId()>",
+ "handlers": ["scan_document", "sign_payload"], "ttl_secs": 3600}
+→ 201 {"token": "dst_…", "device_id": "…", "runtime_id": "…", "expires_at": "…", "handlers": […]}
+```
+
+The app hands its backend `deviceId` and `engine.nodeRuntimeId()` (a UUID
+persisted in the engine database) after authenticating the user its own way,
+and gives the SDK a `TokenProvider` **before** `registerNode`:
+
+```swift
+final class BackendTokens: TokenProvider {
+    func currentToken() -> String { (try? myBackend.deviceSession()) ?? "" }
+    func refreshToken() throws -> String { try myBackend.deviceSession() }
+}
+engine.setTokenProvider(provider: BackendTokens())
+try engine.registerNode(capabilities: NodeCapabilities())
+```
+
+```kotlin
+engine.setTokenProvider(object : TokenProvider {
+    override fun currentToken() = backend.deviceSession()
+    override fun refreshToken() = backend.deviceSession()
+})
+engine.registerNode(NodeCapabilities())
+```
+
+Every control-plane call — device registration, runtime advertisement, the
+worker lease protocol, delegation, and `/mobile/sync` — carries the current
+token. When the server answers `401` (the session expired), the SDK calls
+`refreshToken()` once (however many requests saw the stale token, on a
+background thread; it may block on your HTTP call) and retries the request.
+Sessions last `ttl_secs` (default 3600, at most 86400).
+
+A device session is bound to its tenant, `device_id`, `runtime_id`, and
+handler allowlist, and reaches only:
+
+| Allowed | Object-level check |
+|---------|--------------------|
+| `POST /mobile/devices/register`, `POST /mobile/sync` | `device_id` is the session's; no credential-resolving `step_delegations` |
+| `POST /mobile/devices/{device_id}/runtime` | the session's device and runtime; advertised handlers clamped to the allowlist |
+| `POST /workers/tasks/poll`, `POST /workers/tasks/{id}/complete\|fail\|heartbeat\|release` | `worker_id` is the session's runtime; polled handler is in the allowlist |
+| `POST /continuity/executions` | `hosted_by_runtime: true` for the session's own runtime only |
+| `POST /continuity/grants` | only `accept` grants, for executions the session's runtime owns |
+| `POST /continuity/delegations/claim` | the session's runtime is the delegation source (and owns the parent) |
+| `GET /continuity/delegations/{id}` | the session's runtime is the source or the destination (else 404) |
+| `GET /runtimes` | read-only list of live registrations (destination choice by kind) |
+
+Everything else — task listing, worker commands, other devices, sequences,
+credentials, instances, handoffs, API keys, browser/device session minting —
+is refused with `403`. An empty handler allowlist makes a delegation-only node
+(it never claims tasks).
+
+**Legacy keys.** A `syncApiKey` still works (a `worker` + `device` key covers
+sync and the worker loop; delegation needed `operator`). When the server
+reports that the key is operator-capable or the root key (response header
+`x-orch8-principal-scope` on `/mobile/*`), the SDK logs a warning once. Move
+such apps to device sessions: the operator key then lives only on your
+backend.
+
 ## The phone as a runtime node
 
 A device can join the distributed-execution mesh as a runtime of kind
@@ -760,7 +830,8 @@ engine.registerNode(NodeCapabilities(hardware = listOf("camera"), pushToken = fc
 engine.startWorker(WorkerOptions())
 ```
 
-**Registration.** `registerNode` uses `deviceId`, `syncApiKey` and the API base
+**Registration.** `registerNode` uses `deviceId`, the node credential (the
+token provider's device session, else `syncApiKey`) and the API base
 derived from `syncUrl` (`…/api/v1/mobile/sync` → `…/api/v1`; override with
 `NodeCapabilities.apiBaseUrl`). It calls `POST /mobile/devices/register` and
 `POST /mobile/devices/{deviceId}/runtime`, then re-advertises every ~4 minutes
@@ -807,7 +878,7 @@ arrives through a leased claim.
 **Crash safety.** Every claim is journaled in the engine database before the
 handler runs, marked `started`, then updated with the outcome before it is
 reported. On the next launch (engine construction when `syncApiKey` is set,
-`registerNode`, and `startWorker`) the journal is drained:
+else `registerNode`, and `startWorker`) the journal is drained:
 
 | Journaled state | Action |
 |-----------------|--------|
@@ -881,10 +952,12 @@ Place a step of a local sequence with `$runtime`, as on the server:
   server-side sequence `params.sequence_id` with `params.input` as its
   context data (explicit input only; nothing else of the local instance is
   shared). The local step's output is the destination's report.
-- **Isolated step** — any other handler: the SDK publishes (once, with a
-  deterministic id) a one-step sequence running that handler on
-  `{{context.data.params}}` and delegates it with the step's params. The
-  local step's output is that step's output.
+- **Isolated step** — any other handler: the step runs as a one-step
+  sequence (deterministic id) running that handler on
+  `{{context.data.params}}`, delegated with the step's params. The control
+  plane publishes it when the delegation is claimed (a device session cannot
+  author sequences; a legacy key publishes it itself). The local step's
+  output is that step's output.
 - **Destination** — `$runtime.runtime_id` names it; `$runtime.runtime_kinds`
   without `mobile` lets the SDK choose a live, registered runtime of those
   kinds that serves the handlers (and `orch8.delegation`).
@@ -911,8 +984,10 @@ local task must still be held by the pump — so a duplicate delivery never
 resumes a step twice. Push wakes (`onPushReceived` / `onPushWake`) advance the
 pump immediately.
 
-The node credential needs the `operator` capability for the continuity
-calls (and to publish isolated-step sequences).
+A device session covers every one of these calls for the phone's own
+executions and delegations (see
+[device sessions](#authenticating-a-phone-device-sessions)); no operator
+capability ships in the app. A legacy stored key needs `operator` for them.
 
 **Explicit API.** Hosts that prefer to delegate from app code call
 `delegate(request:)` with a local instance id, a destination runtime id, a

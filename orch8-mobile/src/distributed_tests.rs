@@ -411,7 +411,7 @@ fn registered_node_worker_executes_remote_task_end_to_end() {
     let runtime_id = engine.node_runtime_id().unwrap();
     let client = node::NodeClient::new_unchecked(
         server.base.clone(),
-        "key".into(),
+        crate::credential::Credential::new("key".into()),
         "phone-1".into(),
         orch8_types::continuity::RuntimeId::from_uuid(uuid::Uuid::parse_str(&runtime_id).unwrap()),
         node::Advertisement {

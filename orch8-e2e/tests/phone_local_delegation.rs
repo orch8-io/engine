@@ -18,7 +18,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use orch8_e2e::{Backend, Cloud, Delivery, Desktop, Link, Phone, PhoneDb, backends, wait_for};
+use orch8_e2e::{
+    Backend, Cloud, Delivery, Desktop, Link, Phone, PhoneAuth, PhoneDb, backends, wait_for,
+};
 use orch8_mobile::InstanceStateKind;
 use orch8_types::continuity::EffectState;
 use serde_json::{Value, json};
@@ -64,7 +66,7 @@ struct PhoneNode {
 fn open_phone(
     db_path: &str,
     device_id: &str,
-    key: &str,
+    key: &PhoneAuth,
     base: &str,
     notes: &Arc<std::sync::Mutex<Vec<Value>>>,
 ) -> Phone {
@@ -83,7 +85,7 @@ fn open_phone(
     phone
 }
 
-fn new_phone(cloud: &Cloud, base: &str, key: &str) -> PhoneNode {
+fn new_phone(cloud: &Cloud, base: &str, key: &PhoneAuth) -> PhoneNode {
     let dir = tempfile::tempdir().unwrap();
     let notes = Arc::default();
     let phone = open_phone(
@@ -199,8 +201,10 @@ impl DesktopNode {
     }
 }
 
-fn phone_key(cloud: &Cloud) -> String {
-    cloud.mint_key(&["worker", "device", "operator"])
+/// The phone authenticates with device sessions from the app backend — no
+/// stored key, no operator capability — granting its two local handlers.
+fn phone_key(cloud: &Cloud) -> PhoneAuth {
+    PhoneAuth::DeviceSession(cloud.device_sessions(&["phone_capture", "phone_note"], 3_600))
 }
 
 /// A server-side sub-sequence the desktop runs.

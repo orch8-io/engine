@@ -5812,6 +5812,46 @@
         }
       }
     },
+    "/runtimes/device-sessions": {
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "Mint a device-session token. Operator/Admin only — called by the\ncustomer's app backend, never by the phone itself.",
+        "operationId": "create_device_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDeviceSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Scoped device-session token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateDeviceSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid device_id, handlers, or ttl"
+          },
+          "403": {
+            "description": "Caller is not an operator"
+          },
+          "409": {
+            "description": "The device is registered to another tenant"
+          }
+        }
+      }
+    },
     "/runtimes/register": {
       "post": {
         "tags": [
@@ -8356,7 +8396,8 @@
           "publisher",
           "approver",
           "auditor",
-          "browser_worker"
+          "browser_worker",
+          "device_node"
         ]
       },
       "ApplyRemediationRequest": {
@@ -10165,6 +10206,70 @@
             "$ref": "#/components/schemas/TenantId"
           },
           "timezone": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateDeviceSessionRequest": {
+        "type": "object",
+        "required": [
+          "device_id",
+          "runtime_id"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string",
+            "description": "The mobile device (`MobileEngineConfig.device_id`) the token acts for."
+          },
+          "handlers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Handlers the phone may poll and advertise. Empty = the phone only\ndelegates (it never claims tasks)."
+          },
+          "runtime_id": {
+            "type": "string",
+            "description": "The phone's persisted runtime id (`MobileEngine.node_runtime_id()`):\nits `worker_id` for leases and the owner of executions it hosts."
+          },
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Token lifetime in seconds (default 3600, max 86400).",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateDeviceSessionResponse": {
+        "type": "object",
+        "required": [
+          "token",
+          "device_id",
+          "runtime_id",
+          "expires_at",
+          "handlers"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "handlers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "runtime_id": {
+            "type": "string"
+          },
+          "token": {
             "type": "string"
           }
         }

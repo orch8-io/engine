@@ -94,9 +94,22 @@ struct CommandPayload {
 async fn handle_sync(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(req): Json<SyncRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     const MAX_SYNC_ITEMS_PER_ARRAY: usize = 500;
+
+    // A device session syncs only its own device, and never asks the server
+    // to resolve credentials (`step_delegations` would hand it the tenant's
+    // resolved secrets; the SDK does not use it).
+    crate::device_sessions::enforce_bound_device(&binding, &req.device_id)?;
+    if crate::browser_sessions::device_binding(&binding).is_some()
+        && !req.step_delegations.is_empty()
+    {
+        return Err(ApiError::Forbidden(
+            "device sessions may not request credential-resolving step delegations".into(),
+        ));
+    }
 
     let tenant_id = tenant_ctx
         .as_ref()
@@ -333,8 +346,10 @@ struct RegisterDeviceRequest {
 async fn register_device(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(req): Json<RegisterDeviceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::device_sessions::enforce_bound_device(&binding, &req.device_id)?;
     let tenant_id = tenant_ctx
         .as_ref()
         .map(|axum::Extension(ctx)| ctx.tenant_id.to_string())
@@ -390,9 +405,14 @@ struct RegisterDeviceRuntimeRequest {
 async fn register_device_runtime(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Path(device_id): Path<String>,
     Json(mut req): Json<RegisterDeviceRuntimeRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::device_sessions::enforce_bound_device(&binding, &device_id)?;
+    if let Some(binding) = crate::browser_sessions::device_binding(&binding) {
+        crate::device_sessions::clamp_advertisement(binding, &mut req.capabilities)?;
+    }
     let device = state
         .storage
         .get_mobile_device(&device_id)

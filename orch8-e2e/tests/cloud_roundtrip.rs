@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use orch8_e2e::{
-    Backend, Cloud, Delivery, Desktop, Gate, Ledger, Link, Phone, SignHandler, backends,
+    Backend, Cloud, Delivery, Desktop, Gate, Ledger, Link, Phone, PhoneAuth, SignHandler, backends,
     ledger_effects, ledger_len, wait_for,
 };
 use orch8_types::continuity::EffectState;
@@ -97,16 +97,20 @@ struct Device {
     dir: tempfile::TempDir,
 }
 
-/// A fresh phone with a `worker`+`device` tenant key, reaching the cloud
-/// at `api_base`.
+/// A fresh phone authenticating with device sessions from the app backend
+/// (granting `phone_sign`), reaching the cloud at `api_base`.
 fn phone(cloud: &Cloud, api_base: &str, gate: Arc<Gate>) -> Device {
+    let auth = PhoneAuth::DeviceSession(cloud.device_sessions(&["phone_sign"], 3_600));
+    phone_with(api_base, gate, &auth)
+}
+
+fn phone_with(api_base: &str, gate: Arc<Gate>, key: &PhoneAuth) -> Device {
     let dir = tempfile::tempdir().unwrap();
-    let key = cloud.mint_key(&["worker", "device"]);
     let ledger: Ledger = Arc::default();
     let phone = Phone::open(
         &dir.path().join("phone.db").to_string_lossy(),
         &format!("phone-{}", Uuid::now_v7().simple()),
-        &key,
+        key,
         api_base,
         "phone_sign",
         Arc::new(SignHandler {
@@ -213,51 +217,107 @@ fn sign_task(cloud: &Cloud, instance: Uuid) -> Option<orch8_types::worker::Worke
         .max_by_key(|task| task.attempt)
 }
 
-/// (a) Happy path.
+/// How the phone of a happy-path run authenticates.
+#[derive(Clone, Copy)]
+enum Auth {
+    /// Device sessions valid for this many seconds.
+    Session(u32),
+    /// A stored `worker`+`device` API key (legacy).
+    LegacyKey,
+}
+
+/// (a) Happy path, with a device session.
 #[test]
 fn a_happy_path_runs_cloud_phone_cloud_exactly_once() {
     for backend in backends() {
-        let (cloud, calls) = cloud(&backend);
-        let device = phone(&cloud, &cloud.v1(), Gate::open());
-        device.phone.join(200);
-        let runtime = device.phone.runtime_id();
-
-        let sequence = cloud.create_sequence("roundtrip", &roundtrip_blocks(&runtime, None));
-        let instance = cloud.create_instance(sequence, &json!({}));
-        cloud.wait_state(instance, "completed", LONG);
-
-        assert_exactly_once(&cloud, instance, &device.ledger, &[EffectState::Committed]);
-        let backend = cloud.backend;
-        let seen = device.ledger.lock().unwrap()[0].clone();
-        let task = sign_task(&cloud, instance).unwrap();
-        assert_eq!(task.state, WorkerTaskState::Completed, "{backend}");
-        assert_eq!(
-            seen["__orch8"]["effect_id"],
-            task.effect_id.unwrap().to_string(),
-            "{backend}: the handler saw the effect id stored at dispatch"
-        );
-        assert_eq!(seen["__orch8"]["runtime_id"], runtime, "{backend}");
-        assert_eq!(seen["__orch8"]["task_id"], task.id.to_string(), "{backend}");
-        assert_eq!(
-            task.worker_id.as_deref(),
-            Some(runtime.as_str()),
-            "{backend}"
-        );
-        assert_eq!(
-            task.claimed_runtime_kind,
-            Some(orch8_types::continuity::RuntimeKind::Mobile),
-            "{backend}"
-        );
-        assert_eq!(calls_of(&calls, "prepare"), 1, "{backend}");
-        assert_eq!(calls_of(&calls, "finish"), 1, "{backend}");
-        let stats = device.phone.engine.worker_stats();
-        assert_eq!(
-            (stats.claimed, stats.completed, stats.lost),
-            (1, 1, 0),
-            "{backend}"
-        );
-        device.phone.engine.shutdown();
+        run_happy_path(&backend, Auth::Session(3_600));
     }
+}
+
+/// (a, legacy) The same round trip with a stored `worker`+`device` API key
+/// in `sync_api_key`: configs that predate device sessions keep working.
+#[test]
+fn a_legacy_api_key_phone_still_runs_the_round_trip() {
+    for backend in backends() {
+        run_happy_path(&backend, Auth::LegacyKey);
+    }
+}
+
+/// (a, refresh) Device sessions that expire every two seconds: the SDK
+/// answers each `401` by asking the host's token provider for a fresh one
+/// and retrying, so the round trip completes across several expiries.
+#[test]
+fn a_expired_device_sessions_are_refreshed_through_the_token_provider() {
+    for backend in backends() {
+        run_happy_path(&backend, Auth::Session(2));
+    }
+}
+
+fn run_happy_path(backend: &Backend, auth: Auth) {
+    let (cloud, calls) = cloud(backend);
+    let device = match auth {
+        Auth::LegacyKey => {
+            let key = PhoneAuth::ApiKey(cloud.mint_key(&["worker", "device"]));
+            phone_with(&cloud.v1(), Gate::open(), &key)
+        }
+        Auth::Session(ttl) => {
+            let key = PhoneAuth::DeviceSession(cloud.device_sessions(&["phone_sign"], ttl));
+            phone_with(&cloud.v1(), Gate::open(), &key)
+        }
+    };
+    device.phone.join(200);
+    if let Auth::Session(ttl) = auth
+        && ttl < 10
+    {
+        // Let the first session lapse while the worker idles.
+        std::thread::sleep(Duration::from_secs(u64::from(ttl) + 1));
+    }
+    let runtime = device.phone.runtime_id();
+
+    let sequence = cloud.create_sequence("roundtrip", &roundtrip_blocks(&runtime, None));
+    let instance = cloud.create_instance(sequence, &json!({}));
+    cloud.wait_state(instance, "completed", LONG);
+
+    assert_exactly_once(&cloud, instance, &device.ledger, &[EffectState::Committed]);
+    let backend = cloud.backend;
+    let seen = device.ledger.lock().unwrap()[0].clone();
+    let task = sign_task(&cloud, instance).unwrap();
+    assert_eq!(task.state, WorkerTaskState::Completed, "{backend}");
+    assert_eq!(
+        seen["__orch8"]["effect_id"],
+        task.effect_id.unwrap().to_string(),
+        "{backend}: the handler saw the effect id stored at dispatch"
+    );
+    assert_eq!(seen["__orch8"]["runtime_id"], runtime, "{backend}");
+    assert_eq!(seen["__orch8"]["task_id"], task.id.to_string(), "{backend}");
+    assert_eq!(
+        task.worker_id.as_deref(),
+        Some(runtime.as_str()),
+        "{backend}"
+    );
+    assert_eq!(
+        task.claimed_runtime_kind,
+        Some(orch8_types::continuity::RuntimeKind::Mobile),
+        "{backend}"
+    );
+    assert_eq!(calls_of(&calls, "prepare"), 1, "{backend}");
+    assert_eq!(calls_of(&calls, "finish"), 1, "{backend}");
+    let stats = device.phone.engine.worker_stats();
+    assert_eq!(
+        (stats.claimed, stats.completed, stats.lost),
+        (1, 1, 0),
+        "{backend}"
+    );
+    if let (Auth::Session(ttl), PhoneAuth::DeviceSession(sessions)) = (auth, &device.phone.auth)
+        && ttl < 10
+    {
+        let minted = sessions.minted.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            minted >= 2,
+            "{backend}: expired sessions were refreshed ({minted} minted)"
+        );
+    }
+    device.phone.engine.shutdown();
 }
 
 /// (b) Phone offline when `sign` is dispatched: the task waits in the
@@ -347,7 +407,7 @@ fn c_kill_mid_step_drains_the_orphan_and_retries_once() {
         let (db_path, device_id, key) = (
             phone.db_path.clone(),
             phone.device_id.clone(),
-            phone.key.clone(),
+            phone.auth.clone(),
         );
         drop(phone);
         opener.join().unwrap();
@@ -456,7 +516,7 @@ fn d_lease_loss_rejects_the_late_completion_and_retries_once() {
             "{backend}: the late completion lost the lease"
         );
         let (status, _) = cloud.call(
-            &device.phone.key,
+            &device.phone.credential(),
             "POST",
             &format!("/workers/tasks/{}/complete", first.id),
             Some(&json!({"worker_id": runtime, "claim_epoch": first.claim_epoch, "output": {}})),
@@ -755,12 +815,14 @@ fn f_phone_delegates_to_a_desktop_across_disconnects() {
         // Phone: owns the parent execution, runs capture + delegate.
         let phone_link = Link::start(&cloud);
         let dir = tempfile::tempdir().unwrap();
-        let phone_key = cloud.mint_key(&["worker", "device", "operator"]);
+        let phone_auth = PhoneAuth::DeviceSession(
+            cloud.device_sessions(&["phone_capture", "phone_delegate"], 3_600),
+        );
         let plan: Arc<Mutex<Value>> = Arc::default();
         let phone = Phone::open(
             &dir.path().join("phone.db").to_string_lossy(),
             &format!("phone-{}", Uuid::now_v7().simple()),
-            &phone_key,
+            &phone_auth,
             &phone_link.base,
             "phone_capture",
             Arc::new(Capture),
@@ -772,7 +834,9 @@ fn f_phone_delegates_to_a_desktop_across_disconnects() {
                 Arc::new(DelegateHandler {
                     plan: Arc::clone(&plan),
                     base: phone_link.base.clone(),
-                    key: phone_key.clone(),
+                    // The app calls the delegation API with the phone's own
+                    // device session (it owns the parent execution).
+                    key: phone.credential(),
                     tenant: cloud.tenant.clone(),
                 }),
             )

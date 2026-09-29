@@ -38,6 +38,47 @@ pub const DELEGATION_HANDLER: &str = "orch8.delegation";
 /// Metadata key marking a delegation proxy instance (see the module docs).
 pub const DELEGATION_PROXY_KEY: &str = "orch8_delegation_proxy";
 
+/// Namespace of the one-step sequences an isolated delegated step runs as.
+pub const STEP_SEQUENCE_NAMESPACE: &str = "default";
+
+/// Deterministic id of the one-step sequence that runs `handler` as block
+/// `block` for `tenant` (an isolated step delegated from a runtime-hosted
+/// parent). The phone and the control plane derive the same id, so the
+/// sequence is published at most once per (tenant, handler, block).
+#[must_use]
+pub fn step_sequence_id(tenant: &str, handler: &str, block: &str) -> uuid::Uuid {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"orch8-delegated-step-v1\0");
+    for part in [tenant, handler, block] {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
+}
+
+/// The one-step sequence (as its JSON document) an isolated delegated step
+/// runs as: `handler` on `{{context.data.params}}` in block `block`, under
+/// [`step_sequence_id`].
+#[must_use]
+pub fn step_sequence_document(tenant: &str, handler: &str, block: &str) -> Value {
+    let id = step_sequence_id(tenant, handler, block);
+    json!({
+        "id": id, "tenant_id": tenant, "namespace": STEP_SEQUENCE_NAMESPACE,
+        "name": format!("orch8-delegated-{}", &id.simple().to_string()[..12]),
+        "version": 1, "deprecated": false, "interceptors": null,
+        "blocks": [{"type": "step", "id": block, "handler": handler,
+                    "params": "{{context.data.params}}", "cancellable": true}],
+        "created_at": Utc::now().to_rfc3339(),
+    })
+}
+
 /// Whether `instance` is the server-side proxy of a delegation whose parent
 /// is hosted by a runtime.
 #[must_use]

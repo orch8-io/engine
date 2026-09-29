@@ -162,6 +162,51 @@ POST /runtimes/browser-sessions
   the replica that minted it; the server warns at startup. Set
   `ORCH8_CORS_ORIGINS` to the origins that host browser runtimes.
 
+## Phone runtimes: device sessions
+
+A phone must not carry an operator (or any stored) API key. Your app backend
+(Operator key) mints a short-lived token per device, bound to the phone's
+persisted runtime id (`MobileEngine.nodeRuntimeId()`):
+
+```
+POST /runtimes/device-sessions
+{ "device_id": "iphone-7F3A…", "runtime_id": "…", "handlers": ["scan_document"], "ttl_secs": 3600 }
+→ 201 { "token": "dst_…", "device_id": "…", "runtime_id": "…", "expires_at": "…", "handlers": [...] }
+```
+
+- `ttl_secs` defaults to 3600, maximum 86400. The mobile SDK asks its host
+  `TokenProvider` for a fresh token on `401` and retries once
+  (`MobileEngine.setTokenProvider`). Minting for a `device_id` registered to
+  another tenant is `409`.
+- Same signer as browser sessions (`ORCH8_BROWSER_SESSION_SECRET`, else the
+  root-key derivation). The signed claims carry the runtime kind; a `bst_`
+  token never verifies as `dst_` or the reverse.
+- Allowed, deny by default (`403` otherwise; expired or forged tokens `401`):
+
+  | Route | Object-level check |
+  |-------|--------------------|
+  | `POST /mobile/devices/register`, `POST /mobile/sync` | the session's `device_id`; `step_delegations` (server-side credential resolution) refused |
+  | `POST /mobile/devices/{device_id}/runtime` | the session's device and `runtime_id`, kind `mobile`; handlers clamped to the allowlist |
+  | `POST /workers/tasks/poll`, `/workers/tasks/{id}/{complete,fail,heartbeat,release}` | `worker_id = runtime_id`, kind `mobile`, a granted handler |
+  | `POST /continuity/executions` | `hosted_by_runtime: true`, `runtime_id` = the session's |
+  | `POST /continuity/grants` | `allowed_actions: ["accept"]`, execution owned by the session's runtime (else `404`) |
+  | `POST /continuity/delegations/claim` | `source_runtime_id` = the session's runtime (which must own the parent) |
+  | `GET /continuity/delegations/{id}` | the session's runtime is the source or destination (else `404`) |
+  | `GET /runtimes` | read-only list of live registrations |
+
+- Refused: task listing and stats, `/workers/tasks/poll/queue`, worker
+  commands, other devices' data (`GET /mobile/devices|approvals|status`,
+  `POST /mobile/commands`), browser/device session minting,
+  `/runtimes/register`, sequences, credentials, instances, API keys,
+  handoffs, capsule import, grant consumption, and reading executions.
+- An isolated delegated step (a one-step sequence) is published by the
+  control plane itself when the claim carries `step: {handler, block_id}` and
+  `sub_sequence_id` is that step's deterministic id — a device session never
+  needs sequence-authoring rights.
+- Stored keys hitting `/mobile/*` with Operator capability (or the root key)
+  get `x-orch8-principal-scope: operator|root` on the response; the mobile
+  SDK logs a warning when it sees it.
+
 ### Browsers never receive secrets
 
 - A task whose params referenced `credentials://` material is never claimable
@@ -218,7 +263,15 @@ GET /continuity/delegations/{id}?tenant_id=…
     "parent_epoch_now", "mailbox_task_id", "result": {status, runtime_id, output | error} }
 ```
 
-and resumes its parked step itself — only while it still owns the parent at
+A device session may make these calls only for its own runtime: register
+executions it hosts, grant and claim delegations of executions it owns, and
+read delegations it is the source or destination of (see
+[device sessions](#phone-runtimes-device-sessions)). The claim may carry
+`"step": {"handler": "…", "block_id": "…"}` for an isolated delegated step;
+the control plane then publishes its one-step sequence (idempotently, under
+the id the delegation names) before validating the delegation.
+
+The runtime resumes its parked step itself — only while it still owns the parent at
 the delegation's epoch (`parent_owner_runtime_id` / `parent_epoch_now`). The
 mobile SDK does all of this automatically for steps placed off the phone (see
 [MOBILE_SDK.md](MOBILE_SDK.md#delegating-from-a-phone-local-workflow)).

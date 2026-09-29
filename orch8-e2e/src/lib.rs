@@ -14,10 +14,16 @@
 //! [`Phone`] wraps a real `orch8_mobile::MobileEngine` with its own `SQLite`
 //! file; [`Desktop`] is a desktop-kind runtime node built from the embedded
 //! `orch8` engine plus the lease protocol over HTTP.
+//!
+//! A phone authenticates the way apps should ([`PhoneAuth::DeviceSession`]):
+//! short-lived device sessions minted per device by the "app backend" (here
+//! the root key, through [`DeviceSessions`]) and handed to the SDK through a
+//! `TokenProvider` — or, for the legacy path, with a stored API key
+//! ([`PhoneAuth::ApiKey`]).
 #![allow(clippy::missing_panics_doc)]
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -232,6 +238,22 @@ impl Cloud {
         );
         assert_eq!(status, 201, "mint key: {body}");
         body["secret"].as_str().expect("secret").to_owned()
+    }
+
+    /// The "app backend" minting device sessions for phones of this cloud's
+    /// tenant, granting `handlers`, each valid for `ttl_secs`.
+    #[must_use]
+    pub fn device_sessions(&self, handlers: &[&str], ttl_secs: u32) -> DeviceSessions {
+        DeviceSessions {
+            v1: self.v1(),
+            tenant: self.tenant.clone(),
+            handlers: handlers
+                .iter()
+                .map(|handler| (*handler).to_owned())
+                .collect(),
+            ttl_secs,
+            minted: Arc::default(),
+        }
     }
 
     /// Store a sequence of `blocks`; returns its id.
@@ -716,13 +738,95 @@ impl orch8_mobile::StepHandler for SignHandler {
     }
 }
 
+/// A customer's app backend in miniature: it holds an operator (here: the
+/// root) key and mints short-lived device sessions
+/// (`POST /runtimes/device-sessions`) for one device and runtime at a time.
+#[derive(Clone)]
+pub struct DeviceSessions {
+    v1: String,
+    tenant: String,
+    handlers: Vec<String>,
+    ttl_secs: u32,
+    /// Tokens minted so far (initial + refreshes).
+    pub minted: Arc<AtomicU32>,
+}
+
+impl DeviceSessions {
+    /// Mint a device session for `device_id` / `runtime_id`. Blocking; runs
+    /// on its own thread and runtime like an app's own HTTP stack would.
+    #[must_use]
+    pub fn mint(&self, device_id: &str, runtime_id: &str) -> String {
+        let url = format!("{}/runtimes/device-sessions", self.v1);
+        let body = json!({
+            "device_id": device_id, "runtime_id": runtime_id,
+            "handlers": self.handlers, "ttl_secs": self.ttl_secs,
+        });
+        let tenant = self.tenant.clone();
+        let (status, minted) = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("minting runtime");
+            rt.block_on(async move {
+                let response = reqwest::Client::new()
+                    .post(url)
+                    .header("x-api-key", ROOT_KEY)
+                    .header("X-Tenant-Id", tenant)
+                    .json(&body)
+                    .send()
+                    .await
+                    .expect("mint device session");
+                let status = response.status().as_u16();
+                (
+                    status,
+                    response.json::<Value>().await.unwrap_or(Value::Null),
+                )
+            })
+        })
+        .join()
+        .expect("minting thread");
+        assert_eq!(status, 201, "mint device session: {minted}");
+        self.minted.fetch_add(1, Ordering::SeqCst);
+        let token = minted["token"].as_str().expect("token").to_owned();
+        assert!(token.starts_with("dst_"), "{token}");
+        token
+    }
+}
+
+/// The host `TokenProvider` of a phone: asks the app backend for a device
+/// session on start and on every refresh (`401`).
+struct SessionProvider {
+    sessions: DeviceSessions,
+    device_id: String,
+    runtime_id: String,
+}
+
+impl orch8_mobile::TokenProvider for SessionProvider {
+    fn current_token(&self) -> String {
+        self.sessions.mint(&self.device_id, &self.runtime_id)
+    }
+
+    fn refresh_token(&self) -> Result<String, orch8_mobile::MobileError> {
+        Ok(self.sessions.mint(&self.device_id, &self.runtime_id))
+    }
+}
+
+/// How a [`Phone`] authenticates to the control plane.
+#[derive(Clone)]
+pub enum PhoneAuth {
+    /// A stored tenant API key in `sync_api_key` (legacy; discouraged).
+    ApiKey(String),
+    /// Device sessions from the app backend through a `TokenProvider`.
+    DeviceSession(DeviceSessions),
+}
+
 /// A phone: its own `SQLite` file, device id and credential, reaching the
 /// control plane through `link`.
 pub struct Phone {
     pub engine: Arc<orch8_mobile::MobileEngine>,
     pub db_path: String,
     pub device_id: String,
-    pub key: String,
+    pub auth: PhoneAuth,
     pub api_base: String,
 }
 
@@ -732,7 +836,7 @@ impl Phone {
     pub fn open(
         db_path: &str,
         device_id: &str,
-        key: &str,
+        auth: &PhoneAuth,
         api_base: &str,
         name: &str,
         handler: Arc<dyn orch8_mobile::StepHandler>,
@@ -741,12 +845,22 @@ impl Phone {
             db_path.to_owned(),
             orch8_mobile::MobileEngineConfig {
                 device_id: device_id.to_owned(),
-                sync_api_key: key.to_owned(),
+                sync_api_key: match auth {
+                    PhoneAuth::ApiKey(key) => key.clone(),
+                    PhoneAuth::DeviceSession(_) => String::new(),
+                },
                 handler_timeout_ms: 60_000,
                 ..orch8_mobile::MobileEngineConfig::default()
             },
         )
         .expect("mobile engine");
+        if let PhoneAuth::DeviceSession(sessions) = auth {
+            engine.set_token_provider(Arc::new(SessionProvider {
+                sessions: sessions.clone(),
+                device_id: device_id.to_owned(),
+                runtime_id: engine.node_runtime_id().expect("runtime id"),
+            }));
+        }
         engine
             .register_handler(name.to_owned(), handler)
             .expect("register handler");
@@ -754,8 +868,20 @@ impl Phone {
             engine,
             db_path: db_path.to_owned(),
             device_id: device_id.to_owned(),
-            key: key.to_owned(),
+            auth: auth.clone(),
             api_base: api_base.to_owned(),
+        }
+    }
+
+    /// A credential for this phone's own direct API calls (app code): a
+    /// fresh device session, or the stored key.
+    #[must_use]
+    pub fn credential(&self) -> String {
+        match &self.auth {
+            PhoneAuth::ApiKey(key) => key.clone(),
+            PhoneAuth::DeviceSession(sessions) => {
+                sessions.mint(&self.device_id, &self.runtime_id())
+            }
         }
     }
 

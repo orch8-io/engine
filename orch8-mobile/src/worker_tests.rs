@@ -100,7 +100,7 @@ async fn harness_with(server: &MockControlPlane, handler: Recording, idle_ms: u6
     );
     let client = NodeClient::new_unchecked(
         server.base.clone(),
-        "key".into(),
+        crate::credential::Credential::new("key".into()),
         "device-1".into(),
         RuntimeId::new(),
         Advertisement {

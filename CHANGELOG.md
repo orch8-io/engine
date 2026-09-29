@@ -63,6 +63,33 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
   fan-out). e2e: phone-local parent → desktop across repeated disconnects on
   both sides, duplicate deliveries, and app kills while parked (SQLite and
   Postgres).
+- **Security: phones no longer need an operator key** (device sessions).
+  Phone-local delegation required the app's API key to carry `operator`, so
+  anyone extracting it from the app binary controlled the tenant. The app
+  backend now mints a short-lived, signed per-device token with
+  `POST /runtimes/device-sessions` (`dst_…`, Operator/Admin only, bound to
+  tenant + `device_id` + the phone's `runtime_id` + a handler allowlist,
+  default 1 h, max 24 h, same signer as browser sessions). Its principal
+  (`device_node`, never storable on an API key) is denied by default and
+  reaches only the device's own mobile register / sync / runtime
+  advertisement (handlers clamped to the allowlist, no credential-resolving
+  `step_delegations`), the lease protocol as its runtime, and the delegation
+  calls for executions its runtime owns (runtime-hosted execution
+  registration, `accept` grants, claims as the source, delegation reads as
+  source or destination) plus `GET /runtimes`. The delegation claim accepts
+  `step: {handler, block_id}` so the control plane publishes an isolated
+  step's one-step sequence (a device needs no sequence rights). The mobile
+  SDK adds `MobileEngine.setTokenProvider`: every node, worker, delegation
+  and sync call carries the provider's device session and refreshes it once
+  on `401`. `syncApiKey` keeps working; stored operator keys (and the root
+  key) on `/mobile/*` get `x-orch8-principal-scope`, and the SDK warns once.
+  e2e: every phone scenario (a–f, h–j) now runs on device
+  sessions, plus a legacy-key round trip, a refresh-on-expiry round trip, and
+  a scope matrix of refused actions on both backends.
+- Fixed a flaky test (`execute_step_dry_emits_orch8_step_span_around_handler`):
+  tracing's process-wide callsite-interest cache could record `never` for the
+  `orch8.step` span when another test thread registered it while this test's
+  scoped dispatcher was the only live one.
 - Poll responses echo `target_runtime_id` / `runtime_kinds`; re-sending a
   failure for an already-failed task (same lease) is idempotent.
 - **Worker `fail` is one fenced transaction** (HTTP and gRPC), shared with the

@@ -66,7 +66,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -82,8 +81,6 @@ use crate::node::NodeClient;
 
 /// Worker id under which the pump holds parked local tasks.
 pub(crate) const PUMP_WORKER_ID: &str = "orch8.delegation-pump";
-/// Namespace of the one-step sequences published for isolated steps.
-const STEP_SEQUENCE_NAMESPACE: &str = "default";
 /// Delegations examined per pump pass.
 const PUMP_BATCH: i64 = 50;
 /// A delegation whose outcome cannot be read this long after it expired is
@@ -844,6 +841,15 @@ impl DelegationPump {
             .tenant_id
             .clone()
             .unwrap_or_else(|| self.tenant().to_owned());
+        // An isolated step's one-step sequence is published by the control
+        // plane with the claim (a device session cannot author sequences).
+        let step = match (&record.handler, record.kind) {
+            (Some(handler), Kind::Step) => json!({
+                "handler": handler,
+                "block_id": record.block_id.clone().unwrap_or_else(|| "step".into()),
+            }),
+            _ => Value::Null,
+        };
         let (status, body) = self
             .client
             .post_json(
@@ -864,6 +870,7 @@ impl DelegationPump {
                     "signed_grant": grant["signed_grant"],
                     "token": grant["token"],
                     "input": record.input,
+                    "step": step,
                 }),
             )
             .await?;
@@ -968,23 +975,23 @@ impl DelegationPump {
             .map(|runtime| runtime.runtime_id.to_string()))
     }
 
-    /// Publish (idempotently) the one-step sequence an isolated step runs as.
+    /// The deterministic id of the one-step sequence an isolated step runs
+    /// as. With a device session the control plane publishes it when the
+    /// delegation is claimed; a legacy API key publishes it here
+    /// (idempotently), which also works against servers that predate
+    /// control-plane publishing.
     async fn ensure_step_sequence(&self, record: &Record) -> Result<String, MobileError> {
         let handler = record.handler.clone().unwrap_or_default();
         let block = record.block_id.clone().unwrap_or_else(|| "step".into());
-        let id = step_sequence_id(self.tenant(), &handler, &block);
+        let id = orch8_engine::delegation::step_sequence_id(self.tenant(), &handler, &block);
+        if self.client.is_device_session() {
+            return Ok(id.to_string());
+        }
         let (status, body) = self
             .client
             .post_json(
                 "sequences",
-                &json!({
-                    "id": id, "tenant_id": self.tenant(), "namespace": STEP_SEQUENCE_NAMESPACE,
-                    "name": format!("orch8-delegated-{}", &id.simple().to_string()[..12]),
-                    "version": 1, "deprecated": false, "interceptors": null,
-                    "blocks": [{"type": "step", "id": block, "handler": handler,
-                                "params": "{{context.data.params}}", "cancellable": true}],
-                    "created_at": chrono::Utc::now().to_rfc3339(),
-                }),
+                &orch8_engine::delegation::step_sequence_document(self.tenant(), &handler, &block),
             )
             .await?;
         if (200..300).contains(&status) || status == 409 {
@@ -1177,21 +1184,6 @@ fn output_for(record: &Record, result: &Value) -> Value {
 }
 
 /// Deterministic id of the one-step sequence an isolated step publishes.
-fn step_sequence_id(tenant: &str, handler: &str, block: &str) -> uuid::Uuid {
-    let mut hasher = Sha256::new();
-    hasher.update(b"orch8-delegated-step-v1\0");
-    for part in [tenant, handler, block] {
-        hasher.update(part.as_bytes());
-        hasher.update([0]);
-    }
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    uuid::Uuid::from_bytes(bytes)
-}
-
 /// Percent-encode a query value.
 fn encode(value: &str) -> String {
     use std::fmt::Write as _;
@@ -1212,6 +1204,7 @@ mod tests {
 
     #[test]
     fn step_sequence_ids_are_deterministic_and_scoped() {
+        use orch8_engine::delegation::step_sequence_id;
         let a = step_sequence_id("t", "scan", "step");
         assert_eq!(a, step_sequence_id("t", "scan", "step"));
         assert_ne!(a, step_sequence_id("u", "scan", "step"));

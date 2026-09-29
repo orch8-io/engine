@@ -120,6 +120,13 @@ async fn create_api_key(
                 .into(),
         ));
     }
+    if body.capabilities.contains(&ApiCapability::DeviceNode) {
+        return Err(ApiError::InvalidArgument(
+            "device_node is reserved for short-lived device sessions \
+             (POST /runtimes/device-sessions)"
+                .into(),
+        ));
+    }
     let capabilities = if body.capabilities.is_empty() {
         vec![ApiCapability::Operator]
     } else {

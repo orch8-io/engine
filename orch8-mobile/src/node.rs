@@ -28,6 +28,7 @@ use orch8_types::continuity::{
     RuntimeCapabilities, RuntimeConnectivity, RuntimeKind, RuntimeTrustLevel,
 };
 
+use crate::credential::Credential;
 use crate::error::MobileError;
 
 /// Lifetime of one capability advertisement. The server caps it at five
@@ -282,7 +283,7 @@ pub(crate) struct Advertisement {
 pub(crate) struct NodeClient {
     http: reqwest::Client,
     api_base: String,
-    api_key: String,
+    credential: Arc<Credential>,
     device_id: String,
     runtime_id: RuntimeId,
     advertisement: StdMutex<Advertisement>,
@@ -292,7 +293,7 @@ impl NodeClient {
     /// Build a client for a validated public HTTPS API base.
     pub fn new(
         api_base: String,
-        api_key: String,
+        credential: Arc<Credential>,
         device_id: String,
         runtime_id: RuntimeId,
         advertisement: Advertisement,
@@ -300,7 +301,7 @@ impl NodeClient {
         validate_api_base(&api_base)?;
         Ok(Self::new_unchecked(
             api_base,
-            api_key,
+            credential,
             device_id,
             runtime_id,
             advertisement,
@@ -310,7 +311,7 @@ impl NodeClient {
     /// Skip URL validation — tests point this at a loopback mock server.
     pub(crate) fn new_unchecked(
         api_base: String,
-        api_key: String,
+        credential: Arc<Credential>,
         device_id: String,
         runtime_id: RuntimeId,
         advertisement: Advertisement,
@@ -318,7 +319,7 @@ impl NodeClient {
         Arc::new(Self {
             http: crate::build_mobile_http_client(Duration::from_secs(30)),
             api_base: api_base.trim_end_matches('/').to_string(),
-            api_key,
+            credential,
             device_id,
             runtime_id,
             advertisement: StdMutex::new(advertisement),
@@ -335,6 +336,12 @@ impl NodeClient {
 
     pub fn api_base(&self) -> &str {
         &self.api_base
+    }
+
+    /// Whether calls carry a scoped device session (which cannot publish
+    /// sequences: the control plane publishes delegated steps itself).
+    pub fn is_device_session(&self) -> bool {
+        self.credential.is_device_session()
     }
 
     pub fn handlers(&self) -> Vec<String> {
@@ -390,11 +397,23 @@ impl NodeClient {
         format!("{}/{}", self.api_base, path.trim_start_matches('/'))
     }
 
-    fn post(&self, path: &str) -> reqwest::RequestBuilder {
-        self.http
-            .post(self.url(path))
-            .header("x-api-key", &self.api_key)
-            .header("x-device-id", &self.device_id)
+    /// `POST` `body` to `path` with the node credential, refreshing it and
+    /// retrying once on `401`.
+    async fn post<B: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> reqwest::Result<reqwest::Response> {
+        let url = self.url(path);
+        self.credential
+            .send(|token| {
+                self.http
+                    .post(&url)
+                    .header("x-api-key", token)
+                    .header("x-device-id", &self.device_id)
+                    .json(body)
+            })
+            .await
     }
 
     /// `POST /mobile/devices/register` then `POST /mobile/devices/{id}/runtime`.
@@ -413,9 +432,7 @@ impl NodeClient {
             "app_version": ad.caps.app_version,
         });
         let resp = self
-            .post("mobile/devices/register")
-            .json(&device_body)
-            .send()
+            .post("mobile/devices/register", &device_body)
             .await
             .map_err(|e| network_err("register device", &e))?;
         expect_success("register device", resp).await?;
@@ -431,9 +448,7 @@ impl NodeClient {
             urlencode_path_segment(&self.device_id)
         );
         let resp = self
-            .post(&path)
-            .json(&serde_json::json!({ "capabilities": capabilities }))
-            .send()
+            .post(&path, &serde_json::json!({ "capabilities": capabilities }))
             .await
             .map_err(|e| network_err("advertise runtime", &e))?;
         expect_success("advertise runtime", resp).await?;
@@ -457,9 +472,7 @@ impl NodeClient {
             capabilities: &capabilities,
         };
         let resp = self
-            .post("workers/tasks/poll")
-            .json(&body)
-            .send()
+            .post("workers/tasks/poll", &body)
             .await
             .map_err(|e| network_err("poll tasks", &e))?;
         let resp = expect_success("poll tasks", resp).await?;
@@ -546,9 +559,7 @@ impl NodeClient {
         body: &serde_json::Value,
     ) -> Result<(u16, serde_json::Value), MobileError> {
         let resp = self
-            .post(path)
-            .json(body)
-            .send()
+            .post(path, body)
             .await
             .map_err(|e| network_err(path, &e))?;
         json_answer(resp).await
@@ -560,12 +571,15 @@ impl NodeClient {
         &self,
         path: &str,
     ) -> Result<(u16, serde_json::Value), MobileError> {
+        let url = self.url(path);
         let resp = self
-            .http
-            .get(self.url(path))
-            .header("x-api-key", &self.api_key)
-            .header("x-device-id", &self.device_id)
-            .send()
+            .credential
+            .send(|token| {
+                self.http
+                    .get(&url)
+                    .header("x-api-key", token)
+                    .header("x-device-id", &self.device_id)
+            })
             .await
             .map_err(|e| network_err(path, &e))?;
         json_answer(resp).await
@@ -577,7 +591,7 @@ impl NodeClient {
         body: &serde_json::Value,
         missing_route_is_unsupported: bool,
     ) -> LeaseResponse {
-        match self.post(path).json(body).send().await {
+        match self.post(path, body).await {
             Ok(resp) => classify_lease_status(resp.status().as_u16(), missing_route_is_unsupported),
             Err(e) => {
                 debug!(
@@ -682,7 +696,7 @@ mod tests {
     fn client() -> Arc<NodeClient> {
         NodeClient::new_unchecked(
             "http://127.0.0.1:1/api/v1/".into(),
-            "key".into(),
+            Credential::new("key".into()),
             "dev-1".into(),
             RuntimeId::new(),
             Advertisement {

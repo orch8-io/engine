@@ -13,6 +13,7 @@ mod builtins;
 mod capabilities;
 mod config;
 mod continuity;
+mod credential;
 mod delegation;
 mod error;
 mod handlers;
@@ -246,6 +247,10 @@ pub struct MobileEngine {
     stragglers: Arc<stragglers::Stragglers>,
     /// Device-mesh delegation of placed local steps (`start_delegation`).
     delegation: StdMutex<Option<Arc<delegation::DelegationPump>>>,
+    /// Control-plane credential shared by the node client and the sync
+    /// reporter: `sync_api_key`, or a device session from the host's
+    /// token provider (`set_token_provider`).
+    credential: Arc<credential::Credential>,
 }
 
 /// A registered runtime node and its re-advertisement task.
@@ -368,6 +373,7 @@ impl MobileEngine {
         let mobile_storage = Arc::new(storage::MobileStorage::new(sqlite.clone()));
 
         let node_pool = sqlite.pool().clone();
+        let credential = credential::Credential::new(config.sync_api_key.clone());
         let claims = worker::ClaimStore::new(node_pool.clone());
         rt.block_on(init_node_tables(&node_pool, &claims));
 
@@ -431,11 +437,11 @@ impl MobileEngine {
             // would let a MITM inject commands. Require https up front and fail
             // engine construction rather than silently downgrading trust.
             crate::validate_https_url(&config.sync_url)?;
-            let reporter = Arc::new(sync_reporter::SyncReporter::new(
+            let reporter = Arc::new(sync_reporter::SyncReporter::with_credential(
                 sqlite.pool().clone(),
                 config.sync_url.clone(),
                 config.device_id.clone(),
-                config.sync_api_key.clone(),
+                Arc::clone(&credential),
             ));
             rt.block_on(async { reporter.init_tables().await });
             info!(sync_url = %config.sync_url, "mobile sync reporter enabled");
@@ -471,6 +477,7 @@ impl MobileEngine {
             worker: StdMutex::new(None),
             stragglers: Arc::new(stragglers::Stragglers::default()),
             delegation: StdMutex::new(None),
+            credential,
         });
         engine.release_orphaned_claims_in_background();
         Ok(engine)
@@ -1152,10 +1159,27 @@ impl MobileEngine {
         })
     }
 
+    /// Authenticate every control-plane call (node registration, worker
+    /// leases, delegation, sync) with tokens from `provider` instead of the
+    /// static `sync_api_key`. The provider should return a short-lived device
+    /// session minted by the app's backend with an operator key
+    /// (`POST /runtimes/device-sessions` for this `device_id` and
+    /// [`Self::node_runtime_id`]); `refresh_token` is called when the control
+    /// plane answers `401` (expired session) and the request is retried once.
+    /// Call it before `register_node`. Never ship an operator key in an app.
+    pub fn set_token_provider(&self, provider: Arc<dyn TokenProvider>) {
+        self.credential.set_provider(provider);
+        info!(
+            device_session = self.credential.is_device_session(),
+            "mobile node token provider installed"
+        );
+    }
+
     /// Join the distributed runtime mesh: registers the device
     /// (`/mobile/devices/register`) and its runtime capabilities
     /// (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
-    /// `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+    /// `device_id`, and the node credential (the token provider's device
+    /// session, else `sync_api_key`). The advertisement is refreshed in the
     /// background before its five-minute TTL (that refresh is the node's
     /// liveness signal) until `unregister_node` / `shutdown`. Calling it again
     /// updates the advertised facts. Also settles any remote task a previous
@@ -1182,9 +1206,10 @@ impl MobileEngine {
                 .ok_or_else(|| MobileError::InvalidInput {
                     message: "set api_base_url, or a sync_url ending in /mobile/sync".into(),
                 })?;
-            if self.config.sync_api_key.is_empty() || self.config.device_id.is_empty() {
+            if !self.credential.is_configured() || self.config.device_id.is_empty() {
                 return Err(MobileError::InvalidInput {
-                    message: "register_node requires device_id and sync_api_key in the config"
+                    message: "register_node requires device_id in the config and a credential \
+                              (set_token_provider, or sync_api_key)"
                         .into(),
                 });
             }
@@ -1193,7 +1218,7 @@ impl MobileEngine {
             })?;
             node::NodeClient::new(
                 api_base,
-                self.config.sync_api_key.clone(),
+                Arc::clone(&self.credential),
                 self.config.device_id.clone(),
                 runtime_id,
                 node::Advertisement {
@@ -1594,7 +1619,7 @@ impl MobileEngine {
         };
         let pool = self.node_pool.clone();
         let store = self.claims.clone();
-        let api_key = self.config.sync_api_key.clone();
+        let credential = Arc::clone(&self.credential);
         let device_id = self.config.device_id.clone();
         self.runtime.handle().spawn(async move {
             if !matches!(store.count().await, Ok(count) if count > 0) {
@@ -1605,7 +1630,7 @@ impl MobileEngine {
             };
             let Ok(client) = node::NodeClient::new(
                 api_base,
-                api_key,
+                credential,
                 device_id,
                 runtime_id,
                 node::Advertisement {
