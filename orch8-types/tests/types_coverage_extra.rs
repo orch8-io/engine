@@ -413,6 +413,7 @@ fn cfg_36_config_serde_with_all_sections() {
         telemetry: orch8_types::config::TelemetryConfig::default(),
         alerts: orch8_types::config::AlertsConfig::default(),
         cloud_observability: orch8_types::config::CloudObservabilityConfig::default(),
+        executor: orch8_types::config::ExecutorConfig::default(),
     };
     let json = serde_json::to_string(&cfg).unwrap();
     // Non-empty secrets serialize as "[REDACTED]"; feeding the dump straight
@@ -532,6 +533,7 @@ fn cfg_44_secret_string_not_leaked_in_serialized_config() {
         telemetry: orch8_types::config::TelemetryConfig::default(),
         alerts: orch8_types::config::AlertsConfig::default(),
         cloud_observability: orch8_types::config::CloudObservabilityConfig::default(),
+        executor: orch8_types::config::ExecutorConfig::default(),
     };
     let json = serde_json::to_string(&cfg).unwrap();
     assert!(!json.contains("pass@host"));
