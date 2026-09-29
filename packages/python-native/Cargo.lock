@@ -1909,22 +1909,28 @@ dependencies = [
 name = "orch8-storage"
 version = "0.7.1"
 dependencies = [
+ "aes-gcm",
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "futures",
+ "hmac 0.13.0",
  "moka",
  "object_store",
  "orch8-push",
  "orch8-types",
  "rand 0.10.2",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "thiserror",
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
  "zstd",
 ]
 
