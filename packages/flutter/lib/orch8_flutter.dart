@@ -33,6 +33,11 @@ class Orch8Config {
   /// Server sync endpoint (`…/api/v1/mobile/sync`). Required for [Orch8.registerNode].
   final String syncUrl;
   final String deviceId;
+
+  /// Static API key for sync and runtime-node calls. **Legacy, not for
+  /// production apps**: a key stored in the app is extractable from the
+  /// binary. Use [Orch8.setTokenProvider] with device sessions minted by your
+  /// backend instead, and never put an operator key here.
   final String syncApiKey;
 
   const Orch8Config({
@@ -630,6 +635,7 @@ class Orch8 {
   static const EventChannel _eventChannel = EventChannel('io.orch8/events');
 
   final Map<String, StepHandler> _handlers = {};
+  Future<String> Function()? _fetchToken;
   StreamSubscription? _eventSubscription;
 
   final StreamController<({String instanceId, String output})>
@@ -762,8 +768,39 @@ class Orch8 {
   Future<String> nodeRuntimeId() async =>
       (await _channel.invokeMethod<String>('nodeRuntimeId'))!;
 
-  /// Join the runtime mesh: registers device + capabilities using
-  /// `syncUrl` and `syncApiKey`, then re-advertises before the 5-minute TTL.
+  /// Authenticate every control-plane call (node registration, worker
+  /// leases, delegation, sync reporting) with short-lived **device sessions**
+  /// instead of the legacy static `syncApiKey`.
+  ///
+  /// [fetchToken] asks your app backend for a fresh `dst_…` token; the backend
+  /// holds the operator key and mints it with `POST /runtimes/device-sessions`
+  /// for this device id and [nodeRuntimeId]. It is awaited once here for the
+  /// initial token and again whenever the control plane answers `401` (the
+  /// request is then retried once); the engine waits at most [refreshTimeout]
+  /// for each refresh. Call it after [initialize] and before [registerNode].
+  /// Never ship an operator key in an app. Needs the engine release after 0.7.1.
+  Future<void> setTokenProvider(
+    Future<String> Function() fetchToken, {
+    Duration refreshTimeout = const Duration(seconds: 30),
+  }) async {
+    if (refreshTimeout <= Duration.zero) {
+      throw ArgumentError.value(
+          refreshTimeout, 'refreshTimeout', 'must be greater than zero');
+    }
+    final token = await fetchToken();
+    if (token.trim().isEmpty) {
+      throw ArgumentError('fetchToken returned an empty token');
+    }
+    _fetchToken = fetchToken;
+    await _channel.invokeMethod('setTokenProvider', {
+      'token': token,
+      'refreshTimeoutMs': refreshTimeout.inMilliseconds,
+    });
+  }
+
+  /// Join the runtime mesh: registers device + capabilities using `syncUrl`
+  /// and the node credential ([setTokenProvider], or the legacy
+  /// `syncApiKey`), then re-advertises before the 5-minute TTL.
   Future<NodeRegistration> registerNode(
       [NodeCapabilities capabilities = const NodeCapabilities()]) async {
     final map = await _channel.invokeMapMethod<String, dynamic>(
@@ -884,6 +921,19 @@ class Orch8 {
   }
 
   Future<dynamic> _handleMethodCall(MethodCall call) async {
+    if (call.method == 'refreshToken') {
+      final fetchToken = _fetchToken;
+      if (fetchToken == null) {
+        throw PlatformException(
+            code: 'NO_TOKEN_PROVIDER', message: 'setTokenProvider not called');
+      }
+      final token = await fetchToken();
+      if (token.trim().isEmpty) {
+        throw PlatformException(
+            code: 'EMPTY_TOKEN', message: 'fetchToken returned an empty token');
+      }
+      return token;
+    }
     if (call.method == 'executeStep') {
       final args = call.arguments as Map;
       final stepName = args['stepName'] as String;

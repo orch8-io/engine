@@ -162,6 +162,14 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
         // Runtime node / worker (Orch8Mobile after 0.7.1).
         case "nodeRuntimeId":
             return try engine.nodeRuntimeId()
+        case "setTokenProvider":
+            let token = try a.string("token")
+            guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw InvalidArgument(message: "token must not be empty")
+            }
+            let timeoutMs = (a["refreshTimeoutMs"] as? NSNumber)?.uint64Value ?? 30_000
+            engine.setTokenProvider(provider: FlutterTokenProvider(plugin: self, token: token, timeoutMs: timeoutMs))
+            return nil
         case "registerNode":
             let r = try engine.registerNode(capabilities: NodeCapabilities(
                 handlers: a["handlers"] as? [String] ?? [],
@@ -416,6 +424,55 @@ private final class ResultBox: @unchecked Sendable {
     private var value: Any?
     func set(_ v: Any?) { lock.lock(); value = v; lock.unlock() }
     func get() -> Any? { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+/// Node credential (device sessions) for `MobileEngine.setTokenProvider`.
+/// `refreshToken` runs on the engine's blocking thread: it asks Dart's
+/// `fetchToken` through `refreshToken` on the main thread and waits at most
+/// `timeoutMs`.
+final class FlutterTokenProvider: TokenProvider, @unchecked Sendable {
+    private weak var plugin: Orch8FlutterPlugin?
+    private let timeoutMs: UInt64
+    private let lock = NSLock()
+    private var token: String
+
+    init(plugin: Orch8FlutterPlugin, token: String, timeoutMs: UInt64) {
+        self.plugin = plugin
+        self.token = token
+        self.timeoutMs = timeoutMs
+    }
+
+    func currentToken() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return token
+    }
+
+    func refreshToken() throws -> String {
+        guard let channel = plugin?.channel else {
+            throw MobileError.Engine(message: "Flutter channel not attached")
+        }
+        let done = DispatchSemaphore(value: 0)
+        let box = ResultBox()
+        DispatchQueue.main.async {
+            channel.invokeMethod("refreshToken", arguments: nil) { reply in
+                box.set(reply)
+                done.signal()
+            }
+        }
+        let millis = Int(min(timeoutMs, UInt64(Int32.max)))
+        guard done.wait(timeout: .now() + .milliseconds(millis)) == .success else {
+            throw MobileError.Engine(message: "token provider timed out after \(timeoutMs) ms")
+        }
+        switch box.get() {
+        case let fresh as String where !fresh.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+            lock.lock(); token = fresh; lock.unlock()
+            return fresh
+        case let error as FlutterError:
+            throw MobileError.Engine(message: "token provider failed: \(error.message ?? error.code)")
+        default:
+            throw MobileError.Engine(message: "token provider returned no token")
+        }
+    }
 }
 
 final class StaticTokenProvider: TokenProvider, @unchecked Sendable {

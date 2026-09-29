@@ -15,6 +15,7 @@ import io.orch8.mobile.HandlerException
 import io.orch8.mobile.InstanceStateKind
 import io.orch8.mobile.MobileEngine
 import io.orch8.mobile.MobileEngineConfig
+import io.orch8.mobile.MobileException
 import io.orch8.mobile.NodeCapabilities
 import io.orch8.mobile.NodeConnectivity
 import io.orch8.mobile.PowerState
@@ -38,7 +39,7 @@ import java.util.concurrent.atomic.AtomicReference
  * Int or Long, so conversions happen here.
  */
 class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
-    private var channel: MethodChannel? = null
+    internal var channel: MethodChannel? = null
     private var eventChannel: EventChannel? = null
     private var eventSink: EventChannel.EventSink? = null
     private var appContext: Context? = null
@@ -46,7 +47,7 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
     @Volatile private var engine: MobileEngine? = null
 
     @Volatile private var handlerTimeoutMs: Long = 30_000
-    private val main = Handler(Looper.getMainLooper())
+    internal val main = Handler(Looper.getMainLooper())
     private val work: ExecutorService = Executors.newCachedThreadPool { r ->
         Thread(r, "orch8-flutter-work").apply { isDaemon = true }
     }
@@ -220,6 +221,12 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
 
         // Runtime node / worker (orch8-mobile after 0.7.1).
         "nodeRuntimeId" -> eng.nodeRuntimeId()
+        "setTokenProvider" -> {
+            val token = a.requireStr("token")
+            require(token.isNotBlank()) { "token must not be empty" }
+            eng.setTokenProvider(FlutterTokenProvider(this, token, a.long("refreshTimeoutMs") ?: 30_000L))
+            null
+        }
         "registerNode" -> eng.registerNode(
             NodeCapabilities(
                 handlers = a.strings("handlers"),
@@ -421,6 +428,56 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
                     }
                 else -> throw HandlerException.Retryable("Dart side has no executeStep handler")
             }
+        }
+    }
+}
+
+/**
+ * Node credential (device sessions) for `MobileEngine.setTokenProvider`.
+ * `refreshToken` runs on the engine's blocking thread: it asks Dart's
+ * `fetchToken` through `refreshToken` on the platform thread and waits at
+ * most [timeoutMs].
+ */
+private class FlutterTokenProvider(
+    private val plugin: Orch8FlutterPlugin,
+    initial: String,
+    private val timeoutMs: Long,
+) : TokenProvider {
+    @Volatile private var token: String = initial
+
+    override fun currentToken(): String = token
+
+    override fun refreshToken(): String {
+        val channel = plugin.channel ?: throw MobileException.Engine("Flutter channel not attached")
+        val done = CountDownLatch(1)
+        val reply = AtomicReference<Any?>()
+        plugin.main.post {
+            channel.invokeMethod(
+                "refreshToken",
+                null,
+                object : MethodChannel.Result {
+                    override fun success(result: Any?) {
+                        reply.set(result); done.countDown()
+                    }
+
+                    override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
+                        reply.set(MobileException.Engine("token provider failed: ${errorMessage ?: errorCode}"))
+                        done.countDown()
+                    }
+
+                    override fun notImplemented() {
+                        reply.set(MobileException.Engine("Dart side has no refreshToken handler")); done.countDown()
+                    }
+                },
+            )
+        }
+        if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            throw MobileException.Engine("token provider timed out after $timeoutMs ms")
+        }
+        return when (val r = reply.get()) {
+            is String -> if (r.isBlank()) throw MobileException.Engine("token provider returned an empty token") else r.also { token = it }
+            is MobileException -> throw r
+            else -> throw MobileException.Engine("token provider returned no token")
         }
     }
 }
