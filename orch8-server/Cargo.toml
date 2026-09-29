@@ -45,6 +45,7 @@ utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 tonic.workspace = true
 http = "1"
+reqwest.workspace = true
 tikv-jemallocator.workspace = true
 
 # OTLP trace export (feature `otlp`, on by default — opt out with

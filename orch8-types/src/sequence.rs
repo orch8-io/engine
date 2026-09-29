@@ -1428,6 +1428,35 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "notify",
 ];
 
+/// Built-in handlers a remote executor (hybrid mode, see `docs/HYBRID.md`)
+/// can run away from the engine: they need only their params, the step
+/// context, and outbound network access, never the engine database. Step,
+/// sequence, and policy placement (region/labels/residency) applies to these
+/// and to external worker handlers; every other built-in manipulates engine
+/// state (instance state, signals, events, memory, blobs, human input) and
+/// always runs on the engine node, where that state lives.
+pub const REMOTE_EXECUTABLE_BUILTINS: &[&str] = &[
+    "noop",
+    "log",
+    "sleep",
+    "fail",
+    "transform",
+    "assert",
+    "http_request",
+    "llm_call",
+    "tool_call",
+    "email",
+    "notify",
+];
+
+/// Whether `handler` is a built-in that must run on the engine node (it is
+/// built in and not in [`REMOTE_EXECUTABLE_BUILTINS`]). Placement never
+/// applies to such steps.
+#[must_use]
+pub fn is_engine_only_builtin(handler: &str) -> bool {
+    BUILTIN_HANDLER_NAMES.contains(&handler) && !REMOTE_EXECUTABLE_BUILTINS.contains(&handler)
+}
+
 impl SequenceDefinition {
     /// Structural validation performed at submit time (before the sequence
     /// reaches storage).
@@ -1778,12 +1807,13 @@ fn validate_step_placement(s: &StepDef) -> Result<(), SequenceValidationError> {
                  instance (set it on the sequence's `placement`)",
             ));
         }
-        if placement.has_hard_constraints() && BUILTIN_HANDLER_NAMES.contains(&s.handler.as_str()) {
+        if placement.has_hard_constraints() && is_engine_only_builtin(&s.handler) {
             return Err(block_err(
                 id,
                 format!(
-                    "placement region/labels/residency need an external worker handler; \
-                     built-in handler `{}` runs on the engine node",
+                    "placement region/labels/residency need a worker or a remote-executable \
+                     built-in; built-in handler `{}` manipulates engine state and runs on the \
+                     engine node",
                     s.handler
                 ),
             ));
@@ -3587,6 +3617,37 @@ mod tests {
         assert!(BUILTIN_HANDLER_NAMES.contains(&"noop"));
         assert!(BUILTIN_HANDLER_NAMES.contains(&"http_request"));
         assert!(BUILTIN_HANDLER_NAMES.contains(&"human_review"));
+    }
+
+    #[test]
+    fn remote_executable_builtins_are_builtins_and_engine_state_ones_are_not() {
+        for name in REMOTE_EXECUTABLE_BUILTINS {
+            assert!(BUILTIN_HANDLER_NAMES.contains(name), "{name}");
+            assert!(!is_engine_only_builtin(name), "{name}");
+        }
+        for name in ["set_state", "send_signal", "human_review", "wait_for_event"] {
+            assert!(is_engine_only_builtin(name), "{name}");
+        }
+        assert!(!is_engine_only_builtin("my_worker_handler"));
+    }
+
+    #[test]
+    fn hard_placement_is_allowed_on_remote_builtins_only() {
+        let placed = |handler: &str| {
+            let BlockDefinition::Step(mut s) = step("a") else {
+                unreachable!("step() builds a step");
+            };
+            s.handler = handler.into();
+            s.placement = Some(crate::placement::Placement {
+                residency: Some("eu".into()),
+                ..crate::placement::Placement::default()
+            });
+            validate_step_placement(&s)
+        };
+        assert!(placed("http_request").is_ok());
+        assert!(placed("custom_worker").is_ok());
+        let err = placed("set_state").unwrap_err().to_string();
+        assert!(err.contains("engine node"), "{err}");
     }
 
     // ─── structural validation ───

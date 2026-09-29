@@ -3319,6 +3319,7 @@ dependencies = [
 name = "orch8-e2e"
 version = "0.7.1"
 dependencies = [
+ "axum",
  "chrono",
  "orch8",
  "orch8-api",
@@ -3332,6 +3333,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tonic",
@@ -3344,6 +3346,7 @@ name = "orch8-engine"
 version = "0.7.1"
 dependencies = [
  "async-nats",
+ "async-trait",
  "axum",
  "base64 0.23.1",
  "bytes",
@@ -3512,6 +3515,7 @@ dependencies = [
  "orch8-push",
  "orch8-storage",
  "orch8-types",
+ "reqwest",
  "serde_json",
  "serial_test",
  "tempfile",

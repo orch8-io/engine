@@ -123,19 +123,9 @@ async fn resolve_string(
     tenant_id: &str,
     s: &str,
 ) -> Result<Option<Value>, StepError> {
-    let Some(rest) = s.strip_prefix(SCHEME) else {
+    let Some((id, key)) = parse_reference(s)? else {
         return Ok(None);
     };
-    let (id, key) = match rest.split_once('/') {
-        Some((id, key)) => (id, Some(key)),
-        None => (rest, None),
-    };
-    if id.is_empty() {
-        return Err(StepError::Permanent {
-            message: format!("credentials: missing id in reference '{s}'"),
-            details: None,
-        });
-    }
 
     // Tenant isolation is enforced by the storage layer itself: a non-empty
     // `tenant_id` scopes the lookup to that tenant (or the global scope,
@@ -162,21 +152,195 @@ async fn resolve_string(
         });
     }
 
-    // Parse the stored value as JSON. If parsing fails, treat it as a plain
-    // string — this lets operators store either structured objects or raw
-    // tokens without ceremony.
-    let parsed: Value = serde_json::from_str(credential.value.expose())
-        .unwrap_or_else(|_| Value::String(credential.value.expose().to_string()));
+    expand_material(id, key, credential.value.expose()).map(Some)
+}
 
+/// Turn stored credential text into the value a reference expands to.
+///
+/// The text is parsed as JSON; if parsing fails it is treated as a plain
+/// string, so operators can store either structured objects or raw tokens
+/// without ceremony. `key` selects one field of an object credential.
+fn expand_material(id: &str, key: Option<&str>, material: &str) -> Result<Value, StepError> {
+    let parsed: Value =
+        serde_json::from_str(material).unwrap_or_else(|_| Value::String(material.to_string()));
     match key {
-        None => Ok(Some(parsed)),
-        Some(k) => {
-            let field = parsed.get(k).cloned().ok_or_else(|| StepError::Permanent {
-                message: format!("credentials: credential '{id}' has no field '{k}'"),
-                details: None,
-            })?;
-            Ok(Some(field))
+        None => Ok(parsed),
+        Some(k) => parsed.get(k).cloned().ok_or_else(|| StepError::Permanent {
+            message: format!("credentials: credential '{id}' has no field '{k}'"),
+            details: None,
+        }),
+    }
+}
+
+/// Split `credentials://<id>[/<key>]`. `Ok(None)` for any other string.
+fn parse_reference(s: &str) -> Result<Option<(&str, Option<&str>)>, StepError> {
+    let Some(rest) = s.strip_prefix(SCHEME) else {
+        return Ok(None);
+    };
+    let (id, key) = match rest.split_once('/') {
+        Some((id, key)) => (id, Some(key)),
+        None => (rest, None),
+    };
+    if id.is_empty() {
+        return Err(StepError::Permanent {
+            message: format!("credentials: missing id in reference '{s}'"),
+            details: None,
+        });
+    }
+    Ok(Some((id, key)))
+}
+
+// ---------------------------------------------------------------------------
+// Executor-local credentials (hybrid mode)
+// ---------------------------------------------------------------------------
+
+/// Environment variable prefix of executor-local credentials. The rest of the
+/// variable name is the credential id, verbatim (case-sensitive):
+/// `ORCH8_CREDENTIAL_stripe_prod` backs `credentials://stripe_prod`.
+pub const LOCAL_CREDENTIAL_ENV_PREFIX: &str = "ORCH8_CREDENTIAL_";
+
+/// Upper bound on one local credential file.
+const MAX_LOCAL_CREDENTIAL_BYTES: u64 = 64 * 1024;
+/// Upper bound on credential names a runtime advertises.
+const MAX_ADVERTISED_CREDENTIALS: usize = 64;
+
+/// Credentials held by a remote executor, resolved **on the executor**.
+///
+/// In hybrid mode the engine never expands `credentials://` references of a
+/// step placed on remote executors: the task carries the reference, the
+/// executor looks the id up here, and the secret never reaches the control
+/// plane. Sources, in order:
+///
+/// 1. `ORCH8_CREDENTIAL_<id>` environment variables;
+/// 2. `<dir>/<id>` files (e.g. a mounted Kubernetes Secret), when a
+///    directory is configured.
+///
+/// Values use the engine's format: JSON is parsed (so a field reference
+/// `credentials://<id>/<field>` works), anything else is a plain string.
+#[derive(Debug, Clone, Default)]
+pub struct LocalCredentials {
+    dir: Option<std::path::PathBuf>,
+    env: std::collections::BTreeMap<String, SecretString>,
+}
+
+/// Credential ids usable as a file name and a capability fact.
+fn is_local_credential_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('.')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+impl LocalCredentials {
+    /// Snapshot `ORCH8_CREDENTIAL_*` from the process environment and use
+    /// `dir` (if any) for file-backed credentials.
+    #[must_use]
+    pub fn from_env(dir: Option<std::path::PathBuf>) -> Self {
+        Self::from_vars(dir, std::env::vars())
+    }
+
+    /// Like [`Self::from_env`] with explicit variables (tests).
+    #[must_use]
+    pub fn from_vars(
+        dir: Option<std::path::PathBuf>,
+        vars: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        let env = vars
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let id = name.strip_prefix(LOCAL_CREDENTIAL_ENV_PREFIX)?;
+                is_local_credential_id(id).then(|| (id.to_owned(), SecretString::new(value)))
+            })
+            .collect();
+        Self { dir, env }
+    }
+
+    /// The raw material for `id`, if this executor holds it.
+    fn material(&self, id: &str) -> Result<Option<SecretString>, StepError> {
+        if !is_local_credential_id(id) {
+            return Ok(None);
         }
+        if let Some(value) = self.env.get(id) {
+            return Ok(Some(value.clone()));
+        }
+        let Some(dir) = &self.dir else {
+            return Ok(None);
+        };
+        let path = dir.join(id);
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() && meta.len() <= MAX_LOCAL_CREDENTIAL_BYTES => {}
+            Ok(meta) if meta.is_file() => {
+                return Err(StepError::Permanent {
+                    message: format!(
+                        "credentials: local credential '{id}' exceeds {MAX_LOCAL_CREDENTIAL_BYTES} bytes"
+                    ),
+                    details: None,
+                });
+            }
+            _ => return Ok(None),
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| StepError::Retryable {
+            message: format!("credentials: cannot read local credential '{id}': {e}"),
+            details: None,
+        })?;
+        Ok(Some(SecretString::new(
+            text.trim_end_matches(['\n', '\r']).to_owned(),
+        )))
+    }
+
+    /// Credential ids this executor can resolve (advertised to the control
+    /// plane as capability facts; never values). Sorted, at most 64.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        let mut names: std::collections::BTreeSet<String> = self.env.keys().cloned().collect();
+        if let Some(dir) = &self.dir
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if is_local_credential_id(&name)
+                    && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file())
+                {
+                    names.insert(name);
+                }
+            }
+        }
+        names.into_iter().take(MAX_ADVERTISED_CREDENTIALS).collect()
+    }
+
+    /// Replace every `credentials://<id>[/<key>]` string in `value` with the
+    /// locally held material. A reference to a credential this executor does
+    /// not hold fails the step permanently (it never falls back to asking the
+    /// control plane).
+    pub fn resolve_in_value(&self, value: &mut Value) -> Result<(), StepError> {
+        match value {
+            Value::String(s) => {
+                if let Some((id, key)) = parse_reference(s)? {
+                    let material = self.material(id)?.ok_or_else(|| StepError::Permanent {
+                        message: format!(
+                            "credentials: this executor holds no local credential '{id}' \
+                             (set {LOCAL_CREDENTIAL_ENV_PREFIX}{id} or add it to the credentials directory)"
+                        ),
+                        details: None,
+                    })?;
+                    *value = expand_material(id, key, material.expose())?;
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.resolve_in_value(item)?;
+                }
+            }
+            Value::Object(map) => {
+                for item in map.values_mut() {
+                    self.resolve_in_value(item)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -424,6 +588,50 @@ async fn persist_refreshed_tokens(
 mod tests {
     use super::*;
     use orch8_storage::AdminStore;
+
+    #[test]
+    fn local_credentials_resolve_from_env_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("db-pass"), "s3cr3t\n").unwrap();
+        std::fs::write(dir.path().join("api"), r#"{"token":"tok-1","user":"u"}"#).unwrap();
+        std::fs::write(dir.path().join(".hidden"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("..data")).unwrap_or_default();
+        let local = LocalCredentials::from_vars(
+            Some(dir.path().to_path_buf()),
+            [
+                (
+                    "ORCH8_CREDENTIAL_stripe_prod".to_string(),
+                    "sk_env".to_string(),
+                ),
+                ("ORCH8_CREDENTIAL_bad/id".to_string(), "x".to_string()),
+                ("OTHER".to_string(), "y".to_string()),
+            ],
+        );
+        assert_eq!(local.names(), vec!["api", "db-pass", "stripe_prod"]);
+
+        let mut params = serde_json::json!({
+            "password": "credentials://db-pass",
+            "auth": {"bearer": "credentials://api/token"},
+            "key": "credentials://stripe_prod",
+            "plain": "credentials-free",
+        });
+        local.resolve_in_value(&mut params).unwrap();
+        assert_eq!(params["password"], "s3cr3t");
+        assert_eq!(params["auth"]["bearer"], "tok-1");
+        assert_eq!(params["key"], "sk_env");
+        assert_eq!(params["plain"], "credentials-free");
+
+        let mut missing = serde_json::json!({"x": "credentials://nope"});
+        let err = local
+            .resolve_in_value(&mut missing)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no local credential 'nope'"), "{err}");
+        let mut traversal = serde_json::json!("credentials://../etc/passwd");
+        assert!(local.resolve_in_value(&mut traversal).is_err());
+        let mut no_field = serde_json::json!("credentials://api/missing");
+        assert!(local.resolve_in_value(&mut no_field).is_err());
+    }
 
     fn credential(id: &str, kind: CredentialKind) -> CredentialDef {
         let now = chrono::Utc::now();

@@ -328,6 +328,31 @@ pub fn contains_credential_reference(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Credential ids referenced by `credentials://<id>[/<field>]` strings in
+/// `value` (whole-string references only, the form the resolver expands).
+/// Sorted and de-duplicated.
+#[must_use]
+pub fn credential_reference_ids(value: &serde_json::Value) -> Vec<String> {
+    fn walk(value: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                if let Some(rest) = text.strip_prefix("credentials://") {
+                    let id = rest.split_once('/').map_or(rest, |(id, _)| id);
+                    if !id.is_empty() {
+                        out.insert(id.to_owned());
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, out)),
+            serde_json::Value::Object(map) => map.values().for_each(|item| walk(item, out)),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(value, &mut out);
+    out.into_iter().collect()
+}
+
 /// Context delivered to a `browser` claimant. A browser never receives
 /// secrets: the read-only `config` section and the audit trail (both routinely
 /// carry endpoints, keys, and operator data) are dropped, any top-level `data`
@@ -428,6 +453,21 @@ impl std::str::FromStr for WorkerAttemptEventKind {
 #[cfg(test)]
 mod attempt_tests {
     use super::*;
+
+    #[test]
+    fn credential_reference_ids_collects_whole_string_refs() {
+        let params = serde_json::json!({
+            "auth": "credentials://stripe/access_token",
+            "headers": {"x": "credentials://stripe"},
+            "list": ["credentials://db-pass", "plain", "credentials://"],
+            "embedded": "Bearer credentials://ignored",
+        });
+        assert_eq!(
+            credential_reference_ids(&params),
+            vec!["db-pass".to_string(), "stripe".to_string()]
+        );
+        assert!(credential_reference_ids(&serde_json::json!({"a": 1})).is_empty());
+    }
 
     #[test]
     fn event_kind_has_stable_storage_roundtrip() {

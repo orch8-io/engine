@@ -2,22 +2,49 @@
 
 > **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
 
-Hybrid means the Orch8 control plane runs in Orch8 Cloud and the executors
-that touch your data run in your infrastructure. This page covers the engine
-side: joining an executor, deploying it with Helm or Compose, the
-`kill-executor` drill, signed effect receipts, and run-metadata export.
+Hybrid means **Orch8 Cloud runs the engine** (API, scheduler, database) and
+**executors in your network run the steps** that need your secrets, internal
+APIs, or network. An executor holds no database: it dials **out** to the
+engine, claims leased step tasks over the worker protocol, runs them next to
+your systems, and reports the outcome. Credentials, network access, and side
+effects stay in your network. Steps you do not place keep running in Cloud.
 
-What leaves your network:
+```
+ Orch8 Cloud (engine + DB)                         your VPC
+ ┌──────────────────────────┐   outbound only   ┌──────────────────────────┐
+ │ scheduler, API, reaper   │◄──────────────────│ orch8-server (executor)  │
+ │ worker_tasks, outputs    │  gRPC stream /    │  • local credentials     │
+ │ credential *references*  │  HTTPS polling    │  • calls internal APIs   │
+ └──────────────────────────┘                   │  • optional BYOK vault   │
+                                                └──────────────────────────┘
+```
 
-| Channel | Carries | Never carries |
+## What Cloud sees and what never leaves your network
+
+Derived from the code paths (`orch8_engine::remote_executor`,
+`step_placement::defers_credentials`, the worker protocol):
+
+| Data | Seen/stored by Cloud? | Notes |
 |---|---|---|
-| Managed-control session (outbound gRPC, [NODE_ROLES.md](NODE_ROLES.md#managed-cloud-outbound-control)) | runtime id, worker id, coarse region, lease heartbeats, drain acks | contexts, params, outputs, artifacts, logs, credentials |
-| Run-metadata export (`[cloud_observability]`, optional) | instance id, sequence name/version, state, timestamps, step id, duration, coarse error kind | context, inputs, outputs, params, error messages |
+| Sequence definitions, instance context (`context.data`, `config`), instance metadata | **Yes** | You create them through the Cloud API. |
+| Step params **after template rendering** | **Yes** | Rendered by the Cloud engine and stored in `worker_tasks.params`; anything interpolated from context or earlier outputs is in them. Params are never externalized. |
+| Step context shipped with a task | **Yes** | The step's context snapshot (`context_access` applies), including `runtime.traceparent`. |
+| `credentials://<id>` references in a **placed** step | **Reference only** | The engine leaves them unresolved; the executor resolves them locally. Cloud stores the string `credentials://<id>/…` and the id as a task requirement. |
+| Credential **values** for placed steps | **Never** | Read on the executor from `ORCH8_CREDENTIAL_<id>` or `<ORCH8_CREDENTIALS_DIR>/<id>`. Not sent, not stored (the e2e suite scans every engine table for the value). |
+| Credentials referenced by **unplaced** steps | Yes (engine credential store) | Those steps run in Cloud and resolve from Cloud's store as before. |
+| Network access / side effects of placed steps | **Never** | Requests originate from the executor. Cloud has no inbound path to your network. |
+| Step outputs | **Yes**, unless sealed | Everything the handler returns is reported, including anything it echoes (a `transform` that echoes a resolved credential sends it). |
+| Output fields sealed with BYOK on the executor | **Reference only** | `{"_o8vault": {object, kid, dek (wrapped by your key), ref}}`; plaintext is in your bucket. |
+| Error messages of failed steps | **Yes** | Handler error text (URLs are redacted by the built-ins). |
+| Executor capability advertisement | **Yes** | Runtime id, handler names, labels (e.g. `residency`, `site`), region, `host:<worker name>`, credential **ids**, draining flag. |
+| Lease traffic | **Yes** | Claims, heartbeats (task id, claim epoch), completions, failures, releases. |
+| Managed-control session | **Yes** | Token runtime id, worker name, region, liveness, drain acks. |
+| BYOK keys, bucket credentials, KMS access | **Never** | Only the executor holds them. Cloud needs no KMS access; it stores and relays references. |
+| Handler-local scratch state (LLM cache, usage events) | **Never** | Kept in an in-memory scratch store on the executor and discarded at exit. |
 
-The managed-control channel is control-only today: `place` commands are
-refused, so the cloud cannot push workload payloads to an executor. Work
-reaches an executor through its own database (shared with a control node you
-run) and its local workers.
+Not exactly-once: an executor that dies after its request reached a provider
+but before it reported produces a redelivery on retry. The effect ledger marks
+that attempt `unknown`; use the provider's idempotency key.
 
 ## Join an executor
 
@@ -26,52 +53,171 @@ Orch8 Cloud issues a **join token**, `o8x1.<base64url(json)>`:
 ```json
 { "v": 1, "endpoint": "https://…", "api_key": "…", "tenant_id": "acme",
   "runtime_id": "018f…", "worker_id_prefix": "acme-dc1",
-  "labels": { "gpu": "a10" }, "region": "eu-west-1" }
+  "labels": { "residency": "eu", "site": "vpc" }, "region": "eu-west-1" }
 ```
 
-The token is a **secret** (it contains a dedicated API key) and is unsigned:
-the control plane authenticates the key; the token only carries it.
+The token is a **secret** (it carries a dedicated API key) and is unsigned: the
+engine authenticates the key; the token only carries it. The key needs the
+`worker` capability (worker endpoints plus `POST /runtimes/register`).
+
+The token is **all an executor needs**: no database, no API key of its own, no
+encryption key.
 
 ```bash
-# Write orch8.toml ([node] role = "executor" + managed_control_*), mode 0600.
-ORCH8_JOIN_TOKEN='o8x1.…' orch8 executor join --config-out orch8.toml --label zone=b
-# …or read it from stdin, and start the server right away:
-orch8 executor join - --config-out orch8.toml --run < token.txt
+# Containers: just the token.
+ORCH8_JOIN_TOKEN='o8x1.…' orch8-server
+# Or write orch8.toml ([node] role = "executor" + managed_control_*), mode 0600, and start it:
+orch8 executor join - --config-out orch8.toml --label zone=b --run < token.txt
 ```
 
-`executor join` keeps every other section of an existing `orch8.toml`,
-merges `--label k=v` over the token's labels, derives the worker id as
-`<worker_id_prefix>-<hostname>` (override with `--hostname`), and refuses to
-write a config the server would reject.
+A joined `executor` with no `database.url` runs as a **remote executor**. (An
+executor that also has a database keeps the older shared-database mode.)
 
-In containers, skip the file: set `ORCH8_JOIN_TOKEN` and `orch8-server`
-decodes it at startup. Explicit `ORCH8_MANAGED_CONTROL_*` variables still
-override individual fields; `ORCH8_NODE_ROLE=edge` keeps the edge role.
+What happens at startup:
+
+1. It validates the config and opens a **managed-control** gRPC session to
+   `endpoint` (ping, reload, drain).
+2. It connects to the worker protocol at the same `endpoint`: the negotiated
+   **gRPC worker stream** by default, falling back to **HTTP polling** at
+   `<endpoint>/api/v1` when the endpoint does not serve gRPC
+   (`ORCH8_EXECUTOR_TRANSPORT=auto|grpc|http`, `ORCH8_EXECUTOR_API_URL`).
+3. It advertises a runtime: kind `server`, the handlers it serves, the token
+   labels merged with `[node] labels` / `--label`, the token region, the
+   worker name as `host:<prefix>-<hostname>`, and the ids of its local
+   credentials. Every replica gets its own runtime id, derived from the token
+   runtime id and its worker name, so draining one pod never withdraws its
+   siblings. The lease `worker_id` is that runtime id.
+4. It claims tasks through the engine's capability predicate, runs the
+   built-in handler, heartbeats, and settles with the task's `claim_epoch`.
+
+It serves `/health/live` and `/health/ready` on `api.http_addr` and nothing
+else. Built-ins it can run (`executor.handlers`, default all):
+`http_request`, `llm_call`, `tool_call`, `email`, `notify`, `transform`,
+`assert`, `log`, `sleep`, `noop`, `fail`. Built-ins that manipulate engine
+state (`set_state`, `send_signal`, `human_review`, `wait_for_event`,
+`memory_*`, `blob_*`, …) always run in Cloud and ignore placement.
+Known limits on the executor: `llm_call` prompt-registry references, tenant
+LLM budgets, and artifact-backed images need the engine database and are not
+available; LLM usage is not reported back.
+
+### Executor settings
+
+| Setting | Env | Default |
+|---|---|---|
+| `[executor] transport` | `ORCH8_EXECUTOR_TRANSPORT` | `auto` |
+| `[executor] api_url` | `ORCH8_EXECUTOR_API_URL` | `<endpoint>/api/v1` |
+| `[executor] ca_cert_path` (PEM trusted instead of public roots) | `ORCH8_EXECUTOR_CA_CERT` | public web PKI |
+| `[executor] handlers` | `ORCH8_EXECUTOR_HANDLERS` (comma-separated) | all remote-executable built-ins |
+| `[executor] max_concurrent_tasks` | `ORCH8_EXECUTOR_MAX_CONCURRENT_TASKS` | 16 |
+| `[executor] credentials_dir` | `ORCH8_CREDENTIALS_DIR` | none (env only) |
+| `[executor] drain_timeout_secs` | `ORCH8_EXECUTOR_DRAIN_TIMEOUT_SECS` | 25 |
+| `[executor] externalize_bytes` (BYOK threshold) | `ORCH8_EXECUTOR_EXTERNALIZE_BYTES` | 65536 |
+| `[executor] heartbeat_secs` (cap; 0 = engine hint) | `ORCH8_EXECUTOR_HEARTBEAT_SECS` | 0 |
+| Internal networks steps may call | `ORCH8_ALLOWED_INTERNAL_CIDRS` | none |
+
+The SSRF guard still applies on the executor: `http_request`/`tool_call`
+reach only public addresses unless the network is listed in
+`ORCH8_ALLOWED_INTERNAL_CIDRS` (e.g. `10.20.0.0/16`). Cloud metadata
+endpoints (`169.254.169.254`) stay blocked unless you list them.
+`ORCH8_ALLOW_INTERNAL_URLS=true` opens everything and is not recommended.
+
+## Which steps run in your network
+
+Placement decides (see [PLACEMENT.md](PLACEMENT.md)). A step with a hard
+placement constraint (`region`, `labels`, `residency` — on the step, its
+sequence, or from a tenant policy) is dispatched to executors whose
+advertisement satisfies it; everything else runs in Cloud.
+
+Recommended policy — all steps of instances tagged `vpc` require an executor
+labelled `site=vpc` (issue the join token with that label):
+
+```http
+PUT /api/v1/placement/policies
+{ "items": [ { "name": "vpc",
+               "match": { "tag": "vpc" },
+               "require": { "labels": { "site": "vpc" } } } ] }
+```
+
+Create instances with `"metadata": {"tags": ["vpc"]}`. Or place individual
+steps: `"placement": {"residency": "eu"}` matches executors labelled
+`residency=eu`. With no live matching executor the step waits
+(`placement_unsatisfied`); it never falls back to Cloud.
+
+## Credentials resolve on the executor
+
+For a hard-placed step the engine **does not resolve** `credentials://`
+references: the task carries `credentials://<id>[/<field>]` and requires the
+runtime to advertise `<id>`, so only an executor holding the credential can
+claim it. The executor resolves the reference from, in order:
+
+1. `ORCH8_CREDENTIAL_<id>` — the rest of the variable name is the id,
+   case-sensitive (`ORCH8_CREDENTIAL_stripe_prod` → `credentials://stripe_prod`);
+2. `<ORCH8_CREDENTIALS_DIR>/<id>` — e.g. a mounted Kubernetes Secret whose
+   keys are credential ids.
+
+Values use the engine's format: JSON is parsed (so `credentials://api/token`
+selects a field), anything else is a plain string. A reference the executor
+cannot resolve fails the step permanently; it never asks Cloud. Unplaced
+steps keep resolving from Cloud's credential store.
+
+## BYOK: keep large outputs in your bucket
+
+Configure the BYOK vault on the executor with the `ORCH8_BYOK_*` variables of
+[FEDERATION.md](FEDERATION.md#2-byok-externalization) (bucket + AWS KMS key or
+static key). The executor then seals every top-level output field larger than
+`ORCH8_EXECUTOR_EXTERNALIZE_BYTES` (`0` = every field) into your bucket and
+reports only the reference; small fields (status codes, ids) stay readable.
+A later **placed** step that receives such a reference (through a template)
+gets the plaintext on the executor. The encryption, the KMS calls, and the
+bucket writes happen on the executor with your credentials; Cloud needs no KMS
+access and cannot read sealed fields. Honest limits: step params and context
+rendered by Cloud are never sealed; a Cloud-side (unplaced) step that
+templates a sealed field receives the reference, not the data; a reference is
+bound to its instance and only opens there.
+
+## Drain, restarts, and failures
+
+- **SIGTERM** or a managed **`drain`** command
+  (`POST /api/v1/workers/commands {"worker_id": "<prefix>-<hostname>", "tenant_id": "…", "command": "drain"}`):
+  the executor advertises `draining` (no new placement), stops claiming, lets
+  in-flight steps finish for `drain_timeout_secs`, then releases the rest
+  (`release {started: true}`: the attempt's effect becomes `unknown`, the
+  step's retry policy schedules a new attempt elsewhere), and exits 0. A drain
+  command reaches the executor on its next managed-control heartbeat (within
+  15 s).
+- **Kill / network loss**: heartbeats stop; the engine's lease reaper
+  reclaims the task after `worker_reaper_stale_secs` (default 60 s), marks the
+  attempt `unknown`, and retries it on another executor.
+- A completion from a process whose lease moved on is rejected by its stale
+  `claim_epoch`.
 
 ## Helm
 
 ```bash
 kubectl create secret generic orch8-join --from-literal=join-token='o8x1.…'
+kubectl create secret generic orch8-executor-credentials --from-file=vpc-api=./vpc-api.json
 helm install exec deploy/helm/orch8 \
   --set mode=executor \
   --set hybrid.joinToken.existingSecret=orch8-join \
-  --set externalDatabase.existingSecret=orch8-db
+  --set hybrid.credentials.existingSecret=orch8-executor-credentials \
+  --set hybrid.allowedInternalCidrs=10.0.0.0/8
 ```
 
-`mode: executor` renders only the executor Deployment (HTTP health only,
-worker gRPC surface), injects `ORCH8_JOIN_TOKEN` from the Secret and sets
-`HOSTNAME` to the pod name so each replica has its own worker id. The chart
-fails closed without the Secret, with an ingress, or on SQLite. See
-`deploy/helm/orch8/ci/hybrid-executor-values.yaml`.
+`mode=executor` renders only the executor Deployment: `ORCH8_JOIN_TOKEN` from
+the Secret, `HOSTNAME` = pod name (one worker name per replica), health probes
+on HTTP, no Service, no database, no chart Secret. The chart fails if a
+database or an ingress is configured in this mode. Optional:
+`hybrid.caCert.existingSecret` (private CA), BYOK through `executor.extraEnv`.
+See `deploy/helm/orch8/ci/hybrid-executor-values.yaml`.
 
 ## Docker Compose
 
 [`deploy/hybrid-executor/docker-compose.yml`](../deploy/hybrid-executor/docker-compose.yml)
-runs one executor with a local Postgres:
+runs one executor from the token alone, with credentials from
+`./credentials/<id>`:
 
 ```bash
-export ORCH8_JOIN_TOKEN='o8x1.…' ORCH8_API_KEY=$(openssl rand -hex 24) \
-       ORCH8_ENCRYPTION_KEY=$(openssl rand -hex 32)
+export ORCH8_JOIN_TOKEN='o8x1.…'
 docker compose -f deploy/hybrid-executor/docker-compose.yml up -d
 ```
 
@@ -163,6 +309,10 @@ prove the bundle came from your engine. Window exports scan at most 10,000
 instances touched in the window and set `scope.truncated=true` beyond that.
 
 ## Run-metadata export {#observability-export}
+
+This applies to an engine you run yourself (self-hosted or shared-database
+executors) that reports to the Cloud fleet view. A remote executor runs no
+engine and exports nothing beyond the worker protocol above.
 
 ```toml
 [cloud_observability]

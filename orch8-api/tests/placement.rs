@@ -182,6 +182,23 @@ async fn sequence_create_validates_placement() {
         resp.text().await
     );
 
+    // Hybrid: a remote-executable built-in may be placed on executors.
+    let remote_builtin = sequence(
+        "acme",
+        "remote-builtin",
+        &json!([{"type": "step", "id": "s", "handler": "http_request",
+                 "placement": {"residency": "eu"}}]),
+        None,
+    );
+    let resp = client
+        .post(&url)
+        .header("X-Tenant-Id", "acme")
+        .json(&remote_builtin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
     let rejected = [
         // A step cannot escape the sequence's residency.
         sequence(
@@ -199,11 +216,13 @@ async fn sequence_create_validates_placement() {
                      "placement": {"priority_lane": "premium"}}]),
             None,
         ),
-        // Built-in handlers run on the engine node, not on a placed worker.
+        // Built-ins that manipulate engine state run on the engine node,
+        // never on a placed worker (remote-executable ones such as
+        // `http_request` may be placed; see below).
         sequence(
             "acme",
             "builtin",
-            &json!([{"type": "step", "id": "s", "handler": "http_request",
+            &json!([{"type": "step", "id": "s", "handler": "set_state",
                      "placement": {"residency": "eu"}}]),
             None,
         ),

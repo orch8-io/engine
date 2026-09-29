@@ -1893,6 +1893,7 @@ dependencies = [
 name = "orch8-engine"
 version = "0.7.1"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "bytes",
  "chrono",

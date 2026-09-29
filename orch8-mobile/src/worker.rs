@@ -65,19 +65,15 @@ use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use orch8_engine::handlers::{HandlerRegistry, StepContext};
+use orch8_engine::handlers::HandlerRegistry;
 use orch8_storage::StorageBackend;
-use orch8_types::context::ExecutionContext;
 use orch8_types::error::StepError;
-use orch8_types::ids::{BlockId, InstanceId};
 
 use crate::PowerState;
 use crate::error::MobileError;
 use crate::node::{LeaseResponse, NodeClient, RemoteTask};
 use crate::stragglers::{Stragglers, device_timeout_error, is_device_timeout};
 
-/// Default lease when neither the task nor the poll response carries one.
-const DEFAULT_LEASE_SECS: u64 = 120;
 /// Delivery attempts for complete/fail before leaving the outcome to the
 /// orphan drain.
 const DELIVERY_ATTEMPTS: u32 = 3;
@@ -791,18 +787,12 @@ impl Worker {
         if self.deps.foreign_handlers.contains(&task.handler_name) {
             inject_task_metadata(&mut params, task, &self.deps.client.worker_id());
         }
-        let context: ExecutionContext =
-            serde_json::from_value(task.context.clone()).unwrap_or_default();
-        let ctx = StepContext {
-            instance_id: InstanceId::from_uuid(task.instance_id),
-            tenant_id: crate::mobile_tenant_id(),
-            block_id: BlockId::new(task.block_id.clone()),
+        let ctx = orch8_engine::remote_worker::step_context(
+            task,
+            crate::mobile_tenant_id(),
             params,
-            context: Arc::new(context),
-            attempt: task.attempt.max(1),
-            storage: Arc::clone(&self.deps.storage),
-            wait_for_input: None,
-        };
+            Arc::clone(&self.deps.storage),
+        );
         let future = handler(ctx);
         let Some(ms) = task
             .timeout_ms
@@ -865,43 +855,7 @@ impl Worker {
     }
 }
 
-/// Add the reserved `__orch8` member (see module docs) to object params.
-pub(crate) fn inject_task_metadata(params: &mut Value, task: &RemoteTask, runtime_id: &str) {
-    if let Value::Object(map) = params {
-        map.insert(
-            "__orch8".into(),
-            serde_json::json!({
-                "effect_id": task.effect_id,
-                "task_id": task.id,
-                "instance_id": task.instance_id,
-                "block_id": task.block_id,
-                "attempt": task.attempt,
-                "runtime_id": runtime_id,
-                "continuity_epoch": task.continuity_epoch,
-                "resume_checkpoint": task.resume_checkpoint,
-            }),
-        );
-    }
-}
-
-/// Heartbeat cadence: the server's explicit interval, else a third of the
-/// tightest lease on offer, clamped to at least one second.
-pub(crate) fn heartbeat_interval(
-    server_interval: Option<u64>,
-    response_lease: Option<u64>,
-    task_lease: Option<u32>,
-) -> Duration {
-    let lease = task_lease
-        .map(u64::from)
-        .or(response_lease)
-        .filter(|l| *l > 0)
-        .unwrap_or(DEFAULT_LEASE_SECS);
-    let from_lease = (lease / 3).max(1);
-    let secs = server_interval
-        .filter(|s| *s > 0)
-        .map_or(from_lease, |s| s.min(from_lease));
-    Duration::from_secs(secs.max(1))
-}
+pub(crate) use orch8_engine::remote_worker::{heartbeat_interval, inject_task_metadata};
 
 #[cfg(test)]
 #[path = "worker_tests.rs"]

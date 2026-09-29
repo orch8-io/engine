@@ -79,7 +79,21 @@
             "existingSecret": { "type": "string" },
             "key": { "type": "string", "minLength": 1 }
           }
-        }
+        },
+        "credentials": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" }
+          }
+        },
+        "caCert": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        },
+        "allowedInternalCidrs": { "type": "string" }
       }
     },
     "cloudObservability": {

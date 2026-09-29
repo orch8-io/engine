@@ -15,7 +15,7 @@ use orch8_types::worker::{WorkerCommand, WorkerCommandKind};
 use tokio_util::sync::CancellationToken;
 use tonic::Request;
 use tonic::metadata::MetadataValue;
-use tonic::transport::{ClientTlsConfig, Endpoint};
+use tonic::transport::Endpoint;
 
 #[derive(Clone)]
 pub(crate) struct ManagedControlConfig {
@@ -28,6 +28,9 @@ pub(crate) struct ManagedControlConfig {
     /// the control plane can place by region. Never workload data.
     pub region: Option<String>,
     pub kind: RuntimeKind,
+    /// PEM bundle trusted instead of the public web PKI roots
+    /// (`[executor] ca_cert_path`).
+    pub ca_pem: Option<Vec<u8>>,
 }
 
 fn client_frame(payload: ClientPayload) -> WorkerStreamClient {
@@ -116,7 +119,9 @@ fn open_frame(config: &ManagedControlConfig) -> Result<WorkerStreamClient> {
 async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken) -> Result<()> {
     let endpoint = Endpoint::from_shared(config.endpoint.clone())?
         .connect_timeout(Duration::from_secs(10))
-        .tls_config(ClientTlsConfig::new().with_webpki_roots())?;
+        .tls_config(orch8_grpc::worker_client::client_tls(
+            config.ca_pem.as_deref(),
+        ))?;
     let channel = endpoint
         .connect()
         .await
@@ -257,6 +262,7 @@ mod tests {
             runtime_id: RuntimeId::new(),
             region: None,
             kind: RuntimeKind::Edge,
+            ca_pem: None,
         };
         let value = serde_json::to_value(safe_capabilities(&config, false)).unwrap();
         let rendered = value.to_string();

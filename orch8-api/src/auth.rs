@@ -275,7 +275,13 @@ fn capabilities_allow(
     let path = path.strip_prefix(crate::API_V1_PREFIX).unwrap_or(path);
     capabilities.iter().any(|capability| match capability {
         ApiCapability::Operator => true,
-        ApiCapability::Worker => path.starts_with("/workers") || path == "/handlers",
+        // A worker may refresh its own runtime capability advertisement
+        // (it can already upsert it through a capability poll).
+        ApiCapability::Worker => {
+            path.starts_with("/workers")
+                || path == "/handlers"
+                || (path == "/runtimes/register" && method == axum::http::Method::POST)
+        }
         ApiCapability::Device => path.starts_with("/mobile"),
         // Publisher manages definitions, never live instances or host-side
         // resources: plugin registration points the engine at an arbitrary
@@ -387,6 +393,17 @@ mod tests {
             &[ApiCapability::Worker],
             &axum::http::Method::POST,
             "/api/v1/releases"
+        ));
+        // Hybrid executors refresh their own runtime advertisement.
+        assert!(capabilities_allow(
+            &[ApiCapability::Worker],
+            &axum::http::Method::POST,
+            "/api/v1/runtimes/register"
+        ));
+        assert!(!capabilities_allow(
+            &[ApiCapability::Worker],
+            &axum::http::Method::GET,
+            "/api/v1/runtimes"
         ));
         assert!(capabilities_allow(
             &[ApiCapability::Auditor],

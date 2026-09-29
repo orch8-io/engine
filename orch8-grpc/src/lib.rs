@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod service;
+pub mod worker_client;
 
 /// Worker-stream wire protocol supported by this release.
 pub const WORKER_STREAM_PROTOCOL_VERSION: u32 = 2;

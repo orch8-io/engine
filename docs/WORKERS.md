@@ -15,7 +15,7 @@ The engine doesn't care how a worker is implemented — it's a pull-based REST p
 ## How it works
 
 1. Sequence contains a step with a handler name the engine does **not** have registered as a built-in (see [Architecture — Built-in Step Handlers](ARCHITECTURE.md#built-in-step-handlers)) or a native Rust handler.
-2. Scheduler queues a row in `worker_tasks` with the block's `params` and instance `context`.
+2. Scheduler queues a row in `worker_tasks` with the block's `params` and instance `context`. Templates are rendered and `credentials://` references resolved first — except for steps with hard placement (region/labels/residency), whose references are left for the claiming runtime to resolve locally (see [PLACEMENT.md](PLACEMENT.md#credentials-of-placed-steps) and [HYBRID.md](HYBRID.md)).
 3. Worker polls `POST /workers/tasks/poll` for tasks matching its handler name.
 4. Worker executes, optionally sends heartbeats, then reports success or failure.
 5. Engine resumes the workflow with the worker's output persisted as a `BlockOutput`.

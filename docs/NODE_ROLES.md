@@ -10,6 +10,7 @@ parsing; a role never silently falls back to the all-in-one surface.
 | `all_in_one` | Full API, metrics, docs, public webhooks, health | Full | yes | yes |
 | `control` | Full control API, metrics, docs, public webhooks, health | Full | no | yes |
 | `executor` | Health only | Worker lifecycle, runtime session, artifact transfer, telemetry, health | yes | no |
+| `executor` (remote, joined, no `database.url`) | Health only | None (dials out only) | no — claims tasks from the managed engine | no |
 | `gateway` | Canonical `/api/v1/continuity/*` plus health | Artifact transfer and health only | no | no |
 | `edge` | Health only | Disabled | yes | no |
 
@@ -72,14 +73,24 @@ managed_control_worker_id = "edge-factory-1"
 managed_control_runtime_id = "018f5f2d-58ef-7a61-9b4f-21f77aa1f005"
 ```
 
+An `executor` joined this way **without a `database.url`** is a *remote
+executor* (hybrid, see [HYBRID.md](HYBRID.md)): it runs no engine and needs no
+database, API key, or encryption key. Next to this control session it opens
+the worker protocol (gRPC worker stream, HTTP polling fallback) to the same
+endpoint, advertises its handlers, labels, region, and local credential ids
+under a per-replica runtime id, and claims placed steps. The rest of this
+section describes the control session itself, which is the same in both
+modes.
+
 The session authenticates outbound, advertises only coarse runtime identity
 and connectivity with empty plugin, credential, hardware, and signing key
 lists (and the operator-set `[node] region`, if any), then refreshes a
 45-second lease. It never sends task demand and
 therefore never exports workflow contexts, params, outputs, artifacts, logs,
 or credential bindings. `ping` and `reload` commands are acknowledged; a
-`drain` command triggers local graceful shutdown. Placement commands remain
-pending because this control-only channel will not accept workload payloads.
+`drain` command triggers local graceful shutdown. `place` commands remain
+pending because this control-only channel will not accept workload payloads;
+work reaches a remote executor through the worker protocol instead.
 
 Disconnects retry with bounded 1–30 second exponential backoff. The dedicated
 managed API key is removed from the long-lived engine config after the client
@@ -111,5 +122,7 @@ Stale-node reaping records `stopped_at` but never fabricates capability or
 handoff evidence, so operators can distinguish a graceful transfer boundary
 from a crashed node. Managed-control nodes additionally publish one final
 `draining=true` capability heartbeat with a bounded flush window before the
-outbound session closes. The cluster-node row remains as durable evidence
+outbound session closes. A remote executor additionally advertises `draining`
+on its worker runtime, finishes in-flight steps within
+`[executor] drain_timeout_secs`, and releases the rest to the engine. The cluster-node row remains as durable evidence
 rather than being deleted at shutdown.

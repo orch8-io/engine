@@ -1159,16 +1159,14 @@ pub(super) async fn execute_step_block(
     // snapshot created above (see its comment for why sharing with the
     // `when` guard is safe). Template/credential failures fail the
     // *instance*; infra errors propagate.
-    let crate::handlers::step_block::PreparedStep {
-        step_context,
-        resolved_params,
-        resolved_cache_key,
-        carries_credentials,
-    } = match crate::handlers::step_block::prepare_step(
+    let defer_credentials =
+        crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?;
+    let mut prepared = match crate::handlers::step_block::prepare_step(
         storage.as_ref(),
         instance,
         step_def,
         &outputs_snap,
+        defer_credentials,
     )
     .await
     {
@@ -1219,6 +1217,30 @@ pub(super) async fn execute_step_block(
     // Recompute tracked-ness for the (possibly swapped) effective handler so
     // record_success/record_failure further down gate on the right name.
     let breaker_tracked = crate::circuit_breaker::is_breaker_tracked(&step_def.handler);
+
+    // A fallback handler may not be hard-placed: resolve anything deferred.
+    if prepared.credentials_deferred
+        && !crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?
+        && let Err(error) = prepared
+            .resolve_deferred_credentials(storage.as_ref(), instance)
+            .await
+    {
+        return fail_instance_with_error(
+            storage.as_ref(),
+            instance,
+            webhook_config,
+            cancel,
+            &error.to_string(),
+        )
+        .await;
+    }
+    let crate::handlers::step_block::PreparedStep {
+        step_context,
+        resolved_params,
+        resolved_cache_key,
+        carries_credentials,
+        credentials_deferred: _,
+    } = prepared;
 
     // If the handler is not registered in-process, dispatch to an external
     // worker queue. This mirrors the tree evaluator path in `step_block.rs`
@@ -1801,7 +1823,9 @@ pub(super) async fn fail_instance_with_error(
 ///
 /// `resolved_params` and `step_context` must already have been through
 /// template + credential resolution — external workers receive fully
-/// materialised values, not raw `{{…}}` or `credentials://…` strings.
+/// materialised values, not raw `{{…}}` strings. The one exception is a
+/// hard-placed step (hybrid): its `credentials://…` references stay
+/// unresolved and are resolved on the claiming executor.
 pub(super) async fn dispatch_to_external_worker(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,

@@ -46,6 +46,8 @@ pub mod push;
 pub mod queue_routing;
 pub mod recovery;
 pub mod release_diff;
+pub mod remote_executor;
+pub mod remote_worker;
 pub mod required_fields;
 pub mod scheduler;
 pub mod scheduling;
