@@ -225,7 +225,9 @@ jobs:
   docker-smoke:
     name: Docker Smoke Test
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A cold image build (new workspace manifests invalidate the dependency
+    # layer cache) of the full workspace takes longer than 30 minutes.
+    timeout-minutes: 45
     needs: [check]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
