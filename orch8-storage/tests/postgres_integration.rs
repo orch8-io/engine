@@ -1236,6 +1236,23 @@ async fn stale_recovery_skips_waiting_instances_postgres() {
 
 /// Postgres parity for the atomic terminal transition/outbox protocol. The
 /// `SQLite` version exercises the same contract in `review_fixes_2026_06`.
+///
+/// The outbox claim queries are global: a shared database may hold due or
+/// stale rows from other tests (or earlier runs), so the test asserts only on
+/// its own entry and claims with a limit large enough to reach it.
+async fn claim_own_outbox_row(
+    s: &PostgresStorage,
+    now: chrono::DateTime<Utc>,
+    id: Uuid,
+) -> Vec<WebhookOutboxEntry> {
+    s.claim_due_webhook_outbox(now, 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.id == id)
+        .collect()
+}
+
 #[tokio::test]
 async fn terminal_transition_and_webhook_enqueue_share_one_transaction_postgres() {
     let s = require_postgres!();
@@ -1308,9 +1325,8 @@ async fn terminal_transition_and_webhook_enqueue_share_one_transaction_postgres(
     );
     assert!(s.get_webhook_outbox(losing.id).await.unwrap().is_none());
 
-    let claimed = s.claim_due_webhook_outbox(Utc::now(), 10).await.unwrap();
+    let claimed = claim_own_outbox_row(&s, Utc::now(), entry.id).await;
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].id, entry.id);
     assert_eq!(claimed[0].status, WebhookOutboxStatus::InFlight);
 
     let retry_at = Utc::now() + chrono::Duration::minutes(5);
@@ -1318,15 +1334,12 @@ async fn terminal_transition_and_webhook_enqueue_share_one_transaction_postgres(
         .await
         .unwrap();
     assert!(
-        s.claim_due_webhook_outbox(Utc::now(), 10)
+        claim_own_outbox_row(&s, Utc::now(), entry.id)
             .await
-            .unwrap()
             .is_empty()
     );
-    let retried = s
-        .claim_due_webhook_outbox(retry_at + chrono::Duration::milliseconds(1), 10)
-        .await
-        .unwrap();
+    let retried =
+        claim_own_outbox_row(&s, retry_at + chrono::Duration::milliseconds(1), entry.id).await;
     assert_eq!(retried.len(), 1);
     assert_eq!(retried[0].attempts, 1);
 
