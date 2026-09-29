@@ -7,15 +7,25 @@
   "react-native": "src/index.ts",
   "files": [
     "src",
+    "!src/__tests__",
     "ios",
-    "android",
+    "android/build.gradle.kts",
+    "android/src",
     "CHANGELOG.md",
+    "README.md",
+    "LICENSE",
     "react-native-orch8.podspec"
   ],
   "scripts": {
-    "typescript": "tsc --noEmit"
+    "typescript": "tsc --noEmit",
+    "test": "vitest run"
   },
-  "keywords": ["react-native", "orch8", "workflow", "orchestration"],
+  "keywords": [
+    "react-native",
+    "orch8",
+    "workflow",
+    "orchestration"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/orch8-io/react-native-orch8.git"
@@ -32,6 +42,7 @@
   "devDependencies": {
     "react": "19.2.3",
     "react-native": "0.86.2",
-    "typescript": "~5.9.0"
+    "typescript": "~5.9.0",
+    "vitest": "^3.2.0"
   }
 }

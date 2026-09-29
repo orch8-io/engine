@@ -329,6 +329,7 @@ Key: `SUB_SEQUENCE_DRAFT_ONLY`
 | [ORCH8-D018](#ORCH8-D018) | `WAITING_EXTERNAL_EVENT` | Waiting for an external event |
 | [ORCH8-D019](#ORCH8-D019) | `EVIDENCE_INCOMPLETE` | Diagnosis evidence is incomplete |
 | [ORCH8-D020](#ORCH8-D020) | `NO_BLOCKER_FOUND` | No blocker found |
+| [ORCH8-D021](#ORCH8-D021) | `PLACEMENT_UNSATISFIED` | No runtime satisfies the step placement |
 
 <a id="ORCH8-D001"></a>
 ### ORCH8-D001 — Instance is in a terminal state
@@ -509,4 +510,13 @@ Key: `NO_BLOCKER_FOUND`
 **Cause.** No rule identified a blocking condition; the instance appears healthy.
 
 **Fix.** Watch progress; re-run diagnosis if it stays idle.
+
+<a id="ORCH8-D021"></a>
+### ORCH8-D021 — No runtime satisfies the step placement
+
+Key: `PLACEMENT_UNSATISFIED`
+
+**Cause.** The step's placement (region, labels, or residency) matches no live runtime. The task waits; it is never dispatched to a non-matching runtime.
+
+**Fix.** Start or relabel an executor that advertises the required region/labels (`residency=<zone>` for residency), or change the placement policy.
 

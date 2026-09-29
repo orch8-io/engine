@@ -12,6 +12,9 @@ import io.orch8.kmp.FlushResult
 import io.orch8.kmp.InstanceSnapshot
 import io.orch8.kmp.InstanceState
 import io.orch8.kmp.InstanceSummary
+import io.orch8.kmp.NodeCapabilities
+import io.orch8.kmp.NodeConnectivity
+import io.orch8.kmp.NodeRegistration
 import io.orch8.kmp.Orch8ErrorKind
 import io.orch8.kmp.Orch8Exception
 import io.orch8.kmp.Orch8HandlerException
@@ -20,6 +23,9 @@ import io.orch8.kmp.PowerState
 import io.orch8.kmp.SequenceInfo
 import io.orch8.kmp.SyncResult
 import io.orch8.kmp.TickResult
+import io.orch8.kmp.WorkerOptions
+import io.orch8.kmp.WorkerStats
+import io.orch8.kmp.WorkerWindowResult
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -30,10 +36,13 @@ import io.orch8.mobile.InstanceStateKind as UInstanceStateKind
 import io.orch8.mobile.MobileEngine as UMobileEngine
 import io.orch8.mobile.MobileEngineConfig as UMobileEngineConfig
 import io.orch8.mobile.MobileException as UMobileException
+import io.orch8.mobile.NodeCapabilities as UNodeCapabilities
+import io.orch8.mobile.NodeConnectivity as UNodeConnectivity
 import io.orch8.mobile.PowerState as UPowerState
 import io.orch8.mobile.StepHandler as UStepHandler
 import io.orch8.mobile.SyncException as USyncException
 import io.orch8.mobile.TokenProvider as UTokenProvider
+import io.orch8.mobile.WorkerOptions as UWorkerOptions
 
 internal actual fun openPlatformBackend(dbPath: String, config: EngineConfig): EngineBackend =
     UniffiBackend(mapErrors { UMobileEngine(dbPath, config.toUniffi()) })
@@ -184,7 +193,84 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
 
     override fun activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) =
         mapErrors { engine.activateContinuityCapsule(capsuleId, destinationRuntimeId, destinationInstanceId) }
+
+    override fun nodeRuntimeId(): String = mapErrors { engine.nodeRuntimeId() }
+
+    override fun registerNode(capabilities: NodeCapabilities): NodeRegistration = mapErrors {
+        engine.registerNode(capabilities.toUniffi()).let {
+            NodeRegistration(it.runtimeId, it.deviceId, it.handlers, it.expiresAt)
+        }
+    }
+
+    override fun updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: Int?) = mapErrors {
+        engine.updateNodeStatus(connectivity?.toUniffi(), batteryPercent?.toUByte())
+    }
+
+    override fun unregisterNode() = engine.unregisterNode()
+
+    override fun startWorker(options: WorkerOptions) = mapErrors {
+        engine.startWorker(
+            UWorkerOptions(
+                maxConcurrentTasks = options.maxConcurrentTasks.toUInt(),
+                idlePollIntervalMs = options.idlePollInterval.inWholeMilliseconds.toULong(),
+                version = options.version,
+            ),
+        )
+    }
+
+    override fun stopWorker() = engine.stopWorker()
+
+    override fun runWorkerWindow(timeBudgetMs: Long): WorkerWindowResult = mapErrors {
+        engine.runWorkerWindow(timeBudgetMs.toULong()).let {
+            WorkerWindowResult(
+                claimed = it.claimed.toLong(),
+                completed = it.completed.toLong(),
+                failed = it.failed.toLong(),
+                stillRunning = it.stillRunning.toInt(),
+                budgetExhausted = it.budgetExhausted,
+            )
+        }
+    }
+
+    override fun workerStats(): WorkerStats = engine.workerStats().let {
+        WorkerStats(
+            running = it.running,
+            inFlight = it.inFlight.toInt(),
+            claimed = it.claimed.toLong(),
+            completed = it.completed.toLong(),
+            failed = it.failed.toLong(),
+            released = it.released.toLong(),
+            lost = it.lost.toLong(),
+        )
+    }
+
+    override fun onPushWake(envelopeJson: String): Boolean = engine.onPushWake(envelopeJson)
+
+    override fun enableBuiltin(name: String) = mapErrors { engine.enableBuiltin(name) }
 }
+
+private fun NodeConnectivity.toUniffi(): UNodeConnectivity = when (this) {
+    NodeConnectivity.OFFLINE -> UNodeConnectivity.OFFLINE
+    NodeConnectivity.METERED -> UNodeConnectivity.METERED
+    NodeConnectivity.WIFI -> UNodeConnectivity.WIFI
+    NodeConnectivity.ETHERNET -> UNodeConnectivity.ETHERNET
+}
+
+internal fun NodeCapabilities.toUniffi(): UNodeCapabilities = UNodeCapabilities(
+    handlers = handlers,
+    regions = regions,
+    hardware = hardware,
+    plugins = plugins,
+    credentials = credentials,
+    offlineCapable = offlineCapable,
+    connectivity = connectivity?.toUniffi(),
+    batteryPercent = batteryPercent?.toUByte(),
+    platform = platform,
+    pushToken = pushToken,
+    appVersion = appVersion,
+    apiBaseUrl = apiBaseUrl,
+    capsuleSigningPublicKey = capsuleSigningPublicKey,
+)
 
 private fun UInstanceStateKind.toCommon(): InstanceState = when (this) {
     UInstanceStateKind.SCHEDULED -> InstanceState.SCHEDULED

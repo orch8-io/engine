@@ -184,6 +184,16 @@ message HeartbeatTaskRequest {
   uint64 claim_epoch = 3;
 }
 
+// Voluntary give-back by the lease holder. `started = false`: the task goes
+// straight back to pending, its effect receipt untouched. `started = true`:
+// treated like a lease expiry after start (receipt `unknown`, retry policy).
+message ReleaseTaskRequest {
+  string task_id = 1;
+  string worker_id = 2;
+  uint64 claim_epoch = 3;
+  bool started = 4;
+}
+
 message WorkerStreamOpen {
   string worker_id = 1;
   repeated string handler_names = 2;
@@ -434,6 +444,7 @@ service Orch8Service {
   rpc CompleteTask(CompleteTaskRequest) returns (Empty);
   rpc FailTask(FailTaskRequest) returns (Empty);
   rpc HeartbeatTask(HeartbeatTaskRequest) returns (Empty);
+  rpc ReleaseTask(ReleaseTaskRequest) returns (Empty);
   rpc WorkerStream(stream WorkerStreamClient) returns (stream WorkerStreamServer);
   rpc ArtifactTransfer(stream ArtifactTransferClient) returns (stream ArtifactTransferServer);
 

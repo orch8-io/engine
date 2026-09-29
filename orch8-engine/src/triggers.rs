@@ -372,6 +372,7 @@ pub(crate) fn build_trigger_instance(
 ) -> TaskInstance {
     let now = chrono::Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: id.unwrap_or_default(),
         sequence_id,
         tenant_id: trigger.tenant_id.clone(),
@@ -724,6 +725,8 @@ mod tests {
     async fn seed_sequence(storage: &SqliteStorage, name: &str) -> SequenceId {
         let id = SequenceId::new();
         let seq = SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id,
@@ -739,6 +742,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         };
         storage.create_sequence(&seq).await.unwrap();
@@ -916,6 +920,8 @@ mod tests {
         let v2_id = SequenceId::new();
         let now = chrono::Utc::now();
         let mk_seq = |id: SequenceId, version: i32| SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id,
@@ -931,6 +937,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: now,
         };
         storage.create_sequence(&mk_seq(v1_id, 1)).await.unwrap();
@@ -998,6 +1005,8 @@ mod tests {
         let seq_id = SequenceId::new();
         storage
             .create_sequence(&SequenceDefinition {
+                embed: None,
+                sub_tenant: None,
                 schema: None,
                 schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                 id: seq_id,
@@ -1013,6 +1022,7 @@ mod tests {
                 sla: None,
                 on_failure: None,
                 on_cancel: None,
+                placement: None,
                 created_at: chrono::Utc::now(),
             })
             .await

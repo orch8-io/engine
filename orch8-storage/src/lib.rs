@@ -1,13 +1,23 @@
 pub mod api_key_cache;
+#[cfg(feature = "artifacts")]
+pub mod artifacts;
+#[cfg(not(feature = "artifacts"))]
+#[path = "artifacts_disabled.rs"]
 pub mod artifacts;
 pub mod compression;
 pub mod conformance;
 pub mod encrypting;
 pub mod externalizing;
+pub mod fencing;
 pub mod lifecycle;
+#[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod sqlite;
+pub mod tenancy;
+#[cfg(feature = "postgres")]
 pub mod tenant_partition;
+#[cfg(feature = "byok")]
+pub mod vault;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -52,7 +62,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub(crate) const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 94;
+pub const STORAGE_SCHEMA_VERSION: u32 = 97;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -1486,6 +1496,33 @@ pub trait WorkerStore: Send + Sync + 'static {
     /// Returns the number of tasks expired.
     async fn expire_timed_out_worker_tasks(&self) -> Result<u64, StorageError>;
 
+    /// Claimed tasks whose lease expired: no heartbeat within the task's own
+    /// `lease_secs` (set from the claimant's runtime kind) or, when unset,
+    /// within `default_lease`. Read-only; the engine classifies each task
+    /// (pure requeue vs ambiguous side effect) and applies a fenced
+    /// [`Self::resolve_worker_task`].
+    async fn list_expired_worker_leases(
+        &self,
+        default_lease: Duration,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    /// Pending or claimed tasks whose `timeout_ms` elapsed since creation.
+    /// Read-only; see [`Self::list_expired_worker_leases`].
+    async fn list_timed_out_worker_tasks(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    /// Atomically apply a fenced resolution (requeue / retry / fail node /
+    /// fail instance) to a worker task and its instance. Returns `false`
+    /// without side effects when the task moved on (completed, reclaimed,
+    /// released, or deleted) since it was read.
+    async fn resolve_worker_task(
+        &self,
+        resolution: &orch8_types::worker::WorkerTaskResolution,
+    ) -> Result<bool, StorageError>;
+
     /// Delete pending/claimed worker tasks for an instance + block (used when race cancels a branch).
     async fn cancel_worker_tasks_for_block(
         &self,
@@ -1519,6 +1556,15 @@ pub trait WorkerStore: Send + Sync + 'static {
         &self,
         tenant_id: Option<&orch8_types::ids::TenantId>,
     ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
+
+    /// Claimable pending worker tasks of live instances, grouped by tenant,
+    /// handler, requirements, and instance priority (largest groups first,
+    /// at most `limit` groups). Feeds `orch8_queue_depth{capability,region,
+    /// priority_lane}` and `orch8_placement_unsatisfied`.
+    async fn pending_worker_task_depth(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError>;
 
     // === Task Queue Routing ===
 
@@ -1894,6 +1940,48 @@ pub trait SchedulingStore: Send + Sync + 'static {
     ) -> Result<RateLimitCheck, StorageError>;
 
     async fn upsert_rate_limit(&self, limit: &RateLimit) -> Result<(), StorageError>;
+
+    // === Placement policies & global rate budgets (docs/PLACEMENT.md) ===
+
+    /// The tenant's placement policies (empty when none were stored).
+    async fn get_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<orch8_types::placement::PlacementPolicies, StorageError>;
+
+    /// Replace the tenant's placement policies.
+    async fn put_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+        policies: &orch8_types::placement::PlacementPolicies,
+    ) -> Result<(), StorageError>;
+
+    /// Create a rate budget (full bucket) or change its capacity/refill
+    /// (tokens clamped to the new capacity). Returns the stored bucket.
+    async fn upsert_rate_budget(
+        &self,
+        budget: &orch8_types::placement::RateBudget,
+    ) -> Result<orch8_types::placement::RateBudget, StorageError>;
+
+    async fn list_rate_budgets(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::placement::RateBudget>, StorageError>;
+
+    /// `true` when a budget was deleted.
+    async fn delete_rate_budget(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// Atomically refill and take one token from the shared bucket.
+    async fn take_rate_budget_token(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<orch8_types::placement::RateBudgetCheck, StorageError>;
 }
 
 // ============================================================================
@@ -3110,6 +3198,19 @@ pub trait ContinuityStore: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Option<ContinuityExecution>, StorageError>;
 
+    /// The continuity execution whose ownership history contains
+    /// `instance_id` — either as its current instance or as a former
+    /// location (a handed-off source). Callers compare
+    /// `current_instance_id` to detect a superseded local instance.
+    async fn get_continuity_execution_touching_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+    ) -> Result<Option<ContinuityExecution>, StorageError> {
+        self.get_continuity_execution_by_instance(tenant_id, instance_id)
+            .await
+    }
+
     async fn list_continuity_locations(
         &self,
         tenant_id: &TenantId,
@@ -3341,6 +3442,75 @@ pub trait ContinuityStore: Send + Sync + 'static {
         envelope: &FederationEnvelope,
         envelope_sha256: &str,
         accepted_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    // --- Federation transport (trust registry, outbound calls, region fence) ---
+
+    /// Insert or replace a tenant's trust-registry entry for one peer.
+    async fn upsert_federation_peer(
+        &self,
+        peer: &orch8_types::federation::FederationPeerRecord,
+    ) -> Result<(), StorageError>;
+
+    async fn get_federation_peer(
+        &self,
+        tenant_id: &TenantId,
+        peer_id: orch8_types::continuity_advanced::FederationPeerId,
+    ) -> Result<Option<orch8_types::federation::FederationPeerRecord>, StorageError>;
+
+    async fn list_federation_peers(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::federation::FederationPeerRecord>, StorageError>;
+
+    /// Returns `false` when no such entry existed.
+    async fn delete_federation_peer(
+        &self,
+        tenant_id: &TenantId,
+        peer_id: orch8_types::continuity_advanced::FederationPeerId,
+    ) -> Result<bool, StorageError>;
+
+    /// Insert an outbound call unless `(tenant_id, call_id)` already exists.
+    /// Returns `true` when this call inserted the row.
+    async fn create_federation_call(
+        &self,
+        call: &orch8_types::federation::FederationCall,
+    ) -> Result<bool, StorageError>;
+
+    async fn get_federation_call(
+        &self,
+        tenant_id: &TenantId,
+        call_id: Uuid,
+    ) -> Result<Option<orch8_types::federation::FederationCall>, StorageError>;
+
+    /// Compare-and-swap on `version`: persists `next` (whose `version` must
+    /// be `expected_version + 1`) only if the stored row is still at
+    /// `expected_version`.
+    async fn cas_federation_call(
+        &self,
+        expected_version: u64,
+        next: &orch8_types::federation::FederationCall,
+    ) -> Result<bool, StorageError>;
+
+    /// Calls that are not yet terminal-and-notified and whose `next_poll_at`
+    /// is due, oldest first, across all tenants (poller input).
+    async fn list_due_federation_calls(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::federation::FederationCall>, StorageError>;
+
+    async fn get_region_fence(
+        &self,
+    ) -> Result<Option<orch8_types::federation::RegionFence>, StorageError>;
+
+    /// Install or advance the singleton region fence. `expected_epoch = None`
+    /// only succeeds when no fence exists; otherwise the stored epoch must
+    /// equal `expected_epoch` and `next.epoch` must be exactly one greater.
+    async fn advance_region_fence(
+        &self,
+        expected_epoch: Option<u64>,
+        next: &orch8_types::federation::RegionFence,
     ) -> Result<bool, StorageError>;
 
     async fn save_incident_reproduction(
@@ -3749,6 +3919,75 @@ pub trait AiStore: Send + Sync + 'static {
 // StorageBackend supertrait
 // ============================================================================
 
+// ============================================================================
+// Sub-trait: TenancyStore (sub-tenants, embed theme, release targets)
+// ============================================================================
+
+/// Sub-tenant admission/metering, the embed theme, and release rollout
+/// targets. See `docs/EMBEDDED.md`.
+#[async_trait]
+pub trait TenancyStore: Send + Sync + 'static {
+    /// Atomically admit and insert `instances`, which must all share one
+    /// `(tenant_id, sub_tenant)` with `sub_tenant` set. Under the same tenant
+    /// lock as [`InstanceStore::create_instance_admitted`] it enforces the
+    /// tenant pool (`max_active_instances` non-terminal instances), then the
+    /// sub-tenant's stored caps (concurrent, and executions since
+    /// [`orch8_types::sub_tenant::month_start`] of `now`), and appends one
+    /// execution-ledger row per instance in the same transaction.
+    ///
+    /// Cap violations return `StorageError::QuotaExceeded` whose message
+    /// starts with [`orch8_types::sub_tenant::SUB_TENANT_QUOTA_PREFIX`].
+    async fn create_sub_tenant_instances_admitted(
+        &self,
+        instances: &[TaskInstance],
+        max_active_instances: u64,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError>;
+
+    async fn get_sub_tenant_limits(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+    ) -> Result<Option<orch8_types::sub_tenant::SubTenantLimits>, StorageError>;
+
+    async fn put_sub_tenant_limits(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        limits: &orch8_types::sub_tenant::SubTenantLimits,
+    ) -> Result<(), StorageError>;
+
+    /// Per-sub-tenant activity in `[from, to)`, ordered by sub-tenant id.
+    async fn sub_tenant_usage(
+        &self,
+        tenant_id: &TenantId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<orch8_types::sub_tenant::SubTenantUsage>, StorageError>;
+
+    /// Distinct `(tenant, sub_tenant)` pairs that started an execution since
+    /// `since`, across all tenants (license soft-enforcement).
+    async fn count_active_sub_tenants(&self, since: DateTime<Utc>) -> Result<u64, StorageError>;
+
+    async fn get_embed_theme(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Option<orch8_types::sub_tenant::EmbedTheme>, StorageError>;
+
+    async fn put_embed_theme(
+        &self,
+        tenant_id: &TenantId,
+        theme: &orch8_types::sub_tenant::EmbedTheme,
+    ) -> Result<(), StorageError>;
+
+    /// Replace a release's sub-tenant rollout target. `false` if unknown.
+    async fn set_release_target(
+        &self,
+        release_id: Uuid,
+        target: Option<&orch8_types::release::ReleaseTarget>,
+    ) -> Result<bool, StorageError>;
+}
+
 /// The core storage abstraction.
 ///
 /// Object-safe for `dyn StorageBackend` dispatch.
@@ -3775,6 +4014,7 @@ pub trait StorageBackend:
     + EvaluationStore
     + AttentionStore
     + AiStore
+    + TenancyStore
     + orch8_push::PushOutboxStore
     + Send
     + Sync
@@ -3801,6 +4041,7 @@ impl<T> StorageBackend for T where
         + EvaluationStore
         + AttentionStore
         + AiStore
+        + TenancyStore
         + orch8_push::PushOutboxStore
         + Send
         + Sync

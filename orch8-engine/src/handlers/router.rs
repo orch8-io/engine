@@ -204,6 +204,7 @@ mod tests {
     async fn seed_instance(storage: &SqliteStorage, id: InstanceId) {
         let now = Utc::now();
         let inst = TaskInstance {
+            sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
@@ -375,6 +376,7 @@ mod tests {
     fn mk_instance_rt(id: InstanceId, ctx: ExecutionContext) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),

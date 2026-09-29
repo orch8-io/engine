@@ -107,6 +107,12 @@ impl<'a> EffectGuard<'a> {
         Ok(Some(guard))
     }
 
+    /// Deterministic id of this attempt's receipt. External worker tasks
+    /// store it so settlement never has to recompute it.
+    pub(crate) fn effect_id(&self) -> EffectId {
+        self.receipt.id
+    }
+
     pub(crate) async fn commit(mut self, output: &Value) -> Result<(), EngineError> {
         self.receipt.provider_receipt_id = provider_receipt_id(output);
         self.advance(EffectState::Committed).await
@@ -180,7 +186,7 @@ impl<'a> EffectGuard<'a> {
 /// ordinary local runs that were never explicitly enrolled in portable
 /// continuity. Deriving both IDs from the instance makes concurrent first
 /// effects converge on one scope across processes and runtimes.
-async fn ensure_effect_scope(
+pub async fn ensure_effect_scope(
     storage: &dyn StorageBackend,
     tenant_id: &TenantId,
     instance_id: InstanceId,
@@ -277,6 +283,20 @@ async fn record_effect_guard_results(
     Ok(())
 }
 
+/// How an external worker task's effect receipt is settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerEffectSettlement {
+    /// The node reported success: `dispatched` (or `unknown`, e.g. after a
+    /// racing lease resolution) becomes `committed`.
+    Committed,
+    /// The outcome is ambiguous (worker failure, lease expiry after start,
+    /// release after start): `dispatched` becomes `unknown`.
+    Unknown,
+    /// No node ever started the task (it expired while still `pending`):
+    /// the effect provably did not happen, so the receipt is `abandoned`.
+    Abandoned,
+}
+
 /// Commit the receipt created when an external worker task was dispatched.
 /// Legacy and non-continuity tasks are intentionally a no-op.
 pub async fn commit_external_worker_effect(
@@ -285,7 +305,14 @@ pub async fn commit_external_worker_effect(
     task: &orch8_types::worker::WorkerTask,
     output: &Value,
 ) -> Result<(), EngineError> {
-    settle_external_worker_effect(storage, tenant_id, task, Some(output)).await
+    settle_worker_task_effect(
+        storage,
+        tenant_id,
+        task,
+        WorkerEffectSettlement::Committed,
+        Some(output),
+    )
+    .await
 }
 
 /// Mark an external worker effect uncertain before applying retry policy.
@@ -294,63 +321,127 @@ pub async fn mark_external_worker_effect_unknown(
     tenant_id: &TenantId,
     task: &orch8_types::worker::WorkerTask,
 ) -> Result<(), EngineError> {
-    settle_external_worker_effect(storage, tenant_id, task, None).await
+    settle_worker_task_effect(
+        storage,
+        tenant_id,
+        task,
+        WorkerEffectSettlement::Unknown,
+        None,
+    )
+    .await
 }
 
-async fn settle_external_worker_effect(
+/// The id of the effect receipt bound to a worker task: the `effect_id`
+/// stored on the task when its attempt was dispatched. The id is never
+/// recomputed (a recomputation uses the *current* owner epoch and misses
+/// after a handoff). Rows written before the column existed carry no id;
+/// for those the attempt's still-open receipt is looked up by its recorded
+/// identity (instance, block, attempt) instead.
+async fn bound_effect_receipt_id(
     storage: &dyn StorageBackend,
     tenant_id: &TenantId,
     task: &orch8_types::worker::WorkerTask,
-    output: Option<&Value>,
-) -> Result<(), EngineError> {
+) -> Result<Option<EffectId>, EngineError> {
+    if let Some(id) = task.effect_id {
+        return Ok(Some(id));
+    }
     let Some(execution) = storage
-        .get_continuity_execution_by_instance(tenant_id, task.instance_id)
+        .get_continuity_execution_touching_instance(tenant_id, task.instance_id)
         .await?
     else {
+        return Ok(None);
+    };
+    Ok(storage
+        .find_unresolved_effect_receipt(
+            tenant_id,
+            execution.continuity_id,
+            task.instance_id,
+            &task.block_id,
+            u32::from(task.attempt),
+        )
+        .await?
+        .map(|receipt| receipt.id))
+}
+
+/// Settle the effect receipt bound to a worker task (see
+/// `bound_effect_receipt_id`). Idempotent: an already-settled receipt is
+/// left alone.
+pub async fn settle_worker_task_effect(
+    storage: &dyn StorageBackend,
+    tenant_id: &TenantId,
+    task: &orch8_types::worker::WorkerTask,
+    settlement: WorkerEffectSettlement,
+    output: Option<&Value>,
+) -> Result<(), EngineError> {
+    let Some(id) = bound_effect_receipt_id(storage, tenant_id, task).await? else {
         return Ok(());
     };
-    let id = deterministic_effect_id(
-        execution.continuity_id,
-        execution.epoch,
-        task.instance_id,
-        &task.block_id,
-        u32::from(task.attempt),
-    );
     let Some(mut receipt) = storage.get_effect_receipt(tenant_id, id).await? else {
         return Ok(());
     };
-    if receipt.state != EffectState::Dispatched {
-        return if matches!(receipt.state, EffectState::Committed | EffectState::Unknown) {
-            Ok(())
-        } else {
-            Err(blocked(&receipt))
-        };
-    }
-    let expected = receipt.state;
-    let next = if output.is_some() {
-        EffectState::Committed
-    } else {
-        EffectState::Unknown
+    let path: &[EffectState] = match (settlement, receipt.state) {
+        (WorkerEffectSettlement::Committed, EffectState::Dispatched | EffectState::Unknown) => {
+            &[EffectState::Committed]
+        }
+        (WorkerEffectSettlement::Unknown, EffectState::Dispatched) => &[EffectState::Unknown],
+        (WorkerEffectSettlement::Abandoned, EffectState::Dispatched) => {
+            &[EffectState::Unknown, EffectState::Abandoned]
+        }
+        (WorkerEffectSettlement::Abandoned, EffectState::Unknown) => &[EffectState::Abandoned],
+        (_, state) if state.is_resolved() || state == EffectState::Unknown => return Ok(()),
+        _ => return Err(blocked(&receipt)),
     };
-    receipt.provider_receipt_id = output.and_then(provider_receipt_id);
-    receipt
-        .transition(next, Utc::now())
-        .map_err(|error| EngineError::EffectTransition(error.to_string()))?;
-    if !storage
-        .cas_effect_receipt(tenant_id, id, expected, &receipt)
-        .await?
-    {
-        let current = storage
-            .get_effect_receipt(tenant_id, id)
+    for next in path {
+        let expected = receipt.state;
+        if *next == EffectState::Committed {
+            receipt.provider_receipt_id = output.and_then(provider_receipt_id);
+        }
+        receipt
+            .transition(*next, Utc::now())
+            .map_err(|error| EngineError::EffectTransition(error.to_string()))?;
+        if !storage
+            .cas_effect_receipt(tenant_id, id, expected, &receipt)
             .await?
-            .unwrap_or(receipt);
-        return if current.state == next {
-            Ok(())
-        } else {
-            Err(blocked(&current))
-        };
+        {
+            let current = storage
+                .get_effect_receipt(tenant_id, id)
+                .await?
+                .unwrap_or(receipt);
+            return if current.state == *next || current.state.is_resolved() {
+                Ok(())
+            } else {
+                Err(blocked(&current))
+            };
+        }
     }
     Ok(())
+}
+
+/// Whether a worker task's effect may already have happened: it has a
+/// receipt that is still `dispatched` or `unknown`. Tasks without one
+/// (pure/idempotent built-ins, dry runs) can simply be requeued.
+pub async fn worker_task_effect_is_ambiguous(
+    storage: &dyn StorageBackend,
+    tenant_id: &TenantId,
+    task: &orch8_types::worker::WorkerTask,
+) -> Result<bool, EngineError> {
+    if task.effect_id.is_none()
+        && !crate::release_diff::handler_has_side_effects(&task.handler_name)
+    {
+        return Ok(false);
+    }
+    let Some(id) = bound_effect_receipt_id(storage, tenant_id, task).await? else {
+        return Ok(false);
+    };
+    Ok(storage
+        .get_effect_receipt(tenant_id, id)
+        .await?
+        .is_some_and(|receipt| {
+            matches!(
+                receipt.state,
+                EffectState::Dispatched | EffectState::Unknown
+            )
+        }))
 }
 
 fn blocked(receipt: &EffectReceipt) -> EngineError {
@@ -474,6 +565,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("tenant-effect"),
@@ -514,6 +606,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("tenant-effect"),
@@ -544,6 +637,8 @@ mod tests {
     ) -> InvariantId {
         storage
             .create_sequence(&SequenceDefinition {
+                embed: None,
+                sub_tenant: None,
                 schema: None,
                 schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                 id: instance.sequence_id,
@@ -561,6 +656,8 @@ mod tests {
                     retry: None,
                     timeout: None,
                     rate_limit_key: None,
+                    rate_budget: None,
+                    placement: None,
                     send_window: None,
                     context_access: None,
                     cancellable: true,
@@ -579,6 +676,7 @@ mod tests {
                 sla: None,
                 on_failure: None,
                 on_cancel: None,
+                placement: None,
                 created_at: Utc::now(),
             })
             .await

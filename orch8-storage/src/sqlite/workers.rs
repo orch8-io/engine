@@ -12,10 +12,26 @@ use orch8_types::worker::{
 use super::SqliteStorage;
 use super::helpers::{begin_immediate, row_to_worker_task, ts};
 
-#[instrument(skip(storage, t), fields(task_id = %t.id, handler = %t.handler_name))]
-pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<(), StorageError> {
+/// INSERT for one worker task. On an `(instance_id, block_id)` conflict with
+/// a still-pending row of the same attempt (a retry pre-inserted by a
+/// failure/lease resolution) the dispatch-time effect id, ownership epoch,
+/// and credential flag are filled in. Mirrors the Postgres upsert, including
+/// `awaiting_dispatch`: a retry row stays unclaimable until the re-dispatch
+/// binds its effect id in this same statement.
+pub(super) async fn insert_task(
+    conn: &mut sqlx::SqliteConnection,
+    t: &WorkerTask,
+    awaiting_dispatch: bool,
+) -> Result<(), StorageError> {
     sqlx::query(
-        "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,requirements,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,claim_epoch,resume_checkpoint,checkpoint_seq,completed_at,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22) ON CONFLICT(instance_id,block_id) DO NOTHING"
+        "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,requirements,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,claim_epoch,resume_checkpoint,checkpoint_seq,completed_at,created_at,effect_id,continuity_epoch,lease_secs,carries_credentials,claimed_runtime_kind,awaiting_dispatch) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28) \
+         ON CONFLICT(instance_id,block_id) DO UPDATE SET \
+             effect_id = COALESCE(worker_tasks.effect_id, excluded.effect_id), \
+             continuity_epoch = COALESCE(worker_tasks.continuity_epoch, excluded.continuity_epoch), \
+             carries_credentials = MAX(worker_tasks.carries_credentials, excluded.carries_credentials), \
+             awaiting_dispatch = excluded.awaiting_dispatch \
+         WHERE worker_tasks.state = 'pending' AND worker_tasks.attempt = excluded.attempt"
     )
     .bind(t.id.to_string())
     .bind(t.instance_id.into_uuid().to_string())
@@ -44,8 +60,21 @@ pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<()
     .bind(i64::try_from(t.checkpoint_seq).unwrap_or(i64::MAX))
     .bind(t.completed_at.map(ts))
     .bind(ts(t.created_at))
-    .execute(&storage.pool).await?;
+    .bind(t.effect_id.map(|id| id.to_string()))
+    .bind(t.continuity_epoch.map(|epoch| i64::try_from(epoch).unwrap_or(i64::MAX)))
+    .bind(t.lease_secs.map(i64::from))
+    .bind(i64::from(t.carries_credentials))
+    .bind(t.claimed_runtime_kind.map(orch8_types::continuity::RuntimeKind::as_str))
+    .bind(i64::from(awaiting_dispatch))
+    .execute(conn)
+    .await?;
     Ok(())
+}
+
+#[instrument(skip(storage, t), fields(task_id = %t.id, handler = %t.handler_name))]
+pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    insert_task(&mut conn, t, false).await
 }
 
 pub(super) fn transition_event(
@@ -122,12 +151,13 @@ pub(super) async fn claim(
     let mut conn = begin_immediate(&storage.pool).await?;
 
     let select_res = sqlx::query(
-        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND requirements='{}' \
+        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?3 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) \
          AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) \
          ORDER BY created_at ASC LIMIT ?2",
     )
     .bind(handler_name)
     .bind(limit as i64)
+    .bind(worker_id)
     .fetch_all(&mut *conn)
     .await;
 
@@ -148,6 +178,8 @@ pub(super) async fn claim(
             t.claimed_at = Some(now_dt);
             t.heartbeat_at = Some(now_dt);
             t.claim_epoch = t.claim_epoch.saturating_add(1);
+            t.lease_secs = None;
+            t.claimed_runtime_kind = None;
         }
         let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
         qb.push_bind(worker_id);
@@ -155,7 +187,7 @@ pub(super) async fn claim(
         qb.push_bind(&now);
         qb.push(", heartbeat_at=");
         qb.push_bind(&now);
-        qb.push(", claim_epoch=claim_epoch+1");
+        qb.push(", claim_epoch=claim_epoch+1, lease_secs=NULL, claimed_runtime_kind=NULL");
         qb.push(" WHERE id IN (");
         let mut separated = qb.separated(",");
         for t in &tasks {
@@ -201,7 +233,7 @@ pub(super) async fn claim_for_tenant(
     let select_res = sqlx::query(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
-         WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.requirements='{}' AND ti.tenant_id=?3
+         WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.awaiting_dispatch=0 AND (wt.requirements='{}' OR (json_remove(wt.requirements,'$.prefer')='{}' AND (json_extract(wt.requirements,'$.prefer.worker_id')=?4 OR json_extract(wt.requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) AND ti.tenant_id=?3
            AND ti.state NOT IN ('completed', 'failed', 'cancelled')
          ORDER BY wt.created_at ASC
          LIMIT ?2",
@@ -209,6 +241,7 @@ pub(super) async fn claim_for_tenant(
     .bind(handler_name)
     .bind(limit as i64)
     .bind(tenant_id.as_str())
+    .bind(worker_id)
     .fetch_all(&mut *conn)
     .await;
 
@@ -227,6 +260,8 @@ pub(super) async fn claim_for_tenant(
             t.claimed_at = Some(now_dt);
             t.heartbeat_at = Some(now_dt);
             t.claim_epoch = t.claim_epoch.saturating_add(1);
+            t.lease_secs = None;
+            t.claimed_runtime_kind = None;
         }
         let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
         qb.push_bind(worker_id);
@@ -234,7 +269,7 @@ pub(super) async fn claim_for_tenant(
         qb.push_bind(&now);
         qb.push(", heartbeat_at=");
         qb.push_bind(&now);
-        qb.push(", claim_epoch=claim_epoch+1");
+        qb.push(", claim_epoch=claim_epoch+1, lease_secs=NULL, claimed_runtime_kind=NULL");
         qb.push(" WHERE id IN (");
         let mut separated = qb.separated(",");
         for t in &tasks {
@@ -295,7 +330,8 @@ pub(super) async fn claim_matching(
         query
             .push(" WHERE wt.handler_name=")
             .push_bind(handler_name);
-        query.push(" AND wt.state='pending'");
+        // Retry rows wait for their re-dispatch to bind the effect id.
+        query.push(" AND wt.state='pending' AND wt.awaiting_dispatch=0");
         // See the Postgres twin: no work for terminal/cancelled instances.
         query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))");
         if let Some(queue) = queue_name {
@@ -329,7 +365,7 @@ pub(super) async fn claim_matching(
             .map(|task| (ts(task.created_at), task.id.to_string()));
         tasks.extend(
             page.into_iter()
-                .filter(|task| task.requirements.is_satisfied_by(capabilities, now))
+                .filter(|task| task.claimable_by(capabilities, now))
                 .take(limit as usize - tasks.len()),
         );
     }
@@ -341,6 +377,8 @@ pub(super) async fn claim_matching(
             task.claimed_at = Some(now_dt);
             task.heartbeat_at = Some(now_dt);
             task.claim_epoch = task.claim_epoch.saturating_add(1);
+            task.lease_secs = capabilities.kind.default_lease_secs();
+            task.claimed_runtime_kind = Some(capabilities.kind);
         }
         let mut update = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
             "UPDATE worker_tasks SET state='claimed', worker_id=",
@@ -351,6 +389,10 @@ pub(super) async fn claim_matching(
             .push_bind(&now_text)
             .push(", heartbeat_at=")
             .push_bind(&now_text)
+            .push(", lease_secs=")
+            .push_bind(capabilities.kind.default_lease_secs().map(i64::from))
+            .push(", claimed_runtime_kind=")
+            .push_bind(capabilities.kind.as_str())
             .push(", claim_epoch=claim_epoch+1 WHERE id IN (");
         let mut ids = update.separated(",");
         for task in &tasks {
@@ -555,14 +597,21 @@ pub(super) async fn reap_stale(
             .unwrap_or_else(|_| chrono::Duration::seconds(300));
     let mut conn = begin_immediate(&storage.pool).await?;
     let rows: Vec<(String, i64, Option<String>)> = sqlx::query_as(
-        "SELECT id,claim_epoch,worker_id FROM worker_tasks WHERE state='claimed' AND (COALESCE(heartbeat_at, claimed_at) IS NULL OR COALESCE(heartbeat_at, claimed_at) < ?1)",
+        "SELECT id,claim_epoch,worker_id FROM worker_tasks WHERE state='claimed' \
+         AND (COALESCE(heartbeat_at, claimed_at) IS NULL \
+              OR (lease_secs IS NULL AND COALESCE(heartbeat_at, claimed_at) < ?1) \
+              OR (lease_secs IS NOT NULL \
+                  AND julianday(COALESCE(heartbeat_at, claimed_at)) + lease_secs / 86400.0 < julianday(?2))) \
+         AND NOT EXISTS (SELECT 1 FROM effect_receipts er \
+                         WHERE er.id = worker_tasks.effect_id AND er.state IN ('dispatched','unknown'))",
     )
     .bind(ts(cutoff))
+    .bind(ts(Utc::now()))
     .fetch_all(&mut *conn)
     .await?;
     if !rows.is_empty() {
         let mut update = sqlx::QueryBuilder::new(
-            "UPDATE worker_tasks SET state='pending',worker_id=NULL,claimed_at=NULL,heartbeat_at=NULL WHERE id IN (",
+            "UPDATE worker_tasks SET state='pending',worker_id=NULL,claimed_at=NULL,heartbeat_at=NULL,lease_secs=NULL,claimed_runtime_kind=NULL WHERE id IN (",
         );
         let mut ids = update.separated(",");
         for (id, _, _) in &rows {
@@ -621,6 +670,178 @@ pub(super) async fn expire_timed_out(storage: &SqliteStorage) -> Result<u64, Sto
     insert_attempt_events(&mut tx, &events).await?;
     tx.commit().await?;
     Ok(rows.len() as u64)
+}
+
+pub(super) async fn list_expired_leases(
+    storage: &SqliteStorage,
+    default_lease: Duration,
+    limit: u32,
+) -> Result<Vec<WorkerTask>, StorageError> {
+    let now = Utc::now();
+    let cutoff = now
+        - chrono::Duration::from_std(default_lease)
+            .unwrap_or_else(|_| chrono::Duration::seconds(300));
+    let rows = sqlx::query(
+        "SELECT * FROM worker_tasks WHERE state='claimed' \
+         AND (COALESCE(heartbeat_at, claimed_at) IS NULL \
+              OR (lease_secs IS NULL AND COALESCE(heartbeat_at, claimed_at) < ?1) \
+              OR (lease_secs IS NOT NULL \
+                  AND julianday(COALESCE(heartbeat_at, claimed_at)) + lease_secs / 86400.0 < julianday(?2))) \
+         ORDER BY COALESCE(heartbeat_at, claimed_at) ASC LIMIT ?3",
+    )
+    .bind(ts(cutoff))
+    .bind(ts(now))
+    .bind(i64::from(limit.min(1_000)))
+    .fetch_all(&storage.pool)
+    .await?;
+    rows.iter().map(row_to_worker_task).collect()
+}
+
+pub(super) async fn list_timed_out(
+    storage: &SqliteStorage,
+    limit: u32,
+) -> Result<Vec<WorkerTask>, StorageError> {
+    let rows = sqlx::query(
+        "SELECT * FROM worker_tasks WHERE state IN ('pending','claimed') AND timeout_ms IS NOT NULL \
+         AND julianday(created_at) + (timeout_ms / 86400000.0) < julianday(?1) \
+         ORDER BY created_at ASC LIMIT ?2",
+    )
+    .bind(ts(Utc::now()))
+    .bind(i64::from(limit.min(1_000)))
+    .fetch_all(&storage.pool)
+    .await?;
+    rows.iter().map(row_to_worker_task).collect()
+}
+
+/// Apply one fenced worker-task resolution atomically (see
+/// `WorkerStore::resolve_worker_task`). Mirrors `postgres::workers::resolve`.
+pub(super) async fn resolve(
+    storage: &SqliteStorage,
+    resolution: &orch8_types::worker::WorkerTaskResolution,
+) -> Result<bool, StorageError> {
+    use orch8_types::worker::WorkerTaskResolutionAction as Action;
+
+    let now = ts(Utc::now());
+    let expected_epoch = i64::try_from(resolution.expected_claim_epoch).unwrap_or(i64::MAX);
+    let fence = " WHERE id=?1 AND state=?2 AND claim_epoch=?3 AND (?4 IS NULL OR worker_id=?4)";
+    let mut conn = begin_immediate(&storage.pool).await?;
+    let affected = match &resolution.action {
+        Action::Requeue => sqlx::query(&format!(
+            "UPDATE worker_tasks SET state='pending', worker_id=NULL, claimed_at=NULL, \
+             heartbeat_at=NULL, lease_secs=NULL, claimed_runtime_kind=NULL{fence}"
+        ))
+        .bind(resolution.task_id.to_string())
+        .bind(resolution.expected_state.to_string())
+        .bind(expected_epoch)
+        .bind(resolution.expected_worker_id.as_deref())
+        .execute(&mut *conn)
+        .await?
+        .rows_affected(),
+        Action::Retry { .. } => sqlx::query(&format!("DELETE FROM worker_tasks{fence}"))
+            .bind(resolution.task_id.to_string())
+            .bind(resolution.expected_state.to_string())
+            .bind(expected_epoch)
+            .bind(resolution.expected_worker_id.as_deref())
+            .execute(&mut *conn)
+            .await?
+            .rows_affected(),
+        Action::FailNode { .. } | Action::FailInstance | Action::FailTaskOnly => {
+            sqlx::query(&format!(
+                "UPDATE worker_tasks SET state='failed', error_message=?5, error_retryable=?6, \
+             completed_at=?7{fence}"
+            ))
+            .bind(resolution.task_id.to_string())
+            .bind(resolution.expected_state.to_string())
+            .bind(expected_epoch)
+            .bind(resolution.expected_worker_id.as_deref())
+            .bind(&resolution.reason)
+            .bind(i64::from(resolution.retryable))
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected()
+        }
+    };
+    if affected != 1 {
+        conn.rollback().await?;
+        return Ok(false);
+    }
+    let instance_id = resolution.instance_id.into_uuid().to_string();
+    match &resolution.action {
+        Action::Requeue | Action::FailTaskOnly => {}
+        Action::Retry {
+            retry_task,
+            node_id,
+            fire_at,
+        } => {
+            insert_task(&mut conn, retry_task, true).await?;
+            if let Some(node_id) = node_id {
+                sqlx::query("UPDATE execution_tree SET state='pending' WHERE id=?1")
+                    .bind(node_id.into_uuid().to_string())
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            schedule_live_instance(&mut conn, &instance_id, &ts(*fire_at), &now).await?;
+        }
+        Action::FailNode { node_id, fire_at } => {
+            if let Some(node_id) = node_id {
+                sqlx::query(
+                "UPDATE execution_tree SET state='failed', completed_at=COALESCE(completed_at, ?2) \
+                 WHERE id=?1 AND state IN ('running','waiting')",
+            )
+            .bind(node_id.into_uuid().to_string())
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
+            }
+            schedule_live_instance(&mut conn, &instance_id, &ts(*fire_at), &now).await?;
+        }
+        Action::FailInstance => {
+            sqlx::query(
+                "UPDATE task_instances SET state='failed', next_fire_at=NULL, updated_at=?2 \
+                 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled')",
+            )
+            .bind(&instance_id)
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    insert_attempt_events(
+        &mut conn,
+        &[transition_event(
+            resolution.task_id,
+            resolution.expected_claim_epoch,
+            resolution
+                .holder_worker_id
+                .clone()
+                .or_else(|| resolution.expected_worker_id.clone()),
+            resolution.event,
+            Some(resolution.reason.clone()),
+        )],
+    )
+    .await?;
+    conn.commit().await?;
+    Ok(true)
+}
+
+/// Wake a non-terminal, non-paused instance (see the Postgres twin).
+async fn schedule_live_instance(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: &str,
+    fire_at: &str,
+    now: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE task_instances SET state='scheduled', next_fire_at=?2, updated_at=?3 \
+         WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','paused')",
+    )
+    .bind(instance_id)
+    .bind(fire_at)
+    .bind(now)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 pub(super) async fn cancel_for_block(
@@ -724,6 +945,10 @@ pub(super) async fn list(
     if let Some(ref queue) = filter.queue_name {
         qb.push(" AND queue_name=");
         qb.push_bind(queue);
+    }
+    if let Some(instance_id) = filter.instance_id {
+        qb.push(" AND instance_id=");
+        qb.push_bind(instance_id.into_uuid().to_string());
     }
     if pagination.sort_ascending {
         qb.push(" ORDER BY created_at ASC");

@@ -296,6 +296,7 @@ fn worker_capabilities(
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + Duration::minutes(4),
     }
@@ -706,6 +707,11 @@ mod tests {
             error_message: None,
             error_retryable: None,
             created_at: now,
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         };
         assert_eq!(
             execute_local_process(&manifest, &task).await.unwrap(),

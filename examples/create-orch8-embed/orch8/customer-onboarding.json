@@ -1,0 +1,41 @@
+{
+  "namespace": "default",
+  "name": "customer-onboarding",
+  "embed": { "visible_outputs": ["welcome", "provision"] },
+  "blocks": [
+    {
+      "type": "step",
+      "id": "welcome",
+      "handler": "log",
+      "params": { "message": "Welcome aboard! Setting up your workspace." }
+    },
+    {
+      "type": "step",
+      "id": "provision",
+      "handler": "noop",
+      "params": {},
+      "delay": { "duration": 2000 }
+    },
+    {
+      "type": "step",
+      "id": "activate_approval",
+      "handler": "human_review",
+      "params": { "instructions": "Confirm the workspace can go live", "reviewer": "customer-admin" },
+      "wait_for_input": {
+        "prompt": "Activate this workspace?",
+        "timeout": 86400000,
+        "choices": [
+          { "label": "Activate", "value": "activate" },
+          { "label": "Hold", "value": "hold" }
+        ],
+        "store_as": "activation_decision"
+      }
+    },
+    {
+      "type": "step",
+      "id": "done",
+      "handler": "log",
+      "params": { "message": "Onboarding finished" }
+    }
+  ]
+}

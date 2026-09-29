@@ -149,6 +149,9 @@ pub(crate) struct PreparedStep {
     pub resolved_params: serde_json::Value,
     /// Cache key with its template (if any) resolved.
     pub resolved_cache_key: Option<String>,
+    /// The templated params referenced `credentials://` material (resolved
+    /// into `resolved_params`). Such a step is never handed to a browser.
+    pub carries_credentials: bool,
 }
 
 /// Why [`prepare_step`] could not produce a [`PreparedStep`].
@@ -215,6 +218,8 @@ pub(crate) async fn prepare_step(
         }
     };
 
+    let carries_credentials = orch8_types::worker::contains_credential_reference(&resolved_params);
+
     // Credentials next: every dispatch target sees expanded params without
     // needing the credential registry. Missing/disabled/cross-tenant refs fail.
     if let Err(step_err) = crate::credentials::resolve_in_value(
@@ -250,6 +255,7 @@ pub(crate) async fn prepare_step(
         step_context,
         resolved_params,
         resolved_cache_key,
+        carries_credentials,
     })
 }
 
@@ -431,6 +437,7 @@ pub(crate) async fn execute_step_node_with_clock(
         step_context,
         resolved_params,
         resolved_cache_key,
+        carries_credentials,
     } = match prepare_step(storage.as_ref(), instance, step_def, outputs).await {
         Ok(prepared) => prepared,
         Err(PrepareError::Infra(e)) => return Err(e),
@@ -573,9 +580,41 @@ pub(crate) async fn execute_step_node_with_clock(
         .await;
     }
 
-    // If the handler is not registered in-process, dispatch to external worker queue.
-    let handler_registered = handlers.contains(&step_def.handler);
-    if !handler_registered {
+    // If the handler is not registered in-process — or the step is placed on
+    // specific remote runtimes (`$runtime.runtime_id`, or kinds excluding
+    // `server`) — dispatch to the external worker queue.
+    //
+    // Step/sequence placement and tenant placement policies compile into
+    // `$runtime` first; hard placement (region, labels, residency) always
+    // goes to the worker queue so the claim predicate enforces it.
+    let mut resolved_params = resolved_params;
+    let hard_placed = match Box::pin(crate::step_placement::apply_step_placement(
+        storage.as_ref(),
+        instance,
+        step_def,
+        &mut resolved_params,
+        clock.now(),
+    ))
+    .await?
+    {
+        Ok(resolved) => resolved.is_some_and(|placement| placement.has_hard_constraints()),
+        Err(message) => {
+            super::step_dispatch::record_remote_dispatch_rejection(
+                storage.as_ref(),
+                instance,
+                step_def,
+                attempt,
+                &message,
+            )
+            .await;
+            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            return Ok(false);
+        }
+    };
+    let placed_remotely = hard_placed
+        || orch8_types::worker::peek_runtime_requirements(&resolved_params)
+            .is_ok_and(|requirements| requirements.is_remote_placement());
+    if placed_remotely || !handlers.contains(&step_def.handler) {
         return dispatch_step_to_external_worker(
             storage.as_ref(),
             instance,
@@ -584,6 +623,7 @@ pub(crate) async fn execute_step_node_with_clock(
             resolved_params,
             step_context,
             attempt,
+            carries_credentials,
         )
         .await;
     }
@@ -870,6 +910,7 @@ mod tests {
     async fn seed_instance(storage: &SqliteStorage, id: InstanceId) {
         let now = Utc::now();
         let inst = TaskInstance {
+            sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
@@ -964,6 +1005,7 @@ mod tests {
     ) {
         let now = Utc::now();
         let inst = TaskInstance {
+            sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
@@ -995,6 +1037,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -1514,6 +1558,7 @@ mod tests {
             handler_name: Some("external_q".into()),
             worker_id: None,
             queue_name: None,
+            instance_id: None,
         };
         let tasks = storage
             .list_worker_tasks(&filter, &orch8_types::filter::Pagination::default())

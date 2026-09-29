@@ -485,6 +485,7 @@ async fn run_replay(
         runtime: orch8_types::context::RuntimeContext {
             dry_run: true,
             dry_run_auto_approve: true,
+            traceparent: None,
             ..Default::default()
         },
         ..Default::default()

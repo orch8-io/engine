@@ -2,12 +2,15 @@ pub mod alerts;
 pub mod ap_poll;
 pub mod capsule;
 pub mod circuit_breaker;
+pub mod cloud_observability;
 pub mod compensation;
 pub mod continuity;
 pub mod continuity_advanced;
 pub mod credentials;
 pub mod cron;
 pub mod dataflow;
+pub mod delegation;
+pub mod receipt_bundle;
 /// Virtual time for scheduling decisions — re-exported from `orch8-types` so
 /// engine users can write `orch8_engine::clock::ManualClock`.
 pub mod clock {
@@ -21,6 +24,8 @@ pub mod event_correlation;
 pub mod explain;
 pub mod expression;
 pub mod externalized;
+pub mod failover;
+pub mod federation;
 pub mod gc;
 pub mod handlers;
 pub mod interceptors;
@@ -32,6 +37,7 @@ pub mod metrics;
 pub mod model_pricing;
 pub mod optimizer;
 pub mod outbound;
+pub mod ownership;
 pub mod placement;
 pub mod preflight;
 pub mod preload;
@@ -46,14 +52,17 @@ pub mod scheduling;
 pub mod sequence_cache;
 pub mod signals;
 pub mod step_logs;
+pub mod step_placement;
 pub mod stream_bus;
 pub mod stream_windows;
 pub mod template;
 pub mod template_trace;
 pub mod tenant_budgets;
+pub mod trace_context;
 pub mod trigger_sources;
 pub mod triggers;
 pub mod webhooks;
+pub mod worker_lease;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -252,19 +261,25 @@ impl Engine {
                 tokio::select! {
                     () = reaper_cancel.cancelled() => break,
                     _ = ticker.tick() => {
-                        match reaper_storage
-                            .reap_stale_worker_tasks(worker_reaper_stale)
-                            .await
+                        // Expired leases (per-task lease wins over the
+                        // default) and timed-out tasks. Side-effecting
+                        // tasks are never blindly requeued: their receipt
+                        // goes `unknown` and the step's retry policy
+                        // decides; timed-out tasks always advance.
+                        match crate::worker_lease::reap_worker_tasks(
+                            reaper_storage.as_ref(),
+                            worker_reaper_stale,
+                        )
+                        .await
                         {
-                            Ok(0) => {}
-                            Ok(n) => tracing::info!(count = n, "reaped stale worker tasks"),
+                            Ok(report) if report.total() == 0 => {}
+                            Ok(report) => tracing::info!(
+                                requeued = report.requeued,
+                                ambiguous = report.ambiguous,
+                                timed_out = report.timed_out,
+                                "resolved expired worker tasks"
+                            ),
                             Err(e) => tracing::error!(error = %e, "worker task reaper error"),
-                        }
-                        // Also expire tasks whose timeout_ms has elapsed.
-                        match reaper_storage.expire_timed_out_worker_tasks().await {
-                            Ok(0) => {}
-                            Ok(n) => tracing::info!(count = n, "expired timed-out worker tasks"),
-                            Err(e) => tracing::error!(error = %e, "worker task timeout expiry error"),
                         }
                     }
                 }
@@ -373,6 +388,19 @@ impl Engine {
             )
             .await;
             tracing::info!("externalized gc loop exited");
+        });
+
+        // Autoscaling backlog gauges (`orch8_queue_depth{capability,region,
+        // priority_lane}`, `orch8_placement_unsatisfied`) for KEDA/HPA.
+        let backlog_storage = Arc::clone(&self.storage);
+        let backlog_cancel = self.cancel.clone();
+        set.spawn(async move {
+            step_placement::run_backlog_metrics_loop(
+                backlog_storage,
+                step_placement::BACKLOG_METRICS_INTERVAL,
+                backlog_cancel,
+            )
+            .await;
         });
 
         set

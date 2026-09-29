@@ -41,12 +41,14 @@ mod events;
 mod evidence;
 mod execution_tree;
 mod externalized;
+mod federation;
 mod helpers;
 mod instances;
 mod kv_state;
 mod misc;
 mod mobile_sync;
 mod outputs;
+mod placement;
 mod plugins;
 mod pools;
 mod progress_shares;
@@ -62,6 +64,7 @@ mod sessions;
 mod signals;
 mod step_logs;
 mod telemetry;
+mod tenancy;
 mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
@@ -1471,35 +1474,7 @@ impl crate::WorkerStore for SqliteStorage {
             .execute(&mut *tx)
             .await?;
 
-        sqlx::query(
-            r"INSERT INTO worker_tasks
-                (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
-                 attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at)
-              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-        )
-        .bind(new_task.id.to_string())
-        .bind(new_task.instance_id.into_uuid().to_string())
-        .bind(new_task.block_id.as_str())
-        .bind(&new_task.handler_name)
-        .bind(&new_task.queue_name)
-        .bind(serde_json::to_string(&new_task.requirements)?)
-        .bind(&new_task.params)
-        .bind(&new_task.context)
-        .bind(new_task.attempt as i64)
-        .bind(new_task.timeout_ms)
-        .bind(new_task.state.to_string())
-        .bind(i64::try_from(new_task.claim_epoch).unwrap_or(i64::MAX))
-        .bind(
-            new_task
-                .resume_checkpoint
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?,
-        )
-        .bind(i64::try_from(new_task.checkpoint_seq).unwrap_or(i64::MAX))
-        .bind(new_task.created_at.to_rfc3339())
-        .execute(&mut *tx)
-        .await?;
+        workers::insert_task(&mut tx, new_task, true).await?;
 
         if let Some(nid) = node_id {
             sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = ?1")
@@ -1528,6 +1503,28 @@ impl crate::WorkerStore for SqliteStorage {
 
     async fn expire_timed_out_worker_tasks(&self) -> Result<u64, StorageError> {
         workers::expire_timed_out(self).await
+    }
+
+    async fn list_expired_worker_leases(
+        &self,
+        default_lease: Duration,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        workers::list_expired_leases(self, default_lease, limit).await
+    }
+
+    async fn list_timed_out_worker_tasks(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        workers::list_timed_out(self, limit).await
+    }
+
+    async fn resolve_worker_task(
+        &self,
+        resolution: &orch8_types::worker::WorkerTaskResolution,
+    ) -> Result<bool, StorageError> {
+        workers::resolve(self, resolution).await
     }
 
     async fn cancel_worker_tasks_for_block(
@@ -1559,6 +1556,13 @@ impl crate::WorkerStore for SqliteStorage {
         tenant_id: Option<&orch8_types::ids::TenantId>,
     ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
         workers::stats(self, tenant_id).await
+    }
+
+    async fn pending_worker_task_depth(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError> {
+        placement::pending_depth(self, limit).await
     }
 
     // === Task Queue Routing ===
@@ -1924,6 +1928,52 @@ impl crate::SchedulingStore for SqliteStorage {
 
     async fn upsert_rate_limit(&self, limit: &RateLimit) -> Result<(), StorageError> {
         rate_limits::upsert_rate_limit(self, limit).await
+    }
+
+    async fn get_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<orch8_types::placement::PlacementPolicies, StorageError> {
+        placement::get_policies(self, tenant_id).await
+    }
+
+    async fn put_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+        policies: &orch8_types::placement::PlacementPolicies,
+    ) -> Result<(), StorageError> {
+        placement::put_policies(self, tenant_id, policies).await
+    }
+
+    async fn upsert_rate_budget(
+        &self,
+        budget: &orch8_types::placement::RateBudget,
+    ) -> Result<orch8_types::placement::RateBudget, StorageError> {
+        placement::upsert_budget(self, budget).await
+    }
+
+    async fn list_rate_budgets(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::placement::RateBudget>, StorageError> {
+        placement::list_budgets(self, tenant_id).await
+    }
+
+    async fn delete_rate_budget(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+    ) -> Result<bool, StorageError> {
+        placement::delete_budget(self, tenant_id, key).await
+    }
+
+    async fn take_rate_budget_token(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<orch8_types::placement::RateBudgetCheck, StorageError> {
+        placement::take_budget_token(self, tenant_id, key, now).await
     }
 }
 
@@ -3371,6 +3421,8 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -3388,6 +3440,8 @@ mod tests {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -3406,6 +3460,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: now,
         };
         storage.create_sequence(&seq).await.unwrap();
@@ -3419,6 +3474,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
@@ -3449,6 +3505,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let mut inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("max-concurrency-test"),
@@ -3507,6 +3564,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
@@ -3539,6 +3597,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let mut inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
@@ -3762,6 +3821,7 @@ mod tests {
     fn mk_inst_for_dedupe(id: InstanceId) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
@@ -4159,6 +4219,8 @@ mod tests {
         let now = Utc::now();
 
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -4176,6 +4238,8 @@ mod tests {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -4194,11 +4258,13 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: now,
         };
         storage.create_sequence(&seq).await.unwrap();
 
         let inst = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
             tenant_id: TenantId::unchecked("t"),
@@ -4288,6 +4354,11 @@ mod tests {
                 error_message: None,
                 error_retryable: None,
                 created_at: now,
+                effect_id: None,
+                continuity_epoch: None,
+                lease_secs: None,
+                carries_credentials: false,
+                claimed_runtime_kind: None,
             })
             .await
             .unwrap();
@@ -4876,6 +4947,8 @@ mod tests {
     async fn update_sequence_status_roundtrip() {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -4891,6 +4964,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: Utc::now(),
         };
         storage.create_sequence(&seq).await.unwrap();
@@ -4934,6 +5008,8 @@ mod tests {
     async fn seed_instances(storage: &SqliteStorage, n: usize) -> Vec<InstanceId> {
         let now = Utc::now();
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -4949,6 +5025,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: now,
         };
         storage.create_sequence(&seq).await.unwrap();
@@ -4956,6 +5033,7 @@ mod tests {
         let mut ids = Vec::with_capacity(n);
         for _ in 0..n {
             let inst = TaskInstance {
+                sub_tenant: None,
                 id: InstanceId::new(),
                 sequence_id: seq.id,
                 tenant_id: TenantId::unchecked("t"),
@@ -5236,6 +5314,11 @@ mod tests {
                     error_message: None,
                     error_retryable: None,
                     created_at: now,
+                    effect_id: None,
+                    continuity_epoch: None,
+                    lease_secs: None,
+                    carries_credentials: false,
+                    claimed_runtime_kind: None,
                 })
                 .await
                 .unwrap();

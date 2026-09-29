@@ -42,6 +42,8 @@ fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -58,6 +60,8 @@ fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
         })
         .collect();
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -73,6 +77,7 @@ fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }
@@ -81,6 +86,7 @@ fn make_instances(count: usize, seq_id: SequenceId, tenant: &str) -> Vec<TaskIns
     let now = Utc::now();
     (0..count)
         .map(|_| TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq_id,
             tenant_id: TenantId::unchecked(tenant),

@@ -119,6 +119,25 @@ fn assess_declared_requirements(
             summary: "runtime is not in any allowed region".into(),
         });
     }
+    if !requirements.runtime_kinds.is_empty()
+        && !requirements.runtime_kinds.contains(&capabilities.kind)
+    {
+        findings.push(CompatibilityFinding {
+            code: "RUNTIME_KIND_NOT_PLACED",
+            status: CompatibilityStatus::Fail,
+            summary: format!("runtime kind {:?} is not a placed kind", capabilities.kind),
+        });
+    }
+    if requirements
+        .runtime_id
+        .is_some_and(|target| target != capabilities.runtime_id)
+    {
+        findings.push(CompatibilityFinding {
+            code: "RUNTIME_NOT_TARGETED",
+            status: CompatibilityStatus::Fail,
+            summary: "the step is targeted at another runtime".into(),
+        });
+    }
     if let Some(minimum) = requirements.minimum_trust
         && capabilities.trust < minimum
     {
@@ -629,6 +648,7 @@ mod tests {
                 estimated_latency_ms: None,
                 draining: false,
                 capsule_signing_public_key: None,
+                labels: std::collections::BTreeMap::new(),
                 observed_at: now - chrono::Duration::minutes(2),
                 expires_at: now - chrono::Duration::minutes(1),
             },
@@ -662,6 +682,7 @@ mod tests {
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + chrono::Duration::minutes(1),
         };

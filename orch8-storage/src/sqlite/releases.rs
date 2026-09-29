@@ -42,6 +42,13 @@ fn row_to_release(row: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRelease, Stor
         in_flight_policy: serde_json::from_value(serde_json::Value::String(in_flight))?,
         validation_summary: summary.as_deref().map(serde_json::from_str).transpose()?,
         canary_started_at: canary_started.as_deref().map(parse_ts).transpose()?,
+        target: row
+            .try_get::<Option<String>, _>("target")
+            .ok()
+            .flatten()
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
         created_at: parse_ts(row.get::<&str, _>("created_at"))?,
         updated_at: parse_ts(row.get::<&str, _>("updated_at"))?,
     })
@@ -49,7 +56,7 @@ fn row_to_release(row: &sqlx::sqlite::SqliteRow) -> Result<WorkflowRelease, Stor
 
 const RELEASE_COLUMNS: &str = "id, tenant_id, namespace, sequence_name, baseline_sequence_id, \
      baseline_version, candidate_sequence_id, candidate_version, state, canary_percent, gates, \
-     in_flight_policy, validation_summary, canary_started_at, created_at, updated_at";
+     in_flight_policy, validation_summary, canary_started_at, created_at, updated_at, target";
 
 pub(super) async fn create(
     storage: &SqliteStorage,
@@ -63,8 +70,9 @@ pub(super) async fn create(
         "INSERT INTO workflow_releases
             (id, tenant_id, namespace, sequence_name, baseline_sequence_id, baseline_version,
              candidate_sequence_id, candidate_version, state, canary_percent, gates,
-             in_flight_policy, validation_summary, canary_started_at, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+             in_flight_policy, validation_summary, canary_started_at, created_at, updated_at,
+             target)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
     )
     .bind(release.id.to_string())
     .bind(release.tenant_id.as_str())
@@ -88,6 +96,13 @@ pub(super) async fn create(
     .bind(release.canary_started_at.map(ts))
     .bind(ts(release.created_at))
     .bind(ts(release.updated_at))
+    .bind(
+        release
+            .target
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
     .execute(&storage.pool)
     .await?;
     Ok(())

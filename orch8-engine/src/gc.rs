@@ -735,6 +735,7 @@ mod tests {
     fn old_terminal_instance() -> orch8_types::instance::TaskInstance {
         let now = chrono::Utc::now();
         orch8_types::instance::TaskInstance {
+            sub_tenant: None,
             id: orch8_types::ids::InstanceId::new(),
             sequence_id: orch8_types::ids::SequenceId::new(),
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),

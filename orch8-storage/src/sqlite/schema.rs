@@ -13,7 +13,10 @@ CREATE TABLE IF NOT EXISTS sequences (
     sla TEXT,
     on_failure TEXT,
     on_cancel TEXT,
-    created_at TEXT NOT NULL
+    placement TEXT,
+    created_at TEXT NOT NULL,
+    sub_tenant TEXT,
+    embed TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_instances (
@@ -34,7 +37,8 @@ CREATE TABLE IF NOT EXISTS task_instances (
     parent_instance_id TEXT,
     budget TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    sub_tenant TEXT
 );
 
 CREATE TABLE IF NOT EXISTS execution_tree (
@@ -128,6 +132,14 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     checkpoint_seq INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_seq >= 0),
     completed_at TEXT,
     created_at TEXT NOT NULL,
+    -- Distributed execution (Postgres migration 095).
+    effect_id TEXT,
+    continuity_epoch INTEGER CHECK(continuity_epoch >= 0),
+    lease_secs INTEGER CHECK(lease_secs > 0),
+    carries_credentials INTEGER NOT NULL DEFAULT 0,
+    claimed_runtime_kind TEXT,
+    -- Retry row not yet bound by its re-dispatch (Postgres migration 096).
+    awaiting_dispatch INTEGER NOT NULL DEFAULT 0,
     UNIQUE(instance_id, block_id),
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
@@ -333,6 +345,7 @@ CREATE INDEX IF NOT EXISTS idx_task_instances_parent ON task_instances(parent_in
 CREATE INDEX IF NOT EXISTS idx_task_instances_session ON task_instances(session_id);
 CREATE INDEX IF NOT EXISTS idx_signal_inbox_instance ON signal_inbox(instance_id, delivered);
 CREATE INDEX IF NOT EXISTS idx_worker_tasks_handler ON worker_tasks(handler_name, state);
+CREATE INDEX IF NOT EXISTS idx_worker_tasks_instance_state ON worker_tasks(instance_id, state);
 CREATE INDEX IF NOT EXISTS idx_block_outputs_instance ON block_outputs(instance_id);
 CREATE INDEX IF NOT EXISTS idx_execution_tree_instance ON execution_tree(instance_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_instance ON audit_log(instance_id);
@@ -698,7 +711,8 @@ CREATE TABLE IF NOT EXISTS workflow_releases (
     validation_summary    TEXT,
     canary_started_at     TEXT,
     created_at            TEXT NOT NULL,
-    updated_at            TEXT NOT NULL
+    updated_at            TEXT NOT NULL,
+    target                TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_releases_tenant ON workflow_releases(tenant_id, state);
 CREATE INDEX IF NOT EXISTS idx_releases_baseline ON workflow_releases(baseline_sequence_id, state);
@@ -782,6 +796,8 @@ CREATE TABLE IF NOT EXISTS continuity_locations (
     FOREIGN KEY (tenant_id, continuity_id)
         REFERENCES continuity_executions(tenant_id, continuity_id)
 );
+CREATE INDEX IF NOT EXISTS idx_continuity_locations_instance
+    ON continuity_locations(tenant_id, instance_id);
 CREATE INDEX IF NOT EXISTS idx_continuity_locations_runtime
     ON continuity_locations(tenant_id, runtime_id, entered_at DESC);
 
@@ -1113,6 +1129,41 @@ CREATE TABLE IF NOT EXISTS tenant_storage_placements (
 CREATE INDEX IF NOT EXISTS idx_tenant_storage_placements_backend
     ON tenant_storage_placements(backend_id);
 
+-- Federation transport: per-tenant trust registry, outbound calls, and the
+-- singleton active-region fence (see migrations/099_federation_transport.sql).
+CREATE TABLE IF NOT EXISTS federation_peers (
+    tenant_id TEXT NOT NULL,
+    peer_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    record TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, peer_id),
+    UNIQUE (tenant_id, name)
+);
+CREATE TABLE IF NOT EXISTS federation_calls (
+    tenant_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    notified INTEGER NOT NULL DEFAULT 0,
+    next_poll_at TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version >= 0),
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, call_id)
+);
+CREATE INDEX IF NOT EXISTS idx_federation_calls_due
+    ON federation_calls(next_poll_at) WHERE notified = 0;
+CREATE INDEX IF NOT EXISTS idx_federation_calls_instance
+    ON federation_calls(tenant_id, instance_id);
+CREATE TABLE IF NOT EXISTS region_fence (
+    singleton INTEGER PRIMARY KEY DEFAULT 1 CHECK(singleton = 1),
+    active_region TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK(epoch >= 1),
+    record TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- human_review interactive approval actions (hash of token only).
 CREATE TABLE IF NOT EXISTS approval_action_tokens (
     token_hash TEXT PRIMARY KEY,
@@ -1238,9 +1289,54 @@ CREATE TABLE IF NOT EXISTS tenant_budget_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_budget_alerts_tenant
     ON tenant_budget_alerts(tenant_id, created_at);
+
+-- Sub-tenants (Postgres migration 097). Timestamps are fixed-width RFC 3339
+-- (microseconds, `Z`) so text comparison is ordered.
+CREATE INDEX IF NOT EXISTS idx_task_instances_sub_tenant
+    ON task_instances(tenant_id, sub_tenant, state) WHERE sub_tenant IS NOT NULL;
+CREATE TABLE IF NOT EXISTS sub_tenant_limits (
+    tenant_id TEXT NOT NULL,
+    sub_tenant TEXT NOT NULL,
+    max_executions_per_month INTEGER CHECK(max_executions_per_month >= 0),
+    max_concurrent INTEGER CHECK(max_concurrent >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, sub_tenant)
+);
+CREATE TABLE IF NOT EXISTS sub_tenant_executions (
+    instance_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    sub_tenant TEXT NOT NULL,
+    started_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sub_tenant_executions_window
+    ON sub_tenant_executions(tenant_id, started_at, sub_tenant);
+CREATE INDEX IF NOT EXISTS idx_sub_tenant_executions_sub
+    ON sub_tenant_executions(tenant_id, sub_tenant, started_at);
+CREATE INDEX IF NOT EXISTS idx_sub_tenant_executions_started
+    ON sub_tenant_executions(started_at);
+CREATE TABLE IF NOT EXISTS embed_themes (
+    tenant_id TEXT PRIMARY KEY,
+    record TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+-- Placement policies + global rate budgets (Postgres migration 098).
+CREATE TABLE IF NOT EXISTS placement_policies (
+    tenant_id TEXT PRIMARY KEY,
+    policies TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rate_budgets (
+    tenant_id TEXT NOT NULL,
+    budget_key TEXT NOT NULL,
+    capacity INTEGER NOT NULL CHECK(capacity > 0),
+    refill_per_sec REAL NOT NULL CHECK(refill_per_sec > 0),
+    tokens REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, budget_key)
+);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 45;
+pub(super) const SCHEMA_VERSION: i64 = 50;

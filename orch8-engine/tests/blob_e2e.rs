@@ -1,6 +1,9 @@
 //! End-to-end coverage for the `blob_put` / `blob_get` handlers driven through
 //! the full engine: a real sequence stores bytes, passes the artifact key
 //! forward via a template, and reads it back.
+// TaskInstance/SequenceDefinition grew (sub-tenant fields); these whole-engine
+// test futures are intentionally large and run once each.
+#![allow(clippy::large_futures)]
 
 use std::sync::Arc;
 

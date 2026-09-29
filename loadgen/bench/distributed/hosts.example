@@ -1,0 +1,8 @@
+# role          target                                              [processes]
+# The database is DROPPED and recreated each run: its name must contain "bench".
+database-url    postgres://orch8:CHANGE_ME@10.0.0.5:5432/orch8_bench
+control         ubuntu@10.0.0.10
+executor        ubuntu@10.0.0.11   1
+executor        ubuntu@10.0.0.12   1
+worker          ubuntu@10.0.0.21   2
+worker          ubuntu@10.0.0.22   2

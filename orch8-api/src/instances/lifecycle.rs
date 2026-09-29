@@ -93,10 +93,9 @@ fn build_metadata_filter(
 pub async fn create_instance(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    sub_header: crate::sub_tenants::SubTenantHeader,
     Json(req): Json<CreateInstanceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now = Utc::now();
-
     // Ref#5: delegate header/body tenant reconciliation to the shared helper
     // instead of re-implementing the rule inline (the inline copy drifted from
     // `enforce_tenant_create` once already).
@@ -110,6 +109,23 @@ pub async fn create_instance(
     }
 
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &req.tenant_id)?;
+    let sub_tenant = sub_header.for_create(req.sub_tenant.as_deref())?;
+    let (status, body) = create_instance_scoped(&state, tenant_id, sub_tenant, req).await?;
+    Ok((status, Json(body)))
+}
+
+/// Create one instance for an already-authorized `(tenant, sub_tenant)`:
+/// plan + sub-tenant admission, release routing (including sub-tenant
+/// rollout targets), idempotency and insert. Shared by `POST /instances`
+/// and the embedded `POST /embed/runs`.
+#[allow(clippy::too_many_lines)] // validation → release routing → idempotency → insert, one linear pipeline
+pub(crate) async fn create_instance_scoped(
+    state: &AppState,
+    tenant_id: TenantId,
+    sub_tenant: Option<String>,
+    req: CreateInstanceRequest,
+) -> Result<(StatusCode, serde_json::Value), ApiError> {
+    let now = Utc::now();
 
     // Defensive: the shared helper falls back to "default" when both the body
     // and header are absent, so the tenant can never be empty here.
@@ -125,7 +141,7 @@ pub async fn create_instance(
     }
 
     let entitlement_plan = crate::entitlements::admit_instances(
-        &state,
+        state,
         &tenant_id,
         std::slice::from_ref(&req.namespace),
         1,
@@ -162,13 +178,10 @@ pub async fn create_instance(
             })
             // No stable key supplied: each instance is its own cohort.
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-        let effective_percent = if release.state == orch8_types::release::ReleaseState::Promoted {
-            100
-        } else {
-            release.canary_percent
-        };
+        // Promoted → candidate; a sub-tenant rollout target routes scoped
+        // instances by sub-tenant; otherwise the per-instance cohort canary.
         let variant =
-            orch8_types::release::assign_variant(release.id, &cohort_key, effective_percent);
+            orch8_types::release::route_instance(&release, sub_tenant.as_deref(), &cohort_key);
         if variant == orch8_types::release::ReleaseVariant::Candidate {
             effective_sequence_id = release.candidate_sequence_id;
         }
@@ -235,7 +248,7 @@ pub async fn create_instance(
     {
         return Ok((
             StatusCode::OK,
-            Json(serde_json::json!({ "id": existing.id, "deduplicated": true })),
+            serde_json::json!({ "id": existing.id, "deduplicated": true }),
         ));
     }
 
@@ -253,12 +266,21 @@ pub async fn create_instance(
 
     let instance = TaskInstance {
         id: InstanceId::new(),
+        sub_tenant,
         sequence_id: effective_sequence_id,
         tenant_id,
         namespace: req.namespace,
         state: InstanceState::Scheduled,
         next_fire_at: Some(req.next_fire_at.unwrap_or(now)),
-        priority: req.priority,
+        priority: crate::entitlements::effective_priority(
+            req.priority,
+            req.priority_lane,
+            sequence
+                .placement
+                .as_ref()
+                .and_then(|placement| placement.priority_lane),
+            &entitlement_plan,
+        ),
         timezone: req.timezone,
         metadata,
         context,
@@ -278,23 +300,35 @@ pub async fn create_instance(
     // index remains the authority; on that expected conflict, read the winner
     // and return the same idempotent success response instead of leaking a
     // spurious 409 to one of the callers.
-    match state
-        .storage
-        .create_instance_admitted(&instance, entitlement_plan.max_active_instances)
-        .await
-    {
+    // Sub-tenant instances go through the sub-tenant admission path: the
+    // tenant pool and the sub-tenant's caps under one tenant lock, plus the
+    // durable execution-ledger row used for Embedded metering.
+    let created = if instance.sub_tenant.is_some() {
+        state
+            .storage
+            .create_sub_tenant_instances_admitted(
+                std::slice::from_ref(&instance),
+                entitlement_plan.max_active_instances,
+                now,
+            )
+            .await
+            .map(|_| ())
+    } else {
+        state
+            .storage
+            .create_instance_admitted(&instance, entitlement_plan.max_active_instances)
+            .await
+    };
+    match created {
         Ok(()) => {}
         Err(err @ StorageError::Conflict(_)) => {
-            if let Some(id) = concurrent_idempotency_winner(
-                &state,
-                &instance.tenant_id,
-                effective_idem.as_deref(),
-            )
-            .await?
+            if let Some(id) =
+                concurrent_idempotency_winner(state, &instance.tenant_id, effective_idem.as_deref())
+                    .await?
             {
                 return Ok((
                     StatusCode::OK,
-                    Json(serde_json::json!({ "id": id, "deduplicated": true })),
+                    serde_json::json!({ "id": id, "deduplicated": true }),
                 ));
             }
             return Err(ApiError::from_storage(err, "instance"));
@@ -311,7 +345,7 @@ pub async fn create_instance(
 
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({ "id": instance.id })),
+        serde_json::json!({ "id": instance.id }),
     ))
 }
 
@@ -326,6 +360,7 @@ pub async fn create_instance(
 pub async fn create_instances_batch(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    sub_header: crate::sub_tenants::SubTenantHeader,
     Json(req): Json<BatchCreateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Empty batch is a no-op — return success with count=0 so callers
@@ -353,7 +388,17 @@ pub async fn create_instances_batch(
     // view (tenant isolation requires non-empty scoping values).
     let mut sequence_ids = std::collections::HashSet::new();
     let mut authoritative_tenants = std::collections::HashMap::new();
+    let mut sub_tenants = std::collections::HashMap::new();
     for (i, r) in req.instances.iter().enumerate() {
+        let sub = sub_header
+            .for_create(r.sub_tenant.as_deref())
+            .map_err(|e| match e {
+                ApiError::InvalidArgument(m) => {
+                    ApiError::InvalidArgument(format!("instances[{i}]: {m}"))
+                }
+                other => other,
+            })?;
+        sub_tenants.insert(i, sub);
         if r.tenant_id.as_str().trim().is_empty() && tenant_ctx.is_none() {
             return Err(ApiError::InvalidArgument(format!(
                 "instances[{i}]: tenant_id must not be empty"
@@ -394,6 +439,7 @@ pub async fn create_instances_batch(
         entry.2.insert(item.namespace.clone());
     }
     let mut entitlement_limits = std::collections::HashMap::new();
+    let mut entitlement_plans = std::collections::HashMap::new();
     for (tenant, (count, largest_context, namespaces)) in admission_groups {
         let plan = crate::entitlements::admit_instances(
             &state,
@@ -402,7 +448,8 @@ pub async fn create_instances_batch(
             count,
             largest_context,
         )?;
-        entitlement_limits.insert(tenant, plan.max_active_instances);
+        entitlement_limits.insert(tenant.clone(), plan.max_active_instances);
+        entitlement_plans.insert(tenant, plan);
     }
 
     // Fetch every referenced sequence in one storage query instead of one
@@ -413,6 +460,10 @@ pub async fn create_instances_batch(
         std::collections::HashMap::new();
     let mut sequence_tenants: std::collections::HashMap<_, TenantId> =
         std::collections::HashMap::new();
+    let mut sequence_lanes: std::collections::HashMap<
+        _,
+        Option<orch8_types::placement::PriorityLane>,
+    > = std::collections::HashMap::new();
     let sequence_ids: Vec<_> = sequence_ids.into_iter().collect();
     for seq in state
         .storage
@@ -422,6 +473,10 @@ pub async fn create_instances_batch(
     {
         sequence_tenants.insert(seq.id, seq.tenant_id);
         input_schemas.insert(seq.id, seq.input_schema);
+        sequence_lanes.insert(
+            seq.id,
+            seq.placement.and_then(|placement| placement.priority_lane),
+        );
     }
 
     // Validate each item's data against its sequence's input_schema (422) and
@@ -465,14 +520,23 @@ pub async fn create_instances_batch(
             let tenant_id = authoritative_tenants.remove(&i).ok_or_else(|| {
                 ApiError::Internal(format!("instances[{i}]: tenant not resolved"))
             })?;
+            let priority = crate::entitlements::effective_priority(
+                r.priority,
+                r.priority_lane,
+                sequence_lanes.get(&r.sequence_id).copied().flatten(),
+                entitlement_plans
+                    .get(&tenant_id)
+                    .unwrap_or(&crate::entitlements::PlanEntitlements::unlimited()),
+            );
             Ok::<_, ApiError>(TaskInstance {
                 id: InstanceId::new(),
+                sub_tenant: sub_tenants.remove(&i).flatten(),
                 sequence_id: r.sequence_id,
                 tenant_id,
                 namespace: r.namespace,
                 state: InstanceState::Scheduled,
                 next_fire_at: Some(r.next_fire_at.unwrap_or(now)),
-                priority: r.priority,
+                priority,
                 timezone: r.timezone,
                 metadata: r.metadata,
                 context,
@@ -488,11 +552,37 @@ pub async fn create_instances_batch(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let count = state
-        .storage
-        .create_instances_batch_admitted(&instances, &entitlement_limits)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instances"))?;
+    let scoped = instances.iter().filter(|i| i.sub_tenant.is_some()).count();
+    let count = if scoped == 0 {
+        state
+            .storage
+            .create_instances_batch_admitted(&instances, &entitlement_limits)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instances"))?
+    } else {
+        // Sub-tenant admission is atomic per (tenant, sub_tenant); a batch
+        // must therefore target exactly one of them.
+        let first = &instances[0];
+        if scoped != instances.len()
+            || instances
+                .iter()
+                .any(|i| i.tenant_id != first.tenant_id || i.sub_tenant != first.sub_tenant)
+        {
+            return Err(ApiError::InvalidArgument(
+                "a batch with sub-tenant instances must target a single tenant and sub-tenant"
+                    .into(),
+            ));
+        }
+        let limit = entitlement_limits
+            .get(&first.tenant_id)
+            .copied()
+            .unwrap_or(0);
+        state
+            .storage
+            .create_sub_tenant_instances_admitted(&instances, limit, now)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instances"))?
+    };
 
     Ok((StatusCode::CREATED, Json(CountResponse { count })))
 }
@@ -507,6 +597,7 @@ pub async fn create_instances_batch(
 pub async fn get_instance(
     State(state): State<AppState>,
     tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
+    sub_header: crate::sub_tenants::SubTenantHeader,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance = state
@@ -522,6 +613,7 @@ pub async fn get_instance(
     {
         return Err(ApiError::NotFound(format!("instance {id}")));
     }
+    sub_header.enforce_access(instance.sub_tenant.as_deref(), &format!("instance {id}"))?;
 
     Ok(Json(instance))
 }
@@ -605,6 +697,7 @@ pub async fn get_instance_logs(
         ("namespace" = Option<String>, Query, description = "Filter by namespace"),
         ("sequence_id" = Option<Uuid>, Query, description = "Filter by sequence"),
         ("state" = Option<String>, Query, description = "Comma-separated states"),
+        ("sub_tenant" = Option<String>, Query, description = "Filter by sub-tenant (X-Orch8-Sub-Tenant overrides)"),
         ("offset" = u64, Query, description = "Pagination offset"),
         ("limit" = u32, Query, description = "Pagination limit (max 1000)"),
     ),
@@ -614,6 +707,7 @@ pub async fn list_instances(
     State(state): State<AppState>,
     tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
     admin_ctx: crate::auth::OptionalAdmin,
+    sub_header: crate::sub_tenants::SubTenantHeader,
     Query(q): Query<ListQuery>,
     Query(raw): Query<std::collections::HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -639,6 +733,7 @@ pub async fn list_instances(
         states: q.state.as_deref().map(parse_states).transpose()?,
         metadata_filter,
         priority: None,
+        sub_tenant: sub_header.for_filter(q.sub_tenant.as_deref())?,
     };
 
     let mut pagination = Pagination {

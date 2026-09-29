@@ -29,6 +29,13 @@ pub struct AdminContext;
 /// Extract the admin marker from request extensions (if present).
 pub type OptionalAdmin = Option<axum::Extension<AdminContext>>;
 
+/// Marker for a request carrying an `o8e1` embed bearer on an embed-token
+/// route. Grants nothing by itself: the request carries no tenant, admin or
+/// principal context, and every embed handler verifies the token through
+/// [`crate::embed::EmbedPrincipal`].
+#[derive(Clone, Debug)]
+pub struct EmbedBearer;
+
 /// Authenticated tenant principal and its immutable capability grant.
 #[derive(Clone, Debug)]
 pub struct PrincipalContext {
@@ -114,6 +121,24 @@ pub async fn api_key_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    // Browser-session tokens are verified first (also in `--insecure` mode,
+    // so a tab is always bound to its runtime identity and route allowlist).
+    if let Some(token) = browser_session_token(&request) {
+        return authenticate_browser_session(root_key_digest, &token, request, next).await;
+    }
+
+    // Embed tokens are verified by the embed handlers themselves (they own
+    // the signing secret); here they are only let through, context-free, on
+    // the explicit embed-token route allowlist. Anywhere else an `o8e1`
+    // bearer is not a credential and the request falls through to API-key
+    // authentication below.
+    if crate::embed::token::bearer_token(request.headers()).is_some()
+        && crate::embed::is_token_route(request.method(), request.uri().path())
+    {
+        request.extensions_mut().insert(EmbedBearer);
+        return Ok(next.run(request).await);
+    }
+
     let Some(expected_digest) = root_key_digest else {
         // --insecure mode: authentication disabled (server warns at startup).
         // Treat everyone as admin so management endpoints remain usable in dev.
@@ -182,6 +207,63 @@ pub async fn api_key_middleware(
     }
 }
 
+/// A `bst_…` browser-session token from `x-api-key` or
+/// `Authorization: Bearer`.
+fn browser_session_token(request: &Request) -> Option<String> {
+    let headers = request.headers();
+    let from_key = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.starts_with(crate::browser_sessions::TOKEN_PREFIX));
+    let from_bearer = || {
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(str::trim)
+            .filter(|value| value.starts_with(crate::browser_sessions::TOKEN_PREFIX))
+    };
+    from_key.or_else(from_bearer).map(ToOwned::to_owned)
+}
+
+async fn authenticate_browser_session(
+    root_key_digest: Option<[u8; 32]>,
+    token: &str,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let signer = crate::browser_sessions::BrowserSessionSigner::configured(root_key_digest);
+    let Some(binding) = signer.verify(token, chrono::Utc::now()) else {
+        return Err(ApiError::Unauthorized);
+    };
+    if let Some(header) = request
+        .headers()
+        .get("x-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        && !header.is_empty()
+        && header != binding.tenant_id.as_str()
+    {
+        return Err(ApiError::Forbidden(
+            "X-Tenant-Id does not match the browser session".into(),
+        ));
+    }
+    if !crate::browser_sessions::route_allowed(request.method(), request.uri().path()) {
+        return Err(ApiError::Forbidden(
+            "browser sessions may only poll, complete, fail, heartbeat, or release worker tasks"
+                .into(),
+        ));
+    }
+    request.extensions_mut().insert(TenantContext {
+        tenant_id: binding.tenant_id.clone(),
+    });
+    request.extensions_mut().insert(PrincipalContext {
+        key_id: format!("browser-session:{}", binding.runtime_id),
+        capabilities: vec![ApiCapability::BrowserWorker],
+    });
+    request.extensions_mut().insert(binding);
+    Ok(next.run(request).await)
+}
+
 fn capabilities_allow(
     capabilities: &[ApiCapability],
     method: &axum::http::Method,
@@ -211,6 +293,7 @@ fn capabilities_allow(
                 || (path.starts_with("/instances/") && path.ends_with("/signals"))
         }
         ApiCapability::Auditor => is_read_method(method),
+        ApiCapability::BrowserWorker => crate::browser_sessions::route_allowed(method, path),
     })
 }
 
@@ -242,6 +325,11 @@ pub async fn tenant_middleware(
     // exemption: the root key is *not* exempt, so `require_tenant` applies to it
     // uniformly (it must still present an `X-Tenant-Id`, scoping the operation).
     if request.extensions().get::<TenantContext>().is_some() {
+        return Ok(next.run(request).await);
+    }
+    // Embed-token requests bind their tenant from the verified token, never
+    // from `X-Tenant-Id`, so the header is neither required nor honoured.
+    if request.extensions().get::<EmbedBearer>().is_some() {
         return Ok(next.run(request).await);
     }
 

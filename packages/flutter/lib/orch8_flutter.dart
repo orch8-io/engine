@@ -1,6 +1,7 @@
 library orch8_flutter;
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/services.dart';
 
 class Orch8Config {
@@ -20,6 +21,20 @@ class Orch8Config {
   final String rootPublicKey;
   final String sdkVersion;
 
+  /// HTTPS telemetry ingest endpoint. Empty disables delivery.
+  final String telemetryUrl;
+
+  /// Skip ticks while process RSS exceeds this many bytes (0 = unlimited).
+  final int memoryBudgetBytes;
+
+  /// Endpoint returning a JSON array of sequences for [Orch8.loadSequencesFromUrl].
+  final String sequencesUrl;
+
+  /// Server sync endpoint (`…/api/v1/mobile/sync`). Required for [Orch8.registerNode].
+  final String syncUrl;
+  final String deviceId;
+  final String syncApiKey;
+
   const Orch8Config({
     this.dbPath,
     this.tickIntervalMs = 100,
@@ -36,6 +51,12 @@ class Orch8Config {
     this.environment = 'production',
     this.rootPublicKey = '',
     this.sdkVersion = '0.7.1',
+    this.telemetryUrl = '',
+    this.memoryBudgetBytes = 0,
+    this.sequencesUrl = '',
+    this.syncUrl = '',
+    this.deviceId = '',
+    this.syncApiKey = '',
   });
 
   Map<String, dynamic> toMap() => {
@@ -54,6 +75,12 @@ class Orch8Config {
         'environment': environment,
         'rootPublicKey': rootPublicKey,
         'sdkVersion': sdkVersion,
+        'telemetryUrl': telemetryUrl,
+        'memoryBudgetBytes': memoryBudgetBytes,
+        'sequencesUrl': sequencesUrl,
+        'syncUrl': syncUrl,
+        'deviceId': deviceId,
+        'syncApiKey': syncApiKey,
       };
 }
 
@@ -80,12 +107,14 @@ class SyncResult {
   final int updated;
   final int removed;
   final int skipped;
+  final int signatureFailures;
 
   SyncResult({
     required this.added,
     required this.updated,
     required this.removed,
     required this.skipped,
+    this.signatureFailures = 0,
   });
 
   factory SyncResult.fromMap(Map<String, dynamic> map) => SyncResult(
@@ -93,6 +122,7 @@ class SyncResult {
         updated: map['updated'] as int,
         removed: map['removed'] as int,
         skipped: map['skipped'] as int,
+        signatureFailures: (map['signatureFailures'] as int?) ?? 0,
       );
 }
 
@@ -129,6 +159,296 @@ class InstanceSummary {
       );
 }
 
+class BackgroundRunResult {
+  final int ticksExecuted;
+  final int instancesAdvanced;
+  final int stepsExecuted;
+  final bool hasPendingWork;
+
+  /// Work remains; schedule another OS background opportunity.
+  final bool budgetExhausted;
+
+  BackgroundRunResult({
+    required this.ticksExecuted,
+    required this.instancesAdvanced,
+    required this.stepsExecuted,
+    required this.hasPendingWork,
+    required this.budgetExhausted,
+  });
+
+  factory BackgroundRunResult.fromMap(Map<String, dynamic> map) =>
+      BackgroundRunResult(
+        ticksExecuted: map['ticksExecuted'] as int,
+        instancesAdvanced: map['instancesAdvanced'] as int,
+        stepsExecuted: map['stepsExecuted'] as int,
+        hasPendingWork: map['hasPendingWork'] as bool,
+        budgetExhausted: map['budgetExhausted'] as bool,
+      );
+}
+
+class FlushResult {
+  final int sent;
+  final int dropped;
+
+  FlushResult({required this.sent, required this.dropped});
+
+  factory FlushResult.fromMap(Map<String, dynamic> map) =>
+      FlushResult(sent: map['sent'] as int, dropped: map['dropped'] as int);
+}
+
+class InstanceState {
+  final String instanceId;
+  final String sequenceName;
+
+  /// `scheduled`, `running`, `waiting`, `paused`, `completed`, `failed` or `cancelled`.
+  final String state;
+  final String context;
+  final String createdAt;
+  final String updatedAt;
+
+  InstanceState({
+    required this.instanceId,
+    required this.sequenceName,
+    required this.state,
+    required this.context,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  factory InstanceState.fromMap(Map<String, dynamic> map) => InstanceState(
+        instanceId: map['instanceId'] as String,
+        sequenceName: map['sequenceName'] as String,
+        state: map['state'] as String,
+        context: map['context'] as String,
+        createdAt: map['createdAt'] as String,
+        updatedAt: map['updatedAt'] as String,
+      );
+}
+
+enum PowerState { charging, unplugged, lowBattery, criticalBattery }
+
+// -- Runtime node / worker (engine release after 0.7.1) ----------------------
+
+enum NodeConnectivity { offline, metered, wifi, ethernet }
+
+/// What this device offers the distributed-execution mesh. `handlers` empty
+/// means every handler registered with [Orch8.registerHandler].
+class NodeCapabilities {
+  final List<String> handlers;
+  final List<String> regions;
+
+  /// Free-form hardware facts (`camera`, `nfc`, …).
+  final List<String> hardware;
+  final List<String> plugins;
+
+  /// Credential binding *names* available on the device (never secrets).
+  final List<String> credentials;
+  final bool offlineCapable;
+  final NodeConnectivity? connectivity;
+
+  /// 0..100.
+  final int? batteryPercent;
+  final String? platform;
+
+  /// APNs/FCM token used for id-only wake-up hints.
+  final String? pushToken;
+  final String? appVersion;
+
+  /// Overrides the API base derived from [Orch8Config.syncUrl].
+  final String? apiBaseUrl;
+  final String? capsuleSigningPublicKey;
+
+  const NodeCapabilities({
+    this.handlers = const [],
+    this.regions = const [],
+    this.hardware = const [],
+    this.plugins = const [],
+    this.credentials = const [],
+    this.offlineCapable = true,
+    this.connectivity,
+    this.batteryPercent,
+    this.platform,
+    this.pushToken,
+    this.appVersion,
+    this.apiBaseUrl,
+    this.capsuleSigningPublicKey,
+  }) : assert(batteryPercent == null ||
+            (batteryPercent >= 0 && batteryPercent <= 100));
+
+  Map<String, dynamic> toMap() => {
+        'handlers': handlers,
+        'regions': regions,
+        'hardware': hardware,
+        'plugins': plugins,
+        'credentials': credentials,
+        'offlineCapable': offlineCapable,
+        'connectivity': connectivity?.name,
+        'batteryPercent': batteryPercent,
+        'platform': platform,
+        'pushToken': pushToken,
+        'appVersion': appVersion,
+        'apiBaseUrl': apiBaseUrl,
+        'capsuleSigningPublicKey': capsuleSigningPublicKey,
+      };
+}
+
+class NodeRegistration {
+  final String runtimeId;
+  final String deviceId;
+  final List<String> handlers;
+  final String expiresAt;
+
+  NodeRegistration({
+    required this.runtimeId,
+    required this.deviceId,
+    required this.handlers,
+    required this.expiresAt,
+  });
+
+  factory NodeRegistration.fromMap(Map<String, dynamic> map) =>
+      NodeRegistration(
+        runtimeId: map['runtimeId'] as String,
+        deviceId: map['deviceId'] as String,
+        handlers: List<String>.from(map['handlers'] as List),
+        expiresAt: map['expiresAt'] as String,
+      );
+}
+
+class WorkerOptions {
+  final int maxConcurrentTasks;
+  final Duration idlePollInterval;
+  final String? version;
+
+  const WorkerOptions({
+    this.maxConcurrentTasks = 1,
+    this.idlePollInterval = const Duration(seconds: 15),
+    this.version,
+  });
+
+  Map<String, dynamic> toMap() => {
+        'maxConcurrentTasks': maxConcurrentTasks,
+        'idlePollIntervalMs': idlePollInterval.inMilliseconds,
+        'version': version,
+      };
+}
+
+class WorkerStats {
+  final bool running;
+  final int inFlight;
+  final int claimed;
+  final int completed;
+  final int failed;
+  final int released;
+  final int lost;
+
+  WorkerStats({
+    required this.running,
+    required this.inFlight,
+    required this.claimed,
+    required this.completed,
+    required this.failed,
+    required this.released,
+    required this.lost,
+  });
+
+  factory WorkerStats.fromMap(Map<String, dynamic> map) => WorkerStats(
+        running: map['running'] as bool,
+        inFlight: map['inFlight'] as int,
+        claimed: map['claimed'] as int,
+        completed: map['completed'] as int,
+        failed: map['failed'] as int,
+        released: map['released'] as int,
+        lost: map['lost'] as int,
+      );
+}
+
+class WorkerWindowResult {
+  final int claimed;
+  final int completed;
+  final int failed;
+  final int stillRunning;
+  final bool budgetExhausted;
+
+  WorkerWindowResult({
+    required this.claimed,
+    required this.completed,
+    required this.failed,
+    required this.stillRunning,
+    required this.budgetExhausted,
+  });
+
+  factory WorkerWindowResult.fromMap(Map<String, dynamic> map) =>
+      WorkerWindowResult(
+        claimed: map['claimed'] as int,
+        completed: map['completed'] as int,
+        failed: map['failed'] as int,
+        stillRunning: map['stillRunning'] as int,
+        budgetExhausted: map['budgetExhausted'] as bool,
+      );
+}
+
+/// Remote-task metadata the worker loop adds to handler params as `__orch8`.
+class Orch8TaskContext {
+  /// The server's idempotency key for the step's effect; send it to
+  /// downstream APIs. Null against servers that predate the contract.
+  final String? effectId;
+  final String? taskId;
+  final String? instanceId;
+  final String? blockId;
+  final int? attempt;
+  final String? runtimeId;
+  final int? continuityEpoch;
+  final Object? resumeCheckpoint;
+
+  const Orch8TaskContext({
+    this.effectId,
+    this.taskId,
+    this.instanceId,
+    this.blockId,
+    this.attempt,
+    this.runtimeId,
+    this.continuityEpoch,
+    this.resumeCheckpoint,
+  });
+
+  /// Parse `__orch8` from a handler's `input`; null for local steps.
+  static Orch8TaskContext? fromInput(String input) {
+    Object? root;
+    try {
+      root = jsonDecode(input);
+    } on FormatException {
+      return null;
+    }
+    if (root is! Map) return null;
+    final meta = root['__orch8'];
+    if (meta is! Map) return null;
+    String? str(String k) => meta[k] is String ? meta[k] as String : null;
+    int? num(String k) => meta[k] is int ? meta[k] as int : null;
+    return Orch8TaskContext(
+      effectId: str('effect_id'),
+      taskId: str('task_id'),
+      instanceId: str('instance_id'),
+      blockId: str('block_id'),
+      attempt: num('attempt'),
+      runtimeId: str('runtime_id'),
+      continuityEpoch: num('continuity_epoch'),
+      resumeCheckpoint: meta['resume_checkpoint'],
+    );
+  }
+}
+
+/// Throw from a [StepHandler] to fail the step without retry.
+class PermanentHandlerException implements Exception {
+  final String message;
+  PermanentHandlerException(this.message);
+  @override
+  String toString() => 'PermanentHandlerException: $message';
+}
+
+/// Native step handler. [input] is the params JSON; remote tasks carry a
+/// reserved `__orch8` member (see [Orch8TaskContext.fromInput]).
+/// Return output JSON. Throw [PermanentHandlerException] to fail without
+/// retry; any other error is retryable.
 typedef StepHandler = FutureOr<String> Function(String stepName, String input);
 
 class Orch8 {
@@ -217,8 +537,122 @@ class Orch8 {
     return SyncResult.fromMap(map!);
   }
 
-  Future<void> flushTelemetry(String endpointUrl) =>
-      _channel.invokeMethod('flushTelemetry', {'endpointUrl': endpointUrl});
+  Future<FlushResult> flushTelemetry(String endpointUrl) async {
+    final map = await _channel.invokeMapMethod<String, dynamic>(
+        'flushTelemetry', {'endpointUrl': endpointUrl});
+    return FlushResult.fromMap(map!);
+  }
+
+  /// Drain work inside an OS-granted background window.
+  Future<BackgroundRunResult> runUntilIdle(int maxTicks, Duration timeBudget) async {
+    if (maxTicks <= 0 || timeBudget <= Duration.zero) {
+      throw ArgumentError('maxTicks and timeBudget must be positive');
+    }
+    final map = await _channel.invokeMapMethod<String, dynamic>('runUntilIdle', {
+      'maxTicks': maxTicks,
+      'timeBudgetMs': timeBudget.inMilliseconds,
+    });
+    return BackgroundRunResult.fromMap(map!);
+  }
+
+  Future<void> reportPowerState(PowerState state) =>
+      _channel.invokeMethod('reportPowerState', {'state': state.name});
+
+  Future<InstanceState> getInstance(String instanceId) async {
+    final map = await _channel.invokeMapMethod<String, dynamic>(
+        'getInstance', {'instanceId': instanceId});
+    return InstanceState.fromMap(map!);
+  }
+
+  Future<List<InstanceSummary>> activeInstances() async {
+    final list = await _channel.invokeListMethod<Map>('activeInstances');
+    return list
+            ?.map((m) => InstanceSummary.fromMap(Map<String, dynamic>.from(m)))
+            .toList() ??
+        [];
+  }
+
+  Future<void> loadSequenceFromJson(String json) =>
+      _channel.invokeMethod('loadSequenceFromJson', {'json': json});
+
+  /// Empty [url] uses [Orch8Config.sequencesUrl]. Returns the number loaded.
+  Future<int> loadSequencesFromUrl([String url = '']) async =>
+      (await _channel.invokeMethod<int>('loadSequencesFromUrl', {'url': url}))!;
+
+  /// Trigger an immediate sync and worker poll after a push notification.
+  Future<void> onPushReceived() => _channel.invokeMethod('onPushReceived');
+
+  // -- Runtime node / worker (engine release after 0.7.1) ------------------
+
+  /// Stable runtime UUID of this installation (the lease `worker_id`).
+  Future<String> nodeRuntimeId() async =>
+      (await _channel.invokeMethod<String>('nodeRuntimeId'))!;
+
+  /// Join the runtime mesh: registers device + capabilities using
+  /// `syncUrl` and `syncApiKey`, then re-advertises before the 5-minute TTL.
+  Future<NodeRegistration> registerNode(
+      [NodeCapabilities capabilities = const NodeCapabilities()]) async {
+    final map = await _channel.invokeMapMethod<String, dynamic>(
+        'registerNode', capabilities.toMap());
+    return NodeRegistration.fromMap(map!);
+  }
+
+  Future<void> updateNodeStatus({NodeConnectivity? connectivity, int? batteryPercent}) {
+    if (batteryPercent != null && (batteryPercent < 0 || batteryPercent > 100)) {
+      throw ArgumentError.value(batteryPercent, 'batteryPercent', 'must be 0..100');
+    }
+    return _channel.invokeMethod('updateNodeStatus', {
+      'connectivity': connectivity?.name,
+      'batteryPercent': batteryPercent,
+    });
+  }
+
+  /// Stop the worker, advertise `draining`, stop re-advertising.
+  Future<void> unregisterNode() => _channel.invokeMethod('unregisterNode');
+
+  /// Start the remote worker loop. Register handlers first.
+  Future<void> startWorker([WorkerOptions options = const WorkerOptions()]) {
+    if (options.maxConcurrentTasks <= 0 || options.idlePollInterval <= Duration.zero) {
+      throw ArgumentError('maxConcurrentTasks and idlePollInterval must be positive');
+    }
+    return _channel.invokeMethod('startWorker', options.toMap());
+  }
+
+  Future<void> stopWorker() => _channel.invokeMethod('stopWorker');
+
+  /// Claim and run remote tasks inside a bounded background window.
+  Future<WorkerWindowResult> runWorkerWindow(Duration timeBudget) async {
+    if (timeBudget <= Duration.zero) {
+      throw ArgumentError.value(timeBudget, 'timeBudget', 'must be positive');
+    }
+    final map = await _channel.invokeMapMethod<String, dynamic>(
+        'runWorkerWindow', {'timeBudgetMs': timeBudget.inMilliseconds});
+    return WorkerWindowResult.fromMap(map!);
+  }
+
+  Future<WorkerStats> workerStats() async {
+    final map = await _channel.invokeMapMethod<String, dynamic>('workerStats');
+    return WorkerStats.fromMap(map!);
+  }
+
+  /// Forward an id-only wake push (`task_id` / `runtime_id` / `reason`,
+  /// optionally nested under `orch8`). Returns false when it is not for this
+  /// runtime or carries no Orch8 fields.
+  Future<bool> onPushWake(Map<String, dynamic> data) async {
+    final source = data['orch8'] is Map ? Map<String, dynamic>.from(data['orch8'] as Map) : data;
+    final envelope = <String, String>{
+      for (final k in const ['task_id', 'runtime_id', 'reason'])
+        if (source[k] is String) k: source[k] as String,
+    };
+    if (envelope.isEmpty) return false;
+    return (await _channel.invokeMethod<bool>(
+            'onPushWake', {'envelopeJson': jsonEncode(envelope)})) ??
+        false;
+  }
+
+  /// Enable an opt-in builtin handler (`http_request`) before [resume].
+  Future<void> enableBuiltin(String name) =>
+      _channel.invokeMethod('enableBuiltin', {'name': name});
 
   Future<void> shutdown() async {
     await _channel.invokeMethod('shutdown');
@@ -240,7 +674,13 @@ class Orch8 {
           message: "No handler registered for step '$stepName'",
         );
       }
-      return await handler(stepName, input);
+      try {
+        return await handler(stepName, input);
+      } on PermanentHandlerException catch (e) {
+        throw PlatformException(code: 'PERMANENT', message: e.message);
+      } catch (e) {
+        throw PlatformException(code: 'RETRYABLE', message: e.toString());
+      }
     }
     return null;
   }

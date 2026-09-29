@@ -40,6 +40,8 @@ async fn store() -> SqliteStorage {
 
 fn make_sequence(tenant: &str) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -57,6 +59,8 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -75,6 +79,7 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }
@@ -89,6 +94,7 @@ fn make_sequence_named(tenant: &str, name: &str, namespace: &str) -> SequenceDef
 fn make_instance(tenant: &str, seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked(tenant),
@@ -934,6 +940,8 @@ async fn t33_sequence_blocks_json_roundtrip() {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -955,6 +963,8 @@ async fn t33_sequence_blocks_json_roundtrip() {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -1012,6 +1022,8 @@ async fn t35_sequence_with_complex_nested_blocks() {
                     retry: None,
                     timeout: None,
                     rate_limit_key: None,
+                    rate_budget: None,
+                    placement: None,
                     send_window: None,
                     context_access: None,
                     cancellable: true,
@@ -1033,6 +1045,8 @@ async fn t35_sequence_with_complex_nested_blocks() {
                     retry: None,
                     timeout: None,
                     rate_limit_key: None,
+                    rate_budget: None,
+                    placement: None,
                     send_window: None,
                     context_access: None,
                     cancellable: true,

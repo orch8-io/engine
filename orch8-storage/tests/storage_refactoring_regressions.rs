@@ -51,6 +51,7 @@ async fn store() -> SqliteStorage {
 fn make_instance(state: InstanceState) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
@@ -96,6 +97,11 @@ fn make_worker_task(instance_id: InstanceId, timeout_ms: Option<i64>) -> WorkerT
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     }
 }
 

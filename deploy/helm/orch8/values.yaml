@@ -15,9 +15,32 @@ imagePullSecrets: []
 #   allInOne: one Deployment running role `all_in_one` (API + engine + push outbox).
 #   split:    a `control` Deployment (API, metrics, webhooks, push outbox, no engine)
 #             plus an `executor` Deployment (engine + worker gRPC surface, HTTP health only).
+#   executor: a hybrid executor only (engine + worker gRPC surface, HTTP health
+#             only) that joins a managed Orch8 Cloud control plane with the
+#             join token in hybrid.joinToken (see docs/HYBRID.md). Uses the
+#             `executor` Deployment settings below; needs Postgres.
 # The `edge` role is intentionally not offered: it targets device/edge hosts
 # that run outside the cluster and talk to a managed control plane.
 mode: allInOne
+
+# -- Hybrid executor (mode=executor).
+hybrid:
+  joinToken:
+    # Secret holding the `o8x1.` join token issued by Orch8 Cloud:
+    #   kubectl create secret generic orch8-join --from-literal=join-token=o8x1....
+    existingSecret: ""
+    key: join-token
+
+# -- Metadata-only run export to Orch8 Cloud ([cloud_observability]).
+# Streams instance state transitions (never context, inputs, or outputs).
+cloudObservability:
+  enabled: false
+  endpoint: "https://cloud.orch8.io"
+  # Defaults to the release fullname.
+  engineId: ""
+  # Secret holding the ingest API key.
+  existingSecret: ""
+  apiKeyKey: api-key
 
 # Settings for the all_in_one Deployment (mode=allInOne).
 allInOne:

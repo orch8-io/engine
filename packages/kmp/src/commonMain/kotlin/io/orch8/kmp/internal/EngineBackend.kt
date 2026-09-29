@@ -8,11 +8,17 @@ import io.orch8.kmp.EngineEvent
 import io.orch8.kmp.FlushResult
 import io.orch8.kmp.InstanceSnapshot
 import io.orch8.kmp.InstanceSummary
+import io.orch8.kmp.NodeCapabilities
+import io.orch8.kmp.NodeConnectivity
+import io.orch8.kmp.NodeRegistration
 import io.orch8.kmp.Orch8TokenSource
 import io.orch8.kmp.PowerState
 import io.orch8.kmp.SequenceInfo
 import io.orch8.kmp.SyncResult
 import io.orch8.kmp.TickResult
+import io.orch8.kmp.WorkerOptions
+import io.orch8.kmp.WorkerStats
+import io.orch8.kmp.WorkerWindowResult
 import kotlinx.coroutines.CoroutineDispatcher
 
 /**
@@ -82,6 +88,28 @@ internal interface EngineBackend {
         destinationRuntimeId: String,
         destinationInstanceId: String,
     )
+
+    // Runtime node / worker (engine release after 0.7.1).
+
+    fun nodeRuntimeId(): String
+
+    fun registerNode(capabilities: NodeCapabilities): NodeRegistration
+
+    fun updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: Int?)
+
+    fun unregisterNode()
+
+    fun startWorker(options: WorkerOptions)
+
+    fun stopWorker()
+
+    fun runWorkerWindow(timeBudgetMs: Long): WorkerWindowResult
+
+    fun workerStats(): WorkerStats
+
+    fun onPushWake(envelopeJson: String): Boolean
+
+    fun enableBuiltin(name: String)
 }
 
 /**

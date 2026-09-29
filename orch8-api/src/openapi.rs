@@ -370,9 +370,32 @@ impl Modify for ContinuityOpenApi {
     }
 }
 
+/// Registers the `embed_token` bearer scheme (`Authorization: Bearer o8e1…`)
+/// referenced by the `/embed/*` operations.
+pub(crate) struct EmbedSecurity;
+
+impl Modify for EmbedSecurity {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "embed_token",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("o8e1")
+                    .description(Some(
+                        "Scoped embed token minted by POST /embed/tokens (tenant API key)",
+                    ))
+                    .build(),
+            ),
+        );
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(
-    modifiers(&ContinuityOpenApi),
+    modifiers(&ContinuityOpenApi, &EmbedSecurity),
     info(
         title = "Orch8.io API",
         description = "Durable task sequencing engine — REST API.\n\n\
@@ -470,6 +493,22 @@ impl Modify for ContinuityOpenApi {
         crate::releases::promote_release,
         crate::releases::pause_release,
         crate::releases::rollback_release,
+        crate::releases::set_release_target,
+        crate::sub_tenants::get_limits,
+        crate::sub_tenants::put_limits,
+        crate::sub_tenants::usage,
+        crate::license::get_license,
+        crate::embed::token::issue_token,
+        crate::embed::runs::list_runs,
+        crate::embed::runs::get_run,
+        crate::embed::runs::start_run,
+        crate::embed::runs::list_approvals,
+        crate::embed::runs::resolve_approval,
+        crate::embed::sequences::list_sequences,
+        crate::embed::sequences::get_sequence,
+        crate::embed::sequences::put_sequence,
+        crate::embed::get_theme,
+        crate::embed::put_theme,
         // Cron
         crate::cron::create_cron,
         crate::cron::get_cron,
@@ -489,6 +528,11 @@ impl Modify for ContinuityOpenApi {
         crate::queue_routing::list_rules,
         crate::queue_routing::get_rule,
         crate::queue_routing::delete_rule,
+        crate::placement::get_policies,
+        crate::placement::put_policies,
+        crate::placement::list_budgets,
+        crate::placement::put_budget,
+        crate::placement::delete_budget,
         // Queue dispatch
         crate::queue_dispatch::set_dispatch,
         crate::queue_dispatch::list_dispatch,
@@ -500,6 +544,8 @@ impl Modify for ContinuityOpenApi {
         crate::workers::upload_task_artifact,
         crate::workers::fail_task,
         crate::workers::heartbeat_task,
+        crate::workers::release_task,
+        crate::browser_sessions::create_browser_session,
         crate::workers::list_tasks,
         crate::workers::task_stats,
         crate::workers::list_task_attempts,
@@ -542,6 +588,12 @@ impl Modify for ContinuityOpenApi {
         crate::alerts::get_rule,
         crate::alerts::update_rule,
         crate::alerts::delete_rule,
+        // Signed effect receipts (at-most-once dispatch evidence)
+        crate::receipts::export_instance_receipts,
+        crate::receipts::export_window_receipts,
+        crate::receipts::signing_key,
+        // Embedded -> remote migration
+        crate::migrations::import,
         // Usage
         crate::usage::get_usage,
         crate::usage::purge_llm_cache,
@@ -559,6 +611,15 @@ impl Modify for ContinuityOpenApi {
         crate::budgets::delete_budget,
         crate::budgets::list_budgets,
         crate::budgets::list_alerts,
+        // Federation transport
+        crate::federation::get_identity,
+        crate::federation::list_peers,
+        crate::federation::create_peer,
+        crate::federation::get_peer,
+        crate::federation::update_peer,
+        crate::federation::delete_peer,
+        crate::federation::get_call,
+        crate::federation::inbound,
         // Streaming
         crate::streaming::stream_instance,
         // Cluster
@@ -658,6 +719,30 @@ impl Modify for ContinuityOpenApi {
         orch8_types::release::DiffSeverity,
         crate::releases::CreateReleaseRequest,
         crate::releases::DiffRequest,
+        orch8_types::release::ReleaseTarget,
+        orch8_types::sub_tenant::SubTenantLimits,
+        orch8_types::sub_tenant::SubTenantUsage,
+        orch8_types::sub_tenant::SequenceEmbed,
+        orch8_types::sub_tenant::EmbedTheme,
+        crate::sub_tenants::SubTenantLimitsResponse,
+        crate::sub_tenants::SubTenantUsageResponse,
+        crate::license::LicenseInfo,
+        crate::license::LicenseStatus,
+        crate::embed::EmbedScope,
+        crate::embed::ThemeResponse,
+        crate::embed::token::IssueTokenRequest,
+        crate::embed::token::IssueTokenResponse,
+        crate::embed::runs::EmbedRunSummary,
+        crate::embed::runs::EmbedRunList,
+        crate::embed::runs::EmbedStep,
+        crate::embed::runs::EmbedRunDetail,
+        crate::embed::runs::StartRunRequest,
+        crate::embed::runs::EmbedApproval,
+        crate::embed::runs::EmbedApprovalList,
+        crate::embed::runs::ResolveApprovalRequest,
+        crate::embed::sequences::EmbedSequenceSummary,
+        crate::embed::sequences::EmbedSequenceList,
+        crate::embed::sequences::EmbedHandler,
         orch8_types::event_correlation::EventEnvelope,
         orch8_types::event_correlation::EventStatus,
         orch8_types::event_correlation::EventWait,
@@ -670,6 +755,7 @@ impl Modify for ContinuityOpenApi {
         crate::workbench::BlockOutputSummary,
         crate::workbench::RunComparison,
         crate::workbench::ForkPreview,
+        crate::receipts::SigningKeyResponse,
         // IDs
         orch8_types::ids::InstanceId,
         orch8_types::ids::SequenceId,
@@ -728,12 +814,29 @@ impl Modify for ContinuityOpenApi {
         crate::webhook_outbox::RedeliverResponse,
         orch8_types::queue_routing::QueueRoutingRule,
         crate::queue_routing::CreateRoutingRuleRequest,
+        orch8_types::placement::Placement,
+        orch8_types::placement::Affinity,
+        orch8_types::placement::PriorityLane,
+        orch8_types::placement::PlacementPolicies,
+        orch8_types::placement::PlacementPolicy,
+        orch8_types::placement::PolicyMatch,
+        orch8_types::placement::PolicyRequirement,
+        orch8_types::placement::PolicyPreference,
+        orch8_types::placement::PlacementPreference,
+        orch8_types::placement::RateBudget,
+        crate::placement::RateBudgetList,
+        crate::placement::RateBudgetRequest,
         orch8_types::queue_dispatch::QueueDispatchConfig,
         orch8_types::queue_dispatch::DispatchMode,
         crate::queue_dispatch::SetDispatchRequest,
         // Worker
         orch8_types::worker::WorkerTask,
         orch8_types::worker::WorkerTaskState,
+        crate::workers::ClaimedWorkerTask,
+        crate::workers::ReleaseRequest,
+        crate::browser_sessions::CreateBrowserSessionRequest,
+        crate::browser_sessions::CreateBrowserSessionResponse,
+        orch8_types::continuity::RuntimeKind,
         // Audit
         orch8_types::audit::AuditLogEntry,
         // Session
@@ -804,6 +907,17 @@ impl Modify for ContinuityOpenApi {
         crate::prompts::PromptDetail,
         crate::prompts::SetLabelRequest,
         crate::budgets::BudgetRequest,
+        // Federation transport
+        crate::federation::PeerRequest,
+        orch8_types::federation::FederationIdentity,
+        orch8_types::federation::FederationPeerRecord,
+        orch8_types::federation::PeerRelationship,
+        orch8_types::federation::PeerOutboundPolicy,
+        orch8_types::federation::PeerInboundPolicy,
+        orch8_types::federation::FederationCall,
+        orch8_types::federation::FederationCallState,
+        orch8_types::federation::SignedFederationMessage,
+        orch8_types::continuity_advanced::FederationEnvelope,
         // Credentials
         crate::credentials::CredentialResponse,
         orch8_types::credential::CredentialKind,
@@ -866,7 +980,11 @@ impl Modify for ContinuityOpenApi {
         (name = "pools", description = "Resource pool management"),
         (name = "prompts", description = "Versioned, tenant-scoped prompt registry with labels and canaries"),
         (name = "budgets", description = "Tenant LLM spend budgets: hard caps and threshold alerts"),
+        (name = "placement", description = "Placement policies (residency, labels, affinity, lanes) and global rate budgets"),
+        (name = "federation", description = "Opt-in federation transport: trust registry, outbound calls, and the signature-authenticated inbound endpoint"),
         (name = "usage", description = "LLM usage, estimated cost, cache savings and budget status"),
+        (name = "receipts", description = "Signed effect-receipt bundles: at-most-once dispatch evidence (not an exactly-once claim)"),
+        (name = "migrations", description = "Import sequences and in-flight instances from another engine (orch8 migrate --to)"),
         (name = "cluster", description = "Multi-node cluster management"),
         (name = "credentials", description = "Shared secrets referenced by step params via credentials://<id>"),
         (name = "jobs", description = "Background jobs: enqueue a handler invocation without authoring a sequence"),
@@ -875,6 +993,9 @@ impl Modify for ContinuityOpenApi {
         (name = "approvals", description = "Human-in-the-loop approvals, including public Slack/Teams/email approval actions"),
         (name = "alerts", description = "Built-in alert rules (DLQ growth, circuit breakers, budget breaches, empty worker pools)"),
         (name = "public", description = "Unauthenticated, token-addressed public progress links"),
+        (name = "sub-tenants", description = "End customers inside a tenant: X-Orch8-Sub-Tenant scoping, per-sub-tenant caps and metering"),
+        (name = "embed", description = "Embedded surface: scoped o8e1 embed tokens, sub-tenant run/approval/sequence views, theme"),
+        (name = "license", description = "Offline-verified license status (soft enforcement only)"),
         (name = "continuity-product", description = "Framework-neutral handoff protocol, profiles, receipts, conformance, and commercial deployment validation"),
     )
 )]

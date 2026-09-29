@@ -985,6 +985,8 @@ internal object IntegrityCheckingUniffiLib {
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_complete_step(): Int
 
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_enable_builtin(): Int
+
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_flush_telemetry(): Int
@@ -999,17 +1001,25 @@ internal object IntegrityCheckingUniffiLib {
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_loaded_sequences(): Int
 
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_node_runtime_id(): Int
+
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_on_push_received(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_on_push_wake(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_pause(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_register_handler(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_register_node(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_resume(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_run_until_idle(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_run_worker_window(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_set_device_context(): Int
 
@@ -1019,9 +1029,19 @@ internal object IntegrityCheckingUniffiLib {
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_start(): Int
 
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_start_worker(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_stop_worker(): Int
+
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_sync(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_tick_once(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_unregister_node(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_update_node_status(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_worker_stats(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_capsulesigner_key_id(): Int
 
@@ -1103,6 +1123,12 @@ internal object UniffiLib {
         uniffi_out_err: UniffiRustCallStatus,
     ): Unit
 
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_enable_builtin(
+        `ptr`: Long,
+        `name`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+
     external fun uniffi_orch8_mobile_fn_method_mobileengine_export_continuity_capsule(
         `ptr`: Long,
         `instanceId`: RustBuffer.ByValue,
@@ -1152,10 +1178,21 @@ internal object UniffiLib {
         uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
 
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_node_runtime_id(
+        `ptr`: Long,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+
     external fun uniffi_orch8_mobile_fn_method_mobileengine_on_push_received(
         `ptr`: Long,
         uniffi_out_err: UniffiRustCallStatus,
     ): Unit
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_on_push_wake(
+        `ptr`: Long,
+        `envelopeJson`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Byte
 
     external fun uniffi_orch8_mobile_fn_method_mobileengine_pause(
         `ptr`: Long,
@@ -1168,6 +1205,12 @@ internal object UniffiLib {
         `handler`: Long,
         uniffi_out_err: UniffiRustCallStatus,
     ): Unit
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_register_node(
+        `ptr`: Long,
+        `capabilities`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
 
     external fun uniffi_orch8_mobile_fn_method_mobileengine_report_power_state(
         `ptr`: Long,
@@ -1183,6 +1226,12 @@ internal object UniffiLib {
     external fun uniffi_orch8_mobile_fn_method_mobileengine_run_until_idle(
         `ptr`: Long,
         `maxTicks`: Int,
+        `timeBudgetMs`: Long,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_run_worker_window(
+        `ptr`: Long,
         `timeBudgetMs`: Long,
         uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
@@ -1212,6 +1261,17 @@ internal object UniffiLib {
         uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
 
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_start_worker(
+        `ptr`: Long,
+        `options`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_stop_worker(
+        `ptr`: Long,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+
     external fun uniffi_orch8_mobile_fn_method_mobileengine_sync(
         `ptr`: Long,
         `manifestUrl`: RustBuffer.ByValue,
@@ -1220,6 +1280,23 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
 
     external fun uniffi_orch8_mobile_fn_method_mobileengine_tick_once(
+        `ptr`: Long,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_unregister_node(
+        `ptr`: Long,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_update_node_status(
+        `ptr`: Long,
+        `connectivity`: RustBuffer.ByValue,
+        `batteryPercent`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_worker_stats(
         `ptr`: Long,
         uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
@@ -1541,103 +1618,133 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule() != 961) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule() and 0xFFFF) != 961) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_active_instances() != 27619) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_active_instances() and 0xFFFF) != 27619) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_cancel_instance() != 42878) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_cancel_instance() and 0xFFFF) != 42878) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_complete_step() != 37083) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_complete_step() and 0xFFFF) != 37083) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule() != 28196) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_enable_builtin() and 0xFFFF) != 55786) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_flush_telemetry() != 19645) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule() and 0xFFFF) != 28196) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_get_instance() != 17633) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_flush_telemetry() and 0xFFFF) != 19645) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule() != 19841) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_get_instance() and 0xFFFF) != 17633) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json() != 44133) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule() and 0xFFFF) != 19841) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_load_sequences_from_url() != 37490) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json() and 0xFFFF) != 44133) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_loaded_sequences() != 59070) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_load_sequences_from_url() and 0xFFFF) != 37490) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_on_push_received() != 47207) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_loaded_sequences() and 0xFFFF) != 59070) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_pause() != 23724) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_node_runtime_id() and 0xFFFF) != 72) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_register_handler() != 16855) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_on_push_received() and 0xFFFF) != 6849) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state() != 30406) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_on_push_wake() and 0xFFFF) != 35857) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_resume() != 35126) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_pause() and 0xFFFF) != 32240) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_run_until_idle() != 59390) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_register_handler() and 0xFFFF) != 16855) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_set_device_context() != 20572) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_register_node() and 0xFFFF) != 1315) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_set_listener() != 6834) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state() and 0xFFFF) != 30406) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_shutdown() != 65418) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_resume() and 0xFFFF) != 52748) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_start() != 15754) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_run_until_idle() and 0xFFFF) != 59390) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_sync() != 63648) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_run_worker_window() and 0xFFFF) != 64477) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_mobileengine_tick_once() != 40919) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_set_device_context() and 0xFFFF) != 20572) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_capsulesigner_key_id() != 14959) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_set_listener() and 0xFFFF) != 6834) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_capsulesigner_public_key_base64() != 19094) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_shutdown() and 0xFFFF) != 65418) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_capsulesigner_sign_manifest_sha256() != 12400) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_start() and 0xFFFF) != 15754) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_tokenprovider_current_token() != 29353) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_start_worker() and 0xFFFF) != 51564) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_tokenprovider_refresh_token() != 20657) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_stop_worker() and 0xFFFF) != 30469) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_completed() != 8200) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_sync() and 0xFFFF) != 63648) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_failed() != 20475) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_tick_once() and 0xFFFF) != 40919) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_enginelistener_on_step_pending() != 53831) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_unregister_node() and 0xFFFF) != 24105) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_method_stephandler_execute() != 17601) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_update_node_status() and 0xFFFF) != 43143) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_orch8_mobile_checksum_constructor_mobileengine_new() != 21007) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_worker_stats() and 0xFFFF) != 54173) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_capsulesigner_key_id() and 0xFFFF) != 14959) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_capsulesigner_public_key_base64() and 0xFFFF) != 19094) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_capsulesigner_sign_manifest_sha256() and 0xFFFF) != 12400) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_tokenprovider_current_token() and 0xFFFF) != 29353) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_tokenprovider_refresh_token() and 0xFFFF) != 20657) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_completed() and 0xFFFF) != 8200) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_failed() and 0xFFFF) != 20475) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_enginelistener_on_step_pending() and 0xFFFF) != 53831) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_stephandler_execute() and 0xFFFF) != 17601) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_constructor_mobileengine_new() and 0xFFFF) != 21007) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1845,6 +1952,28 @@ private class JavaLangRefCleanable(
     val cleanable: java.lang.ref.Cleaner.Cleanable,
 ) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUByte : FfiConverter<UByte, Byte> {
+    override fun lift(value: Byte): UByte = value.toUByte()
+
+    fun lift(value: Int): UByte = value.toUByte()
+
+    override fun read(buf: ByteBuffer): UByte = lift(buf.get())
+
+    override fun lower(value: UByte): Byte = value.toByte()
+
+    override fun allocationSize(value: UByte) = 1UL
+
+    override fun write(
+        value: UByte,
+        buf: ByteBuffer,
+    ) {
+        buf.put(value.toByte())
+    }
 }
 
 /**
@@ -2293,10 +2422,9 @@ internal object uniffiCallbackInterfaceCapsuleSigner {
             uniffiCallStatus: UniffiRustCallStatus,
         ) {
             val uniffiObj = FfiConverterTypeCapsuleSigner.handleMap.get(uniffiHandle)
-            val makeCall = {
-                uniffiObj.`signManifestSha256`(
-                    FfiConverterString.lift(`digest`),
-                )
+            val makeCall = {  uniffiObj.`signManifestSha256`(
+                FfiConverterString.lift(`digest`),
+            )
             }
             val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
             uniffiTraitInterfaceCallWithError(
@@ -2660,11 +2788,10 @@ internal object uniffiCallbackInterfaceEngineListener {
             uniffiCallStatus: UniffiRustCallStatus,
         ) {
             val uniffiObj = FfiConverterTypeEngineListener.handleMap.get(uniffiHandle)
-            val makeCall = {
-                uniffiObj.`onInstanceCompleted`(
-                    FfiConverterString.lift(`instanceId`),
-                    FfiConverterString.lift(`output`),
-                )
+            val makeCall = {  uniffiObj.`onInstanceCompleted`(
+                FfiConverterString.lift(`instanceId`),
+                FfiConverterString.lift(`output`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -2680,11 +2807,10 @@ internal object uniffiCallbackInterfaceEngineListener {
             uniffiCallStatus: UniffiRustCallStatus,
         ) {
             val uniffiObj = FfiConverterTypeEngineListener.handleMap.get(uniffiHandle)
-            val makeCall = {
-                uniffiObj.`onInstanceFailed`(
-                    FfiConverterString.lift(`instanceId`),
-                    FfiConverterString.lift(`error`),
-                )
+            val makeCall = {  uniffiObj.`onInstanceFailed`(
+                FfiConverterString.lift(`instanceId`),
+                FfiConverterString.lift(`error`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -2701,12 +2827,11 @@ internal object uniffiCallbackInterfaceEngineListener {
             uniffiCallStatus: UniffiRustCallStatus,
         ) {
             val uniffiObj = FfiConverterTypeEngineListener.handleMap.get(uniffiHandle)
-            val makeCall = {
-                uniffiObj.`onStepPending`(
-                    FfiConverterString.lift(`instanceId`),
-                    FfiConverterString.lift(`stepName`),
-                    FfiConverterString.lift(`handler`),
-                )
+            val makeCall = {  uniffiObj.`onStepPending`(
+                FfiConverterString.lift(`instanceId`),
+                FfiConverterString.lift(`stepName`),
+                FfiConverterString.lift(`handler`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -2913,6 +3038,13 @@ public interface MobileEngineInterface {
     )
 
     /**
+     * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
+     * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
+     * registered. Must be called before `resume()` / `start_worker()`.
+     */
+    fun `enableBuiltin`(`name`: kotlin.String)
+
+    /**
      * Export a paused or waiting device-owned execution for a destination
      * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
      * never receives the private signing key.
@@ -2968,13 +3100,33 @@ public interface MobileEngineInterface {
     fun `loadedSequences`(): List<SequenceInfo>
 
     /**
+     * This device's stable runtime id (a UUID persisted in the local
+     * database). It is the `worker_id` for task leases and the target for
+     * `$runtime.runtime_id` step placement.
+     */
+    fun `nodeRuntimeId`(): kotlin.String
+
+    /**
      * Notify the engine that a silent push notification was received.
-     * Triggers an immediate sync cycle on the next tick.
+     * Triggers an immediate sync cycle on the next tick and an immediate
+     * worker poll.
      */
     fun `onPushReceived`()
 
     /**
-     * Pause the foreground tick loop.
+     * Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
+     * "reason"?}`, the push `data`/`userInfo` payload as JSON). A wake that
+     * names a different runtime is ignored; otherwise the worker polls
+     * immediately and a sync is triggered. Pushes never carry task params:
+     * the task arrives through a leased poll. Returns whether it was
+     * accepted.
+     */
+    fun `onPushWake`(`envelopeJson`: kotlin.String): kotlin.Boolean
+
+    /**
+     * Pause the foreground tick loop. The remote worker stops claiming new
+     * tasks and gives back any task claimed but not yet started; tasks that
+     * are already executing run to completion while the process lives.
      */
     fun `pause`()
 
@@ -2987,6 +3139,18 @@ public interface MobileEngineInterface {
     )
 
     /**
+     * Join the distributed runtime mesh: registers the device
+     * (`/mobile/devices/register`) and its runtime capabilities
+     * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
+     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * background before its five-minute TTL (that refresh is the node's
+     * liveness signal) until `unregister_node` / `shutdown`. Calling it again
+     * updates the advertised facts. Also settles any remote task a previous
+     * process left claimed.
+     */
+    fun `registerNode`(`capabilities`: NodeCapabilities): NodeRegistration
+
+    /**
      * Report current device power state. The engine adapts tick frequency based
      * on battery level: `Charging`/`Unplugged` = normal, `LowBattery` = 2x interval,
      * `CriticalBattery` = 4x interval.
@@ -2994,7 +3158,8 @@ public interface MobileEngineInterface {
     fun `reportPowerState`(`state`: PowerState)
 
     /**
-     * Start a foreground tick loop.
+     * Start a foreground tick loop. Also lets the remote worker (if started)
+     * claim tasks again.
      */
     fun `resume`()
 
@@ -3010,6 +3175,14 @@ public interface MobileEngineInterface {
         `maxTicks`: kotlin.UInt,
         `timeBudgetMs`: kotlin.ULong,
     ): BackgroundRunResult
+
+    /**
+     * Run the worker for an OS-granted background window (`BGTask` /
+     * `WorkManager` / push-wake handler): claims tasks even while paused,
+     * until the queue is idle and nothing is in flight or `time_budget_ms`
+     * elapses. Requires `start_worker`.
+     */
+    fun `runWorkerWindow`(`timeBudgetMs`: kotlin.ULong): WorkerWindowResult
 
     /**
      * Set device context for telemetry.
@@ -3036,6 +3209,20 @@ public interface MobileEngineInterface {
     ): kotlin.String
 
     /**
+     * Start the remote worker loop: poll the control plane as this `mobile`
+     * runtime, run claimed tasks with the registered handlers, heartbeat
+     * per the task lease, and complete / fail / release them. Requires
+     * `register_node` first. Handlers must be registered before this call.
+     */
+    fun `startWorker`(`options`: WorkerOptions)
+
+    /**
+     * Stop claiming remote tasks. Tasks already executing finish and are
+     * settled in the background.
+     */
+    fun `stopWorker`()
+
+    /**
      * Sync sequences from the remote manifest.
      */
     fun `sync`(
@@ -3047,6 +3234,26 @@ public interface MobileEngineInterface {
      * Execute a single tick.
      */
     fun `tickOnce`(): TickResult
+
+    /**
+     * Leave the mesh: stops the worker, advertises the node as draining
+     * (best effort), and stops the background re-advertisement.
+     */
+    fun `unregisterNode`()
+
+    /**
+     * Update the liveness facts advertised by a registered node (battery,
+     * connectivity) and push them to the control plane now.
+     */
+    fun `updateNodeStatus`(
+        `connectivity`: NodeConnectivity?,
+        `batteryPercent`: kotlin.UByte?,
+    )
+
+    /**
+     * Counters for the remote worker (zeros when it is not running).
+     */
+    fun `workerStats`(): WorkerStats
 
     companion object
 }
@@ -3253,6 +3460,23 @@ open class MobileEngine :
     }
 
     /**
+     * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
+     * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
+     * registered. Must be called before `resume()` / `start_worker()`.
+     */
+    @Throws(MobileException::class)
+    override fun `enableBuiltin`(`name`: kotlin.String) =
+        callWithHandle {
+            uniffiRustCallWithError(MobileException) { _status ->
+                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_enable_builtin(
+                    it,
+                    FfiConverterString.lower(`name`),
+                    _status,
+                )
+            }
+        }
+
+    /**
      * Export a paused or waiting device-owned execution for a destination
      * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
      * never receives the private signing key.
@@ -3397,8 +3621,27 @@ open class MobileEngine :
         )
 
     /**
+     * This device's stable runtime id (a UUID persisted in the local
+     * database). It is the `worker_id` for task leases and the target for
+     * `$runtime.runtime_id` step placement.
+     */
+    @Throws(MobileException::class)
+    override fun `nodeRuntimeId`(): kotlin.String =
+        FfiConverterString.lift(
+            callWithHandle {
+                uniffiRustCallWithError(MobileException) { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_node_runtime_id(
+                        it,
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
      * Notify the engine that a silent push notification was received.
-     * Triggers an immediate sync cycle on the next tick.
+     * Triggers an immediate sync cycle on the next tick and an immediate
+     * worker poll.
      */
     override fun `onPushReceived`() =
         callWithHandle {
@@ -3411,7 +3654,30 @@ open class MobileEngine :
         }
 
     /**
-     * Pause the foreground tick loop.
+     * Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
+     * "reason"?}`, the push `data`/`userInfo` payload as JSON). A wake that
+     * names a different runtime is ignored; otherwise the worker polls
+     * immediately and a sync is triggered. Pushes never carry task params:
+     * the task arrives through a leased poll. Returns whether it was
+     * accepted.
+     */
+    override fun `onPushWake`(`envelopeJson`: kotlin.String): kotlin.Boolean =
+        FfiConverterBoolean.lift(
+            callWithHandle {
+                uniffiRustCall { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_on_push_wake(
+                        it,
+                        FfiConverterString.lower(`envelopeJson`),
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
+     * Pause the foreground tick loop. The remote worker stops claiming new
+     * tasks and gives back any task claimed but not yet started; tasks that
+     * are already executing run to completion while the process lives.
      */
     override fun `pause`() =
         callWithHandle {
@@ -3442,6 +3708,30 @@ open class MobileEngine :
     }
 
     /**
+     * Join the distributed runtime mesh: registers the device
+     * (`/mobile/devices/register`) and its runtime capabilities
+     * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
+     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * background before its five-minute TTL (that refresh is the node's
+     * liveness signal) until `unregister_node` / `shutdown`. Calling it again
+     * updates the advertised facts. Also settles any remote task a previous
+     * process left claimed.
+     */
+    @Throws(MobileException::class)
+    override fun `registerNode`(`capabilities`: NodeCapabilities): NodeRegistration =
+        FfiConverterTypeNodeRegistration.lift(
+            callWithHandle {
+                uniffiRustCallWithError(MobileException) { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_register_node(
+                        it,
+                        FfiConverterTypeNodeCapabilities.lower(`capabilities`),
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
      * Report current device power state. The engine adapts tick frequency based
      * on battery level: `Charging`/`Unplugged` = normal, `LowBattery` = 2x interval,
      * `CriticalBattery` = 4x interval.
@@ -3458,7 +3748,8 @@ open class MobileEngine :
         }
 
     /**
-     * Start a foreground tick loop.
+     * Start a foreground tick loop. Also lets the remote worker (if started)
+     * claim tasks again.
      */
     override fun `resume`() =
         callWithHandle {
@@ -3489,6 +3780,26 @@ open class MobileEngine :
                     UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_run_until_idle(
                         it,
                         FfiConverterUInt.lower(`maxTicks`),
+                        FfiConverterULong.lower(`timeBudgetMs`),
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
+     * Run the worker for an OS-granted background window (`BGTask` /
+     * `WorkManager` / push-wake handler): claims tasks even while paused,
+     * until the queue is idle and nothing is in flight or `time_budget_ms`
+     * elapses. Requires `start_worker`.
+     */
+    @Throws(MobileException::class)
+    override fun `runWorkerWindow`(`timeBudgetMs`: kotlin.ULong): WorkerWindowResult =
+        FfiConverterTypeWorkerWindowResult.lift(
+            callWithHandle {
+                uniffiRustCallWithError(MobileException) { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_run_worker_window(
+                        it,
                         FfiConverterULong.lower(`timeBudgetMs`),
                         _status,
                     )
@@ -3561,6 +3872,38 @@ open class MobileEngine :
         )
 
     /**
+     * Start the remote worker loop: poll the control plane as this `mobile`
+     * runtime, run claimed tasks with the registered handlers, heartbeat
+     * per the task lease, and complete / fail / release them. Requires
+     * `register_node` first. Handlers must be registered before this call.
+     */
+    @Throws(MobileException::class)
+    override fun `startWorker`(`options`: WorkerOptions) =
+        callWithHandle {
+            uniffiRustCallWithError(MobileException) { _status ->
+                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_start_worker(
+                    it,
+                    FfiConverterTypeWorkerOptions.lower(`options`),
+                    _status,
+                )
+            }
+        }
+
+    /**
+     * Stop claiming remote tasks. Tasks already executing finish and are
+     * settled in the background.
+     */
+    override fun `stopWorker`() =
+        callWithHandle {
+            uniffiRustCall { _status ->
+                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_stop_worker(
+                    it,
+                    _status,
+                )
+            }
+        }
+
+    /**
      * Sync sequences from the remote manifest.
      */
     @Throws(MobileException::class)
@@ -3590,6 +3933,54 @@ open class MobileEngine :
             callWithHandle {
                 uniffiRustCallWithError(MobileException) { _status ->
                     UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_tick_once(
+                        it,
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
+     * Leave the mesh: stops the worker, advertises the node as draining
+     * (best effort), and stops the background re-advertisement.
+     */
+    override fun `unregisterNode`() =
+        callWithHandle {
+            uniffiRustCall { _status ->
+                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_unregister_node(
+                    it,
+                    _status,
+                )
+            }
+        }
+
+    /**
+     * Update the liveness facts advertised by a registered node (battery,
+     * connectivity) and push them to the control plane now.
+     */
+    @Throws(MobileException::class)
+    override fun `updateNodeStatus`(
+        `connectivity`: NodeConnectivity?,
+        `batteryPercent`: kotlin.UByte?,
+    ) = callWithHandle {
+        uniffiRustCallWithError(MobileException) { _status ->
+            UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_update_node_status(
+                it,
+                FfiConverterOptionalTypeNodeConnectivity.lower(`connectivity`),
+                FfiConverterOptionalUByte.lower(`batteryPercent`),
+                _status,
+            )
+        }
+    }
+
+    /**
+     * Counters for the remote worker (zeros when it is not running).
+     */
+    override fun `workerStats`(): WorkerStats =
+        FfiConverterTypeWorkerStats.lift(
+            callWithHandle {
+                uniffiRustCall { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_worker_stats(
                         it,
                         _status,
                     )
@@ -3873,11 +4264,10 @@ internal object uniffiCallbackInterfaceStepHandler {
             uniffiCallStatus: UniffiRustCallStatus,
         ) {
             val uniffiObj = FfiConverterTypeStepHandler.handleMap.get(uniffiHandle)
-            val makeCall = {
-                uniffiObj.`execute`(
-                    FfiConverterString.lift(`stepName`),
-                    FfiConverterString.lift(`input`),
-                )
+            val makeCall = {  uniffiObj.`execute`(
+                FfiConverterString.lift(`stepName`),
+                FfiConverterString.lift(`input`),
+            )
             }
             val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
             uniffiTraitInterfaceCallWithError(
@@ -4360,6 +4750,54 @@ public object FfiConverterTypeBackgroundRunResult : FfiConverterRustBuffer<Backg
     }
 }
 
+data class CapabilityDescriptor(
+    var `handler`: kotlin.String,
+    var `capability`: DeviceCapability,
+    var `operations`: List<kotlin.String>,
+    var `requiresForeground`: kotlin.Boolean,
+    var `handlesProtectedData`: kotlin.Boolean,
+    var `maxResponseBytes`: kotlin.ULong,
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCapabilityDescriptor : FfiConverterRustBuffer<CapabilityDescriptor> {
+    override fun read(buf: ByteBuffer): CapabilityDescriptor =
+        CapabilityDescriptor(
+            FfiConverterString.read(buf),
+            FfiConverterTypeDeviceCapability.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterULong.read(buf),
+        )
+
+    override fun allocationSize(value: CapabilityDescriptor) =
+        (
+            FfiConverterString.allocationSize(value.`handler`) +
+                FfiConverterTypeDeviceCapability.allocationSize(value.`capability`) +
+                FfiConverterSequenceString.allocationSize(value.`operations`) +
+                FfiConverterBoolean.allocationSize(value.`requiresForeground`) +
+                FfiConverterBoolean.allocationSize(value.`handlesProtectedData`) +
+                FfiConverterULong.allocationSize(value.`maxResponseBytes`)
+        )
+
+    override fun write(
+        value: CapabilityDescriptor,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterString.write(value.`handler`, buf)
+        FfiConverterTypeDeviceCapability.write(value.`capability`, buf)
+        FfiConverterSequenceString.write(value.`operations`, buf)
+        FfiConverterBoolean.write(value.`requiresForeground`, buf)
+        FfiConverterBoolean.write(value.`handlesProtectedData`, buf)
+        FfiConverterULong.write(value.`maxResponseBytes`, buf)
+    }
+}
+
 data class ContinuityExportResult(
     var `capsuleId`: kotlin.String,
     var `continuityId`: kotlin.String,
@@ -4626,6 +5064,10 @@ public object FfiConverterTypeInstanceSummary : FfiConverterRustBuffer<InstanceS
 
 /**
  * Configuration for the mobile engine, exposed to host apps via `UniFFI`.
+ *
+ * `Debug` is implemented by hand: `sync_api_key` is a credential and URLs
+ * may carry signed-URL tokens in their query strings, so neither may reach
+ * logs or crash reports verbatim.
  */
 data class MobileEngineConfig(
     /**
@@ -4633,7 +5075,7 @@ data class MobileEngineConfig(
      */
     var `tickIntervalMs`: kotlin.ULong,
     /**
-     * Maximum concurrent step executions (default: 4).
+     * Maximum concurrent step executions; must be positive (default: 4).
      */
     var `maxConcurrentSteps`: kotlin.UInt,
     /**
@@ -4641,7 +5083,7 @@ data class MobileEngineConfig(
      */
     var `maxStepsPerInstance`: kotlin.UInt,
     /**
-     * Maximum concurrent running instances (default: 10).
+     * Maximum concurrent running instances; must be positive (default: 10).
      */
     var `maxConcurrentInstances`: kotlin.UInt,
     /**
@@ -4796,6 +5238,164 @@ public object FfiConverterTypeMobileEngineConfig : FfiConverterRustBuffer<Mobile
         FfiConverterString.write(value.`syncUrl`, buf)
         FfiConverterString.write(value.`deviceId`, buf)
         FfiConverterString.write(value.`syncApiKey`, buf)
+    }
+}
+
+/**
+ * What this device advertises to the control plane when it joins the
+ * runtime mesh. Every field has a default, so hosts only set what they know.
+ */
+data class NodeCapabilities(
+    /**
+     * Handler names this node serves. Empty = every app-native handler
+     * registered with `register_handler`. Built-in handlers are only served
+     * remotely when listed here explicitly.
+     */
+    var `handlers`: List<kotlin.String> = listOf(),
+    var `regions`: List<kotlin.String> = listOf(),
+    /**
+     * Free-form hardware facts (`camera`, `nfc`, `secure-enclave`, …).
+     * `device:<device_id>` is always added.
+     */
+    var `hardware`: List<kotlin.String> = listOf(),
+    var `plugins`: List<kotlin.String> = listOf(),
+    /**
+     * Credential binding *names* available on the device (never secrets).
+     */
+    var `credentials`: List<kotlin.String> = listOf(),
+    var `offlineCapable`: kotlin.Boolean = true,
+    var `connectivity`: NodeConnectivity? = null,
+    var `batteryPercent`: kotlin.UByte? = null,
+    /**
+     * `ios` / `android`; inferred from the build target when absent.
+     */
+    var `platform`: kotlin.String? = null,
+    /**
+     * APNs/FCM token used for id-only wake-up hints.
+     */
+    var `pushToken`: kotlin.String? = null,
+    var `appVersion`: kotlin.String? = null,
+    /**
+     * Control-plane API base (e.g. `https://api.orch8.io/api/v1`). When
+     * absent it is derived from `sync_url` by stripping `/mobile/sync`.
+     */
+    var `apiBaseUrl`: kotlin.String? = null,
+    /**
+     * Base64 Ed25519 key that signs capsules exported by this device.
+     */
+    var `capsuleSigningPublicKey`: kotlin.String? = null,
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNodeCapabilities : FfiConverterRustBuffer<NodeCapabilities> {
+    override fun read(buf: ByteBuffer): NodeCapabilities =
+        NodeCapabilities(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeNodeConnectivity.read(buf),
+            FfiConverterOptionalUByte.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+
+    override fun allocationSize(value: NodeCapabilities) =
+        (
+            FfiConverterSequenceString.allocationSize(value.`handlers`) +
+                FfiConverterSequenceString.allocationSize(value.`regions`) +
+                FfiConverterSequenceString.allocationSize(value.`hardware`) +
+                FfiConverterSequenceString.allocationSize(value.`plugins`) +
+                FfiConverterSequenceString.allocationSize(value.`credentials`) +
+                FfiConverterBoolean.allocationSize(value.`offlineCapable`) +
+                FfiConverterOptionalTypeNodeConnectivity.allocationSize(value.`connectivity`) +
+                FfiConverterOptionalUByte.allocationSize(value.`batteryPercent`) +
+                FfiConverterOptionalString.allocationSize(value.`platform`) +
+                FfiConverterOptionalString.allocationSize(value.`pushToken`) +
+                FfiConverterOptionalString.allocationSize(value.`appVersion`) +
+                FfiConverterOptionalString.allocationSize(value.`apiBaseUrl`) +
+                FfiConverterOptionalString.allocationSize(value.`capsuleSigningPublicKey`)
+        )
+
+    override fun write(
+        value: NodeCapabilities,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterSequenceString.write(value.`handlers`, buf)
+        FfiConverterSequenceString.write(value.`regions`, buf)
+        FfiConverterSequenceString.write(value.`hardware`, buf)
+        FfiConverterSequenceString.write(value.`plugins`, buf)
+        FfiConverterSequenceString.write(value.`credentials`, buf)
+        FfiConverterBoolean.write(value.`offlineCapable`, buf)
+        FfiConverterOptionalTypeNodeConnectivity.write(value.`connectivity`, buf)
+        FfiConverterOptionalUByte.write(value.`batteryPercent`, buf)
+        FfiConverterOptionalString.write(value.`platform`, buf)
+        FfiConverterOptionalString.write(value.`pushToken`, buf)
+        FfiConverterOptionalString.write(value.`appVersion`, buf)
+        FfiConverterOptionalString.write(value.`apiBaseUrl`, buf)
+        FfiConverterOptionalString.write(value.`capsuleSigningPublicKey`, buf)
+    }
+}
+
+/**
+ * Result of `register_node`.
+ */
+data class NodeRegistration(
+    /**
+     * Stable runtime UUID (also the `worker_id` used for task leases).
+     */
+    var `runtimeId`: kotlin.String,
+    var `deviceId`: kotlin.String,
+    /**
+     * Handlers advertised to the control plane.
+     */
+    var `handlers`: List<kotlin.String>,
+    /**
+     * RFC 3339 expiry of the advertisement just sent; the engine refreshes
+     * it automatically before then.
+     */
+    var `expiresAt`: kotlin.String,
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNodeRegistration : FfiConverterRustBuffer<NodeRegistration> {
+    override fun read(buf: ByteBuffer): NodeRegistration =
+        NodeRegistration(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterString.read(buf),
+        )
+
+    override fun allocationSize(value: NodeRegistration) =
+        (
+            FfiConverterString.allocationSize(value.`runtimeId`) +
+                FfiConverterString.allocationSize(value.`deviceId`) +
+                FfiConverterSequenceString.allocationSize(value.`handlers`) +
+                FfiConverterString.allocationSize(value.`expiresAt`)
+        )
+
+    override fun write(
+        value: NodeRegistration,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterString.write(value.`runtimeId`, buf)
+        FfiConverterString.write(value.`deviceId`, buf)
+        FfiConverterSequenceString.write(value.`handlers`, buf)
+        FfiConverterString.write(value.`expiresAt`, buf)
     }
 }
 
@@ -4956,6 +5556,196 @@ public object FfiConverterTypeTickResult : FfiConverterRustBuffer<TickResult> {
         FfiConverterUInt.write(value.`instancesAdvanced`, buf)
         FfiConverterUInt.write(value.`stepsExecuted`, buf)
         FfiConverterBoolean.write(value.`hasPendingWork`, buf)
+    }
+}
+
+/**
+ * Options for `start_worker`.
+ */
+data class WorkerOptions(
+    /**
+     * Remote tasks executed concurrently on the device (default 1).
+     */
+    var `maxConcurrentTasks`: kotlin.UInt = 1u,
+    /**
+     * Poll cadence while idle, before power-state scaling (default 15 s).
+     * Push wake-ups and `on_push_received` poll immediately regardless.
+     */
+    var `idlePollIntervalMs`: kotlin.ULong = 15000uL,
+    /**
+     * Worker build/version reported to the server's version pins.
+     */
+    var `version`: kotlin.String? = null,
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWorkerOptions : FfiConverterRustBuffer<WorkerOptions> {
+    override fun read(buf: ByteBuffer): WorkerOptions =
+        WorkerOptions(
+            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+
+    override fun allocationSize(value: WorkerOptions) =
+        (
+            FfiConverterUInt.allocationSize(value.`maxConcurrentTasks`) +
+                FfiConverterULong.allocationSize(value.`idlePollIntervalMs`) +
+                FfiConverterOptionalString.allocationSize(value.`version`)
+        )
+
+    override fun write(
+        value: WorkerOptions,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterUInt.write(value.`maxConcurrentTasks`, buf)
+        FfiConverterULong.write(value.`idlePollIntervalMs`, buf)
+        FfiConverterOptionalString.write(value.`version`, buf)
+    }
+}
+
+/**
+ * Counters exposed through `worker_stats`.
+ */
+data class WorkerStats(
+    var `running`: kotlin.Boolean,
+    var `inFlight`: kotlin.UInt,
+    var `claimed`: kotlin.ULong,
+    var `completed`: kotlin.ULong,
+    var `failed`: kotlin.ULong,
+    var `released`: kotlin.ULong,
+    /**
+     * Tasks whose lease was lost (reclaimed by the server) mid-execution.
+     */
+    var `lost`: kotlin.ULong,
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWorkerStats : FfiConverterRustBuffer<WorkerStats> {
+    override fun read(buf: ByteBuffer): WorkerStats =
+        WorkerStats(
+            FfiConverterBoolean.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+
+    override fun allocationSize(value: WorkerStats) =
+        (
+            FfiConverterBoolean.allocationSize(value.`running`) +
+                FfiConverterUInt.allocationSize(value.`inFlight`) +
+                FfiConverterULong.allocationSize(value.`claimed`) +
+                FfiConverterULong.allocationSize(value.`completed`) +
+                FfiConverterULong.allocationSize(value.`failed`) +
+                FfiConverterULong.allocationSize(value.`released`) +
+                FfiConverterULong.allocationSize(value.`lost`)
+        )
+
+    override fun write(
+        value: WorkerStats,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterBoolean.write(value.`running`, buf)
+        FfiConverterUInt.write(value.`inFlight`, buf)
+        FfiConverterULong.write(value.`claimed`, buf)
+        FfiConverterULong.write(value.`completed`, buf)
+        FfiConverterULong.write(value.`failed`, buf)
+        FfiConverterULong.write(value.`released`, buf)
+        FfiConverterULong.write(value.`lost`, buf)
+    }
+}
+
+/**
+ * Result of a bounded background window (`run_worker_window`).
+ */
+data class WorkerWindowResult(
+    var `claimed`: kotlin.ULong,
+    var `completed`: kotlin.ULong,
+    var `failed`: kotlin.ULong,
+    /**
+     * Tasks still executing when the budget ran out. They keep running
+     * while the process lives; if it is suspended, the lease lapses and the
+     * next launch releases them.
+     */
+    var `stillRunning`: kotlin.UInt,
+    var `budgetExhausted`: kotlin.Boolean,
+) {
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWorkerWindowResult : FfiConverterRustBuffer<WorkerWindowResult> {
+    override fun read(buf: ByteBuffer): WorkerWindowResult =
+        WorkerWindowResult(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+
+    override fun allocationSize(value: WorkerWindowResult) =
+        (
+            FfiConverterULong.allocationSize(value.`claimed`) +
+                FfiConverterULong.allocationSize(value.`completed`) +
+                FfiConverterULong.allocationSize(value.`failed`) +
+                FfiConverterUInt.allocationSize(value.`stillRunning`) +
+                FfiConverterBoolean.allocationSize(value.`budgetExhausted`)
+        )
+
+    override fun write(
+        value: WorkerWindowResult,
+        buf: ByteBuffer,
+    ) {
+        FfiConverterULong.write(value.`claimed`, buf)
+        FfiConverterULong.write(value.`completed`, buf)
+        FfiConverterULong.write(value.`failed`, buf)
+        FfiConverterUInt.write(value.`stillRunning`, buf)
+        FfiConverterBoolean.write(value.`budgetExhausted`, buf)
+    }
+}
+
+enum class DeviceCapability {
+    CAMERA,
+    FILE,
+    BIOMETRIC,
+    SECURE_STORAGE,
+    ;
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceCapability : FfiConverterRustBuffer<DeviceCapability> {
+    override fun read(buf: ByteBuffer) =
+        try {
+            DeviceCapability.values()[buf.getInt() - 1]
+        } catch (e: IndexOutOfBoundsException) {
+            throw RuntimeException("invalid enum value, something is very wrong!!", e)
+        }
+
+    override fun allocationSize(value: DeviceCapability) = 4UL
+
+    override fun write(
+        value: DeviceCapability,
+        buf: ByteBuffer,
+    ) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -5148,6 +5938,41 @@ public object FfiConverterTypeMobileError : FfiConverterRustBuffer<MobileExcepti
 }
 
 /**
+ * Current network path, reported with the node's capabilities.
+ */
+
+enum class NodeConnectivity {
+    OFFLINE,
+    METERED,
+    WIFI,
+    ETHERNET,
+    ;
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNodeConnectivity : FfiConverterRustBuffer<NodeConnectivity> {
+    override fun read(buf: ByteBuffer) =
+        try {
+            NodeConnectivity.values()[buf.getInt() - 1]
+        } catch (e: IndexOutOfBoundsException) {
+            throw RuntimeException("invalid enum value, something is very wrong!!", e)
+        }
+
+    override fun allocationSize(value: NodeConnectivity) = 4UL
+
+    override fun write(
+        value: NodeConnectivity,
+        buf: ByteBuffer,
+    ) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+/**
  * Device power state reported by the host app. Used to adapt tick frequency.
  */
 
@@ -5261,6 +6086,38 @@ public object FfiConverterTypeSyncError : FfiConverterRustBuffer<SyncException> 
 /**
  * @suppress
  */
+public object FfiConverterOptionalUByte : FfiConverterRustBuffer<kotlin.UByte?> {
+    override fun read(buf: ByteBuffer): kotlin.UByte? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUByte.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UByte?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUByte.allocationSize(value)
+        }
+    }
+
+    override fun write(
+        value: kotlin.UByte?,
+        buf: ByteBuffer,
+    ) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUByte.write(value, buf)
+        }
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -5318,6 +6175,66 @@ public object FfiConverterOptionalTypeTokenProvider : FfiConverterRustBuffer<Tok
         } else {
             buf.put(1)
             FfiConverterTypeTokenProvider.write(value, buf)
+        }
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeNodeConnectivity : FfiConverterRustBuffer<NodeConnectivity?> {
+    override fun read(buf: ByteBuffer): NodeConnectivity? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeNodeConnectivity.read(buf)
+    }
+
+    override fun allocationSize(value: NodeConnectivity?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeNodeConnectivity.allocationSize(value)
+        }
+    }
+
+    override fun write(
+        value: NodeConnectivity?,
+        buf: ByteBuffer,
+    ) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeNodeConnectivity.write(value, buf)
+        }
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceString : FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(
+        value: List<kotlin.String>,
+        buf: ByteBuffer,
+    ) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
         }
     }
 }

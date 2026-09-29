@@ -39,6 +39,8 @@ fn mk_step_cached(
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -335,6 +337,7 @@ async fn cache_key_serves_from_cache_on_second_instance() {
 
     let now = Utc::now();
     let inst = TaskInstance {
+        sub_tenant: None,
         id: instance_id,
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked("t"),

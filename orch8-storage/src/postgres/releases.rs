@@ -30,6 +30,10 @@ fn row_to_release(row: &sqlx::postgres::PgRow) -> Result<WorkflowRelease, Storag
         in_flight_policy: serde_json::from_value(serde_json::Value::String(in_flight))?,
         validation_summary: row.get("validation_summary"),
         canary_started_at: row.get("canary_started_at"),
+        target: row
+            .get::<Option<serde_json::Value>, _>("target")
+            .map(serde_json::from_value)
+            .transpose()?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -37,7 +41,7 @@ fn row_to_release(row: &sqlx::postgres::PgRow) -> Result<WorkflowRelease, Storag
 
 const RELEASE_COLUMNS: &str = "id, tenant_id, namespace, sequence_name, baseline_sequence_id, \
      baseline_version, candidate_sequence_id, candidate_version, state, canary_percent, gates, \
-     in_flight_policy, validation_summary, canary_started_at, created_at, updated_at";
+     in_flight_policy, validation_summary, canary_started_at, created_at, updated_at, target";
 
 pub(super) async fn create(
     store: &PostgresStorage,
@@ -47,8 +51,9 @@ pub(super) async fn create(
         r"INSERT INTO workflow_releases
             (id, tenant_id, namespace, sequence_name, baseline_sequence_id, baseline_version,
              candidate_sequence_id, candidate_version, state, canary_percent, gates,
-             in_flight_policy, validation_summary, canary_started_at, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+             in_flight_policy, validation_summary, canary_started_at, created_at, updated_at,
+             target)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
     )
     .bind(release.id)
     .bind(release.tenant_id.as_str())
@@ -66,6 +71,13 @@ pub(super) async fn create(
     .bind(release.canary_started_at)
     .bind(release.created_at)
     .bind(release.updated_at)
+    .bind(
+        release
+            .target
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?,
+    )
     .execute(&store.pool)
     .await?;
     Ok(())

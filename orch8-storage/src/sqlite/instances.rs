@@ -38,7 +38,7 @@ use super::helpers::{apply_filter_sql, row_to_instance, ts};
 /// insert sites (`create`, `create_batch`, `create_externalized`,
 /// `create_batch_externalized`, `create_instance_with_dedupe`) bind against
 /// this string via [`bind_instance_insert`].
-pub(super) const INSTANCE_INSERT_SQL: &str = "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,budget,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)";
+pub(super) const INSTANCE_INSERT_SQL: &str = "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,budget,created_at,updated_at,sub_tenant) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)";
 
 /// Bind a `TaskInstance` to an already-prepared query in the canonical column
 /// order used by [`INSTANCE_INSERT_SQL`]. Kept out of `sqlx::query(...)` so
@@ -65,7 +65,8 @@ pub(super) fn bind_instance_insert<'q>(
         .bind(i.parent_instance_id.map(|u| u.into_uuid().to_string()))
         .bind(i.budget.as_ref().map(serde_json::to_string).transpose()?)
         .bind(ts(i.created_at))
-        .bind(ts(i.updated_at)))
+        .bind(ts(i.updated_at))
+        .bind(i.sub_tenant.as_deref()))
 }
 
 #[instrument(skip(storage, i), fields(instance_id = %i.id, tenant = %i.tenant_id))]
@@ -194,7 +195,7 @@ pub(super) async fn create_batch(
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut qb = sqlx::QueryBuilder::new(
-            "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,budget,created_at,updated_at) ",
+            "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,budget,created_at,updated_at,sub_tenant) ",
         );
         qb.push_values(
             chunk.iter().zip(rows.iter()),
@@ -216,7 +217,8 @@ pub(super) async fn create_batch(
                     .push_bind(i.parent_instance_id.map(|u| u.into_uuid().to_string()))
                     .push_bind(budget.as_ref())
                     .push_bind(ts(i.created_at))
-                    .push_bind(ts(i.updated_at));
+                    .push_bind(ts(i.updated_at))
+                    .push_bind(i.sub_tenant.as_deref());
             },
         );
         let result = qb.build().execute(&mut *tx).await?;
@@ -1011,6 +1013,7 @@ pub(super) async fn list_waiting_with_trees(
         states: Some(vec![InstanceState::Waiting]),
         tenant_id: filter.tenant_id.clone(),
         namespace: filter.namespace.clone(),
+        sub_tenant: filter.sub_tenant.clone(),
         ..InstanceFilter::default()
     };
     let instances = list(storage, &waiting_filter, pagination).await?;

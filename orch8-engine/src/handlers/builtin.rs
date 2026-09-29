@@ -315,6 +315,11 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     );
     registry.register("blob_get", super::blob::handle_blob_get);
     registry.register("jev", super::jev::handle_jev);
+    registry.register(
+        crate::federation::FEDERATE_HANDLER,
+        crate::federation::handle_federate,
+    );
+    #[cfg(feature = "email")]
     registry.register("email", super::email::handle_email);
     registry.register("notify", super::notify::handle_notify);
 }

@@ -19,7 +19,7 @@ pub(super) async fn find_by_idempotency_key(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, budget, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at, sub_tenant
            FROM task_instances
            WHERE tenant_id = $1 AND idempotency_key = $2",
     )
@@ -154,7 +154,7 @@ pub(super) async fn get_child_instances(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, budget, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at, sub_tenant
            FROM task_instances WHERE parent_instance_id = $1 ORDER BY created_at",
     )
     .bind(parent_instance_id.into_uuid())
@@ -176,11 +176,13 @@ pub(super) async fn claim_worker_tasks_from_queue(
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
-        SET state = 'claimed', worker_id = $4, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1
+        SET state = 'claimed', worker_id = $4, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1,
+            lease_secs = NULL, claimed_runtime_kind = NULL
         WHERE id IN (
             SELECT id FROM worker_tasks
-            WHERE handler_name = $1 AND state = 'pending' AND queue_name = $5
-              AND requirements = '{}'::jsonb
+            WHERE handler_name = $1 AND state = 'pending' AND NOT awaiting_dispatch
+              AND queue_name = $5
+              AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $4 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
             ORDER BY created_at ASC
             LIMIT $3
             FOR UPDATE SKIP LOCKED
@@ -231,13 +233,15 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
-        SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1
+        SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1,
+            lease_secs = NULL, claimed_runtime_kind = NULL
         WHERE id IN (
             SELECT wt.id FROM worker_tasks wt
             JOIN task_instances ti ON ti.id = wt.instance_id
             WHERE wt.handler_name = $1
               AND wt.state = 'pending'
-              AND wt.requirements = '{}'::jsonb
+              AND NOT wt.awaiting_dispatch
+              AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
               AND wt.queue_name = $3
               AND ti.tenant_id = $5
             ORDER BY wt.created_at ASC

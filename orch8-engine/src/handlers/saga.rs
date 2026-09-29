@@ -164,6 +164,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -182,6 +184,8 @@ mod tests {
     async fn seed_instance(s: &SqliteStorage, inst: InstanceId) {
         let now = chrono::Utc::now();
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -197,10 +201,12 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: now,
         };
         s.create_sequence(&seq).await.unwrap();
         let inst_row = TaskInstance {
+            sub_tenant: None,
             id: inst,
             sequence_id: seq.id,
             tenant_id: TenantId::unchecked("t"),
@@ -231,6 +237,7 @@ mod tests {
     fn mk_instance(inst_id: InstanceId) -> TaskInstance {
         let now = chrono::Utc::now();
         TaskInstance {
+            sub_tenant: None,
             id: inst_id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),

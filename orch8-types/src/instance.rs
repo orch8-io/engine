@@ -323,6 +323,9 @@ impl Budget {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TaskInstance {
     pub id: InstanceId,
+    /// End customer (sub-tenant) inside `tenant_id`; `None` = tenant-level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_tenant: Option<String>,
     pub sequence_id: SequenceId,
     pub tenant_id: TenantId,
     pub namespace: Namespace,

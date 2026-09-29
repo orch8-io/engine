@@ -53,6 +53,7 @@ pub async fn bulk_update_state(
     }
     let metadata = metadata_filter(&req.filter);
     let filter = InstanceFilter {
+        sub_tenant: None,
         tenant_id: scoped_tenant,
         namespace: req.filter.namespace.map(Namespace::new),
         sequence_id: req.filter.sequence_id.map(SequenceId::from_uuid),
@@ -99,6 +100,7 @@ pub async fn bulk_reschedule(
     }
     let metadata = metadata_filter(&req.filter);
     let filter = InstanceFilter {
+        sub_tenant: None,
         tenant_id: scoped_tenant,
         namespace: req.filter.namespace.map(Namespace::new),
         sequence_id: req.filter.sequence_id.map(SequenceId::from_uuid),
@@ -137,6 +139,7 @@ pub async fn list_dlq(
         crate::api_keys::require_admin(&admin_ctx)?;
     }
     let filter = InstanceFilter {
+        sub_tenant: None,
         tenant_id: scoped_tenant,
         namespace: q.namespace.map(Namespace::new),
         sequence_id: q.sequence_id.map(SequenceId::from_uuid),
@@ -198,6 +201,7 @@ pub async fn batch_action(
     let metadata = metadata_filter(&req.filter);
 
     let filter = InstanceFilter {
+        sub_tenant: None,
         tenant_id: Some(tenant_id.clone()),
         namespace: req.filter.namespace.clone().map(Namespace::new),
         sequence_id: req.filter.sequence_id.map(SequenceId::from_uuid),

@@ -17,11 +17,13 @@ mod events;
 mod evidence;
 mod execution_tree;
 mod externalized;
+mod federation;
 mod instances;
 mod kv_state;
 mod misc;
 mod mobile_sync;
 mod outputs;
+mod placement;
 mod plugins;
 mod pools;
 mod progress_shares;
@@ -37,6 +39,7 @@ mod sessions;
 mod signals;
 mod step_logs;
 mod telemetry;
+mod tenancy;
 mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
@@ -1204,6 +1207,28 @@ impl crate::WorkerStore for PostgresStorage {
         workers::expire_timed_out(self).await
     }
 
+    async fn list_expired_worker_leases(
+        &self,
+        default_lease: Duration,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        workers::list_expired_leases(self, default_lease, limit).await
+    }
+
+    async fn list_timed_out_worker_tasks(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        workers::list_timed_out(self, limit).await
+    }
+
+    async fn resolve_worker_task(
+        &self,
+        resolution: &orch8_types::worker::WorkerTaskResolution,
+    ) -> Result<bool, StorageError> {
+        workers::resolve(self, resolution).await
+    }
+
     async fn cancel_worker_tasks_for_block(
         &self,
         instance_id: Uuid,
@@ -1233,6 +1258,13 @@ impl crate::WorkerStore for PostgresStorage {
         tenant_id: Option<&orch8_types::ids::TenantId>,
     ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
         workers::stats(self, tenant_id).await
+    }
+
+    async fn pending_worker_task_depth(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError> {
+        placement::pending_depth(self, limit).await
     }
 
     async fn claim_worker_tasks_from_queue(
@@ -1592,6 +1624,52 @@ impl crate::SchedulingStore for PostgresStorage {
 
     async fn upsert_rate_limit(&self, limit: &RateLimit) -> Result<(), StorageError> {
         rate_limits::upsert_rate_limit(self, limit).await
+    }
+
+    async fn get_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<orch8_types::placement::PlacementPolicies, StorageError> {
+        placement::get_policies(self, tenant_id).await
+    }
+
+    async fn put_placement_policies(
+        &self,
+        tenant_id: &TenantId,
+        policies: &orch8_types::placement::PlacementPolicies,
+    ) -> Result<(), StorageError> {
+        placement::put_policies(self, tenant_id, policies).await
+    }
+
+    async fn upsert_rate_budget(
+        &self,
+        budget: &orch8_types::placement::RateBudget,
+    ) -> Result<orch8_types::placement::RateBudget, StorageError> {
+        placement::upsert_budget(self, budget).await
+    }
+
+    async fn list_rate_budgets(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::placement::RateBudget>, StorageError> {
+        placement::list_budgets(self, tenant_id).await
+    }
+
+    async fn delete_rate_budget(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+    ) -> Result<bool, StorageError> {
+        placement::delete_budget(self, tenant_id, key).await
+    }
+
+    async fn take_rate_budget_token(
+        &self,
+        tenant_id: &TenantId,
+        key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<orch8_types::placement::RateBudgetCheck, StorageError> {
+        placement::take_budget_token(self, tenant_id, key, now).await
     }
 }
 

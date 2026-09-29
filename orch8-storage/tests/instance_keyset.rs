@@ -14,6 +14,7 @@ use serde_json::json;
 fn instance(tenant: &str, seq: SequenceId, meta: serde_json::Value) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq,
         tenant_id: TenantId::unchecked(tenant),
@@ -38,6 +39,8 @@ fn instance(tenant: &str, seq: SequenceId, meta: serde_json::Value) -> TaskInsta
 async fn exercise(storage: &dyn StorageBackend) {
     let tenant = format!("keyset-{}", uuid::Uuid::now_v7());
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -53,6 +56,7 @@ async fn exercise(storage: &dyn StorageBackend) {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();

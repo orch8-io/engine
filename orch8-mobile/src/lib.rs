@@ -9,6 +9,7 @@
     clippy::used_underscore_binding,
 )]
 
+mod builtins;
 mod capabilities;
 mod config;
 mod continuity;
@@ -16,17 +17,21 @@ mod error;
 mod handlers;
 mod lifecycle;
 mod memory;
+mod node;
 mod notifier;
 mod privacy;
 mod runtime;
 mod storage;
+mod stragglers;
 mod sync;
 mod sync_reporter;
 mod telemetry;
 mod tick_controller;
+mod worker;
 
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
@@ -43,6 +48,7 @@ use orch8_types::ids::{Namespace, TenantId};
 use orch8_types::instance::InstanceState;
 use orch8_types::sequence::SequenceDefinition;
 
+pub use crate::builtins::{DEFAULT_BUILTINS, OPT_IN_BUILTINS};
 pub use crate::capabilities::{
     CapabilityDescriptor, CapabilityHost, CapabilityRequest, CapabilityResponse, DeviceCapability,
     DeviceToolBridge, standard_capability_descriptors,
@@ -51,9 +57,11 @@ pub use crate::config::MobileEngineConfig;
 pub use crate::continuity::{CapsuleSigner, ContinuityExportResult, ContinuityImportResult};
 pub use crate::error::{HandlerError, MobileError, SyncError, TokenProvider};
 pub use crate::handlers::{EngineListener, StepHandler};
+pub use crate::node::{NodeCapabilities, NodeConnectivity, NodeRegistration};
 pub use crate::privacy::{DisclosureSurface, PrivacyError, ProtectedFieldBoundary};
 pub use crate::sync::{RootKey, SyncResult};
 pub use crate::telemetry::{DeviceContext, FlushResult, TelemetryEventRecord};
+pub use crate::worker::{WorkerOptions, WorkerStats, WorkerWindowResult};
 
 uniffi::setup_scaffolding!();
 
@@ -217,6 +225,38 @@ pub struct MobileEngine {
     sync_orchestrator: Arc<tokio::sync::Mutex<Option<Arc<sync::SyncOrchestrator>>>>,
     lifecycle: Arc<lifecycle::InstanceLifecycleManager>,
     sync_reporter: Option<Arc<sync_reporter::SyncReporter>>,
+
+    // --- Handler sources (the registry is rebuilt from these) ---
+    foreign_handlers: StdMutex<Vec<(String, Arc<dyn StepHandler>)>>,
+    enabled_builtins: StdMutex<Vec<&'static str>>,
+
+    // --- Distributed runtime node ---
+    /// Foreground flag shared with the worker loop (`resume` / `pause`).
+    foreground: Arc<AtomicBool>,
+    claims: worker::ClaimStore,
+    node_pool: sqlx::SqlitePool,
+    node: StdMutex<Option<NodeSlot>>,
+    worker: StdMutex<Option<Arc<worker::Worker>>>,
+    /// Handler calls still running after a device-side timeout; the worker
+    /// claims nothing new for their handler until they return.
+    stragglers: Arc<stragglers::Stragglers>,
+}
+
+/// A registered runtime node and its re-advertisement task.
+struct NodeSlot {
+    client: Arc<node::NodeClient>,
+    readvertise: CancellationToken,
+}
+
+/// Id-only push wake envelope (`{task_id?, runtime_id?, reason?}`).
+#[derive(serde::Deserialize)]
+struct WakeEnvelope {
+    #[serde(default)]
+    runtime_id: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// Maximum response body size for `load_sequences_from_url`.
@@ -301,6 +341,9 @@ pub(crate) fn validate_https_url(url: &str) -> Result<(), MobileError> {
 impl MobileEngine {
     /// Create a new mobile engine backed by a `SQLite` database at `db_path`.
     #[uniffi::constructor]
+    // Linear construction of every component; splitting it would only move
+    // the same sequence of steps into single-use helpers.
+    #[allow(clippy::too_many_lines)]
     pub fn new(db_path: String, config: MobileEngineConfig) -> Result<Arc<Self>, MobileError> {
         config.validate()?;
         let rt = runtime::MobileRuntime::new(config.max_concurrent_steps)
@@ -314,7 +357,13 @@ impl MobileEngine {
             Ok::<_, MobileError>((arc.clone() as Arc<dyn StorageBackend>, arc))
         })?;
 
+        recover_after_restart(&rt, storage.as_ref());
+
         let mobile_storage = Arc::new(storage::MobileStorage::new(sqlite.clone()));
+
+        let node_pool = sqlite.pool().clone();
+        let claims = worker::ClaimStore::new(node_pool.clone());
+        rt.block_on(init_node_tables(&node_pool, &claims));
 
         let scheduler_config = config.to_scheduler_config();
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_steps as usize));
@@ -389,9 +438,11 @@ impl MobileEngine {
 
         info!(db_path = %db_path, "mobile engine initialized");
 
-        Ok(Arc::new(Self {
+        let engine = Arc::new(Self {
             storage,
-            handlers: StdRwLock::new(Arc::new(HandlerRegistry::new())),
+            handlers: StdRwLock::new(Arc::new(builtins::registry_with(
+                builtins::DEFAULT_BUILTINS,
+            ))),
             config,
             scheduler_config,
             semaphore,
@@ -405,7 +456,17 @@ impl MobileEngine {
             sync_orchestrator: Arc::new(tokio::sync::Mutex::new(sync_orch)),
             lifecycle,
             sync_reporter,
-        }))
+            foreign_handlers: StdMutex::new(Vec::new()),
+            enabled_builtins: StdMutex::new(builtins::DEFAULT_BUILTINS.to_vec()),
+            foreground: Arc::new(AtomicBool::new(true)),
+            claims,
+            node_pool,
+            node: StdMutex::new(None),
+            worker: StdMutex::new(None),
+            stragglers: Arc::new(stragglers::Stragglers::default()),
+        });
+        engine.release_orphaned_claims_in_background();
+        Ok(engine)
     }
 
     /// Register a native step handler. Must be called before `resume()`.
@@ -414,16 +475,55 @@ impl MobileEngine {
         name: String,
         handler: Arc<dyn StepHandler>,
     ) -> Result<(), MobileError> {
-        let timeout = Duration::from_millis(self.config.handler_timeout_ms);
-        let mut guard = self
-            .handlers
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let registry = Arc::get_mut(&mut guard).ok_or_else(|| MobileError::Engine {
-            message: "cannot register handlers after engine has started".to_string(),
-        })?;
-        handlers::register_foreign_handler(registry, &name, handler, timeout);
+        {
+            let mut foreign = self
+                .foreign_handlers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            foreign.retain(|(existing, _)| existing != &name);
+            foreign.push((name.clone(), handler));
+        }
+        if let Err(e) = self.rebuild_registry() {
+            self.foreign_handlers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|(existing, _)| existing != &name);
+            return Err(e);
+        }
         debug!(handler = %name, "registered mobile handler");
+        Ok(())
+    }
+
+    /// Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
+    /// `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
+    /// registered. Must be called before `resume()` / `start_worker()`.
+    pub fn enable_builtin(&self, name: String) -> Result<(), MobileError> {
+        let Some(builtin) = builtins::OPT_IN_BUILTINS
+            .iter()
+            .chain(builtins::DEFAULT_BUILTINS)
+            .find(|candidate| **candidate == name)
+        else {
+            return Err(MobileError::InvalidInput {
+                message: format!("builtin '{name}' is not available on mobile"),
+            });
+        };
+        {
+            let mut enabled = self
+                .enabled_builtins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if enabled.contains(builtin) {
+                return Ok(());
+            }
+            enabled.push(builtin);
+        }
+        if let Err(e) = self.rebuild_registry() {
+            self.enabled_builtins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|enabled| enabled != builtin);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -539,8 +639,11 @@ impl MobileEngine {
         Ok(aggregate)
     }
 
-    /// Start a foreground tick loop.
+    /// Start a foreground tick loop. Also lets the remote worker (if started)
+    /// claim tasks again.
     pub fn resume(&self) {
+        self.foreground.store(true, Ordering::Release);
+        self.wake_worker();
         self.tick_controller.resume(
             &self.runtime,
             &self.storage,
@@ -559,8 +662,11 @@ impl MobileEngine {
         );
     }
 
-    /// Pause the foreground tick loop.
+    /// Pause the foreground tick loop. The remote worker stops claiming new
+    /// tasks and gives back any task claimed but not yet started; tasks that
+    /// are already executing run to completion while the process lives.
     pub fn pause(&self) {
+        self.foreground.store(false, Ordering::Release);
         self.tick_controller
             .pause(&self.runtime, self.config.max_tick_duration_ms);
     }
@@ -573,12 +679,44 @@ impl MobileEngine {
     }
 
     /// Notify the engine that a silent push notification was received.
-    /// Triggers an immediate sync cycle on the next tick.
+    /// Triggers an immediate sync cycle on the next tick and an immediate
+    /// worker poll.
     pub fn on_push_received(&self) {
         if let Some(ref reporter) = self.sync_reporter {
             reporter.on_push_received();
             self.tick_controller.wake();
         }
+        self.wake_worker();
+    }
+
+    /// Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
+    /// "reason"?}`, the push `data`/`userInfo` payload as JSON). A wake that
+    /// names a different runtime is ignored; otherwise the worker polls
+    /// immediately and a sync is triggered. Pushes never carry task params:
+    /// the task arrives through a leased poll. Returns whether it was
+    /// accepted.
+    pub fn on_push_wake(&self, envelope_json: String) -> bool {
+        let envelope: WakeEnvelope = match serde_json::from_str(&envelope_json) {
+            Ok(envelope) => envelope,
+            Err(e) => {
+                debug!(error = %e, "ignoring malformed push wake envelope");
+                return false;
+            }
+        };
+        if let Some(target) = envelope.runtime_id.as_deref()
+            && let Ok(own) = self.node_runtime_id()
+            && !target.eq_ignore_ascii_case(&own)
+        {
+            debug!(target, "push wake addressed to another runtime");
+            return false;
+        }
+        debug!(
+            task_id = envelope.task_id.as_deref().unwrap_or(""),
+            reason = envelope.reason.as_deref().unwrap_or(""),
+            "push wake"
+        );
+        self.on_push_received();
+        true
     }
 
     /// Start a new workflow instance.
@@ -975,12 +1113,370 @@ impl MobileEngine {
     /// Shut down the engine.
     pub fn shutdown(&self) {
         info!("mobile engine shutting down");
+        self.stop_worker();
+        if let Some(slot) = self
+            .node
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            slot.readvertise.cancel();
+        }
         self.cancel.cancel();
         self.tick_controller.cancel_loop();
+    }
+
+    // ------------------------------------------------------------------
+    // Distributed runtime node
+    // ------------------------------------------------------------------
+
+    /// This device's stable runtime id (a UUID persisted in the local
+    /// database). It is the `worker_id` for task leases and the target for
+    /// `$runtime.runtime_id` step placement.
+    pub fn node_runtime_id(&self) -> Result<String, MobileError> {
+        self.run_with_timeout(async {
+            node::load_or_create_runtime_id(&self.node_pool)
+                .await
+                .map(|id| id.to_string())
+        })
+    }
+
+    /// Join the distributed runtime mesh: registers the device
+    /// (`/mobile/devices/register`) and its runtime capabilities
+    /// (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
+    /// `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+    /// background before its five-minute TTL (that refresh is the node's
+    /// liveness signal) until `unregister_node` / `shutdown`. Calling it again
+    /// updates the advertised facts. Also settles any remote task a previous
+    /// process left claimed.
+    pub fn register_node(
+        &self,
+        capabilities: NodeCapabilities,
+    ) -> Result<NodeRegistration, MobileError> {
+        let handlers = self.advertised_handlers(&capabilities);
+        let existing = self.node_client();
+        let client = if let Some(client) = existing {
+            client.update_advertisement(|ad| {
+                ad.handlers.clone_from(&handlers);
+                ad.caps = capabilities.clone();
+                ad.draining = false;
+            });
+            client
+        } else {
+            let api_base = capabilities
+                .api_base_url
+                .clone()
+                .filter(|base| !base.is_empty())
+                .or_else(|| node::derive_api_base(&self.config.sync_url))
+                .ok_or_else(|| MobileError::InvalidInput {
+                    message: "set api_base_url, or a sync_url ending in /mobile/sync".into(),
+                })?;
+            if self.config.sync_api_key.is_empty() || self.config.device_id.is_empty() {
+                return Err(MobileError::InvalidInput {
+                    message: "register_node requires device_id and sync_api_key in the config"
+                        .into(),
+                });
+            }
+            let runtime_id = self.run_with_timeout(async {
+                node::load_or_create_runtime_id(&self.node_pool).await
+            })?;
+            node::NodeClient::new(
+                api_base,
+                self.config.sync_api_key.clone(),
+                self.config.device_id.clone(),
+                runtime_id,
+                node::Advertisement {
+                    handlers: handlers.clone(),
+                    caps: capabilities,
+                    draining: false,
+                },
+            )?
+        };
+        self.register_with_client(client)
+    }
+
+    /// Update the liveness facts advertised by a registered node (battery,
+    /// connectivity) and push them to the control plane now.
+    pub fn update_node_status(
+        &self,
+        connectivity: Option<NodeConnectivity>,
+        battery_percent: Option<u8>,
+    ) -> Result<(), MobileError> {
+        let client = self
+            .node_client()
+            .ok_or_else(|| MobileError::InvalidInput {
+                message: "register_node first".into(),
+            })?;
+        client.update_advertisement(|ad| {
+            ad.caps.connectivity = connectivity;
+            ad.caps.battery_percent = battery_percent;
+        });
+        self.run_with_timeout(async { client.advertise().await.map(|_| ()) })
+    }
+
+    /// Leave the mesh: stops the worker, advertises the node as draining
+    /// (best effort), and stops the background re-advertisement.
+    pub fn unregister_node(&self) {
+        self.stop_worker();
+        let slot = self
+            .node
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(slot) = slot {
+            slot.readvertise.cancel();
+            slot.client.update_advertisement(|ad| ad.draining = true);
+            if let Err(e) = self.run_with_timeout(async { slot.client.advertise().await }) {
+                warn!(error = %e, "failed to advertise draining node");
+            }
+        }
+    }
+
+    /// Start the remote worker loop: poll the control plane as this `mobile`
+    /// runtime, run claimed tasks with the registered handlers, heartbeat
+    /// per the task lease, and complete / fail / release them. Requires
+    /// `register_node` first. Handlers must be registered before this call.
+    pub fn start_worker(&self, options: WorkerOptions) -> Result<(), MobileError> {
+        let client = self
+            .node_client()
+            .ok_or_else(|| MobileError::InvalidInput {
+                message: "register_node before start_worker".into(),
+            })?;
+        let mut slot = self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.as_ref().is_some_and(|worker| !worker.is_stopped()) {
+            return Err(MobileError::InvalidInput {
+                message: "worker already running".into(),
+            });
+        }
+        let registry = self
+            .handlers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let foreign_handlers = self
+            .foreign_handlers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let worker = worker::Worker::new(
+            worker::WorkerDeps {
+                client,
+                store: self.claims.clone(),
+                registry,
+                foreign_handlers,
+                storage: Arc::clone(&self.storage),
+                signals: worker::HostSignals {
+                    foreground: Arc::clone(&self.foreground),
+                    power_state: self.tick_controller.power_state_handle(),
+                },
+                stragglers: Arc::clone(&self.stragglers),
+            },
+            options,
+        )?;
+        worker.spawn(&self.runtime.handle());
+        *slot = Some(worker);
+        Ok(())
+    }
+
+    /// Stop claiming remote tasks. Tasks already executing finish and are
+    /// settled in the background.
+    pub fn stop_worker(&self) {
+        if let Some(worker) = self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            worker.stop();
+        }
+    }
+
+    /// Counters for the remote worker (zeros when it is not running).
+    pub fn worker_stats(&self) -> WorkerStats {
+        self.current_worker()
+            .map(|worker| worker.stats())
+            .unwrap_or_default()
+    }
+
+    /// Run the worker for an OS-granted background window (`BGTask` /
+    /// `WorkManager` / push-wake handler): claims tasks even while paused,
+    /// until the queue is idle and nothing is in flight or `time_budget_ms`
+    /// elapses. Requires `start_worker`.
+    pub fn run_worker_window(
+        &self,
+        time_budget_ms: u64,
+    ) -> Result<WorkerWindowResult, MobileError> {
+        let worker = self
+            .current_worker()
+            .ok_or_else(|| MobileError::InvalidInput {
+                message: "start_worker before run_worker_window".into(),
+            })?;
+        let budget = Duration::from_millis(time_budget_ms.max(1));
+        Ok(self.runtime.block_on(worker.run_window(budget)))
     }
 }
 
 impl MobileEngine {
+    /// Rebuild the handler registry from the enabled builtins plus every
+    /// host handler (host handlers win on a name clash). Fails once the
+    /// registry is shared with a running tick loop or worker.
+    fn rebuild_registry(&self) -> Result<(), MobileError> {
+        let timeout = Duration::from_millis(self.config.handler_timeout_ms);
+        let mut guard = self
+            .handlers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Arc::get_mut(&mut guard).is_none() {
+            return Err(MobileError::Engine {
+                message: "cannot register handlers after engine has started".to_string(),
+            });
+        }
+        let enabled = self
+            .enabled_builtins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut registry = builtins::registry_with(&enabled);
+        for (name, handler) in self
+            .foreign_handlers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            handlers::register_foreign_handler(
+                &mut registry,
+                name,
+                Arc::clone(handler),
+                timeout,
+                Arc::clone(&self.stragglers),
+            );
+        }
+        *guard = Arc::new(registry);
+        Ok(())
+    }
+
+    fn advertised_handlers(&self, capabilities: &NodeCapabilities) -> Vec<String> {
+        if capabilities.handlers.is_empty() {
+            let mut names: Vec<String> = self
+                .foreign_handlers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            names.sort_unstable();
+            names
+        } else {
+            let mut names = capabilities.handlers.clone();
+            names.sort_unstable();
+            names.dedup();
+            names
+        }
+    }
+
+    fn node_client(&self) -> Option<Arc<node::NodeClient>> {
+        self.node
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|slot| Arc::clone(&slot.client))
+    }
+
+    fn current_worker(&self) -> Option<Arc<worker::Worker>> {
+        self.worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn wake_worker(&self) {
+        if let Some(worker) = self.current_worker() {
+            worker.wake();
+        }
+    }
+
+    /// Register/advertise through `client`, install it as the node, start
+    /// the re-advertisement loop, and settle orphaned claims.
+    fn register_with_client(
+        &self,
+        client: Arc<node::NodeClient>,
+    ) -> Result<NodeRegistration, MobileError> {
+        let expires_at = self.run_with_timeout(async { client.register().await })?;
+        let readvertise = CancellationToken::new();
+        let previous = self
+            .node
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(NodeSlot {
+                client: Arc::clone(&client),
+                readvertise: readvertise.clone(),
+            });
+        if let Some(previous) = previous {
+            previous.readvertise.cancel();
+        }
+        spawn_readvertise_loop(&self.runtime.handle(), Arc::clone(&client), readvertise);
+        let store = self.claims.clone();
+        let drain_client = Arc::clone(&client);
+        self.runtime.handle().spawn(async move {
+            let none = StdMutex::new(HashSet::new());
+            worker::drain_orphans(&drain_client, &store, &none, None).await;
+        });
+        info!(runtime_id = %client.runtime_id(), "mobile runtime node registered");
+        Ok(NodeRegistration {
+            runtime_id: client.runtime_id().to_string(),
+            device_id: self.config.device_id.clone(),
+            handlers: client.handlers(),
+            expires_at: expires_at.to_rfc3339(),
+        })
+    }
+
+    /// On open: if a previous process left remote tasks claimed and the
+    /// config carries the credential, give them back without waiting for
+    /// `register_node` (non-blocking).
+    fn release_orphaned_claims_in_background(&self) {
+        if self.config.sync_api_key.is_empty() {
+            return;
+        }
+        let Some(api_base) = node::derive_api_base(&self.config.sync_url) else {
+            return;
+        };
+        let pool = self.node_pool.clone();
+        let store = self.claims.clone();
+        let api_key = self.config.sync_api_key.clone();
+        let device_id = self.config.device_id.clone();
+        self.runtime.handle().spawn(async move {
+            if !matches!(store.count().await, Ok(count) if count > 0) {
+                return;
+            }
+            let Ok(runtime_id) = node::load_or_create_runtime_id(&pool).await else {
+                return;
+            };
+            let Ok(client) = node::NodeClient::new(
+                api_base,
+                api_key,
+                device_id,
+                runtime_id,
+                node::Advertisement {
+                    handlers: Vec::new(),
+                    caps: NodeCapabilities::default(),
+                    draining: false,
+                },
+            ) else {
+                return;
+            };
+            let none = StdMutex::new(HashSet::new());
+            let settled = worker::drain_orphans(&client, &store, &none, None).await;
+            if settled > 0 {
+                warn!(settled, "released remote tasks held by a previous process");
+            }
+        });
+    }
+
     fn run_with_timeout<F, T>(&self, fut: F) -> Result<T, MobileError>
     where
         F: std::future::Future<Output = Result<T, MobileError>>,
@@ -1027,6 +1523,59 @@ impl MobileEngine {
             warn!(error = %e, "instance GC failed");
         }
     }
+}
+
+/// Crash recovery on open. A fresh engine is the only executor of its
+/// database (one engine per DB file), so any instance still marked `Running`
+/// was mid-step when the previous process died — the OS killed the app, or it
+/// crashed. Put every one back to `Scheduled` now (threshold 0) instead of
+/// waiting for a dirty `pause`. Replay-safe steps re-run; app-native (side-
+/// effecting) steps go through the engine's at-most-once effect guard.
+fn recover_after_restart(rt: &runtime::MobileRuntime, storage: &dyn StorageBackend) {
+    rt.block_on(async {
+        match orch8_engine::recovery::recover_stale_instances(storage, 0).await {
+            Ok(0) => {}
+            Ok(count) => warn!(
+                count,
+                "recovered instances left running by a previous process"
+            ),
+            Err(e) => warn!(error = %e, "startup stale-instance recovery failed"),
+        }
+    });
+}
+
+async fn init_node_tables(pool: &sqlx::SqlitePool, claims: &worker::ClaimStore) {
+    if let Err(e) = node::init_tables(pool).await {
+        warn!(error = %e, "failed to create mobile node identity table");
+    }
+    if let Err(e) = claims.init_tables().await {
+        warn!(error = %e, "failed to create mobile worker claim journal");
+    }
+}
+
+/// Refresh the node's capability advertisement before the server-side TTL
+/// lapses. Failures retry sooner; the loop ends with the token.
+fn spawn_readvertise_loop(
+    handle: &tokio::runtime::Handle,
+    client: Arc<node::NodeClient>,
+    cancel: CancellationToken,
+) {
+    handle.spawn(async move {
+        let mut delay = node::READVERTISE_INTERVAL;
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(delay) => {}
+            }
+            delay = match client.advertise().await {
+                Ok(_) => node::READVERTISE_INTERVAL,
+                Err(e) => {
+                    warn!(error = %e, "runtime re-advertisement failed; retrying");
+                    Duration::from_secs(30)
+                }
+            };
+        }
+    });
 }
 
 // Only referenced by unit tests; the runtime path uses
@@ -2003,6 +2552,7 @@ mod tests {
         });
 
         let old_instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
             tenant_id: TenantId::new("mobile").unwrap(),
@@ -2049,3 +2599,10 @@ mod tests {
 #[cfg(test)]
 #[path = "engine_coverage_tests.rs"]
 mod engine_coverage_tests;
+
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+#[path = "distributed_tests.rs"]
+mod distributed_tests;

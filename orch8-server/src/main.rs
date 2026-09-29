@@ -31,6 +31,7 @@ use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::config::EngineConfig;
 use orch8_types::config::NodeRole;
 
+mod federation_wiring;
 mod managed_control;
 mod telemetry;
 
@@ -278,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
             tenant_id: config.node.managed_control_tenant_id.clone(),
             worker_id: config.node.managed_control_worker_id.clone(),
             runtime_id,
+            region: (!config.node.region.trim().is_empty()).then(|| config.node.region.clone()),
             kind: if config.node.role == NodeRole::Edge {
                 orch8_types::continuity::RuntimeKind::Edge
             } else {
@@ -290,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize OTLP trace export (no-op unless ORCH8_OTLP_ENDPOINT /
     // [telemetry] otlp_endpoint is set) and logging.
     let otel = init_observability(&config)?;
+    check_browser_session_signer(&config)?;
 
     print_startup_banner(&config, insecure_auth, insecure_storage);
 
@@ -309,6 +312,14 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_token = CancellationToken::new();
     let managed_control_handle =
         managed_control.map(|managed| managed_control::spawn(managed, shutdown_token.clone()));
+    // Metadata-only run export to a managed cloud; bounded and non-blocking.
+    let _cloud_observability = orch8_engine::cloud_observability::spawn(
+        &config.cloud_observability,
+        storage.clone(),
+        shutdown_token.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("invalid [cloud_observability] config: {e}"))?;
+    config.cloud_observability.api_key = orch8_types::SecretString::default();
 
     // Inject storage so `Open` transitions survive process restarts, then
     // rehydrate any previously persisted rows. Load failures are non-fatal —
@@ -332,6 +343,8 @@ async fn main() -> anyhow::Result<()> {
         cb_registry.clone(),
         engine_ready.clone(),
     )?;
+    let federation_client =
+        federation_wiring::federation_client(app_state.continuity_crypto.as_deref());
     let push_outbox_handle = assembly.push_outbox.then(|| {
         spawn_push_outbox_worker(
             storage.clone(),
@@ -340,7 +353,7 @@ async fn main() -> anyhow::Result<()> {
             shutdown_token.clone(),
         )
     });
-    let cors = build_cors_layer(&config.api.cors_origins);
+    let cors = build_cors_layer(&config.api.cors_origins, &config.embed.allowed_origins);
     let require_tenant = config.api.require_tenant_header;
     let has_api_key = !config.api.api_key.is_empty();
 
@@ -398,6 +411,12 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::api_key_middleware(auth_storage.clone(), root_key_digest, req, next)
         }));
+    if assembly.full_api || assembly.continuity_gateway {
+        // Signature-authenticated federation transport: the peer's envelope
+        // is the credential, so it sits outside API-key/tenant middleware.
+        protected_app = protected_app
+            .merge(orch8_api::federation::inbound_routes().with_state(app_state.clone()));
+    }
     if assembly.public_webhooks {
         protected_app =
             protected_app.merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()));
@@ -470,6 +489,7 @@ async fn main() -> anyhow::Result<()> {
         http_addr
     );
 
+    let failover = federation_wiring::failover_from_env()?;
     let engine_handle = assembly.engine.then(|| {
         spawn_engine(
             storage.clone(),
@@ -477,6 +497,8 @@ async fn main() -> anyhow::Result<()> {
             shutdown_token.clone(),
             cb_registry.clone(),
             engine_ready.clone(),
+            federation_client.clone(),
+            failover.clone(),
         )
     });
 
@@ -514,6 +536,26 @@ async fn main() -> anyhow::Result<()> {
     served?;
     tracing::info!("Shutdown complete");
     Ok(())
+}
+
+/// Embed tokens + license. An invalid embed secret refuses to start (never
+/// a silent disable); a bad license only logs (soft enforcement).
+fn build_embedded_runtime(
+    config: &EngineConfig,
+) -> anyhow::Result<Arc<orch8_api::embed::EmbeddedRuntime>> {
+    let embedded = Arc::new(
+        orch8_api::embed::EmbeddedRuntime::from_config(&config.embed, &config.license)
+            .map_err(|error| anyhow::anyhow!("invalid embed configuration: {error}"))?,
+    );
+    let license = embedded.license.info(chrono::Utc::now());
+    tracing::info!(
+        embed = embedded.signer.is_some(),
+        embed_origins = embedded.allowed_origins.len(),
+        license = ?license.status,
+        edition = license.edition.as_deref().unwrap_or("-"),
+        "embedded surface configured"
+    );
+    Ok(embedded)
 }
 
 fn build_app_state(
@@ -593,6 +635,8 @@ fn build_app_state(
         }
     }
 
+    let embedded = build_embedded_runtime(config)?;
+
     Ok(AppState {
         storage,
         shutdown,
@@ -615,7 +659,31 @@ fn build_app_state(
         federation_peers: Arc::new(federation_peers),
         continuity_lab_enabled: std::env::var("ORCH8_CONTINUITY_LAB_ENABLED")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
+        // Same resolution as the auth middleware (shared secret, else the
+        // root-key derivation), validated at startup by
+        // `check_browser_session_signer`.
+        browser_sessions: Arc::new(
+            orch8_api::browser_sessions::BrowserSessionSigner::configured(
+                (!config.api.api_key.is_empty()).then(|| {
+                    orch8_types::auth::precompute_secret_digest(config.api.api_key.expose())
+                }),
+            ),
+        ),
+        browser_output_max_bytes: browser_output_max_bytes(),
+        embedded,
     })
+}
+
+/// `ORCH8_BROWSER_OUTPUT_MAX_BYTES` (default 1 MiB): bound on the serialized
+/// output a browser runtime may report for one step.
+fn browser_output_max_bytes() -> usize {
+    match std::env::var("ORCH8_BROWSER_OUTPUT_MAX_BYTES") {
+        Ok(value) => value.trim().parse::<usize>().unwrap_or_else(|error| {
+            tracing::error!(%error, value, "invalid ORCH8_BROWSER_OUTPUT_MAX_BYTES; using the default");
+            orch8_api::DEFAULT_BROWSER_OUTPUT_MAX_BYTES
+        }),
+        Err(_) => orch8_api::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
+    }
 }
 
 fn configured_federation_peers() -> Vec<orch8_types::continuity_advanced::FederationPeer> {
@@ -731,6 +799,33 @@ fn validate_auth_config(
              to enable authentication, or pass --insecure-auth (or --insecure) to explicitly \
              run without auth."
         );
+    }
+    Ok(())
+}
+
+/// Refuse an invalid `ORCH8_BROWSER_SESSION_SECRET` and say where the
+/// browser-session signing key comes from. Without a shared secret or a root
+/// key (`--insecure`), tokens only verify on the replica that minted them.
+fn check_browser_session_signer(config: &EngineConfig) -> anyhow::Result<()> {
+    use orch8_api::browser_sessions::{BrowserSessionSigner, SECRET_ENV, SignerSource};
+    let root = (!config.api.api_key.is_empty())
+        .then(|| orch8_types::auth::precompute_secret_digest(config.api.api_key.expose()));
+    let (_, source) =
+        BrowserSessionSigner::resolve(root).map_err(|error| anyhow::anyhow!(error))?;
+    match source {
+        SignerSource::SharedSecret => {
+            tracing::info!("browser-session tokens are signed with {SECRET_ENV}");
+        }
+        SignerSource::RootKey => {
+            tracing::info!(
+                "browser-session tokens are signed with a key derived from the root API key"
+            );
+        }
+        SignerSource::ProcessRandom => tracing::warn!(
+            "neither {SECRET_ENV} nor a root API key is set: browser-session tokens verify \
+             only on the replica that minted them. Set {SECRET_ENV} (>= 32 bytes, same on \
+             every replica) for multi-replica deployments."
+        ),
     }
     Ok(())
 }
@@ -863,6 +958,12 @@ fn wrap_encryption(
                  only)."
             );
         }
+        if federation_wiring::payload_vault_from_env()?.is_some() {
+            anyhow::bail!(
+                "ORCH8_BYOK_* is configured but encryption at rest is disabled; the BYOK vault \
+                 is attached to the encrypting storage layer and requires ORCH8_ENCRYPTION_KEY"
+            );
+        }
         tracing::warn!(
             "Running with --insecure-storage (or --insecure): encryption at rest is DISABLED — \
              credentials and context.data are stored in plaintext. Never use this in production."
@@ -893,9 +994,11 @@ fn wrap_encryption(
     }
 
     tracing::info!("Encryption at rest enabled for context.data and credentials");
-    Ok(Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
-        storage, encryptor,
-    )))
+    let mut encrypting = orch8_storage::encrypting::EncryptingStorage::new(storage, encryptor);
+    if let Some(vault) = federation_wiring::payload_vault_from_env()? {
+        encrypting = encrypting.with_vault(vault);
+    }
+    Ok(Arc::new(encrypting))
 }
 
 fn init_prometheus() -> anyhow::Result<MetricsState> {
@@ -1073,7 +1176,84 @@ fn spawn_engine(
     shutdown: CancellationToken,
     cb_registry: Arc<CircuitBreakerRegistry>,
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
+    federation: Option<Arc<orch8_engine::federation::FederationClient>>,
+    failover: Option<federation_wiring::FailoverSettings>,
 ) -> tokio::task::JoinHandle<()> {
+    let Some(failover) = failover else {
+        return spawn_engine_now(
+            storage,
+            config,
+            shutdown,
+            cb_registry,
+            engine_ready,
+            federation,
+        );
+    };
+    // Active-passive: a standby node reports not-ready and never runs the
+    // scheduler until its region holds the fence; once active, losing the
+    // fence (or being unable to read it past the blind window) shuts the
+    // whole process down so the orchestrator restarts it as a standby.
+    let config = config.clone();
+    engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+    tokio::spawn(async move {
+        let Some(epoch) = orch8_engine::failover::wait_until_active(
+            storage.as_ref(),
+            &failover.region,
+            failover.poll,
+            &shutdown,
+        )
+        .await
+        else {
+            return;
+        };
+        engine_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+        let watch_storage = Arc::clone(&storage);
+        let watch_shutdown = shutdown.clone();
+        let watcher = tokio::spawn(async move {
+            orch8_engine::failover::watch(
+                watch_storage.as_ref(),
+                &failover.region,
+                epoch,
+                failover.poll,
+                failover.blind_window,
+                &watch_shutdown,
+            )
+            .await
+        });
+        let engine = spawn_engine_now(
+            storage,
+            &config,
+            shutdown,
+            cb_registry,
+            engine_ready,
+            federation,
+        );
+        let _ = engine.await;
+        let _ = watcher.await;
+    })
+}
+
+fn spawn_engine_now(
+    storage: Arc<dyn StorageBackend>,
+    config: &EngineConfig,
+    shutdown: CancellationToken,
+    cb_registry: Arc<CircuitBreakerRegistry>,
+    engine_ready: Arc<std::sync::atomic::AtomicBool>,
+    federation: Option<Arc<orch8_engine::federation::FederationClient>>,
+) -> tokio::task::JoinHandle<()> {
+    if let Some(client) = federation {
+        let poller_storage = Arc::clone(&storage);
+        let poller_cancel = shutdown.clone();
+        tokio::spawn(async move {
+            orch8_engine::federation::run_poller(
+                poller_storage,
+                client,
+                std::time::Duration::from_secs(1),
+                poller_cancel,
+            )
+            .await;
+        });
+    }
     let mut handlers = HandlerRegistry::new();
     orch8_engine::handlers::builtin::register_builtins(&mut handlers);
     // Share the same breaker registry the HTTP API exposes, so admin resets
@@ -1251,6 +1431,25 @@ fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
     }
 }
 
+/// Decode an executor join token into `[node]`: role `executor` (unless the
+/// operator explicitly chose `edge`), managed-control identity, labels and
+/// region. The worker id suffix is the container/host name so every replica
+/// gets a distinct, stable identity.
+fn apply_join_token(config: &mut EngineConfig, raw: &str) -> anyhow::Result<()> {
+    let token = orch8_types::join_token::JoinToken::parse(raw)
+        .map_err(|e| anyhow::anyhow!("ORCH8_JOIN_TOKEN is invalid: {e}"))?;
+    let host = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_default();
+    let keep_edge = config.node.role == NodeRole::Edge;
+    token.apply_to(&mut config.node, &host);
+    if keep_edge {
+        config.node.role = NodeRole::Edge;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_ARTIFACT_BACKEND") {
@@ -1314,6 +1513,13 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
         config.node.role = serde_json::from_value(serde_json::Value::String(val))
             .context("ORCH8_NODE_ROLE must be all_in_one, control, executor, gateway, or edge")?;
     }
+    // Executor join token (contract: `o8x1.<b64url(json)>`). Applied before
+    // the individual ORCH8_MANAGED_CONTROL_* variables so those still win.
+    if let Ok(raw) = std::env::var("ORCH8_JOIN_TOKEN")
+        && !raw.trim().is_empty()
+    {
+        apply_join_token(config, &raw)?;
+    }
     if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_ENDPOINT") {
         config.node.managed_control_endpoint = val;
     }
@@ -1329,6 +1535,18 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_RUNTIME_ID") {
         config.node.managed_control_runtime_id = val;
     }
+    if let Ok(val) = std::env::var("ORCH8_CLOUD_OBSERVABILITY_ENDPOINT") {
+        config.cloud_observability.endpoint = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_CLOUD_OBSERVABILITY_API_KEY") {
+        config.cloud_observability.api_key = val.into();
+    }
+    if let Ok(val) = std::env::var("ORCH8_CLOUD_OBSERVABILITY_ENGINE_ID") {
+        config.cloud_observability.engine_id = val;
+    }
+    if let Some(n) = env_parse("ORCH8_CLOUD_OBSERVABILITY_INTERVAL_MS") {
+        config.cloud_observability.interval_ms = n;
+    }
     if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_CERT_PATH") {
         config.api.grpc_tls_cert_path = val;
     }
@@ -1343,6 +1561,15 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     }
     if let Ok(val) = std::env::var("ORCH8_CORS_ORIGINS") {
         config.api.cors_origins = val;
+    }
+    if let Ok(val) = std::env::var(orch8_api::embed::token::SECRET_ENV) {
+        config.embed.token_secret = val.into();
+    }
+    if let Ok(val) = std::env::var(orch8_api::embed::token::ALLOWED_ORIGINS_ENV) {
+        config.embed.allowed_origins = val;
+    }
+    if let Ok(val) = std::env::var(orch8_api::license::LICENSE_KEY_ENV) {
+        config.license.key = val.into();
     }
     if let Some(n) = env_parse("ORCH8_TICK_INTERVAL_MS") {
         config.engine.tick_interval_ms = n;
@@ -1523,11 +1750,40 @@ fn print_startup_banner(config: &EngineConfig, insecure_auth: bool, insecure_sto
     tracing::info!("© Oleksii Vasylenko Tecnologia LTDA — BUSL-1.1 — https://orch8.io");
 }
 
-fn build_cors_layer(origins: &str) -> CorsLayer {
+fn parse_cors_origins(origins: &str) -> Vec<http::HeaderValue> {
+    origins
+        .split(',')
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+        .filter_map(|o| match o.trim_end_matches('/').parse() {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!(origin = %o, %error, "Ignoring unparseable CORS origin");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Browser-callable embed paths (token minting stays server-to-server).
+fn is_embed_cors_path(path: &str) -> bool {
+    let path = path.strip_prefix(API_V1_PREFIX).unwrap_or(path);
+    path.starts_with("/embed/") && !path.starts_with("/embed/tokens")
+}
+
+/// CORS for the API. `origins` (`api.cors_origins`) apply to every route;
+/// `embed_origins` (`[embed] allowed_origins`) are admitted only on the
+/// embed-token routes, so an embedding site never gains CORS access to the
+/// management API.
+fn build_cors_layer(origins: &str, embed_origins: &str) -> CorsLayer {
     use http::Method;
     use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
 
     let layer = CorsLayer::new()
+        // Cache preflights (browsers cap this at ~2h) so a browser runtime's
+        // `fetch(…, {keepalive: true})` release during `pagehide` is not
+        // blocked on a fresh preflight round-trip.
+        .max_age(std::time::Duration::from_secs(7_200))
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -1545,6 +1801,7 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
             // response strip it from the actual request and the API returns
             // 400 BAD_REQUEST, which looks like an auth bug to the SPA.
             HeaderName::from_static("x-tenant-id"),
+            HeaderName::from_static("x-orch8-sub-tenant"),
             // Trigger secret + replay-protection headers — webhooks called
             // from browsers (dashboard test fire, SaaS-embedded widgets) need
             // these to survive the preflight.
@@ -1552,30 +1809,121 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
             HeaderName::from_static("x-trigger-timestamp"),
             HeaderName::from_static("x-trigger-nonce"),
             HeaderName::from_static("x-orch8-signature"),
-        ]);
+        ])
+        .expose_headers([HeaderName::from_static(orch8_api::license::LICENSE_HEADER)]);
 
-    if origins.trim() == "*" {
-        layer.allow_origin(AllowOrigin::any())
-    } else {
-        let parsed: Vec<http::HeaderValue> = origins
-            .split(',')
-            .map(str::trim)
-            .filter(|o| !o.is_empty())
-            .filter_map(|o| match o.parse() {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    tracing::warn!(origin = %o, %error, "Ignoring unparseable CORS origin");
-                    None
-                }
-            })
-            .collect();
-        layer.allow_origin(parsed)
+    let api_any = origins.trim() == "*";
+    if embed_origins.trim().is_empty() {
+        return if api_any {
+            layer.allow_origin(AllowOrigin::any())
+        } else {
+            layer.allow_origin(parse_cors_origins(origins))
+        };
     }
+    let api_list = parse_cors_origins(origins);
+    let embed_any = embed_origins.trim() == "*";
+    let embed_list = parse_cors_origins(embed_origins);
+    layer.allow_origin(AllowOrigin::predicate(move |origin, parts| {
+        api_any
+            || api_list.contains(origin)
+            || (is_embed_cors_path(parts.uri.path()) && (embed_any || embed_list.contains(origin)))
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cors_preflight_admits_browser_session_tokens_and_is_cached() {
+        use tower::Service as _;
+        let mut app: axum::Router = axum::Router::new()
+            .route(
+                "/api/v1/workers/tasks/{id}/release",
+                axum::routing::post(|| async { http::StatusCode::NO_CONTENT }),
+            )
+            .layer(build_cors_layer("https://shop.example", ""));
+        let response = app
+            .call(
+                http::Request::builder()
+                    .method(http::Method::OPTIONS)
+                    .uri("/api/v1/workers/tasks/0190f5a0-0000-7000-8000-000000000001/release")
+                    .header("origin", "https://shop.example")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "x-api-key,content-type")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let headers = response.headers();
+        let allowed = headers
+            .get("access-control-allow-headers")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(allowed.contains("x-api-key") && allowed.contains("content-type"));
+        assert!(allowed.contains("authorization"));
+        assert_eq!(headers.get("access-control-max-age").unwrap(), "7200");
+    }
+
+    #[tokio::test]
+    async fn embed_origins_are_admitted_only_on_embed_routes() {
+        use tower::Service as _;
+        let mut app: axum::Router = axum::Router::new()
+            .route("/api/v1/embed/runs", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/api/v1/embed/tokens",
+                axum::routing::post(|| async { "ok" }),
+            )
+            .route("/api/v1/instances", axum::routing::get(|| async { "ok" }))
+            .layer(build_cors_layer(
+                "https://admin.example",
+                "https://app.vendor.example",
+            ));
+        let mut preflight = |path: &'static str, origin: &'static str| {
+            app.call(
+                http::Request::builder()
+                    .method(http::Method::OPTIONS)
+                    .uri(path)
+                    .header("origin", origin)
+                    .header("access-control-request-method", "GET")
+                    .header("access-control-request-headers", "authorization")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+        };
+        let allowed = |response: &http::Response<axum::body::Body>| {
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+        let embed = preflight("/api/v1/embed/runs", "https://app.vendor.example")
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed(&embed).as_deref(),
+            Some("https://app.vendor.example")
+        );
+        let mgmt = preflight("/api/v1/instances", "https://app.vendor.example")
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed(&mgmt),
+            None,
+            "embed origins must not reach the management API"
+        );
+        let mint = preflight("/api/v1/embed/tokens", "https://app.vendor.example")
+            .await
+            .unwrap();
+        assert_eq!(allowed(&mint), None, "token minting is server-to-server");
+        let admin = preflight("/api/v1/instances", "https://admin.example")
+            .await
+            .unwrap();
+        assert_eq!(allowed(&admin).as_deref(), Some("https://admin.example"));
+    }
 
     #[test]
     fn node_roles_select_disjoint_hardened_surfaces() {
@@ -1749,6 +2097,45 @@ mod tests {
         let insecure_storage = cli.insecure || cli.insecure_storage;
         assert!(insecure_auth);
         assert!(insecure_storage);
+    }
+
+    #[test]
+    fn join_token_configures_executor_managed_control() {
+        let token = orch8_types::join_token::JoinToken {
+            v: 1,
+            endpoint: "https://control.orch8.example".into(),
+            api_key: "o8k_join".into(),
+            tenant_id: "acme".into(),
+            runtime_id: uuid::Uuid::now_v7(),
+            worker_id_prefix: "acme-dc1".into(),
+            labels: std::collections::BTreeMap::from([("gpu".into(), "a10".into())]),
+            region: Some("eu-west-1".into()),
+        };
+        let mut config = EngineConfig::default();
+        apply_join_token(&mut config, &token.encode()).unwrap();
+        assert_eq!(config.node.role, NodeRole::Executor);
+        assert_eq!(config.node.managed_control_endpoint, token.endpoint);
+        assert_eq!(config.node.managed_control_tenant_id, "acme");
+        assert!(
+            config
+                .node
+                .managed_control_worker_id
+                .starts_with("acme-dc1")
+        );
+        assert_eq!(config.node.region, "eu-west-1");
+        let errors = config.validate().err().unwrap_or_default();
+        assert!(
+            errors.iter().all(|e| !e.contains("managed_control")),
+            "{errors:?}"
+        );
+
+        let mut edge = EngineConfig::default();
+        edge.node.role = NodeRole::Edge;
+        apply_join_token(&mut edge, &token.encode()).unwrap();
+        assert_eq!(edge.node.role, NodeRole::Edge);
+
+        let error = apply_join_token(&mut EngineConfig::default(), "o8x1.nope").unwrap_err();
+        assert!(error.to_string().contains("ORCH8_JOIN_TOKEN"));
     }
 
     #[test]

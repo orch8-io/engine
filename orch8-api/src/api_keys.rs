@@ -113,6 +113,13 @@ async fn create_api_key(
         return Err(ApiError::InvalidArgument("tenant_id is required".into()));
     }
 
+    if body.capabilities.contains(&ApiCapability::BrowserWorker) {
+        return Err(ApiError::InvalidArgument(
+            "browser_worker is reserved for short-lived browser sessions \
+             (POST /runtimes/browser-sessions)"
+                .into(),
+        ));
+    }
     let capabilities = if body.capabilities.is_empty() {
         vec![ApiCapability::Operator]
     } else {

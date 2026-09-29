@@ -3316,6 +3316,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch8-e2e"
+version = "0.7.1"
+dependencies = [
+ "chrono",
+ "orch8",
+ "orch8-api",
+ "orch8-engine",
+ "orch8-grpc",
+ "orch8-mobile",
+ "orch8-storage",
+ "orch8-types",
+ "reqwest",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "orch8-engine"
 version = "0.7.1"
 dependencies = [
@@ -3337,6 +3361,7 @@ dependencies = [
  "metrics",
  "moka",
  "notify",
+ "opentelemetry",
  "orch8-publisher",
  "orch8-storage",
  "orch8-types",
@@ -3357,6 +3382,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
  "utoipa",
@@ -3372,6 +3398,7 @@ version = "0.7.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "orch8-engine",
  "orch8-storage",
  "orch8-types",
  "prost",
@@ -3508,23 +3535,29 @@ dependencies = [
 name = "orch8-storage"
 version = "0.7.1"
 dependencies = [
+ "aes-gcm",
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "chrono",
  "criterion",
  "futures",
+ "hmac 0.13.0",
  "moka",
  "object_store",
  "orch8-push",
  "orch8-types",
  "rand 0.10.3",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
  "zstd 0.14.0",
 ]
 

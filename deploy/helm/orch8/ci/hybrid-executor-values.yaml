@@ -1,0 +1,15 @@
+# Hybrid executor joining Orch8 Cloud; token and ingest key from Secrets.
+mode: executor
+externalDatabase:
+  existingSecret: orch8-db
+  existingSecretKey: url
+hybrid:
+  joinToken:
+    existingSecret: orch8-join
+executor:
+  replicas: 2
+cloudObservability:
+  enabled: true
+  existingSecret: orch8-cloud-ingest
+migrations:
+  mode: server

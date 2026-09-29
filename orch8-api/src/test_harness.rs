@@ -74,22 +74,101 @@ pub async fn spawn_test_server_with_context_limit(max_context_bytes: u32) -> Tes
     spawn_test_server_inner(false, false, max_context_bytes).await
 }
 
-async fn spawn_test_server_inner(
-    mobile_sync_enabled: bool,
-    artifacts_enabled: bool,
-    max_context_bytes: u32,
-) -> TestServer {
-    let mut storage = SqliteStorage::in_memory()
-        .await
-        .expect("in-memory sqlite storage must initialise for tests");
-    if artifacts_enabled {
-        storage = storage.with_artifact_store(Arc::new(ObjectArtifactStore::memory()));
+/// A running test server over any storage backend (e.g. Postgres), with
+/// optional root API-key authentication.
+pub struct BackendTestServer {
+    pub base_url: String,
+    pub shutdown: CancellationToken,
+    pub storage: Arc<dyn orch8_storage::StorageBackend>,
+}
+
+impl BackendTestServer {
+    #[must_use]
+    pub fn v1_url(&self) -> String {
+        format!("{}{}", self.base_url, crate::API_V1_PREFIX)
     }
-    let storage = Arc::new(storage);
+}
+
+impl Drop for BackendTestServer {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+/// Spawn the router over `storage`. With `root_api_key`, API-key auth is
+/// enforced exactly like `orch8-server` (root key = admin, per-tenant keys,
+/// browser-session tokens); without it the server runs in insecure mode.
+///
+/// # Panics
+/// Panics if the TCP listener fails to bind.
+pub async fn spawn_test_server_on(
+    storage: Arc<dyn orch8_storage::StorageBackend>,
+    root_api_key: Option<&str>,
+) -> BackendTestServer {
+    let root_key_digest = root_api_key.map(orch8_types::auth::precompute_secret_digest);
     let shutdown = CancellationToken::new();
-    let state = AppState {
-        storage: storage.clone(),
-        shutdown: shutdown.clone(),
+    let state = test_state(storage.clone(), shutdown.clone(), false, 0, root_key_digest);
+    let base_url = serve(state, storage.clone(), root_key_digest, shutdown.clone()).await;
+    BackendTestServer {
+        base_url,
+        shutdown,
+        storage,
+    }
+}
+
+/// Options for [`spawn_test_server_with`].
+#[derive(Debug, Clone, Default)]
+pub struct TestServerOptions {
+    /// Root API key; `None` runs the server in insecure mode.
+    pub root_api_key: Option<String>,
+    /// Mount the `/mobile/*` device endpoints.
+    pub mobile_sync_enabled: bool,
+    /// Embedded runtime (embed signer, license); `None` = disabled.
+    pub embedded: Option<Arc<crate::embed::EmbeddedRuntime>>,
+}
+
+/// Spawn the router over `storage` with [`TestServerOptions`] (auth exactly
+/// like `orch8-server` when a root key is set).
+///
+/// # Panics
+/// Panics if the TCP listener fails to bind.
+pub async fn spawn_test_server_with(
+    storage: Arc<dyn orch8_storage::StorageBackend>,
+    options: TestServerOptions,
+) -> BackendTestServer {
+    let root_key_digest = options
+        .root_api_key
+        .as_deref()
+        .map(orch8_types::auth::precompute_secret_digest);
+    let shutdown = CancellationToken::new();
+    let mut state = test_state(
+        storage.clone(),
+        shutdown.clone(),
+        options.mobile_sync_enabled,
+        0,
+        root_key_digest,
+    );
+    if let Some(embedded) = options.embedded {
+        state.embedded = embedded;
+    }
+    let base_url = serve(state, storage.clone(), root_key_digest, shutdown.clone()).await;
+    BackendTestServer {
+        base_url,
+        shutdown,
+        storage,
+    }
+}
+
+fn test_state(
+    storage: Arc<dyn orch8_storage::StorageBackend>,
+    shutdown: CancellationToken,
+    mobile_sync_enabled: bool,
+    max_context_bytes: u32,
+    root_key_digest: Option<[u8; 32]>,
+) -> AppState {
+    AppState {
+        storage,
+        shutdown,
         max_context_bytes,
         externalization_mode: ExternalizationMode::default(),
         worker_lease_secs: 60,
@@ -111,8 +190,74 @@ async fn spawn_test_server_inner(
         continuity_trusted_signing_keys: Arc::new(std::collections::BTreeMap::new()),
         federation_peers: Arc::new(Vec::new()),
         continuity_lab_enabled: false,
-    };
+        browser_sessions: std::sync::Arc::new(
+            crate::browser_sessions::BrowserSessionSigner::configured(root_key_digest),
+        ),
+        browser_output_max_bytes: crate::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
+        embedded: std::sync::Arc::default(),
+    }
+}
 
+/// Spawn a test server whose continuity/federation identity is derived
+/// from `master_key_hex` (64 hex chars), so two servers in one test have
+/// distinct federation identities.
+///
+/// # Panics
+/// Panics on an invalid key or a broken test environment.
+pub async fn spawn_federation_test_server(master_key_hex: &str) -> TestServer {
+    crate::federation::allow_http_peers_for_loopback_tests();
+    let storage = Arc::new(
+        SqliteStorage::in_memory()
+            .await
+            .expect("in-memory sqlite storage must initialise for tests"),
+    );
+    let shutdown = CancellationToken::new();
+    let mut state = test_state(storage.clone(), shutdown.clone(), false, 0, None);
+    state.continuity_crypto = Some(Arc::new(
+        crate::ContinuityCrypto::from_master_key(master_key_hex).expect("valid test master key"),
+    ));
+    let base_url = serve(state, storage.clone(), None, shutdown.clone()).await;
+    TestServer {
+        base_url,
+        shutdown,
+        storage,
+    }
+}
+
+async fn spawn_test_server_inner(
+    mobile_sync_enabled: bool,
+    artifacts_enabled: bool,
+    max_context_bytes: u32,
+) -> TestServer {
+    let mut storage = SqliteStorage::in_memory()
+        .await
+        .expect("in-memory sqlite storage must initialise for tests");
+    if artifacts_enabled {
+        storage = storage.with_artifact_store(Arc::new(ObjectArtifactStore::memory()));
+    }
+    let storage = Arc::new(storage);
+    let shutdown = CancellationToken::new();
+    let state = test_state(
+        storage.clone(),
+        shutdown.clone(),
+        mobile_sync_enabled,
+        max_context_bytes,
+        None,
+    );
+    let base_url = serve(state, storage.clone(), None, shutdown.clone()).await;
+    TestServer {
+        base_url,
+        shutdown,
+        storage,
+    }
+}
+
+async fn serve(
+    state: AppState,
+    storage: Arc<dyn orch8_storage::StorageBackend>,
+    root_key_digest: Option<[u8; 32]>,
+    shutdown: CancellationToken,
+) -> String {
     // Attach auth + tenant middleware. API-key auth is disabled for the
     // harness (root_key_digest = None), which marks every request as admin so
     // operator endpoints that require `OptionalAdmin` remain testable. The
@@ -126,7 +271,9 @@ async fn spawn_test_server_inner(
     let app: Router = build_router(state.clone())
         .layer(axum::middleware::from_fn(move |req, next| {
             let storage = storage_for_auth.clone();
-            async move { crate::auth::api_key_middleware(storage, None, req, next).await }
+            async move {
+                crate::auth::api_key_middleware(storage, root_key_digest, req, next).await
+            }
         }))
         .layer(axum::middleware::from_fn(|req, next| async move {
             crate::auth::tenant_middleware(false, req, next).await
@@ -134,6 +281,7 @@ async fn spawn_test_server_inner(
         .merge(crate::health::routes().with_state(state.clone()))
         .merge(webhooks::public_routes().with_state(state.clone()))
         .merge(crate::public_routes().with_state(state.clone()))
+        .merge(crate::federation::inbound_routes().with_state(state.clone()))
         .layer(axum::middleware::from_fn(
             crate::request_id::request_id_middleware,
         ));
@@ -165,10 +313,5 @@ async fn spawn_test_server_inner(
     ready_rx
         .await
         .expect("test server task failed to start before first request");
-
-    TestServer {
-        base_url,
-        shutdown,
-        storage,
-    }
+    base_url
 }

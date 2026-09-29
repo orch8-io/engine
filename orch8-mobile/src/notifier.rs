@@ -231,6 +231,8 @@ mod tests {
         let ns = Namespace::new("default");
 
         let seq = SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -246,12 +248,14 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         };
         storage.create_sequence(&seq).await.unwrap();
 
         let now = chrono::Utc::now();
         let instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
             tenant_id: tenant,
@@ -416,6 +420,7 @@ mod tests {
         let mut context = ExecutionContext::default();
         context.runtime.current_step = Some(BlockId::new("review"));
         let instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: sequence.id,
             tenant_id: TenantId::new("mobile").unwrap(),

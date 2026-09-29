@@ -93,8 +93,9 @@ the pinned version of each other system and record them in the result `notes`.
 
 ## What is not measured
 
-- Multi-node or horizontally scaled deployments, managed/cloud offerings, and
-  cost.
+- Multi-node or horizontally scaled deployments (see the separate
+  [distributed benchmark](BENCHMARK_DISTRIBUTED.md)), managed/cloud offerings,
+  and cost.
 - Long-running workflows, timers, signals, fan-out, large payloads, or
   activities that do real I/O.
 - Developer experience, feature coverage, or operational effort.

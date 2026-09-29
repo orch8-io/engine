@@ -75,6 +75,11 @@ fn parse_json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, StorageError
 pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInstance, StorageError> {
     Ok(TaskInstance {
         id: InstanceId::from_uuid(parse_uuid(row.get::<&str, _>("id"))?),
+        // try_get: tolerate projections that predate the sub-tenant column.
+        sub_tenant: row
+            .try_get::<Option<String>, _>("sub_tenant")
+            .ok()
+            .flatten(),
         sequence_id: SequenceId::from_uuid(parse_uuid(row.get::<&str, _>("sequence_id"))?),
         tenant_id: TenantId::unchecked(row.get::<String, _>("tenant_id")),
         namespace: Namespace::new(row.get::<String, _>("namespace")),
@@ -169,6 +174,21 @@ pub(super) fn row_to_sequence(
             .and_then(|s| serde_json::from_str(&s).ok()),
         on_cancel: row
             .try_get::<Option<String>, _>("on_cancel")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        sub_tenant: row
+            .try_get::<Option<String>, _>("sub_tenant")
+            .ok()
+            .flatten(),
+        embed: row
+            .try_get::<Option<String>, _>("embed")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        // try_get: tolerate rows from pre-placement databases.
+        placement: row
+            .try_get::<Option<String>, _>("placement")
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str(&s).ok()),
@@ -269,6 +289,40 @@ pub(super) fn row_to_worker_task(
         error_message: row.get::<Option<String>, _>("error_message"),
         error_retryable: row.get::<Option<i32>, _>("error_retryable").map(|v| v != 0),
         created_at: parse_ts(row.get::<&str, _>("created_at"))?,
+        effect_id: row
+            .try_get::<Option<String>, _>("effect_id")
+            .ok()
+            .flatten()
+            .map(|id| parse_uuid(&id).map(orch8_types::continuity::EffectId::from_uuid))
+            .transpose()?,
+        continuity_epoch: row
+            .try_get::<Option<i64>, _>("continuity_epoch")
+            .ok()
+            .flatten()
+            .map(|epoch| {
+                u64::try_from(epoch)
+                    .map_err(|_| StorageError::Query("negative continuity_epoch".into()))
+            })
+            .transpose()?,
+        lease_secs: row
+            .try_get::<Option<i64>, _>("lease_secs")
+            .ok()
+            .flatten()
+            .map(|secs| {
+                u32::try_from(secs)
+                    .map_err(|_| StorageError::Query("invalid worker lease_secs".into()))
+            })
+            .transpose()?,
+        carries_credentials: row
+            .try_get::<i64, _>("carries_credentials")
+            .is_ok_and(|flag| flag != 0),
+        claimed_runtime_kind: row
+            .try_get::<Option<String>, _>("claimed_runtime_kind")
+            .ok()
+            .flatten()
+            .map(|kind| kind.parse())
+            .transpose()
+            .map_err(StorageError::Query)?,
     })
 }
 
@@ -397,6 +451,10 @@ pub(super) fn apply_filter_sql<'q>(
     if let Some(ref ns) = filter.namespace {
         qb.push(" AND namespace=");
         qb.push_bind(ns.as_str());
+    }
+    if let Some(ref sub) = filter.sub_tenant {
+        qb.push(" AND sub_tenant=");
+        qb.push_bind(sub.as_str());
     }
     if let Some(ref sid) = filter.sequence_id {
         qb.push(" AND sequence_id=");

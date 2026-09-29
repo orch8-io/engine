@@ -38,12 +38,16 @@ for gradle_file in \
   packages/flutter/android/build.gradle.kts \
   packages/react-native/android/build.gradle.kts; do
   grep -Fq 'https://raw.githubusercontent.com/orch8-io/maven/main' "$gradle_file"
-  grep -Fq 'implementation("io.orch8:orch8-mobile:0.7.1")' "$gradle_file"
+  # Either a literal pin or the package.json-driven pin (whose version
+  # check-sdk-versions.sh already enforced above).
+  grep -Fq 'implementation("io.orch8:orch8-mobile:0.7.1")' "$gradle_file" ||
+    grep -Fq 'implementation("io.orch8:orch8-mobile:$orch8NativeVersion")' "$gradle_file"
 done
 
 grep -Fq 'url: "https://github.com/orch8-io/engine/releases/download/v0.7.1/Orch8Mobile-v0.7.1.xcframework.zip"' packages/swift/Package.swift
 grep -Fq 'checksum: "0a83ce860c5b41bb7d5dcd9401e4466eb48fc0513658194293a4ca691b3f61d5"' packages/swift/Package.swift
-grep -Fq '"Orch8Mobile", "0.7.1"' packages/react-native/react-native-orch8.podspec
+grep -Fq '"Orch8Mobile", "0.7.1"' packages/react-native/react-native-orch8.podspec ||
+  grep -Fq 's.dependency     "Orch8Mobile", orch8_native_version' packages/react-native/react-native-orch8.podspec
 grep -Fq "'Orch8Mobile', '0.7.1'" packages/flutter/ios/orch8_flutter.podspec
 
 # All Apple-facing packages and native builds must advertise the binary's

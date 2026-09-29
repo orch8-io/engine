@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "orch8-engine-native"
 version = "0.7.1"
 requires-python = ">=3.10"
-description = "PyO3 bindings for Orch8 sequence validation"
+description = "In-process Orch8: durable SQLite-backed workflows, validation and dry runs"
 
 [tool.maturin]
 python-source = "python"

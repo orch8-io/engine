@@ -96,6 +96,11 @@ async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id
         error_message: None,
         error_retryable: None,
         created_at: chrono::Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     srv.storage.create_worker_task(&task).await.unwrap();
     task.id

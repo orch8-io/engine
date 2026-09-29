@@ -55,6 +55,11 @@ pub enum CapsuleServiceError {
     OwnershipMismatch,
     #[error("instance must be paused before capsule export")]
     UnsafeBoundary,
+    #[error(
+        "instance has {0} pending or claimed worker task(s); wait for them to settle \
+         (or cancel them) before exporting"
+    )]
+    WorkerTasksInFlight(usize),
     #[error("capsule expiry must be in the future")]
     InvalidExpiry,
     #[error("no persisted checkpoint exists for the paused instance")]
@@ -110,6 +115,31 @@ fn capsule_aad(
     .into_bytes()
 }
 
+/// Number of `pending` or `claimed` worker tasks of an instance.
+pub async fn open_worker_task_count(
+    storage: &dyn StorageBackend,
+    instance_id: orch8_types::ids::InstanceId,
+) -> Result<usize, orch8_types::error::StorageError> {
+    Ok(storage
+        .list_worker_tasks(
+            &orch8_types::worker_filter::WorkerTaskFilter {
+                instance_id: Some(instance_id),
+                states: Some(vec![
+                    orch8_types::worker::WorkerTaskState::Pending,
+                    orch8_types::worker::WorkerTaskState::Claimed,
+                ]),
+                ..orch8_types::worker_filter::WorkerTaskFilter::default()
+            },
+            &orch8_types::filter::Pagination {
+                offset: 0,
+                limit: 1_000,
+                sort_ascending: true,
+            },
+        )
+        .await?
+        .len())
+}
+
 #[allow(clippy::too_many_lines)] // protocol assembly is intentionally linear and auditable
 pub async fn export_paused_capsule(
     storage: &dyn StorageBackend,
@@ -145,6 +175,13 @@ pub async fn export_paused_capsule_manifest(
         InstanceState::Paused | InstanceState::Waiting
     ) {
         return Err(CapsuleServiceError::UnsafeBoundary);
+    }
+    // A `Waiting` instance may be waiting on a remote node: exporting now
+    // would let that node's completion land on an execution that already
+    // moved. Refuse until every worker task settled.
+    let in_flight = open_worker_task_count(storage, instance.id).await?;
+    if in_flight > 0 {
+        return Err(CapsuleServiceError::WorkerTasksInFlight(in_flight));
     }
     let now = Utc::now();
     if request.expires_at <= now {
@@ -337,6 +374,7 @@ pub async fn verify_and_import_paused_capsule_bytes(
     }
     let now = request.now;
     let candidate = TaskInstance {
+        sub_tenant: None,
         id: request.destination_instance_id.unwrap_or_default(),
         sequence_id: payload.instance.sequence_id,
         tenant_id: request.tenant_id.clone(),

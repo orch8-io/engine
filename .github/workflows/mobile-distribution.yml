@@ -1,0 +1,321 @@
+name: Mobile distribution
+
+# Publishes the native mobile SDK from an engine GitHub release to the
+# channels app developers install from:
+#
+#   swift-package  github.com/orch8-io/orch8-mobile-swift  (SwiftPM tag + CocoaPods source archive)
+#   cocoapods      CocoaPods trunk, pod `Orch8Mobile`
+#   maven          github.com/orch8-io/maven, io.orch8:orch8-mobile (AAR + POM)
+#   kmp            github.com/orch8-io/maven, io.orch8:orch8-kmp (Kotlin Multiplatform)
+#
+# release.yml calls this after the GitHub release exists. Run it by hand
+# (workflow_dispatch) to recover a failed or partially published release.
+#
+# Each channel is gated on its own secret. A missing secret skips that
+# channel with a notice, so forks and repositories without credentials pass.
+# See docs/MOBILE_RELEASING.md for the secrets and what each one needs.
+#
+# Every step is idempotent: an already published version is detected and
+# left alone, and published versions are never overwritten.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Engine release tag, e.g. v0.7.2"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Engine release tag to distribute, e.g. v0.7.2 (its GitHub release must exist)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-distribution-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  # -- Swift package + CocoaPods source archive -------------------------------
+  swift-package:
+    name: Swift package (orch8-mobile-swift)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      SWIFT_REPO_TOKEN: ${{ secrets.ORCH8_MOBILE_SWIFT_TOKEN }}
+    steps:
+      - name: Skip without ORCH8_MOBILE_SWIFT_TOKEN
+        if: env.SWIFT_REPO_TOKEN == ''
+        run: echo "::notice::ORCH8_MOBILE_SWIFT_TOKEN is not set; skipping the orch8-mobile-swift release."
+
+      - name: Validate tag
+        if: env.SWIFT_REPO_TOKEN != ''
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$TAG' is not a release tag (vMAJOR.MINOR.PATCH)."
+            exit 1
+          fi
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: env.SWIFT_REPO_TOKEN != ''
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.tag) }}
+
+      - name: Check whether the Swift release already exists
+        id: existing
+        if: env.SWIFT_REPO_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.ORCH8_MOBILE_SWIFT_TOKEN }}
+        run: |
+          if gh release view "$VERSION" --repo orch8-io/orch8-mobile-swift \
+               --json assets --jq '.assets[].name' 2>/dev/null \
+               | grep -Fxq "Orch8MobileCocoaPods-${VERSION}.zip"; then
+            echo "orch8-mobile-swift ${VERSION} is already released."
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download release assets
+        if: env.SWIFT_REPO_TOKEN != '' && steps.existing.outputs.released != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets \
+            --pattern "Orch8Mobile-${TAG}.xcframework.zip" \
+            --pattern "Orch8Mobile-${TAG}.xcframework.zip.sha256" \
+            --pattern "orch8-bindings-${TAG}.zip" \
+            --pattern "orch8-bindings-${TAG}.zip.sha256"
+          cd assets
+          shasum -a 256 -c "Orch8Mobile-${TAG}.xcframework.zip.sha256"
+          shasum -a 256 -c "orch8-bindings-${TAG}.zip.sha256"
+
+      - name: Commit, tag and release orch8-mobile-swift
+        if: env.SWIFT_REPO_TOKEN != '' && steps.existing.outputs.released != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ORCH8_MOBILE_SWIFT_TOKEN }}
+        run: |
+          gh repo clone orch8-io/orch8-mobile-swift swift-repo
+          ./scripts/sync-swift-distribution.sh swift-repo "$VERSION" \
+            "assets/Orch8Mobile-${TAG}.xcframework.zip" \
+            "assets/orch8-bindings-${TAG}.zip" \
+            dist
+
+          cd swift-repo
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          # SwiftPM resolves `exact: "<version>"` to this tag, so the tag must
+          # point at the commit whose Package.swift carries the new checksum.
+          if git ls-remote --exit-code --tags origin "refs/tags/${VERSION}" > /dev/null; then
+            echo "Tag ${VERSION} already exists in orch8-mobile-swift; not moving it."
+          else
+            git add -A
+            if git diff --cached --quiet; then
+              echo "orch8-mobile-swift already matches ${TAG}."
+            else
+              git commit -m "Release ${VERSION} (engine ${TAG})"
+              git push origin HEAD:main
+            fi
+            git tag -a "${VERSION}" -m "Orch8Mobile ${VERSION} (engine ${TAG})"
+            git push origin "refs/tags/${VERSION}"
+          fi
+
+          archive="../dist/Orch8MobileCocoaPods-${VERSION}.zip"
+          if gh release view "$VERSION" > /dev/null 2>&1; then
+            gh release upload "$VERSION" "$archive" "${archive}.sha256" --clobber
+          else
+            flags=(--verify-tag --title "$VERSION"
+              --notes "Orch8Mobile ${VERSION}, built from engine ${TAG}: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}")
+            if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$VERSION" "${flags[@]}" "$archive" "${archive}.sha256"
+          fi
+
+  # -- CocoaPods trunk -------------------------------------------------------
+  cocoapods:
+    name: CocoaPods trunk (Orch8Mobile)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    needs: [swift-package]
+    env:
+      COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+    steps:
+      - name: Skip without COCOAPODS_TRUNK_TOKEN
+        if: env.COCOAPODS_TRUNK_TOKEN == ''
+        run: echo "::notice::COCOAPODS_TRUNK_TOKEN is not set; skipping pod trunk push."
+
+      - name: Check whether the pod version is already on trunk
+        id: trunk
+        if: env.COCOAPODS_TRUNK_TOKEN != ''
+        run: |
+          VERSION="${TAG#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          if pod trunk info Orch8Mobile 2>/dev/null | grep -Fq -- "- ${VERSION} ("; then
+            echo "Orch8Mobile ${VERSION} is already on trunk."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the released podspec
+        if: env.COCOAPODS_TRUNK_TOKEN != '' && steps.trunk.outputs.published != 'true'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: orch8-io/orch8-mobile-swift
+          ref: ${{ format('refs/tags/{0}', env.VERSION) }}
+          path: swift-repo
+
+      - name: pod trunk push
+        if: env.COCOAPODS_TRUNK_TOKEN != '' && steps.trunk.outputs.published != 'true'
+        working-directory: swift-repo
+        run: |
+          if ! grep -Eq "s\.version[[:space:]]*=[[:space:]]*'${VERSION//./\\.}'" Orch8Mobile.podspec; then
+            echo "::error::orch8-mobile-swift ${VERSION} does not declare podspec version ${VERSION}."
+            exit 1
+          fi
+          archive="https://github.com/orch8-io/orch8-mobile-swift/releases/download/${VERSION}/Orch8MobileCocoaPods-${VERSION}.zip"
+          if ! curl -fsSLI "$archive" > /dev/null; then
+            echo "::error::${archive} is not published. The swift-package job must release orch8-mobile-swift ${VERSION} first (needs ORCH8_MOBILE_SWIFT_TOKEN)."
+            exit 1
+          fi
+          pod trunk push Orch8Mobile.podspec --allow-warnings --skip-tests
+
+  # -- Maven: io.orch8:orch8-mobile ------------------------------------------
+  maven:
+    name: Maven (io.orch8:orch8-mobile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MAVEN_REPO_TOKEN: ${{ secrets.ORCH8_MAVEN_TOKEN }}
+    steps:
+      - name: Skip without ORCH8_MAVEN_TOKEN
+        if: env.MAVEN_REPO_TOKEN == ''
+        run: echo "::notice::ORCH8_MAVEN_TOKEN is not set; skipping the orch8-io/maven publication."
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: env.MAVEN_REPO_TOKEN != ''
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.tag) }}
+
+      - name: Download the release AAR
+        if: env.MAVEN_REPO_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          mkdir -p assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets \
+            --pattern "orch8-mobile-${TAG}.aar" \
+            --pattern "orch8-mobile-${TAG}.aar.sha256"
+          (cd assets && sha256sum -c "orch8-mobile-${TAG}.aar.sha256")
+
+      - name: Publish to orch8-io/maven
+        if: env.MAVEN_REPO_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.ORCH8_MAVEN_TOKEN }}
+        run: |
+          gh repo clone orch8-io/maven maven-repo -- --depth 1
+          ./scripts/publish-maven-aar.py --repo maven-repo --version "$VERSION" \
+            --aar "assets/orch8-mobile-${TAG}.aar"
+          cd maven-repo
+          git add -A
+          if git diff --cached --quiet; then
+            echo "io.orch8:orch8-mobile:${VERSION} is already in orch8-io/maven."
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "io.orch8:orch8-mobile:${VERSION}"
+          for _ in 1 2 3; do
+            git push origin HEAD:main && exit 0
+            git pull --rebase origin main
+          done
+          exit 1
+
+  # -- Maven: io.orch8:orch8-kmp ---------------------------------------------
+  kmp:
+    name: Maven (io.orch8:orch8-kmp)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    needs: [maven]
+    env:
+      MAVEN_REPO_TOKEN: ${{ secrets.ORCH8_MAVEN_TOKEN }}
+    steps:
+      - name: Skip without ORCH8_MAVEN_TOKEN
+        if: env.MAVEN_REPO_TOKEN == ''
+        run: echo "::notice::ORCH8_MAVEN_TOKEN is not set; skipping the orch8-kmp publication."
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: env.MAVEN_REPO_TOKEN != ''
+        with:
+          ref: ${{ format('refs/tags/{0}', inputs.tag) }}
+
+      - name: Check whether orch8-kmp is already published
+        id: existing
+        if: env.MAVEN_REPO_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.ORCH8_MAVEN_TOKEN }}
+        run: |
+          VERSION="${TAG#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          gh repo clone orch8-io/maven maven-repo -- --depth 1
+          if [[ -d "maven-repo/io/orch8/orch8-kmp/${VERSION}" ]]; then
+            echo "io.orch8:orch8-kmp:${VERSION} is already published; versions are immutable."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "published=false" >> "$GITHUB_OUTPUT"
+          # androidMain depends on the AAR the maven job just published.
+          if [[ ! -d "maven-repo/io/orch8/orch8-mobile/${VERSION}" ]]; then
+            echo "::error::io.orch8:orch8-mobile:${VERSION} is not in orch8-io/maven; orch8-kmp cannot be published without it."
+            exit 1
+          fi
+
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        if: env.MAVEN_REPO_TOKEN != '' && steps.existing.outputs.published != 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        if: env.MAVEN_REPO_TOKEN != '' && steps.existing.outputs.published != 'true'
+        with:
+          gradle-version: "8.9"
+
+      - name: Test (JVM) and publish (Android + iOS)
+        if: env.MAVEN_REPO_TOKEN != '' && steps.existing.outputs.published != 'true'
+        working-directory: packages/kmp
+        env:
+          ORCH8_MOBILE_VERSION: ${{ inputs.tag }}
+        run: |
+          gradle --no-daemon jvmTest -Porch8.kmp.targets=jvm
+          gradle --no-daemon publishAllPublicationsToOrch8DistRepository \
+            -Porch8.kmp.targets=android,ios \
+            -Porch8.dist.repo="$GITHUB_WORKSPACE/maven-repo"
+          for artifact in orch8-kmp orch8-kmp-android orch8-kmp-iosarm64 orch8-kmp-iossimulatorarm64 orch8-kmp-iosx64; do
+            test -d "$GITHUB_WORKSPACE/maven-repo/io/orch8/${artifact}/${VERSION}" || {
+              echo "::error::publication did not produce io.orch8:${artifact}:${VERSION}"
+              exit 1
+            }
+          done
+
+      - name: Push to orch8-io/maven
+        if: env.MAVEN_REPO_TOKEN != '' && steps.existing.outputs.published != 'true'
+        working-directory: maven-repo
+        run: |
+          git add -A io/orch8
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "io.orch8:orch8-kmp:${VERSION}"
+          for _ in 1 2 3; do
+            git push origin HEAD:main && exit 0
+            git pull --rebase origin main
+          done
+          exit 1

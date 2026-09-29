@@ -10,7 +10,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use orch8_types::ids::{SequenceId, TenantId};
 use orch8_types::instance::InstanceState;
 use orch8_types::release::{
     GateEvaluation, GateVerdict, InFlightPolicy, ReleaseDecision, ReleaseGate, ReleaseState,
-    SemanticDiff, VariantStats, WorkflowRelease, evaluate_gates,
+    ReleaseTarget, SemanticDiff, VariantStats, WorkflowRelease, evaluate_gates,
 };
 use orch8_types::sequence::SequenceDefinition;
 
@@ -48,6 +48,7 @@ pub fn routes() -> Router<AppState> {
         .route("/releases/{id}/promote", post(promote_release))
         .route("/releases/{id}/pause", post(pause_release))
         .route("/releases/{id}/rollback", post(rollback_release))
+        .route("/releases/{id}/target", put(set_release_target))
         .route("/sequences/releases/diff", post(diff_sequences))
 }
 
@@ -60,6 +61,11 @@ pub(crate) struct CreateReleaseRequest {
     pub gates: Vec<ReleaseGate>,
     #[serde(default)]
     pub in_flight_policy: InFlightPolicy,
+    /// Optional sub-tenant staged rollout: sub-tenant scoped instances are
+    /// routed by sub-tenant instead of per-instance cohorts; unscoped
+    /// instances stay on the baseline until promotion.
+    #[serde(default)]
+    pub target: Option<ReleaseTarget>,
 }
 
 #[utoipa::path(post, path = "/releases", tag = "releases",
@@ -77,6 +83,9 @@ pub(crate) async fn create_release(
 ) -> Result<impl IntoResponse, ApiError> {
     let tenant_id =
         crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId::unchecked(&req.tenant_id))?;
+    if let Some(target) = &req.target {
+        target.validate().map_err(ApiError::InvalidArgument)?;
+    }
 
     let baseline = fetch_sequence(&state, req.baseline_sequence_id, &tenant_id).await?;
     let candidate = fetch_sequence(&state, req.candidate_sequence_id, &tenant_id).await?;
@@ -130,6 +139,7 @@ pub(crate) async fn create_release(
         in_flight_policy: req.in_flight_policy,
         validation_summary: None,
         canary_started_at: None,
+        target: req.target,
         created_at: now,
         updated_at: now,
     };
@@ -432,6 +442,7 @@ async fn run_validation(
         .storage
         .list_instances(
             &InstanceFilter {
+                sub_tenant: None,
                 tenant_id: Some(release.tenant_id.clone()),
                 namespace: None,
                 sequence_id: Some(release.baseline_sequence_id),
@@ -843,6 +854,7 @@ async fn observe(
             .storage
             .list_instances(
                 &InstanceFilter {
+                    sub_tenant: None,
                     tenant_id: Some(release.tenant_id.clone()),
                     namespace: None,
                     sequence_id: Some(sequence_id),
@@ -996,6 +1008,65 @@ pub(crate) async fn rollback_release(
         "rolled back by operator",
     )
     .await?;
+    let fresh = load_release(&state, &tenant_ctx, id).await?;
+    Ok(Json(fresh))
+}
+
+#[utoipa::path(put, path = "/releases/{id}/target", tag = "releases",
+    params(("id" = Uuid, Path, description = "Release id")),
+    request_body(content = Option<ReleaseTarget>,
+        description = "Sub-tenant rollout target, or null to return to per-instance cohorts"),
+    responses(
+        (status = 200, description = "Target replaced (audited)", body = WorkflowRelease),
+        (status = 400, description = "Invalid target"),
+        (status = 409, description = "Release is promoted or rolled back"),
+    )
+)]
+pub(crate) async fn set_release_target(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+    Json(target): Json<Option<ReleaseTarget>>,
+) -> Result<impl IntoResponse, ApiError> {
+    if let Some(target) = &target {
+        target.validate().map_err(ApiError::InvalidArgument)?;
+    }
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    if matches!(
+        release.state,
+        ReleaseState::Promoted | ReleaseState::RolledBack
+    ) {
+        return Err(ApiError::Conflict(format!(
+            "cannot retarget a release in '{}'",
+            release.state.as_str()
+        )));
+    }
+    let updated = state
+        .storage
+        .set_release_target(id, target.as_ref())
+        .await
+        .map_err(|e| ApiError::from_storage(e, "release"))?;
+    if !updated {
+        return Err(ApiError::NotFound(format!("release {id}")));
+    }
+    let reason = match &target {
+        Some(t) => format!(
+            "rollout target set: {} listed sub-tenant(s), percentage {}",
+            t.sub_tenants.as_ref().map_or(0, Vec::len),
+            t.percentage
+                .map_or_else(|| "none".to_string(), |p| format!("{p}%"))
+        ),
+        None => "rollout target cleared".to_string(),
+    };
+    record_decision(
+        &state,
+        id,
+        release.state,
+        release.state,
+        "operator",
+        &reason,
+    )
+    .await;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
     Ok(Json(fresh))
 }

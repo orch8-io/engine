@@ -8,14 +8,14 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 tracing.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"], optional = true }
 chrono.workspace = true
-tokio.workspace = true
-urlencoding = "2"
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+urlencoding = { version = "2", optional = true }
 zeroize.workspace = true
 uuid.workspace = true
 base64.workspace = true
@@ -23,7 +23,16 @@ ed25519-dalek.workspace = true
 sha2.workspace = true
 hex = "0.4"
 
+[features]
+# APNs/FCM delivery providers (JWT signing via aws-lc, HTTP clients). The
+# outbox/governance traits that `orch8-storage` implements are always built;
+# on-device consumers (`orch8-mobile`) depend on this crate with
+# `default-features = false` and never ship the server-side senders.
+default = ["providers"]
+providers = ["dep:jsonwebtoken", "dep:reqwest", "dep:urlencoding"]
+
 [dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
 axum.workspace = true
 
 [lints]

@@ -28,6 +28,17 @@ pub fn take_runtime_requirements(
     Ok((requirements, params))
 }
 
+/// Parse `params.$runtime` without removing it (dispatch routing decision).
+pub fn peek_runtime_requirements(
+    params: &serde_json::Value,
+) -> Result<crate::continuity::CapsuleRequirements, String> {
+    match params.get(RUNTIME_REQUIREMENTS_PARAM) {
+        None => Ok(crate::continuity::CapsuleRequirements::default()),
+        Some(raw) => serde_json::from_value(raw.clone())
+            .map_err(|error| format!("invalid {RUNTIME_REQUIREMENTS_PARAM} requirements: {error}")),
+    }
+}
+
 /// State of a worker task in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -228,6 +239,122 @@ pub struct WorkerTask {
     pub error_message: Option<String>,
     pub error_retryable: Option<bool>,
     pub created_at: DateTime<Utc>,
+    /// Deterministic idempotency key of this attempt's effect receipt, fixed
+    /// at dispatch. Nodes pass it to handlers and downstream APIs as an
+    /// idempotency key; the server settles the receipt by this stored id
+    /// (never a recomputed one, which would miss after an ownership handoff).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_id: Option<crate::continuity::EffectId>,
+    /// Continuity ownership epoch of the instance when the task was
+    /// dispatched. Lease mutations are fenced on it: a task dispatched under
+    /// an older owner cannot complete after a handoff. `None` = the instance
+    /// was not enrolled in continuity at dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuity_epoch: Option<u64>,
+    /// Lease (seconds between heartbeats) for the current claim, chosen from
+    /// the claimant's runtime kind. `None` = the server-wide default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_secs: Option<u32>,
+    /// The step's params referenced `credentials://` material. Such a task is
+    /// never claimable by a `browser` runtime.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub carries_credentials: bool,
+    /// Runtime kind of the current claimant (from its capability
+    /// advertisement), recorded for lease sizing, output bounds, and
+    /// provenance. `None` for legacy capability-less claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_runtime_kind: Option<crate::continuity::RuntimeKind>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip predicate requires `&T`.
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl WorkerTask {
+    /// Whether a runtime advertising `capabilities` may claim this task:
+    /// its placement requirements are satisfied, and a browser never
+    /// receives a task whose params carried credentials.
+    #[must_use]
+    pub fn claimable_by(
+        &self,
+        capabilities: &crate::continuity::RuntimeCapabilities,
+        now: DateTime<Utc>,
+    ) -> bool {
+        claim_allowed(
+            &self.requirements,
+            self.carries_credentials,
+            capabilities,
+            now,
+        )
+    }
+}
+
+/// Claim predicate shared by every storage backend (see
+/// [`WorkerTask::claimable_by`]).
+#[must_use]
+pub fn claim_allowed(
+    requirements: &crate::continuity::CapsuleRequirements,
+    carries_credentials: bool,
+    capabilities: &crate::continuity::RuntimeCapabilities,
+    now: DateTime<Utc>,
+) -> bool {
+    if carries_credentials && capabilities.kind == crate::continuity::RuntimeKind::Browser {
+        return false;
+    }
+    // A soft preference (sticky affinity, preferred labels) holds the task
+    // for its preferred claimants until the bounded wait elapses. It never
+    // widens eligibility: the hard requirements below still apply.
+    if let Some(prefer) = &requirements.prefer
+        && !prefer.admits(
+            &capabilities.runtime_id.to_string(),
+            &capabilities.labels,
+            now,
+        )
+    {
+        return false;
+    }
+    requirements.is_satisfied_by(capabilities, now)
+}
+
+/// Whether any string in `value` is a `credentials://` reference.
+#[must_use]
+pub fn contains_credential_reference(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.contains("credentials://"),
+        serde_json::Value::Array(items) => items.iter().any(contains_credential_reference),
+        serde_json::Value::Object(map) => map.values().any(contains_credential_reference),
+        _ => false,
+    }
+}
+
+/// Context delivered to a `browser` claimant. A browser never receives
+/// secrets: the read-only `config` section and the audit trail (both routinely
+/// carry endpoints, keys, and operator data) are dropped, any top-level `data`
+/// entry holding a `credentials://` reference is removed, and the platform
+/// [`crate::redaction::RedactionPolicy`] is applied to what remains
+/// (secret-shaped keys/values and URL-embedded credentials are redacted).
+#[must_use]
+pub fn browser_safe_context(context: &serde_json::Value) -> serde_json::Value {
+    let policy = crate::redaction::RedactionPolicy::default();
+    let Some(object) = context.as_object() else {
+        return serde_json::Value::Object(serde_json::Map::new());
+    };
+    let mut safe = serde_json::Map::new();
+    if let Some(data) = object.get("data") {
+        let mut data = data.clone();
+        if let Some(entries) = data.as_object_mut() {
+            entries.retain(|_, value| !contains_credential_reference(value));
+        }
+        policy.redact_value(&mut data);
+        safe.insert("data".into(), data);
+    }
+    if let Some(runtime) = object.get("runtime") {
+        let mut runtime = runtime.clone();
+        policy.redact_value(&mut runtime);
+        safe.insert("runtime".into(), runtime);
+    }
+    serde_json::Value::Object(safe)
 }
 
 fn is_default_requirements(value: &crate::continuity::CapsuleRequirements) -> bool {
@@ -331,6 +458,54 @@ mod attempt_tests {
             })
         );
     }
+}
+
+/// What happens to an instance when a worker task is resolved without a
+/// worker-reported outcome (lease expiry, timeout, voluntary release).
+#[derive(Debug, Clone)]
+pub enum WorkerTaskResolutionAction {
+    /// Give the task back: state `pending`, lease cleared, receipt untouched.
+    /// Only valid when no side effect can have started (pure step, or a
+    /// release before the handler started).
+    Requeue,
+    /// Replace the task with `retry_task` (next attempt), reset the tree node
+    /// to `pending` (when present), and schedule the instance at `fire_at`.
+    Retry {
+        retry_task: Box<WorkerTask>,
+        node_id: Option<crate::ids::ExecutionNodeId>,
+        fire_at: DateTime<Utc>,
+    },
+    /// Mark the task failed, fail the tree node, and schedule the instance so
+    /// the evaluator propagates the failure.
+    FailNode {
+        node_id: Option<crate::ids::ExecutionNodeId>,
+        fire_at: DateTime<Utc>,
+    },
+    /// Flat (tree-less) execution: mark the task and the instance failed.
+    FailInstance,
+    /// Mark only the task failed; the caller integrates the outcome into the
+    /// instance itself (device-mesh delegation results).
+    FailTaskOnly,
+}
+
+/// One fenced, atomic worker-task resolution. Storage applies `action` only
+/// when the task is still in `expected_state` at `expected_claim_epoch` (and,
+/// when set, still held by `expected_worker_id`); otherwise nothing changes
+/// and the call returns `false`, so a racing completion always wins cleanly.
+#[derive(Debug, Clone)]
+pub struct WorkerTaskResolution {
+    pub task_id: Uuid,
+    pub instance_id: InstanceId,
+    pub expected_state: WorkerTaskState,
+    pub expected_claim_epoch: u64,
+    pub expected_worker_id: Option<String>,
+    /// Lease holder recorded on the attempt event (evidence only, not part
+    /// of the fence).
+    pub holder_worker_id: Option<String>,
+    pub event: WorkerAttemptEventKind,
+    pub reason: String,
+    pub retryable: bool,
+    pub action: WorkerTaskResolutionAction,
 }
 
 /// Append-only evidence for one transition of one worker claim generation.
@@ -525,4 +700,130 @@ fn parse_version(v: &str) -> Option<Vec<u64>> {
         return None;
     }
     v.split('.').map(|c| c.parse::<u64>().ok()).collect()
+}
+
+#[cfg(test)]
+mod distribution_tests {
+    use super::*;
+    use crate::continuity::{
+        CapsuleRequirements, RuntimeCapabilities, RuntimeConnectivity, RuntimeId, RuntimeKind,
+        RuntimeTrustLevel,
+    };
+
+    fn caps(kind: RuntimeKind) -> RuntimeCapabilities {
+        let now = Utc::now();
+        RuntimeCapabilities {
+            runtime_id: RuntimeId::new(),
+            kind,
+            trust: RuntimeTrustLevel::Registered,
+            handlers: vec!["h".into()],
+            plugins: Vec::new(),
+            credentials: Vec::new(),
+            regions: Vec::new(),
+            hardware: Vec::new(),
+            offline_capable: false,
+            connectivity: Some(RuntimeConnectivity::Wifi),
+            battery_percent: None,
+            estimated_cost_microunits: None,
+            estimated_latency_ms: None,
+            draining: false,
+            capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
+            observed_at: now,
+            expires_at: now + chrono::Duration::minutes(4),
+        }
+    }
+
+    #[test]
+    fn browser_never_claims_credential_bearing_tasks() {
+        let now = Utc::now();
+        let requirements = CapsuleRequirements::default();
+        assert!(!claim_allowed(
+            &requirements,
+            true,
+            &caps(RuntimeKind::Browser),
+            now
+        ));
+        assert!(claim_allowed(
+            &requirements,
+            false,
+            &caps(RuntimeKind::Browser),
+            now
+        ));
+        assert!(claim_allowed(
+            &requirements,
+            true,
+            &caps(RuntimeKind::Mobile),
+            now
+        ));
+        assert!(claim_allowed(
+            &requirements,
+            true,
+            &caps(RuntimeKind::Server),
+            now
+        ));
+    }
+
+    #[test]
+    fn credential_references_are_detected_anywhere() {
+        assert!(contains_credential_reference(&serde_json::json!({
+            "a": [{"auth": "credentials://stripe/key"}]
+        })));
+        assert!(!contains_credential_reference(
+            &serde_json::json!({"a": "plain"})
+        ));
+    }
+
+    #[test]
+    fn browser_context_drops_secret_sections_and_redacts() {
+        let context = serde_json::json!({
+            "data": {
+                "order": {"id": 7, "api_key": "k"},
+                "token_ref": "credentials://vault/token",
+                "note": "Bearer abc.def",
+                "db": "postgres://user:hunter2@db/app"
+            },
+            "config": {"stripe_key": "sk_live_x"},
+            "audit": [{"event": "x"}],
+            "runtime": {"current_step": "s1"}
+        });
+        let safe = browser_safe_context(&context);
+        assert!(safe.get("config").is_none());
+        assert!(safe.get("audit").is_none());
+        assert!(safe["data"].get("token_ref").is_none());
+        assert_eq!(safe["data"]["order"]["id"], 7);
+        assert_ne!(safe["data"]["order"]["api_key"], "k");
+        assert_ne!(safe["data"]["note"], "Bearer abc.def");
+        assert!(!safe["data"]["db"].as_str().unwrap().contains("hunter2"));
+        assert_eq!(safe["runtime"]["current_step"], "s1");
+    }
+
+    #[test]
+    fn distribution_fields_are_optional_on_the_wire() {
+        let json = serde_json::json!({
+            "id": uuid::Uuid::now_v7(),
+            "instance_id": uuid::Uuid::now_v7(),
+            "block_id": "b",
+            "handler_name": "h",
+            "params": {},
+            "context": {},
+            "attempt": 0,
+            "timeout_ms": null,
+            "state": "pending",
+            "worker_id": null,
+            "claimed_at": null,
+            "heartbeat_at": null,
+            "completed_at": null,
+            "output": null,
+            "error_message": null,
+            "error_retryable": null,
+            "created_at": Utc::now(),
+        });
+        let task: WorkerTask = serde_json::from_value(json).unwrap();
+        assert!(task.effect_id.is_none());
+        assert!(!task.carries_credentials);
+        let back = serde_json::to_value(&task).unwrap();
+        assert!(back.get("effect_id").is_none());
+        assert!(back.get("carries_credentials").is_none());
+    }
 }

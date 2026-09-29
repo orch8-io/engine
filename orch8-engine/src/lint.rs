@@ -116,6 +116,30 @@ fn lint_event_waits(blocks: &[BlockDefinition], warnings: &mut Vec<LintWarning>)
                         .to_owned(),
                 });
             }
+            if s.handler == crate::federation::FEDERATE_HANDLER {
+                if s.wait_for_input.is_none() {
+                    warnings.push(LintWarning {
+                        block_id: s.id.as_str().to_owned(),
+                        message: "federate step has no `wait_for_input` — the engine \
+                                  cannot park while the remote run executes and the \
+                                  step will fail; add `\"wait_for_input\": {\"prompt\": \
+                                  \"...\", \"timeout\": ...}` to the step"
+                            .to_owned(),
+                    });
+                } else if s
+                    .wait_for_input
+                    .as_ref()
+                    .is_some_and(|d| d.choices.is_some())
+                {
+                    warnings.push(LintWarning {
+                        block_id: s.id.as_str().to_owned(),
+                        message: "federate steps must not define custom \
+                                  `wait_for_input.choices` — the federation resume signal \
+                                  carries the default choice and would be rejected"
+                            .to_owned(),
+                    });
+                }
+            }
             if s.handler == "wait_for_event" && s.wait_for_input.is_none() {
                 warnings.push(LintWarning {
                     block_id: s.id.as_str().to_owned(),
@@ -740,6 +764,8 @@ mod tests {
 
     fn sample_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -755,6 +781,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -768,6 +795,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -1221,6 +1250,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -1263,6 +1294,8 @@ mod tests {
             retry: None,
             timeout: Some(Duration::from_secs(60)),
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -1292,6 +1325,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,

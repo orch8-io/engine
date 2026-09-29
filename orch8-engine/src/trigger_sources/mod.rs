@@ -345,6 +345,8 @@ mod tests {
     async fn deliver_creates_once_then_reports_duplicate() {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let seq = orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -360,6 +362,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         };
         storage.create_sequence(&seq).await.unwrap();

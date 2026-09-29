@@ -102,6 +102,8 @@ async fn seed_instance(s: &SqliteStorage, inst_id: InstanceId) {
 
 fn make_sequence(tenant: &str) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -118,6 +120,8 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -136,6 +140,7 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
         status: orch8_types::sequence::SequenceStatus::Production,
     }
@@ -158,6 +163,7 @@ fn distributed_runtime(now: chrono::DateTime<Utc>, region: &str) -> RuntimeCapab
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + Duration::minutes(4),
     }
@@ -199,12 +205,18 @@ fn distributed_task(
         error_message: None,
         error_retryable: None,
         created_at,
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     }
 }
 
 fn make_instance(tenant: &str, seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked(tenant),
@@ -541,6 +553,11 @@ async fn worker_task_full_lifecycle() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -637,6 +654,11 @@ async fn constrained_worker_task_is_claimed_only_by_matching_runtime() {
         error_message: None,
         error_retryable: None,
         created_at: now,
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
     assert!(
@@ -662,6 +684,7 @@ async fn constrained_worker_task_is_claimed_only_by_matching_runtime() {
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + Duration::minutes(4),
     };
@@ -920,6 +943,11 @@ async fn worker_activity_checkpoint_survives_lease_recovery() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
     s.claim_worker_tasks("long_activity", "worker-1", 1)
@@ -1015,6 +1043,11 @@ async fn worker_task_fail_and_cancel() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -1061,6 +1094,11 @@ async fn worker_task_fail_and_cancel() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task2).await.unwrap();
     let cancelled = s
@@ -1118,6 +1156,11 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&iter0).await.unwrap();
     s.claim_worker_tasks("external_handler", "w1", 1)
@@ -1163,6 +1206,11 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&iter1).await.unwrap();
 
@@ -1207,6 +1255,11 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
     s.claim_worker_tasks("external_handler", "w1", 1)
@@ -1251,6 +1304,11 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task2).await.unwrap();
     let fetched = s.get_worker_task(task2.id).await.unwrap();
@@ -1305,6 +1363,11 @@ async fn worker_task_queue_routing() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -3126,6 +3189,11 @@ async fn worker_task_list_and_stats() {
             error_message: None,
             error_retryable: None,
             created_at: Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         };
         s.create_worker_task(&task).await.unwrap();
     }
@@ -3320,6 +3388,11 @@ async fn perf_concurrent_worker_claims() {
             error_message: None,
             error_retryable: None,
             created_at: Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         };
         s.create_worker_task(&task).await.unwrap();
     }
@@ -3385,6 +3458,7 @@ async fn context_round_trip_all_sections() {
             total_steps_executed: 0,
             dry_run: false,
             dry_run_auto_approve: false,
+            traceparent: None,
         },
     };
     s.create_instance(&inst).await.unwrap();
@@ -3625,6 +3699,7 @@ async fn merge_context_data_preserves_other_sections() {
             total_steps_executed: 0,
             dry_run: false,
             dry_run_auto_approve: false,
+            traceparent: None,
         },
     };
     s.create_instance(&inst).await.unwrap();
@@ -4484,6 +4559,11 @@ async fn retry_worker_task_atomically_replaces_task() {
         error_message: Some("boom".into()),
         error_retryable: Some(true),
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&old_task).await.unwrap();
 
@@ -4510,6 +4590,11 @@ async fn retry_worker_task_atomically_replaces_task() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
 
     let fire_at = Utc::now() + Duration::seconds(5);

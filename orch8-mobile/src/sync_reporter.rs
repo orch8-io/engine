@@ -60,7 +60,6 @@ struct SyncRequest<'a> {
     device_id: &'a str,
     status_updates: Vec<&'a serde_json::value::RawValue>,
     approval_requests: Vec<&'a serde_json::value::RawValue>,
-    step_delegations: Vec<&'a serde_json::value::RawValue>,
     command_acks: &'a [String],
 }
 
@@ -299,40 +298,6 @@ impl SyncReporter {
         }
     }
 
-    /// Queue a step delegation request to the server.
-    /// The server resolves `credentials://` references and returns
-    /// resolved params as a `step_result` command.
-    #[allow(dead_code)]
-    pub async fn queue_step_delegation(
-        &self,
-        request_id: &str,
-        instance_id: &str,
-        block_id: &str,
-        handler: &str,
-        params: &serde_json::Value,
-    ) {
-        let payload = serde_json::json!({
-            "request_id": request_id,
-            "instance_id": instance_id,
-            "block_id": block_id,
-            "handler": handler,
-            "params": params,
-        });
-        let key = format!("{instance_id}:{block_id}");
-        if let Err(e) = sqlx::query(
-            "INSERT OR REPLACE INTO sync_outbox (entry_type, instance_id, payload) VALUES ('delegation', ?, ?)",
-        )
-        .bind(&key)
-        .bind(payload.to_string())
-        .execute(&self.pool)
-        .await
-        {
-            warn!(error = %e, instance_id, block_id, "failed to queue mobile step delegation");
-            return;
-        }
-        self.request_immediate_sync();
-    }
-
     /// Scan storage for active instances and queue status updates + approval
     /// requests. Coalescing in the outbox table ensures duplicates are harmless.
     pub async fn scan_and_queue(
@@ -434,16 +399,12 @@ impl SyncReporter {
                 "SELECT id, payload FROM sync_outbox WHERE entry_type = 'approval' ORDER BY id LIMIT 50",
             )
             .fetch_all(&self.pool),
-            sqlx::query_as::<_, (i64, String)>(
-                "SELECT id, payload FROM sync_outbox WHERE entry_type = 'delegation' ORDER BY id LIMIT 20",
-            )
-            .fetch_all(&self.pool),
             sqlx::query_scalar::<_, String>(
                 "SELECT command_id FROM sync_command_acks ORDER BY created_at LIMIT 100",
             )
             .fetch_all(&self.pool),
         );
-        let (status_rows, approval_rows, delegation_rows, command_acks) = match pending {
+        let (status_rows, approval_rows, command_acks) = match pending {
             Ok(rows) => rows,
             Err(error) => {
                 warn!(%error, "failed to read pending mobile sync data");
@@ -456,13 +417,11 @@ impl SyncReporter {
         // for reqwest to serialize that tree back into the same JSON.
         let status_updates = borrow_valid_payloads(&status_rows);
         let approval_requests = borrow_valid_payloads(&approval_rows);
-        let step_delegations = borrow_valid_payloads(&delegation_rows);
 
         let req = SyncRequest {
             device_id: &self.device_id,
             status_updates,
             approval_requests,
-            step_delegations,
             command_acks: &command_acks,
         };
 
@@ -505,11 +464,9 @@ impl SyncReporter {
         let commands_received = !sync_resp.commands.is_empty();
 
         // Clean up sent outbox entries.
-        let mut sent_outbox_ids =
-            Vec::with_capacity(status_rows.len() + approval_rows.len() + delegation_rows.len());
+        let mut sent_outbox_ids = Vec::with_capacity(status_rows.len() + approval_rows.len());
         sent_outbox_ids.extend(status_rows.iter().map(|(id, _)| *id));
         sent_outbox_ids.extend(approval_rows.iter().map(|(id, _)| *id));
-        sent_outbox_ids.extend(delegation_rows.iter().map(|(id, _)| *id));
         if let Err(e) = delete_outbox_rows(&self.pool, &sent_outbox_ids).await {
             warn!(error = %e, "failed to delete sent sync outbox rows");
         }
@@ -652,7 +609,6 @@ impl SyncReporter {
         debug!(
             status_sent = status_rows.len(),
             approvals_sent = approval_rows.len(),
-            delegations_sent = delegation_rows.len(),
             commands_received = sync_resp.commands.len(),
             next_sync_secs = clamped_secs,
             "sync complete"
@@ -1495,6 +1451,8 @@ mod tests {
 
     async fn seed_sequence(storage: &Arc<dyn StorageBackend>, name: &str) {
         let seq = SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -1512,6 +1470,8 @@ mod tests {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -1530,6 +1490,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         };
         storage.create_sequence(&seq).await.unwrap();
@@ -1826,7 +1787,6 @@ mod tests {
             device_id: "device-1",
             status_updates: Vec::new(),
             approval_requests: Vec::new(),
-            step_delegations: Vec::new(),
             command_acks: &command_acks,
         };
 
@@ -1852,7 +1812,6 @@ mod tests {
             device_id: "device-1",
             status_updates,
             approval_requests: Vec::new(),
-            step_delegations: Vec::new(),
             command_acks: &[],
         };
         let json = serde_json::to_value(request).unwrap();

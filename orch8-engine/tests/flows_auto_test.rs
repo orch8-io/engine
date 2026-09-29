@@ -43,6 +43,8 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -60,6 +62,8 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
 
 fn mk_sequence(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -74,6 +78,7 @@ fn mk_sequence(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
         status: orch8_types::sequence::SequenceStatus::Production,
     }
@@ -82,6 +87,7 @@ fn mk_sequence(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
 fn mk_instance(seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked("t"),

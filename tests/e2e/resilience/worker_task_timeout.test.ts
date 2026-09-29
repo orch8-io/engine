@@ -1,6 +1,8 @@
 /**
- * Verifies that a worker task whose claimant never heartbeats is
- * automatically returned to `pending` and reassigned to a different worker.
+ * Verifies what happens to a worker task whose claimant never heartbeats.
+ * External handlers are side-effecting, so the lease reaper never hands the
+ * same attempt to another worker: the effect receipt goes `unknown` and the
+ * step's retry policy decides (new attempt, or the step fails).
  *
  * Relationship to `worker_heartbeat_timeout.test.ts`: both tests exercise
  * the same `reap_stale_worker_tasks` machinery (see
@@ -63,18 +65,19 @@ describe("Worker Task Claim Timeout", () => {
   });
 
   it(
-    "should auto-reassign a claimed task when no heartbeat arrives",
+    "retries a side-effecting task as a new attempt (never silently requeues the same effect)",
     { timeout: 180_000 },
     async () => {
       const tenantId = `test-${uuid().slice(0, 8)}`;
       const handler = `claim_timeout_${uuid().slice(0, 8)}`;
 
-      // Try to bias the engine toward a shorter wait via StepDef.timeout —
-      // currently ignored by the reaper but harmless to set. When the engine
-      // closes the gap this test will get faster automatically.
+      // Every external handler is side-effecting: when worker-1's lease
+      // expires the effect may already have happened, so the reaper marks
+      // the receipt `unknown` and applies the retry policy instead of
+      // handing the same attempt to worker-2.
       const seq = testSequence(
         "claim-timeout",
-        [step("s1", handler, {}, { timeout: 5_000 })],
+        [step("s1", handler, {}, { retry: { max_attempts: 2, initial_backoff: 5, max_backoff: 20 } })],
         { tenantId },
       );
       await client.createSequence(seq);
@@ -90,28 +93,53 @@ describe("Worker Task Claim Timeout", () => {
       // worker-1 claims the task but never heartbeats or completes it.
       const claimA = await client.pollWorkerTasks(handler, "worker-1");
       assert.equal(claimA.length, 1, "expected a single claimed task");
-      const originalTaskId = claimA[0]!.id;
-      assert.equal(claimA[0]!.worker_id, "worker-1");
+      const original = claimA[0]!;
+      assert.equal(original.worker_id, "worker-1");
+      assert.equal(original.attempt, 0);
 
-      // Wait for the reaper to reclaim. worker-2 polling should eventually
-      // receive the same row.
+      // The retry is a new attempt on a new row with its own effect id.
       const reclaimed = await waitFor<WorkerTask>(async () => {
         const tasks = await client.pollWorkerTasks(handler, "worker-2");
         return tasks.length > 0 ? tasks[0] : undefined;
       });
-
-      assert.equal(
-        reclaimed.id,
-        originalTaskId,
-        "reclaimed task should be the same row, not a new insert",
-      );
+      assert.notEqual(reclaimed.id, original.id, "a new attempt, not the same claim");
+      assert.equal(reclaimed.attempt, 1);
       assert.equal(reclaimed.worker_id, "worker-2");
-      assert.equal(reclaimed.state, "claimed");
+      if (original.effect_id && reclaimed.effect_id) {
+        assert.notEqual(reclaimed.effect_id, original.effect_id);
+      }
+
+      // The stale worker-1 can no longer report on its attempt.
+      await assert.rejects(
+        () => client.completeWorkerTask(original.id, "worker-1", { ok: true }, original.claim_epoch),
+      );
 
       // worker-2 completes — the instance must finish cleanly.
-      await client.completeWorkerTask(reclaimed.id, "worker-2", { ok: true });
+      await client.completeWorkerTask(reclaimed.id, "worker-2", { ok: true }, reclaimed.claim_epoch);
       const done = await client.waitForState(id, "completed", { timeoutMs: 15_000 });
       assert.equal(done.state, "completed");
+    },
+  );
+
+  it(
+    "fails the step when the lease expires and no retry policy allows another attempt",
+    { timeout: 180_000 },
+    async () => {
+      const tenantId = `test-${uuid().slice(0, 8)}`;
+      const handler = `claim_timeout_noretry_${uuid().slice(0, 8)}`;
+      const seq = testSequence("claim-timeout-noretry", [step("s1", handler, {})], { tenantId });
+      await client.createSequence(seq);
+      const { id } = await client.createInstance({
+        sequence_id: seq.id,
+        tenant_id: tenantId,
+        namespace: "default",
+      });
+      await client.waitForState(id, "waiting", { timeoutMs: 10_000 });
+      const claimA = await client.pollWorkerTasks(handler, "worker-1");
+      assert.equal(claimA.length, 1);
+      const failed = await client.waitForState(id, "failed", { timeoutMs: 30_000 });
+      assert.equal(failed.state, "failed");
+      assert.equal((await client.pollWorkerTasks(handler, "worker-2")).length, 0);
     },
   );
 });

@@ -30,8 +30,23 @@ pub(super) struct SequenceRow {
 
 impl SequenceRow {
     pub fn into_definition(self) -> Result<SequenceDefinition, StorageError> {
+        let sub_tenant = self
+            .definition
+            .get("sub_tenant")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string);
+        let embed = self
+            .definition
+            .get("embed")
+            .filter(|v| !v.is_null())
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         // Support both old format (array of blocks) and new format
         // ({blocks, interceptors, input_schema}).
+        let placement = self
+            .definition
+            .get("placement")
+            .filter(|v| !v.is_null())
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
         let (blocks, interceptors, input_schema, sla, on_failure, on_cancel) =
             if self.definition.is_array() {
                 (
@@ -106,6 +121,9 @@ impl SequenceRow {
             sla,
             on_failure,
             on_cancel,
+            sub_tenant,
+            embed,
+            placement,
             created_at: self.created_at,
         })
     }
@@ -170,6 +188,7 @@ pub(super) struct InstanceRow {
     pub budget: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub sub_tenant: Option<String>,
 }
 
 impl InstanceRow {
@@ -181,6 +200,7 @@ impl InstanceRow {
 
         Ok(TaskInstance {
             id: InstanceId::from_uuid(self.id),
+            sub_tenant: self.sub_tenant,
             sequence_id: SequenceId::from_uuid(self.sequence_id),
             tenant_id: TenantId::unchecked(self.tenant_id),
             namespace: Namespace::new(self.namespace),
@@ -377,7 +397,24 @@ pub(super) struct WorkerTaskRow {
     pub error_message: Option<String>,
     pub error_retryable: Option<bool>,
     pub created_at: DateTime<Utc>,
+    pub effect_id: Option<Uuid>,
+    pub continuity_epoch: Option<i64>,
+    pub lease_secs: Option<i32>,
+    pub carries_credentials: bool,
+    pub claimed_runtime_kind: Option<String>,
 }
+
+/// Every column `WorkerTaskRow` maps, for SELECT / RETURNING lists.
+macro_rules! worker_task_columns {
+    () => {
+        "id, instance_id, block_id, handler_name, queue_name, requirements, params, context, \
+         attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at, \
+         claim_epoch, resume_checkpoint, checkpoint_seq, \
+         completed_at, output, error_message, error_retryable, created_at, \
+         effect_id, continuity_epoch, lease_secs, carries_credentials, claimed_runtime_kind"
+    };
+}
+pub(super) use worker_task_columns;
 
 impl WorkerTaskRow {
     // A corrupt `state` column must surface as an error, not silently
@@ -412,6 +449,30 @@ impl WorkerTaskRow {
             error_message: self.error_message,
             error_retryable: self.error_retryable,
             created_at: self.created_at,
+            effect_id: self
+                .effect_id
+                .map(orch8_types::continuity::EffectId::from_uuid),
+            continuity_epoch: self
+                .continuity_epoch
+                .map(|epoch| {
+                    u64::try_from(epoch)
+                        .map_err(|_| StorageError::Query("negative continuity_epoch".into()))
+                })
+                .transpose()?,
+            lease_secs: self
+                .lease_secs
+                .map(|secs| {
+                    u32::try_from(secs)
+                        .map_err(|_| StorageError::Query("negative worker lease_secs".into()))
+                })
+                .transpose()?,
+            carries_credentials: self.carries_credentials,
+            claimed_runtime_kind: self
+                .claimed_runtime_kind
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(StorageError::Query)?,
         })
     }
 }

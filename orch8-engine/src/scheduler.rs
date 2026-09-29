@@ -2009,6 +2009,42 @@ async fn process_instance(
     } = *ctx;
     let instance_id = instance.id;
 
+    // Continuity fencing: never advance an instance whose portable execution
+    // is being exported, or has been handed to another runtime. A superseded
+    // source parks for good; a transferring one re-checks shortly (the
+    // export may still be revoked or fail).
+    match crate::ownership::local_ownership(storage.as_ref(), &instance.tenant_id, instance_id)
+        .await?
+    {
+        crate::ownership::LocalOwnership::Owned => {}
+        crate::ownership::LocalOwnership::Transferring => {
+            info!(%instance_id, "continuity execution is transferring; deferring instance");
+            crate::lifecycle::transition_instance(
+                storage.as_ref(),
+                instance_id,
+                Some(&instance.tenant_id),
+                InstanceState::Running,
+                InstanceState::Scheduled,
+                Some(chrono::Utc::now() + chrono::Duration::seconds(30)),
+            )
+            .await?;
+            return Ok(());
+        }
+        crate::ownership::LocalOwnership::Superseded => {
+            warn!(%instance_id, "continuity execution is owned elsewhere; parking local instance");
+            crate::lifecycle::transition_instance(
+                storage.as_ref(),
+                instance_id,
+                Some(&instance.tenant_id),
+                InstanceState::Running,
+                InstanceState::Waiting,
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
     // Fetch sequence definition early — needed for cancellation scopes and evaluation.
     let sequence = sequence_cache
         .get_by_id(storage.as_ref(), instance.sequence_id)

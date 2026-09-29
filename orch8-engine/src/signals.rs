@@ -552,6 +552,7 @@ mod tests {
     fn mk_instance_with_state(state: InstanceState) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
@@ -612,6 +613,11 @@ mod tests {
             error_message: None,
             error_retryable: None,
             created_at: Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         };
         storage.create_worker_task(&task).await.unwrap();
 
@@ -1152,6 +1158,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable,
@@ -1170,6 +1178,8 @@ mod tests {
     fn mk_sequence(blocks: Vec<orch8_types::sequence::BlockDefinition>) -> SequenceDefinition {
         use orch8_types::ids::{Namespace, SequenceId, TenantId};
         SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -1185,6 +1195,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: Utc::now(),
         }
     }

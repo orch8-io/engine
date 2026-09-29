@@ -8,9 +8,9 @@ This document describes the `0.7.1` SDK family. Engine and SDK releases use
 unified versioning: Swift, Android, Flutter, and React Native packages at
 `0.7.1` embed or resolve Orch8 Engine `0.7.1`.
 
-> **Building with Expo or React Native?** Start with
-> [Expo (recommended)](#expo-recommended). `@orch8.io/expo` bundles the native
-> engine for iOS and Android, a REST client, and React hooks in one package.
+> **Building with Expo or React Native?** Start with [Expo](#expo).
+> `@orch8.io/expo` wires the native engine for iOS and Android, a REST client,
+> and React hooks into one package.
 > **Sharing workflow code across Android and iOS in Kotlin?** See
 > [Kotlin Multiplatform](#kotlin-multiplatform).
 
@@ -35,20 +35,158 @@ unified versioning: Swift, Android, Flutter, and React Native packages at
 
 The SDK embeds the full orch8 engine compiled as a native library. Sequences are synced from your server, verified with Ed25519 signatures, stored in a local SQLite database, and executed entirely on-device.
 
-## Installation
+## 10-minute install
 
-### Expo (recommended)
+Every channel resolves the same native engine, pinned to the same version
+(`0.7.1` below). Pick your platform, add one dependency, build once, and make
+the first call. Each section ends with a check that proves the native engine
+was resolved rather than left for a runtime crash.
 
-[`@orch8.io/expo`](https://github.com/orch8-io/sdk-expo) is an Expo module.
-Expo autolinking finds it through its `expo-module.config.json`, so no config
-plugin or `app.json` change is needed. It contains native code, so it runs in
-a [development build](https://docs.expo.dev/develop/development-builds/introduction/)
+| Platform | Package | Registry |
+|---|---|---|
+| iOS, Swift Package Manager | `Orch8Mobile` | [`orch8-io/orch8-mobile-swift`](https://github.com/orch8-io/orch8-mobile-swift) |
+| iOS, CocoaPods | `Orch8Mobile` | CocoaPods trunk |
+| Android, Gradle | `io.orch8:orch8-mobile` | `https://raw.githubusercontent.com/orch8-io/maven/main` |
+| React Native | `@orch8.io/react-native-orch8` | npm (+ the two native registries above) |
+| Expo | `@orch8.io/expo` | npm (+ the two native registries above) |
+| Kotlin Multiplatform | `io.orch8:orch8-kmp` | `https://raw.githubusercontent.com/orch8-io/maven/main` |
+
+Requirements everywhere: iOS 16.0+ with Xcode 16+, Android API 24+ with JDK 17.
+
+### iOS: Swift Package Manager
+
+1. Xcode → **File → Add Package Dependencies…** →
+   `https://github.com/orch8-io/orch8-mobile-swift`, rule **Exact Version**
+   `0.7.1`. Or in `Package.swift`:
+
+   ```swift
+   dependencies: [
+       .package(url: "https://github.com/orch8-io/orch8-mobile-swift", exact: "0.7.1"),
+   ],
+   targets: [
+       .target(name: "App", dependencies: [.product(name: "Orch8Mobile", package: "orch8-mobile-swift")]),
+   ]
+   ```
+
+2. Set the app's deployment target to iOS 16.0 or later.
+3. Check: `import Orch8Mobile` compiles and `print(orch8MobileVersion)` prints
+   `0.7.1`. SwiftPM verifies the XCFramework checksum pinned in
+   `Package.swift`, so a tampered or mismatched binary fails to resolve.
+
+During engine development you can point at the checkout instead:
+`.package(path: "../packages/swift")` (requires a locally built
+XCFramework, see `scripts/build-xcframework.sh`).
+
+### iOS: CocoaPods
+
+```ruby
+# Podfile
+platform :ios, '16.0'
+
+target 'App' do
+  pod 'Orch8Mobile', '0.7.1'
+end
+```
+
+Run `pod install`, then open the `.xcworkspace`. Check: `Podfile.lock`
+contains `Orch8Mobile (0.7.1)` and `import Orch8Mobile` compiles.
+
+### Android: Gradle
+
+Add Orch8's Maven repository once, where your build declares repositories
+(usually `settings.gradle.kts`):
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven("https://raw.githubusercontent.com/orch8-io/maven/main")
+    }
+}
+```
+
+```kotlin
+// app/build.gradle.kts
+dependencies {
+    implementation("io.orch8:orch8-mobile:0.7.1")
+}
+```
+
+The AAR carries `liborch8_mobile.so` for `arm64-v8a`, `armeabi-v7a` and
+`x86_64`, and its POM brings JNA and kotlinx-coroutines. Check:
+`./gradlew :app:dependencies --configuration releaseRuntimeClasspath | grep orch8-mobile`
+shows `io.orch8:orch8-mobile:0.7.1`, and the built APK contains
+`lib/arm64-v8a/liborch8_mobile.so`.
+
+Kotlin: starting with the first engine release after `0.7.1`, the AAR is
+compiled at Kotlin language/API level 1.9 (class metadata 1.9.0) and its POM
+pins `kotlin-stdlib` 1.9.24 and `kotlinx-coroutines` 1.8.1, so apps on Kotlin
+1.9 (Expo SDK 52, React Native 0.76) and on Kotlin 2.x both consume it
+unchanged. The `0.7.1` AAR itself was compiled with Kotlin 2.1: a Kotlin 1.9
+module that calls it must add
+`freeCompilerArgs += "-Xskip-metadata-version-check"` to its Kotlin options
+(what `@orch8.io/expo` and `@orch8.io/react-native-orch8` do).
+
+For engine development, `implementation(project(":orch8-mobile"))` against
+`packages/android` works after `scripts/build-android-aar.sh`.
+
+### React Native
+
+```bash
+npm install @orch8.io/react-native-orch8@0.7.1
+cd ios && pod install     # resolves the Orch8Mobile pod (iOS 16.0+)
+```
+
+On Android, Gradle resolves the app's dependency graph with the **app's**
+repositories, so a repository declared only inside the library is not enough.
+Starting with the release after `0.7.1`, the package adds Orch8's Maven
+repository to every project of the build itself; with `0.7.1`, or when your
+settings use `RepositoriesMode.FAIL_ON_PROJECT_REPOS` (set
+`orch8.addMavenRepository=false` in `android/gradle.properties`), declare it in
+the app's root `android/build.gradle`:
+
+```groovy
+allprojects {
+    repositories {
+        maven { url "https://raw.githubusercontent.com/orch8-io/maven/main" }
+    }
+}
+```
+
+Check: `Podfile.lock` contains `Orch8Mobile (0.7.1)`, and
+`./gradlew :app:assembleDebug` succeeds.
+
+### Expo
+
+[`@orch8.io/expo`](https://github.com/orch8-io/sdk-expo) is an Expo module
+with a config plugin. It contains native code, so it runs in a
+[development build](https://docs.expo.dev/develop/development-builds/introduction/)
 or a prebuilt app, not in Expo Go.
 
 ```bash
 npx expo install @orch8.io/expo
+```
+
+```jsonc
+// app.json
+{ "expo": { "plugins": ["@orch8.io/expo"] } }
+```
+
+```bash
 npx expo prebuild        # or: eas build --profile development
 ```
+
+The package does not vendor the engine. Its podspec depends on the
+`Orch8Mobile` pod and its Gradle build on `io.orch8:orch8-mobile`, both
+pinned to `orch8NativeVersion` in its `package.json`. On prebuild the config
+plugin adds Orch8's Maven repository to `android.extraMavenRepos` in
+`android/gradle.properties` and raises the iOS deployment target to 16.0 when
+it is lower. Check: `ios/Podfile.lock` contains `Orch8Mobile (0.7.1)` and
+`Orch8Expo`, and `android/gradle.properties` contains the Maven URL.
+
+> `@orch8.io/expo` 0.7.0 shipped without its podspec and with an unresolvable
+> Android dependency. Use 0.7.1 or later.
 
 Quick start: load a sequence, start it offline, and answer its
 `wait_for_input` step from React:
@@ -87,9 +225,10 @@ rejected, and the step stays waiting.
 Expo-specific behavior (as of `@orch8.io/expo` 0.7):
 
 - `engine.registerHandler(name)` registers a **fire-and-forget** handler. The
-  native side emits a `handlerInvoked` event and returns `{}` right away. For
-  anything that needs user input or async JS work, give the step a
-  `wait_for_input` gate and resume it with `completeStep()`.
+  native side emits a `handlerInvoked` event (`stepName`, `handlerName`,
+  `params`) and returns `{}` right away. For anything that needs user input
+  or async JS work, give the step a `wait_for_input` gate and resume it with
+  `completeStep()`.
 - Set `syncUrl`, `deviceId`, and `syncApiKey` in `nativeConfig` to report
   status and approval requests to your server. For OS background windows,
   call `engine.runUntilIdle(maxTicks, timeBudgetMs)` from an Expo
@@ -99,49 +238,6 @@ Expo-specific behavior (as of `@orch8.io/expo` 0.7):
   [`field-inspection`](https://github.com/orch8-io/mobile-examples/tree/main/field-inspection)
   reference app in `mobile-examples`.
 
-### iOS (Swift Package Manager)
-
-Add the package dependency in Xcode or `Package.swift`:
-
-```swift
-dependencies: [
-    .package(
-        url: "https://github.com/orch8-io/orch8-mobile-swift",
-        exact: "0.7.1"
-    ),
-]
-```
-
-Or use the local path during development:
-
-```swift
-.package(path: "../packages/swift")
-```
-
-**Requirements:** iOS 16+, Xcode 16+.
-
-### Android (Gradle)
-
-Add Orch8's public Maven repository and the AAR dependency:
-
-```kotlin
-repositories {
-    maven("https://raw.githubusercontent.com/orch8-io/maven/main")
-}
-
-dependencies {
-    implementation("io.orch8:orch8-mobile:0.7.1")
-}
-```
-
-Or use a local project reference during development:
-
-```kotlin
-implementation(project(":orch8-mobile"))
-```
-
-**Requirements:** Android API 24+ (Android 7.0), JDK 17.
-
 ### Flutter
 
 ```yaml
@@ -149,36 +245,58 @@ dependencies:
   orch8_flutter: ^0.7.1
 ```
 
-### React Native
-
-```bash
-npm install react-native-orch8@0.7.1
-```
-
-Run `pod install` after installation on iOS. Both wrappers resolve the native
-SDK at exactly `0.7.1`.
-
 ### Kotlin Multiplatform
 
-[`packages/kmp`](../packages/kmp) (`io.orch8:orch8-kmp`, preview, not
-published yet) gives shared KMP code one coroutine/Flow API over the same
-native runtime:
+[`packages/kmp`](../packages/kmp) (`io.orch8:orch8-kmp`, preview) gives
+shared KMP code one coroutine/Flow API over the same native runtime. It is
+published to Orch8's Maven repository by the release workflow starting with
+the first engine release after `0.7.1`; for `0.7.1` itself use
+`includeBuild("path/to/engine/packages/kmp")`.
 
-- **Android:** `androidMain` calls the UniFFI Kotlin bindings from the
-  `io.orch8:orch8-mobile` AAR above.
-- **iOS:** `iosMain` reaches the `Orch8Mobile` Swift package through a small
-  Swift adapter that you compile into the app
-  (`packages/kmp/ios-bridge/Orch8KmpBridge.swift`).
+1. Gradle (shared module):
 
-```kotlin
-commonMain.dependencies { implementation("io.orch8:orch8-kmp:0.7.1") }
-```
+   ```kotlin
+   // settings.gradle.kts
+   dependencyResolutionManagement {
+       repositories {
+           google()
+           mavenCentral()
+           maven("https://raw.githubusercontent.com/orch8-io/maven/main")
+       }
+   }
 
-```swift
-// iOS app launch, before shared code opens the engine
-import Orch8Kmp
-Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
-```
+   // shared/build.gradle.kts
+   kotlin {
+       sourceSets {
+           commonMain.dependencies { implementation("io.orch8:orch8-kmp:<version>") }
+       }
+   }
+   ```
+
+   Android needs nothing else: `androidMain` depends on
+   `io.orch8:orch8-mobile` at the same version.
+
+2. iOS: add the `Orch8Mobile` Swift package or pod (same version, see above),
+   then install the Swift bridge into the app target:
+
+   ```bash
+   curl -fsSLO https://raw.githubusercontent.com/orch8-io/engine/v<version>/packages/kmp/ios-bridge/install-bridge.sh
+   bash install-bridge.sh iosApp/iosApp Shared <version>   # Shared = your shared framework's baseName
+   ```
+
+   The script downloads `Orch8KmpBridge-v<version>.swift` from the engine
+   release, verifies its SHA-256, and rewrites `import Orch8Kmp` to your
+   framework's module name. The bridge is a source file, not a package,
+   because it implements Kotlin protocols exported by *your* shared
+   framework; a prebuilt package would carry a second Kotlin runtime whose
+   types your shared code would not recognise.
+
+3. Install the bridge once at launch, before shared code opens the engine:
+
+   ```swift
+   import Shared   // or Orch8Kmp
+   Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
+   ```
 
 ```kotlin
 // shared code
@@ -194,11 +312,17 @@ engine.observeInstance(id).collect { showState(it.state) } // completes at a ter
 
 Every call is `suspend` and runs on `Dispatchers.IO`. Listener callbacks
 arrive as `events: SharedFlow<EngineEvent>`. Errors from both platforms
-arrive as one `Orch8Exception(kind)`. `exportContinuityCapsule`
-(it needs a Secure Enclave or KeyStore signer) and the Swift-only distributed-worker and
-trusted-handoff helpers are not wrapped. Call them through the platform SDKs.
+arrive as one `Orch8Exception(kind)`. The runtime node / worker calls
+(`registerNode`, `startWorker`, `runWorkerWindow`, `onPushWake`, …) are
+wrapped as `suspend` functions for the release after `0.7.1`.
+`exportContinuityCapsule` (it needs a Secure Enclave or KeyStore signer) and
+the Swift-only `DistributedWorkerClient` and trusted-handoff helpers are not
+wrapped. Call them through the platform SDKs.
 See [`packages/kmp/README.md`](../packages/kmp/README.md) for setup, the
 iOS bridge design, and the full API map.
+
+Maintainers: how each channel is published is described in
+[Mobile releasing](MOBILE_RELEASING.md).
 
 ## Quick Start
 
@@ -385,7 +509,16 @@ engine.setListener(listener: MyListener())
 | `flushTelemetry(endpointUrl)` | Flush buffered telemetry events |
 | `setDeviceContext(ctx)` | Set device info for telemetry |
 | `reportPowerState(state)` | Report device power state to throttle background work |
-| `onPushReceived()` | Trigger an immediate tick after a push notification |
+| `onPushReceived()` | Trigger an immediate sync and worker poll after a push notification |
+| `onPushWake(envelopeJson)` | Handle an id-only wake envelope (`{task_id?, runtime_id?, reason?}`); ignored when addressed to another runtime |
+| `enableBuiltin(name)` | Enable an opt-in builtin handler (`http_request`); see [Built-in handlers](#built-in-handlers) |
+| `nodeRuntimeId()` | Stable runtime UUID of this installation (lease `worker_id`) |
+| `registerNode(capabilities)` | Join the runtime mesh (device + capability registration, auto re-advertise) |
+| `updateNodeStatus(connectivity, batteryPercent)` | Push fresh liveness facts |
+| `unregisterNode()` | Stop the worker, advertise `draining`, stop re-advertising |
+| `startWorker(options)` / `stopWorker()` | Run / stop the remote worker loop |
+| `runWorkerWindow(timeBudgetMs)` | Claim and run remote tasks inside a bounded background window |
+| `workerStats()` | Worker counters (claimed, completed, failed, released, lost, in flight) |
 | `shutdown()` | Shut down the engine |
 
 ### MobileEngineConfig
@@ -590,6 +723,122 @@ credential for the transport headers and HTTPS outside loopback development.
 This feature promises durable recovery from interruption, not unrestricted
 background execution. iOS still decides when the process may run.
 
+## Built-in handlers
+
+The embedded engine registers a safe subset of the server's builtins so
+server-authored sequences can use them without host code:
+
+| Set | Handlers | How |
+|-----|----------|-----|
+| Default | `noop`, `log`, `sleep`, `fail`, `transform`, `assert`, `set_state`, `get_state`, `delete_state`, `merge_state` | Always registered (pure data / control flow + instance-local state) |
+| Opt-in | `http_request` | `engine.enableBuiltin(name: "http_request")` before `resume()`; keeps the SSRF guard |
+| Server-only | `email`, `llm_call`, `tool_call`, `mcp_call`, `agent`, `embed`, `memory_*`, `human_review`, `self_modify`, `emit_event`, `send_signal`, `query_instance`, `blob_*`, `wait_for_event`, `jev`, `notify` | Not available on-device; place those steps on a server runtime |
+
+A handler registered with `registerHandler` under a builtin's name replaces
+the builtin. Only app-native handlers are advertised to the control plane by
+default; list a builtin in `NodeCapabilities.handlers` to serve it remotely.
+
+## The phone as a runtime node
+
+A device can join the distributed-execution mesh as a runtime of kind
+`mobile` and execute server-placed steps with its app-native handlers
+(camera, NFC, Secure Enclave signing, on-device models, …). The worker loop
+runs in Rust, so Swift, Kotlin, React Native and Expo all get the same
+behaviour.
+
+```swift
+try engine.registerHandler(name: "scan_document", handler: ScanHandler())
+let node = Orch8RuntimeNode(engine: engine)          // packages/swift
+try await node.join(capabilities: NodeCapabilities(
+    hardware: ["camera"], pushToken: apnsToken))
+try node.startWorker()
+```
+
+```kotlin
+engine.registerHandler("scan_document", ScanHandler())
+engine.registerNode(NodeCapabilities(hardware = listOf("camera"), pushToken = fcmToken))
+engine.startWorker(WorkerOptions())
+```
+
+**Registration.** `registerNode` uses `deviceId`, `syncApiKey` and the API base
+derived from `syncUrl` (`…/api/v1/mobile/sync` → `…/api/v1`; override with
+`NodeCapabilities.apiBaseUrl`). It calls `POST /mobile/devices/register` and
+`POST /mobile/devices/{deviceId}/runtime`, then re-advertises every ~4 minutes
+(capability TTL is 5 minutes) — that refresh is the node's liveness signal.
+The runtime id is a UUID persisted in the engine database; it is the lease
+`worker_id` and the target of `$runtime.runtime_id` placement (the per-device
+mailbox). `handlers` defaults to every handler registered with
+`registerHandler`.
+
+**Worker loop.** `startWorker` polls `POST /workers/tasks/poll` as kind
+`mobile` (one poll per advertised handler, round-robin), runs each claimed task
+through the handler registry, heartbeats every `lease_secs / 3` (per-task lease
+when the server sends one, default 120 s for mobile), and settles with
+`complete`, `fail` (`retryable` from `HandlerError`), or `release`. A lost lease
+(404/409 on heartbeat) abandons the task without reporting.
+
+**Handler input.** App-native handlers receive the task params plus a reserved
+`__orch8` member (only when params is a JSON object):
+
+```json
+{ "document": "passport", "__orch8": {
+    "effect_id": "…", "task_id": "…", "instance_id": "…", "block_id": "…",
+    "attempt": 1, "runtime_id": "…", "continuity_epoch": 3, "resume_checkpoint": null } }
+```
+
+`effect_id` is the server's deterministic idempotency key for the step's
+effect; send it to downstream APIs (for example as `Idempotency-Key`) so a
+retry after a crash cannot duplicate the side effect. It is `null` against
+servers that predate the distributed-execution contract.
+
+**App lifecycle and power.** `pause()` stops claiming; a task claimed but not
+yet started is released (`started: false`), tasks already executing finish
+while the process lives. `resume()` claims again. `reportPowerState` scales the
+idle poll interval (2× low battery, 4× critical) and `CriticalBattery` stops
+claiming entirely. For BGTask / WorkManager / push-wake handlers call
+`runWorkerWindow(timeBudgetMs:)`: it claims even while paused and returns when
+idle or out of budget.
+
+**Push.** Wake pushes are id-only hints (`{task_id?, runtime_id?, reason?}`)
+and never carry params. Forward them with `onPushWake(envelopeJson:)` (Swift:
+`node.handlePush(userInfo:)`); the worker polls immediately and the task
+arrives through a leased claim.
+
+**Crash safety.** Every claim is journaled in the engine database before the
+handler runs, marked `started`, then updated with the outcome before it is
+reported. On the next launch (engine construction when `syncApiKey` is set,
+`registerNode`, and `startWorker`) the journal is drained:
+
+| Journaled state | Action |
+|-----------------|--------|
+| claimed, not started | `release {started: false}` — back to pending |
+| started, no outcome | `release {started: true}` — server marks the effect unknown |
+| outcome recorded | re-deliver `complete` / `fail` |
+
+Servers without `/release` (404/405) get a retryable `fail` instead.
+
+**Device-side timeouts.** A remote task's `timeout_ms` (and the engine's
+`handlerTimeoutMs`) is enforced on the device too, but a timeout cannot stop
+an app-native handler: the native `execute` call keeps running on its thread
+and may still perform its side effect. Under the engine's ambiguous-effect
+policy that outcome is **unknown**, not failed, so the worker answers
+`release {started: true}` rather than `fail`:
+
+- the server marks the step's effect receipt `unknown` and applies the step's
+  retry policy — a retry is a new attempt with a **new** `effect_id`, the
+  exact treatment of a lease that expired after the step started (a
+  pre-contract server without `/release` gets a retryable `fail`, which the
+  server resolves the same way);
+- until the timed-out call actually returns, the worker **claims no new task
+  for that handler**, so a retry never runs on the same device concurrently
+  with the attempt it replaces. The quarantine ends when the call returns, or
+  after 15 minutes for a call that never does (logged);
+- the late result of the timed-out call is discarded; it is never reported.
+
+Handlers that can take longer than the step timeout should either raise the
+step's `timeout` or pass `__orch8.effect_id` downstream as an idempotency key,
+so a retry that reaches the same backend is deduplicated there.
+
 ## Capability-routed distributed work
 
 External steps may reserve the `$runtime` param for durable placement
@@ -614,8 +863,11 @@ atomically compatible worker can claim the task:
 }
 ```
 
-`DistributedWorkerClient` publishes a short-lived capability advertisement on
-every poll. Keep its runtime UUID stable for the installation, but refresh the
+`DistributedWorkerClient` (Swift) is the low-level HTTP client for the same
+lease protocol — `poll`, `heartbeat`, `upload`, `complete`, `fail`, `release`.
+Prefer the Rust worker loop above; use this client when a task needs an
+artifact upload or custom settlement. It publishes a short-lived capability
+advertisement on every poll. Keep its runtime UUID stable for the installation, but refresh the
 observation and expiry before polling. Advertisements live for at most five
 minutes; draining and expired runtimes receive no new work.
 
@@ -748,6 +1000,10 @@ openssl pkey -in private.pem -pubout -outform DER | base64
 
 ### "handler timed out"
 The default handler timeout is 30 seconds. For handlers that need user interaction, the step transitions to `Waiting` state. Use `completeStep()` when the user responds.
+For remote (server-placed) tasks a device-side timeout releases the task as
+started instead of failing it, and the handler is not offered new work until
+the timed-out native call returns — see
+[device-side timeouts](#the-phone-as-a-runtime-node).
 
 ### "max concurrent instances reached"
 Reduce active instances by calling `cancelInstance()` on stale ones, or increase `maxConcurrentInstances`.
@@ -772,7 +1028,17 @@ construction — per-version schema deltas are applied based on the database's r
 schema version. No action needed.
 
 ### Crash recovery
-The engine sets a `dirty` flag when `pause()` times out. On the next `resume()`, it automatically recovers stale instances that were mid-execution when the app was killed.
+When iOS/Android kills the app mid-step, the next `MobileEngine` construction on
+that database reschedules every instance left `Running` (no `pause()` needed;
+the `dirty` flag from a timed-out `pause()` still triggers recovery on
+`resume()`). Replay-safe steps (builtins such as `sleep`, `transform`, `log`)
+simply run again and the instance completes once. App-native handlers are
+treated as side-effecting: the engine's at-most-once effect guard does **not**
+re-run an effect whose outcome is unknown — the instance fails and
+`onInstanceFailed` fires once, so the app can reconcile. Remote tasks held by
+the killed process are released as described in
+[crash safety](#the-phone-as-a-runtime-node). This relies on one engine per
+database file.
 
 ### SQLite errors
 The SDK uses WAL mode for concurrent reads. Ensure only one `MobileEngine` instance exists per database file.
@@ -797,3 +1063,13 @@ export ANDROID_NDK_HOME=/path/to/ndk
 ```
 
 Output: `packages/android/orch8-mobile/build/outputs/aar/orch8-mobile-release.aar`
+
+### What the mobile library links
+
+`orch8-mobile` builds `orch8-engine`, `orch8-storage` and `orch8-push` with
+`default-features = false`, so the device library contains only the SQLite
+backend: no Postgres driver (`orch8-storage/postgres`), no object-store
+artifact backend (`orch8-storage/artifacts`), no SMTP/`email` builtin
+(`orch8-engine/email`), no APNs/FCM senders (`orch8-push/providers`), and only
+the Tokio features it uses. Server crates enable these features explicitly, so
+their builds are unchanged.

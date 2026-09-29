@@ -58,6 +58,9 @@ pub struct InstanceDiagnosticContext {
     pub pending_approval_blocks: Option<Vec<String>>,
     /// Event waits registered by `wait_for_event` blocks of this instance.
     pub event_waits: Option<Vec<orch8_types::event_correlation::EventWait>>,
+    /// Live runtime capability advertisements of the instance's tenant
+    /// (placement satisfiability).
+    pub runtime_capabilities: Option<Vec<orch8_types::continuity::RuntimeCapabilities>>,
 }
 
 impl InstanceDiagnosticContext {
@@ -75,6 +78,7 @@ impl InstanceDiagnosticContext {
             children: None,
             pending_approval_blocks: None,
             event_waits: None,
+            runtime_capabilities: None,
         }
     }
 }
@@ -412,6 +416,10 @@ fn rule_worker_tasks(
     for task in tasks {
         match task.state {
             WorkerTaskState::Pending => {
+                if let Some(diagnosis) = placement_unsatisfied(ctx, task, now) {
+                    out.push(diagnosis);
+                    continue;
+                }
                 let Some(registrations) = &ctx.worker_registrations else {
                     out.push(Diagnosis {
                         category: DiagnosisCategory::ProbableCause,
@@ -570,6 +578,61 @@ fn rule_worker_tasks(
             _ => {}
         }
     }
+}
+
+/// A pending task with hard placement (region, labels, residency) that no
+/// live runtime satisfies waits by design: report the placement, not a
+/// missing worker.
+fn placement_unsatisfied(
+    ctx: &InstanceDiagnosticContext,
+    task: &WorkerTask,
+    now: DateTime<Utc>,
+) -> Option<Diagnosis> {
+    if !task.requirements.has_placement_facts() {
+        return None;
+    }
+    let runtimes = ctx.runtime_capabilities.as_ref()?;
+    let mut hard = task.requirements.clone();
+    hard.prefer = None;
+    if runtimes.iter().any(|runtime| {
+        orch8_types::worker::claim_allowed(&hard, task.carries_credentials, runtime, now)
+    }) {
+        return None;
+    }
+    let mut facts = Vec::new();
+    if !hard.regions.is_empty() {
+        facts.push(format!("regions={}", hard.regions.join("|")));
+    }
+    if let Some(zone) = &hard.residency {
+        facts.push(format!("residency={zone}"));
+    }
+    facts.extend(
+        hard.labels
+            .iter()
+            .map(|(key, value)| format!("{key}={value}")),
+    );
+    Some(Diagnosis {
+        category: DiagnosisCategory::DirectEvidence,
+        health: DiagnosisHealth::Degraded,
+        finding: Finding::new(
+            "PLACEMENT_UNSATISFIED",
+            FindingSeverity::Warning,
+            format!(
+                "block '{}' waits (placement_unsatisfied): no live runtime for handler '{}' \
+                 matches its placement ({})",
+                task.block_id.as_str(),
+                task.handler_name,
+                facts.join(", ")
+            ),
+            Confidence::High,
+            now,
+        )
+        .with_evidence(Evidence::new("live_runtimes", runtimes.len().to_string()).observed_at(now))
+        .with_remediation(Remediation::new(
+            "start an executor advertising the required region/labels (residency=<zone>), \
+             or change the placement policy",
+        )),
+    })
 }
 
 fn no_compatible_worker(task: &WorkerTask, now: DateTime<Utc>) -> Diagnosis {
@@ -908,6 +971,7 @@ mod tests {
 
     fn instance(state: InstanceState) -> TaskInstance {
         TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
@@ -941,6 +1005,7 @@ mod tests {
             children: Some(vec![]),
             pending_approval_blocks: Some(vec![]),
             event_waits: Some(vec![]),
+            runtime_capabilities: None,
         }
     }
 
@@ -968,6 +1033,11 @@ mod tests {
             error_message: None,
             error_retryable: None,
             created_at: t0() - Duration::seconds(age_secs),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         }
     }
 

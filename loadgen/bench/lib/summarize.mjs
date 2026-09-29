@@ -140,6 +140,7 @@ const result = {
   crash_recovery: crash,
   raw_samples_file: relative(dirname(outPath), need("samples")) || basename(need("samples")),
   activity_log_file: args["activity-log"] ? relative(dirname(outPath), args["activity-log"]) : null,
+  ...(args.topology ? { topology: JSON.parse(readFileSync(args.topology, "utf8")) } : {}),
   ...(args.notes ? { notes: args.notes } : {}),
 };
 

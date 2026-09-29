@@ -8,6 +8,7 @@ use orch8_engine::handlers::{HandlerRegistry, StepContext};
 use orch8_types::error::StepError;
 
 use crate::error::HandlerError;
+use crate::stragglers::{Stragglers, device_timeout_error};
 
 /// Callback interface for host-registered step handlers.
 /// Implementations live in Swift/Kotlin and are called by the engine during tick execution.
@@ -28,30 +29,46 @@ pub trait EngineListener: Send + Sync {
 /// Register a foreign `StepHandler` into the engine's `HandlerRegistry`.
 /// Bridges the `UniFFI` callback interface to the engine's async handler signature.
 /// If the handler does not respond within `timeout`, the step returns a retryable
-/// error (which causes the engine to transition the instance to Waiting).
+/// error (which causes the engine to transition the instance to Waiting) marked
+/// as a device timeout. The native call cannot be interrupted, so it is tracked
+/// in `stragglers` until it returns (see [`crate::stragglers`]).
 pub(crate) fn register_foreign_handler(
     registry: &mut HandlerRegistry,
     name: &str,
     handler: Arc<dyn StepHandler>,
     timeout: Duration,
+    stragglers: Arc<Stragglers>,
 ) {
     let handler_name = name.to_string();
     registry.register(name, move |ctx: StepContext| {
         let handler = Arc::clone(&handler);
         let name = handler_name.clone();
+        let stragglers = Arc::clone(&stragglers);
         async move {
             let input = serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string());
 
             let name_for_call = name.clone();
+            let mut call =
+                tokio::task::spawn_blocking(move || handler.execute(name_for_call, input));
 
-            let result = tokio::time::timeout(timeout, async move {
-                tokio::task::spawn_blocking(move || handler.execute(name_for_call, input))
-                    .await
-                    .map_err(|e| HandlerError::Permanent {
-                        message: format!("handler task panicked: {e}"),
-                    })?
-            })
-            .await;
+            let result = match tokio::time::timeout(timeout, &mut call).await {
+                Ok(joined) => joined.map_err(|e| HandlerError::Permanent {
+                    message: format!("handler task panicked: {e}"),
+                }),
+                Err(_elapsed) => {
+                    warn!(handler = %name, "handler timed out; the native call is still running");
+                    stragglers.begin(&name);
+                    let straggler_name = name.clone();
+                    tokio::spawn(async move {
+                        let _ = call.await;
+                        stragglers.end(&straggler_name);
+                    });
+                    return Err(device_timeout_error(format!(
+                        "handler '{name}' timed out after {}ms",
+                        timeout.as_millis()
+                    )));
+                }
+            };
 
             match result {
                 Ok(Ok(output_json)) => {
@@ -61,24 +78,16 @@ pub(crate) fn register_foreign_handler(
                     });
                     Ok(value)
                 }
-                Ok(Err(HandlerError::Retryable { message })) => Err(StepError::Retryable {
+                Ok(Err(HandlerError::Retryable { message }))
+                | Err(HandlerError::Retryable { message }) => Err(StepError::Retryable {
                     message,
                     details: None,
                 }),
-                Ok(Err(HandlerError::Permanent { message })) => Err(StepError::Permanent {
+                Ok(Err(HandlerError::Permanent { message }))
+                | Err(HandlerError::Permanent { message }) => Err(StepError::Permanent {
                     message,
                     details: None,
                 }),
-                Err(_elapsed) => {
-                    warn!(handler = %name, "handler timed out, step will transition to Waiting");
-                    Err(StepError::Retryable {
-                        message: format!(
-                            "handler '{name}' timed out after {}ms",
-                            timeout.as_millis()
-                        ),
-                        details: None,
-                    })
-                }
             }
         }
     });
@@ -146,7 +155,13 @@ mod tests {
 
     async fn invoke(handler: Arc<dyn StepHandler>, timeout: Duration) -> Result<Value, StepError> {
         let mut registry = HandlerRegistry::new();
-        register_foreign_handler(&mut registry, "foreign", handler, timeout);
+        register_foreign_handler(
+            &mut registry,
+            "foreign",
+            handler,
+            timeout,
+            Arc::new(Stragglers::default()),
+        );
         registry.get("foreign").unwrap()(context(serde_json::json!({ "n": 7 })).await).await
     }
 
@@ -238,10 +253,36 @@ mod tests {
     async fn timed_out_foreign_callback_becomes_a_retryable_step_error() {
         let result = invoke(Arc::new(SlowHandler), Duration::from_millis(5)).await;
 
+        let error = result.unwrap_err();
+        assert!(crate::stragglers::is_device_timeout(&error));
         assert!(matches!(
-            result,
-            Err(StepError::Retryable { message, details: None })
+            &error,
+            StepError::Retryable { message, .. }
                 if message.contains("handler 'foreign' timed out after 5ms")
         ));
+    }
+
+    #[tokio::test]
+    async fn timed_out_foreign_callback_is_tracked_until_it_returns() {
+        let stragglers = Arc::new(Stragglers::default());
+        let mut registry = HandlerRegistry::new();
+        register_foreign_handler(
+            &mut registry,
+            "foreign",
+            Arc::new(SlowHandler),
+            Duration::from_millis(5),
+            Arc::clone(&stragglers),
+        );
+        let result = registry.get("foreign").unwrap()(context(serde_json::json!({})).await).await;
+        assert!(result.is_err());
+        assert!(
+            stragglers.blocks("foreign"),
+            "the native call is still running"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !stragglers.blocks("foreign"),
+            "released once the call returned"
+        );
     }
 }

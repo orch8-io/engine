@@ -7,6 +7,280 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Embedded: sub-tenants, embed tokens, rollouts, licensing
+
+See [docs/EMBEDDED.md](docs/EMBEDDED.md).
+
+- **Sub-tenants**: `X-Orch8-Sub-Tenant` (or `sub_tenant` in the body) scopes
+  instances and sequences to a vendor's end customer; instances carry a
+  nullable `sub_tenant` (children and forks inherit it) and `GET /instances`
+  filters with `?sub_tenant=`. Migration `097_sub_tenants` adds the column,
+  caps, an append-only execution ledger, embed themes and release targets
+  (SQLite reconciles the same shape, schema version 50, together with placement and federation).
+- **Pooled limits**: `GET|PUT /sub-tenants/{sub}/limits`
+  (`max_executions_per_month`, `max_concurrent`) are enforced atomically
+  inside the tenant's plan pool; violations are `429` with the new error code
+  `sub_tenant_quota_exceeded`.
+- **Metering**: `GET /usage/sub-tenants?from=&to=` reports per-sub-tenant
+  executions started/completed, steps and last activity, plus
+  `active_sub_tenants` (the Embedded billing number). Started executions come
+  from a ledger that survives instance pruning.
+- **Scoped embed tokens**: `POST /embed/tokens` mints `o8e1.` HMAC tokens
+  (≤ 1 h, one tenant + sub-tenant, scopes `runs:read`, `runs:start`,
+  `approvals:resolve`, `sequences:read`, `builder:edit`, optional sequence
+  allowlist). New embed routes: runs (list/detail/start), approvals
+  (list/resolve), sequences (list/read/builder write, gallery templates) and
+  theme. They return no context or metadata and only the step outputs a
+  sequence opts into via `embed.visible_outputs`. Missing scopes are `403
+  embed_scope_denied`. Routes are 404 until `[embed] token_secret` /
+  `ORCH8_EMBED_TOKEN_SECRET` is set; `[embed] allowed_origins` grants CORS on
+  the embed routes only.
+- **Theme**: `PUT /embed/theme` stores `css_vars`, `logo_url` and
+  `hide_badge`. Values are validated against CSS injection, and `hide_badge`
+  takes effect only with a `white_label` license.
+- **Staged rollouts per sub-tenant**: releases accept
+  `target: { sub_tenants, percentage }` (also `PUT /releases/{id}/target`).
+  Sub-tenant instances are routed by listed sub-tenant or by a stable
+  per-sub-tenant bucket; tenant-level instances stay on the baseline until
+  promotion.
+- **License keys**: `[license] key` / `ORCH8_LICENSE_KEY` (`o8l1.`, ed25519,
+  verified offline) and `GET /license`. Enforcement is soft only: more than 3
+  active sub-tenants without a `sub_tenants` license adds
+  `X-Orch8-License: unlicensed` (or `over_limit` above `max_sub_tenants`) and
+  a warning logged at most once an hour. Executions are never blocked. The
+  compiled-in verification key is a placeholder until the production key is
+  rotated in.
+
+### Hybrid executors, drills, receipts, migration
+
+See [docs/HYBRID.md](docs/HYBRID.md) and [docs/MIGRATING_TO_CLOUD.md](docs/MIGRATING_TO_CLOUD.md).
+
+- **Executor join tokens**: `orch8 executor join <token>` writes an
+  `executor` `orch8.toml` (managed-control fields, `[node] labels`, `region`;
+  mode 0600) from a cloud-issued `o8x1.` token, optionally `--run`;
+  `orch8-server` accepts the same token as `ORCH8_JOIN_TOKEN`. The managed
+  control session now advertises the configured region.
+- **Helm `mode: executor`** renders a hybrid executor that takes its join
+  token from a Secret; `cloudObservability.*` values wire run-metadata
+  export. New Compose example: `deploy/hybrid-executor/`.
+- **`orch8 drill kill-executor`**: SIGKILLs one of two executor processes
+  mid-flight, measures detection and time to recovery, reconciles ambiguous
+  receipts against a provider log, and fails unless no effect was recorded
+  twice, no redelivery was silent, and every instance completed.
+- **Signed effect-receipt export** (at-most-once dispatch evidence, not an
+  exactly-once claim): `GET /instances/{id}/receipts/export`,
+  `GET /receipts/export?from=&to=`, `GET /receipts/signing-key`, and
+  `orch8 receipts export|verify|signing-key`. Bundles are JSON Lines signed
+  with the engine's continuity Ed25519 key.
+- **`orch8 migrate --to <url> --source <sqlite>`** moves sequences and
+  in-flight instances (tree, outputs, receipts, pending signals) from an
+  embedded engine to a remote one via the new idempotent
+  `POST /migrations/import`, fencing the source with the continuity
+  ownership record. Busy instances are refused unless `--wait-for-idle`.
+  `orch8 migrate --database-url` is unchanged.
+- **`orch8 generate --pieces-from <catalog>`** restricts generated steps to a
+  vendor catalog of handlers / Activepieces actions and repairs or rejects
+  anything outside it.
+- **`[cloud_observability]`**: bounded, non-blocking export of instance
+  state transitions (metadata only) to `{endpoint}/api/ingest/v1/runs`, at
+  most 500 events per batch, exponential backoff, drop-oldest.
+
+### Importers: Step Functions, Temporal, Inngest, BullMQ
+
+See [docs/MIGRATION_GUIDES.md](docs/MIGRATION_GUIDES.md).
+
+- `orch8 import stepfunctions` translates ASL state machines structurally
+  (Task/Choice/Parallel/Map/Wait/Pass/Fail, Retry/Catch, polling loops,
+  JSONPath data flow).
+- `orch8 import temporal|inngest|bullmq` statically extracts a sequence
+  skeleton from TypeScript sources; the report's new `unmapped` section lists
+  every untranslated construct with `file:line`.
+
+### Durable functions in Node and Python
+
+- `@orch8/engine-native` and `orch8-engine-native` expose an in-process,
+  SQLite-backed durable engine (`Engine.open(path)`, handlers, deploy/start/run)
+  that survives process restarts. `orch8::EngineBuilder::stale_instance_threshold`
+  lets a single-owner embedder recover interrupted instances on startup.
+
+### WASM sandbox for end-user steps
+
+See [docs/WASM_USER_STEPS.md](docs/WASM_USER_STEPS.md).
+
+- **Wall-clock limit**: WASM plugin calls are interrupted after
+  `ORCH8_WASM_TIMEOUT_MS` (default 2000) by an epoch ticker; previously the
+  epoch deadline was never armed and only fuel bounded a call.
+- **Configurable limits**: `ORCH8_WASM_FUEL`, `ORCH8_WASM_MAX_MEMORY_BYTES`,
+  `ORCH8_WASM_MAX_MODULE_BYTES` and the new `ORCH8_WASM_MAX_OUTPUT_BYTES`
+  (default 4 MiB); zero or unparsable values fall back to the default.
+- **No host imports**: a module that declares any import (WASI or otherwise)
+  is refused with a clear error before instantiation.
+- **Limit errors are classified**: memory/table-cap denials report
+  `memory limit exceeded`; every guest trap is now a permanent step error
+  (previously non-fuel traps were retried).
+- `validate_module_bytes` checks an uploaded module (size, magic, imports,
+  ABI exports, initial memory) without running it.
+
+### Placement: residency, labels, affinity, lanes, budgets
+
+See [docs/PLACEMENT.md](docs/PLACEMENT.md). Everything compiles into the
+existing capability requirements (`$runtime`) and claim predicate; there is no
+second scheduler.
+
+- **Data residency**: step/sequence `placement.residency` (and tenant policy
+  `require.residency`) only lets runtimes advertising `residency=<zone>` claim.
+  Placed work is never handed to a non-matching or capability-less runtime;
+  when nothing matches, the task waits and the instance shows
+  `metadata.placement.status = "placement_unsatisfied"`, an audit event,
+  `orch8_placement_unsatisfied_total`, and diagnosis `PLACEMENT_UNSATISFIED`
+  (`ORCH8-D021`).
+- **Capability labels and placement policies**: runtimes advertise
+  `capabilities.labels`; steps and sequences take
+  `placement: {region, labels, residency, affinity, priority_lane}`, validated
+  at sequence create (conflicts with the sequence placement, `priority_lane`
+  on a step, and hard placement on built-in handlers are rejected). New
+  `GET|PUT /placement/policies` holds per-tenant policies
+  (`match {sequence, handler, tag}` → `require` hard facts, `prefer` soft
+  labels). Hard-placed steps always go to the worker queue.
+- **Sticky affinity**: `placement.affinity: "instance"` prefers the runtime
+  that completed the instance's previous worker step for `affinity_wait_ms`
+  (default 15 s), then falls back to any eligible runtime. Legacy polls
+  honour the window in SQL.
+- **Priority lanes**: `premium`/`standard`/`batch` map onto instance priority
+  (and so cooperative preemption). `POST /instances` accepts `priority_lane`;
+  otherwise the sequence's `placement.priority_lane`, then the plan's
+  `default_priority_lane` (entitlements) apply. `priority` in the create body
+  is now optional.
+- **Global rate budgets**: durable token buckets per `(tenant, key)`
+  (`rate_budgets` table, migration 098) shared by every node, managed with
+  `GET /rate-budgets` and `PUT|DELETE /rate-budgets/{key}`. Steps declaring
+  `"rate_budget": "<key>"` are deferred (never failed) while the bucket is
+  empty (`orch8_rate_budget_deferred_total`).
+- **Autoscaling metrics**: `orch8_queue_depth{capability,region,priority_lane}`
+  and `orch8_placement_unsatisfied{capability,region}` publish the pending
+  worker backlog every 15 s; a KEDA `ScaledObject` example is in
+  `deploy/keda/scaledobject.yaml`. The unlabeled `orch8_queue_depth` series is
+  unchanged.
+- **Trace propagation**: worker tasks carry a W3C `traceparent` in
+  `context.runtime.traceparent` (the dispatch span when OTLP export is on,
+  else a deterministic per-instance context); completions accept
+  `traceparent` (HTTP header/body, gRPC metadata) and parent the
+  `orch8.worker_task.complete` span on it.
+- gRPC worker sessions that negotiated `runtime_capabilities` now claim
+  through the capability predicate, so they receive placed work.
+
+### Federation transport, BYOK externalization, region failover
+
+See [docs/FEDERATION.md](docs/FEDERATION.md) and [docs/FAILOVER.md](docs/FAILOVER.md).
+All three are opt-in; nothing changes for deployments that do not configure them.
+
+- **Cross-organization federation**: an explicit HTTPS transport for the
+  existing signed federation envelopes. Adds a per-tenant trust registry
+  (`GET|POST /api/v1/federation/peers`, `GET|PUT|DELETE /api/v1/federation/peers/{peer_id}`;
+  writes require the root key), `GET /api/v1/federation/identity`, and
+  `GET /api/v1/federation/calls/{call_id}`. The new signature-authenticated
+  inbound route `POST /api/v1/federation/inbound` sits outside API-key auth
+  and is also mounted on `gateway` nodes. Access requires mutual sequence
+  allowlists (plus an optional inbound handler allowlist). Only declared
+  input fields and declared block outputs cross the boundary. Idempotency
+  comes from the instance idempotency key and the existing
+  `federation_receipts`.
+- **`federate` step handler**: runs a sequence at a peer, parks on
+  `wait_for_input`, and resumes with the peer's declared outputs through the
+  `human_input:<block>` resume signal that `wait_for_event` also uses. A
+  background federation poller owns all network I/O, retrying with bounded
+  backoff. Lint warns when `wait_for_input` is missing.
+- **Cross-cluster child workflows**: peers with `relationship: "cluster"`
+  (same organization) may disclose `"*"` and link the child to its parent.
+  Cancelling or failing the parent propagates a signed `cancel` to the child.
+- **BYOK externalization**: `ORCH8_BYOK_*` sends every externalized payload to
+  a customer-owned S3-compatible bucket under AES-256-GCM envelope encryption.
+  DEKs are wrapped by AWS KMS (SigV4-signed, no AWS SDK added) or by a static
+  key provider. The database then stores only `{"_o8vault": …}` references,
+  and nodes without the vault see those references and nothing else. Requires
+  `ORCH8_ENCRYPTION_KEY`.
+- **Active-passive multi-region failover**: `ORCH8_FAILOVER_REGION` keeps
+  standby nodes out of the scheduler until their region holds the
+  database-resident region fence. Active nodes fence themselves (and fail
+  closed) when the fence moves. `orch8 failover status|promote` performs
+  epoch-CAS promotion directly against a database. Data replication remains
+  the operator's PostgreSQL responsibility.
+- **Migration** `099_federation_transport.sql` adds the `federation_peers`,
+  `federation_calls` and `region_fence` tables (the SQLite schema adds them too).
+
+### Distributed execution (runtime nodes)
+
+See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
+
+- **Lease expiry never duplicates side effects**: worker tasks store the
+  dispatch-time `effect_id`, `continuity_epoch`, and a per-claim `lease_secs`
+  (browser 30 s, mobile 120 s). The engine reaper requeues pure tasks but moves
+  a side-effecting task's receipt to `unknown` and applies the retry policy;
+  timed-out tasks now advance the instance (previously they dangled) and settle
+  their receipt (`abandoned` when never claimed). Receipts are settled by the
+  stored id, so settlement no longer misses after a handoff. The legacy storage
+  reaper skips ambiguous effects and honours per-task leases.
+- **Handoff fencing**: worker complete/fail/heartbeat/release/artifact calls
+  (HTTP and gRPC) are fenced on the continuity owner epoch as well as
+  `claim_epoch`; capsule export is refused while worker tasks are open; the
+  scheduler never advances an instance whose execution is transferring or was
+  handed to another runtime.
+- **Push dispatch is an id-only wake-up** (`{task_id, runtime_id, reason}`); no
+  params or context leave the server without a lease.
+- **Browsers never receive secrets**: credential-bearing tasks are unclaimable
+  by browser runtimes, browser-placed credential steps fail at dispatch, and
+  browser claimants get a filtered, redacted context.
+- **Placement**: `$runtime.runtime_kinds`, `$runtime.runtime_id` (per-node
+  mailbox), `$runtime.policy`/`classification`; placed steps dispatch remotely
+  even when the handler is local; placement is validated and locality is
+  evaluated at dispatch with a recorded placement decision, and re-evaluated at
+  claim.
+- **New endpoints**: `POST /workers/tasks/{id}/release` (voluntary give-back)
+  and `POST /runtimes/browser-sessions` (short-lived, scoped browser tokens:
+  bound kind/runtime_id/handler allowlist, lease protocol only). Polls reject
+  identities that conflict with the credential binding. Browser outputs are
+  size-bounded (`ORCH8_BROWSER_OUTPUT_MAX_BYTES`, default 1 MiB) and remote
+  outputs record provenance. CORS preflights are cacheable (2 h).
+- **Device-mesh delegation** (Feature 29): a claimed delegation with a
+  server-hosted parent becomes a mailbox task for the destination runtime whose
+  result is integrated into the parent (`context.data.delegations.<id>`).
+- Poll responses echo `target_runtime_id` / `runtime_kinds`; re-sending a
+  failure for an already-failed task (same lease) is idempotent.
+- **Worker `fail` is one fenced transaction** (HTTP and gRPC), shared with the
+  reaper, timeouts and release: receipt → `unknown`, then retry (new attempt,
+  new effect id), fail node / flat instance, or — for a delegation or a
+  terminal/paused instance — fail only the task. Same-lease re-reports stay
+  `200`; a task superseded by its retry is `404`.
+- **A retry attempt is claimable only once its effect id is bound**: rows
+  pre-inserted by a resolution wait (`awaiting_dispatch`) for the scheduler's
+  re-dispatch, which binds `effect_id` in the same statement that makes them
+  claimable. Settlement never recomputes an effect id.
+- **gRPC worker parity**: `CompleteTask` commits the effect receipt (and
+  integrates delegation results), `FailTask` uses the fenced resolution, and a
+  new `ReleaseTask` RPC mirrors `POST /workers/tasks/{id}/release`.
+- **Mobile device-side timeouts** release the task as started (effect
+  `unknown`, retry policy) instead of failing it, and the worker claims no new
+  work for a handler while its timed-out native call is still running.
+- **Placement rejections on the flat path are observable**: an `__error__`
+  step output with the reason and a `remote_dispatch_rejected` audit event
+  (previously only the `instance.failed` webhook carried it).
+- A delegation completion re-delivered after a lost response is integrated
+  once; completing a flat instance's worker step no longer logs a
+  "falling back to non-atomic transition" warning.
+- `ORCH8_BROWSER_SESSION_SECRET` (≥ 32 bytes) signs browser-session tokens
+  across replicas independently of the root API key (root-key derivation
+  remains the fallback; startup warns when tokens can only verify on the
+  minting replica and refuses a short secret).
+- Scheduler ownership lookup uses two indexed queries instead of `OR EXISTS`.
+- **End-to-end suite** `orch8-e2e`: cloud → phone → cloud with a real
+  `MobileEngine` against the real API (API-key auth) and scheduler, on SQLite
+  and Postgres — happy path, offline mailbox + push wake, kill mid-step, lease
+  loss, handoff fencing, phone → desktop delegation across disconnects, and
+  browser-session secret isolation.
+- Schema: Postgres migrations `095_distributed_worker_tasks.sql` and
+  `096_worker_task_dispatch_binding.sql`; bundled SQLite schema v47 (columns
+  reconciled additively on boot).
+
 ### Security
 
 - **WASM plugin loading** only accepts binary modules (`\0asm` magic, 32 MiB cap,
@@ -28,6 +302,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only receive and ack their own tenant's commands (migration 088).
 
 ### Added
+
+- **Mobile runtime node** (`orch8-mobile`): `MobileEngine.registerNode`
+  registers the device and its runtime capabilities
+  (`/mobile/devices/register` + `/mobile/devices/{id}/runtime`) with a
+  persistent runtime UUID and re-advertises before the 5-minute capability
+  TTL. `startWorker` / `stopWorker` / `runWorkerWindow` run a Rust worker loop
+  (so Swift, Kotlin, RN and Expo share it) that polls as kind `mobile`, runs
+  app-native `StepHandler`s, heartbeats per `lease_secs`, and completes / fails
+  / releases tasks. Handlers receive `__orch8.effect_id` (plus task/instance
+  ids and `continuity_epoch`) for downstream idempotency. Claims are journaled
+  locally; after an OS kill the next launch releases unstarted/started tasks
+  (`started` flag) or re-delivers recorded outcomes, falling back to a
+  retryable `fail` on servers without `/release`. `pause()` stops claiming and
+  releases unstarted claims; critical battery stops claiming; `onPushWake`
+  handles id-only wake envelopes. New contract fields (`effect_id`,
+  `continuity_epoch`, `lease_secs`) are optional, so the SDK works against
+  older servers.
+- **Android AAR consumable from Kotlin 1.9**: `io.orch8:orch8-mobile` is now
+  compiled at Kotlin language/API level 1.9 (class metadata 1.9.0) and depends
+  on kotlinx-coroutines 1.8.1, so Expo SDK 52 and React Native 0.76 apps no
+  longer need `-Xskip-metadata-version-check` to call it. Verified by compiling
+  a consumer against the AAR's classes with `kotlinc` 1.9.24.
+- **Mobile builtins**: the embedded engine registers `noop`, `log`, `sleep`,
+  `fail`, `transform`, `assert`, `set_state`, `get_state`, `delete_state`,
+  `merge_state` by default; `http_request` is opt-in via `enableBuiltin`.
+  Host handlers with the same name take precedence.
+- **Swift**: `Orch8RuntimeNode` wraps the Rust node/worker API;
+  `DistributedWorkerClient` gains `heartbeat`, `fail`, `release` and decodes
+  `effectId` / `continuityEpoch` / `leaseSecs`.
+- **Automated mobile distribution**: after the GitHub release,
+  `release.yml` calls the new `mobile-distribution.yml`, which publishes the
+  release's XCFramework and AAR to every install channel: it commits, tags
+  and releases `orch8-io/orch8-mobile-swift` (Package.swift url + checksum,
+  CocoaPods source archive), runs `pod trunk push Orch8Mobile`, and adds
+  `io.orch8:orch8-mobile` (AAR + POM) and `io.orch8:orch8-kmp` to
+  `orch8-io/maven`. Each channel is gated on its own secret
+  (`ORCH8_MOBILE_SWIFT_TOKEN`, `COCOAPODS_TRUNK_TOKEN`, `ORCH8_MAVEN_TOKEN`)
+  and skips cleanly without it; every step is idempotent and never replaces a
+  published version. It can be re-run by hand with `workflow_dispatch` to
+  recover a partial release. See `docs/MOBILE_RELEASING.md`.
+- **Kotlin Multiplatform is publishable**: `packages/kmp` publishes its
+  Android and iOS variants to a file-based Maven repository
+  (`-Porch8.dist.repo=...`, task `publishAllPublicationsToOrch8DistRepository`),
+  resolves a just-published `orch8-mobile` from the same repository, and can
+  drop its test-only JVM target (`-Porch8.kmp.targets=android,ios`). Its
+  version is checked by `scripts/check-sdk-versions.sh`. The iOS bridge is
+  attached to each GitHub release as `Orch8KmpBridge-vX.Y.Z.swift` (+ `.sha256`),
+  and `packages/kmp/ios-bridge/install-bridge.sh` downloads, verifies and
+  installs it with the app's framework name.
+- **Mobile docs**: a "10-minute install" section in `docs/MOBILE_SDK.md` for
+  SwiftPM, CocoaPods, Gradle, React Native, Expo and KMP, each ending with a
+  check that the native engine resolved. It also documents that React Native
+  apps must declare Orch8's Maven repository in the app's own Gradle build.
+- `scripts/publish-maven-aar.py` (POM generated from
+  `packages/android/orch8-mobile/build.gradle.kts`; byte-identical to the
+  published `0.7.1` POM) and `scripts/sync-swift-distribution.sh`.
 
 - **Background jobs**: `POST/GET/DELETE /jobs` and keyset-paginated `GET /jobs`
   enqueue a handler without authoring a sequence (each job is an instance of a
@@ -114,11 +444,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Mobile crash recovery (P0)**: an app killed mid-step left its instance
+  `Running` forever unless a previous `pause()` had timed out. Engine
+  construction now reschedules every instance left `Running` by a dead
+  process; replay-safe steps finish exactly once and app-native effects stay
+  at-most-once (the effect guard fails the instance instead of replaying).
+
 - Render, the root `docker-compose.yml` and the Kubernetes manifest now set
   `ORCH8_RUN_MIGRATIONS=true`; a fresh Postgres previously never became ready.
 - Dashboard timeline and fork calls now match the engine's API.
 - Quick starts used `orch8 dev --context`, which the global fleet-context flag
   swallowed; they now use `--input`.
+
+### Changed
+
+- **Mobile binary size**: `orch8-mobile` no longer links sqlx-postgres,
+  object_store, lettre/SMTP, the APNs/FCM push senders (jsonwebtoken +
+  aws-lc JWT signing), or Tokio process/signal support. New cargo features —
+  `orch8-storage/{postgres,artifacts}`, `orch8-engine/email`,
+  `orch8-push/providers` — are on by default and enabled explicitly by the
+  server crates, whose dependency/feature sets are unchanged. The workspace
+  `tokio` and `sqlx` dependencies no longer carry `full` / `postgres`; crates
+  opt in. aarch64-apple-ios `mobile-release` static library: 266.2 MB →
+  212.8 MB from the gating alone (216.9 MB including the new worker loop);
+  the mobile dependency graph drops from 438 to 284 crates.
+- `orch8-mobile` no longer carries the unused `queue_step_delegation` outbox
+  path; remote steps run through the leased worker loop instead.
 
 ## [0.7.1] — 2026-07-30
 

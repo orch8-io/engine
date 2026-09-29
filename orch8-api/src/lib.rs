@@ -3,6 +3,7 @@ pub mod api_keys;
 pub mod approval_actions;
 pub mod approvals;
 pub mod auth;
+pub mod browser_sessions;
 pub(crate) mod budgets;
 pub mod changes;
 pub mod circuit_breakers;
@@ -14,20 +15,25 @@ pub mod cron;
 pub mod dataflow;
 pub mod diagnosis;
 pub mod dlq_groups;
+pub mod embed;
 pub mod entitlements;
 pub mod error;
 pub mod events;
+pub mod federation;
 pub mod health;
 pub mod input_schema;
 pub mod inspect;
 pub mod instances;
 pub mod jobs;
+pub mod license;
 pub mod mcp_server;
 pub mod metrics;
+pub mod migrations;
 pub mod mobile_sync;
 pub mod model_pricing;
 #[allow(clippy::needless_for_each)]
 pub mod openapi;
+pub(crate) mod placement;
 pub mod plugins;
 pub mod pools;
 pub mod preflight;
@@ -36,6 +42,7 @@ pub(crate) mod prompts;
 pub(crate) mod public_http;
 pub mod queue_dispatch;
 pub mod queue_routing;
+pub mod receipts;
 pub mod releases;
 pub mod request_id;
 pub mod rollback;
@@ -44,6 +51,7 @@ pub mod sequences;
 pub mod sessions;
 pub mod stream_limits;
 pub mod streaming;
+pub mod sub_tenants;
 pub mod telemetry;
 pub mod test_harness;
 pub mod triggers;
@@ -141,7 +149,21 @@ pub struct AppState {
     /// Enables bounded fault/state-space lab endpoints. Kept off in
     /// production unless an operator explicitly opts in.
     pub continuity_lab_enabled: bool,
+    /// Signs/verifies browser-session tokens (derived from the root API key;
+    /// process-random in `--insecure` mode). Must match the key the auth
+    /// middleware derives: build it with
+    /// [`browser_sessions::BrowserSessionSigner::for_root`].
+    pub browser_sessions: browser_sessions::SharedSigner,
+    /// Upper bound (bytes of serialized JSON) on a step output reported by a
+    /// browser runtime. Browser output is untrusted page data.
+    pub browser_output_max_bytes: usize,
+    /// Embed-token signer, embed CORS origins and the offline-verified
+    /// license (soft enforcement). Default: embedding disabled, unlicensed.
+    pub embedded: Arc<embed::EmbeddedRuntime>,
 }
+
+/// Default bound on browser-reported step output (1 MiB).
+pub const DEFAULT_BROWSER_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 pub struct ContinuityCrypto {
@@ -257,8 +279,16 @@ fn api_routes() -> Router<AppState> {
         .merge(budgets::routes())
         .merge(webhook_outbox::routes())
         .merge(queue_routing::routes())
+        .merge(placement::routes())
         .merge(queue_dispatch::routes())
         .merge(mcp_server::routes())
+        .merge(browser_sessions::routes())
+        .merge(sub_tenants::routes())
+        .merge(embed::routes())
+        .merge(license::routes())
+        .merge(receipts::routes())
+        .merge(migrations::routes())
+        .merge(federation::routes())
 }
 
 /// Build the axum router with all routes.
@@ -273,6 +303,11 @@ pub fn build_router(state: AppState) -> Router {
     if state.mobile_sync_enabled {
         api = api.merge(mobile_sync::routes());
     }
+    // Soft license enforcement: annotates responses, never blocks.
+    let api = api.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        license::soft_enforcement,
+    ));
 
     Router::new()
         // Canonical versioned mount — clients should migrate to these paths.
@@ -307,7 +342,10 @@ pub fn public_routes() -> Router<AppState> {
 /// Operational health is attached by `orch8-server` outside this router.
 pub fn build_continuity_gateway_router(state: AppState) -> Router {
     Router::new()
-        .nest(API_V1_PREFIX, continuity::routes())
+        .nest(
+            API_V1_PREFIX,
+            continuity::routes().merge(federation::routes()),
+        )
         .with_state(state)
 }
 

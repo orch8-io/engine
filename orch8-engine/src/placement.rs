@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use orch8_types::continuity::{
     CapsuleRequirements, ContinuityId, DataClassification, ExecutionEpoch, LocalityPolicy,
-    LocalityRule, PlacementDecision, PlacementDecisionId, PlacementEvidence, PlacementScoreFactors,
+    PlacementDecision, PlacementDecisionId, PlacementEvidence, PlacementScoreFactors,
     PolicyOutcome, RuntimeCapabilities, RuntimeId, RuntimeTrustLevel,
 };
 use orch8_types::ids::TenantId;
@@ -33,6 +33,25 @@ pub enum RequirementsValidationError {
 pub fn validate_requirements(
     requirements: &CapsuleRequirements,
 ) -> Result<(), RequirementsValidationError> {
+    if requirements.runtime_kinds.len() > MAX_REQUIREMENT_FACTS_PER_KIND {
+        return Err(RequirementsValidationError::TooManyFacts);
+    }
+    if requirements.labels.len() > MAX_REQUIREMENT_FACTS_PER_KIND {
+        return Err(RequirementsValidationError::TooManyFacts);
+    }
+    let placement_facts = requirements
+        .labels
+        .iter()
+        .flat_map(|(key, value)| [key, value])
+        .chain(requirements.residency.iter());
+    for fact in placement_facts {
+        if fact.trim().is_empty() {
+            return Err(RequirementsValidationError::EmptyFact);
+        }
+        if fact.len() > MAX_REQUIREMENT_FACT_LENGTH {
+            return Err(RequirementsValidationError::FactTooLong);
+        }
+    }
     let fact_groups = [
         requirements.handlers.as_slice(),
         requirements.plugins.as_slice(),
@@ -199,175 +218,120 @@ pub fn validate_policy(policy: &LocalityPolicy) -> Result<(), PolicyValidationEr
     Ok(())
 }
 
+pub use orch8_types::locality::{PolicyEvaluation, evaluate_locality};
+
+/// Dispatch-time placement evaluation of a placed step (`$runtime` with a
+/// target runtime, placed kinds, or a locality policy).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PolicyEvaluation {
-    pub outcome: PolicyOutcome,
-    pub finding_codes: Vec<String>,
+pub struct DispatchPlacement {
+    /// Explainable decision over the currently registered candidates; saved
+    /// as placement evidence whether or not dispatch proceeds.
+    pub decision: PlacementDecision,
+    /// Finding codes that make the placement impossible; empty = dispatch.
+    pub denial_codes: Vec<String>,
 }
 
+/// Evaluate a placed step at dispatch. Only *definitive* policy denials stop
+/// dispatch: the policy contradicts the placement itself (targeted runtime id
+/// or placed kinds outside the rule), the classification has no rule and can
+/// therefore never be satisfied, or the registered target runtime is denied
+/// by locality. Anything merely unknown (target not registered yet, missing
+/// region facts) dispatches, because every claimant is re-checked against the
+/// same policy atomically at claim time (fail closed).
 #[must_use]
-pub fn evaluate_locality(
-    policy: Option<&LocalityPolicy>,
-    classification: DataClassification,
-    runtime: &RuntimeCapabilities,
-) -> PolicyEvaluation {
-    let Some(policy) = policy else {
-        return match classification {
-            DataClassification::Public | DataClassification::Internal => PolicyEvaluation {
-                outcome: PolicyOutcome::Allow,
-                finding_codes: vec!["POLICY_DEFAULT_CURRENT_BOUNDARY".into()],
-            },
-            DataClassification::Confidential => PolicyEvaluation {
-                outcome: PolicyOutcome::Unknown,
-                finding_codes: vec!["CONFIDENTIAL_POLICY_MISSING".into()],
-            },
-            DataClassification::Restricted => PolicyEvaluation {
-                outcome: PolicyOutcome::Deny,
-                finding_codes: vec!["RESTRICTED_POLICY_MISSING".into()],
-            },
-        };
+pub fn evaluate_dispatch_placement(
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
+    epoch: ExecutionEpoch,
+    requirements: &CapsuleRequirements,
+    candidates: &[RuntimeCapabilities],
+    now: DateTime<Utc>,
+) -> DispatchPlacement {
+    let classification = requirements.classification.unwrap_or_default();
+    let policy = requirements.policy.as_ref();
+    let pool: Vec<RuntimeCapabilities> = match requirements.runtime_id {
+        Some(target) => candidates
+            .iter()
+            .filter(|runtime| runtime.runtime_id == target)
+            .cloned()
+            .collect(),
+        None => candidates.to_vec(),
     };
-    let rules: Vec<_> = policy
-        .rules
+    let mut decision = choose_runtime(
+        tenant_id,
+        continuity_id,
+        epoch,
+        requirements,
+        policy,
+        classification,
+        &pool,
+        None,
+        now,
+    );
+    let mut denial_codes = static_policy_denials(requirements, classification);
+    if denial_codes.is_empty()
+        && requirements.has_locality_policy()
+        && let Some(target) = pool.first().filter(|_| requirements.runtime_id.is_some())
+    {
+        let locality = evaluate_locality(policy, classification, target);
+        if locality.outcome == PolicyOutcome::Deny {
+            denial_codes = locality
+                .finding_codes
+                .into_iter()
+                .filter(|code| code.ends_with("_DENIED") || code.ends_with("_MISSING"))
+                .collect();
+        }
+    }
+    denial_codes.sort();
+    denial_codes.dedup();
+    if !denial_codes.is_empty() {
+        decision.selected_runtime_id = None;
+    }
+    DispatchPlacement {
+        decision,
+        denial_codes,
+    }
+}
+
+fn static_policy_denials(
+    requirements: &CapsuleRequirements,
+    classification: DataClassification,
+) -> Vec<String> {
+    if !requirements.has_locality_policy() {
+        return Vec::new();
+    }
+    let rules: Vec<_> = requirements
+        .policy
         .iter()
+        .flat_map(|policy| policy.rules.iter())
         .filter(|rule| rule.classification == classification)
         .collect();
     if rules.is_empty() {
-        return evaluate_locality(None, classification, runtime);
+        return match classification {
+            DataClassification::Confidential => vec!["CONFIDENTIAL_POLICY_MISSING".into()],
+            DataClassification::Restricted => vec!["RESTRICTED_POLICY_MISSING".into()],
+            DataClassification::Public | DataClassification::Internal => Vec::new(),
+        };
     }
-
-    let mut codes: Vec<String> = Vec::new();
-    let mut unknown = false;
+    let mut codes = Vec::new();
     for rule in rules {
-        evaluate_identity_and_residency(rule, runtime, &mut unknown, &mut codes);
-        evaluate_runtime_environment(rule, runtime, &mut unknown, &mut codes);
-    }
-    codes.sort();
-    codes.dedup();
-    let denied = codes.iter().any(|code| code.ends_with("_DENIED"));
-    let outcome = if denied {
-        PolicyOutcome::Deny
-    } else if unknown {
-        PolicyOutcome::Unknown
-    } else {
-        PolicyOutcome::Allow
-    };
-    if codes.is_empty() {
-        codes.push("POLICY_ALLOW".into());
-    }
-    PolicyEvaluation {
-        outcome,
-        finding_codes: codes,
-    }
-}
-
-fn evaluate_identity_and_residency(
-    rule: &LocalityRule,
-    runtime: &RuntimeCapabilities,
-    unknown: &mut bool,
-    codes: &mut Vec<String>,
-) {
-    if !rule.allowed_runtime_ids.is_empty()
-        && !rule.allowed_runtime_ids.contains(&runtime.runtime_id)
-    {
-        codes.push("RUNTIME_ID_DENIED".into());
-    }
-    if !rule.allowed_runtime_kinds.is_empty() && !rule.allowed_runtime_kinds.contains(&runtime.kind)
-    {
-        codes.push("RUNTIME_KIND_DENIED".into());
-    }
-    if !rule.allowed_regions.is_empty() {
-        if runtime.regions.is_empty() {
-            *unknown = true;
-            codes.push("RUNTIME_REGION_UNKNOWN".into());
-        } else if !rule
-            .allowed_regions
-            .iter()
-            .any(|region| runtime.regions.contains(region))
+        if let Some(target) = requirements.runtime_id
+            && !rule.allowed_runtime_ids.is_empty()
+            && !rule.allowed_runtime_ids.contains(&target)
         {
-            codes.push("REGION_DENIED".into());
+            codes.push("RUNTIME_ID_DENIED".into());
+        }
+        if !requirements.runtime_kinds.is_empty()
+            && !rule.allowed_runtime_kinds.is_empty()
+            && !requirements
+                .runtime_kinds
+                .iter()
+                .any(|kind| rule.allowed_runtime_kinds.contains(kind))
+        {
+            codes.push("RUNTIME_KIND_DENIED".into());
         }
     }
-    if let Some(minimum) = rule.minimum_trust
-        && runtime.trust < minimum
-    {
-        codes.push("TRUST_DENIED".into());
-    }
-}
-
-fn evaluate_runtime_environment(
-    rule: &LocalityRule,
-    runtime: &RuntimeCapabilities,
-    unknown: &mut bool,
-    codes: &mut Vec<String>,
-) {
-    if let Some(required) = rule.require_offline
-        && runtime.offline_capable != required
-    {
-        codes.push("CONNECTIVITY_DENIED".into());
-    }
-    if let Some(hardware) = &rule.require_hardware
-        && !runtime.hardware.contains(hardware)
-    {
-        codes.push("HARDWARE_DENIED".into());
-    }
-    if !rule.allowed_connectivity.is_empty() {
-        match runtime.connectivity {
-            Some(connectivity) if rule.allowed_connectivity.contains(&connectivity) => {}
-            Some(_) => codes.push("CONNECTIVITY_DENIED".into()),
-            None => {
-                *unknown = true;
-                codes.push("RUNTIME_CONNECTIVITY_UNKNOWN".into());
-            }
-        }
-    }
-    compare_maximum(
-        runtime.estimated_cost_microunits,
-        rule.maximum_cost_microunits,
-        "RUNTIME_COST_UNKNOWN",
-        "COST_DENIED",
-        unknown,
-        codes,
-    );
-    compare_maximum(
-        runtime.estimated_latency_ms,
-        rule.maximum_latency_ms,
-        "RUNTIME_LATENCY_UNKNOWN",
-        "LATENCY_DENIED",
-        unknown,
-        codes,
-    );
-    if let Some(minimum) = rule.minimum_battery_percent {
-        match runtime.battery_percent {
-            Some(actual) if actual >= minimum => {}
-            Some(_) => codes.push("BATTERY_DENIED".into()),
-            None => {
-                *unknown = true;
-                codes.push("RUNTIME_BATTERY_UNKNOWN".into());
-            }
-        }
-    }
-}
-
-fn compare_maximum(
-    actual: Option<u64>,
-    maximum: Option<u64>,
-    unknown_code: &str,
-    denied_code: &str,
-    unknown: &mut bool,
-    codes: &mut Vec<String>,
-) {
-    let Some(maximum) = maximum else {
-        return;
-    };
-    match actual {
-        Some(actual) if actual <= maximum => {}
-        Some(_) => codes.push(denied_code.into()),
-        None => {
-            *unknown = true;
-            codes.push(unknown_code.into());
-        }
-    }
+    codes
 }
 
 fn trust_score(trust: RuntimeTrustLevel) -> i64 {
@@ -546,6 +510,7 @@ mod tests {
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + Duration::minutes(1),
         }

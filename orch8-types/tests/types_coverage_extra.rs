@@ -33,6 +33,8 @@ fn make_step(id: &str, handler: &str) -> BlockDefinition {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -50,6 +52,8 @@ fn make_step(id: &str, handler: &str) -> BlockDefinition {
 
 fn make_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -65,6 +69,7 @@ fn make_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }
@@ -93,6 +98,8 @@ fn full_step(id: &str) -> StepDef {
         }),
         timeout: Some(Duration::from_secs(30)),
         rate_limit_key: Some("api:send".into()),
+        rate_budget: None,
+        placement: None,
         send_window: Some(SendWindow {
             start_hour: 8,
             end_hour: 20,
@@ -386,6 +393,8 @@ fn cfg_35_scheduler_config_max_steps_per_instance() {
 #[test]
 fn cfg_36_config_serde_with_all_sections() {
     let cfg = EngineConfig {
+        embed: orch8_types::config::EmbedConfig::default(),
+        license: orch8_types::config::LicenseConfig::default(),
         node: orch8_types::config::NodeConfig::default(),
         database: orch8_types::config::DatabaseConfig {
             backend: "sqlite".into(),
@@ -403,6 +412,7 @@ fn cfg_36_config_serde_with_all_sections() {
         artifacts: orch8_types::config::ArtifactConfig::default(),
         telemetry: orch8_types::config::TelemetryConfig::default(),
         alerts: orch8_types::config::AlertsConfig::default(),
+        cloud_observability: orch8_types::config::CloudObservabilityConfig::default(),
     };
     let json = serde_json::to_string(&cfg).unwrap();
     // Non-empty secrets serialize as "[REDACTED]"; feeding the dump straight
@@ -502,6 +512,8 @@ fn cfg_43_config_validate_accepts_sqlite_backend() {
 #[test]
 fn cfg_44_secret_string_not_leaked_in_serialized_config() {
     let cfg = EngineConfig {
+        embed: orch8_types::config::EmbedConfig::default(),
+        license: orch8_types::config::LicenseConfig::default(),
         node: orch8_types::config::NodeConfig::default(),
         database: orch8_types::config::DatabaseConfig {
             url: SecretString::from("postgres://user:pass@host/db"),
@@ -519,6 +531,7 @@ fn cfg_44_secret_string_not_leaked_in_serialized_config() {
         artifacts: orch8_types::config::ArtifactConfig::default(),
         telemetry: orch8_types::config::TelemetryConfig::default(),
         alerts: orch8_types::config::AlertsConfig::default(),
+        cloud_observability: orch8_types::config::CloudObservabilityConfig::default(),
     };
     let json = serde_json::to_string(&cfg).unwrap();
     assert!(!json.contains("pass@host"));
@@ -539,6 +552,7 @@ fn cfg_45_scheduler_config_max_instances_per_tenant_default() {
 #[test]
 fn inst_46_task_instance_serde_round_trip_all_fields() {
     let instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("tenant-1"),
@@ -580,6 +594,7 @@ fn inst_46_task_instance_serde_round_trip_all_fields() {
 #[test]
 fn inst_47_task_instance_optional_fields_none() {
     let instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
@@ -610,6 +625,7 @@ fn inst_47_task_instance_optional_fields_none() {
 #[test]
 fn inst_48_task_instance_metadata_json() {
     let instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),

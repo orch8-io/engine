@@ -9,8 +9,9 @@ name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
+chrono = "0.4"
 orch8 = { path = "../../orch8", default-features = false }
 orch8-types = { path = "../../orch8-types" }
 pyo3 = { version = "0.27", features = ["extension-module", "abi3-py310"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }

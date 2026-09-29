@@ -40,11 +40,13 @@ release notes.
 - `beta` [Agent patterns](agent-patterns/README.md) — run four composable AI workflow examples.
 - [Email classifier](../examples/email-classifier/README.md) — a complete TypeScript worker and webhook application.
 - [Portable agent product](../examples/portable-agent-product/README.md) — compile policy, wrap a local worker, score conformance, and validate an OEM plan.
+- `beta` [Embed kit](EMBED_KIT.md) — put runs, approvals and a step builder inside your product with `@orch8/embed` web components and per-customer embed tokens.
 
 ## Operate
 
 - `beta` [Dashboard](DASHBOARD.md) — connect the operator console and use its current surfaces.
 - `stable` [Safe releases](RELEASES.md) — diff, validate, canary, evaluate, promote, and roll back.
+- `beta` [Embedded Orch8](EMBEDDED.md) — sub-tenants, per-sub-tenant caps and metering, scoped embed tokens, theme, per-sub-tenant rollouts, and offline license keys.
 - `beta` [Prompt registry](PROMPTS.md) — versioned, tenant-scoped prompts with labels, canaries, and replay-safe resolution in `llm_call`.
 - `beta` [LLM response cache](LLM_CACHE.md) — opt-in exact/semantic `llm_call` caching, what is never cached, and savings reporting.
 - `beta` [Tenant spend budgets](BUDGETS.md) — daily/monthly USD caps, threshold alerts, and fail-closed hard caps.
@@ -59,9 +61,13 @@ release notes.
 - `stable` [Authentication and SSO](AUTHENTICATION.md) — engine keys and the Cloud OIDC boundary.
 - `stable` [Secure production bootstrap](SECURE_BOOTSTRAP.md) — scaffold, validate, start, and readiness-check a secure node.
 - `beta` [Node roles](NODE_ROLES.md) — assemble all-in-one, control, executor, gateway, and edge processes; operate managed-control sessions and fleet draining.
+- `beta` [Federation and BYOK](FEDERATION.md): cross-organization federation, cross-cluster child workflows, and customer-owned payload vaults.
+- `beta` [Multi-region failover](FAILOVER.md): the active-passive region fence, the promotion procedure, and the RPO/RTO it gives.
 - `stable` [Operator support bundle](SUPPORT_BUNDLE.md) — collect bounded, redacted diagnostics atomically.
 - `beta` [Background jobs](JOBS.md) — enqueue a handler with one call (`POST /jobs`), no sequence required.
+- `beta` [End-user WASM steps](WASM_USER_STEPS.md) — accept untrusted WASM modules from your users: sandbox limits, upload validation, ABI, and threat model.
 - `stable` [External workers](WORKERS.md) — poll, heartbeat, complete, and fail work from any language.
+- `beta` [Placement](PLACEMENT.md) — data residency, capability labels, placement policies, sticky affinity, priority lanes, global rate budgets, KEDA autoscaling, and trace propagation.
 - `beta` [Triggers](TRIGGERS.md) — start workflows from webhooks, NATS, Kafka, SQS, Pub/Sub, Redis Streams, and Postgres row changes.
 - `beta` [Negotiated gRPC worker stream](GRPC_WORKER_STREAM.md) — worker sessions, control, resumable artifacts, telemetry, and mTLS identity.
 - `stable` [Webhooks](WEBHOOKS.md) — delivery, signatures, replay protection, and receiver example.
@@ -78,7 +84,8 @@ release notes.
 - `beta` [API entitlements and generated-client gate](API_ENTITLEMENTS_AND_CLIENT_GATE.md) — plan admission limits and OpenAPI compatibility enforcement.
 - `stable` [Configuration](CONFIGURATION.md) — TOML and environment variables.
 - `stable` [CLI productization commands](CLI_PRODUCTIZATION.md) — contexts, deploy gates, and bounded debugging.
-- `beta` [Mobile SDK](MOBILE_SDK.md) — iOS/Android API and build reference.
+- `beta` [Mobile SDK](MOBILE_SDK.md) — 10-minute install per platform (SPM, CocoaPods, Gradle, React Native, Expo, KMP), iOS/Android API and build reference.
+- `beta` [Mobile releasing](MOBILE_RELEASING.md) — how a release reaches SwiftPM, CocoaPods and Maven, required secrets, and recovery.
 - `beta` [Mobile protected fields and device tools](MOBILE_PRIVACY_AND_TOOLS.md) — capability descriptors, opaque handles, redaction, and field-key rotation.
 - `beta` [Typed dataflow](TYPED_DATAFLOW.md) — static reference checking and generated bindings.
 - `beta` [Storage backend conformance](STORAGE_BACKEND_CONFORMANCE.md) — reusable minimum behavioral suite for third-party backends.
@@ -93,6 +100,7 @@ release notes.
 - `beta` [Workflow compiler optimization](WORKFLOW_OPTIMIZER.md) — immutable optimization sidecars and equivalence guarantees.
 - `stable` [Database migrations](../migrations/README.md) — immutability and checksum rules.
 - [Licensing](LICENSING.md) — plain-language "Can I use this?" table derived from the LICENSE text.
+- `experimental` [Distributed benchmark](BENCHMARK_DISTRIBUTED.md) — control + N executors + W workers over compose, SSH hosts, or local processes; topology-annotated result files.
 - `experimental` [Benchmarks](BENCHMARKS.md) — reproducible cross-engine harness and methodology (no published results yet).
 - [SchemaStore submission](SCHEMASTORE_SUBMISSION.md) — prepared editor-schema registration steps.
 

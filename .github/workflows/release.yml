@@ -630,6 +630,12 @@ jobs:
           zip -r "orch8-bindings-${TAG}.zip" bindings/
           unzip -l "orch8-bindings-${TAG}.zip" | grep -F 'bindings/LICENSE'
           shasum -a 256 "orch8-bindings-${TAG}.zip" > "orch8-bindings-${TAG}.zip.sha256"
+          # The KMP iOS bridge is compiled into the app (it implements Kotlin
+          # protocols from the app's own shared framework), so it ships as a
+          # versioned, checksummed file. packages/kmp/ios-bridge/install-bridge.sh
+          # downloads and verifies it.
+          cp packages/kmp/ios-bridge/Orch8KmpBridge.swift "Orch8KmpBridge-${TAG}.swift"
+          shasum -a 256 "Orch8KmpBridge-${TAG}.swift" > "Orch8KmpBridge-${TAG}.swift.sha256"
 
       - name: Upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -638,6 +644,8 @@ jobs:
           path: |
             orch8-bindings-*.zip
             orch8-bindings-*.zip.sha256
+            Orch8KmpBridge-*.swift
+            Orch8KmpBridge-*.swift.sha256
 
   # -- GitHub Release --------------------------------------------------------
   release:
@@ -669,6 +677,22 @@ jobs:
             artifacts/orch8-mobile-*.aar.sha256
             artifacts/orch8-bindings-*.zip
             artifacts/orch8-bindings-*.zip.sha256
+            artifacts/Orch8KmpBridge-*.swift
+            artifacts/Orch8KmpBridge-*.swift.sha256
+
+  # -- Mobile package channels ----------------------------------------------
+  # orch8-mobile-swift (SwiftPM), CocoaPods trunk, and orch8-io/maven
+  # (io.orch8:orch8-mobile, io.orch8:orch8-kmp). Each channel is skipped
+  # unless its secret is configured; see docs/MOBILE_RELEASING.md.
+  mobile-distribution:
+    name: Mobile distribution
+    needs: [release]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/mobile-distribution.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
 
   homebrew:
     name: Publish Homebrew formula

@@ -21,6 +21,7 @@ fn t0() -> DateTime<Utc> {
 
 fn instance(state: InstanceState) -> TaskInstance {
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t1"),
@@ -54,6 +55,7 @@ fn full_ctx(inst: TaskInstance) -> InstanceDiagnosticContext {
         children: Some(vec![]),
         pending_approval_blocks: Some(vec![]),
         event_waits: Some(vec![]),
+        runtime_capabilities: None,
     }
 }
 
@@ -81,6 +83,11 @@ fn task(state: WorkerTaskState, handler: &str, age_secs: i64) -> WorkerTask {
         error_message: None,
         error_retryable: None,
         created_at: t0() - Duration::seconds(age_secs),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     }
 }
 

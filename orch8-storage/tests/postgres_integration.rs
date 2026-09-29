@@ -362,6 +362,8 @@ async fn postgres_memory_batch_deletes_handle_more_than_bind_limit() {
 
 fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: seq_id,
@@ -377,6 +379,7 @@ fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }
@@ -384,6 +387,7 @@ fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
 fn mk_instance(tenant: &str, seq_id: SequenceId, concurrency_key: Option<&str>) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked(tenant),
@@ -603,6 +607,11 @@ async fn tenant_worker_claim_does_not_lock_task_instances_row() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -712,6 +721,11 @@ async fn capability_aware_postgres_claim_skips_incompatible_work_atomically() {
             error_message: None,
             error_retryable: None,
             created_at: now,
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
         })
         .await
         .unwrap();
@@ -733,6 +747,7 @@ async fn capability_aware_postgres_claim_skips_incompatible_work_atomically() {
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + chrono::Duration::minutes(5),
     };
@@ -790,6 +805,11 @@ async fn worker_claim_epoch_fences_restarted_postgres_worker() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
 
@@ -1637,6 +1657,11 @@ async fn postgres_reaper_reclaims_null_heartbeat_by_claimed_at() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     s.create_worker_task(&task).await.unwrap();
     assert_eq!(
@@ -2089,6 +2114,11 @@ async fn worker_claims_skip_tasks_of_terminal_instances_postgres() {
         error_message: None,
         error_retryable: None,
         created_at: Utc::now(),
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        carries_credentials: false,
+        claimed_runtime_kind: None,
     };
     storage.create_worker_task(&task).await.unwrap();
     assert!(

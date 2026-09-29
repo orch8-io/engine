@@ -1,0 +1,57 @@
+# Hybrid executor: runs Orch8 work in your infrastructure and joins an Orch8
+# Cloud control plane with a join token. See docs/HYBRID.md.
+#
+#   export ORCH8_JOIN_TOKEN='o8x1....'        # from the Orch8 Cloud console
+#   export ORCH8_ENCRYPTION_KEY=$(openssl rand -hex 32)
+#   export ORCH8_API_KEY=$(openssl rand -hex 24)
+#   docker compose -f deploy/hybrid-executor/docker-compose.yml up -d
+#
+# Workflow data (context, inputs, outputs) stays in the local Postgres. The
+# outbound control session carries only runtime identity, labels, region and
+# lease heartbeats; the optional run-metadata export carries state transitions
+# without payloads.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: orch8
+      POSTGRES_USER: orch8
+      POSTGRES_PASSWORD: ${ORCH8_PG_PASSWORD:-orch8}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orch8"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  executor:
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    hostname: ${ORCH8_EXECUTOR_NAME:-executor-1}
+    environment:
+      # Decoded at startup into [node] role=executor + managed_control_*.
+      ORCH8_JOIN_TOKEN: ${ORCH8_JOIN_TOKEN:?set ORCH8_JOIN_TOKEN (o8x1.… from Orch8 Cloud)}
+      ORCH8_STORAGE_BACKEND: postgres
+      ORCH8_DATABASE_URL: postgres://orch8:${ORCH8_PG_PASSWORD:-orch8}@postgres:5432/orch8
+      ORCH8_RUN_MIGRATIONS: "true"
+      ORCH8_ENCRYPTION_KEY: ${ORCH8_ENCRYPTION_KEY:?set ORCH8_ENCRYPTION_KEY}
+      # Authenticates your local workers against this executor's gRPC surface.
+      ORCH8_API_KEY: ${ORCH8_API_KEY:?set ORCH8_API_KEY}
+      ORCH8_REQUIRE_TENANT_HEADER: "true"
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+      ORCH8_GRPC_ADDR: 0.0.0.0:50051
+      # Optional: stream run metadata (no payloads) to the cloud fleet view.
+      ORCH8_CLOUD_OBSERVABILITY_ENDPOINT: ${ORCH8_CLOUD_OBSERVABILITY_ENDPOINT:-}
+      ORCH8_CLOUD_OBSERVABILITY_API_KEY: ${ORCH8_CLOUD_OBSERVABILITY_API_KEY:-}
+      ORCH8_CLOUD_OBSERVABILITY_ENGINE_ID: ${ORCH8_EXECUTOR_NAME:-executor-1}
+    ports:
+      # Health only on HTTP; the worker gRPC surface for local workers.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:50051:50051"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

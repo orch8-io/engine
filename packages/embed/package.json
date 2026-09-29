@@ -1,0 +1,77 @@
+{
+  "name": "@orch8/embed",
+  "version": "0.1.0",
+  "description": "Framework-free, white-label web components for embedding Orch8 runs, approvals and a step builder in your product",
+  "license": "BUSL-1.1",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
+    },
+    "./cdn": "./dist/cdn/orch8-embed.min.js",
+    "./package.json": "./package.json"
+  },
+  "unpkg": "./dist/cdn/orch8-embed.min.js",
+  "jsdelivr": "./dist/cdn/orch8-embed.min.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/cdn/*"
+  ],
+  "keywords": [
+    "orch8",
+    "workflow",
+    "web-components",
+    "custom-elements",
+    "embed",
+    "white-label"
+  ],
+  "scripts": {
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.build.json && node scripts/bundle.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "size": "node scripts/bundle.mjs --report"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0",
+    "happy-dom": "^20.14.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orch8-io/engine.git",
+    "directory": "packages/embed"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

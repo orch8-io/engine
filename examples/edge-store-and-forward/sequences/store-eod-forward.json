@@ -1,0 +1,51 @@
+{
+  "name": "store-eod-forward",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "export",
+      "handler": "http_request",
+      "params": {
+        "method": "GET",
+        "url": "__POS_EXPORT_URL__",
+        "timeout_ms": 30000
+      },
+      "retry": {
+        "max_attempts": 20,
+        "initial_backoff": 30000,
+        "max_backoff": 900000,
+        "backoff_multiplier": 2.0
+      }
+    },
+    {
+      "type": "step",
+      "id": "forward",
+      "handler": "http_request",
+      "params": {
+        "method": "POST",
+        "url": "__HQ_URL__/api/v1/instances",
+        "timeout_ms": 30000,
+        "headers": {
+          "x-api-key": "credentials://hq-forwarder",
+          "x-tenant-id": "__HQ_TENANT__"
+        },
+        "body": "{\"sequence_id\":\"__HQ_SEQUENCE_ID__\",\"tenant_id\":\"__HQ_TENANT__\",\"namespace\":\"default\",\"idempotency_key\":\"store:__STORE_ID__:eod:{{runtime.instance_id}}\",\"context\":{\"data\":{\"store_id\":\"__STORE_ID__\",\"edge_instance_id\":\"{{runtime.instance_id}}\",\"export\":{{outputs.export.body}}}}}"
+      },
+      "retry": {
+        "max_attempts": 500,
+        "initial_backoff": 30000,
+        "max_backoff": 3600000,
+        "backoff_multiplier": 2.0
+      }
+    },
+    {
+      "type": "step",
+      "id": "done",
+      "handler": "log",
+      "params": {
+        "message": "end-of-day export forwarded to HQ",
+        "hq_response": "{{outputs.forward.body}}"
+      }
+    }
+  ]
+}

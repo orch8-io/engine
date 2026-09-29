@@ -30,6 +30,8 @@ fn make_step(id: &str) -> BlockDefinition {
         retry: None,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -47,6 +49,8 @@ fn make_step(id: &str) -> BlockDefinition {
 
 fn make_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -62,6 +66,7 @@ fn make_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }

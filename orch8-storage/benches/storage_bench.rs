@@ -20,6 +20,8 @@ use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 fn make_sequence() -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -37,6 +39,8 @@ fn make_sequence() -> SequenceDefinition {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -55,6 +59,7 @@ fn make_sequence() -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     }
 }
@@ -62,6 +67,7 @@ fn make_sequence() -> SequenceDefinition {
 fn make_instance(seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked("bench"),
@@ -309,6 +315,11 @@ fn bench_worker_tasks(c: &mut Criterion) {
                             error_message: None,
                             error_retryable: None,
                             created_at: Utc::now(),
+                            effect_id: None,
+                            continuity_epoch: None,
+                            lease_secs: None,
+                            carries_credentials: false,
+                            claimed_runtime_kind: None,
                         };
                         s.create_worker_task(&task).await.unwrap();
                     }

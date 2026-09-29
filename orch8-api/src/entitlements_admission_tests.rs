@@ -44,6 +44,11 @@ async fn state_with(provider: Arc<dyn EntitlementProvider>) -> AppState {
         continuity_trusted_signing_keys: Arc::new(std::collections::BTreeMap::new()),
         federation_peers: Arc::new(Vec::new()),
         continuity_lab_enabled: false,
+        browser_sessions: std::sync::Arc::new(
+            crate::browser_sessions::BrowserSessionSigner::for_root(None),
+        ),
+        browser_output_max_bytes: crate::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
+        embedded: std::sync::Arc::default(),
     }
 }
 
@@ -60,6 +65,7 @@ fn team_plan() -> PlanEntitlements {
         max_context_bytes: 1024,
         allowed_namespaces: BTreeSet::from(["prod".to_string()]),
         features: BTreeSet::new(),
+        default_priority_lane: None,
     }
 }
 
@@ -557,6 +563,7 @@ fn coverage_admission_055_serde_round_trip_preserves_non_empty_policy_sets() {
     let plan = PlanEntitlements {
         allowed_namespaces: BTreeSet::from(["prod".to_string(), "staging".to_string()]),
         features: BTreeSet::from(["continuity".to_string()]),
+        default_priority_lane: None,
         ..team_plan()
     };
     let json = serde_json::to_string(&plan).expect("serialize");

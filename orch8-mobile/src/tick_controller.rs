@@ -61,6 +61,12 @@ impl TickController {
         }
     }
 
+    /// Shared power-state cell, read by the remote worker loop so it backs
+    /// off (and stops claiming on critical battery) with the scheduler.
+    pub fn power_state_handle(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.power_state)
+    }
+
     /// Acquire the tick mutex (used by `tick_once` to serialize ticks).
     pub fn tick_mutex(&self) -> &Arc<Mutex<()>> {
         &self.tick_mutex

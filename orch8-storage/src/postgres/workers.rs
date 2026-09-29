@@ -8,7 +8,7 @@ use orch8_types::worker::{
 use sqlx::{Postgres, Transaction};
 
 use super::PostgresStorage;
-use super::rows::WorkerTaskRow;
+use super::rows::{WorkerTaskRow, worker_task_columns};
 
 const REAPER_BATCH_SIZE: i64 = 1_000;
 
@@ -54,31 +54,62 @@ pub(super) fn transition_event(
     }
 }
 
-pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result<(), StorageError> {
-    sqlx::query(
+/// INSERT statement for one worker task. On a `(instance_id, block_id)`
+/// conflict with a still-pending row of the same attempt (a retry row
+/// pre-inserted by a failure/lease resolution), the dispatch-time effect id,
+/// ownership epoch, and credential flag are filled in so the re-dispatch's
+/// receipt binds to the row a worker will actually claim.
+///
+/// `awaiting_dispatch = true` (retry rows only) makes the row unclaimable
+/// until that re-dispatch binds it: the same upsert clears the flag in the
+/// statement that writes `effect_id`, so a worker can never claim a retry
+/// attempt before its effect id is present.
+fn insert_task_query(
+    task: &WorkerTask,
+    awaiting_dispatch: bool,
+) -> Result<sqlx::query::Query<'static, Postgres, sqlx::postgres::PgArguments>, StorageError> {
+    Ok(sqlx::query(
         r"INSERT INTO worker_tasks
             (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
-             attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-          ON CONFLICT (instance_id, block_id) DO NOTHING",
+             attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at,
+             effect_id, continuity_epoch, carries_credentials, awaiting_dispatch)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+          ON CONFLICT (instance_id, block_id) DO UPDATE SET
+              effect_id = COALESCE(worker_tasks.effect_id, EXCLUDED.effect_id),
+              continuity_epoch = COALESCE(worker_tasks.continuity_epoch, EXCLUDED.continuity_epoch),
+              carries_credentials = worker_tasks.carries_credentials OR EXCLUDED.carries_credentials,
+              awaiting_dispatch = EXCLUDED.awaiting_dispatch
+          WHERE worker_tasks.state = 'pending' AND worker_tasks.attempt = EXCLUDED.attempt",
     )
     .bind(task.id)
     .bind(task.instance_id.into_uuid())
-    .bind(task.block_id.as_str())
-    .bind(&task.handler_name)
-    .bind(&task.queue_name)
+    .bind(task.block_id.as_str().to_owned())
+    .bind(task.handler_name.clone())
+    .bind(task.queue_name.clone())
     .bind(serde_json::to_value(&task.requirements)?)
-    .bind(&task.params)
-    .bind(&task.context)
+    .bind(task.params.clone())
+    .bind(task.context.clone())
     .bind(task.attempt as i16)
     .bind(task.timeout_ms)
     .bind(task.state.to_string())
     .bind(i64::try_from(task.claim_epoch).unwrap_or(i64::MAX))
-    .bind(&task.resume_checkpoint)
+    .bind(task.resume_checkpoint.clone())
     .bind(i64::try_from(task.checkpoint_seq).unwrap_or(i64::MAX))
     .bind(task.created_at)
-    .execute(&store.pool)
-    .await?;
+    .bind(
+        task.effect_id
+            .map(orch8_types::continuity::EffectId::into_uuid),
+    )
+    .bind(
+        task.continuity_epoch
+            .map(|epoch| i64::try_from(epoch).unwrap_or(i64::MAX)),
+    )
+    .bind(task.carries_credentials)
+    .bind(awaiting_dispatch))
+}
+
+pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result<(), StorageError> {
+    insert_task_query(task, false)?.execute(&store.pool).await?;
     Ok(())
 }
 
@@ -86,13 +117,11 @@ pub(super) async fn get(
     store: &PostgresStorage,
     task_id: Uuid,
 ) -> Result<Option<WorkerTask>, StorageError> {
-    let row = sqlx::query_as::<_, WorkerTaskRow>(
-        r"SELECT id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
-                 attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
-                 claim_epoch, resume_checkpoint, checkpoint_seq,
-                 completed_at, output, error_message, error_retryable, created_at
-          FROM worker_tasks WHERE id = $1",
-    )
+    let row = sqlx::query_as::<_, WorkerTaskRow>(concat!(
+        "SELECT ",
+        worker_task_columns!(),
+        " FROM worker_tasks WHERE id = $1"
+    ))
     .bind(task_id)
     .fetch_optional(&store.pool)
     .await?;
@@ -107,21 +136,21 @@ pub(super) async fn claim(
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let mut tx = store.pool.begin().await?;
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
-        r"UPDATE worker_tasks
+        concat!(r"UPDATE worker_tasks
           SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(),
-              claim_epoch = claim_epoch + 1
+              claim_epoch = claim_epoch + 1, lease_secs = NULL, claimed_runtime_kind = NULL
           WHERE id IN (
               SELECT id FROM worker_tasks
-              WHERE handler_name = $1 AND state = 'pending' AND requirements = '{}'::jsonb
+              WHERE handler_name = $1 AND state = 'pending' AND NOT awaiting_dispatch
+                AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $2 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))
               ORDER BY created_at
               LIMIT $3
               FOR UPDATE SKIP LOCKED
           )
-          RETURNING id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
-                    attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
-                    claim_epoch, resume_checkpoint, checkpoint_seq,
-                    completed_at, output, error_message, error_retryable, created_at",
+          RETURNING ",
+            worker_task_columns!()
+        ),
     )
     .bind(handler_name)
     .bind(worker_id)
@@ -163,27 +192,26 @@ pub(super) async fn claim_for_tenant(
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let mut tx = store.pool.begin().await?;
-    let rows = sqlx::query_as::<_, WorkerTaskRow>(
+    let rows = sqlx::query_as::<_, WorkerTaskRow>(concat!(
         r"UPDATE worker_tasks
           SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(),
-              claim_epoch = claim_epoch + 1
+              claim_epoch = claim_epoch + 1, lease_secs = NULL, claimed_runtime_kind = NULL
           WHERE id IN (
               SELECT wt.id FROM worker_tasks wt
               JOIN task_instances ti ON ti.id = wt.instance_id
               WHERE wt.handler_name = $1
                 AND wt.state = 'pending'
-                AND wt.requirements = '{}'::jsonb
+                AND NOT wt.awaiting_dispatch
+                AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND ti.tenant_id = $4
                 AND ti.state NOT IN ('completed', 'failed', 'cancelled')
               ORDER BY wt.created_at
               LIMIT $3
               FOR UPDATE OF wt SKIP LOCKED
           )
-          RETURNING id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
-                    attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
-                    claim_epoch, resume_checkpoint, checkpoint_seq,
-                    completed_at, output, error_message, error_retryable, created_at",
-    )
+          RETURNING ",
+        worker_task_columns!()
+    ))
     .bind(handler_name)
     .bind(worker_id)
     .bind(i64::from(limit))
@@ -214,6 +242,7 @@ pub(super) async fn claim_for_tenant(
 /// Upper bound on pending rows one `claim_matching` poll inspects.
 const CLAIM_MATCHING_MAX_SCAN: usize = 4096;
 
+#[allow(clippy::too_many_lines)] // two-phase scan + fenced claim reads best as one unit
 pub(super) async fn claim_matching(
     store: &PostgresStorage,
     handler_name: &str,
@@ -241,7 +270,7 @@ pub(super) async fn claim_matching(
     let mut scanned = 0usize;
     while ids.len() < want && scanned < CLAIM_MATCHING_MAX_SCAN {
         let mut query = sqlx::QueryBuilder::<Postgres>::new(
-            "SELECT wt.id, wt.created_at, wt.requirements FROM worker_tasks wt",
+            "SELECT wt.id, wt.created_at, wt.requirements, wt.carries_credentials FROM worker_tasks wt",
         );
         if tenant_id.is_some() {
             query.push(" JOIN task_instances ti ON ti.id = wt.instance_id");
@@ -249,7 +278,9 @@ pub(super) async fn claim_matching(
         query
             .push(" WHERE wt.handler_name = ")
             .push_bind(handler_name);
-        query.push(" AND wt.state = 'pending'");
+        // A retry row is claimable only once its re-dispatch bound the
+        // attempt's effect id (see `insert_task_query`).
+        query.push(" AND wt.state = 'pending' AND NOT wt.awaiting_dispatch");
         // Never hand out work for an instance that already finished or was
         // cancelled (its tasks are purged on cancel, but a racing dispatch
         // or an older row may remain).
@@ -271,20 +302,25 @@ pub(super) async fn claim_matching(
                 .push(")");
         }
         query.push(" ORDER BY wt.created_at, wt.id LIMIT 256");
-        let page: Vec<(Uuid, chrono::DateTime<chrono::Utc>, serde_json::Value)> =
+        let page: Vec<(Uuid, chrono::DateTime<chrono::Utc>, serde_json::Value, bool)> =
             query.build_query_as().fetch_all(&store.pool).await?;
-        let Some(&(last_id, last_created_at, _)) = page.last() else {
+        let Some(&(last_id, last_created_at, _, _)) = page.last() else {
             break;
         };
         scanned += page.len();
         cursor = Some((last_created_at, last_id));
-        for (id, _, requirements) in page {
+        for (id, _, requirements, carries_credentials) in page {
             if ids.len() >= want {
                 break;
             }
             let requirements: orch8_types::continuity::CapsuleRequirements =
                 serde_json::from_value(requirements).map_err(StorageError::Serialization)?;
-            if requirements.is_satisfied_by(capabilities, now) {
+            if orch8_types::worker::claim_allowed(
+                &requirements,
+                carries_credentials,
+                capabilities,
+                now,
+            ) {
                 ids.push(id);
             }
         }
@@ -295,24 +331,30 @@ pub(super) async fn claim_matching(
     // Phase 2: lock only the chosen rows (re-checking `pending`, since the
     // scan was unlocked) and claim at most `limit` of them, oldest first.
     let mut tx = store.pool.begin().await?;
-    let rows = sqlx::query_as::<_, WorkerTaskRow>(
+    let rows = sqlx::query_as::<_, WorkerTaskRow>(concat!(
         r"UPDATE worker_tasks SET state='claimed', worker_id=$1, claimed_at=NOW(),
-             heartbeat_at=NOW(), claim_epoch=claim_epoch+1
+             heartbeat_at=NOW(), claim_epoch=claim_epoch+1,
+             lease_secs=$4, claimed_runtime_kind=$5
            WHERE id IN (
              SELECT id FROM worker_tasks
-             WHERE id = ANY($2) AND state = 'pending'
+             WHERE id = ANY($2) AND state = 'pending' AND NOT awaiting_dispatch
              ORDER BY created_at, id
              LIMIT $3
              FOR UPDATE SKIP LOCKED
            )
-           RETURNING id, instance_id, block_id, handler_name, queue_name, requirements,
-             params, context, attempt, timeout_ms, state, worker_id, claimed_at,
-             heartbeat_at, claim_epoch, resume_checkpoint, checkpoint_seq, completed_at,
-             output, error_message, error_retryable, created_at",
-    )
+           RETURNING ",
+        worker_task_columns!()
+    ))
     .bind(worker_id)
     .bind(&ids)
     .bind(i64::from(limit))
+    .bind(
+        capabilities
+            .kind
+            .default_lease_secs()
+            .map(|secs| secs as i32),
+    )
+    .bind(capabilities.kind.as_str())
     .fetch_all(&mut *tx)
     .await?;
     let tasks = rows
@@ -529,15 +571,25 @@ pub(super) async fn reap_stale(
                 -- time (a row with neither is reclaimable at once); a bare
                 -- `heartbeat_at < cutoff` never matched NULL, so such rows
                 -- were stranded forever on PG while SQLite reclaimed them.
+                -- The per-claim lease (browser/mobile) wins over the default.
                 AND (COALESCE(heartbeat_at, claimed_at) IS NULL
                      OR COALESCE(heartbeat_at, claimed_at)
-                        < NOW() - make_interval(secs => $1::double precision))
+                        < NOW() - make_interval(secs => COALESCE(lease_secs::double precision, $1::double precision)))
+                -- Never blindly requeue a task whose side effect may already
+                -- have happened: those go through the engine's
+                -- ambiguous-effect resolution instead.
+                AND NOT EXISTS (
+                    SELECT 1 FROM effect_receipts er
+                    WHERE er.id = worker_tasks.effect_id
+                      AND er.state IN ('dispatched', 'unknown')
+                )
               ORDER BY COALESCE(heartbeat_at, claimed_at) ASC NULLS FIRST
               LIMIT $2
               FOR UPDATE SKIP LOCKED
           )
           UPDATE worker_tasks wt
-          SET state = 'pending', worker_id = NULL, claimed_at = NULL, heartbeat_at = NULL
+          SET state = 'pending', worker_id = NULL, claimed_at = NULL, heartbeat_at = NULL,
+              lease_secs = NULL, claimed_runtime_kind = NULL
           FROM stale
           WHERE wt.id = stale.id
           RETURNING wt.id, stale.claim_epoch, stale.worker_id",
@@ -598,6 +650,180 @@ pub(super) async fn expire_timed_out(store: &PostgresStorage) -> Result<u64, Sto
     Ok(rows.len() as u64)
 }
 
+pub(super) async fn list_expired_leases(
+    store: &PostgresStorage,
+    default_lease: Duration,
+    limit: u32,
+) -> Result<Vec<WorkerTask>, StorageError> {
+    let rows = sqlx::query_as::<_, WorkerTaskRow>(concat!(
+        "SELECT ",
+        worker_task_columns!(),
+        r" FROM worker_tasks
+           WHERE state = 'claimed'
+             AND (COALESCE(heartbeat_at, claimed_at) IS NULL
+                  OR COALESCE(heartbeat_at, claimed_at)
+                     < NOW() - make_interval(secs => COALESCE(lease_secs::double precision, $1::double precision)))
+           ORDER BY COALESCE(heartbeat_at, claimed_at) ASC NULLS FIRST
+           LIMIT $2"
+    ))
+    .bind(default_lease.as_secs_f64())
+    .bind(i64::from(limit).min(REAPER_BATCH_SIZE))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.into_iter().map(WorkerTaskRow::into_task).collect()
+}
+
+pub(super) async fn list_timed_out(
+    store: &PostgresStorage,
+    limit: u32,
+) -> Result<Vec<WorkerTask>, StorageError> {
+    let rows = sqlx::query_as::<_, WorkerTaskRow>(concat!(
+        "SELECT ",
+        worker_task_columns!(),
+        r" FROM worker_tasks
+           WHERE state IN ('pending', 'claimed')
+             AND timeout_ms IS NOT NULL
+             AND created_at + make_interval(secs => timeout_ms::double precision / 1000.0) < NOW()
+           ORDER BY created_at ASC
+           LIMIT $1"
+    ))
+    .bind(i64::from(limit).min(REAPER_BATCH_SIZE))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.into_iter().map(WorkerTaskRow::into_task).collect()
+}
+
+/// Apply one fenced worker-task resolution atomically. See
+/// `WorkerStore::resolve_worker_task`.
+#[allow(clippy::too_many_lines)] // one transaction: fence, action, evidence
+pub(super) async fn resolve(
+    store: &PostgresStorage,
+    resolution: &orch8_types::worker::WorkerTaskResolution,
+) -> Result<bool, StorageError> {
+    use orch8_types::worker::WorkerTaskResolutionAction as Action;
+
+    let expected_epoch = i64::try_from(resolution.expected_claim_epoch).unwrap_or(i64::MAX);
+    let mut tx = store.pool.begin().await?;
+    let fence = " WHERE id = $1 AND state = $2 AND claim_epoch = $3 \
+                  AND ($4::text IS NULL OR worker_id = $4)";
+    let affected = match &resolution.action {
+        Action::Requeue => sqlx::query(&format!(
+            "UPDATE worker_tasks SET state = 'pending', worker_id = NULL, claimed_at = NULL, \
+                 heartbeat_at = NULL, lease_secs = NULL, claimed_runtime_kind = NULL{fence}"
+        ))
+        .bind(resolution.task_id)
+        .bind(resolution.expected_state.to_string())
+        .bind(expected_epoch)
+        .bind(resolution.expected_worker_id.as_deref())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected(),
+        Action::Retry { .. } => sqlx::query(&format!("DELETE FROM worker_tasks{fence}"))
+            .bind(resolution.task_id)
+            .bind(resolution.expected_state.to_string())
+            .bind(expected_epoch)
+            .bind(resolution.expected_worker_id.as_deref())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+        Action::FailNode { .. } | Action::FailInstance | Action::FailTaskOnly => {
+            sqlx::query(&format!(
+                "UPDATE worker_tasks SET state = 'failed', error_message = $5, \
+                 error_retryable = $6, completed_at = NOW(){fence}"
+            ))
+            .bind(resolution.task_id)
+            .bind(resolution.expected_state.to_string())
+            .bind(expected_epoch)
+            .bind(resolution.expected_worker_id.as_deref())
+            .bind(&resolution.reason)
+            .bind(resolution.retryable)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+        }
+    };
+    if affected != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let instance_id = resolution.instance_id.into_uuid();
+    match &resolution.action {
+        Action::Requeue | Action::FailTaskOnly => {}
+        Action::Retry {
+            retry_task,
+            node_id,
+            fire_at,
+        } => {
+            insert_task_query(retry_task, true)?
+                .execute(&mut *tx)
+                .await?;
+            if let Some(node_id) = node_id {
+                sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = $1")
+                    .bind(node_id.into_uuid())
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            schedule_live_instance(&mut tx, instance_id, *fire_at).await?;
+        }
+        Action::FailNode { node_id, fire_at } => {
+            if let Some(node_id) = node_id {
+                sqlx::query(
+                "UPDATE execution_tree SET state = 'failed', completed_at = COALESCE(completed_at, NOW()) \
+                 WHERE id = $1 AND state IN ('running', 'waiting')",
+            )
+            .bind(node_id.into_uuid())
+            .execute(&mut *tx)
+            .await?;
+            }
+            schedule_live_instance(&mut tx, instance_id, *fire_at).await?;
+        }
+        Action::FailInstance => {
+            sqlx::query(
+                "UPDATE task_instances SET state = 'failed', next_fire_at = NULL, updated_at = NOW() \
+                 WHERE id = $1 AND state NOT IN ('completed', 'failed', 'cancelled')",
+            )
+            .bind(instance_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    insert_attempt_events(
+        &mut tx,
+        &[transition_event(
+            resolution.task_id,
+            resolution.expected_claim_epoch,
+            resolution
+                .holder_worker_id
+                .clone()
+                .or_else(|| resolution.expected_worker_id.clone()),
+            resolution.event,
+            Some(resolution.reason.clone()),
+        )],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Wake a non-terminal, non-paused instance so the evaluator observes a
+/// resolved worker step. A paused instance stays paused (its resume path
+/// re-schedules it); a terminal one is never resurrected.
+async fn schedule_live_instance(
+    tx: &mut Transaction<'_, Postgres>,
+    instance_id: Uuid,
+    fire_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE task_instances SET state = 'scheduled', next_fire_at = $2, updated_at = NOW() \
+         WHERE id = $1 AND state NOT IN ('completed', 'failed', 'cancelled', 'paused')",
+    )
+    .bind(instance_id)
+    .bind(fire_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn retry(
     store: &PostgresStorage,
     old_task_id: Uuid,
@@ -613,30 +839,7 @@ pub(super) async fn retry(
         .execute(&mut *tx)
         .await?;
 
-    sqlx::query(
-        r"INSERT INTO worker_tasks
-            (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
-             attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-          ON CONFLICT (instance_id, block_id) DO NOTHING",
-    )
-    .bind(new_task.id)
-    .bind(new_task.instance_id.into_uuid())
-    .bind(new_task.block_id.as_str())
-    .bind(&new_task.handler_name)
-    .bind(&new_task.queue_name)
-    .bind(serde_json::to_value(&new_task.requirements)?)
-    .bind(&new_task.params)
-    .bind(&new_task.context)
-    .bind(new_task.attempt as i16)
-    .bind(new_task.timeout_ms)
-    .bind(new_task.state.to_string())
-    .bind(i64::try_from(new_task.claim_epoch).unwrap_or(i64::MAX))
-    .bind(&new_task.resume_checkpoint)
-    .bind(i64::try_from(new_task.checkpoint_seq).unwrap_or(i64::MAX))
-    .bind(new_task.created_at)
-    .execute(&mut *tx)
-    .await?;
+    insert_task_query(new_task, true)?.execute(&mut *tx).await?;
 
     if let Some(nid) = node_id {
         sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = $1")
@@ -728,13 +931,11 @@ pub(super) async fn list(
     filter: &orch8_types::worker_filter::WorkerTaskFilter,
     pagination: &orch8_types::filter::Pagination,
 ) -> Result<Vec<WorkerTask>, StorageError> {
-    let mut qb = sqlx::QueryBuilder::new(
-        r"SELECT id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
-                 attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
-                 claim_epoch, resume_checkpoint, checkpoint_seq,
-                 completed_at, output, error_message, error_retryable, created_at
-           FROM worker_tasks WHERE 1=1",
-    );
+    let mut qb = sqlx::QueryBuilder::new(concat!(
+        "SELECT ",
+        worker_task_columns!(),
+        " FROM worker_tasks WHERE 1=1"
+    ));
     apply_worker_task_filter(&mut qb, filter);
     if pagination.sort_ascending {
         qb.push(" ORDER BY created_at ASC");
@@ -835,6 +1036,10 @@ fn apply_worker_task_filter<'a>(
     }
     if let Some(ref queue) = filter.queue_name {
         qb.push(" AND queue_name = ").push_bind(queue);
+    }
+    if let Some(instance_id) = filter.instance_id {
+        qb.push(" AND instance_id = ")
+            .push_bind(instance_id.into_uuid());
     }
 }
 

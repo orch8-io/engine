@@ -1,0 +1,160 @@
+# Hybrid GPU executor template. See README.md.
+#
+#   Mode A — Orch8 Cloud (or any remote control plane) + local GPU worker:
+#     ORCH8_URL=https://<your-control-plane>/api/v1 ORCH8_API_KEY=... ORCH8_TENANT_ID=... \
+#       docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+#   Mode B — everything local (self-hosted control + executor node + GPU worker):
+#     ORCH8_API_KEY=$(openssl rand -hex 32) ORCH8_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+#       docker compose --profile local-control up -d
+#
+#   vLLM instead of Ollama (needs an NVIDIA GPU):
+#     LLM_BASE_URL=http://vllm:8000/v1 LLM_MODEL=Qwen/Qwen2.5-0.5B-Instruct \
+#       docker compose --profile vllm up -d vllm gpu-worker
+#
+# Pin every image to an exact tag or digest before production use.
+name: orch8-hybrid-gpu
+
+services:
+  # ── Model server (OpenAI-compatible) ───────────────────────────────────────
+  ollama:
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    # Not published: only the worker on this host talks to the model.
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ollama-pull:
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-latest}
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${LLM_MODEL:-llama3.2:1b}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  vllm:
+    profiles: ["vllm"]
+    image: vllm/vllm-openai:${VLLM_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["--model", "${LLM_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}", "--max-model-len", "8192"]
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── The GPU handler: polls the control plane, calls the local model ────────
+  gpu-worker:
+    image: python:3.12-slim
+    restart: unless-stopped
+    command: ["python", "-u", "/app/gpu_worker.py"]
+    volumes:
+      - ./worker/gpu_worker.py:/app/gpu_worker.py:ro
+    environment:
+      # Mode A: your control plane. Mode B default: the local control node.
+      ORCH8_URL: ${ORCH8_URL:-http://orch8-control:8080/api/v1}
+      ORCH8_API_KEY: ${ORCH8_API_KEY:?set ORCH8_API_KEY (worker key for your tenant)}
+      ORCH8_TENANT_ID: ${ORCH8_TENANT_ID:-demo}
+      # Stable identity across restarts (runtime_id == worker_id). Generate once: uuidgen
+      ORCH8_WORKER_ID: ${ORCH8_WORKER_ID:-}
+      ORCH8_HARDWARE: gpu
+      ORCH8_WORKER_LABELS: gpu=true
+      ORCH8_REGION: ${ORCH8_REGION:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-llama3.2:1b}
+      WORKER_SLOTS: ${WORKER_SLOTS:-2}
+    read_only: true
+    user: "65534:65534"
+    stop_grace_period: 120s
+
+  # ── Mode B only: a self-hosted control plane for local testing ─────────────
+  postgres:
+    profiles: ["local-control"]
+    image: postgres:16
+    environment:
+      POSTGRES_DB: orch8
+      POSTGRES_USER: orch8
+      POSTGRES_PASSWORD: orch8-local-only
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orch8"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  orch8-control:
+    profiles: ["local-control"]
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # ORCH8_API_KEY and ORCH8_ENCRYPTION_KEY are required; the engine refuses to start without them.
+      ORCH8_NODE_ROLE: control
+      ORCH8_STORAGE_BACKEND: postgres
+      ORCH8_DATABASE_URL: postgres://orch8:orch8-local-only@postgres:5432/orch8
+      ORCH8_RUN_MIGRATIONS: "true"
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+      ORCH8_GRPC_ADDR: 0.0.0.0:50051
+      ORCH8_API_KEY: ${ORCH8_API_KEY:-}
+      ORCH8_ENCRYPTION_KEY: ${ORCH8_ENCRYPTION_KEY:-}
+      ORCH8_REQUIRE_TENANT_HEADER: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  # Engine-only node: runs the scheduler against the shared database and
+  # dispatches `gpu_llm_generate` steps to the worker queue.
+  orch8-executor:
+    profiles: ["local-control"]
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      ORCH8_NODE_ROLE: executor
+      ORCH8_STORAGE_BACKEND: postgres
+      ORCH8_DATABASE_URL: postgres://orch8:orch8-local-only@postgres:5432/orch8
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+      ORCH8_GRPC_ADDR: 0.0.0.0:50051
+      ORCH8_API_KEY: ${ORCH8_API_KEY:-}
+      ORCH8_ENCRYPTION_KEY: ${ORCH8_ENCRYPTION_KEY:-}
+      ORCH8_REQUIRE_TENANT_HEADER: "true"
+    depends_on:
+      orch8-control:
+        condition: service_healthy
+
+  # ── Contract §5 (requires an engine with `orch8 executor join`) ────────────
+  # Joins this GPU host to an Orch8 Cloud control plane as a labelled executor
+  # using a join token issued by Cloud. Not needed for Mode A's worker path.
+  orch8-executor-join:
+    profiles: ["executor-join"]
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/orch8"]
+    command: ["executor", "join", "--label", "gpu=true", "--config-out", "/tmp/orch8.toml", "--run"]
+    environment:
+      ORCH8_JOIN_TOKEN: ${ORCH8_JOIN_TOKEN:-}
+
+volumes:
+  ollama-models:
+  hf-cache:
+  pgdata:

@@ -161,4 +161,48 @@ class JsonBridgeBackendTest {
         val args = bridge.calls.last { it.first == "sync" }.second
         assertTrue(args["useTokenSource"]!!.jsonPrimitive.content.toBoolean())
     }
+
+    @Test
+    fun runtimeNodeMethodsUseTheBridgeProtocol() {
+        val (bridge, backend) = open()
+        bridge.replies["registerNode"] =
+            """{"ok":{"runtimeId":"rt","deviceId":"dev-1","handlers":["scan"],"expiresAt":"e"}}"""
+        bridge.replies["runWorkerWindow"] =
+            """{"ok":{"claimed":2,"completed":1,"failed":1,"stillRunning":0,"budgetExhausted":true}}"""
+        bridge.replies["workerStats"] =
+            """{"ok":{"running":true,"inFlight":1,"claimed":5,"completed":3,"failed":1,"released":1,"lost":0}}"""
+        bridge.replies["onPushWake"] = """{"ok":true}"""
+        bridge.replies["nodeRuntimeId"] = """{"ok":"rt"}"""
+
+        val reg = backend.registerNode(
+            NodeCapabilities(hardware = listOf("camera"), connectivity = NodeConnectivity.WIFI, batteryPercent = 42),
+        )
+        assertEquals(listOf("scan"), reg.handlers)
+        val caps = bridge.calls.last { it.first == "registerNode" }.second["capabilities"]!!.jsonObject
+        assertEquals("wifi", caps["connectivity"]!!.jsonPrimitive.content)
+        assertEquals("42", caps["batteryPercent"]!!.jsonPrimitive.content)
+        assertEquals("camera", caps["hardware"]!!.toString().trim('[', ']', '"'))
+
+        backend.startWorker(WorkerOptions(maxConcurrentTasks = 3))
+        val opts = bridge.calls.last { it.first == "startWorker" }.second
+        assertEquals("3", opts["maxConcurrentTasks"]!!.jsonPrimitive.content)
+        assertEquals("15000", opts["idlePollIntervalMs"]!!.jsonPrimitive.content)
+
+        assertTrue(backend.runWorkerWindow(20_000).budgetExhausted)
+        assertEquals(5L, backend.workerStats().claimed)
+        assertTrue(backend.onPushWake("""{"task_id":"t"}"""))
+        assertEquals("rt", backend.nodeRuntimeId())
+
+        backend.updateNodeStatus(null, 10)
+        val status = bridge.calls.last { it.first == "updateNodeStatus" }.second
+        assertEquals("null", status["connectivity"].toString())
+
+        bridge.replies["workerStats"] = """{"ok":{"running":true}}"""
+        assertEquals(Orch8ErrorKind.ENGINE, assertFailsWith<Orch8Exception> { backend.workerStats() }.kind)
+        bridge.replies["registerNode"] = BridgeCodec.error("InvalidInput", "sync not configured")
+        assertEquals(
+            Orch8ErrorKind.INVALID_INPUT,
+            assertFailsWith<Orch8Exception> { backend.registerNode(NodeCapabilities()) }.kind,
+        )
+    }
 }

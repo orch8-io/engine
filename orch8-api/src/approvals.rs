@@ -224,7 +224,7 @@ fn default_yes_no_choices() -> Vec<HumanChoice> {
 }
 
 /// Build an `ApprovalItem` directly from a step definition (flat-path, no tree node).
-fn build_item_from_step(
+pub(crate) fn build_item_from_step(
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
@@ -263,7 +263,7 @@ fn build_item_from_step(
 
 /// Build an `ApprovalItem` if this (instance, node) pair represents a step
 /// currently paused on `wait_for_input`. Returns None otherwise.
-fn try_build_item(
+pub(crate) fn try_build_item(
     instance: &orch8_types::instance::TaskInstance,
     node: &orch8_types::execution::ExecutionNode,
     sequence: &orch8_types::sequence::SequenceDefinition,
@@ -436,6 +436,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -453,6 +455,8 @@ mod tests {
 
     fn make_sequence(step: StepDef) -> SequenceDefinition {
         SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -468,6 +472,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: Utc::now(),
         }
     }
@@ -475,6 +480,7 @@ mod tests {
     fn make_instance(sequence_id: SequenceId) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id,
             tenant_id: TenantId::unchecked("t1"),

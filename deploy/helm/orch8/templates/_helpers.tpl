@@ -99,6 +99,17 @@ aborts install/template with an actionable message.
     {{- fail "secrets.encryptionKey must be exactly 64 hex characters (openssl rand -hex 32)." -}}
   {{- end -}}
 {{- end -}}
+{{- if eq $v.mode "executor" -}}
+  {{- if not $v.hybrid.joinToken.existingSecret -}}
+    {{- fail "mode=executor requires hybrid.joinToken.existingSecret (a Secret holding the o8x1 join token from the Orch8 Cloud console)." -}}
+  {{- end -}}
+  {{- if $v.ingress.enabled -}}
+    {{- fail "mode=executor serves no HTTP API (health only); disable ingress." -}}
+  {{- end -}}
+{{- end -}}
+{{- if and $v.cloudObservability.enabled (not $v.cloudObservability.existingSecret) -}}
+  {{- fail "cloudObservability.enabled requires cloudObservability.existingSecret with the ingest API key." -}}
+{{- end -}}
 {{- if and $v.gateway.enabled (not $v.gateway.tls.existingSecret) -}}
   {{- fail "gateway.enabled requires gateway.tls.existingSecret with the gRPC server cert, key and client CA." -}}
 {{- end -}}
@@ -164,6 +175,28 @@ aborts install/template with an actionable message.
 {{- if $v.config.corsOrigins }}
 - name: ORCH8_CORS_ORIGINS
   value: {{ $v.config.corsOrigins | quote }}
+{{- end }}
+{{- if and (eq $v.mode "executor") (eq .role "executor") }}
+- name: ORCH8_JOIN_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ $v.hybrid.joinToken.existingSecret }}
+      key: {{ $v.hybrid.joinToken.key }}
+- name: HOSTNAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
+{{- end }}
+{{- if $v.cloudObservability.enabled }}
+- name: ORCH8_CLOUD_OBSERVABILITY_ENDPOINT
+  value: {{ $v.cloudObservability.endpoint | quote }}
+- name: ORCH8_CLOUD_OBSERVABILITY_ENGINE_ID
+  value: {{ default (include "orch8.fullname" $root) $v.cloudObservability.engineId | quote }}
+- name: ORCH8_CLOUD_OBSERVABILITY_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ $v.cloudObservability.existingSecret }}
+      key: {{ $v.cloudObservability.apiKeyKey }}
 {{- end }}
 {{- with $v.extraEnv }}
 {{ toYaml . }}
