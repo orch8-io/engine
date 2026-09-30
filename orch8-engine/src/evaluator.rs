@@ -1320,6 +1320,40 @@ pub async fn fail_node(
     Ok(())
 }
 
+/// Check if all child nodes of a parent (optionally filtered by branch index) are in a terminal state.
+/// This avoids allocating an intermediate Vec compared to calling `children_of` followed by `all_terminal`.
+pub fn all_children_terminal(
+    tree: &[ExecutionNode],
+    parent_id: ExecutionNodeId,
+    branch_index: Option<i16>,
+) -> bool {
+    // If there are no children matching the criteria, we consider them "all terminal" (vacuously true).
+    let mut has_children = false;
+    let all_terminal = tree
+        .iter()
+        .filter(|n| {
+            n.parent_id == Some(parent_id)
+                && (branch_index.is_none() || n.branch_index == branch_index)
+        })
+        .inspect(|_| has_children = true)
+        .all(|n| n.state.is_terminal());
+    !has_children || all_terminal
+}
+
+/// Check if any child node of a parent (optionally filtered by branch index) failed.
+/// This avoids allocating an intermediate Vec compared to calling `children_of` followed by `any_failed`.
+pub fn any_child_failed(
+    tree: &[ExecutionNode],
+    parent_id: ExecutionNodeId,
+    branch_index: Option<i16>,
+) -> bool {
+    tree.iter().any(|n| {
+        n.parent_id == Some(parent_id)
+            && (branch_index.is_none() || n.branch_index == branch_index)
+            && n.state == NodeState::Failed
+    })
+}
+
 /// Get child nodes for a parent, optionally filtered by branch index.
 pub fn children_of(
     tree: &[ExecutionNode],
