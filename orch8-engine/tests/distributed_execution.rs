@@ -145,6 +145,12 @@ fn browser_caps(runtime_id: RuntimeId, handler: &str) -> RuntimeCapabilities {
     }
 }
 
+/// Serializes the tests that reap with a zero default lease: on the shared
+/// Postgres table such a reaper expires *every* claimed task, so it could
+/// resolve another scenario's task between its claim and its next step
+/// (e.g. before a checkpoint lands).
+static ZERO_LEASE_REAPER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn claim(storage: &Arc<dyn StorageBackend>, task: &WorkerTask) -> WorkerTask {
     // Claim this exact row: other parallel tests share the Postgres table, so
     // target it through a unique handler name per scenario.
@@ -192,6 +198,7 @@ async fn dispatch_binds_effect_id_and_ownership_epoch() {
 
 #[tokio::test]
 async fn lease_expiry_with_side_effect_goes_unknown_and_fails_node() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.charge");
         let (seq, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
@@ -234,6 +241,7 @@ async fn lease_expiry_with_side_effect_goes_unknown_and_fails_node() {
 
 #[tokio::test]
 async fn lease_expiry_with_retry_policy_schedules_a_fresh_attempt() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.charge");
         let (seq, inst) = start(&storage, vec![mk_step_with_retry("charge", &handler, 3)]).await;
@@ -301,6 +309,7 @@ async fn lease_expiry_with_retry_policy_schedules_a_fresh_attempt() {
 
 #[tokio::test]
 async fn pure_task_lease_expiry_requeues() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let (_, inst) = start(&storage, vec![mk_step("noop", "noop")]).await;
         let handler = unique_handler("pure");
@@ -459,6 +468,7 @@ async fn claimant_kind_sets_the_per_task_lease() {
 
 #[tokio::test]
 async fn legacy_reaper_never_requeues_an_ambiguous_side_effect() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.charge");
         let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
@@ -956,6 +966,7 @@ async fn placed_step_dispatches_remotely_even_when_handler_is_local() {
 
 #[tokio::test]
 async fn targeted_task_is_a_per_node_mailbox() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.capture");
         let device = caps_of(RuntimeKind::Mobile, &handler);
@@ -1497,6 +1508,7 @@ async fn expired_delegation_integrates_a_failure_without_failing_the_parent() {
 
 #[tokio::test]
 async fn checkpointed_activity_resumes_on_lease_expiry_with_unknown_receipt() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.batch");
         let (_, inst) = start(&storage, vec![mk_step("batch", &handler)]).await;
