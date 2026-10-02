@@ -317,6 +317,8 @@ fn run(backend: &Backend) {
             ("site".into(), "vpc".into()),
         ]),
         region: Some("eu-central-1".into()),
+        api_url: None,
+        headers: BTreeMap::new(),
     };
     let encoded = token.encode();
     let bucket = dir.path().join("customer-bucket");

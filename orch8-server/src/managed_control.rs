@@ -31,6 +31,9 @@ pub(crate) struct ManagedControlConfig {
     /// PEM bundle trusted instead of the public web PKI roots
     /// (`[executor] ca_cert_path`).
     pub ca_pem: Option<Vec<u8>>,
+    /// Routing headers sent as metadata on the session
+    /// (`node.managed_control_headers`).
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 fn client_frame(payload: ClientPayload) -> WorkerStreamClient {
@@ -133,6 +136,8 @@ async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken
         .await
         .context("queue managed control open")?;
     let mut request = Request::new(tokio_stream::wrappers::ReceiverStream::new(receiver));
+    orch8_grpc::worker_client::insert_routing_metadata(request.metadata_mut(), &config.headers)
+        .map_err(anyhow::Error::msg)?;
     request.metadata_mut().insert(
         "x-api-key",
         MetadataValue::try_from(config.api_key.expose()).context("managed API key is not ASCII")?,
@@ -263,6 +268,7 @@ mod tests {
             region: None,
             kind: RuntimeKind::Edge,
             ca_pem: None,
+            headers: std::collections::BTreeMap::new(),
         };
         let value = serde_json::to_value(safe_capabilities(&config, false)).unwrap();
         let rendered = value.to_string();

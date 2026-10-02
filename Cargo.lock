@@ -3321,6 +3321,8 @@ version = "0.7.1"
 dependencies = [
  "axum",
  "chrono",
+ "hyper",
+ "hyper-util",
  "orch8",
  "orch8-api",
  "orch8-engine",

@@ -60,6 +60,28 @@ The token is a **secret** (it carries a dedicated API key) and is unsigned: the
 engine authenticates the key; the token only carries it. The key needs the
 `worker` capability (worker endpoints plus `POST /runtimes/register`).
 
+Two optional **routing** fields (no version bump; older executors ignore them,
+and tokens without them encode exactly as before):
+
+- `api_url`: the REST base for the HTTP polling fallback when it is not
+  `<endpoint>/api/v1`, e.g. when gRPC and REST are on different ports.
+- `headers`: routing headers sent on **every** gRPC call (metadata) and REST
+  request, e.g. a shared load balancer's instance pin. Up to 16 lowercase
+  names; credential, tenant, `grpc-*` and transport headers are refused.
+
+Orch8 Cloud's managed engines all sit behind one shared host and are reached
+only through the proxy's instance pin, so Cloud issues:
+
+```json
+{ …, "endpoint": "https://<cloud engine host>:50051",
+  "api_url": "https://<cloud engine host>/api/v1",
+  "headers": { "fly-force-instance-id": "<machine id>" } }
+```
+
+The routing header is not a secret and not a credential: a request pinned to
+another organisation's engine is authenticated by *that* engine, which has
+never seen this key, and is refused.
+
 The token is **all an executor needs**: no database, no API key of its own, no
 encryption key.
 
@@ -78,9 +100,12 @@ What happens at startup:
 1. It validates the config and opens a **managed-control** gRPC session to
    `endpoint` (ping, reload, drain).
 2. It connects to the worker protocol at the same `endpoint`: the negotiated
-   **gRPC worker stream** by default, falling back to **HTTP polling** at
-   `<endpoint>/api/v1` when the endpoint does not serve gRPC
-   (`ORCH8_EXECUTOR_TRANSPORT=auto|grpc|http`, `ORCH8_EXECUTOR_API_URL`).
+   **gRPC worker stream** by default, falling back to **HTTP polling** at the
+   token's `api_url` (default `<endpoint>/api/v1`) when the endpoint does not
+   serve gRPC or cannot be reached (for example an egress firewall that only
+   allows 443) (`ORCH8_EXECUTOR_TRANSPORT=auto|grpc|http`,
+   `ORCH8_EXECUTOR_API_URL` overrides the token). Both carry the token's
+   routing `headers`.
 3. It advertises a runtime: kind `server`, the handlers it serves, the token
    labels merged with `[node] labels` / `--label`, the token region, the
    worker name as `host:<prefix>-<hostname>`, and the ids of its local
@@ -105,7 +130,8 @@ available; LLM usage is not reported back.
 | Setting | Env | Default |
 |---|---|---|
 | `[executor] transport` | `ORCH8_EXECUTOR_TRANSPORT` | `auto` |
-| `[executor] api_url` | `ORCH8_EXECUTOR_API_URL` | `<endpoint>/api/v1` |
+| `[executor] api_url` | `ORCH8_EXECUTOR_API_URL` | token `api_url`, else `<endpoint>/api/v1` |
+| `[node] managed_control_headers` (routing headers, all requests) | via `ORCH8_JOIN_TOKEN` | token `headers` |
 | `[executor] ca_cert_path` (PEM trusted instead of public roots) | `ORCH8_EXECUTOR_CA_CERT` | public web PKI |
 | `[executor] handlers` | `ORCH8_EXECUTOR_HANDLERS` (comma-separated) | all remote-executable built-ins |
 | `[executor] max_concurrent_tasks` | `ORCH8_EXECUTOR_MAX_CONCURRENT_TASKS` | 16 |

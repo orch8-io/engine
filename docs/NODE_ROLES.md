@@ -71,6 +71,9 @@ managed_control_api_key = "replace-with-dedicated-key"
 managed_control_tenant_id = "acme"
 managed_control_worker_id = "edge-factory-1"
 managed_control_runtime_id = "018f5f2d-58ef-7a61-9b4f-21f77aa1f005"
+# Optional: routing headers sent on every gRPC call and REST request, for a
+# load balancer shared by several engines (from a join token's `headers`).
+# managed_control_headers = { "fly-force-instance-id" = "148e21ea7d9389" }
 ```
 
 An `executor` joined this way **without a `database.url`** is a *remote
