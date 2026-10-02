@@ -15,6 +15,7 @@ fn config() -> ManagedControlConfig {
         region: None,
         kind: RuntimeKind::Edge,
         ca_pem: None,
+        headers: std::collections::BTreeMap::new(),
     }
 }
 

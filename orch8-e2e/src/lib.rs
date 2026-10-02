@@ -690,6 +690,205 @@ impl Drop for TlsFront {
 }
 
 // ---------------------------------------------------------------------------
+// RoutedFront: a shared load balancer that routes by a header
+// ---------------------------------------------------------------------------
+
+/// One request seen by a [`RoutedFront`].
+#[derive(Debug, Clone)]
+pub struct RoutedHit {
+    /// `"grpc"` or `"rest"`.
+    pub listener: &'static str,
+    pub path: String,
+    /// Whether it carried the routing header with this engine's id (and was
+    /// forwarded); otherwise it was refused with 404.
+    pub routed: bool,
+}
+
+/// A stand-in for a load balancer shared by many engines (Fly's shared app):
+/// it terminates TLS, inspects HTTP, and forwards a request to this engine
+/// only when it carries `<header>: <instance>`; anything else gets 404, as
+/// if no engine matched. gRPC (`h2`, forwarded as h2c) and REST (HTTP/1.1)
+/// listen on **separate ports**, so a token needs both `endpoint` (gRPC) and
+/// `api_url` (REST).
+pub struct RoutedFront {
+    /// `https://127.0.0.1:<port>` serving gRPC (join token `endpoint`).
+    pub grpc_endpoint: String,
+    /// `https://127.0.0.1:<port>/api/v1` (join token `api_url`).
+    pub api_url: String,
+    hits: Arc<Mutex<Vec<RoutedHit>>>,
+    stop: CancellationToken,
+}
+
+type FrontClient = hyper_util::client::legacy::Client<
+    hyper_util::client::legacy::connect::HttpConnector,
+    hyper::body::Incoming,
+>;
+
+impl RoutedFront {
+    #[must_use]
+    pub fn start(cloud: &Cloud, header: &'static str, instance: &'static str) -> Self {
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let stop = CancellationToken::new();
+        let grpc_port = Self::listen(
+            cloud,
+            "grpc",
+            cloud.grpc_addr,
+            true,
+            (header, instance),
+            Arc::clone(&hits),
+            stop.clone(),
+        );
+        let rest_port = Self::listen(
+            cloud,
+            "rest",
+            cloud.http_addr(),
+            false,
+            (header, instance),
+            Arc::clone(&hits),
+            stop.clone(),
+        );
+        Self {
+            grpc_endpoint: format!("https://127.0.0.1:{grpc_port}"),
+            api_url: format!("https://127.0.0.1:{rest_port}/api/v1"),
+            hits,
+            stop,
+        }
+    }
+
+    /// Every request seen so far.
+    #[must_use]
+    pub fn hits(&self) -> Vec<RoutedHit> {
+        self.hits.lock().expect("hits").clone()
+    }
+
+    fn tls_acceptor(alpn: &[u8]) -> tokio_rustls::TlsAcceptor {
+        use tokio_rustls::rustls;
+        use tokio_rustls::rustls::pki_types::pem::PemObject as _;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+        let certs: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_file_iter(tls_fixture("server.pem"))
+                .expect("server.pem")
+                .collect::<Result<_, _>>()
+                .expect("server certificate");
+        let key = PrivateKeyDer::from_pem_file(tls_fixture("server.key")).expect("server.key");
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("tls versions")
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("tls config");
+        config.alpn_protocols = vec![alpn.to_vec()];
+        tokio_rustls::TlsAcceptor::from(Arc::new(config))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn listen(
+        cloud: &Cloud,
+        name: &'static str,
+        upstream: SocketAddr,
+        h2: bool,
+        route: (&'static str, &'static str),
+        hits: Arc<Mutex<Vec<RoutedHit>>>,
+        stop: CancellationToken,
+    ) -> u16 {
+        let acceptor = Self::tls_acceptor(if h2 { b"h2" } else { b"http/1.1" });
+        let listener = cloud
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .expect("bind routed front");
+        let port = listener.local_addr().expect("front addr").port();
+        let client: FrontClient = {
+            let mut builder =
+                hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new());
+            builder.http2_only(h2);
+            builder.build_http()
+        };
+        cloud.handle().spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    () = stop.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((tcp, _)) = accepted else { continue };
+                let (acceptor, client, hits) =
+                    (acceptor.clone(), client.clone(), Arc::clone(&hits));
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let service = hyper::service::service_fn(move |request| {
+                        Self::forward(
+                            name,
+                            upstream,
+                            route,
+                            client.clone(),
+                            Arc::clone(&hits),
+                            request,
+                        )
+                    });
+                    let _ = hyper_util::server::conn::auto::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection(hyper_util::rt::TokioIo::new(tls), service)
+                    .await;
+                });
+            }
+        });
+        port
+    }
+
+    async fn forward(
+        name: &'static str,
+        upstream: SocketAddr,
+        (header, instance): (&'static str, &'static str),
+        client: FrontClient,
+        hits: Arc<Mutex<Vec<RoutedHit>>>,
+        mut request: hyper::Request<hyper::body::Incoming>,
+    ) -> Result<hyper::Response<axum::body::Body>, std::convert::Infallible> {
+        let routed = request
+            .headers()
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+            == Some(instance);
+        hits.lock().expect("hits").push(RoutedHit {
+            listener: name,
+            path: request.uri().path().to_owned(),
+            routed,
+        });
+        let status = |code: u16| {
+            hyper::Response::builder()
+                .status(code)
+                .body(axum::body::Body::empty())
+                .expect("response")
+        };
+        if !routed {
+            return Ok(status(404));
+        }
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", hyper::http::uri::PathAndQuery::as_str)
+            .to_owned();
+        let Ok(uri) = format!("http://{upstream}{path}").parse() else {
+            return Ok(status(400));
+        };
+        *request.uri_mut() = uri;
+        match client.request(request).await {
+            Ok(response) => Ok(response.map(axum::body::Body::new)),
+            Err(_) => Ok(status(502)),
+        }
+    }
+}
+
+impl Drop for RoutedFront {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ExecutorProcess: a real `orch8-server` remote executor (no database)
 // ---------------------------------------------------------------------------
 

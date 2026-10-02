@@ -293,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
                 orch8_types::continuity::RuntimeKind::Server
             },
             ca_pem: None,
+            headers: config.node.managed_control_headers.clone(),
         })
     };
     config.node.managed_control_api_key = orch8_types::SecretString::default();
@@ -1477,7 +1478,7 @@ fn apply_join_token(config: &mut EngineConfig, raw: &str) -> anyhow::Result<()> 
         .filter(|h| !h.trim().is_empty())
         .unwrap_or_default();
     let keep_edge = config.node.role == NodeRole::Edge;
-    token.apply_to(&mut config.node, &host);
+    token.apply_to_config(config, &host);
     if keep_edge {
         config.node.role = NodeRole::Edge;
     }
@@ -2186,6 +2187,8 @@ mod tests {
             worker_id_prefix: "acme-dc1".into(),
             labels: std::collections::BTreeMap::from([("gpu".into(), "a10".into())]),
             region: Some("eu-west-1".into()),
+            api_url: None,
+            headers: std::collections::BTreeMap::new(),
         };
         let mut config = EngineConfig::default();
         apply_join_token(&mut config, &token.encode()).unwrap();
