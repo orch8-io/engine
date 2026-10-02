@@ -19,7 +19,7 @@
 //!   the unary RPCs so their precise status (stale epoch, task gone) is
 //!   observed instead of guessed.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -78,6 +78,32 @@ pub fn client_tls(ca_pem: Option<&[u8]>) -> ClientTlsConfig {
     }
 }
 
+/// Add routing headers (e.g. `fly-force-instance-id`) to outbound gRPC
+/// metadata. Names are lowercased; credentials are set separately and are
+/// never overwritten by a routing header.
+///
+/// # Errors
+/// A header name or value that is not valid gRPC ASCII metadata.
+pub fn insert_routing_metadata(
+    metadata: &mut tonic::metadata::MetadataMap,
+    headers: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (name, value) in headers {
+        let key =
+            tonic::metadata::AsciiMetadataKey::from_bytes(name.to_ascii_lowercase().as_bytes())
+                .map_err(|_| format!("routing header name `{name}` is not valid gRPC metadata"))?;
+        if key.as_str() == "x-api-key" || key.as_str() == "x-tenant-id" {
+            return Err(format!(
+                "routing header `{name}` may not override credentials"
+            ));
+        }
+        let value = MetadataValue::try_from(value.as_str())
+            .map_err(|_| format!("routing header `{name}` has a non-ASCII value"))?;
+        metadata.insert(key, value);
+    }
+    Ok(())
+}
+
 /// Connection settings of a [`GrpcLeaseTransport`].
 #[derive(Clone)]
 pub struct GrpcWorkerConfig {
@@ -91,6 +117,8 @@ pub struct GrpcWorkerConfig {
     pub ca_pem: Option<Vec<u8>>,
     /// Cancelled when the engine sends a `drain` command on this session.
     pub drain: CancellationToken,
+    /// Routing headers sent as metadata on every call (join token `headers`).
+    pub headers: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for GrpcWorkerConfig {
@@ -99,6 +127,7 @@ impl std::fmt::Debug for GrpcWorkerConfig {
             .field("endpoint", &self.endpoint)
             .field("tenant_id", &self.tenant_id)
             .field("worker_id", &self.worker_id)
+            .field("headers", &self.headers)
             .finish_non_exhaustive()
     }
 }
@@ -200,6 +229,7 @@ impl GrpcLeaseTransport {
 
     fn request<T>(&self, message: T) -> Result<Request<T>, String> {
         let mut request = Request::new(message);
+        insert_routing_metadata(request.metadata_mut(), &self.config.headers)?;
         request.metadata_mut().insert(
             "x-api-key",
             MetadataValue::try_from(self.config.api_key.expose())
@@ -661,6 +691,36 @@ mod tests {
     }
 
     #[test]
+    fn routing_metadata_is_added_but_never_overrides_credentials() {
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        insert_routing_metadata(
+            &mut metadata,
+            &BTreeMap::from([("fly-force-instance-id".into(), "148e21ea7d9389".into())]),
+        )
+        .unwrap();
+        assert_eq!(
+            metadata.get("fly-force-instance-id").unwrap(),
+            "148e21ea7d9389"
+        );
+        for name in ["x-api-key", "X-Tenant-Id"] {
+            assert!(
+                insert_routing_metadata(
+                    &mut metadata,
+                    &BTreeMap::from([(name.into(), "v".into())])
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            insert_routing_metadata(
+                &mut metadata,
+                &BTreeMap::from([("bad name".into(), "v".into())])
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn unsupported_endpoints_are_recognised() {
         assert!(status_is_unsupported(&Status::unimplemented("x")));
         assert!(status_is_unsupported(&Status::unknown(
@@ -680,6 +740,7 @@ mod tests {
             worker_id: "w".into(),
             ca_pem: None,
             drain: CancellationToken::new(),
+            headers: BTreeMap::new(),
         };
         assert!(GrpcLeaseTransport::new(config.clone()).is_ok());
         let bad = GrpcWorkerConfig {

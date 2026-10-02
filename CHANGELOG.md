@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 See [docs/HYBRID.md](docs/HYBRID.md).
 
+- **Join-token routing fields** (backward compatible, still `o8x1`): optional
+  `api_url` (REST base for the HTTP fallback when gRPC is on another port) and
+  `headers` (routing headers such as `fly-force-instance-id`, sent on every
+  gRPC call and REST request, stored as `[node] managed_control_headers`).
+  Lets executors reach engines behind a shared, header-routed load balancer
+  (Orch8 Cloud's managed engines). Older tokens parse unchanged; older
+  executors ignore the new fields.
+
 - **Remote executor mode**: an `executor` joined with a join token
   (`ORCH8_JOIN_TOKEN`, `orch8 executor join --run`) and no `database.url`
   needs nothing else — no database, API key or encryption key. It dials out

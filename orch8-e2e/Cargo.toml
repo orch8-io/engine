@@ -33,6 +33,10 @@ axum = { workspace = true }
 tracing = { workspace = true }
 # TLS front end of the in-process engine (hybrid suite).
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# Header-routing front (a shared load balancer that pins requests to one
+# engine by a routing header, like Fly's `fly-force-instance-id`).
+hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
 
 [lints]
 workspace = true

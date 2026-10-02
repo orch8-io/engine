@@ -40,6 +40,19 @@ fn api_base(config: &EngineConfig) -> String {
     }
 }
 
+/// `node.managed_control_headers` as REST headers (sent on every request).
+fn routing_header_map(config: &EngineConfig) -> anyhow::Result<reqwest::header::HeaderMap> {
+    let mut map = reqwest::header::HeaderMap::new();
+    for (name, value) in &config.node.managed_control_headers {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .with_context(|| format!("routing header name `{name}` is invalid"))?;
+        let value = reqwest::header::HeaderValue::from_str(value)
+            .with_context(|| format!("routing header `{name}` has an invalid value"))?;
+        map.insert(name, value);
+    }
+    Ok(map)
+}
+
 fn http_transport(
     config: &EngineConfig,
     identity: &ExecutorIdentity,
@@ -50,7 +63,8 @@ fn http_transport(
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
-        .http1_only();
+        .http1_only()
+        .default_headers(routing_header_map(config)?);
     if let Some(pem) = ca_pem {
         let certs = reqwest::Certificate::from_pem_bundle(pem)
             .context("executor.ca_cert_path is not a PEM certificate bundle")?;
@@ -92,6 +106,7 @@ async fn select_transport(
             worker_id: identity.worker_id(),
             ca_pem: ca_pem.map(<[u8]>::to_vec),
             drain: drain.clone(),
+            headers: config.node.managed_control_headers.clone(),
         })
         .map_err(anyhow::Error::msg)
     };
@@ -235,6 +250,7 @@ pub(crate) async fn run(mut config: EngineConfig) -> anyhow::Result<()> {
             region: (!config.node.region.trim().is_empty()).then(|| config.node.region.clone()),
             kind: orch8_types::continuity::RuntimeKind::Server,
             ca_pem: ca_pem.clone(),
+            headers: config.node.managed_control_headers.clone(),
         },
         shutdown.clone(),
     );
@@ -295,5 +311,21 @@ mod tests {
         assert_eq!(api_base(&config), "https://engine.example.com/api/v1");
         config.executor.api_url = "https://api.example.com/api/v1/".into();
         assert_eq!(api_base(&config), "https://api.example.com/api/v1");
+    }
+
+    #[test]
+    fn routing_headers_become_default_rest_headers() {
+        let mut config = EngineConfig::default();
+        config
+            .node
+            .managed_control_headers
+            .insert("fly-force-instance-id".into(), "148e21ea7d9389".into());
+        let map = routing_header_map(&config).unwrap();
+        assert_eq!(map.get("fly-force-instance-id").unwrap(), "148e21ea7d9389");
+        config
+            .node
+            .managed_control_headers
+            .insert("bad name".into(), "x".into());
+        assert!(routing_header_map(&config).is_err());
     }
 }
