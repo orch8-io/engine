@@ -2,6 +2,7 @@ pub mod alerts;
 pub mod ap_poll;
 pub mod capsule;
 pub mod circuit_breaker;
+pub mod cloud_observability;
 pub mod compensation;
 pub mod continuity;
 pub mod continuity_advanced;
@@ -9,6 +10,7 @@ pub mod credentials;
 pub mod cron;
 pub mod dataflow;
 pub mod delegation;
+pub mod receipt_bundle;
 /// Virtual time for scheduling decisions — re-exported from `orch8-types` so
 /// engine users can write `orch8_engine::clock::ManualClock`.
 pub mod clock {
@@ -22,6 +24,8 @@ pub mod event_correlation;
 pub mod explain;
 pub mod expression;
 pub mod externalized;
+pub mod failover;
+pub mod federation;
 pub mod gc;
 pub mod handlers;
 pub mod interceptors;
@@ -43,17 +47,21 @@ pub mod push;
 pub mod queue_routing;
 pub mod recovery;
 pub mod release_diff;
+pub mod remote_executor;
+pub mod remote_worker;
 pub mod required_fields;
 pub mod scheduler;
 pub mod scheduling;
 pub mod sequence_cache;
 pub mod signals;
 pub mod step_logs;
+pub mod step_placement;
 pub mod stream_bus;
 pub mod stream_windows;
 pub mod template;
 pub mod template_trace;
 pub mod tenant_budgets;
+pub mod trace_context;
 pub mod trigger_sources;
 pub mod triggers;
 pub mod webhooks;
@@ -384,6 +392,19 @@ impl Engine {
             )
             .await;
             tracing::info!("externalized gc loop exited");
+        });
+
+        // Autoscaling backlog gauges (`orch8_queue_depth{capability,region,
+        // priority_lane}`, `orch8_placement_unsatisfied`) for KEDA/HPA.
+        let backlog_storage = Arc::clone(&self.storage);
+        let backlog_cancel = self.cancel.clone();
+        set.spawn(async move {
+            step_placement::run_backlog_metrics_loop(
+                backlog_storage,
+                step_placement::BACKLOG_METRICS_INTERVAL,
+                backlog_cancel,
+            )
+            .await;
         });
 
         set

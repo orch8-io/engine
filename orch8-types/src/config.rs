@@ -148,6 +148,220 @@ pub struct EngineConfig {
     /// the `/alerts/rules` API.
     #[serde(default)]
     pub alerts: AlertsConfig,
+    /// Embedded (end-customer) surface: scoped embed tokens + CORS.
+    #[serde(default)]
+    pub embed: EmbedConfig,
+    /// Offline-verified license key (soft enforcement only).
+    #[serde(default)]
+    pub license: LicenseConfig,
+    /// Optional run-metadata export to a managed cloud (`[cloud_observability]`).
+    /// Disabled unless `endpoint` is set.
+    #[serde(default)]
+    pub cloud_observability: CloudObservabilityConfig,
+    /// Remote (hybrid) executor settings (`[executor]`). Used only by an
+    /// `executor` node joined to a managed control plane without a database
+    /// of its own (see [`EngineConfig::is_remote_executor`]).
+    #[serde(default)]
+    pub executor: ExecutorConfig,
+}
+
+/// How a remote executor reaches the control plane's worker protocol.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorTransport {
+    /// The negotiated gRPC worker stream, falling back to HTTP polling when
+    /// the endpoint does not serve it.
+    #[default]
+    Auto,
+    /// gRPC worker stream only.
+    Grpc,
+    /// HTTP polling (`/workers/tasks/poll`) only.
+    Http,
+}
+
+/// `[executor]`: remote executor mode (hybrid). The executor holds no
+/// database: it claims leased tasks from the managed engine over the worker
+/// protocol, runs them locally, and reports outcomes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutorConfig {
+    /// `auto` (gRPC stream, HTTP fallback), `grpc`, or `http`.
+    /// Env: `ORCH8_EXECUTOR_TRANSPORT`.
+    #[serde(default)]
+    pub transport: ExecutorTransport,
+    /// Worker HTTP API base for the `http` transport. Empty = the managed
+    /// control endpoint + `/api/v1`. Env: `ORCH8_EXECUTOR_API_URL`.
+    #[serde(default)]
+    pub api_url: String,
+    /// PEM bundle trusted *instead of* the public web PKI roots for the
+    /// control plane connection (private CA, TLS-inspecting proxy).
+    /// Env: `ORCH8_EXECUTOR_CA_CERT`.
+    #[serde(default)]
+    pub ca_cert_path: String,
+    /// Built-in handlers this executor serves. Empty = every
+    /// remote-executable built-in compiled into this binary.
+    /// Env: `ORCH8_EXECUTOR_HANDLERS` (comma-separated).
+    #[serde(default)]
+    pub handlers: Vec<String>,
+    /// Tasks executed concurrently. Env: `ORCH8_EXECUTOR_MAX_CONCURRENT_TASKS`.
+    #[serde(default = "default_executor_concurrency")]
+    pub max_concurrent_tasks: u32,
+    /// Idle poll cadence (HTTP) / demand refresh (gRPC), in milliseconds.
+    #[serde(default = "default_executor_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    /// Directory of local credential files (`<dir>/<credential id>`),
+    /// e.g. a mounted Kubernetes Secret. Env: `ORCH8_CREDENTIALS_DIR`.
+    /// `ORCH8_CREDENTIAL_<ID>` environment variables are always consulted.
+    #[serde(default)]
+    pub credentials_dir: String,
+    /// On SIGTERM / drain: how long in-flight tasks may finish before the
+    /// rest are released back to the control plane.
+    /// Env: `ORCH8_EXECUTOR_DRAIN_TIMEOUT_SECS`.
+    #[serde(default = "default_executor_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
+    /// With a BYOK vault configured (`ORCH8_BYOK_*`): top-level output
+    /// fields larger than this many bytes are sealed into the customer
+    /// bucket and only a reference is returned. `0` seals every field.
+    /// Env: `ORCH8_EXECUTOR_EXTERNALIZE_BYTES`.
+    #[serde(default = "default_executor_externalize_bytes")]
+    pub externalize_bytes: u64,
+    /// Upper bound on the lease heartbeat cadence, in seconds. `0` follows
+    /// the engine's hint (15 s by default); set it lower only when the
+    /// engine's reaper runs with a stale threshold below ~3 heartbeats.
+    /// Env: `ORCH8_EXECUTOR_HEARTBEAT_SECS`.
+    #[serde(default)]
+    pub heartbeat_secs: u64,
+}
+
+impl ExecutorConfig {
+    /// Remote-executor checks appended to `errors`.
+    fn validate_into(&self, errors: &mut Vec<String>) {
+        if self.max_concurrent_tasks == 0 || self.max_concurrent_tasks > 256 {
+            errors.push("executor.max_concurrent_tasks must be within 1..=256".into());
+        }
+        if self.poll_interval_ms == 0 {
+            errors.push("executor.poll_interval_ms must be > 0".into());
+        }
+        for handler in &self.handlers {
+            if !crate::sequence::REMOTE_EXECUTABLE_BUILTINS.contains(&handler.as_str()) {
+                errors.push(format!(
+                    "executor.handlers: `{handler}` is not a remote-executable built-in \
+                     (expected one of {:?})",
+                    crate::sequence::REMOTE_EXECUTABLE_BUILTINS
+                ));
+            }
+        }
+        if !self.api_url.is_empty() && !self.api_url.starts_with("https://") {
+            errors.push("executor.api_url must use HTTPS".into());
+        }
+    }
+}
+
+const fn default_executor_concurrency() -> u32 {
+    16
+}
+
+const fn default_executor_poll_interval_ms() -> u64 {
+    500
+}
+
+const fn default_executor_drain_timeout_secs() -> u64 {
+    25
+}
+
+const fn default_executor_externalize_bytes() -> u64 {
+    64 * 1024
+}
+
+impl Default for ExecutorConfig {
+    fn default() -> Self {
+        Self {
+            transport: ExecutorTransport::default(),
+            api_url: String::new(),
+            ca_cert_path: String::new(),
+            handlers: Vec::new(),
+            max_concurrent_tasks: default_executor_concurrency(),
+            poll_interval_ms: default_executor_poll_interval_ms(),
+            credentials_dir: String::new(),
+            drain_timeout_secs: default_executor_drain_timeout_secs(),
+            externalize_bytes: default_executor_externalize_bytes(),
+            heartbeat_secs: 0,
+        }
+    }
+}
+
+/// `[embed]` section. Embed routes are disabled (404) without a secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbedConfig {
+    /// Hex-encoded HMAC secret (at least 32 bytes decoded) signing `o8e1.`
+    /// embed tokens. Env: `ORCH8_EMBED_TOKEN_SECRET`.
+    #[serde(default)]
+    pub token_secret: SecretString,
+    /// Comma-separated browser origins allowed to call `/api/v1/embed/*`.
+    /// Env: `ORCH8_EMBED_ALLOWED_ORIGINS`.
+    #[serde(default)]
+    pub allowed_origins: String,
+}
+
+/// `[license]` section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LicenseConfig {
+    /// `o8l1.` license key. Env: `ORCH8_LICENSE_KEY`.
+    #[serde(default)]
+    pub key: SecretString,
+}
+
+/// `[cloud_observability]`: batch instance state transitions (metadata only —
+/// never context, payloads, inputs, or outputs) to
+/// `{endpoint}/api/ingest/v1/runs`. Export is bounded and non-blocking: when
+/// the cloud is slow or unreachable the oldest buffered events are dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudObservabilityConfig {
+    /// Base URL of the ingest service. Empty disables export.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Bearer token for the ingest endpoint.
+    #[serde(default)]
+    pub api_key: SecretString,
+    /// Stable identifier of this engine in the cloud fleet view.
+    #[serde(default)]
+    pub engine_id: String,
+    /// Flush cadence. Default 5000 ms, minimum 250 ms.
+    #[serde(default = "default_cloud_observability_interval_ms")]
+    pub interval_ms: u64,
+    /// In-memory buffer bound (events). Default 10 000.
+    #[serde(default = "default_cloud_observability_buffer")]
+    pub max_buffered_events: usize,
+}
+
+impl Default for CloudObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            api_key: SecretString::default(),
+            engine_id: String::new(),
+            interval_ms: default_cloud_observability_interval_ms(),
+            max_buffered_events: default_cloud_observability_buffer(),
+        }
+    }
+}
+
+impl CloudObservabilityConfig {
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        !self.endpoint.trim().is_empty()
+    }
+}
+
+const fn default_cloud_observability_interval_ms() -> u64 {
+    5_000
+}
+
+const fn default_cloud_observability_buffer() -> usize {
+    10_000
 }
 
 /// `[alerts]` section.
@@ -237,6 +451,13 @@ pub struct NodeConfig {
     pub managed_control_worker_id: String,
     #[serde(default)]
     pub managed_control_runtime_id: String,
+    /// Operator placement labels for this node (e.g. from an executor join
+    /// token). Advertised coarsely; never contain workload data.
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// Coarse region label for this node (e.g. `eu-west-1`). Empty = unset.
+    #[serde(default)]
+    pub region: String,
 }
 
 /// Selectable durable artifact backends. In-memory is intentionally absent —
@@ -791,6 +1012,16 @@ fn default_otlp_protocol() -> String {
 }
 
 impl EngineConfig {
+    /// Remote (hybrid) executor mode: an `executor` node joined to a managed
+    /// control plane with no database of its own. It claims work from the
+    /// control plane over the worker protocol instead of a shared database.
+    #[must_use]
+    pub fn is_remote_executor(&self) -> bool {
+        self.node.role == NodeRole::Executor
+            && !self.node.managed_control_endpoint.trim().is_empty()
+            && self.database.url.is_empty()
+    }
+
     /// Validate configuration values, returning all errors found.
     #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), Vec<String>> {
@@ -847,6 +1078,10 @@ impl EngineConfig {
                         .into(),
                 );
             }
+        }
+
+        if self.is_remote_executor() {
+            self.executor.validate_into(&mut errors);
         }
 
         // Database
@@ -1689,5 +1924,43 @@ mod tests {
         cfg.node.managed_control_worker_id = "edge-1".into();
         cfg.node.managed_control_runtime_id = uuid::Uuid::now_v7().to_string();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn remote_executor_mode_is_a_joined_executor_without_a_database() {
+        let mut cfg = EngineConfig::default();
+        cfg.node.role = NodeRole::Executor;
+        assert!(!cfg.is_remote_executor(), "not joined");
+        cfg.node.managed_control_endpoint = "https://control.example.com".into();
+        cfg.node.managed_control_api_key = "managed-secret".into();
+        cfg.node.managed_control_tenant_id = "acme".into();
+        cfg.node.managed_control_worker_id = "acme-dc1-host".into();
+        cfg.node.managed_control_runtime_id = uuid::Uuid::now_v7().to_string();
+        assert!(cfg.is_remote_executor());
+        assert!(cfg.validate().is_ok());
+
+        cfg.executor.handlers = vec!["http_request".into(), "set_state".into()];
+        cfg.executor.api_url = "http://plain.example.com".into();
+        let errors = cfg.validate().unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("`set_state`")),
+            "{errors:?}"
+        );
+        assert!(errors.iter().any(|e| e.contains("api_url")), "{errors:?}");
+
+        cfg.database.url = "postgres://db/orch8".into();
+        assert!(
+            !cfg.is_remote_executor(),
+            "a local database keeps shared-DB mode"
+        );
+        cfg.node.role = NodeRole::Edge;
+        cfg.database.url = SecretString::default();
+        assert!(!cfg.is_remote_executor());
+
+        let parsed: EngineConfig =
+            toml::from_str("[executor]\ntransport = \"http\"\nhandlers = [\"http_request\"]\n")
+                .unwrap();
+        assert_eq!(parsed.executor.transport, ExecutorTransport::Http);
+        assert_eq!(parsed.executor.max_concurrent_tasks, 16);
     }
 }

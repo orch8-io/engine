@@ -21,6 +21,7 @@ fn options() -> TestServerOptions {
         root_api_key: Some(ROOT.into()),
         mobile_sync_enabled: true,
         mobile_sync_resolve_credentials: false,
+        ..TestServerOptions::default()
     }
 }
 
@@ -253,6 +254,7 @@ fn runtime(
         estimated_latency_ms: Some(12),
         draining: false,
         capsule_signing_public_key: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into()),
+        labels: [("residency".to_owned(), "eu".to_owned())].into(),
         observed_at: now,
         expires_at: now + chrono::Duration::minutes(5),
     }
@@ -343,7 +345,8 @@ async fn device_sessions_see_only_live_delegation_destinations_reduced_to_matchi
         );
         assert!(
             full.iter()
-                .all(|runtime| runtime["regions"] == json!(["eu-west-1"])),
+                .all(|runtime| runtime["regions"] == json!(["eu-west-1"])
+                    && runtime["labels"] == json!({"residency": "eu"})),
             "{backend}: operators keep every fact"
         );
 

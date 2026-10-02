@@ -1,5 +1,6 @@
-{{- if eq .Values.mode "split" }}
-{{- range $component := list "control" "executor" }}
+{{- if or (eq .Values.mode "split") (eq .Values.mode "executor") }}
+{{- $components := ternary (list "executor") (list "control" "executor") (eq .Values.mode "executor") }}
+{{- range $component := $components }}
 {{- $cfg := index $.Values $component }}
 {{- with (include "orch8.hpa" (dict "root" $ "component" $component "cfg" $cfg)) }}
 ---

@@ -1,0 +1,32 @@
+{
+  "name": "pos-sale",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "print_receipt",
+      "handler": "print_receipt",
+      "params": { "receipt_id": "{{context.data.receipt_id}}" }
+    },
+    {
+      "type": "step",
+      "id": "decrement_stock",
+      "handler": "decrement_local_stock",
+      "params": { "lines": "{{context.data.lines}}" }
+    },
+    {
+      "type": "step",
+      "id": "loyalty_points",
+      "handler": "award_loyalty_points",
+      "params": {
+        "customer_id": "{{context.data.customer_id}}",
+        "idempotency_key": "loyalty:{{context.data.store_id}}:{{context.data.receipt_id}}"
+      },
+      "retry": {
+        "max_attempts": 1000,
+        "initial_backoff": 15000,
+        "max_backoff": 1800000,
+        "backoff_multiplier": 2.0
+      }
+    }
+  ]
+}

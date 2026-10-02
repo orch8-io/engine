@@ -73,7 +73,11 @@ aborts install/template with an actionable message.
 */}}
 {{- define "orch8.validate" -}}
 {{- $v := .Values -}}
-{{- if eq $v.storage.backend "sqlite" -}}
+{{- if eq $v.mode "executor" -}}
+  {{- if or $v.postgresql.enabled $v.externalDatabase.url $v.externalDatabase.existingSecret -}}
+    {{- fail "mode=executor runs without a database (it claims work from Orch8 Cloud over the worker protocol): unset postgresql.enabled and externalDatabase.*." -}}
+  {{- end -}}
+{{- else if eq $v.storage.backend "sqlite" -}}
   {{- if ne $v.mode "allInOne" -}}
     {{- fail "storage.backend=sqlite requires mode=allInOne: SQLite supports a single writer node only; use Postgres for split roles." -}}
   {{- end -}}
@@ -99,6 +103,17 @@ aborts install/template with an actionable message.
     {{- fail "secrets.encryptionKey must be exactly 64 hex characters (openssl rand -hex 32)." -}}
   {{- end -}}
 {{- end -}}
+{{- if eq $v.mode "executor" -}}
+  {{- if not $v.hybrid.joinToken.existingSecret -}}
+    {{- fail "mode=executor requires hybrid.joinToken.existingSecret (a Secret holding the o8x1 join token from the Orch8 Cloud console)." -}}
+  {{- end -}}
+  {{- if $v.ingress.enabled -}}
+    {{- fail "mode=executor serves no HTTP API (health only); disable ingress." -}}
+  {{- end -}}
+{{- end -}}
+{{- if and $v.cloudObservability.enabled (not $v.cloudObservability.existingSecret) -}}
+  {{- fail "cloudObservability.enabled requires cloudObservability.existingSecret with the ingest API key." -}}
+{{- end -}}
 {{- if and $v.gateway.enabled (not $v.gateway.tls.existingSecret) -}}
   {{- fail "gateway.enabled requires gateway.tls.existingSecret with the gRPC server cert, key and client CA." -}}
 {{- end -}}
@@ -111,6 +126,36 @@ aborts install/template with an actionable message.
 {{- define "orch8.env" -}}
 {{- $root := .root -}}
 {{- $v := $root.Values -}}
+{{- if eq $v.mode "executor" }}
+{{- /* Remote executor: the join token is all it needs (no database, API key, or encryption key). */}}
+- name: ORCH8_JOIN_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ $v.hybrid.joinToken.existingSecret }}
+      key: {{ $v.hybrid.joinToken.key }}
+- name: HOSTNAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
+- name: ORCH8_HTTP_ADDR
+  value: {{ .httpAddr | quote }}
+- name: ORCH8_LOG_LEVEL
+  value: {{ $v.config.logLevel | quote }}
+- name: ORCH8_LOG_JSON
+  value: {{ $v.config.logJson | toString | quote }}
+{{- if $v.hybrid.credentials.existingSecret }}
+- name: ORCH8_CREDENTIALS_DIR
+  value: /var/run/orch8/credentials
+{{- end }}
+{{- if $v.hybrid.caCert.existingSecret }}
+- name: ORCH8_EXECUTOR_CA_CERT
+  value: {{ printf "/var/run/orch8/ca/%s" $v.hybrid.caCert.key | quote }}
+{{- end }}
+{{- if $v.hybrid.allowedInternalCidrs }}
+- name: ORCH8_ALLOWED_INTERNAL_CIDRS
+  value: {{ $v.hybrid.allowedInternalCidrs | quote }}
+{{- end }}
+{{- else }}
 - name: ORCH8_NODE_ROLE
   value: {{ .role | quote }}
 - name: ORCH8_HTTP_ADDR
@@ -164,6 +209,18 @@ aborts install/template with an actionable message.
 {{- if $v.config.corsOrigins }}
 - name: ORCH8_CORS_ORIGINS
   value: {{ $v.config.corsOrigins | quote }}
+{{- end }}
+{{- if $v.cloudObservability.enabled }}
+- name: ORCH8_CLOUD_OBSERVABILITY_ENDPOINT
+  value: {{ $v.cloudObservability.endpoint | quote }}
+- name: ORCH8_CLOUD_OBSERVABILITY_ENGINE_ID
+  value: {{ default (include "orch8.fullname" $root) $v.cloudObservability.engineId | quote }}
+- name: ORCH8_CLOUD_OBSERVABILITY_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ $v.cloudObservability.existingSecret }}
+      key: {{ $v.cloudObservability.apiKeyKey }}
+{{- end }}
 {{- end }}
 {{- with $v.extraEnv }}
 {{ toYaml . }}
@@ -240,9 +297,11 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- if ne $v.mode "executor" }}
             - name: grpc
               containerPort: {{ $v.service.grpcPort }}
               protocol: TCP
+            {{- end }}
           env:
             {{- include "orch8.env" (dict "root" $root "role" .role "httpAddr" "0.0.0.0:8080" "extraEnv" $cfg.extraEnv) | nindent 12 }}
           startupProbe:
@@ -273,9 +332,30 @@ spec:
               mountPath: /etc/orch8
               readOnly: true
             {{- end }}
+            {{- if and (eq $v.mode "executor") $v.hybrid.credentials.existingSecret }}
+            - name: credentials
+              mountPath: /var/run/orch8/credentials
+              readOnly: true
+            {{- end }}
+            {{- if and (eq $v.mode "executor") $v.hybrid.caCert.existingSecret }}
+            - name: ca
+              mountPath: /var/run/orch8/ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if and (eq $v.mode "executor") $v.hybrid.credentials.existingSecret }}
+        - name: credentials
+          secret:
+            secretName: {{ $v.hybrid.credentials.existingSecret }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if and (eq $v.mode "executor") $v.hybrid.caCert.existingSecret }}
+        - name: ca
+          secret:
+            secretName: {{ $v.hybrid.caCert.existingSecret }}
+        {{- end }}
         {{- if $sqlite }}
         - name: data
           persistentVolumeClaim:

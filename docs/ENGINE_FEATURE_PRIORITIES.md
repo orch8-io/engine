@@ -16,7 +16,7 @@ and generic “AI assistant” features are intentionally excluded.
 | Resumable activities | Implemented | 10x | 3–5 weeks | Worker heartbeat checkpoints use lease ownership and monotonic CAS, and survive recovery/retry. |
 | Shared agent knowledge store | Implemented, bounded | 5x | 2–4 weeks | Tenant/namespace memory is durable, encrypted, isolated, and capped. Cross-tenant global memory is rejected. |
 | Cooperative priority preemption | Implemented | 3–5x | 2–3 weeks | Lower-priority flat workflows yield at durable step boundaries. Killing an in-flight effect is rejected. |
-| Federation send/receive | Implemented as primitives | 3–5x | 3–6 weeks | The engine signs outbound short-lived envelopes and verifies/deduplicates inbound ones. Network transport remains explicit. |
+| Federation send/receive | Implemented, opt-in transport | 3–5x | 3–6 weeks | The engine signs outbound short-lived envelopes and verifies/deduplicates inbound ones. An explicit HTTPS transport delivers them only to operator-registered peers with mutual allowlists (see FEDERATION.md). |
 | Device capability mesh | Implemented | 3–5x | 2–4 weeks | A tenant-owned mobile device can advertise a bounded, expiring mobile runtime for placement. |
 | PostgreSQL storage partitioning | Implemented proactively | 2–3x at scale | 2–4 weeks | Fixed hash partitions avoid a risky conversion after append-heavy tables reach millions of rows. |
 

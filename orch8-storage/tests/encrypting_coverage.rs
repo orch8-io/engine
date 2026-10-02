@@ -132,6 +132,7 @@ async fn deterministic_artifact_retry_rejects_changed_plaintext_through_encrypti
 fn mk_instance(tenant: &str, data: serde_json::Value) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked(tenant),
@@ -227,6 +228,8 @@ async fn new_run_and_atomic_webhook_operations_forward_through_encryption_decora
 
 async fn seed_sequence(storage: &dyn StorageBackend, seq_id: SequenceId, tenant: &str) {
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: seq_id,
@@ -242,6 +245,7 @@ async fn seed_sequence(storage: &dyn StorageBackend, seq_id: SequenceId, tenant:
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
@@ -834,6 +838,8 @@ async fn delegated_sequence_crud_passes_through_encryption_layer() {
     let storage = EncryptingStorage::new(inner, enc);
 
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -849,6 +855,7 @@ async fn delegated_sequence_crud_passes_through_encryption_layer() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: chrono::Utc::now(),
     };
 

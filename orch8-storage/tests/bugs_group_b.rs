@@ -42,6 +42,7 @@ fn make_instance(
 ) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
         tenant_id: TenantId::unchecked(tenant),

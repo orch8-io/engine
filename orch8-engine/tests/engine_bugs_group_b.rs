@@ -66,6 +66,8 @@ fn mk_step_with_retry(id: &str, handler: &str, retry: Option<RetryPolicy>) -> St
         retry,
         timeout: None,
         rate_limit_key: None,
+        rate_budget: None,
+        placement: None,
         send_window: None,
         context_access: None,
         cancellable: true,
@@ -84,6 +86,7 @@ fn mk_step_with_retry(id: &str, handler: &str, retry: Option<RetryPolicy>) -> St
 fn mk_instance(seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked("t"),
@@ -124,6 +127,8 @@ async fn setup_single_step(
     let storage = SqliteStorage::in_memory().await.unwrap();
     let step_id = step.id.clone();
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -139,6 +144,7 @@ async fn setup_single_step(
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
@@ -345,6 +351,8 @@ async fn b28_apply_self_modify_append_preserves_prior_blocks() {
     let storage_dyn: Arc<dyn StorageBackend> = Arc::new(storage);
 
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -360,6 +368,7 @@ async fn b28_apply_self_modify_append_preserves_prior_blocks() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage_dyn.create_sequence(&seq).await.unwrap();
@@ -430,6 +439,8 @@ async fn b28_apply_self_modify_position_still_preserves_prior() {
     let storage_dyn: Arc<dyn StorageBackend> = Arc::new(storage);
 
     let seq = SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -445,6 +456,7 @@ async fn b28_apply_self_modify_position_still_preserves_prior() {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
     };
     storage_dyn.create_sequence(&seq).await.unwrap();

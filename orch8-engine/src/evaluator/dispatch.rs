@@ -154,9 +154,11 @@ pub(super) async fn dispatch_block(
                 )
                 .await;
             }
-            let result = crate::handlers::step_block::execute_step_node_with_clock(
+            // Boxed: the step-dispatch future (templating, placement,
+            // effect guard, worker enqueue) is large; keep `evaluate` small.
+            let result = Box::pin(crate::handlers::step_block::execute_step_node_with_clock(
                 storage, handlers, instance, node, step_def, outputs, clock,
-            )
+            ))
             .await;
             // Interceptor: after_step
             if let Some(ic) = interceptors {
@@ -394,6 +396,8 @@ pub(super) async fn dispatch_block(
 
                 let child = orch8_types::instance::TaskInstance {
                     id: orch8_types::ids::InstanceId::new(),
+                    // Children stay inside the parent's sub-tenant.
+                    sub_tenant: instance.sub_tenant.clone(),
                     sequence_id: child_seq.id,
                     tenant_id: instance.tenant_id.clone(),
                     namespace: instance.namespace.clone(),
@@ -485,6 +489,7 @@ mod tests {
     fn instance_with_metadata(metadata: serde_json::Value) -> orch8_types::instance::TaskInstance {
         let now = chrono::Utc::now();
         orch8_types::instance::TaskInstance {
+            sub_tenant: None,
             id: orch8_types::ids::InstanceId::new(),
             sequence_id: orch8_types::ids::SequenceId::new(),
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),

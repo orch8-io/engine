@@ -6,3 +6,4 @@ packages:
   - tests/e2e
   - loadgen
   - dashboard
+  - "!examples/create-orch8-embed"

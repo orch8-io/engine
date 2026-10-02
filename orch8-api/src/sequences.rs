@@ -106,12 +106,35 @@ pub fn routes() -> Router<AppState> {
 pub(crate) async fn create_sequence(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    sub_header: crate::sub_tenants::SubTenantHeader,
     Query(options): Query<DraftDecodeOptions>,
     SequenceDocument(value): SequenceDocument,
 ) -> Result<impl IntoResponse, ApiError> {
     let (mut seq, decode_warnings) = decode_draft_sequence(&value, options.strict)?;
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &seq.tenant_id)?;
     seq.tenant_id = tenant_id;
+    // A sub-tenant (header or body) owns the sequence: only that
+    // sub-tenant's embedded builder may edit it.
+    seq.sub_tenant = sub_header.for_create(seq.sub_tenant.as_deref())?;
+    let body = validate_and_persist_sequence(&state, &seq, decode_warnings).await?;
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+/// Validate a decoded sequence (structure, schemas, templates, lint) and
+/// persist it. Returns `{ id, warnings? }`. Shared with the embedded
+/// builder (`PUT /embed/sequences/{name}`).
+pub(crate) async fn validate_and_persist_sequence(
+    state: &AppState,
+    seq: &SequenceDefinition,
+    decode_warnings: Vec<String>,
+) -> Result<serde_json::Value, ApiError> {
+    if let Some(embed) = &seq.embed
+        && embed.visible_outputs.len() > 256
+    {
+        return Err(ApiError::InvalidArgument(
+            "embed.visible_outputs may list at most 256 step ids".into(),
+        ));
+    }
 
     // Structural validation — reject duplicate block ids up-front so the
     // engine isn't forced to reconcile collisions in block_outputs /
@@ -137,19 +160,19 @@ pub(crate) async fn create_sequence(
     let mut warnings = decode_warnings;
     warnings.extend(seq.unknown_handler_warnings());
 
-    let template_warnings = orch8_engine::template::validate_sequence_templates(&seq);
+    let template_warnings = orch8_engine::template::validate_sequence_templates(seq);
     for tw in &template_warnings {
         warnings.push(tw.to_string());
     }
 
-    let lint_warnings = orch8_engine::lint::lint_sequence(&seq);
+    let lint_warnings = orch8_engine::lint::lint_sequence(seq);
     for lw in &lint_warnings {
         warnings.push(lw.to_string());
     }
 
     state
         .storage
-        .create_sequence(&seq)
+        .create_sequence(seq)
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?;
 
@@ -158,7 +181,7 @@ pub(crate) async fn create_sequence(
         body["warnings"] = serde_json::json!(warnings);
     }
 
-    Ok((StatusCode::CREATED, Json(body)))
+    Ok(body)
 }
 
 #[utoipa::path(get, path = "/sequences/{id}", tag = "sequences",

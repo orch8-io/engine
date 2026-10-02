@@ -104,6 +104,7 @@ async fn seeded_source(dir: &Path) -> (PathBuf, SequenceId, InstanceId) {
     let instance_id = InstanceId::new();
     storage
         .create_instance(&TaskInstance {
+            sub_tenant: None,
             id: instance_id,
             sequence_id: seq_id,
             tenant_id: TenantId::unchecked("acme"),

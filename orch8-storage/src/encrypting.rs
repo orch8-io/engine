@@ -120,14 +120,98 @@ macro_rules! passthrough_impl {
 }
 
 /// Wraps an inner `StorageBackend` and encrypts/decrypts `context.data` transparently.
+/// Top-level key of a BYOK vault reference stored in `externalized_state`
+/// in place of the payload.
+pub const VAULT_REF_KEY: &str = "_o8vault";
+
+/// `true` iff `value` is exactly `{"_o8vault": {...}}`.
+#[must_use]
+pub fn is_vault_reference(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|map| {
+        map.len() == 1
+            && map
+                .get(VAULT_REF_KEY)
+                .is_some_and(serde_json::Value::is_object)
+    })
+}
+
+/// Destination for externalized payloads outside the engine database
+/// (BYOK). Implemented by [`crate::vault::PayloadVault`].
+#[async_trait]
+pub trait ExternalPayloadVault: Send + Sync + 'static {
+    /// Store `value` and return the reference persisted in its place.
+    async fn seal(
+        &self,
+        instance_id: InstanceId,
+        ref_key: &str,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, StorageError>;
+    /// Resolve a reference produced by [`Self::seal`] for the same
+    /// `(instance_id, ref_key)`.
+    async fn open(
+        &self,
+        instance_id: InstanceId,
+        ref_key: &str,
+        reference: &serde_json::Value,
+    ) -> Result<serde_json::Value, StorageError>;
+}
+
 pub struct EncryptingStorage {
     inner: Arc<dyn StorageBackend>,
     encryptor: FieldEncryptor,
+    vault: Option<Arc<dyn ExternalPayloadVault>>,
 }
 
 impl EncryptingStorage {
     pub fn new(inner: Arc<dyn StorageBackend>, encryptor: FieldEncryptor) -> Self {
-        Self { inner, encryptor }
+        Self {
+            inner,
+            encryptor,
+            vault: None,
+        }
+    }
+
+    /// Route externalized payloads to a customer-owned vault (BYOK). The
+    /// database then stores only vault references.
+    #[must_use]
+    pub fn with_vault(mut self, vault: Arc<dyn ExternalPayloadVault>) -> Self {
+        self.vault = Some(vault);
+        self
+    }
+
+    /// Seal an externalized payload: into the vault when configured (the
+    /// reference is stored as-is so a control plane without vault access can
+    /// still list and reason about it), else encrypted in place.
+    async fn seal_externalized(
+        &self,
+        instance_id: InstanceId,
+        ref_key: &str,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, StorageError> {
+        match &self.vault {
+            Some(vault) if !is_vault_reference(value) => {
+                vault.seal(instance_id, ref_key, value).await
+            }
+            Some(_) => Ok(value.clone()),
+            None => self.encrypt_json_value(value),
+        }
+    }
+
+    /// Inverse of [`Self::seal_externalized`]. Without a vault, a vault
+    /// reference is returned unchanged (reference-only operation).
+    async fn open_externalized(
+        &self,
+        instance_id: InstanceId,
+        ref_key: &str,
+        stored: &serde_json::Value,
+    ) -> Result<serde_json::Value, StorageError> {
+        let value = self.decrypt_json_value(stored)?;
+        match &self.vault {
+            Some(vault) if is_vault_reference(&value) => {
+                vault.open(instance_id, ref_key, &value).await
+            }
+            _ => Ok(value),
+        }
     }
 
     /// Associated data binding a `context.data` ciphertext to the instance it
@@ -251,6 +335,29 @@ impl EncryptingStorage {
                 .map_err(|e| StorageError::Encryption(e.to_string()));
         }
         Ok(value.clone())
+    }
+
+    fn seal_federation_call(
+        &self,
+        call: &orch8_types::federation::FederationCall,
+    ) -> Result<orch8_types::federation::FederationCall, StorageError> {
+        let mut sealed = call.clone();
+        sealed.input = self.encrypt_json_value(&call.input)?;
+        if let Some(result) = &call.result {
+            sealed.result = Some(self.encrypt_json_value(result)?);
+        }
+        Ok(sealed)
+    }
+
+    fn open_federation_call(
+        &self,
+        mut call: orch8_types::federation::FederationCall,
+    ) -> Result<orch8_types::federation::FederationCall, StorageError> {
+        call.input = self.decrypt_json_value(&call.input)?;
+        if let Some(result) = &call.result {
+            call.result = Some(self.decrypt_json_value(result)?);
+        }
+        Ok(call)
     }
 
     fn encrypt_what_if_run(
@@ -696,6 +803,36 @@ passthrough_impl! {
         async fn get_provenance_head(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ProvenanceEntry>, StorageError>;
         async fn list_provenance(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ProvenanceEntry>, StorageError>;
         async fn accept_federation_message(&self, envelope: &orch8_types::continuity_advanced::FederationEnvelope, envelope_sha256: &str, accepted_at: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+        async fn upsert_federation_peer(&self, peer: &orch8_types::federation::FederationPeerRecord) -> Result<(), StorageError>;
+        async fn get_federation_peer(&self, tenant_id: &orch8_types::ids::TenantId, peer_id: orch8_types::continuity_advanced::FederationPeerId) -> Result<Option<orch8_types::federation::FederationPeerRecord>, StorageError>;
+        async fn list_federation_peers(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<Vec<orch8_types::federation::FederationPeerRecord>, StorageError>;
+        async fn delete_federation_peer(&self, tenant_id: &orch8_types::ids::TenantId, peer_id: orch8_types::continuity_advanced::FederationPeerId) -> Result<bool, StorageError>;
+        // Call records carry the disclosed input and the remote result: both
+        // get the same at-rest protection as `context.data`.
+        async fn create_federation_call(&self, call: &orch8_types::federation::FederationCall) -> Result<bool, StorageError> {
+            let sealed = self.seal_federation_call(call)?;
+            self.inner.create_federation_call(&sealed).await
+        }
+        async fn get_federation_call(&self, tenant_id: &orch8_types::ids::TenantId, call_id: Uuid) -> Result<Option<orch8_types::federation::FederationCall>, StorageError> {
+            match self.inner.get_federation_call(tenant_id, call_id).await? {
+                Some(call) => Ok(Some(self.open_federation_call(call)?)),
+                None => Ok(None),
+            }
+        }
+        async fn cas_federation_call(&self, expected_version: u64, next: &orch8_types::federation::FederationCall) -> Result<bool, StorageError> {
+            let sealed = self.seal_federation_call(next)?;
+            self.inner.cas_federation_call(expected_version, &sealed).await
+        }
+        async fn list_due_federation_calls(&self, now: DateTime<Utc>, limit: u32) -> Result<Vec<orch8_types::federation::FederationCall>, StorageError> {
+            self.inner
+                .list_due_federation_calls(now, limit)
+                .await?
+                .into_iter()
+                .map(|call| self.open_federation_call(call))
+                .collect()
+        }
+        async fn get_region_fence(&self) -> Result<Option<orch8_types::federation::RegionFence>, StorageError>;
+        async fn advance_region_fence(&self, expected_epoch: Option<u64>, next: &orch8_types::federation::RegionFence) -> Result<bool, StorageError>;
         async fn save_incident_reproduction(&self, reproduction: &orch8_types::dlq::DlqIncidentReproduction) -> Result<(), StorageError>;
         async fn list_incident_reproductions(&self, tenant_id: &orch8_types::ids::TenantId, fingerprint: &str, limit: u32) -> Result<Vec<orch8_types::dlq::DlqIncidentReproduction>, StorageError>;
         async fn create_continuation_grant(&self, grant: &orch8_types::continuity::ContinuationGrant) -> Result<(), StorageError>;
@@ -942,6 +1079,29 @@ passthrough_impl! {
         async fn delete_tenant_budget(&self, tenant_id: &str, id: Uuid) -> Result<bool, StorageError>;
         async fn record_budget_alert(&self, alert: &orch8_types::ai::BudgetAlert) -> Result<bool, StorageError>;
         async fn list_budget_alerts(&self, tenant_id: &str, limit: u32) -> Result<Vec<orch8_types::ai::BudgetAlert>, StorageError>;
+    }
+}
+
+passthrough_impl! {
+    impl crate::TenancyStore for EncryptingStorage {
+        // Encrypt like every other instance-create path before delegating to
+        // the inner backend's atomic admission transaction.
+        async fn create_sub_tenant_instances_admitted(&self, instances: &[TaskInstance], max_active_instances: u64, now: DateTime<Utc>) -> Result<u64, StorageError> {
+            let encrypted: Vec<TaskInstance> = instances
+                .iter()
+                .map(|i| self.encrypt_instance(i).map(Cow::into_owned))
+                .collect::<Result<_, _>>()?;
+            self.inner
+                .create_sub_tenant_instances_admitted(&encrypted, max_active_instances, now)
+                .await
+        }
+        async fn get_sub_tenant_limits(&self, tenant_id: &orch8_types::ids::TenantId, sub_tenant: &str) -> Result<Option<orch8_types::sub_tenant::SubTenantLimits>, StorageError>;
+        async fn put_sub_tenant_limits(&self, tenant_id: &orch8_types::ids::TenantId, sub_tenant: &str, limits: &orch8_types::sub_tenant::SubTenantLimits) -> Result<(), StorageError>;
+        async fn sub_tenant_usage(&self, tenant_id: &orch8_types::ids::TenantId, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<orch8_types::sub_tenant::SubTenantUsage>, StorageError>;
+        async fn count_active_sub_tenants(&self, since: DateTime<Utc>) -> Result<u64, StorageError>;
+        async fn get_embed_theme(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<Option<orch8_types::sub_tenant::EmbedTheme>, StorageError>;
+        async fn put_embed_theme(&self, tenant_id: &orch8_types::ids::TenantId, theme: &orch8_types::sub_tenant::EmbedTheme) -> Result<(), StorageError>;
+        async fn set_release_target(&self, release_id: Uuid, target: Option<&orch8_types::release::ReleaseTarget>) -> Result<bool, StorageError>;
     }
 }
 
@@ -1380,10 +1540,10 @@ passthrough_impl! {
         instance_id: InstanceId,
         entries: &[(String, serde_json::Value)],
     ) -> Result<(), StorageError> {
-        let encrypted: Vec<(String, serde_json::Value)> = entries
-            .iter()
-            .map(|(k, v)| self.encrypt_json_value(v).map(|ev| (k.clone(), ev)))
-            .collect::<Result<_, _>>()?;
+        let mut encrypted: Vec<(String, serde_json::Value)> = Vec::with_capacity(entries.len());
+        for (k, v) in entries {
+            encrypted.push((k.clone(), self.seal_externalized(instance_id, k, v).await?));
+        }
         crate::InstanceStore::batch_save_externalized_state(&*self.inner, instance_id, &encrypted)
             .await
     }
@@ -1860,6 +2020,7 @@ passthrough_impl! {
         Ok(tasks)
     }
     async fn worker_task_stats(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
+    async fn pending_worker_task_depth(&self, limit: u32) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError>;
 
     async fn claim_worker_tasks_from_queue(
         &self,
@@ -2002,6 +2163,12 @@ passthrough_impl! {
         async fn active_instance_ids_for_cron(&self, cron_id: Uuid, limit: u32) -> Result<Vec<orch8_types::ids::InstanceId>, StorageError>;
         async fn check_rate_limit(&self, tenant_id: &orch8_types::ids::TenantId, resource_key: &orch8_types::ids::ResourceKey, now: DateTime<Utc>) -> Result<orch8_types::rate_limit::RateLimitCheck, StorageError>;
         async fn upsert_rate_limit(&self, limit: &orch8_types::rate_limit::RateLimit) -> Result<(), StorageError>;
+        async fn get_placement_policies(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<orch8_types::placement::PlacementPolicies, StorageError>;
+        async fn put_placement_policies(&self, tenant_id: &orch8_types::ids::TenantId, policies: &orch8_types::placement::PlacementPolicies) -> Result<(), StorageError>;
+        async fn upsert_rate_budget(&self, budget: &orch8_types::placement::RateBudget) -> Result<orch8_types::placement::RateBudget, StorageError>;
+        async fn list_rate_budgets(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<Vec<orch8_types::placement::RateBudget>, StorageError>;
+        async fn delete_rate_budget(&self, tenant_id: &orch8_types::ids::TenantId, key: &str) -> Result<bool, StorageError>;
+        async fn take_rate_budget_token(&self, tenant_id: &orch8_types::ids::TenantId, key: &str, now: DateTime<Utc>) -> Result<orch8_types::placement::RateBudgetCheck, StorageError>;
     }
 }
 
@@ -2492,7 +2659,7 @@ passthrough_impl! {
         ref_key: &str,
         payload: &serde_json::Value,
     ) -> Result<(), StorageError> {
-        let encrypted = self.encrypt_json_value(payload)?;
+        let encrypted = self.seal_externalized(instance_id, ref_key, payload).await?;
         self.inner
             .save_externalized_state(instance_id, ref_key, &encrypted)
             .await
@@ -2503,7 +2670,7 @@ passthrough_impl! {
         ref_key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
         match self.inner.get_externalized_state(instance_id, ref_key).await? {
-            Some(v) => Ok(Some(self.decrypt_json_value(&v)?)),
+            Some(v) => Ok(Some(self.open_externalized(instance_id, ref_key, &v).await?)),
             None => Ok(None),
         }
     }
@@ -2514,10 +2681,10 @@ passthrough_impl! {
         instance_id: InstanceId,
         entries: &[(String, serde_json::Value)],
     ) -> Result<(), StorageError> {
-        let encrypted: Vec<(String, serde_json::Value)> = entries
-            .iter()
-            .map(|(k, v)| self.encrypt_json_value(v).map(|ev| (k.clone(), ev)))
-            .collect::<Result<_, _>>()?;
+        let mut encrypted: Vec<(String, serde_json::Value)> = Vec::with_capacity(entries.len());
+        for (k, v) in entries {
+            encrypted.push((k.clone(), self.seal_externalized(instance_id, k, v).await?));
+        }
         crate::ResourceStore::batch_save_externalized_state(&*self.inner, instance_id, &encrypted)
             .await
     }
@@ -2527,9 +2694,12 @@ passthrough_impl! {
     ) -> Result<std::collections::HashMap<(InstanceId, String), serde_json::Value>, StorageError>
     {
         let raw = self.inner.batch_get_externalized_state(refs).await?;
-        raw.into_iter()
-            .map(|(k, v)| self.decrypt_json_value(&v).map(|dv| (k, dv)))
-            .collect()
+        let mut out = std::collections::HashMap::with_capacity(raw.len());
+        for ((instance_id, ref_key), stored) in raw {
+            let value = self.open_externalized(instance_id, &ref_key, &stored).await?;
+            out.insert((instance_id, ref_key), value);
+        }
+        Ok(out)
     }
     async fn delete_expired_externalized_state(&self, limit: u32) -> Result<u64, StorageError>;
 

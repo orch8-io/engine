@@ -16,8 +16,15 @@ pub struct CreateInstanceRequest {
     pub(crate) sequence_id: SequenceId,
     pub(crate) tenant_id: TenantId,
     pub(crate) namespace: Namespace,
+    /// Explicit priority. When omitted, the lane decides: `priority_lane`,
+    /// then the sequence's `placement.priority_lane`, then the tenant plan's
+    /// `default_priority_lane`, else `normal`.
     #[serde(default)]
-    pub(crate) priority: Priority,
+    pub(crate) priority: Option<Priority>,
+    /// Priority lane (`premium` → high, `standard` → normal, `batch` → low).
+    /// Ignored when `priority` is set.
+    #[serde(default)]
+    pub(crate) priority_lane: Option<orch8_types::placement::PriorityLane>,
     #[serde(default = "default_timezone")]
     pub(crate) timezone: String,
     #[serde(default)]
@@ -45,6 +52,10 @@ pub struct CreateInstanceRequest {
     /// `metadata.paused_reason = "budget_exceeded"`. Default: no budget.
     #[serde(default)]
     pub(crate) budget: Option<orch8_types::instance::Budget>,
+    /// End customer inside the tenant. The `X-Orch8-Sub-Tenant` header is
+    /// authoritative; a body value must match it.
+    #[serde(default)]
+    pub(crate) sub_tenant: Option<String>,
 }
 
 pub fn default_timezone() -> String {
@@ -125,6 +136,10 @@ pub struct ListQuery {
     pub(crate) namespace: Option<String>,
     pub(crate) sequence_id: Option<Uuid>,
     pub(crate) state: Option<String>,
+    /// Restrict to one sub-tenant (the `X-Orch8-Sub-Tenant` header, when
+    /// present, overrides it).
+    #[serde(default)]
+    pub(crate) sub_tenant: Option<String>,
     #[serde(default)]
     pub(crate) offset: u64,
     #[serde(default = "default_limit")]

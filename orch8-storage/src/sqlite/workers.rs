@@ -151,12 +151,13 @@ pub(super) async fn claim(
     let mut conn = begin_immediate(&storage.pool).await?;
 
     let select_res = sqlx::query(
-        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND awaiting_dispatch=0 AND requirements='{}' \
+        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?3 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) \
          AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) \
          ORDER BY created_at ASC LIMIT ?2",
     )
     .bind(handler_name)
     .bind(limit as i64)
+    .bind(worker_id)
     .fetch_all(&mut *conn)
     .await;
 
@@ -232,7 +233,7 @@ pub(super) async fn claim_for_tenant(
     let select_res = sqlx::query(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
-         WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.awaiting_dispatch=0 AND wt.requirements='{}' AND ti.tenant_id=?3
+         WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.awaiting_dispatch=0 AND (wt.requirements='{}' OR (json_remove(wt.requirements,'$.prefer')='{}' AND (json_extract(wt.requirements,'$.prefer.worker_id')=?4 OR json_extract(wt.requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) AND ti.tenant_id=?3
            AND ti.state NOT IN ('completed', 'failed', 'cancelled')
          ORDER BY wt.created_at ASC
          LIMIT ?2",
@@ -240,6 +241,7 @@ pub(super) async fn claim_for_tenant(
     .bind(handler_name)
     .bind(limit as i64)
     .bind(tenant_id.as_str())
+    .bind(worker_id)
     .fetch_all(&mut *conn)
     .await;
 

@@ -302,6 +302,18 @@ pub fn claim_allowed(
     if carries_credentials && capabilities.kind == crate::continuity::RuntimeKind::Browser {
         return false;
     }
+    // A soft preference (sticky affinity, preferred labels) holds the task
+    // for its preferred claimants until the bounded wait elapses. It never
+    // widens eligibility: the hard requirements below still apply.
+    if let Some(prefer) = &requirements.prefer
+        && !prefer.admits(
+            &capabilities.runtime_id.to_string(),
+            &capabilities.labels,
+            now,
+        )
+    {
+        return false;
+    }
     requirements.is_satisfied_by(capabilities, now)
 }
 
@@ -314,6 +326,31 @@ pub fn contains_credential_reference(value: &serde_json::Value) -> bool {
         serde_json::Value::Object(map) => map.values().any(contains_credential_reference),
         _ => false,
     }
+}
+
+/// Credential ids referenced by `credentials://<id>[/<field>]` strings in
+/// `value` (whole-string references only, the form the resolver expands).
+/// Sorted and de-duplicated.
+#[must_use]
+pub fn credential_reference_ids(value: &serde_json::Value) -> Vec<String> {
+    fn walk(value: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                if let Some(rest) = text.strip_prefix("credentials://") {
+                    let id = rest.split_once('/').map_or(rest, |(id, _)| id);
+                    if !id.is_empty() {
+                        out.insert(id.to_owned());
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, out)),
+            serde_json::Value::Object(map) => map.values().for_each(|item| walk(item, out)),
+            _ => {}
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(value, &mut out);
+    out.into_iter().collect()
 }
 
 /// Context delivered to a `browser` claimant. A browser never receives
@@ -416,6 +453,21 @@ impl std::str::FromStr for WorkerAttemptEventKind {
 #[cfg(test)]
 mod attempt_tests {
     use super::*;
+
+    #[test]
+    fn credential_reference_ids_collects_whole_string_refs() {
+        let params = serde_json::json!({
+            "auth": "credentials://stripe/access_token",
+            "headers": {"x": "credentials://stripe"},
+            "list": ["credentials://db-pass", "plain", "credentials://"],
+            "embedded": "Bearer credentials://ignored",
+        });
+        assert_eq!(
+            credential_reference_ids(&params),
+            vec!["db-pass".to_string(), "stripe".to_string()]
+        );
+        assert!(credential_reference_ids(&serde_json::json!({"a": 1})).is_empty());
+    }
 
     #[test]
     fn event_kind_has_stable_storage_roundtrip() {
@@ -716,6 +768,7 @@ mod distribution_tests {
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + chrono::Duration::minutes(4),
         }
@@ -744,6 +797,43 @@ mod distribution_tests {
             now
         ));
         assert!(claim_allowed(
+            &requirements,
+            true,
+            &caps(RuntimeKind::Server),
+            now
+        ));
+    }
+
+    /// A hard-placed step whose `credentials://` references are deferred to
+    /// the claiming executor still carries credentials: a browser advertising
+    /// every required fact (labels, credential names) never claims it.
+    #[test]
+    fn browser_never_claims_executor_resolved_credential_tasks() {
+        let now = Utc::now();
+        let requirements = CapsuleRequirements {
+            credentials: vec!["stripe".into()],
+            labels: [("residency".to_owned(), "eu".to_owned())].into(),
+            ..CapsuleRequirements::default()
+        };
+        let matching = |kind| {
+            let mut caps = caps(kind);
+            caps.credentials = vec!["stripe".into()];
+            caps.labels = [("residency".to_owned(), "eu".to_owned())].into();
+            caps
+        };
+        assert!(!claim_allowed(
+            &requirements,
+            true,
+            &matching(RuntimeKind::Browser),
+            now
+        ));
+        assert!(claim_allowed(
+            &requirements,
+            true,
+            &matching(RuntimeKind::Server),
+            now
+        ));
+        assert!(!claim_allowed(
             &requirements,
             true,
             &caps(RuntimeKind::Server),

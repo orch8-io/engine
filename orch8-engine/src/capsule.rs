@@ -374,6 +374,7 @@ pub async fn verify_and_import_paused_capsule_bytes(
     }
     let now = request.now;
     let candidate = TaskInstance {
+        sub_tenant: None,
         id: request.destination_instance_id.unwrap_or_default(),
         sequence_id: payload.instance.sequence_id,
         tenant_id: request.tenant_id.clone(),

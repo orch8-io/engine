@@ -28,5 +28,10 @@ end-to-end; SDK/API usage and image settings are marked `UNVERIFIED` in the
 files. **trigger** is a skeleton — `run.sh` refuses it until the self-hosted
 stack is completed (see its compose file).
 
+`distributed/run.sh` runs the same Orch8 workload against one `control` node,
+N `executor` nodes and W workers (`--mode compose|ssh|local`) and adds a
+`topology` block to the result. See
+[docs/BENCHMARK_DISTRIBUTED.md](../../docs/BENCHMARK_DISTRIBUTED.md).
+
 This harness is separate from the continuous traffic generator in
 `loadgen/src`, which is unchanged.

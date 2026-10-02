@@ -125,6 +125,8 @@ pub struct TestServerOptions {
     pub mobile_sync_enabled: bool,
     /// `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS`.
     pub mobile_sync_resolve_credentials: bool,
+    /// Embedded runtime (embed signer, license); `None` = disabled.
+    pub embedded: Option<Arc<crate::embed::EmbeddedRuntime>>,
 }
 
 /// Spawn the router over `storage` with [`TestServerOptions`] (auth exactly
@@ -149,6 +151,9 @@ pub async fn spawn_test_server_with(
         root_key_digest,
     );
     state.mobile_sync_resolve_credentials = options.mobile_sync_resolve_credentials;
+    if let Some(embedded) = options.embedded {
+        state.embedded = embedded;
+    }
     let base_url = serve(state, storage.clone(), root_key_digest, shutdown.clone()).await;
     BackendTestServer {
         base_url,
@@ -193,6 +198,33 @@ fn test_state(
             crate::browser_sessions::BrowserSessionSigner::configured(root_key_digest),
         ),
         browser_output_max_bytes: crate::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
+        embedded: std::sync::Arc::default(),
+    }
+}
+
+/// Spawn a test server whose continuity/federation identity is derived
+/// from `master_key_hex` (64 hex chars), so two servers in one test have
+/// distinct federation identities.
+///
+/// # Panics
+/// Panics on an invalid key or a broken test environment.
+pub async fn spawn_federation_test_server(master_key_hex: &str) -> TestServer {
+    crate::federation::allow_http_peers_for_loopback_tests();
+    let storage = Arc::new(
+        SqliteStorage::in_memory()
+            .await
+            .expect("in-memory sqlite storage must initialise for tests"),
+    );
+    let shutdown = CancellationToken::new();
+    let mut state = test_state(storage.clone(), shutdown.clone(), false, 0, None);
+    state.continuity_crypto = Some(Arc::new(
+        crate::ContinuityCrypto::from_master_key(master_key_hex).expect("valid test master key"),
+    ));
+    let base_url = serve(state, storage.clone(), None, shutdown.clone()).await;
+    TestServer {
+        base_url,
+        shutdown,
+        storage,
     }
 }
 
@@ -253,6 +285,7 @@ async fn serve(
         .merge(crate::health::routes().with_state(state.clone()))
         .merge(webhooks::public_routes().with_state(state.clone()))
         .merge(crate::public_routes().with_state(state.clone()))
+        .merge(crate::federation::inbound_routes().with_state(state.clone()))
         .layer(axum::middleware::from_fn(
             crate::request_id::request_id_middleware,
         ));

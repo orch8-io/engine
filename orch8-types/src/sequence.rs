@@ -107,6 +107,17 @@ pub struct SequenceDefinition {
     /// `Cancelled`. Same semantics as `on_failure`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_cancel: Option<Vec<BlockDefinition>>,
+    /// Owning sub-tenant (embedded builder); `None` = tenant-level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_tenant: Option<String>,
+    /// Embedding opt-ins (which step outputs embedded viewers may see).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed: Option<crate::sub_tenant::SequenceEmbed>,
+    /// Sequence-level placement default (region, labels, residency,
+    /// affinity, priority lane) applied to every worker-dispatched step;
+    /// see `docs/PLACEMENT.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::placement::Placement>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -189,6 +200,15 @@ pub struct StepDef {
     /// If set, this step consumes a rate limit token for the given resource key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit_key: Option<String>,
+    /// Global rate budget key (durable token bucket shared by every node,
+    /// configured via `PUT /rate-budgets/{key}`). Over budget, the instance
+    /// is deferred until a token refills — never failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_budget: Option<String>,
+    /// Step placement (region, labels, residency, affinity). Hard facts
+    /// route the step to the worker queue; see `docs/PLACEMENT.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::placement::Placement>,
     /// If set, only execute during the specified time window (per instance timezone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_window: Option<SendWindow>,
@@ -469,6 +489,14 @@ const SEQUENCE_FIELD_NAMES: &[&str] = &[
     "retry",
     "timeout",
     "rate_limit_key",
+    "rate_budget",
+    "placement",
+    "region",
+    "labels",
+    "residency",
+    "affinity",
+    "affinity_wait_ms",
+    "priority_lane",
     "send_window",
     "context_access",
     "cancellable",
@@ -1394,10 +1422,40 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "blob_put",
     "blob_get",
     "wait_for_event",
+    "federate",
     "jev",
     "email",
     "notify",
 ];
+
+/// Built-in handlers a remote executor (hybrid mode, see `docs/HYBRID.md`)
+/// can run away from the engine: they need only their params, the step
+/// context, and outbound network access, never the engine database. Step,
+/// sequence, and policy placement (region/labels/residency) applies to these
+/// and to external worker handlers; every other built-in manipulates engine
+/// state (instance state, signals, events, memory, blobs, human input) and
+/// always runs on the engine node, where that state lives.
+pub const REMOTE_EXECUTABLE_BUILTINS: &[&str] = &[
+    "noop",
+    "log",
+    "sleep",
+    "fail",
+    "transform",
+    "assert",
+    "http_request",
+    "llm_call",
+    "tool_call",
+    "email",
+    "notify",
+];
+
+/// Whether `handler` is a built-in that must run on the engine node (it is
+/// built in and not in [`REMOTE_EXECUTABLE_BUILTINS`]). Placement never
+/// applies to such steps.
+#[must_use]
+pub fn is_engine_only_builtin(handler: &str) -> bool {
+    BUILTIN_HANDLER_NAMES.contains(&handler) && !REMOTE_EXECUTABLE_BUILTINS.contains(&handler)
+}
 
 impl SequenceDefinition {
     /// Structural validation performed at submit time (before the sequence
@@ -1449,6 +1507,7 @@ impl SequenceDefinition {
             }
             total_blocks += cleanup_seen.len();
         }
+        self.validate_placement()?;
         if total_blocks > MAX_TOTAL_BLOCKS {
             return Err(SequenceValidationError::InvalidBlock {
                 block_id: "(root)".into(),
@@ -1458,6 +1517,57 @@ impl SequenceDefinition {
             });
         }
         Ok(())
+    }
+
+    /// Sequence-level `placement` is well-formed and every step placement is
+    /// compatible with it (a step cannot escape the sequence's region or
+    /// residency). Rejected at create time instead of at dispatch.
+    fn validate_placement(&self) -> Result<(), SequenceValidationError> {
+        let Some(sequence) = &self.placement else {
+            return Ok(());
+        };
+        sequence
+            .validate()
+            .map_err(|message| block_err("(root)", message))?;
+        let mut conflict: Option<SequenceValidationError> = None;
+        for block in self
+            .blocks
+            .iter()
+            .chain(self.on_failure.iter().flatten())
+            .chain(self.on_cancel.iter().flatten())
+        {
+            visit_steps(block, &mut |step| {
+                if conflict.is_some() {
+                    return;
+                }
+                if let Some(placement) = &step.placement
+                    && let Err(message) = placement.combine(sequence)
+                {
+                    conflict = Some(block_err(step.id.as_str(), message));
+                }
+            });
+        }
+        conflict.map_or(Ok(()), Err)
+    }
+
+    /// Find a step definition by block id anywhere in the tree (main blocks
+    /// and cleanup trees).
+    #[must_use]
+    pub fn find_step(&self, block_id: &str) -> Option<&StepDef> {
+        let mut found = None;
+        for block in self
+            .blocks
+            .iter()
+            .chain(self.on_failure.iter().flatten())
+            .chain(self.on_cancel.iter().flatten())
+        {
+            visit_steps(block, &mut |step| {
+                if found.is_none() && step.id.as_str() == block_id {
+                    found = Some(step);
+                }
+            });
+        }
+        found
     }
 
     /// Collect all locally referenced handlers, including recovery and lifecycle
@@ -1606,6 +1716,61 @@ fn collect_handler_names(block: &BlockDefinition, names: &mut Vec<String>) {
     }
 }
 
+/// Visit every step definition in `block`'s subtree (saga actions and
+/// compensations included).
+pub fn visit_steps<'a>(block: &'a BlockDefinition, visit: &mut dyn FnMut(&'a StepDef)) {
+    let all = |blocks: &'a [BlockDefinition], visit: &mut dyn FnMut(&'a StepDef)| {
+        for child in blocks {
+            visit_steps(child, visit);
+        }
+    };
+    match block {
+        BlockDefinition::Step(s) => visit(s),
+        BlockDefinition::Parallel(p) => {
+            for branch in &p.branches {
+                all(branch, visit);
+            }
+        }
+        BlockDefinition::Race(r) => {
+            for branch in &r.branches {
+                all(branch, visit);
+            }
+        }
+        BlockDefinition::Loop(l) => all(&l.body, visit),
+        BlockDefinition::ForEach(fe) => all(&fe.body, visit),
+        BlockDefinition::Router(r) => {
+            for route in &r.routes {
+                all(&route.blocks, visit);
+            }
+            if let Some(default) = &r.default {
+                all(default, visit);
+            }
+        }
+        BlockDefinition::TryCatch(tc) => {
+            all(&tc.try_block, visit);
+            all(&tc.catch_block, visit);
+            if let Some(finally) = &tc.finally_block {
+                all(finally, visit);
+            }
+        }
+        BlockDefinition::SubSequence(_) => {}
+        BlockDefinition::ABSplit(ab) => {
+            for variant in &ab.variants {
+                all(&variant.blocks, visit);
+            }
+        }
+        BlockDefinition::CancellationScope(cs) => all(&cs.blocks, visit),
+        BlockDefinition::Saga(saga) => {
+            for step in &saga.steps {
+                visit_steps(&step.action, visit);
+                if let Some(compensation) = &step.compensation {
+                    visit_steps(compensation, visit);
+                }
+            }
+        }
+    }
+}
+
 fn block_err(id: &str, msg: impl Into<String>) -> SequenceValidationError {
     SequenceValidationError::InvalidBlock {
         block_id: id.into(),
@@ -1628,6 +1793,39 @@ fn check_id(
     Ok(())
 }
 
+/// Step `placement` and `rate_budget` checks (see `docs/PLACEMENT.md`).
+fn validate_step_placement(s: &StepDef) -> Result<(), SequenceValidationError> {
+    let id = s.id.as_str();
+    if let Some(placement) = &s.placement {
+        placement
+            .validate()
+            .map_err(|message| block_err(id, message))?;
+        if placement.priority_lane.is_some() {
+            return Err(block_err(
+                id,
+                "placement.priority_lane is sequence-level: priority applies to the whole \
+                 instance (set it on the sequence's `placement`)",
+            ));
+        }
+        if placement.has_hard_constraints() && is_engine_only_builtin(&s.handler) {
+            return Err(block_err(
+                id,
+                format!(
+                    "placement region/labels/residency need a worker or a remote-executable \
+                     built-in; built-in handler `{}` manipulates engine state and runs on the \
+                     engine node",
+                    s.handler
+                ),
+            ));
+        }
+    }
+    if let Some(key) = &s.rate_budget {
+        crate::placement::validate_rate_budget_key(key)
+            .map_err(|message| block_err(id, message))?;
+    }
+    Ok(())
+}
+
 fn validate_step(
     s: &StepDef,
     seen: &mut std::collections::HashSet<String>,
@@ -1638,6 +1836,7 @@ fn validate_step(
     if s.handler.is_empty() {
         return Err(block_err(id, "handler name must not be empty"));
     }
+    validate_step_placement(s)?;
     if let Some(compensation) = &s.compensation {
         if compensation.handler.trim().is_empty() {
             return Err(block_err(id, "compensation.handler must not be empty"));
@@ -2099,6 +2298,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -2204,6 +2405,8 @@ mod tests {
 
     fn seq_with(block: BlockDefinition) -> SequenceDefinition {
         SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -2219,6 +2422,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: Utc::now(),
         }
     }
@@ -2260,6 +2464,8 @@ mod tests {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -2300,6 +2506,8 @@ mod tests {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                rate_budget: None,
+                placement: None,
                 send_window: None,
                 context_access: None,
                 cancellable: true,
@@ -2344,6 +2552,8 @@ mod tests {
                     retry: None,
                     timeout: None,
                     rate_limit_key: None,
+                    rate_budget: None,
+                    placement: None,
                     send_window: None,
                     context_access: None,
                     cancellable: true,
@@ -2884,6 +3094,8 @@ mod tests {
 
     fn sample_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
             schema: None,
             schema_version: SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
@@ -2899,6 +3111,7 @@ mod tests {
             sla: None,
             on_failure: None,
             on_cancel: None,
+            placement: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -2912,6 +3125,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -3117,6 +3332,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -3400,6 +3617,37 @@ mod tests {
         assert!(BUILTIN_HANDLER_NAMES.contains(&"noop"));
         assert!(BUILTIN_HANDLER_NAMES.contains(&"http_request"));
         assert!(BUILTIN_HANDLER_NAMES.contains(&"human_review"));
+    }
+
+    #[test]
+    fn remote_executable_builtins_are_builtins_and_engine_state_ones_are_not() {
+        for name in REMOTE_EXECUTABLE_BUILTINS {
+            assert!(BUILTIN_HANDLER_NAMES.contains(name), "{name}");
+            assert!(!is_engine_only_builtin(name), "{name}");
+        }
+        for name in ["set_state", "send_signal", "human_review", "wait_for_event"] {
+            assert!(is_engine_only_builtin(name), "{name}");
+        }
+        assert!(!is_engine_only_builtin("my_worker_handler"));
+    }
+
+    #[test]
+    fn hard_placement_is_allowed_on_remote_builtins_only() {
+        let placed = |handler: &str| {
+            let BlockDefinition::Step(mut s) = step("a") else {
+                unreachable!("step() builds a step");
+            };
+            s.handler = handler.into();
+            s.placement = Some(crate::placement::Placement {
+                residency: Some("eu".into()),
+                ..crate::placement::Placement::default()
+            });
+            validate_step_placement(&s)
+        };
+        assert!(placed("http_request").is_ok());
+        assert!(placed("custom_worker").is_ok());
+        let err = placed("set_state").unwrap_err().to_string();
+        assert!(err.contains("engine node"), "{err}");
     }
 
     // ─── structural validation ───

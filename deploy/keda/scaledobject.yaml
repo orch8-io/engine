@@ -1,0 +1,44 @@
+# KEDA autoscaling for Orch8 executors (docs/PLACEMENT.md#autoscaling-metrics-keda--hpa).
+#
+# Every engine node exports the cluster-wide pending worker backlog as
+#   orch8_queue_depth{capability="<handler>",region="<region>|any",priority_lane="premium|standard|batch"}
+# Aggregate with max() (each node reports the same backlog), filter on the
+# capability/region/lane this executor pool serves, and let KEDA size it.
+#
+# Prerequisites: KEDA >= 2.10 and a Prometheus scraping the engine's
+# /metrics endpoint. Adjust names, namespace, serverAddress and thresholds.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: orch8-executor-stripe
+  namespace: orch8
+spec:
+  scaleTargetRef:
+    # The Deployment running `orch8 executor join ... --label residency=eu`.
+    name: orch8-executor
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  pollingInterval: 15
+  cooldownPeriod: 300
+  triggers:
+    # Backlog for this pool's capability and region: one replica per 20
+    # pending tasks.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: max(orch8_queue_depth{capability="stripe_charge",region="eu-west-1"})
+        threshold: "20"
+        activationThreshold: "1"
+    # Premium-lane work scales faster (lower threshold).
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: max(orch8_queue_depth{capability="stripe_charge",priority_lane="premium"})
+        threshold: "5"
+    # Placed work nothing can run (placement_unsatisfied): wake the pool
+    # even from zero so residency-bound steps do not wait forever.
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: max(orch8_placement_unsatisfied{capability="stripe_charge"})
+        threshold: "1"

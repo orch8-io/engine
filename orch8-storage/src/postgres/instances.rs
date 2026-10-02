@@ -41,8 +41,8 @@ pub(super) const INSTANCE_INSERT_SQL: &str = r"
          priority, timezone, metadata, context,
          concurrency_key, max_concurrency, idempotency_key,
          session_id, parent_instance_id, budget,
-         created_at, updated_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+         created_at, updated_at, sub_tenant)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 ";
 
 /// Bind a `TaskInstance` to an already-prepared query in the canonical column
@@ -78,6 +78,7 @@ pub(super) fn bind_instance_insert<'q>(
         )
         .bind(inst.created_at)
         .bind(inst.updated_at)
+        .bind(inst.sub_tenant.as_deref())
 }
 
 pub(super) async fn create(
@@ -185,7 +186,7 @@ async fn insert_batch_tx(
                  priority, timezone, metadata, context,
                  concurrency_key, max_concurrency, idempotency_key,
                  session_id, parent_instance_id, budget,
-                 created_at, updated_at) ",
+                 created_at, updated_at, sub_tenant) ",
         );
         qb.push_values(
             chunk.iter().zip(rows.iter()),
@@ -210,7 +211,8 @@ async fn insert_batch_tx(
                     )
                     .push_bind(budget.as_ref())
                     .push_bind(inst.created_at)
-                    .push_bind(inst.updated_at);
+                    .push_bind(inst.updated_at)
+                    .push_bind(inst.sub_tenant.as_deref());
             },
         );
         let result = qb.build().execute(&mut **transaction).await?;
@@ -242,7 +244,7 @@ pub(super) async fn get(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, budget, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at, sub_tenant
            FROM task_instances WHERE id = $1",
     )
     .bind(id.into_uuid())
@@ -834,7 +836,7 @@ pub(super) async fn create_batch_externalized(
                  priority, timezone, metadata, context,
                  concurrency_key, max_concurrency, idempotency_key,
                  session_id, parent_instance_id, budget,
-                 created_at, updated_at) ",
+                 created_at, updated_at, sub_tenant) ",
         );
         let mut idx = 0usize;
         qb.push_values(chunk, |mut b, (inst, _)| {
@@ -861,7 +863,8 @@ pub(super) async fn create_batch_externalized(
                 )
                 .push_bind(budget)
                 .push_bind(inst.created_at)
-                .push_bind(inst.updated_at);
+                .push_bind(inst.updated_at)
+                .push_bind(inst.sub_tenant.as_deref());
         });
         let result = qb.build().execute(&mut *tx).await?;
         count += result.rows_affected();
@@ -1009,7 +1012,7 @@ pub(super) async fn list(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, budget, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at, sub_tenant
            FROM task_instances WHERE 1=1",
     );
     apply_instance_filter(&mut qb, filter);
@@ -1044,7 +1047,7 @@ pub(super) async fn list_keyset(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, budget, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at, sub_tenant
            FROM task_instances WHERE 1=1",
     );
     apply_instance_filter(&mut qb, filter);
@@ -1072,6 +1075,7 @@ pub(super) async fn list_waiting_with_trees(
         states: Some(vec![InstanceState::Waiting]),
         tenant_id: filter.tenant_id.clone(),
         namespace: filter.namespace.clone(),
+        sub_tenant: filter.sub_tenant.clone(),
         ..InstanceFilter::default()
     };
     let instances = list(store, &waiting_filter, pagination).await?;
@@ -1181,6 +1185,9 @@ fn apply_instance_filter<'a>(
     }
     if let Some(ref p) = filter.priority {
         qb.push(" AND priority = ").push_bind(*p as i16);
+    }
+    if let Some(ref sub) = filter.sub_tenant {
+        qb.push(" AND sub_tenant = ").push_bind(sub.clone());
     }
 }
 

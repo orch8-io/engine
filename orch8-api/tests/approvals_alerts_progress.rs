@@ -36,6 +36,7 @@ async fn setup() -> (TestServer, reqwest::Client, InstanceId) {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     let instance = TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id,
         tenant_id: TenantId::unchecked(TENANT),

@@ -160,6 +160,239 @@
       "description": "Path (relative to the result file) of the JSONL per-workflow samples."
     },
     "activity_log_file": { "type": ["string", "null"] },
-    "notes": { "type": "string" }
+    "notes": { "type": "string" },
+    "topology": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Present for loadgen/bench/distributed runs: where each role ran. See docs/BENCHMARK_DISTRIBUTED.md.",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "single_host",
+        "executors",
+        "workers",
+        "worker_slots",
+        "engine_build",
+        "control",
+        "executor_hosts",
+        "worker_hosts"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "compose",
+            "ssh",
+            "local"
+          ]
+        },
+        "single_host": {
+          "type": "boolean",
+          "description": "True when every role shared one machine. Such a result is a smoke test, not a distributed result."
+        },
+        "label": {
+          "type": "string",
+          "description": "Human label printed next to any published number."
+        },
+        "executors": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of `executor` engine processes."
+        },
+        "workers": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of REST worker processes."
+        },
+        "worker_slots": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Concurrent activities per worker process."
+        },
+        "engine_build": {
+          "type": "string",
+          "description": "Image reference, or `<path> (<version>, debug|release)` for a local binary."
+        },
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host",
+            "os",
+            "cpu",
+            "cores",
+            "memory_bytes"
+          ],
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "Hostname, or the ssh target."
+            },
+            "os": {
+              "type": "string"
+            },
+            "cpu": {
+              "type": "string"
+            },
+            "cores": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "memory_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "hw_model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "e.g. `sysctl hw.model` on macOS, DMI product name on Linux."
+            },
+            "processes": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "How many processes of this role ran on this host."
+            }
+          }
+        },
+        "control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host",
+            "os",
+            "cpu",
+            "cores",
+            "memory_bytes"
+          ],
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "Hostname, or the ssh target."
+            },
+            "os": {
+              "type": "string"
+            },
+            "cpu": {
+              "type": "string"
+            },
+            "cores": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "memory_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "hw_model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "e.g. `sysctl hw.model` on macOS, DMI product name on Linux."
+            },
+            "processes": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "How many processes of this role ran on this host."
+            }
+          }
+        },
+        "executor_hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "host",
+              "os",
+              "cpu",
+              "cores",
+              "memory_bytes"
+            ],
+            "properties": {
+              "host": {
+                "type": "string",
+                "description": "Hostname, or the ssh target."
+              },
+              "os": {
+                "type": "string"
+              },
+              "cpu": {
+                "type": "string"
+              },
+              "cores": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "memory_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "hw_model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "e.g. `sysctl hw.model` on macOS, DMI product name on Linux."
+              },
+              "processes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "How many processes of this role ran on this host."
+              }
+            }
+          }
+        },
+        "worker_hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "host",
+              "os",
+              "cpu",
+              "cores",
+              "memory_bytes"
+            ],
+            "properties": {
+              "host": {
+                "type": "string",
+                "description": "Hostname, or the ssh target."
+              },
+              "os": {
+                "type": "string"
+              },
+              "cpu": {
+                "type": "string"
+              },
+              "cores": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "memory_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "hw_model": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "e.g. `sysctl hw.model` on macOS, DMI product name on Linux."
+              },
+              "processes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "How many processes of this role ran on this host."
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }

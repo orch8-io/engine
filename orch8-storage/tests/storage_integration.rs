@@ -102,6 +102,8 @@ async fn seed_instance(s: &SqliteStorage, inst_id: InstanceId) {
 
 fn make_sequence(tenant: &str) -> SequenceDefinition {
     SequenceDefinition {
+        embed: None,
+        sub_tenant: None,
         schema: None,
         schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
@@ -118,6 +120,8 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,
@@ -136,6 +140,7 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
         sla: None,
         on_failure: None,
         on_cancel: None,
+        placement: None,
         created_at: Utc::now(),
         status: orch8_types::sequence::SequenceStatus::Production,
     }
@@ -158,6 +163,7 @@ fn distributed_runtime(now: chrono::DateTime<Utc>, region: &str) -> RuntimeCapab
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + Duration::minutes(4),
     }
@@ -210,6 +216,7 @@ fn distributed_task(
 fn make_instance(tenant: &str, seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
         tenant_id: TenantId::unchecked(tenant),
@@ -677,6 +684,7 @@ async fn constrained_worker_task_is_claimed_only_by_matching_runtime() {
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + Duration::minutes(4),
     };
@@ -3450,6 +3458,7 @@ async fn context_round_trip_all_sections() {
             total_steps_executed: 0,
             dry_run: false,
             dry_run_auto_approve: false,
+            traceparent: None,
         },
     };
     s.create_instance(&inst).await.unwrap();
@@ -3690,6 +3699,7 @@ async fn merge_context_data_preserves_other_sections() {
             total_steps_executed: 0,
             dry_run: false,
             dry_run_auto_approve: false,
+            traceparent: None,
         },
     };
     s.create_instance(&inst).await.unwrap();

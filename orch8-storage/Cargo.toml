@@ -26,17 +26,27 @@ rand.workspace = true
 # fire-and-forget `last_used_at` touch on the auth hot path.
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 zstd = { version = "0.14", optional = true }
+# BYOK payload vault (customer bucket + KMS envelope encryption). All
+# already in the workspace graph; no new crates.
+aes-gcm = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 
 [features]
 # Server builds keep every backend. `orch8-mobile` (and `orch8-engine`, which
 # re-enables what it needs) use `default-features = false` so the on-device
 # library links only SQLite.
-default = ["compression", "postgres", "artifacts"]
+default = ["compression", "postgres", "artifacts", "byok"]
 compression = ["dep:zstd"]
 # Postgres backend (`postgres` module, tenant partitioning) + sqlx TLS.
 postgres = ["sqlx/postgres", "sqlx/runtime-tokio-rustls", "artifacts"]
 # Object-store backed artifact store (local FS / S3 / in-memory).
 artifacts = ["dep:object_store"]
+# Customer-owned payload vault with envelope encryption (AWS KMS / static key).
+byok = ["artifacts", "dep:aes-gcm", "dep:hmac", "dep:sha2", "dep:base64", "dep:zeroize", "dep:reqwest"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

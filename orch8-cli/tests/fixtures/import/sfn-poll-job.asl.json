@@ -1,0 +1,39 @@
+{
+  "Comment": "Poll a batch job",
+  "StartAt": "Start Job",
+  "States": {
+    "Start Job": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:us-east-1:123456789012:activity:start-job",
+      "ResultPath": "$.job",
+      "Next": "Wait 30s"
+    },
+    "Wait 30s": { "Type": "Wait", "Seconds": 30, "Next": "Check Status" },
+    "Check Status": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:123456789012:function:CheckJob",
+      "Parameters": { "jobId.$": "$.job.id" },
+      "ResultPath": "$.status",
+      "Next": "Job Complete?"
+    },
+    "Job Complete?": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.status.state", "StringEquals": "SUCCEEDED", "Next": "Publish Result" },
+        { "Variable": "$.status.state", "StringEquals": "FAILED", "Next": "Job Failed" }
+      ],
+      "Default": "Wait 30s"
+    },
+    "Publish Result": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::http:invoke",
+      "Parameters": {
+        "ApiEndpoint": "https://hooks.example.com/jobs",
+        "Method": "POST",
+        "RequestBody": { "jobId.$": "$.job.id", "state.$": "$.status.state" }
+      },
+      "End": true
+    },
+    "Job Failed": { "Type": "Fail", "Error": "JobFailed" }
+  }
+}

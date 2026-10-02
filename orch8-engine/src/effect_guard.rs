@@ -186,7 +186,7 @@ impl<'a> EffectGuard<'a> {
 /// ordinary local runs that were never explicitly enrolled in portable
 /// continuity. Deriving both IDs from the instance makes concurrent first
 /// effects converge on one scope across processes and runtimes.
-pub(crate) async fn ensure_effect_scope(
+pub async fn ensure_effect_scope(
     storage: &dyn StorageBackend,
     tenant_id: &TenantId,
     instance_id: InstanceId,
@@ -606,6 +606,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("tenant-effect"),
@@ -646,6 +647,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("tenant-effect"),
@@ -676,6 +678,8 @@ mod tests {
     ) -> InvariantId {
         storage
             .create_sequence(&SequenceDefinition {
+                embed: None,
+                sub_tenant: None,
                 schema: None,
                 schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                 id: instance.sequence_id,
@@ -693,6 +697,8 @@ mod tests {
                     retry: None,
                     timeout: None,
                     rate_limit_key: None,
+                    rate_budget: None,
+                    placement: None,
                     send_window: None,
                     context_access: None,
                     cancellable: true,
@@ -711,6 +717,7 @@ mod tests {
                 sla: None,
                 on_failure: None,
                 on_cancel: None,
+                placement: None,
                 created_at: Utc::now(),
             })
             .await

@@ -109,9 +109,17 @@ pub async fn ensure_delegation_proxy(
             ))
         };
     }
+    // The proxy belongs to the parent's end customer: inherit its sub-tenant
+    // when the control plane holds a copy of the parent.
+    let sub_tenant = storage
+        .get_instance(execution.current_instance_id)
+        .await?
+        .filter(|parent| parent.tenant_id == delegation.tenant_id)
+        .and_then(|parent| parent.sub_tenant);
     let now = Utc::now();
     let proxy = TaskInstance {
         id,
+        sub_tenant,
         sequence_id: sub_sequence.id,
         tenant_id: delegation.tenant_id.clone(),
         namespace: sub_sequence.namespace.clone(),

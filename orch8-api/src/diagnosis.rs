@@ -356,6 +356,11 @@ async fn collect_context(state: &AppState, instance: TaskInstance) -> InstanceDi
 
     ctx.version_pins = storage.list_worker_version_pins(None).await.ok();
 
+    ctx.runtime_capabilities = storage
+        .list_runtime_capabilities(&tenant, chrono::Utc::now(), 1_000)
+        .await
+        .ok();
+
     ctx.open_breakers = storage.list_open_circuit_breakers().await.ok();
 
     ctx.children = storage.get_child_instances(instance_id).await.ok();

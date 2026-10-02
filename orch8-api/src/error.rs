@@ -70,6 +70,16 @@ pub enum ApiError {
 
     #[error("rate limit exceeded: {0}")]
     RateLimited(String),
+
+    /// A per-sub-tenant cap (concurrent or monthly executions) rejected
+    /// admission: HTTP 429 with code `sub_tenant_quota_exceeded`.
+    #[error("sub-tenant quota exceeded: {0}")]
+    SubTenantQuotaExceeded(String),
+
+    /// An embed token lacks the scope (or sequence grant) a route needs:
+    /// HTTP 403 with code `embed_scope_denied`.
+    #[error("embed scope denied: {0}")]
+    EmbedScopeDenied(String),
 }
 
 impl ApiError {
@@ -88,6 +98,8 @@ impl ApiError {
             Self::UnprocessableEntity(_) => "unprocessable_entity",
             Self::BadGateway(_) => "bad_gateway",
             Self::RateLimited(_) => "rate_limited",
+            Self::SubTenantQuotaExceeded(_) => "sub_tenant_quota_exceeded",
+            Self::EmbedScopeDenied(_) => "embed_scope_denied",
         }
     }
 
@@ -112,7 +124,14 @@ impl ApiError {
         match err {
             StorageError::NotFound { entity: e, id } => Self::NotFound(format!("{e} {id}")),
             StorageError::Conflict(msg) => Self::AlreadyExists(msg),
-            StorageError::QuotaExceeded(msg) => Self::RateLimited(msg),
+            StorageError::QuotaExceeded(msg) => {
+                match msg.strip_prefix(orch8_types::sub_tenant::SUB_TENANT_QUOTA_PREFIX) {
+                    Some(rest) => Self::SubTenantQuotaExceeded(
+                        rest.trim_start_matches(':').trim().to_string(),
+                    ),
+                    None => Self::RateLimited(msg),
+                }
+            }
             // Terminal-state targets are precondition failures, not "already
             // exists" — surface as 409 Conflict with a clear message so HTTP
             // clients can distinguish "duplicate" from "wrong state".
@@ -138,7 +157,7 @@ impl IntoResponse for ApiError {
         let status = match &self {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::Forbidden(_) | Self::EmbedScopeDenied(_) => StatusCode::FORBIDDEN,
             Self::InvalidArgument(_) | Self::Validation { .. } => StatusCode::BAD_REQUEST,
             Self::AlreadyExists(_) | Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -146,7 +165,7 @@ impl IntoResponse for ApiError {
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
-            Self::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::RateLimited(_) | Self::SubTenantQuotaExceeded(_) => StatusCode::TOO_MANY_REQUESTS,
         };
         let message = match &self {
             Self::Internal(msg) => {
@@ -243,6 +262,18 @@ mod tests {
             status_of(ApiError::PayloadTooLarge("context > max".into())),
             StatusCode::PAYLOAD_TOO_LARGE
         );
+    }
+
+    #[test]
+    fn sub_tenant_quota_maps_to_429_with_its_own_code() {
+        let err: ApiError = StorageError::QuotaExceeded(
+            "sub_tenant_quota_exceeded: sub-tenant concurrent cap (1) reached".into(),
+        )
+        .into();
+        assert_eq!(err.code(), "sub_tenant_quota_exceeded");
+        assert_eq!(status_of(err), StatusCode::TOO_MANY_REQUESTS);
+        let pool: ApiError = StorageError::QuotaExceeded("active-instance".into()).into();
+        assert_eq!(pool.code(), "rate_limited");
     }
 
     #[tokio::test]

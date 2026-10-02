@@ -7,6 +7,245 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Hybrid: remote executors with no database
+
+See [docs/HYBRID.md](docs/HYBRID.md).
+
+- **Remote executor mode**: an `executor` joined with a join token
+  (`ORCH8_JOIN_TOKEN`, `orch8 executor join --run`) and no `database.url`
+  needs nothing else — no database, API key or encryption key. It dials out
+  to the managed engine, advertises a per-replica runtime (handlers, token and
+  `[node]` labels, region, local credential ids), claims leased tasks over the
+  gRPC worker stream (HTTP polling fallback, `ORCH8_EXECUTOR_TRANSPORT`), runs
+  remote-executable built-ins locally, heartbeats, settles with `claim_epoch`,
+  and on SIGTERM or a managed `drain` withdraws, finishes in-flight work within
+  `ORCH8_EXECUTOR_DRAIN_TIMEOUT_SECS`, and releases the rest. New `[executor]`
+  config section.
+- **Executor-local credentials**: the engine no longer resolves
+  `credentials://` references of hard-placed steps (region/labels/residency);
+  tasks keep the reference and require the credential id as a runtime fact.
+  Executors resolve it from `ORCH8_CREDENTIAL_<id>` or `ORCH8_CREDENTIALS_DIR`.
+  **Behavior change** for external workers that claim hard-placed steps: they
+  now receive the reference instead of the value.
+- **Placement on built-ins**: `http_request`, `llm_call`, `tool_call`,
+  `email`, `notify`, `transform`, `assert`, `log`, `sleep`, `noop` and `fail`
+  may be placed; built-ins that manipulate engine state still run on the
+  engine and now ignore sequence placement and policies instead of waiting
+  for a worker that never comes.
+- **BYOK on executors**: with `ORCH8_BYOK_*` configured, an executor seals
+  output fields over `ORCH8_EXECUTOR_EXTERNALIZE_BYTES` into the customer
+  bucket, reports references only, and opens them for later placed steps.
+- **SSRF allow-list**: `ORCH8_ALLOWED_INTERNAL_CIDRS` lets outbound handlers
+  reach listed internal networks without `ORCH8_ALLOW_INTERNAL_URLS`.
+- API keys with the `worker` capability may `POST /runtimes/register`.
+- `orch8_engine::remote_worker` holds the lease-protocol client shared by the
+  mobile runtime node and the executor; `orch8_grpc::worker_client` is the
+  worker-stream client.
+- Helm `mode=executor` renders a DB-less executor (join token, optional
+  `hybrid.credentials`, `hybrid.caCert`, `hybrid.allowedInternalCidrs`) and
+  fails if a database is configured; the Compose example drops Postgres.
+
+### Embedded: sub-tenants, embed tokens, rollouts, licensing
+
+See [docs/EMBEDDED.md](docs/EMBEDDED.md).
+
+- **Sub-tenants**: `X-Orch8-Sub-Tenant` (or `sub_tenant` in the body) scopes
+  instances and sequences to a vendor's end customer; instances carry a
+  nullable `sub_tenant` (children and forks inherit it) and `GET /instances`
+  filters with `?sub_tenant=`. Migration `097_sub_tenants` adds the column,
+  caps, an append-only execution ledger, embed themes and release targets
+  (SQLite reconciles the same shape, schema version 50, together with placement and federation).
+- **Pooled limits**: `GET|PUT /sub-tenants/{sub}/limits`
+  (`max_executions_per_month`, `max_concurrent`) are enforced atomically
+  inside the tenant's plan pool; violations are `429` with the new error code
+  `sub_tenant_quota_exceeded`.
+- **Metering**: `GET /usage/sub-tenants?from=&to=` reports per-sub-tenant
+  executions started/completed, steps and last activity, plus
+  `active_sub_tenants` (the Embedded billing number). Started executions come
+  from a ledger that survives instance pruning.
+- **Scoped embed tokens**: `POST /embed/tokens` mints `o8e1.` HMAC tokens
+  (≤ 1 h, one tenant + sub-tenant, scopes `runs:read`, `runs:start`,
+  `approvals:resolve`, `sequences:read`, `builder:edit`, optional sequence
+  allowlist). New embed routes: runs (list/detail/start), approvals
+  (list/resolve), sequences (list/read/builder write, gallery templates) and
+  theme. They return no context or metadata and only the step outputs a
+  sequence opts into via `embed.visible_outputs`. Missing scopes are `403
+  embed_scope_denied`. Routes are 404 until `[embed] token_secret` /
+  `ORCH8_EMBED_TOKEN_SECRET` is set; `[embed] allowed_origins` grants CORS on
+  the embed routes only.
+- **Theme**: `PUT /embed/theme` stores `css_vars`, `logo_url` and
+  `hide_badge`. Values are validated against CSS injection, and `hide_badge`
+  takes effect only with a `white_label` license.
+- **Staged rollouts per sub-tenant**: releases accept
+  `target: { sub_tenants, percentage }` (also `PUT /releases/{id}/target`).
+  Sub-tenant instances are routed by listed sub-tenant or by a stable
+  per-sub-tenant bucket; tenant-level instances stay on the baseline until
+  promotion.
+- **License keys**: `[license] key` / `ORCH8_LICENSE_KEY` (`o8l1.`, ed25519,
+  verified offline) and `GET /license`. Enforcement is soft only: more than 3
+  active sub-tenants without a `sub_tenants` license adds
+  `X-Orch8-License: unlicensed` (or `over_limit` above `max_sub_tenants`) and
+  a warning logged at most once an hour. Executions are never blocked. The
+  compiled-in verification key is a placeholder until the production key is
+  rotated in.
+
+### Hybrid executors, drills, receipts, migration
+
+See [docs/HYBRID.md](docs/HYBRID.md) and [docs/MIGRATING_TO_CLOUD.md](docs/MIGRATING_TO_CLOUD.md).
+
+- **Executor join tokens**: `orch8 executor join <token>` writes an
+  `executor` `orch8.toml` (managed-control fields, `[node] labels`, `region`;
+  mode 0600) from a cloud-issued `o8x1.` token, optionally `--run`;
+  `orch8-server` accepts the same token as `ORCH8_JOIN_TOKEN`. The managed
+  control session now advertises the configured region.
+- **Helm `mode: executor`** renders a hybrid executor that takes its join
+  token from a Secret; `cloudObservability.*` values wire run-metadata
+  export. New Compose example: `deploy/hybrid-executor/`.
+- **`orch8 drill kill-executor`**: SIGKILLs one of two executor processes
+  mid-flight, measures detection and time to recovery, reconciles ambiguous
+  receipts against a provider log, and fails unless no effect was recorded
+  twice, no redelivery was silent, and every instance completed.
+- **Signed effect-receipt export** (at-most-once dispatch evidence, not an
+  exactly-once claim): `GET /instances/{id}/receipts/export`,
+  `GET /receipts/export?from=&to=`, `GET /receipts/signing-key`, and
+  `orch8 receipts export|verify|signing-key`. Bundles are JSON Lines signed
+  with the engine's continuity Ed25519 key.
+- **`orch8 migrate --to <url> --source <sqlite>`** moves sequences and
+  in-flight instances (tree, outputs, receipts, pending signals) from an
+  embedded engine to a remote one via the new idempotent
+  `POST /migrations/import`, fencing the source with the continuity
+  ownership record. Busy instances are refused unless `--wait-for-idle`.
+  `orch8 migrate --database-url` is unchanged.
+- **`orch8 generate --pieces-from <catalog>`** restricts generated steps to a
+  vendor catalog of handlers / Activepieces actions and repairs or rejects
+  anything outside it.
+- **`[cloud_observability]`**: bounded, non-blocking export of instance
+  state transitions (metadata only) to `{endpoint}/api/ingest/v1/runs`, at
+  most 500 events per batch, exponential backoff, drop-oldest.
+
+### Importers: Step Functions, Temporal, Inngest, BullMQ
+
+See [docs/MIGRATION_GUIDES.md](docs/MIGRATION_GUIDES.md).
+
+- `orch8 import stepfunctions` translates ASL state machines structurally
+  (Task/Choice/Parallel/Map/Wait/Pass/Fail, Retry/Catch, polling loops,
+  JSONPath data flow).
+- `orch8 import temporal|inngest|bullmq` statically extracts a sequence
+  skeleton from TypeScript sources; the report's new `unmapped` section lists
+  every untranslated construct with `file:line`.
+
+### Durable functions in Node and Python
+
+- `@orch8/engine-native` and `orch8-engine-native` expose an in-process,
+  SQLite-backed durable engine (`Engine.open(path)`, handlers, deploy/start/run)
+  that survives process restarts. `orch8::EngineBuilder::stale_instance_threshold`
+  lets a single-owner embedder recover interrupted instances on startup.
+
+### WASM sandbox for end-user steps
+
+See [docs/WASM_USER_STEPS.md](docs/WASM_USER_STEPS.md).
+
+- **Wall-clock limit**: WASM plugin calls are interrupted after
+  `ORCH8_WASM_TIMEOUT_MS` (default 2000) by an epoch ticker; previously the
+  epoch deadline was never armed and only fuel bounded a call.
+- **Configurable limits**: `ORCH8_WASM_FUEL`, `ORCH8_WASM_MAX_MEMORY_BYTES`,
+  `ORCH8_WASM_MAX_MODULE_BYTES` and the new `ORCH8_WASM_MAX_OUTPUT_BYTES`
+  (default 4 MiB); zero or unparsable values fall back to the default.
+- **No host imports**: a module that declares any import (WASI or otherwise)
+  is refused with a clear error before instantiation.
+- **Limit errors are classified**: memory/table-cap denials report
+  `memory limit exceeded`; every guest trap is now a permanent step error
+  (previously non-fuel traps were retried).
+- `validate_module_bytes` checks an uploaded module (size, magic, imports,
+  ABI exports, initial memory) without running it.
+
+### Placement: residency, labels, affinity, lanes, budgets
+
+See [docs/PLACEMENT.md](docs/PLACEMENT.md). Everything compiles into the
+existing capability requirements (`$runtime`) and claim predicate; there is no
+second scheduler.
+
+- **Data residency**: step/sequence `placement.residency` (and tenant policy
+  `require.residency`) only lets runtimes advertising `residency=<zone>` claim.
+  Placed work is never handed to a non-matching or capability-less runtime;
+  when nothing matches, the task waits and the instance shows
+  `metadata.placement.status = "placement_unsatisfied"`, an audit event,
+  `orch8_placement_unsatisfied_total`, and diagnosis `PLACEMENT_UNSATISFIED`
+  (`ORCH8-D021`).
+- **Capability labels and placement policies**: runtimes advertise
+  `capabilities.labels`; steps and sequences take
+  `placement: {region, labels, residency, affinity, priority_lane}`, validated
+  at sequence create (conflicts with the sequence placement, `priority_lane`
+  on a step, and hard placement on built-in handlers are rejected). New
+  `GET|PUT /placement/policies` holds per-tenant policies
+  (`match {sequence, handler, tag}` → `require` hard facts, `prefer` soft
+  labels). Hard-placed steps always go to the worker queue.
+- **Sticky affinity**: `placement.affinity: "instance"` prefers the runtime
+  that completed the instance's previous worker step for `affinity_wait_ms`
+  (default 15 s), then falls back to any eligible runtime. Legacy polls
+  honour the window in SQL.
+- **Priority lanes**: `premium`/`standard`/`batch` map onto instance priority
+  (and so cooperative preemption). `POST /instances` accepts `priority_lane`;
+  otherwise the sequence's `placement.priority_lane`, then the plan's
+  `default_priority_lane` (entitlements) apply. `priority` in the create body
+  is now optional.
+- **Global rate budgets**: durable token buckets per `(tenant, key)`
+  (`rate_budgets` table, migration 098) shared by every node, managed with
+  `GET /rate-budgets` and `PUT|DELETE /rate-budgets/{key}`. Steps declaring
+  `"rate_budget": "<key>"` are deferred (never failed) while the bucket is
+  empty (`orch8_rate_budget_deferred_total`).
+- **Autoscaling metrics**: `orch8_queue_depth{capability,region,priority_lane}`
+  and `orch8_placement_unsatisfied{capability,region}` publish the pending
+  worker backlog every 15 s; a KEDA `ScaledObject` example is in
+  `deploy/keda/scaledobject.yaml`. The unlabeled `orch8_queue_depth` series is
+  unchanged.
+- **Trace propagation**: worker tasks carry a W3C `traceparent` in
+  `context.runtime.traceparent` (the dispatch span when OTLP export is on,
+  else a deterministic per-instance context); completions accept
+  `traceparent` (HTTP header/body, gRPC metadata) and parent the
+  `orch8.worker_task.complete` span on it.
+- gRPC worker sessions that negotiated `runtime_capabilities` now claim
+  through the capability predicate, so they receive placed work.
+
+### Federation transport, BYOK externalization, region failover
+
+See [docs/FEDERATION.md](docs/FEDERATION.md) and [docs/FAILOVER.md](docs/FAILOVER.md).
+All three are opt-in; nothing changes for deployments that do not configure them.
+
+- **Cross-organization federation**: an explicit HTTPS transport for the
+  existing signed federation envelopes. Adds a per-tenant trust registry
+  (`GET|POST /api/v1/federation/peers`, `GET|PUT|DELETE /api/v1/federation/peers/{peer_id}`;
+  writes require the root key), `GET /api/v1/federation/identity`, and
+  `GET /api/v1/federation/calls/{call_id}`. The new signature-authenticated
+  inbound route `POST /api/v1/federation/inbound` sits outside API-key auth
+  and is also mounted on `gateway` nodes. Access requires mutual sequence
+  allowlists (plus an optional inbound handler allowlist). Only declared
+  input fields and declared block outputs cross the boundary. Idempotency
+  comes from the instance idempotency key and the existing
+  `federation_receipts`.
+- **`federate` step handler**: runs a sequence at a peer, parks on
+  `wait_for_input`, and resumes with the peer's declared outputs through the
+  `human_input:<block>` resume signal that `wait_for_event` also uses. A
+  background federation poller owns all network I/O, retrying with bounded
+  backoff. Lint warns when `wait_for_input` is missing.
+- **Cross-cluster child workflows**: peers with `relationship: "cluster"`
+  (same organization) may disclose `"*"` and link the child to its parent.
+  Cancelling or failing the parent propagates a signed `cancel` to the child.
+- **BYOK externalization**: `ORCH8_BYOK_*` sends every externalized payload to
+  a customer-owned S3-compatible bucket under AES-256-GCM envelope encryption.
+  DEKs are wrapped by AWS KMS (SigV4-signed, no AWS SDK added) or by a static
+  key provider. The database then stores only `{"_o8vault": …}` references,
+  and nodes without the vault see those references and nothing else. Requires
+  `ORCH8_ENCRYPTION_KEY`.
+- **Active-passive multi-region failover**: `ORCH8_FAILOVER_REGION` keeps
+  standby nodes out of the scheduler until their region holds the
+  database-resident region fence. Active nodes fence themselves (and fail
+  closed) when the fence moves. `orch8 failover status|promote` performs
+  epoch-CAS promotion directly against a database. Data replication remains
+  the operator's PostgreSQL responsibility.
+- **Migration** `099_federation_transport.sql` adds the `federation_peers`,
+  `federation_calls` and `region_fence` tables (the SQLite schema adds them too).
+
 ### Distributed execution (runtime nodes)
 
 See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
@@ -162,6 +401,18 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
 
 ### Security
 
+- **Browser and device sessions cannot assert placement labels.** Labels
+  such as `residency=eu` are matched by hard placement and never relaxed, so
+  a self-asserted label from an end-user tab or phone could pull
+  residency-restricted steps onto it. Session-bound polls and phone runtime
+  advertisements now drop `labels`, and the device-session `GET /runtimes`
+  view never includes them. Hybrid executors (join token / API key) keep
+  advertising labels.
+- **Phones keep refreshing device sessions on the shared lease client.** The
+  lease client shared with the hybrid executor takes a pluggable
+  `LeaseAuth`: executors send static headers, while phones send the current
+  device-session token on every poll, heartbeat, complete, fail, release,
+  registration, and delegation call, and refresh it and retry once on `401`.
 - **Breaking — `/mobile/sync` no longer resolves credentials by default.**
   `step_delegations` asked the server to resolve `credentials://` references
   and returned the plaintext in a `step_result` command. Any key with the

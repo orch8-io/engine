@@ -235,8 +235,9 @@ async fn rate_limit_retry_at(
 }
 
 /// Shared step preamble for the flat and tree dispatch paths: `delay`, then
-/// `send_window`, then `rate_limit_key` (in that order — a rate-limit token
-/// is only consumed once the step is otherwise allowed to run). Returns the
+/// `send_window`, then `rate_limit_key`, then the global `rate_budget` (in
+/// that order — a token is only consumed once the step is otherwise allowed
+/// to run). Returns the
 /// instant the instance must be parked until, or `None` to proceed.
 ///
 /// Pure with respect to instance state: callers own the Running → Scheduled
@@ -267,7 +268,16 @@ pub(crate) async fn step_preamble_deferral(
         );
         return Ok(Some(next_open));
     }
-    rate_limit_retry_at(storage, instance, step_def, clock).await
+    if let Some(retry_after) = rate_limit_retry_at(storage, instance, step_def, clock).await? {
+        return Ok(Some(retry_after));
+    }
+    Box::pin(crate::step_placement::rate_budget_retry_at(
+        storage,
+        instance,
+        step_def,
+        clock.now(),
+    ))
+    .await
 }
 
 /// Tree-path counterpart of the flat path's Running → Scheduled deferral.
@@ -1149,16 +1159,14 @@ pub(super) async fn execute_step_block(
     // snapshot created above (see its comment for why sharing with the
     // `when` guard is safe). Template/credential failures fail the
     // *instance*; infra errors propagate.
-    let crate::handlers::step_block::PreparedStep {
-        step_context,
-        resolved_params,
-        resolved_cache_key,
-        carries_credentials,
-    } = match crate::handlers::step_block::prepare_step(
+    let defer_credentials =
+        crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?;
+    let mut prepared = match crate::handlers::step_block::prepare_step(
         storage.as_ref(),
         instance,
         step_def,
         &outputs_snap,
+        defer_credentials,
     )
     .await
     {
@@ -1210,13 +1218,71 @@ pub(super) async fn execute_step_block(
     // record_success/record_failure further down gate on the right name.
     let breaker_tracked = crate::circuit_breaker::is_breaker_tracked(&step_def.handler);
 
+    // A fallback handler may not be hard-placed: resolve anything deferred.
+    if prepared.credentials_deferred
+        && !crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?
+        && let Err(error) = prepared
+            .resolve_deferred_credentials(storage.as_ref(), instance)
+            .await
+    {
+        return fail_instance_with_error(
+            storage.as_ref(),
+            instance,
+            webhook_config,
+            cancel,
+            &error.to_string(),
+        )
+        .await;
+    }
+    let crate::handlers::step_block::PreparedStep {
+        step_context,
+        resolved_params,
+        resolved_cache_key,
+        carries_credentials,
+        credentials_deferred: _,
+    } = prepared;
+
     // If the handler is not registered in-process, dispatch to an external
     // worker queue. This mirrors the tree evaluator path in `step_block.rs`
     // which always dispatches unregistered handlers to external workers.
     // Placed steps (`$runtime.runtime_id`, or kinds excluding `server`) go to
     // the worker queue even when the handler is registered in-process.
-    let placed_remotely = orch8_types::worker::peek_runtime_requirements(&resolved_params)
-        .is_ok_and(|requirements| requirements.is_remote_placement());
+    // Step/sequence placement and tenant placement policies compile into
+    // `$runtime`; hard placement (region, labels, residency) always goes to
+    // the worker queue so it is enforced by the claim predicate.
+    let mut resolved_params = resolved_params;
+    let hard_placed = match Box::pin(crate::step_placement::apply_step_placement(
+        storage.as_ref(),
+        instance,
+        step_def,
+        &mut resolved_params,
+        clock.now(),
+    ))
+    .await?
+    {
+        Ok(resolved) => resolved.is_some_and(|placement| placement.has_hard_constraints()),
+        Err(message) => {
+            crate::handlers::step_dispatch::record_remote_dispatch_rejection(
+                storage.as_ref(),
+                instance,
+                step_def,
+                attempt,
+                &message,
+            )
+            .await;
+            return fail_instance_with_error(
+                storage.as_ref(),
+                instance,
+                webhook_config,
+                cancel,
+                &message,
+            )
+            .await;
+        }
+    };
+    let placed_remotely = hard_placed
+        || orch8_types::worker::peek_runtime_requirements(&resolved_params)
+            .is_ok_and(|requirements| requirements.is_remote_placement());
     if placed_remotely || !handlers.contains(&step_def.handler) {
         return match dispatch_to_external_worker(
             storage.as_ref(),
@@ -1757,7 +1823,9 @@ pub(super) async fn fail_instance_with_error(
 ///
 /// `resolved_params` and `step_context` must already have been through
 /// template + credential resolution — external workers receive fully
-/// materialised values, not raw `{{…}}` or `credentials://…` strings.
+/// materialised values, not raw `{{…}}` strings. The one exception is a
+/// hard-placed step (hybrid): its `credentials://…` references stay
+/// unresolved and are resolved on the claiming executor.
 pub(super) async fn dispatch_to_external_worker(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,

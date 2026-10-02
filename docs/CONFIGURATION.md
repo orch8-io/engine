@@ -108,6 +108,25 @@ Controls the HTTP and gRPC servers, authentication, CORS, and rate limiting.
 
 ---
 
+## [embed]
+
+Embedded surface for vendors; see [Embedded Orch8](EMBEDDED.md).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `token_secret` | string | `""` | Hex HMAC secret (≥ 32 bytes decoded) that signs `o8e1.` embed tokens. Empty = every `/api/v1/embed/*` route answers 404. An invalid value refuses startup |
+| `allowed_origins` | string | `""` | Comma-separated browser origins granted CORS on the embed-token routes only (`*` = any) |
+
+---
+
+## [license]
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `key` | string | `""` | `o8l1.` license key, verified offline (ed25519). Soft enforcement only: never blocks executions. See [License keys](EMBEDDED.md#license-keys) |
+
+---
+
 ## [alerts]
 
 Built-in operational alerts evaluated on engine nodes; see [Alerts](ALERTS.md). Rules can also be managed per tenant via `/alerts/rules`.
@@ -185,6 +204,11 @@ mount a config file for those settings.
 | `ORCH8_ENCRYPTION_KEY` | — | 64 hex chars for AES-256-GCM encryption at rest (required unless `--insecure-storage`) |
 | `ORCH8_OLD_ENCRYPTION_KEY` | — | Previous encryption key, for rotation: new writes use `ORCH8_ENCRYPTION_KEY`, this key is retained as a decryption fallback for rows written before the rotation |
 | `ORCH8_WASM_PLUGIN_DIR` | — | When set, WASM plugin `source` paths must resolve (after canonicalization) inside this directory |
+| `ORCH8_WASM_FUEL` | `10000000` | Fuel (≈ Wasm instructions) per WASM plugin invocation. See [End-user WASM steps](WASM_USER_STEPS.md) |
+| `ORCH8_WASM_TIMEOUT_MS` | `2000` | Wall-clock limit per WASM plugin invocation (epoch interruption, 10 ms granularity) |
+| `ORCH8_WASM_MAX_MEMORY_BYTES` | `67108864` | Linear-memory ceiling per WASM plugin instance |
+| `ORCH8_WASM_MAX_MODULE_BYTES` | `33554432` | Largest WASM module file the engine will read and compile |
+| `ORCH8_WASM_MAX_OUTPUT_BYTES` | `4194304` | Largest output a WASM plugin may return |
 | `ORCH8_CRON_TICK_SECS` | `10` | Cron loop check interval (seconds) |
 | `ORCH8_WORKER_REAPER_TICK_SECS` | `30` | How often the stale worker-task reaper runs (seconds) |
 | `ORCH8_WORKER_REAPER_STALE_SECS` | `60` | Claimed task is reclaimed after this long without a heartbeat (seconds) |
@@ -212,6 +236,10 @@ mount a config file for those settings.
 | `ORCH8_BROWSER_OUTPUT_MAX_BYTES` | `1048576` | Largest serialized step output a browser runtime may report (larger completions get `413`). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
 | `ORCH8_BROWSER_SESSION_SECRET` | — | Shared key (≥ 32 bytes, identical on every replica) that signs runtime-session tokens: browser sessions (`bst_…`) and phone device sessions (`dst_…`, `POST /runtimes/device-sessions`). When unset the key is derived from the root API key; with neither (`--insecure`), a process-random key is used and tokens only verify on the replica that minted them (warned at startup). A shorter value refuses startup. Changing it (or, without it, the root key) invalidates outstanding tokens: browser sessions live ≤ 1 h, device sessions ≤ 24 h (phones refresh through their `TokenProvider` on the resulting `401`). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
 | `ORCH8_REQUIRE_TENANT_HEADER` | `true` | Enforce `X-Tenant-Id` header (secure by default) |
+| `ORCH8_EMBED_TOKEN_SECRET` | — | Sets `embed.token_secret` (hex, ≥ 32 bytes decoded); enables `/api/v1/embed/*` |
+| `ORCH8_EMBED_ALLOWED_ORIGINS` | — | Sets `embed.allowed_origins` (CORS on embed-token routes only) |
+| `ORCH8_LICENSE_KEY` | — | Sets `license.key` |
+| `ORCH8_LICENSE_PUBLIC_KEY` | — | Overrides the compiled-in license verification key (base64 of the raw 32-byte ed25519 key). For tests and private deployments |
 | `ORCH8_ALLOW_NO_TENANT_ISOLATION` | — | Set to `1` to allow `require_tenant_header=false` while API-key auth is on (explicit opt-out of tenant isolation; the server warns loudly) |
 | `ORCH8_MAX_CONCURRENT_REQUESTS` | `0` | Global in-flight request cap (0 = unlimited). Legacy `ORCH8_RATE_LIMIT_RPS` still accepted. |
 | `ORCH8_PUBLIC_URL` | — | Sets `api.public_url` (base for approval magic links and public progress URLs) |
@@ -246,6 +274,21 @@ mount a config file for those settings.
 | `ORCH8_CONTINUITY_LAB_ENABLED` | `false` | Enables the deterministic continuity fault laboratory. Use only in a non-production process. |
 | `ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON` | — | JSON object mapping historical signing-key IDs to base64 Ed25519 public keys for provenance verification during key rotation. Never include private keys. |
 | `ORCH8_FEDERATION_PEERS` | — | Bounded JSON array of explicitly trusted federation peers. Invalid configuration disables federation rather than accepting a partial trust set. See [Continuity operations](CONTINUITY_OPERATIONS.md#enforce-sovereign-edge-boundaries-from-registered-facts). |
+
+
+### Federation transport, BYOK, and failover
+
+All of these are opt-in. See [Federation and BYOK](FEDERATION.md) and [Multi-region failover](FAILOVER.md).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCH8_FEDERATION_ALLOW_HTTP` | `false` | Accept `http://` peer endpoints in the trust registry. Loopback testing only. |
+| `ORCH8_BYOK_BUCKET` / `ORCH8_BYOK_LOCAL_PATH` | — | Send every externalized payload to this customer bucket (or to a local directory, for development). Requires the encryption key. |
+| `ORCH8_BYOK_PREFIX`, `ORCH8_BYOK_REGION`, `ORCH8_BYOK_ENDPOINT`, `ORCH8_BYOK_ACCESS_KEY_ID`, `ORCH8_BYOK_SECRET_ACCESS_KEY`, `ORCH8_BYOK_ALLOW_HTTP` | `orch8`, AWS default chain | Bucket addressing and credentials. |
+| `ORCH8_BYOK_KMS_KEY_ARN` (+ `ORCH8_BYOK_KMS_REGION`, `ORCH8_BYOK_KMS_ENDPOINT`) | — | Wrap DEKs with this AWS KMS key. Credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`. |
+| `ORCH8_BYOK_STATIC_KEY`, `ORCH8_BYOK_STATIC_KEY_ID` | — | Wrap DEKs with a local 64-hex key instead of KMS. |
+| `ORCH8_FAILOVER_REGION` | — | This node's region. The scheduler runs only while the database region fence names this region. |
+| `ORCH8_FAILOVER_POLL_SECS` | `5` | Fence poll interval (1–60). A node fails closed after 3 intervals without a successful read. |
 
 ### Logging
 

@@ -1,0 +1,37 @@
+# Hybrid remote executor: runs Orch8 steps inside your network and joins an
+# Orch8 Cloud engine with a join token. See docs/HYBRID.md.
+#
+#   export ORCH8_JOIN_TOKEN='o8x1....'        # from the Orch8 Cloud console
+#   docker compose -f deploy/hybrid-executor/docker-compose.yml up -d
+#
+# The join token is all it needs: no database, no API key, no encryption key.
+# It dials out to Orch8 Cloud (gRPC worker stream, HTTP fallback) and listens
+# only for health checks. Credentials referenced by placed steps
+# (`credentials://<id>`) are read from ./credentials/<id> (or
+# ORCH8_CREDENTIAL_<id> variables) on this host and never sent to Cloud.
+services:
+  executor:
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    # The worker name is `<worker_id_prefix>-<hostname>`: give each executor
+    # a distinct hostname.
+    hostname: ${ORCH8_EXECUTOR_NAME:-executor-1}
+    # Longer than ORCH8_EXECUTOR_DRAIN_TIMEOUT_SECS so in-flight steps finish
+    # (or are released back to Cloud) before the container is killed.
+    stop_grace_period: 40s
+    environment:
+      ORCH8_JOIN_TOKEN: ${ORCH8_JOIN_TOKEN:?set ORCH8_JOIN_TOKEN (o8x1.… from Orch8 Cloud)}
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+      ORCH8_CREDENTIALS_DIR: /run/orch8/credentials
+      # Internal networks placed steps may call (metadata endpoints stay
+      # blocked unless listed). Empty = public destinations only.
+      ORCH8_ALLOWED_INTERNAL_CIDRS: ${ORCH8_ALLOWED_INTERNAL_CIDRS:-}
+      ORCH8_EXECUTOR_DRAIN_TIMEOUT_SECS: "25"
+      # Optional BYOK: seal large outputs into your bucket (docs/HYBRID.md).
+      # ORCH8_BYOK_BUCKET: my-orch8-payloads
+      # ORCH8_BYOK_KMS_KEY_ARN: arn:aws:kms:…
+    volumes:
+      - ./credentials:/run/orch8/credentials:ro
+    ports:
+      # Health only (/health/live, /health/ready).
+      - "127.0.0.1:8080:8080"

@@ -175,6 +175,7 @@ pub async fn fork_instance(
     let now = Utc::now();
     let fork = TaskInstance {
         id: InstanceId::new(),
+        sub_tenant: source.sub_tenant.clone(),
         sequence_id: source.sequence_id,
         tenant_id: source.tenant_id.clone(),
         namespace: source.namespace.clone(),

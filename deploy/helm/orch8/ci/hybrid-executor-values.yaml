@@ -1,0 +1,12 @@
+# Hybrid remote executor joining Orch8 Cloud: only the join token (no
+# database, API key or encryption key), executor-local credentials, and the
+# internal networks placed steps may call.
+mode: executor
+hybrid:
+  joinToken:
+    existingSecret: orch8-join
+  credentials:
+    existingSecret: orch8-executor-credentials
+  allowedInternalCidrs: "10.0.0.0/8"
+executor:
+  replicas: 2

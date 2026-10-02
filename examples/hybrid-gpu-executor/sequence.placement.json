@@ -1,0 +1,32 @@
+{
+  "name": "gpu-summarize-placement",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "summarize",
+      "handler": "gpu_llm_generate",
+      "placement": { "labels": { "gpu": "true" } },
+      "params": {
+        "system": "You summarize support tickets in three bullet points.",
+        "prompt": "{{context.data.ticket_text}}",
+        "max_tokens": 256
+      },
+      "timeout": 300000,
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff": 5000,
+        "max_backoff": 60000,
+        "backoff_multiplier": 2.0
+      }
+    },
+    {
+      "type": "step",
+      "id": "record",
+      "handler": "log",
+      "params": {
+        "message": "summary ready",
+        "summary": "{{outputs.summarize.text}}"
+      }
+    }
+  ]
+}

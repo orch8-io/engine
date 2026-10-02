@@ -104,8 +104,9 @@ pub fn enforce_bound_runtime(
 }
 
 /// Clamp a device-session runtime advertisement: the runtime must be the
-/// bound one, and it may only advertise handlers its token grants (they are
-/// the handlers delegations are routed to it for).
+/// bound one, it may only advertise handlers its token grants (they are
+/// the handlers delegations are routed to it for), and it carries no
+/// placement labels.
 pub fn clamp_advertisement(
     binding: &RuntimeBinding,
     capabilities: &mut orch8_types::continuity::RuntimeCapabilities,
@@ -118,6 +119,9 @@ pub fn clamp_advertisement(
     capabilities
         .handlers
         .retain(|handler| binding.allows_handler(handler));
+    // Placement labels (`residency=…`) are operator-vouched facts a phone
+    // cannot assert for itself.
+    capabilities.labels.clear();
     capabilities.expires_at = capabilities.expires_at.min(binding.expires_at);
     Ok(())
 }
@@ -168,6 +172,9 @@ pub fn destination_view(
             estimated_latency_ms: None,
             draining: false,
             capsule_signing_public_key: None,
+            // Destination selection matches kind and handlers only; labels
+            // (residency, hardware classes, …) are inventory, not routing.
+            labels: std::collections::BTreeMap::new(),
             observed_at: runtime.observed_at,
             expires_at: runtime.expires_at,
         })
@@ -366,6 +373,46 @@ mod tests {
     }
 
     #[test]
+    fn device_advertisements_are_clamped_to_the_binding() {
+        let now = Utc::now();
+        let binding = RuntimeBinding {
+            tenant_id: TenantId::unchecked("acme"),
+            kind: RuntimeKind::Mobile,
+            runtime_id: RuntimeId::new(),
+            device_id: Some("phone-1".into()),
+            handlers: vec!["scan".into()],
+            queues: Vec::new(),
+            expires_at: now + chrono::Duration::seconds(60),
+        };
+        let mut caps = RuntimeCapabilities {
+            runtime_id: binding.runtime_id,
+            kind: RuntimeKind::Mobile,
+            trust: RuntimeTrustLevel::Registered,
+            handlers: vec!["scan".into(), "charge".into()],
+            plugins: Vec::new(),
+            credentials: Vec::new(),
+            regions: Vec::new(),
+            hardware: Vec::new(),
+            offline_capable: true,
+            connectivity: None,
+            battery_percent: None,
+            estimated_cost_microunits: None,
+            estimated_latency_ms: None,
+            draining: false,
+            capsule_signing_public_key: None,
+            labels: [("residency".to_owned(), "eu".to_owned())].into(),
+            observed_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+        };
+        clamp_advertisement(&binding, &mut caps).unwrap();
+        assert_eq!(caps.handlers, vec!["scan".to_string()]);
+        assert!(caps.labels.is_empty(), "a phone cannot claim residency");
+        assert_eq!(caps.expires_at, binding.expires_at);
+        caps.kind = RuntimeKind::Browser;
+        assert!(clamp_advertisement(&binding, &mut caps).is_err());
+    }
+
+    #[test]
     fn device_sessions_reach_only_their_routes() {
         let post = Method::POST;
         let get = Method::GET;
@@ -411,6 +458,16 @@ mod tests {
             (&get, "/api/v1/continuity/delegations/not-a-uuid".to_owned()),
             (&post, format!("/api/v1/continuity/delegations/{id}")),
             (&post, "/api/v1/api-keys".to_owned()),
+            // Sub-tenant, embed, federation, and migration surfaces.
+            (&get, "/api/v1/sub-tenants/acme/limits".to_owned()),
+            (&get, "/api/v1/usage/sub-tenants".to_owned()),
+            (&post, "/api/v1/embed/tokens".to_owned()),
+            (&post, "/api/v1/embed/runs".to_owned()),
+            (&post, "/api/v1/federation/peers".to_owned()),
+            (&post, "/api/v1/federation/inbound".to_owned()),
+            (&post, "/api/v1/continuity/federation/sign".to_owned()),
+            (&post, "/api/v1/migrations/import".to_owned()),
+            (&get, "/api/v1/receipts/export".to_owned()),
             (
                 &Method::DELETE,
                 format!("/api/v1/workers/tasks/{id}/complete"),

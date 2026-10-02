@@ -12,7 +12,9 @@ fn config() -> ManagedControlConfig {
         tenant_id: "tenant-acme".into(),
         worker_id: "worker-edge-7".into(),
         runtime_id: RuntimeId::new(),
+        region: None,
         kind: RuntimeKind::Edge,
+        ca_pem: None,
     }
 }
 

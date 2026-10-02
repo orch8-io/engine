@@ -15,7 +15,7 @@ use orch8_types::worker::{WorkerCommand, WorkerCommandKind};
 use tokio_util::sync::CancellationToken;
 use tonic::Request;
 use tonic::metadata::MetadataValue;
-use tonic::transport::{ClientTlsConfig, Endpoint};
+use tonic::transport::Endpoint;
 
 #[derive(Clone)]
 pub(crate) struct ManagedControlConfig {
@@ -24,7 +24,13 @@ pub(crate) struct ManagedControlConfig {
     pub tenant_id: String,
     pub worker_id: String,
     pub runtime_id: RuntimeId,
+    /// Operator-chosen coarse region (e.g. from a join token); advertised so
+    /// the control plane can place by region. Never workload data.
+    pub region: Option<String>,
     pub kind: RuntimeKind,
+    /// PEM bundle trusted instead of the public web PKI roots
+    /// (`[executor] ca_cert_path`).
+    pub ca_pem: Option<Vec<u8>>,
 }
 
 fn client_frame(payload: ClientPayload) -> WorkerStreamClient {
@@ -42,7 +48,7 @@ fn safe_capabilities(config: &ManagedControlConfig, draining: bool) -> RuntimeCa
         handlers: vec!["managed-control".into()],
         plugins: Vec::new(),
         credentials: Vec::new(),
-        regions: Vec::new(),
+        regions: config.region.iter().cloned().collect(),
         hardware: Vec::new(),
         offline_capable: false,
         connectivity: Some(RuntimeConnectivity::Ethernet),
@@ -51,6 +57,7 @@ fn safe_capabilities(config: &ManagedControlConfig, draining: bool) -> RuntimeCa
         estimated_latency_ms: None,
         draining,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + chrono::Duration::seconds(45),
     }
@@ -112,7 +119,9 @@ fn open_frame(config: &ManagedControlConfig) -> Result<WorkerStreamClient> {
 async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken) -> Result<()> {
     let endpoint = Endpoint::from_shared(config.endpoint.clone())?
         .connect_timeout(Duration::from_secs(10))
-        .tls_config(ClientTlsConfig::new().with_webpki_roots())?;
+        .tls_config(orch8_grpc::worker_client::client_tls(
+            config.ca_pem.as_deref(),
+        ))?;
     let channel = endpoint
         .connect()
         .await
@@ -251,7 +260,9 @@ mod tests {
             tenant_id: "acme".into(),
             worker_id: "edge-1".into(),
             runtime_id: RuntimeId::new(),
+            region: None,
             kind: RuntimeKind::Edge,
+            ca_pem: None,
         };
         let value = serde_json::to_value(safe_capabilities(&config, false)).unwrap();
         let rendered = value.to_string();

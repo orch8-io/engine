@@ -531,6 +531,16 @@ pub const CATALOG: &[ErrorCodeEntry] = &[
         "No rule identified a blocking condition; the instance appears healthy.",
         "Watch progress; re-run diagnosis if it stays idle."
     ),
+    entry!(
+        "ORCH8-D021",
+        "PLACEMENT_UNSATISFIED",
+        Diagnosis,
+        "No runtime satisfies the step placement",
+        "The step's placement (region, labels, or residency) matches no live \
+         runtime. The task waits; it is never dispatched to a non-matching runtime.",
+        "Start or relabel an executor that advertises the required region/labels \
+         (`residency=<zone>` for residency), or change the placement policy."
+    ),
 ];
 
 /// Look up the catalog entry for a finding key (exact, or by `PREFIX:`).

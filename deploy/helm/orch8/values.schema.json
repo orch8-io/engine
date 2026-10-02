@@ -67,8 +67,44 @@
     },
     "imagePullSecrets": { "type": "array" },
     "mode": {
-      "description": "allInOne = one all_in_one Deployment; split = control + executor Deployments. The edge role is not offered by this chart.",
-      "enum": ["allInOne", "split"]
+      "description": "allInOne = one all_in_one Deployment; split = control + executor Deployments; executor = a hybrid executor joining a managed control plane (hybrid.joinToken). The edge role is not offered by this chart.",
+      "enum": ["allInOne", "split", "executor"]
+    },
+    "hybrid": {
+      "type": "object",
+      "properties": {
+        "joinToken": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        },
+        "credentials": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" }
+          }
+        },
+        "caCert": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        },
+        "allowedInternalCidrs": { "type": "string" }
+      }
+    },
+    "cloudObservability": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "endpoint": { "type": "string", "pattern": "^https://" },
+        "engineId": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "apiKeyKey": { "type": "string", "minLength": 1 }
+      }
     },
     "allInOne": { "$ref": "#/definitions/roleDeployment" },
     "control": { "$ref": "#/definitions/roleDeployment" },

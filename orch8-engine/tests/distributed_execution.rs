@@ -4,6 +4,9 @@
 //! against Postgres too (skipped otherwise, like the storage PG suite).
 //! Postgres rows are shared across parallel tests, so assertions look at the
 //! scenario's own instance/task only — never at global reaper counters.
+// TaskInstance/SequenceDefinition grew (sub-tenant fields); these whole-engine
+// test futures are intentionally large and run once each.
+#![allow(clippy::large_futures)]
 #![allow(clippy::too_many_lines)]
 
 mod common;
@@ -136,6 +139,7 @@ fn browser_caps(runtime_id: RuntimeId, handler: &str) -> RuntimeCapabilities {
         estimated_latency_ms: None,
         draining: false,
         capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
         observed_at: now,
         expires_at: now + chrono::Duration::minutes(4),
     }

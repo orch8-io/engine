@@ -1,6 +1,10 @@
 Orch8 {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}" (mode: {{ .Values.mode }}, storage: {{ .Values.storage.backend }}).
 
+{{- if eq .Values.mode "executor" }}
+Hybrid remote executor: joins Orch8 Cloud with the join token in Secret {{ .Values.hybrid.joinToken.existingSecret }} (ORCH8_JOIN_TOKEN). No database; it dials out only (gRPC worker stream, HTTP fallback) and serves health on :8080. Watch it appear in the Orch8 Cloud fleet view.
+{{- else }}
 API service: {{ include "orch8.apiServiceName" . }}:{{ .Values.service.httpPort }} (REST under /api/v1, health at /health/live and /health/ready)
+{{- end }}
 {{- if eq .Values.mode "split" }}
 Executor gRPC service: {{ include "orch8.fullname" . }}-executor:{{ .Values.service.grpcPort }} (worker lifecycle surface only; HTTP is health only)
 {{- end }}

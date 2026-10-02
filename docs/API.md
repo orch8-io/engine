@@ -1150,6 +1150,8 @@ When `ORCH8_API_KEY` is set, the scraper must send it as `x-api-key` (and an `x-
 | Metric | Description |
 |--------|-------------|
 | `orch8_queue_depth` | Instances claimed in current tick |
+| `orch8_queue_depth{capability,region,priority_lane}` | Pending worker backlog for autoscaling ([Placement](PLACEMENT.md)) |
+| `orch8_placement_unsatisfied{capability,region}` | Pending placed tasks no live runtime satisfies |
 | `orch8_active_tasks` | Currently in-flight step executions |
 
 ---

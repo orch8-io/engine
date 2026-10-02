@@ -19,6 +19,9 @@ async fn create_on(
         "sla": seq.sla,
         "on_failure": seq.on_failure,
         "on_cancel": seq.on_cancel,
+        "sub_tenant": seq.sub_tenant,
+        "embed": seq.embed,
+        "placement": seq.placement,
     });
     sqlx::query(
         r"

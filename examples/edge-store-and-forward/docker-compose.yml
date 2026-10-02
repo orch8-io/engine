@@ -1,0 +1,117 @@
+# Offline edge store node + HQ, store-and-forward. See README.md.
+#
+#   Store box (normal operation, WAN may be down):
+#       docker compose up -d store-edge
+#   Store box (provisioning / changing workflows — stop the edge node first):
+#       docker compose stop store-edge
+#       docker compose --profile provision up -d store-provision && ./provision.sh
+#       docker compose --profile provision stop store-provision && docker compose up -d store-edge
+#   HQ for local testing (Postgres + all_in_one with the mobile sync API):
+#       docker compose --profile hq up -d
+#
+# Pin ORCH8_VERSION to an exact tag before rolling out to stores.
+name: orch8-edge-store
+
+x-store-env: &store-env
+  ORCH8_STORAGE_BACKEND: sqlite
+  ORCH8_DATABASE_URL: sqlite:///data/orch8.db?mode=rwc
+  # Required: the engine refuses to start without both keys. STORE_API_KEY stays
+  # on the box; back STORE_ENCRYPTION_KEY up off the box (restores need it).
+  ORCH8_API_KEY: ${STORE_API_KEY:-}
+  ORCH8_ENCRYPTION_KEY: ${STORE_ENCRYPTION_KEY:-}
+  ORCH8_REQUIRE_TENANT_HEADER: "true"
+  # The store's own back-office/POS server lives on the LAN (private IPs).
+  # http_request blocks internal addresses unless this is set.
+  ORCH8_ALLOW_INTERNAL_URLS: "true"
+  ORCH8_INSTANCE_RETENTION_SECS: ${STORE_RETENTION_SECS:-2592000}
+  ORCH8_LOG_JSON: "true"
+
+services:
+  # Engine-only node: no inbound API, no gRPC, health endpoint only.
+  store-edge:
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      <<: *store-env
+      ORCH8_NODE_ROLE: edge
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+      # Optional outbound control session to HQ/Cloud (liveness + drain only;
+      # never carries workflow data). Leave ORCH8_MANAGED_CONTROL_ENDPOINT
+      # empty to run fully standalone. Must be https://.
+      ORCH8_MANAGED_CONTROL_ENDPOINT: ${MANAGED_CONTROL_ENDPOINT:-}
+      ORCH8_MANAGED_CONTROL_API_KEY: ${MANAGED_CONTROL_API_KEY:-}
+      ORCH8_MANAGED_CONTROL_TENANT_ID: ${MANAGED_CONTROL_TENANT_ID:-}
+      ORCH8_MANAGED_CONTROL_WORKER_ID: ${STORE_ID:-store-001}
+      ORCH8_MANAGED_CONTROL_RUNTIME_ID: ${STORE_RUNTIME_ID:-}
+    volumes:
+      - store-data:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # Same database, full API on loopback — ONLY while store-edge is stopped.
+  # SQLite allows exactly one engine process per file.
+  store-provision:
+    profiles: ["provision"]
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: "no"
+    environment:
+      <<: *store-env
+      ORCH8_NODE_ROLE: all_in_one
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - store-data:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # ── HQ (local testing stand-in) ────────────────────────────────────────────
+  hq-postgres:
+    profiles: ["hq"]
+    image: postgres:16
+    environment:
+      POSTGRES_DB: orch8
+      POSTGRES_USER: orch8
+      POSTGRES_PASSWORD: orch8-local-only
+    volumes:
+      - hq-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orch8"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  hq:
+    profiles: ["hq"]
+    image: ghcr.io/orch8-io/engine:${ORCH8_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      ORCH8_STORAGE_BACKEND: postgres
+      ORCH8_DATABASE_URL: postgres://orch8:orch8-local-only@hq-postgres:5432/orch8
+      ORCH8_RUN_MIGRATIONS: "true"
+      ORCH8_HTTP_ADDR: 0.0.0.0:8080
+      ORCH8_API_KEY: ${HQ_API_KEY:-}
+      ORCH8_ENCRYPTION_KEY: ${HQ_ENCRYPTION_KEY:-}
+      ORCH8_REQUIRE_TENANT_HEADER: "true"
+      # POS terminals running the mobile/embedded SDK sync here.
+      ORCH8_MOBILE_SYNC_ENABLED: "true"
+    depends_on:
+      hq-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+volumes:
+  store-data:
+  hq-pgdata:

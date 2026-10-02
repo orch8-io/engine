@@ -150,8 +150,37 @@ pub(crate) struct PreparedStep {
     /// Cache key with its template (if any) resolved.
     pub resolved_cache_key: Option<String>,
     /// The templated params referenced `credentials://` material (resolved
-    /// into `resolved_params`). Such a step is never handed to a browser.
+    /// into `resolved_params` unless `credentials_deferred`). Such a step is
+    /// never handed to a browser.
     pub carries_credentials: bool,
+    /// The `credentials://` references were left in `resolved_params` for
+    /// the remote executor that claims the step (hybrid placement, see
+    /// [`crate::step_placement::defers_credentials`]).
+    pub credentials_deferred: bool,
+}
+
+impl PreparedStep {
+    /// Resolve credentials that [`prepare_step`] deferred, when the step
+    /// turns out not to be dispatched by hard placement after all (e.g. a
+    /// circuit breaker swapped in a fallback handler that runs in-process).
+    /// No-op when nothing was deferred.
+    pub(crate) async fn resolve_deferred_credentials(
+        &mut self,
+        storage: &dyn StorageBackend,
+        instance: &TaskInstance,
+    ) -> Result<(), StepError> {
+        if !self.credentials_deferred {
+            return Ok(());
+        }
+        crate::credentials::resolve_in_value(
+            storage,
+            instance.tenant_id.as_str(),
+            &mut self.resolved_params,
+        )
+        .await?;
+        self.credentials_deferred = false;
+        Ok(())
+    }
 }
 
 /// Why [`prepare_step`] could not produce a [`PreparedStep`].
@@ -179,6 +208,10 @@ impl PrepareError {
 /// `{{templates}}`, then `credentials://` refs, then the cache key — in the
 /// exact order both dispatch paths require.
 ///
+/// `defer_credentials` (from [`crate::step_placement::defers_credentials`])
+/// leaves `credentials://` references unresolved: the step is hard-placed on
+/// remote executors, which resolve them locally.
+///
 /// Shared by the tree-evaluator (`execute_step_node`) and the fast-path
 /// (`scheduler::step_exec`) so the resolution order and failure logging cannot
 /// drift. The caller maps [`PrepareError`] to its own fail action (node-level
@@ -188,6 +221,7 @@ pub(crate) async fn prepare_step(
     instance: &TaskInstance,
     step_def: &StepDef,
     outputs: &OutputsSnapshot,
+    defer_credentials: bool,
 ) -> Result<PreparedStep, PrepareError> {
     // Context snapshot — reads only `instance.context` + `context_access`, so
     // it is built before template resolution. An error here is infrastructural.
@@ -222,12 +256,15 @@ pub(crate) async fn prepare_step(
 
     // Credentials next: every dispatch target sees expanded params without
     // needing the credential registry. Missing/disabled/cross-tenant refs fail.
-    if let Err(step_err) = crate::credentials::resolve_in_value(
-        storage,
-        instance.tenant_id.as_str(),
-        &mut resolved_params,
-    )
-    .await
+    // Hard-placed steps keep the references for the executor instead.
+    let credentials_deferred = defer_credentials && carries_credentials;
+    if !credentials_deferred
+        && let Err(step_err) = crate::credentials::resolve_in_value(
+            storage,
+            instance.tenant_id.as_str(),
+            &mut resolved_params,
+        )
+        .await
     {
         tracing::warn!(
             instance_id = %instance.id,
@@ -256,6 +293,7 @@ pub(crate) async fn prepare_step(
         resolved_params,
         resolved_cache_key,
         carries_credentials,
+        credentials_deferred,
     })
 }
 
@@ -433,12 +471,17 @@ pub(crate) async fn execute_step_node_with_clock(
     // Resolve context snapshot + templates + credentials + cache key (shared
     // with the fast path). Template/credential failures fail this *node*;
     // infrastructural errors propagate.
-    let PreparedStep {
-        step_context,
-        resolved_params,
-        resolved_cache_key,
-        carries_credentials,
-    } = match prepare_step(storage.as_ref(), instance, step_def, outputs).await {
+    let defer_credentials =
+        crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?;
+    let mut prepared = match prepare_step(
+        storage.as_ref(),
+        instance,
+        step_def,
+        outputs,
+        defer_credentials,
+    )
+    .await
+    {
         Ok(prepared) => prepared,
         Err(PrepareError::Infra(e)) => return Err(e),
         Err(_) => {
@@ -481,6 +524,25 @@ pub(crate) async fn execute_step_node_with_clock(
     // fallback-swapped version (if any). `cb_step_def` owns the borrow.
     let step_def = cb_step_def.as_ref();
     let breaker_tracked = crate::circuit_breaker::is_breaker_tracked(&step_def.handler);
+
+    // A fallback handler may not be hard-placed: resolve anything deferred.
+    if prepared.credentials_deferred
+        && !crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?
+        && prepared
+            .resolve_deferred_credentials(storage.as_ref(), instance)
+            .await
+            .is_err()
+    {
+        evaluator::fail_node(storage.as_ref(), node.id).await?;
+        return Ok(false);
+    }
+    let PreparedStep {
+        step_context,
+        resolved_params,
+        resolved_cache_key,
+        carries_credentials,
+        credentials_deferred: _,
+    } = prepared;
 
     // If the handler is an ActivePieces sidecar call, dispatch via HTTP to the
     // Node worker. No plugin-registry lookup needed — the endpoint is a single
@@ -583,8 +645,37 @@ pub(crate) async fn execute_step_node_with_clock(
     // If the handler is not registered in-process — or the step is placed on
     // specific remote runtimes (`$runtime.runtime_id`, or kinds excluding
     // `server`) — dispatch to the external worker queue.
-    let placed_remotely = orch8_types::worker::peek_runtime_requirements(&resolved_params)
-        .is_ok_and(|requirements| requirements.is_remote_placement());
+    //
+    // Step/sequence placement and tenant placement policies compile into
+    // `$runtime` first; hard placement (region, labels, residency) always
+    // goes to the worker queue so the claim predicate enforces it.
+    let mut resolved_params = resolved_params;
+    let hard_placed = match Box::pin(crate::step_placement::apply_step_placement(
+        storage.as_ref(),
+        instance,
+        step_def,
+        &mut resolved_params,
+        clock.now(),
+    ))
+    .await?
+    {
+        Ok(resolved) => resolved.is_some_and(|placement| placement.has_hard_constraints()),
+        Err(message) => {
+            super::step_dispatch::record_remote_dispatch_rejection(
+                storage.as_ref(),
+                instance,
+                step_def,
+                attempt,
+                &message,
+            )
+            .await;
+            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            return Ok(false);
+        }
+    };
+    let placed_remotely = hard_placed
+        || orch8_types::worker::peek_runtime_requirements(&resolved_params)
+            .is_ok_and(|requirements| requirements.is_remote_placement());
     if placed_remotely || !handlers.contains(&step_def.handler) {
         return dispatch_step_to_external_worker(
             storage.as_ref(),
@@ -881,6 +972,7 @@ mod tests {
     async fn seed_instance(storage: &SqliteStorage, id: InstanceId) {
         let now = Utc::now();
         let inst = TaskInstance {
+            sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
@@ -975,6 +1067,7 @@ mod tests {
     ) {
         let now = Utc::now();
         let inst = TaskInstance {
+            sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
@@ -1006,6 +1099,8 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            rate_budget: None,
+            placement: None,
             send_window: None,
             context_access: None,
             cancellable: true,

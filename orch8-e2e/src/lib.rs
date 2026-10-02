@@ -110,10 +110,42 @@ pub struct Cloud {
     pg_schema: Option<(sqlx::PgPool, String)>,
 }
 
+/// Knobs of a [`Cloud`] beyond the defaults.
+#[derive(Debug, Clone)]
+pub struct CloudOptions {
+    pub scheduler: orch8_types::config::SchedulerConfig,
+    /// Authenticate gRPC exactly like `orch8-server` (root key + per-tenant
+    /// keys). Off by default: older suites call gRPC without a key.
+    pub grpc_auth: bool,
+}
+
+impl Default for CloudOptions {
+    fn default() -> Self {
+        Self {
+            scheduler: orch8_types::config::SchedulerConfig {
+                tick_interval_ms: 50,
+                worker_reaper_tick_secs: 1,
+                worker_reaper_stale_secs: 60,
+                ..orch8_types::config::SchedulerConfig::default()
+            },
+            grpc_auth: false,
+        }
+    }
+}
+
 impl Cloud {
     /// Start a control plane whose scheduler serves the handlers `register`
     /// adds (plus every builtin).
     pub fn start(backend: &Backend, register: impl FnOnce(&mut HandlerRegistry)) -> Self {
+        Self::start_with(backend, register, CloudOptions::default())
+    }
+
+    /// [`Self::start`] with explicit [`CloudOptions`].
+    pub fn start_with(
+        backend: &Backend,
+        register: impl FnOnce(&mut HandlerRegistry),
+        options: CloudOptions,
+    ) -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()
@@ -130,19 +162,14 @@ impl Cloud {
             TestServerOptions {
                 root_api_key: Some(ROOT_KEY.into()),
                 mobile_sync_enabled: true,
-                mobile_sync_resolve_credentials: false,
+                ..TestServerOptions::default()
             },
         ));
 
-        let grpc_addr = rt.block_on(spawn_grpc(Arc::clone(&storage)));
+        let grpc_addr = rt.block_on(spawn_grpc(Arc::clone(&storage), options.grpc_auth));
 
         let engine_cancel = CancellationToken::new();
-        let config = orch8_types::config::SchedulerConfig {
-            tick_interval_ms: 50,
-            worker_reaper_tick_secs: 1,
-            worker_reaper_stale_secs: 60,
-            ..orch8_types::config::SchedulerConfig::default()
-        };
+        let config = options.scheduler;
         let engine = orch8_engine::Engine::new(
             Arc::clone(&storage),
             config,
@@ -203,6 +230,7 @@ impl Cloud {
             let request = match method {
                 "GET" => self.http.get(&url),
                 "DELETE" => self.http.delete(&url),
+                "PUT" => self.http.put(&url),
                 _ => self.http.post(&url),
             }
             .header("x-api-key", key)
@@ -485,6 +513,301 @@ impl Cloud {
             }
         })
     }
+
+    /// Every table of this cloud's database whose rows contain `needle`
+    /// anywhere (any text or binary column; Postgres rows are rendered as
+    /// text). Used to prove a value never reached the control plane.
+    pub fn tables_containing(&self, needle: &str) -> Vec<String> {
+        use sqlx::Row as _;
+        self.rt.block_on(async {
+            let mut hits = Vec::new();
+            match &self.raw {
+                RawPool::Sqlite(pool) => {
+                    let tables: Vec<String> =
+                        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+                            .fetch_all(pool)
+                            .await
+                            .expect("list tables");
+                    for table in tables {
+                        let rows = sqlx::query(&format!("SELECT * FROM \"{table}\""))
+                            .fetch_all(pool)
+                            .await
+                            .expect("scan table");
+                        let found = rows.iter().any(|row| {
+                            (0..row.len()).any(|i| {
+                                row.try_get::<Option<String>, _>(i)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|text| text.contains(needle))
+                                    || row
+                                        .try_get::<Option<Vec<u8>>, _>(i)
+                                        .ok()
+                                        .flatten()
+                                        .is_some_and(|bytes| {
+                                            String::from_utf8_lossy(&bytes).contains(needle)
+                                        })
+                            })
+                        });
+                        if found {
+                            hits.push(table);
+                        }
+                    }
+                }
+                RawPool::Postgres(pool) => {
+                    let schema = self
+                        .pg_schema
+                        .as_ref()
+                        .map(|(_, schema)| schema.clone())
+                        .expect("postgres schema");
+                    let tables: Vec<String> = sqlx::query_scalar(
+                        "SELECT table_name::text FROM information_schema.tables \
+                         WHERE table_schema = $1 AND table_type = 'BASE TABLE'",
+                    )
+                    .bind(&schema)
+                    .fetch_all(pool)
+                    .await
+                    .expect("list tables");
+                    for table in tables {
+                        let count: i64 = sqlx::query_scalar(&format!(
+                            "SELECT COUNT(*) FROM \"{schema}\".\"{table}\" t \
+                             WHERE strpos(t::text, $1) > 0"
+                        ))
+                        .bind(needle)
+                        .fetch_one(pool)
+                        .await
+                        .expect("scan table");
+                        if count > 0 {
+                            hits.push(table);
+                        }
+                    }
+                }
+            }
+            hits
+        })
+    }
+
+    /// Runtime capability advertisements of this cloud's tenant (including
+    /// expired ones' latest state as long as they are listed).
+    pub fn runtimes(&self) -> Vec<orch8_types::continuity::RuntimeCapabilities> {
+        let tenant = TenantId::unchecked(&self.tenant);
+        self.rt
+            .block_on(self.storage.list_runtime_capabilities(
+                &tenant,
+                chrono::Utc::now() - chrono::Duration::hours(1),
+                1_000,
+            ))
+            .expect("runtimes")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TlsFront: the managed engine's public HTTPS/gRPC endpoint
+// ---------------------------------------------------------------------------
+
+/// Directory of the committed test TLS material (a throwaway CA and a
+/// `localhost` / `127.0.0.1` server certificate; not secret).
+#[must_use]
+pub fn tls_fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/tls")
+        .join(name)
+}
+
+/// A TLS front end standing in for the managed engine's public endpoint:
+/// one `https://127.0.0.1:<port>` that routes by ALPN — `h2` to the gRPC
+/// service, anything else (HTTP/1.1) to the REST API — like an ingress that
+/// serves both on one host name.
+pub struct TlsFront {
+    pub endpoint: String,
+    stop: CancellationToken,
+}
+
+impl TlsFront {
+    #[must_use]
+    pub fn start(cloud: &Cloud) -> Self {
+        use tokio_rustls::rustls;
+        use tokio_rustls::rustls::pki_types::pem::PemObject as _;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+        let certs: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_file_iter(tls_fixture("server.pem"))
+                .expect("server.pem")
+                .collect::<Result<_, _>>()
+                .expect("server certificate");
+        let key = PrivateKeyDer::from_pem_file(tls_fixture("server.key")).expect("server.key");
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("tls versions")
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("tls config");
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = cloud
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .expect("bind tls front");
+        let port = listener.local_addr().expect("tls addr").port();
+        let (grpc, http) = (cloud.grpc_addr, cloud.http_addr());
+        let stop = CancellationToken::new();
+        let stop_task = stop.clone();
+        cloud.handle().spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    () = stop_task.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((tcp, _)) = accepted else { continue };
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(mut tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let upstream = if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+                        grpc
+                    } else {
+                        http
+                    };
+                    let Ok(mut outbound) = tokio::net::TcpStream::connect(upstream).await else {
+                        return;
+                    };
+                    let _ = tokio::io::copy_bidirectional(&mut tls, &mut outbound).await;
+                });
+            }
+        });
+        Self {
+            endpoint: format!("https://127.0.0.1:{port}"),
+            stop,
+        }
+    }
+}
+
+impl Drop for TlsFront {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ExecutorProcess: a real `orch8-server` remote executor (no database)
+// ---------------------------------------------------------------------------
+
+/// Path of the `orch8-server` binary: `ORCH8_SERVER_BIN`, else the binary
+/// next to this test's profile directory (run `cargo build -p orch8-server`
+/// first), else build it.
+#[must_use]
+pub fn server_binary() -> std::path::PathBuf {
+    static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        if let Ok(path) = std::env::var("ORCH8_SERVER_BIN") {
+            return path.into();
+        }
+        // <target>/<profile>/deps/<test binary> → <target>/<profile>/orch8-server
+        let exe = std::env::current_exe().expect("test binary path");
+        let profile_dir = exe
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("target profile dir");
+        let bin = profile_dir.join("orch8-server");
+        if !bin.exists() {
+            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+            let status = std::process::Command::new(cargo)
+                .args(["build", "-q", "-p", "orch8-server", "--bin", "orch8-server"])
+                .status()
+                .expect("run cargo build");
+            assert!(status.success(), "building orch8-server failed");
+        }
+        assert!(bin.exists(), "{} not found", bin.display());
+        bin
+    })
+    .clone()
+}
+
+/// A remote executor process started from a join token, with no database.
+pub struct ExecutorProcess {
+    pub name: String,
+    child: std::process::Child,
+    pub log: std::path::PathBuf,
+}
+
+impl ExecutorProcess {
+    /// `orch8-server` with only `ORCH8_JOIN_TOKEN` (+ `env`) set: no config
+    /// file, no database, no API or encryption key.
+    #[must_use]
+    pub fn spawn(name: &str, token: &str, env: &[(&str, String)], dir: &std::path::Path) -> Self {
+        let log = dir.join(format!("{name}.log"));
+        let file = std::fs::File::create(&log).expect("executor log");
+        let health = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("free port");
+        let mut command = std::process::Command::new(server_binary());
+        command
+            .args(["--config", dir.join("absent.toml").to_str().expect("utf-8")])
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOSTNAME", name)
+            .env("ORCH8_JOIN_TOKEN", token)
+            .env("ORCH8_HTTP_ADDR", health.to_string())
+            .env("RUST_LOG", "info,orch8_engine=debug,orch8_grpc=debug")
+            .stdin(std::process::Stdio::null())
+            .stdout(file.try_clone().expect("log"))
+            .stderr(file);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let child = command.spawn().expect("spawn executor");
+        Self {
+            name: name.to_owned(),
+            child,
+            log,
+        }
+    }
+
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// `SIGKILL`: the process vanishes without releasing anything.
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Wait up to `limit` for the process to exit on its own.
+    pub fn wait_exit(&mut self, limit: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[must_use]
+    pub fn log_text(&self) -> String {
+        std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+}
+
+impl Drop for ExecutorProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if std::thread::panicking() {
+            let log = self.log_text();
+            let tail: Vec<&str> = log.lines().rev().take(80).collect();
+            eprintln!("---- executor {} log (tail) ----", self.name);
+            for line in tail.into_iter().rev() {
+                eprintln!("{line}");
+            }
+        }
+    }
 }
 
 impl Drop for Cloud {
@@ -549,18 +872,34 @@ async fn open_storage(
     }
 }
 
-async fn spawn_grpc(storage: Arc<dyn StorageBackend>) -> SocketAddr {
+async fn spawn_grpc(storage: Arc<dyn StorageBackend>, auth: bool) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind grpc");
     let addr = listener.local_addr().expect("grpc addr");
-    let service = orch8_grpc::service::Orch8GrpcService::new(storage);
-    tokio::spawn(async move {
-        let _ = tonic::transport::Server::builder()
-            .add_service(orch8_grpc::Orch8ServiceServer::new(service))
-            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
-            .await;
-    });
+    let service = orch8_grpc::service::Orch8GrpcService::new(Arc::clone(&storage));
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    if auth {
+        let layer = orch8_grpc::auth::GrpcAuthLayer::new(
+            storage,
+            Some(orch8_types::auth::precompute_secret_digest(ROOT_KEY)),
+            false,
+        );
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .layer(layer)
+                .add_service(orch8_grpc::Orch8ServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await;
+        });
+    } else {
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(orch8_grpc::Orch8ServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await;
+        });
+    }
     addr
 }
 

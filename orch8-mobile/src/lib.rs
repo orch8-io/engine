@@ -2727,6 +2727,7 @@ mod tests {
         });
 
         let old_instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
             tenant_id: TenantId::new("mobile").unwrap(),

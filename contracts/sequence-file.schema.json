@@ -26,6 +26,17 @@
       "type": "boolean",
       "description": "If true, this version is deprecated. New instances should use a newer version.\nRunning instances bound to this version continue unaffected."
     },
+    "embed": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/SequenceEmbed",
+          "description": "Embedding opt-ins (which step outputs embedded viewers may see)."
+        }
+      ]
+    },
     "id": {
       "$ref": "#/$defs/SequenceId"
     },
@@ -69,6 +80,17 @@
       },
       "description": "Best-effort cleanup blocks run when the instance reaches terminal\n`Failed`. Each top-level step block is dispatched once; errors are\nswallowed (the instance is already failing). Use to release resources,\nsend a death notification, etc. — so a failed run doesn't \"just die\"."
     },
+    "placement": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/Placement",
+          "description": "Sequence-level placement default (region, labels, residency,\naffinity, priority lane) applied to every worker-dispatched step;\nsee `docs/PLACEMENT.md`."
+        }
+      ]
+    },
     "schema_version": {
       "type": "integer",
       "format": "int32",
@@ -87,6 +109,13 @@
     },
     "status": {
       "$ref": "#/$defs/SequenceStatus"
+    },
+    "sub_tenant": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Owning sub-tenant (embedded builder); `None` = tenant-level."
     },
     "tenant_id": {
       "$ref": "#/$defs/TenantId"
@@ -148,6 +177,14 @@
           "minimum": 0
         }
       }
+    },
+    "Affinity": {
+      "type": "string",
+      "description": "Sticky-affinity mode.",
+      "enum": [
+        "instance",
+        "none"
+      ]
     },
     "AutoDecideDef": {
       "type": "object",
@@ -819,6 +856,76 @@
         }
       }
     },
+    "Placement": {
+      "type": "object",
+      "description": "Step- or sequence-level `placement`.",
+      "properties": {
+        "affinity": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Affinity",
+              "description": "`instance`: prefer the runtime that ran the previous worker step."
+            }
+          ]
+        },
+        "affinity_wait_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Bounded wait for `affinity` before any eligible runtime may claim.\nDefault 15000, maximum 600000.",
+          "minimum": 0
+        },
+        "labels": {
+          "type": "object",
+          "description": "Every label must be advertised with exactly this value.",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "propertyNames": {
+            "type": "string"
+          }
+        },
+        "priority_lane": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/PriorityLane",
+              "description": "Priority lane. Sequence-level (sets the instance priority at\ncreation); rejected on steps because priority is per instance."
+            }
+          ]
+        },
+        "region": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Only runtimes advertising this region may claim the step."
+        },
+        "residency": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Data-residency zone: only runtimes advertising the label\n`residency=<zone>` may claim. Never relaxed; the step waits\n(`placement_unsatisfied`) instead."
+        }
+      }
+    },
+    "PriorityLane": {
+      "type": "string",
+      "description": "Plan/tenant priority lane. Lanes map onto the engine's existing instance\n[`Priority`], which drives claim order and cooperative preemption.",
+      "enum": [
+        "premium",
+        "standard",
+        "batch"
+      ]
+    },
     "RaceDef": {
       "type": "object",
       "required": [
@@ -1010,6 +1117,40 @@
         }
       }
     },
+    "SequenceEmbed": {
+      "type": "object",
+      "description": "Per-sequence embedding settings. Nothing from a run's context or outputs\nis shown to embedded (end-customer) viewers unless the sequence lists the\nstep in `visible_outputs`.",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display description."
+        },
+        "gallery": {
+          "type": "boolean",
+          "description": "Gallery template (tenant-level, namespace `embed-gallery`): listed\nto every sub-tenant, read-only, copyable by the embedded builder."
+        },
+        "template": {
+          "description": "Gallery template descriptor (opaque to the engine)."
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Display title."
+        },
+        "visible_outputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Step ids whose outputs embedded viewers may see."
+        }
+      }
+    },
     "SequenceId": {
       "type": "string",
       "format": "uuid"
@@ -1157,12 +1298,30 @@
           "description": "Optional JSON Schema that the handler output must conform to.\nValidated after handler returns; schema violation is a permanent failure."
         },
         "params": {},
+        "placement": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Placement",
+              "description": "Step placement (region, labels, residency, affinity). Hard facts\nroute the step to the worker queue; see `docs/PLACEMENT.md`."
+            }
+          ]
+        },
         "queue_name": {
           "type": [
             "string",
             "null"
           ],
           "description": "Named task queue for routing to dedicated worker pools.\nIf omitted, uses the default queue."
+        },
+        "rate_budget": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Global rate budget key (durable token bucket shared by every node,\nconfigured via `PUT /rate-budgets/{key}`). Over budget, the instance\nis deferred until a token refills — never failed."
         },
         "rate_limit_key": {
           "type": [

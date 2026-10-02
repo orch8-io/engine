@@ -151,6 +151,7 @@ fn iid(id: &str) -> InstanceId {
 fn mk_instance(seq_id: &str, state: InstanceState) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::from_uuid(Uuid::parse_str(seq_id).unwrap()),
         tenant_id: TenantId::unchecked(TENANT),

@@ -19,7 +19,7 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlx::SqlitePool;
 use tracing::debug;
 
@@ -27,6 +27,8 @@ use orch8_types::continuity::RuntimeId;
 use orch8_types::continuity::{
     RuntimeCapabilities, RuntimeConnectivity, RuntimeKind, RuntimeTrustLevel,
 };
+
+use orch8_engine::remote_worker::{AuthHeaders, HttpLeaseClient, LeaseAuth, RefreshingAuth};
 
 use crate::credential::Credential;
 use crate::error::MobileError;
@@ -203,72 +205,10 @@ pub(crate) fn storage_err(e: sqlx::Error) -> MobileError {
 // HTTP client
 // ---------------------------------------------------------------------------
 
-/// Outcome class of a lease mutation (heartbeat/complete/fail/release).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LeaseResponse {
-    /// 2xx — accepted.
-    Accepted,
-    /// 404 / 409 / 410 — the task is gone or no longer ours (stale epoch,
-    /// reclaimed, reaped). Stop acting on it and forget the claim.
-    LostOwnership,
-    /// 404/405 on an endpoint an older server may not have (release).
-    Unsupported,
-    /// Network error, 408/429/5xx — try again later.
-    Retry,
-    /// Any other 4xx — the request itself is wrong; retrying cannot help.
-    Rejected,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct PollResponse {
-    #[serde(default)]
-    pub tasks: Vec<RemoteTask>,
-    #[serde(default)]
-    pub lease_secs: Option<u64>,
-    #[serde(default)]
-    pub heartbeat_interval_secs: Option<u64>,
-    #[serde(default)]
-    pub poll_after_ms: Option<u64>,
-}
-
-/// A claimed worker task, parsed leniently: only the fields the device needs
-/// are required, and every distributed-execution field is optional so the
-/// SDK works against servers with and without the v1 contract additions.
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct RemoteTask {
-    pub id: uuid::Uuid,
-    pub instance_id: uuid::Uuid,
-    pub block_id: String,
-    pub handler_name: String,
-    #[serde(default)]
-    pub params: serde_json::Value,
-    #[serde(default)]
-    pub context: serde_json::Value,
-    #[serde(default)]
-    pub attempt: u32,
-    #[serde(default)]
-    pub timeout_ms: Option<i64>,
-    #[serde(default)]
-    pub claim_epoch: u64,
-    #[serde(default)]
-    pub effect_id: Option<String>,
-    #[serde(default)]
-    pub continuity_epoch: Option<u64>,
-    #[serde(default)]
-    pub lease_secs: Option<u32>,
-    #[serde(default)]
-    pub resume_checkpoint: Option<serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct PollBody<'a> {
-    handler_name: &'a str,
-    worker_id: &'a str,
-    limit: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<&'a str>,
-    capabilities: &'a RuntimeCapabilities,
-}
+// The lease protocol wire shapes and status classification are shared with
+// every other remote runtime node (the hybrid executor) through
+// `orch8_engine::remote_worker`, so the nodes cannot drift apart.
+pub(crate) use orch8_engine::remote_worker::{LeaseResponse, PollResponse, RemoteTask};
 
 /// Mutable advertisement facts (battery, connectivity, draining) that the
 /// host can update between registrations.
@@ -281,8 +221,7 @@ pub(crate) struct Advertisement {
 
 /// Control-plane client bound to one node identity and credential.
 pub(crate) struct NodeClient {
-    http: reqwest::Client,
-    api_base: String,
+    lease: HttpLeaseClient,
     credential: Arc<Credential>,
     device_id: String,
     runtime_id: RuntimeId,
@@ -316,9 +255,18 @@ impl NodeClient {
         runtime_id: RuntimeId,
         advertisement: Advertisement,
     ) -> Arc<Self> {
+        let auth = NodeAuth {
+            credential: Arc::clone(&credential),
+            device_id: device_id.clone(),
+        };
+        let lease = HttpLeaseClient::with_auth(
+            crate::build_mobile_http_client(Duration::from_secs(30)),
+            &api_base,
+            LeaseAuth::Refreshing(Arc::new(auth)),
+            runtime_id.to_string(),
+        );
         Arc::new(Self {
-            http: crate::build_mobile_http_client(Duration::from_secs(30)),
-            api_base: api_base.trim_end_matches('/').to_string(),
+            lease,
             credential,
             device_id,
             runtime_id,
@@ -335,7 +283,7 @@ impl NodeClient {
     }
 
     pub fn api_base(&self) -> &str {
-        &self.api_base
+        self.lease.api_base()
     }
 
     /// Whether calls carry a scoped device session (which cannot publish
@@ -388,32 +336,20 @@ impl NodeClient {
             estimated_latency_ms: None,
             draining: ad.draining,
             capsule_signing_public_key: ad.caps.capsule_signing_public_key,
+            labels: std::collections::BTreeMap::new(),
             observed_at: now,
             expires_at: now + ttl,
         }
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}/{}", self.api_base, path.trim_start_matches('/'))
-    }
-
     /// `POST` `body` to `path` with the node credential, refreshing it and
     /// retrying once on `401`.
-    async fn post<B: Serialize + ?Sized>(
+    async fn post<B: Serialize + Sync + ?Sized>(
         &self,
         path: &str,
         body: &B,
     ) -> reqwest::Result<reqwest::Response> {
-        let url = self.url(path);
-        self.credential
-            .send(|token| {
-                self.http
-                    .post(&url)
-                    .header("x-api-key", token)
-                    .header("x-device-id", &self.device_id)
-                    .json(body)
-            })
-            .await
+        self.lease.post_json(path, body).await
     }
 
     /// `POST /mobile/devices/register` then `POST /mobile/devices/{id}/runtime`.
@@ -462,33 +398,14 @@ impl NodeClient {
         limit: u32,
         version: Option<&str>,
     ) -> Result<PollResponse, MobileError> {
-        let capabilities = self.capabilities();
-        let worker_id = self.worker_id();
-        let body = PollBody {
-            handler_name: handler,
-            worker_id: &worker_id,
-            limit: limit.max(1),
-            version,
-            capabilities: &capabilities,
-        };
-        let resp = self
-            .post("workers/tasks/poll", &body)
+        self.lease
+            .poll(handler, limit, version, &self.capabilities())
             .await
-            .map_err(|e| network_err("poll tasks", &e))?;
-        let resp = expect_success("poll tasks", resp).await?;
-        let bytes = read_capped(resp).await?;
-        serde_json::from_slice(&bytes).map_err(|e| MobileError::Engine {
-            message: format!("poll tasks: invalid response: {e}"),
-        })
+            .map_err(|message| MobileError::Engine { message })
     }
 
     pub async fn heartbeat(&self, task_id: uuid::Uuid, claim_epoch: u64) -> LeaseResponse {
-        self.lease_call(
-            &format!("workers/tasks/{task_id}/heartbeat"),
-            &serde_json::json!({ "worker_id": self.worker_id(), "claim_epoch": claim_epoch }),
-            false,
-        )
-        .await
+        self.lease.heartbeat(task_id, claim_epoch).await
     }
 
     pub async fn complete(
@@ -497,16 +414,7 @@ impl NodeClient {
         claim_epoch: u64,
         output: &serde_json::Value,
     ) -> LeaseResponse {
-        self.lease_call(
-            &format!("workers/tasks/{task_id}/complete"),
-            &serde_json::json!({
-                "worker_id": self.worker_id(),
-                "claim_epoch": claim_epoch,
-                "output": output,
-            }),
-            false,
-        )
-        .await
+        self.lease.complete(task_id, claim_epoch, output).await
     }
 
     pub async fn fail(
@@ -516,17 +424,9 @@ impl NodeClient {
         message: &str,
         retryable: bool,
     ) -> LeaseResponse {
-        self.lease_call(
-            &format!("workers/tasks/{task_id}/fail"),
-            &serde_json::json!({
-                "worker_id": self.worker_id(),
-                "claim_epoch": claim_epoch,
-                "message": message,
-                "retryable": retryable,
-            }),
-            false,
-        )
-        .await
+        self.lease
+            .fail(task_id, claim_epoch, message, retryable)
+            .await
     }
 
     /// `POST /workers/tasks/{id}/release`. Returns [`LeaseResponse::Unsupported`]
@@ -538,16 +438,7 @@ impl NodeClient {
         claim_epoch: u64,
         started: bool,
     ) -> LeaseResponse {
-        self.lease_call(
-            &format!("workers/tasks/{task_id}/release"),
-            &serde_json::json!({
-                "worker_id": self.worker_id(),
-                "claim_epoch": claim_epoch,
-                "started": started,
-            }),
-            true,
-        )
-        .await
+        self.lease.release(task_id, claim_epoch, started).await
     }
 
     /// `POST` a JSON body to a control-plane path with the node credential.
@@ -571,37 +462,41 @@ impl NodeClient {
         &self,
         path: &str,
     ) -> Result<(u16, serde_json::Value), MobileError> {
-        let url = self.url(path);
         let resp = self
-            .credential
-            .send(|token| {
-                self.http
-                    .get(&url)
-                    .header("x-api-key", token)
-                    .header("x-device-id", &self.device_id)
-            })
+            .lease
+            .get(path)
             .await
             .map_err(|e| network_err(path, &e))?;
         json_answer(resp).await
     }
+}
 
-    async fn lease_call(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-        missing_route_is_unsupported: bool,
-    ) -> LeaseResponse {
-        match self.post(path, body).await {
-            Ok(resp) => classify_lease_status(resp.status().as_u16(), missing_route_is_unsupported),
-            Err(e) => {
-                debug!(
-                    path,
-                    error = %orch8_engine::outbound::redact_error(&e),
-                    "lease call failed"
-                );
-                LeaseResponse::Retry
-            }
+/// The phone's lease-client credential: the shared, refreshable
+/// [`Credential`] (device session or legacy key) plus this device's id.
+struct NodeAuth {
+    credential: Arc<Credential>,
+    device_id: String,
+}
+
+#[async_trait::async_trait]
+impl RefreshingAuth for NodeAuth {
+    fn headers(&self) -> AuthHeaders {
+        let token = self.credential.current();
+        AuthHeaders {
+            headers: vec![
+                ("x-api-key", token.clone()),
+                ("x-device-id", self.device_id.clone()),
+            ],
+            generation: token,
         }
+    }
+
+    async fn refresh_after_unauthorized(&self, stale: &str) -> bool {
+        self.credential.refresh_after_unauthorized(stale).await
+    }
+
+    fn observe(&self, response: &reqwest::Response) {
+        self.credential.observe(response);
     }
 }
 
@@ -618,19 +513,6 @@ fn validate_api_base(api_base: &str) -> Result<(), MobileError> {
         return Ok(());
     }
     crate::validate_https_url(api_base)
-}
-
-pub(crate) fn classify_lease_status(
-    status: u16,
-    missing_route_is_unsupported: bool,
-) -> LeaseResponse {
-    match status {
-        200..=299 => LeaseResponse::Accepted,
-        404 | 405 if missing_route_is_unsupported => LeaseResponse::Unsupported,
-        404 | 409 | 410 => LeaseResponse::LostOwnership,
-        408 | 425 | 429 | 500..=599 => LeaseResponse::Retry,
-        _ => LeaseResponse::Rejected,
-    }
 }
 
 fn urlencode_path_segment(segment: &str) -> String {
@@ -736,46 +618,6 @@ mod tests {
         let json = serde_json::to_value(&caps).unwrap();
         assert_eq!(json["kind"], "mobile");
         assert_eq!(json["runtime_id"], c.worker_id());
-    }
-
-    #[test]
-    fn lease_status_classification() {
-        assert_eq!(classify_lease_status(200, false), LeaseResponse::Accepted);
-        assert_eq!(
-            classify_lease_status(409, false),
-            LeaseResponse::LostOwnership
-        );
-        assert_eq!(
-            classify_lease_status(404, false),
-            LeaseResponse::LostOwnership
-        );
-        assert_eq!(classify_lease_status(404, true), LeaseResponse::Unsupported);
-        assert_eq!(classify_lease_status(405, true), LeaseResponse::Unsupported);
-        assert_eq!(classify_lease_status(503, false), LeaseResponse::Retry);
-        assert_eq!(classify_lease_status(429, false), LeaseResponse::Retry);
-        assert_eq!(classify_lease_status(400, false), LeaseResponse::Rejected);
-    }
-
-    #[test]
-    fn remote_task_parses_with_and_without_contract_fields() {
-        let old: RemoteTask = serde_json::from_value(serde_json::json!({
-            "id": uuid::Uuid::new_v4(), "instance_id": uuid::Uuid::new_v4(),
-            "block_id": "b", "handler_name": "scan", "params": {}, "context": {},
-            "attempt": 1, "claim_epoch": 3, "state": "claimed",
-            "created_at": "2026-01-01T00:00:00Z"
-        }))
-        .unwrap();
-        assert!(old.effect_id.is_none() && old.lease_secs.is_none());
-        let new: RemoteTask = serde_json::from_value(serde_json::json!({
-            "id": uuid::Uuid::new_v4(), "instance_id": uuid::Uuid::new_v4(),
-            "block_id": "b", "handler_name": "scan", "claim_epoch": 1,
-            "effect_id": "eff-1", "continuity_epoch": 4, "lease_secs": 120,
-            "target_runtime_id": "x", "runtime_kinds": ["mobile"]
-        }))
-        .unwrap();
-        assert_eq!(new.effect_id.as_deref(), Some("eff-1"));
-        assert_eq!(new.lease_secs, Some(120));
-        assert_eq!(new.continuity_epoch, Some(4));
     }
 
     #[test]

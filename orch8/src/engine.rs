@@ -305,6 +305,7 @@ impl Engine {
         }
 
         let instance = TaskInstance {
+            sub_tenant: None,
             id: InstanceId::new(),
             sequence_id,
             tenant_id: self.inner.tenant.clone(),

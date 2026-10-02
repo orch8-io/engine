@@ -51,6 +51,7 @@ async fn test_state() -> AppState {
             crate::browser_sessions::BrowserSessionSigner::for_root(None),
         ),
         browser_output_max_bytes: crate::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
+        embedded: std::sync::Arc::default(),
     }
 }
 

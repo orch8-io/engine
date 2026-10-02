@@ -89,6 +89,7 @@ impl DevServer {
                 orch8_api::browser_sessions::BrowserSessionSigner::for_root(None),
             ),
             browser_output_max_bytes: orch8_api::DEFAULT_BROWSER_OUTPUT_MAX_BYTES,
+            embedded: std::sync::Arc::default(),
         };
 
         let cb_routes = orch8_api::circuit_breakers::routes().with_state(app_state.clone());

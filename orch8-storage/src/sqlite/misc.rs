@@ -210,7 +210,7 @@ async fn claim_from_queue_inner(
             "SELECT wt.* FROM worker_tasks wt
              JOIN task_instances ti ON ti.id = wt.instance_id
              WHERE wt.queue_name=?1 AND wt.handler_name=?2 AND wt.state='pending'
-               AND wt.awaiting_dispatch=0 AND wt.requirements='{}'
+               AND wt.awaiting_dispatch=0 AND (wt.requirements='{}' OR (json_remove(wt.requirements,'$.prefer')='{}' AND (json_extract(wt.requirements,'$.prefer.worker_id')=?5 OR json_extract(wt.requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER))))
                AND ti.tenant_id=?4
              ORDER BY wt.created_at ASC
              LIMIT ?3",
@@ -219,13 +219,15 @@ async fn claim_from_queue_inner(
         .bind(handler_name)
         .bind(limit as i64)
         .bind(tenant.as_str())
+        .bind(worker_id)
         .fetch_all(&mut *conn)
         .await?
     } else {
-        sqlx::query("SELECT * FROM worker_tasks WHERE queue_name=?1 AND handler_name=?2 AND state='pending' AND awaiting_dispatch=0 AND requirements='{}' ORDER BY created_at ASC LIMIT ?3")
+        sqlx::query("SELECT * FROM worker_tasks WHERE queue_name=?1 AND handler_name=?2 AND state='pending' AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?4 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) ORDER BY created_at ASC LIMIT ?3")
             .bind(queue_name)
             .bind(handler_name)
             .bind(limit as i64)
+            .bind(worker_id)
             .fetch_all(&mut *conn)
             .await?
     };
