@@ -304,8 +304,8 @@ Either case also logs a warning at most once an hour.
 ### Rotating the verification key
 
 The compiled-in key (`EMBEDDED_PUBLIC_KEY_B64` in `orch8-api/src/license.rs`)
-is a placeholder in this release line: its private half was discarded, so no
-license verifies against it until the production key is rotated in. To rotate:
+is Orch8 Cloud's production verification key (rotated in 2026-10-02; engines
+built before that shipped a placeholder that verifies nothing). To rotate:
 
 1. Generate the production ed25519 keypair offline, on a trusted machine.
 2. Store the PKCS#8 private key only in Orch8 Cloud's secret store as
