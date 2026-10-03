@@ -64,7 +64,7 @@ jobs:
           fi
           echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.SWIFT_REPO_TOKEN != ''
         with:
           ref: ${{ format('refs/tags/{0}', inputs.tag) }}
@@ -167,7 +167,7 @@ jobs:
 
       - name: Check out the released podspec
         if: env.COCOAPODS_TRUNK_TOKEN != '' && steps.trunk.outputs.published != 'true'
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: orch8-io/orch8-mobile-swift
           ref: ${{ format('refs/tags/{0}', env.VERSION) }}
@@ -200,7 +200,7 @@ jobs:
         if: env.MAVEN_REPO_TOKEN == ''
         run: echo "::notice::ORCH8_MAVEN_TOKEN is not set; skipping the orch8-io/maven publication."
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.MAVEN_REPO_TOKEN != ''
         with:
           ref: ${{ format('refs/tags/{0}', inputs.tag) }}
@@ -253,7 +253,7 @@ jobs:
         if: env.MAVEN_REPO_TOKEN == ''
         run: echo "::notice::ORCH8_MAVEN_TOKEN is not set; skipping the orch8-kmp publication."
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.MAVEN_REPO_TOKEN != ''
         with:
           ref: ${{ format('refs/tags/{0}', inputs.tag) }}
