@@ -84,8 +84,8 @@ toml = "1.1"
 async-trait = "0.1"
 
 # OpenAPI
-utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
 
 # Encryption
 aes-gcm = "0.11"
@@ -100,7 +100,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 # JSON Schema validation (llm_call `response_schema`). default-features off:
 # the default feature set enables remote `$ref` resolution over HTTP, which
 # is an SSRF hazard for workflow-supplied schemas and drags in extra deps.
-jsonschema = { version = "0.57", default-features = false }
+jsonschema = { version = "0.58", default-features = false }
 
 # Object storage for artifacts — local FS, S3-compatible (R2/MinIO/S3), in-memory (tests)
 # 0.14.2 includes the quick-xml 0.41 fix and a backend HTTP-500 panic fix.
@@ -128,7 +128,7 @@ rskafka = { version = "0.6", default-features = false, features = ["transport-tl
 redis = { version = "1", default-features = false, features = ["tokio-comp", "streams", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 notify = { version = "8", features = ["serde"] }
-wasmtime = "48"
+wasmtime = "49"
 dashmap = "6"
 tempfile = "3"
 serial_test = "4"
