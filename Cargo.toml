@@ -128,7 +128,7 @@ rskafka = { version = "0.6", default-features = false, features = ["transport-tl
 redis = { version = "1", default-features = false, features = ["tokio-comp", "streams", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 notify = { version = "8", features = ["serde"] }
-wasmtime = "48"
+wasmtime = "49"
 dashmap = "6"
 tempfile = "3"
 serial_test = "4"
