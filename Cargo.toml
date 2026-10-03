@@ -85,7 +85,7 @@ async-trait = "0.1"
 
 # OpenAPI
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
 
 # Encryption
 aes-gcm = "0.11"
