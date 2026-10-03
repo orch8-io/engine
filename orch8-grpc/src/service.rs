@@ -37,6 +37,9 @@ pub struct Orch8GrpcService {
     /// Mirrors HTTP `/health/ready`: cleared when the engine tick loop or a
     /// serving surface dies so `Health` stops reporting `ok`.
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// Continuity signing key for remote-output provenance entries (key id,
+    /// key). Unsigned entries are appended when absent, as over HTTP.
+    provenance_signer: Option<Arc<(String, ed25519_dalek::SigningKey)>>,
 }
 
 impl Orch8GrpcService {
@@ -59,6 +62,7 @@ impl Orch8GrpcService {
             max_context_bytes,
             shutdown: tokio_util::sync::CancellationToken::new(),
             engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            provenance_signer: None,
         }
     }
 
@@ -67,6 +71,29 @@ impl Orch8GrpcService {
     pub fn with_shutdown(mut self, shutdown: tokio_util::sync::CancellationToken) -> Self {
         self.shutdown = shutdown;
         self
+    }
+
+    /// Sign remote-output provenance entries with the continuity signing key
+    /// (the same key the HTTP surface signs with).
+    #[must_use]
+    pub fn with_provenance_signer(
+        mut self,
+        key_id: String,
+        signing_key: ed25519_dalek::SigningKey,
+    ) -> Self {
+        self.provenance_signer = Some(Arc::new((key_id, signing_key)));
+        self
+    }
+
+    fn provenance_signer(&self) -> Option<orch8_engine::provenance::ProvenanceSigner<'_>> {
+        self.provenance_signer
+            .as_deref()
+            .map(
+                |(key_id, signing_key)| orch8_engine::provenance::ProvenanceSigner {
+                    key_id,
+                    signing_key,
+                },
+            )
     }
 
     /// Share the process readiness flag so `Health` agrees with
@@ -1907,6 +1934,16 @@ impl Orch8Service for Orch8GrpcService {
         if !updated {
             return Err(Status::failed_precondition("worker task lease changed"));
         }
+        // Which runtime produced the output (audit + provenance chain), the
+        // same record the HTTP completion writes.
+        orch8_engine::provenance::record_worker_output_provenance(
+            self.storage.as_ref(),
+            self.provenance_signer(),
+            &pre_instance.tenant_id,
+            &pre_task,
+            &output,
+        )
+        .await;
 
         let task = self
             .storage

@@ -139,7 +139,7 @@ fn join(token: &JoinToken, path: &Path, labels: &[String], host: &str) -> Result
     let mut config: EngineConfig = toml::Value::Table(document.clone())
         .try_into()
         .with_context(|| format!("{} is not a valid orch8 config", path.display()))?;
-    token.apply_to(&mut config.node, host);
+    token.apply_to_config(&mut config, host);
     for raw in labels {
         let (key, value) = parse_label(raw)?;
         config.node.labels.insert(key, value);
@@ -188,7 +188,29 @@ fn join(token: &JoinToken, path: &Path, labels: &[String], host: &str) -> Result
             .collect();
         section.insert("labels".into(), toml::Value::Table(labels));
     }
+    if !node.managed_control_headers.is_empty() {
+        let headers: toml::Table = node
+            .managed_control_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), toml::Value::from(v.clone())))
+            .collect();
+        section.insert(
+            "managed_control_headers".into(),
+            toml::Value::Table(headers),
+        );
+    }
     document.insert("node".into(), toml::Value::Table(section));
+    // The REST base for the HTTP fallback, when the token names one. Other
+    // `[executor]` settings in the file are preserved.
+    if let Some(api_url) = &token.api_url {
+        let executor = document
+            .entry("executor")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let Some(executor) = executor.as_table_mut() else {
+            bail!("{}: `executor` must be a table", path.display());
+        };
+        executor.insert("api_url".into(), api_url.trim().to_owned().into());
+    }
     let rendered = format!(
         "# Written by `orch8 executor join`. Contains a secret (managed_control_api_key).\n{}",
         toml::to_string(&document)?
@@ -247,7 +269,51 @@ mod tests {
             worker_id_prefix: "acme-dc1".into(),
             labels: std::collections::BTreeMap::from([("gpu".into(), "a10".into())]),
             region: Some("eu-west-1".into()),
+            api_url: None,
+            headers: std::collections::BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn join_writes_routing_headers_and_api_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orch8.toml");
+        std::fs::write(
+            &path,
+            "[executor]
+max_concurrent_tasks = 3
+",
+        )
+        .unwrap();
+        let token = JoinToken {
+            endpoint: "https://engines.orch8.example:50051".into(),
+            api_url: Some("https://engines.orch8.example/api/v1".into()),
+            headers: std::collections::BTreeMap::from([(
+                "fly-force-instance-id".into(),
+                "148e21ea7d9389".into(),
+            )]),
+            ..token()
+        };
+        join(&token, &path, &[], "h").unwrap();
+        let config: EngineConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            config.node.managed_control_endpoint,
+            "https://engines.orch8.example:50051"
+        );
+        assert_eq!(
+            config
+                .node
+                .managed_control_headers
+                .get("fly-force-instance-id")
+                .map(String::as_str),
+            Some("148e21ea7d9389")
+        );
+        assert_eq!(
+            config.executor.api_url,
+            "https://engines.orch8.example/api/v1"
+        );
+        assert_eq!(config.executor.max_concurrent_tasks, 3);
     }
 
     #[test]

@@ -39,13 +39,11 @@ pub const PUBLIC_KEY_ENV: &str = "ORCH8_LICENSE_PUBLIC_KEY";
 pub const LICENSE_KEY_ENV: &str = "ORCH8_LICENSE_KEY";
 /// Compiled-in license verification key (base64, raw 32 bytes).
 ///
-/// PLACEHOLDER: generated for this release line; its private half was
-/// discarded, so no license verifies against it until the production key is
-/// rotated in. Rotation (see `docs/EMBEDDED.md#license-keys`): Cloud
-/// generates the production keypair offline, stores the PKCS#8 private key
-/// only in `ORCH8_LICENSE_SIGNING_KEY`, and the release replacing this
-/// constant ships the matching public key. Never commit a private key.
-pub const EMBEDDED_PUBLIC_KEY_B64: &str = "53ByqxyURFdk/4Wcg4H3bnsfM1A+7MsyzFfQd1u6gZ4=";
+/// Production key (rotated in 2026-10-02). The PKCS#8 private half lives only
+/// in Orch8 Cloud's secret store as `ORCH8_LICENSE_SIGNING_KEY`. Rotation
+/// steps: `docs/EMBEDDED.md#rotating-the-verification-key`. Never commit a
+/// private key.
+pub const EMBEDDED_PUBLIC_KEY_B64: &str = "90fS4aSuSHgES8cBI11eRdmZdAxUtntWaKLgfSkuN2Q=";
 /// Active sub-tenants tolerated without a `sub_tenants` license.
 pub const UNLICENSED_SUB_TENANT_ALLOWANCE: u64 = 3;
 /// Response header carrying the soft-enforcement verdict.

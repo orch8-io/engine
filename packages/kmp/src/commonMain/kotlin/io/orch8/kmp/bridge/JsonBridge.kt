@@ -45,6 +45,20 @@ interface Orch8BridgeCallbacks {
 
     /** Envelope: `{"ok": "<token>"}` or `{"error": {...}}`. */
     fun refreshToken(): String
+
+    /**
+     * Current node credential (device session) installed with
+     * `setTokenProvider`; empty when none. Read by the engine before each
+     * control-plane request (engine release after 0.7.1).
+     */
+    fun currentNodeToken(): String
+
+    /**
+     * Fetch a fresh node credential after a `401`. Envelope:
+     * `{"ok": "<token>"}` or `{"error": {...}}`. Called from the engine's
+     * blocking thread, never the main thread.
+     */
+    fun refreshNodeToken(): String
 }
 
 /** Bumped when the method set or payload shapes change incompatibly. */

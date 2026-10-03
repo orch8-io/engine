@@ -19,6 +19,7 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use serde::Serialize;
 use sqlx::SqlitePool;
 use tracing::debug;
 
@@ -27,8 +28,9 @@ use orch8_types::continuity::{
     RuntimeCapabilities, RuntimeConnectivity, RuntimeKind, RuntimeTrustLevel,
 };
 
-use orch8_engine::remote_worker::HttpLeaseClient;
+use orch8_engine::remote_worker::{AuthHeaders, HttpLeaseClient, LeaseAuth, RefreshingAuth};
 
+use crate::credential::Credential;
 use crate::error::MobileError;
 
 /// Lifetime of one capability advertisement. The server caps it at five
@@ -220,6 +222,7 @@ pub(crate) struct Advertisement {
 /// Control-plane client bound to one node identity and credential.
 pub(crate) struct NodeClient {
     lease: HttpLeaseClient,
+    credential: Arc<Credential>,
     device_id: String,
     runtime_id: RuntimeId,
     advertisement: StdMutex<Advertisement>,
@@ -229,7 +232,7 @@ impl NodeClient {
     /// Build a client for a validated public HTTPS API base.
     pub fn new(
         api_base: String,
-        api_key: String,
+        credential: Arc<Credential>,
         device_id: String,
         runtime_id: RuntimeId,
         advertisement: Advertisement,
@@ -237,7 +240,7 @@ impl NodeClient {
         validate_api_base(&api_base)?;
         Ok(Self::new_unchecked(
             api_base,
-            api_key,
+            credential,
             device_id,
             runtime_id,
             advertisement,
@@ -247,19 +250,24 @@ impl NodeClient {
     /// Skip URL validation — tests point this at a loopback mock server.
     pub(crate) fn new_unchecked(
         api_base: String,
-        api_key: String,
+        credential: Arc<Credential>,
         device_id: String,
         runtime_id: RuntimeId,
         advertisement: Advertisement,
     ) -> Arc<Self> {
-        let lease = HttpLeaseClient::new(
+        let auth = NodeAuth {
+            credential: Arc::clone(&credential),
+            device_id: device_id.clone(),
+        };
+        let lease = HttpLeaseClient::with_auth(
             crate::build_mobile_http_client(Duration::from_secs(30)),
             &api_base,
-            vec![("x-api-key", api_key), ("x-device-id", device_id.clone())],
+            LeaseAuth::Refreshing(Arc::new(auth)),
             runtime_id.to_string(),
         );
         Arc::new(Self {
             lease,
+            credential,
             device_id,
             runtime_id,
             advertisement: StdMutex::new(advertisement),
@@ -276,6 +284,12 @@ impl NodeClient {
 
     pub fn api_base(&self) -> &str {
         self.lease.api_base()
+    }
+
+    /// Whether calls carry a scoped device session (which cannot publish
+    /// sequences: the control plane publishes delegated steps itself).
+    pub fn is_device_session(&self) -> bool {
+        self.credential.is_device_session()
     }
 
     pub fn handlers(&self) -> Vec<String> {
@@ -328,8 +342,14 @@ impl NodeClient {
         }
     }
 
-    fn post(&self, path: &str) -> reqwest::RequestBuilder {
-        self.lease.post(path)
+    /// `POST` `body` to `path` with the node credential, refreshing it and
+    /// retrying once on `401`.
+    async fn post<B: Serialize + Sync + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> reqwest::Result<reqwest::Response> {
+        self.lease.post_json(path, body).await
     }
 
     /// `POST /mobile/devices/register` then `POST /mobile/devices/{id}/runtime`.
@@ -348,9 +368,7 @@ impl NodeClient {
             "app_version": ad.caps.app_version,
         });
         let resp = self
-            .post("mobile/devices/register")
-            .json(&device_body)
-            .send()
+            .post("mobile/devices/register", &device_body)
             .await
             .map_err(|e| network_err("register device", &e))?;
         expect_success("register device", resp).await?;
@@ -366,9 +384,7 @@ impl NodeClient {
             urlencode_path_segment(&self.device_id)
         );
         let resp = self
-            .post(&path)
-            .json(&serde_json::json!({ "capabilities": capabilities }))
-            .send()
+            .post(&path, &serde_json::json!({ "capabilities": capabilities }))
             .await
             .map_err(|e| network_err("advertise runtime", &e))?;
         expect_success("advertise runtime", resp).await?;
@@ -424,6 +440,64 @@ impl NodeClient {
     ) -> LeaseResponse {
         self.lease.release(task_id, claim_epoch, started).await
     }
+
+    /// `POST` a JSON body to a control-plane path with the node credential.
+    /// `Ok((status, body))` for any HTTP answer (the body is `Null` when it
+    /// is not JSON); `Err` only when the control plane is unreachable.
+    pub(crate) async fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<(u16, serde_json::Value), MobileError> {
+        let resp = self
+            .post(path, body)
+            .await
+            .map_err(|e| network_err(path, &e))?;
+        json_answer(resp).await
+    }
+
+    /// `GET` a control-plane path with the node credential (see
+    /// [`Self::post_json`]).
+    pub(crate) async fn get_json(
+        &self,
+        path: &str,
+    ) -> Result<(u16, serde_json::Value), MobileError> {
+        let resp = self
+            .lease
+            .get(path)
+            .await
+            .map_err(|e| network_err(path, &e))?;
+        json_answer(resp).await
+    }
+}
+
+/// The phone's lease-client credential: the shared, refreshable
+/// [`Credential`] (device session or legacy key) plus this device's id.
+struct NodeAuth {
+    credential: Arc<Credential>,
+    device_id: String,
+}
+
+#[async_trait::async_trait]
+impl RefreshingAuth for NodeAuth {
+    fn headers(&self) -> AuthHeaders {
+        let token = self.credential.current();
+        AuthHeaders {
+            headers: vec![
+                ("x-api-key", token.clone()),
+                ("x-device-id", self.device_id.clone()),
+            ],
+            generation: token,
+        }
+    }
+
+    async fn refresh_after_unauthorized(&self, stale: &str) -> bool {
+        self.credential.refresh_after_unauthorized(stale).await
+    }
+
+    fn observe(&self, response: &reqwest::Response) {
+        self.credential.observe(response);
+    }
 }
 
 /// The control-plane base must be a public HTTPS URL. Test builds that
@@ -475,6 +549,15 @@ async fn expect_success(
     })
 }
 
+async fn json_answer(resp: reqwest::Response) -> Result<(u16, serde_json::Value), MobileError> {
+    let status = resp.status().as_u16();
+    let body = read_capped(resp).await?;
+    Ok((
+        status,
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+    ))
+}
+
 async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, MobileError> {
     orch8_engine::handlers::builtin::read_body_capped(resp, MAX_RESPONSE_BYTES)
         .await
@@ -495,7 +578,7 @@ mod tests {
     fn client() -> Arc<NodeClient> {
         NodeClient::new_unchecked(
             "http://127.0.0.1:1/api/v1/".into(),
-            "key".into(),
+            Credential::new("key".into()),
             "dev-1".into(),
             RuntimeId::new(),
             Advertisement {

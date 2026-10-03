@@ -42,6 +42,7 @@ pub mod placement;
 pub mod preflight;
 pub mod preload;
 pub mod prompt_registry;
+pub mod provenance;
 pub mod push;
 pub mod queue_routing;
 pub mod recovery;
@@ -279,6 +280,7 @@ impl Engine {
                                 requeued = report.requeued,
                                 ambiguous = report.ambiguous,
                                 timed_out = report.timed_out,
+                                stranded_finalized = report.stranded_finalized,
                                 "resolved expired worker tasks"
                             ),
                             Err(e) => tracing::error!(error = %e, "worker task reaper error"),

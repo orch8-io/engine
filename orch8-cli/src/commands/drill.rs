@@ -351,6 +351,7 @@ async fn start_control(db: &std::path::Path) -> Result<Control> {
         publisher: None,
         push_provider: Arc::new(orch8_push::NoopPushProvider),
         mobile_sync_enabled: false,
+        mobile_sync_resolve_credentials: false,
         entitlements: orch8_api::entitlements::unlimited_provider(),
         builtin_handlers: Arc::new(orch8_api::builtin_handler_names()),
         engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),

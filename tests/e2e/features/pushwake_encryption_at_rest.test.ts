@@ -45,6 +45,8 @@ describe("push wake — mobile command payload encryption at rest", () => {
       env: {
         ORCH8_ENCRYPTION_KEY: TEST_KEY,
         ORCH8_MOBILE_SYNC_ENABLED: "true",
+        // Resolved delegation params must be ciphertext at rest (opt-in path).
+        ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS: "true",
       },
     });
   });

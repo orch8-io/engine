@@ -9,12 +9,16 @@ import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import io.orch8.mobile.DelegateRequest
+import io.orch8.mobile.DelegationOptions
+import io.orch8.mobile.DelegationStatus
 import io.orch8.mobile.DeviceContext
 import io.orch8.mobile.EngineListener
 import io.orch8.mobile.HandlerException
 import io.orch8.mobile.InstanceStateKind
 import io.orch8.mobile.MobileEngine
 import io.orch8.mobile.MobileEngineConfig
+import io.orch8.mobile.MobileException
 import io.orch8.mobile.NodeCapabilities
 import io.orch8.mobile.NodeConnectivity
 import io.orch8.mobile.PowerState
@@ -236,6 +240,25 @@ class Orch8Module(reactContext: ReactApplicationContext) :
         promise.resolve(null)
     }
 
+    // -- Node credential -------------------------------------------------------
+
+    /**
+     * Install a device-session token provider: [initialToken] is used now, and
+     * a `401` from the control plane emits `orch8:refreshToken`, which JS
+     * answers through [resolveToken].
+     */
+    @ReactMethod
+    fun setTokenProvider(initialToken: String, promise: Promise) = withEngine(promise) { eng ->
+        eng.setTokenProvider(RNTokenProvider(this, initialToken, handlerTimeoutMs))
+        promise.resolve(null)
+    }
+
+    /** JS answer for an `orch8:refreshToken` event. */
+    @ReactMethod
+    fun resolveToken(requestId: String, token: String?, error: String?) {
+        pending.resolve(requestId, token, error, false)
+    }
+
     /** JS answer for an `orch8:executeStep` event. */
     @ReactMethod
     fun resolveStep(requestId: String, output: String?, error: String?, permanent: Boolean) {
@@ -433,6 +456,67 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     fun enableBuiltin(name: String, promise: Promise) =
         withEngine(promise) { it.enableBuiltin(name); promise.resolve(null) }
 
+    // -- Delegation from phone-local workflows -------------------------------
+
+    private fun delegationStatusMap(s: DelegationStatus): WritableMap = Arguments.createMap().apply {
+        putString("delegationId", s.delegationId)
+        putString("state", s.state)
+        putString("localInstanceId", s.localInstanceId)
+        putString("blockId", s.blockId)
+        putString("destinationRuntimeId", s.destinationRuntimeId)
+        putString("outputJson", s.outputJson)
+        putString("error", s.error)
+    }
+
+    @ReactMethod
+    fun startDelegation(options: ReadableMap, promise: Promise) {
+        val opts = DelegationOptions(
+            tenantId = options.str("tenantId") ?: "",
+            pollIntervalMs = options.ulong("pollIntervalMs", 2000uL),
+            ttlSecs = options.uint("ttlSecs", 600u),
+        )
+        background(promise) { it.startDelegation(opts); promise.resolve(null) }
+    }
+
+    @ReactMethod
+    fun stopDelegation(promise: Promise) = background(promise) { it.stopDelegation(); promise.resolve(null) }
+
+    @ReactMethod
+    fun delegate(request: ReadableMap, promise: Promise) {
+        val req = DelegateRequest(
+            instanceId = request.str("instanceId") ?: "",
+            destinationRuntimeId = request.str("destinationRuntimeId") ?: "",
+            subSequenceId = request.str("subSequenceId") ?: "",
+            inputJson = request.str("inputJson") ?: "{}",
+        )
+        background(promise) { promise.resolve(it.delegate(req)) }
+    }
+
+    @ReactMethod
+    fun delegationStatus(delegationId: String, promise: Promise) = background(promise) { eng ->
+        promise.resolve(delegationStatusMap(eng.delegationStatus(delegationId)))
+    }
+
+    @ReactMethod
+    fun listDelegations(promise: Promise) = background(promise) { eng ->
+        val arr = Arguments.createArray()
+        eng.listDelegations().forEach { arr.pushMap(delegationStatusMap(it)) }
+        promise.resolve(arr)
+    }
+
+    @ReactMethod
+    fun delegationStats(promise: Promise) = withEngine(promise) { eng ->
+        val s = eng.delegationStats()
+        promise.resolve(Arguments.createMap().apply {
+            putBoolean("running", s.running)
+            putDouble("delegated", s.delegated.toDouble())
+            putDouble("completed", s.completed.toDouble())
+            putDouble("failed", s.failed.toDouble())
+            putDouble("abandoned", s.abandoned.toDouble())
+            putDouble("resumed", s.resumed.toDouble())
+        })
+    }
+
     override fun invalidate() {
         pending.failAll("React Native context invalidated")
         work.shutdown()
@@ -499,6 +583,36 @@ private class RNStepHandler(
             throw if (outcome.permanent) HandlerException.Permanent(message) else HandlerException.Retryable(message)
         }
         return outcome.output ?: "{}"
+    }
+}
+
+/**
+ * Serves the cached device session and, when the control plane answers `401`,
+ * asks JS for a fresh one (`orch8:refreshToken`). [refreshToken] runs on a Rust
+ * blocking thread, so waiting here never blocks JS or the UI.
+ */
+private class RNTokenProvider(
+    private val module: Orch8Module,
+    initialToken: String,
+    private val timeoutMs: Long,
+) : TokenProvider {
+    @Volatile private var token: String = initialToken
+
+    override fun currentToken(): String = token
+
+    override fun refreshToken(): String {
+        val requestId = UUID.randomUUID().toString()
+        module.pending.open(requestId)
+        module.sendEvent("orch8:refreshToken", Arguments.createMap().apply {
+            putString("requestId", requestId)
+        })
+        val outcome = module.pending.await(requestId, timeoutMs)
+            ?: throw MobileException.Engine("JS token provider timed out after $timeoutMs ms")
+        outcome.error?.let { throw MobileException.Engine(it) }
+        val fresh = outcome.output
+        if (fresh.isNullOrEmpty()) throw MobileException.Engine("JS token provider returned an empty token")
+        token = fresh
+        return fresh
     }
 }
 

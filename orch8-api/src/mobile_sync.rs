@@ -67,6 +67,10 @@ struct ApprovalRequestPayload {
     metadata: Option<serde_json::Value>,
 }
 
+/// Why a `step_delegations` entry fails while credential resolution is off.
+const CREDENTIAL_RESOLUTION_DISABLED: &str = "server-side credential resolution for mobile \
+    step delegations is disabled (ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS)";
+
 #[derive(Deserialize)]
 struct StepDelegationPayload {
     request_id: String,
@@ -94,9 +98,22 @@ struct CommandPayload {
 async fn handle_sync(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(req): Json<SyncRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     const MAX_SYNC_ITEMS_PER_ARRAY: usize = 500;
+
+    // A device session syncs only its own device, and never asks the server
+    // to resolve credentials (`step_delegations` would hand it the tenant's
+    // resolved secrets; the SDK does not use it).
+    crate::device_sessions::enforce_bound_device(&binding, &req.device_id)?;
+    if crate::browser_sessions::device_binding(&binding).is_some()
+        && !req.step_delegations.is_empty()
+    {
+        return Err(ApiError::Forbidden(
+            "device sessions may not request credential-resolving step delegations".into(),
+        ));
+    }
 
     let tenant_id = tenant_ctx
         .as_ref()
@@ -187,13 +204,21 @@ async fn handle_sync(
 
     // Process step delegations — device asks server to resolve credentials
     // and execute steps that require secrets. Results come back as commands.
+    //
+    // Opt-in (`ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS`): the caller is a
+    // device credential that ships inside an app, and this would hand it the
+    // plaintext of any tenant secret it names. Disabled, each delegation is
+    // answered with a failed `step_result` and the rest of the sync proceeds.
     for delegation in &req.step_delegations {
         let mut params = delegation.params.clone();
-        // Resolve credentials:// references in the params
-        if let Err(e) =
+        let resolved = if state.mobile_sync_resolve_credentials {
             orch8_engine::credentials::resolve_in_value(storage.as_ref(), &tenant_id, &mut params)
                 .await
-        {
+                .map_err(|e| e.to_string())
+        } else {
+            Err(CREDENTIAL_RESOLUTION_DISABLED.to_owned())
+        };
+        if let Err(e) = resolved {
             warn!(
                 request_id = %delegation.request_id,
                 error = %e,
@@ -333,8 +358,10 @@ struct RegisterDeviceRequest {
 async fn register_device(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(req): Json<RegisterDeviceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::device_sessions::enforce_bound_device(&binding, &req.device_id)?;
     let tenant_id = tenant_ctx
         .as_ref()
         .map(|axum::Extension(ctx)| ctx.tenant_id.to_string())
@@ -390,9 +417,14 @@ struct RegisterDeviceRuntimeRequest {
 async fn register_device_runtime(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Path(device_id): Path<String>,
     Json(mut req): Json<RegisterDeviceRuntimeRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::device_sessions::enforce_bound_device(&binding, &device_id)?;
+    if let Some(binding) = crate::browser_sessions::device_binding(&binding) {
+        crate::device_sessions::clamp_advertisement(binding, &mut req.capabilities)?;
+    }
     let device = state
         .storage
         .get_mobile_device(&device_id)

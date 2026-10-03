@@ -234,7 +234,7 @@ mount a config file for those settings.
 | `ORCH8_CORS_ORIGINS` | — | CORS allowed origins (empty = no CORS headers). `*` is rejected at startup while API-key auth is enabled. List the origins that host browser runtimes; preflights allow `x-api-key`/`Authorization` and are cached for 2 h |
 | `ORCH8_API_KEY` | — | Root API key, sent by clients as `x-api-key`. Required unless `--insecure-auth` is passed |
 | `ORCH8_BROWSER_OUTPUT_MAX_BYTES` | `1048576` | Largest serialized step output a browser runtime may report (larger completions get `413`). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
-| `ORCH8_BROWSER_SESSION_SECRET` | — | Shared key (≥ 32 bytes, identical on every replica) that signs browser-session tokens. When unset the key is derived from the root API key; with neither (`--insecure`), a process-random key is used and tokens only verify on the replica that minted them (warned at startup). A shorter value refuses startup. Changing it invalidates outstanding tokens (they live ≤ 1 h). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
+| `ORCH8_BROWSER_SESSION_SECRET` | — | Shared key (≥ 32 bytes, identical on every replica) that signs runtime-session tokens: browser sessions (`bst_…`) and phone device sessions (`dst_…`, `POST /runtimes/device-sessions`). When unset the key is derived from the root API key; with neither (`--insecure`), a process-random key is used and tokens only verify on the replica that minted them (warned at startup). A shorter value refuses startup. Changing it (or, without it, the root key) invalidates outstanding tokens: browser sessions live ≤ 1 h, device sessions ≤ 24 h (phones refresh through their `TokenProvider` on the resulting `401`). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
 | `ORCH8_REQUIRE_TENANT_HEADER` | `true` | Enforce `X-Tenant-Id` header (secure by default) |
 | `ORCH8_EMBED_TOKEN_SECRET` | — | Sets `embed.token_secret` (hex, ≥ 32 bytes decoded); enables `/api/v1/embed/*` |
 | `ORCH8_EMBED_ALLOWED_ORIGINS` | — | Sets `embed.allowed_origins` (CORS on embed-token routes only) |
@@ -246,6 +246,7 @@ mount a config file for those settings.
 | `ORCH8_ALERTS_ENABLED` | `true` | Sets `alerts.enabled` |
 | `ORCH8_ALERTS_EVAL_INTERVAL_SECS` | `30` | Sets `alerts.eval_interval_secs` |
 | `ORCH8_MOBILE_SYNC_ENABLED` | `false` | Set to `true` or `1` to enable mobile sync API endpoints (`/mobile/*`) |
+| `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS` | `false` | Set to `true` or `1` to let `/mobile/sync` `step_delegations` resolve `credentials://` secrets and return them to the device. **Risk:** any `device`-capability key — which ships inside mobile apps — can then read every tenant secret it can name; the server warns at startup. Device sessions are always refused. Leave off unless a legacy custom client needs it |
 
 ### Artifacts
 

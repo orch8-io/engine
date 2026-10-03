@@ -525,12 +525,13 @@ async fn validate_and_record_capabilities(
     Ok(())
 }
 
-/// Bind a poll to the caller's credential. A browser-session principal may
-/// only poll as its own `runtime_id`, with `kind = browser`, for handlers and
-/// queues its token grants; a conflicting self-assertion is refused (403).
-/// Its capability advertisement is clamped (trust at most `registered`,
-/// handlers limited to the allowlist, no credential bindings, expiry at most
-/// the token's) and synthesized when absent, so browser claims always go
+/// Bind a poll to the caller's credential. A browser- or device-session
+/// principal may only poll as its own `runtime_id`, with its session's kind
+/// (`browser` / `mobile`), for handlers and queues its token grants; a
+/// conflicting self-assertion is refused (403). Its capability advertisement
+/// is clamped (trust at most `registered`, handlers limited to the allowlist,
+/// expiry at most the token's, no placement labels; a browser also
+/// advertises no credential bindings) and synthesized when absent, so session claims always go
 /// through capability matching (and the browser no-secrets claim filter).
 fn bind_poll_identity(
     binding: &crate::browser_sessions::OptionalBinding,
@@ -550,14 +551,14 @@ fn bind_poll_identity(
     )?;
     if !binding.allows_handler(handler_name) {
         return Err(ApiError::Forbidden(format!(
-            "handler {handler_name} is not granted to this browser session"
+            "handler {handler_name} is not granted to this session"
         )));
     }
     if let Some(queue) = queue_name
         && !binding.allows_queue(queue)
     {
         return Err(ApiError::Forbidden(format!(
-            "queue {queue} is not granted to this browser session"
+            "queue {queue} is not granted to this session"
         )));
     }
     let now = chrono::Utc::now();
@@ -565,7 +566,7 @@ fn bind_poll_identity(
         Some(capabilities) => {
             if capabilities.kind != binding.kind || capabilities.runtime_id != binding.runtime_id {
                 return Err(ApiError::Forbidden(
-                    "capabilities kind/runtime_id conflict with the browser session binding".into(),
+                    "capabilities kind/runtime_id conflict with the session binding".into(),
                 ));
             }
             capabilities
@@ -602,8 +603,13 @@ fn bind_poll_identity(
     {
         capabilities.handlers.push(handler_name.to_owned());
     }
-    capabilities.credentials.clear();
-    capabilities.capsule_signing_public_key = None;
+    if !binding.is_device() {
+        capabilities.credentials.clear();
+        capabilities.capsule_signing_public_key = None;
+    }
+    // Placement labels (`residency=…` is never relaxed) are operator-vouched
+    // facts; a session on an end-user device or tab cannot assert them.
+    capabilities.labels.clear();
     capabilities.expires_at = capabilities.expires_at.min(binding.expires_at);
     Ok(Some(capabilities))
 }
@@ -1235,7 +1241,9 @@ pub(crate) async fn complete_task(
     }
     // Browser output is untrusted page data (DOM, forms, user input): bound
     // its size before anything is committed.
-    let from_browser = binding.is_some()
+    let from_browser = binding
+        .as_ref()
+        .is_some_and(|axum::Extension(binding)| !binding.is_device())
         || pre_task.claimed_runtime_kind == Some(orch8_types::continuity::RuntimeKind::Browser);
     if from_browser && !completion_retry {
         let bytes = serde_json::to_vec(&req.output)
@@ -1307,7 +1315,14 @@ pub(crate) async fn complete_task(
     // retry already persisted them on the first attempt).
     if !completion_retry {
         persist_reported_logs(&state, pre_task.instance_id, &pre_task.block_id, &req.logs).await;
-        record_output_provenance(&state, &tenant_id, &pre_task, &req.output).await;
+        orch8_engine::provenance::record_worker_output_provenance(
+            state.storage.as_ref(),
+            state.provenance_signer(),
+            &tenant_id,
+            &pre_task,
+            &req.output,
+        )
+        .await;
     }
 
     let task = state
@@ -1540,76 +1555,6 @@ pub(crate) async fn complete_task(
     }
 
     Ok(StatusCode::OK)
-}
-
-/// Record which runtime produced a step output (kind + id) in the audit
-/// trail and, for continuity-enrolled instances, the provenance chain — as
-/// evidence alongside the output, never by mutating the output JSON.
-/// Best-effort: provenance failures are logged, never fail the completion.
-async fn record_output_provenance(
-    state: &AppState,
-    tenant_id: &orch8_types::ids::TenantId,
-    task: &orch8_types::worker::WorkerTask,
-    output: &serde_json::Value,
-) {
-    let Some(kind) = task.claimed_runtime_kind else {
-        return;
-    };
-    let encoded = serde_json::to_vec(output).unwrap_or_default();
-    let output_sha256 = crate::continuity::hex_sha256(&encoded);
-    let runtime_id = task.worker_id.clone().unwrap_or_default();
-    let details = serde_json::json!({
-        "task_id": task.id,
-        "runtime_kind": kind,
-        "runtime_id": runtime_id,
-        "claim_epoch": task.claim_epoch,
-        "effect_id": task.effect_id,
-        "output_sha256": output_sha256,
-        "output_bytes": encoded.len(),
-        "untrusted_page_data": kind == orch8_types::continuity::RuntimeKind::Browser,
-    });
-    let entry = orch8_types::audit::AuditLogEntry {
-        id: Uuid::now_v7(),
-        instance_id: task.instance_id,
-        tenant_id: tenant_id.clone(),
-        event_type: "worker_output_provenance".into(),
-        from_state: None,
-        to_state: None,
-        block_id: Some(task.block_id.as_str().to_owned()),
-        details: details.clone(),
-        created_at: chrono::Utc::now(),
-    };
-    if let Err(error) = state.storage.append_audit_log(&entry).await {
-        tracing::warn!(task_id = %task.id, %error, "failed to record worker output provenance");
-    }
-    match state
-        .storage
-        .get_continuity_execution_by_instance(tenant_id, task.instance_id)
-        .await
-    {
-        Ok(Some(execution)) => {
-            let digest = crate::continuity::hex_sha256(details.to_string().as_bytes());
-            if let Err(error) = crate::continuity::append_provenance_digest(
-                state,
-                &execution,
-                "remote_step_output",
-                &format!(
-                    "step {} output from {} runtime {runtime_id}",
-                    task.block_id,
-                    kind.as_str()
-                ),
-                &digest,
-            )
-            .await
-            {
-                tracing::warn!(task_id = %task.id, ?error, "failed to append output provenance");
-            }
-        }
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(task_id = %task.id, %error, "provenance lookup failed");
-        }
-    }
 }
 
 #[derive(Deserialize, ToSchema)]

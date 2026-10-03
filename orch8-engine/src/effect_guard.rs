@@ -417,6 +417,47 @@ pub async fn settle_worker_task_effect(
     Ok(())
 }
 
+/// The effect receipt a stranded retry row (see
+/// `worker_lease::finalize_stranded_dispatches`) must be bound to: the
+/// attempt's still-open receipt when a dispatcher already created one (an
+/// older node's dispatch records the receipt but cannot bind it to the row),
+/// otherwise a freshly dispatched receipt for this attempt. `None` for pure
+/// handlers, which carry no receipt.
+pub(crate) async fn stranded_attempt_effect_id(
+    storage: &dyn StorageBackend,
+    tenant_id: &TenantId,
+    task: &orch8_types::worker::WorkerTask,
+) -> Result<Option<EffectId>, EngineError> {
+    if !crate::release_diff::handler_has_side_effects(&task.handler_name) {
+        return Ok(None);
+    }
+    let execution = ensure_effect_scope(storage, tenant_id, task.instance_id).await?;
+    if let Some(open) = storage
+        .find_unresolved_effect_receipt(
+            tenant_id,
+            execution.continuity_id,
+            task.instance_id,
+            &task.block_id,
+            u32::from(task.attempt),
+        )
+        .await?
+    {
+        return Ok(Some(open.id));
+    }
+    Ok(EffectGuard::begin(
+        storage,
+        tenant_id,
+        task.instance_id,
+        &task.block_id,
+        &task.handler_name,
+        &task.params,
+        u32::from(task.attempt),
+    )
+    .await?
+    .as_ref()
+    .map(EffectGuard::effect_id))
+}
+
 /// Whether a worker task's effect may already have happened: it has a
 /// receipt that is still `dispatched` or `unknown`. Tasks without one
 /// (pure/idempotent built-ins, dry runs) can simply be requeued.

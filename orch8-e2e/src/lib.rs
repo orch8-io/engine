@@ -14,10 +14,16 @@
 //! [`Phone`] wraps a real `orch8_mobile::MobileEngine` with its own `SQLite`
 //! file; [`Desktop`] is a desktop-kind runtime node built from the embedded
 //! `orch8` engine plus the lease protocol over HTTP.
+//!
+//! A phone authenticates the way apps should ([`PhoneAuth::DeviceSession`]):
+//! short-lived device sessions minted per device by the "app backend" (here
+//! the root key, through [`DeviceSessions`]) and handed to the SDK through a
+//! `TokenProvider` — or, for the legacy path, with a stored API key
+//! ([`PhoneAuth::ApiKey`]).
 #![allow(clippy::missing_panics_doc)]
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -102,6 +108,8 @@ pub struct Cloud {
     raw: RawPool,
     /// Isolated Postgres schema (dropped with the cloud).
     pg_schema: Option<(sqlx::PgPool, String)>,
+    /// Backing directory of the `SQLite` database (removed with the cloud).
+    _sqlite_dir: Option<tempfile::TempDir>,
 }
 
 /// Knobs of a [`Cloud`] beyond the defaults.
@@ -145,7 +153,7 @@ impl Cloud {
             .enable_all()
             .build()
             .expect("cloud runtime");
-        let (storage, raw, pg_schema) = rt.block_on(open_storage(backend));
+        let (storage, raw, pg_schema, sqlite_dir) = rt.block_on(open_storage(backend));
 
         let mut handlers = HandlerRegistry::new();
         orch8_engine::handlers::builtin::register_builtins(&mut handlers);
@@ -187,6 +195,7 @@ impl Cloud {
             tenant: format!("e2e-{}", Uuid::now_v7().simple()),
             raw,
             pg_schema,
+            _sqlite_dir: sqlite_dir,
         }
     }
 
@@ -261,6 +270,22 @@ impl Cloud {
         );
         assert_eq!(status, 201, "mint key: {body}");
         body["secret"].as_str().expect("secret").to_owned()
+    }
+
+    /// The "app backend" minting device sessions for phones of this cloud's
+    /// tenant, granting `handlers`, each valid for `ttl_secs`.
+    #[must_use]
+    pub fn device_sessions(&self, handlers: &[&str], ttl_secs: u32) -> DeviceSessions {
+        DeviceSessions {
+            v1: self.v1(),
+            tenant: self.tenant.clone(),
+            handlers: handlers
+                .iter()
+                .map(|handler| (*handler).to_owned())
+                .collect(),
+            ttl_secs,
+            minted: Arc::default(),
+        }
     }
 
     /// Store a sequence of `blocks`; returns its id.
@@ -430,6 +455,68 @@ impl Cloud {
 }
 
 impl Cloud {
+    /// Put a dispatched retry row into the state a pre-`awaiting_dispatch`
+    /// node's re-dispatch leaves behind in a mixed-version fleet: the
+    /// attempt's receipt exists, but the row was never bound (its insert was
+    /// `ON CONFLICT DO NOTHING`), so `effect_id` / `continuity_epoch` are
+    /// unset and the row is still `awaiting_dispatch`. `age` backdates the
+    /// row's creation.
+    pub fn strand_dispatch(&self, task: Uuid, age: chrono::Duration) {
+        let created = chrono::Utc::now() - age;
+        self.rt.block_on(async {
+            match &self.raw {
+                RawPool::Postgres(pool) => {
+                    sqlx::query(
+                        "UPDATE worker_tasks SET effect_id = NULL, continuity_epoch = NULL, \
+                         awaiting_dispatch = TRUE, created_at = $2 WHERE id = $1",
+                    )
+                    .bind(task)
+                    .bind(created)
+                    .execute(pool)
+                    .await
+                    .expect("strand dispatch");
+                }
+                RawPool::Sqlite(pool) => {
+                    sqlx::query(
+                        "UPDATE worker_tasks SET effect_id = NULL, continuity_epoch = NULL, \
+                         awaiting_dispatch = 1, created_at = ?2 WHERE id = ?1",
+                    )
+                    .bind(task.to_string())
+                    .bind(created.to_rfc3339())
+                    .execute(pool)
+                    .await
+                    .expect("strand dispatch");
+                }
+            }
+        });
+    }
+
+    /// Whether a worker task row is still `awaiting_dispatch`.
+    #[must_use]
+    pub fn awaiting_dispatch(&self, task: Uuid) -> bool {
+        self.rt.block_on(async {
+            match &self.raw {
+                RawPool::Postgres(pool) => sqlx::query_scalar::<_, bool>(
+                    "SELECT awaiting_dispatch FROM worker_tasks WHERE id = $1",
+                )
+                .bind(task)
+                .fetch_one(pool)
+                .await
+                .expect("awaiting_dispatch"),
+                RawPool::Sqlite(pool) => {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT awaiting_dispatch FROM worker_tasks WHERE id = ?1",
+                    )
+                    .bind(task.to_string())
+                    .fetch_one(pool)
+                    .await
+                    .expect("awaiting_dispatch")
+                        != 0
+                }
+            }
+        })
+    }
+
     /// Every table of this cloud's database whose rows contain `needle`
     /// anywhere (any text or binary column; Postgres rows are rendered as
     /// text). Used to prove a value never reached the control plane.
@@ -606,6 +693,205 @@ impl Drop for TlsFront {
 }
 
 // ---------------------------------------------------------------------------
+// RoutedFront: a shared load balancer that routes by a header
+// ---------------------------------------------------------------------------
+
+/// One request seen by a [`RoutedFront`].
+#[derive(Debug, Clone)]
+pub struct RoutedHit {
+    /// `"grpc"` or `"rest"`.
+    pub listener: &'static str,
+    pub path: String,
+    /// Whether it carried the routing header with this engine's id (and was
+    /// forwarded); otherwise it was refused with 404.
+    pub routed: bool,
+}
+
+/// A stand-in for a load balancer shared by many engines (Fly's shared app):
+/// it terminates TLS, inspects HTTP, and forwards a request to this engine
+/// only when it carries `<header>: <instance>`; anything else gets 404, as
+/// if no engine matched. gRPC (`h2`, forwarded as h2c) and REST (HTTP/1.1)
+/// listen on **separate ports**, so a token needs both `endpoint` (gRPC) and
+/// `api_url` (REST).
+pub struct RoutedFront {
+    /// `https://127.0.0.1:<port>` serving gRPC (join token `endpoint`).
+    pub grpc_endpoint: String,
+    /// `https://127.0.0.1:<port>/api/v1` (join token `api_url`).
+    pub api_url: String,
+    hits: Arc<Mutex<Vec<RoutedHit>>>,
+    stop: CancellationToken,
+}
+
+type FrontClient = hyper_util::client::legacy::Client<
+    hyper_util::client::legacy::connect::HttpConnector,
+    hyper::body::Incoming,
+>;
+
+impl RoutedFront {
+    #[must_use]
+    pub fn start(cloud: &Cloud, header: &'static str, instance: &'static str) -> Self {
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let stop = CancellationToken::new();
+        let grpc_port = Self::listen(
+            cloud,
+            "grpc",
+            cloud.grpc_addr,
+            true,
+            (header, instance),
+            Arc::clone(&hits),
+            stop.clone(),
+        );
+        let rest_port = Self::listen(
+            cloud,
+            "rest",
+            cloud.http_addr(),
+            false,
+            (header, instance),
+            Arc::clone(&hits),
+            stop.clone(),
+        );
+        Self {
+            grpc_endpoint: format!("https://127.0.0.1:{grpc_port}"),
+            api_url: format!("https://127.0.0.1:{rest_port}/api/v1"),
+            hits,
+            stop,
+        }
+    }
+
+    /// Every request seen so far.
+    #[must_use]
+    pub fn hits(&self) -> Vec<RoutedHit> {
+        self.hits.lock().expect("hits").clone()
+    }
+
+    fn tls_acceptor(alpn: &[u8]) -> tokio_rustls::TlsAcceptor {
+        use tokio_rustls::rustls;
+        use tokio_rustls::rustls::pki_types::pem::PemObject as _;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+        let certs: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_file_iter(tls_fixture("server.pem"))
+                .expect("server.pem")
+                .collect::<Result<_, _>>()
+                .expect("server certificate");
+        let key = PrivateKeyDer::from_pem_file(tls_fixture("server.key")).expect("server.key");
+        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("tls versions")
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("tls config");
+        config.alpn_protocols = vec![alpn.to_vec()];
+        tokio_rustls::TlsAcceptor::from(Arc::new(config))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn listen(
+        cloud: &Cloud,
+        name: &'static str,
+        upstream: SocketAddr,
+        h2: bool,
+        route: (&'static str, &'static str),
+        hits: Arc<Mutex<Vec<RoutedHit>>>,
+        stop: CancellationToken,
+    ) -> u16 {
+        let acceptor = Self::tls_acceptor(if h2 { b"h2" } else { b"http/1.1" });
+        let listener = cloud
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .expect("bind routed front");
+        let port = listener.local_addr().expect("front addr").port();
+        let client: FrontClient = {
+            let mut builder =
+                hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new());
+            builder.http2_only(h2);
+            builder.build_http()
+        };
+        cloud.handle().spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    () = stop.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((tcp, _)) = accepted else { continue };
+                let (acceptor, client, hits) =
+                    (acceptor.clone(), client.clone(), Arc::clone(&hits));
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else {
+                        return;
+                    };
+                    let service = hyper::service::service_fn(move |request| {
+                        Self::forward(
+                            name,
+                            upstream,
+                            route,
+                            client.clone(),
+                            Arc::clone(&hits),
+                            request,
+                        )
+                    });
+                    let _ = hyper_util::server::conn::auto::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection(hyper_util::rt::TokioIo::new(tls), service)
+                    .await;
+                });
+            }
+        });
+        port
+    }
+
+    async fn forward(
+        name: &'static str,
+        upstream: SocketAddr,
+        (header, instance): (&'static str, &'static str),
+        client: FrontClient,
+        hits: Arc<Mutex<Vec<RoutedHit>>>,
+        mut request: hyper::Request<hyper::body::Incoming>,
+    ) -> Result<hyper::Response<axum::body::Body>, std::convert::Infallible> {
+        let routed = request
+            .headers()
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+            == Some(instance);
+        hits.lock().expect("hits").push(RoutedHit {
+            listener: name,
+            path: request.uri().path().to_owned(),
+            routed,
+        });
+        let status = |code: u16| {
+            hyper::Response::builder()
+                .status(code)
+                .body(axum::body::Body::empty())
+                .expect("response")
+        };
+        if !routed {
+            return Ok(status(404));
+        }
+        let path = request
+            .uri()
+            .path_and_query()
+            .map_or("/", hyper::http::uri::PathAndQuery::as_str)
+            .to_owned();
+        let Ok(uri) = format!("http://{upstream}{path}").parse() else {
+            return Ok(status(400));
+        };
+        *request.uri_mut() = uri;
+        match client.request(request).await {
+            Ok(response) => Ok(response.map(axum::body::Body::new)),
+            Err(_) => Ok(status(502)),
+        }
+    }
+}
+
+impl Drop for RoutedFront {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ExecutorProcess: a real `orch8-server` remote executor (no database)
 // ---------------------------------------------------------------------------
 
@@ -764,12 +1050,19 @@ async fn open_storage(
     Arc<dyn StorageBackend>,
     RawPool,
     Option<(sqlx::PgPool, String)>,
+    Option<tempfile::TempDir>,
 ) {
     match backend {
         Backend::Sqlite => {
-            let sqlite = SqliteStorage::in_memory().await.expect("sqlite");
+            // File-backed like the standalone server: an in-memory database
+            // vanishes whenever its single pooled connection is recycled.
+            let dir = tempfile::tempdir().expect("sqlite dir");
+            let path = dir.path().join("cloud.db");
+            let sqlite = SqliteStorage::file(path.to_str().expect("utf-8 path"))
+                .await
+                .expect("sqlite");
             let raw = RawPool::Sqlite(sqlite.pool().clone());
-            (Arc::new(sqlite), raw, None)
+            (Arc::new(sqlite), raw, None, Some(dir))
         }
         Backend::Postgres(url) => {
             let admin = sqlx::PgPool::connect(url).await.expect("connect postgres");
@@ -783,7 +1076,7 @@ async fn open_storage(
                 .expect("postgres storage");
             pg.run_migrations().await.expect("migrations");
             let raw = RawPool::Postgres(pg.pool().clone());
-            (Arc::new(pg), raw, Some((admin, schema)))
+            (Arc::new(pg), raw, Some((admin, schema)), None)
         }
     }
 }
@@ -994,13 +1287,95 @@ impl orch8_mobile::StepHandler for SignHandler {
     }
 }
 
+/// A customer's app backend in miniature: it holds an operator (here: the
+/// root) key and mints short-lived device sessions
+/// (`POST /runtimes/device-sessions`) for one device and runtime at a time.
+#[derive(Clone)]
+pub struct DeviceSessions {
+    v1: String,
+    tenant: String,
+    handlers: Vec<String>,
+    ttl_secs: u32,
+    /// Tokens minted so far (initial + refreshes).
+    pub minted: Arc<AtomicU32>,
+}
+
+impl DeviceSessions {
+    /// Mint a device session for `device_id` / `runtime_id`. Blocking; runs
+    /// on its own thread and runtime like an app's own HTTP stack would.
+    #[must_use]
+    pub fn mint(&self, device_id: &str, runtime_id: &str) -> String {
+        let url = format!("{}/runtimes/device-sessions", self.v1);
+        let body = json!({
+            "device_id": device_id, "runtime_id": runtime_id,
+            "handlers": self.handlers, "ttl_secs": self.ttl_secs,
+        });
+        let tenant = self.tenant.clone();
+        let (status, minted) = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("minting runtime");
+            rt.block_on(async move {
+                let response = reqwest::Client::new()
+                    .post(url)
+                    .header("x-api-key", ROOT_KEY)
+                    .header("X-Tenant-Id", tenant)
+                    .json(&body)
+                    .send()
+                    .await
+                    .expect("mint device session");
+                let status = response.status().as_u16();
+                (
+                    status,
+                    response.json::<Value>().await.unwrap_or(Value::Null),
+                )
+            })
+        })
+        .join()
+        .expect("minting thread");
+        assert_eq!(status, 201, "mint device session: {minted}");
+        self.minted.fetch_add(1, Ordering::SeqCst);
+        let token = minted["token"].as_str().expect("token").to_owned();
+        assert!(token.starts_with("dst_"), "{token}");
+        token
+    }
+}
+
+/// The host `TokenProvider` of a phone: asks the app backend for a device
+/// session on start and on every refresh (`401`).
+struct SessionProvider {
+    sessions: DeviceSessions,
+    device_id: String,
+    runtime_id: String,
+}
+
+impl orch8_mobile::TokenProvider for SessionProvider {
+    fn current_token(&self) -> String {
+        self.sessions.mint(&self.device_id, &self.runtime_id)
+    }
+
+    fn refresh_token(&self) -> Result<String, orch8_mobile::MobileError> {
+        Ok(self.sessions.mint(&self.device_id, &self.runtime_id))
+    }
+}
+
+/// How a [`Phone`] authenticates to the control plane.
+#[derive(Clone)]
+pub enum PhoneAuth {
+    /// A stored tenant API key in `sync_api_key` (legacy; discouraged).
+    ApiKey(String),
+    /// Device sessions from the app backend through a `TokenProvider`.
+    DeviceSession(DeviceSessions),
+}
+
 /// A phone: its own `SQLite` file, device id and credential, reaching the
 /// control plane through `link`.
 pub struct Phone {
     pub engine: Arc<orch8_mobile::MobileEngine>,
     pub db_path: String,
     pub device_id: String,
-    pub key: String,
+    pub auth: PhoneAuth,
     pub api_base: String,
 }
 
@@ -1010,7 +1385,7 @@ impl Phone {
     pub fn open(
         db_path: &str,
         device_id: &str,
-        key: &str,
+        auth: &PhoneAuth,
         api_base: &str,
         name: &str,
         handler: Arc<dyn orch8_mobile::StepHandler>,
@@ -1019,12 +1394,22 @@ impl Phone {
             db_path.to_owned(),
             orch8_mobile::MobileEngineConfig {
                 device_id: device_id.to_owned(),
-                sync_api_key: key.to_owned(),
+                sync_api_key: match auth {
+                    PhoneAuth::ApiKey(key) => key.clone(),
+                    PhoneAuth::DeviceSession(_) => String::new(),
+                },
                 handler_timeout_ms: 60_000,
                 ..orch8_mobile::MobileEngineConfig::default()
             },
         )
         .expect("mobile engine");
+        if let PhoneAuth::DeviceSession(sessions) = auth {
+            engine.set_token_provider(Arc::new(SessionProvider {
+                sessions: sessions.clone(),
+                device_id: device_id.to_owned(),
+                runtime_id: engine.node_runtime_id().expect("runtime id"),
+            }));
+        }
         engine
             .register_handler(name.to_owned(), handler)
             .expect("register handler");
@@ -1032,8 +1417,20 @@ impl Phone {
             engine,
             db_path: db_path.to_owned(),
             device_id: device_id.to_owned(),
-            key: key.to_owned(),
+            auth: auth.clone(),
             api_base: api_base.to_owned(),
+        }
+    }
+
+    /// A credential for this phone's own direct API calls (app code): a
+    /// fresh device session, or the stored key.
+    #[must_use]
+    pub fn credential(&self) -> String {
+        match &self.auth {
+            PhoneAuth::ApiKey(key) => key.clone(),
+            PhoneAuth::DeviceSession(sessions) => {
+                sessions.mint(&self.device_id, &self.runtime_id())
+            }
         }
     }
 
@@ -1060,6 +1457,164 @@ impl Phone {
                 version: Some("e2e".into()),
             })
             .expect("start worker");
+    }
+}
+
+impl Phone {
+    /// Load a phone-local sequence (tenant `mobile`, namespace `default`)
+    /// named `name` with `blocks`.
+    pub fn load_local_sequence(&self, name: &str, blocks: &Value) {
+        self.engine
+            .load_sequence_from_json(
+                json!({
+                    "id": Uuid::now_v7(), "tenant_id": "mobile", "namespace": "default",
+                    "name": name, "version": 1, "deprecated": false, "blocks": blocks,
+                    "created_at": chrono::Utc::now().to_rfc3339(),
+                })
+                .to_string(),
+            )
+            .expect("load local sequence");
+    }
+
+    /// Start a phone-local instance of `name`; returns its id.
+    pub fn start_local(&self, name: &str, input: &Value) -> String {
+        let id = self
+            .engine
+            .start(name.to_owned(), input.to_string(), None)
+            .expect("start local instance");
+        self.engine.resume();
+        id
+    }
+
+    #[must_use]
+    pub fn local_state(&self, id: &str) -> orch8_mobile::InstanceStateKind {
+        self.engine
+            .get_instance(id.to_owned())
+            .expect("local instance")
+            .state
+    }
+
+    /// Wait until the local instance reaches `state`.
+    pub fn wait_local_state(
+        &self,
+        id: &str,
+        state: orch8_mobile::InstanceStateKind,
+        limit: Duration,
+    ) {
+        let mut last = None;
+        let reached = wait_for_opt(limit, || {
+            let now = self.local_state(id);
+            last = Some(now);
+            (now == state).then_some(())
+        });
+        assert!(
+            reached.is_some(),
+            "local instance {id} never reached {state:?}; last: {last:?}"
+        );
+    }
+
+    /// `start_delegation` for this cloud tenant, polling every 150 ms.
+    pub fn start_delegation(&self, tenant: &str) {
+        self.engine
+            .start_delegation(orch8_mobile::DelegationOptions {
+                tenant_id: tenant.to_owned(),
+                poll_interval_ms: 150,
+                ttl_secs: 300,
+            })
+            .expect("start delegation");
+    }
+
+    /// Wait until the delegation journal holds a delegation in `state`
+    /// (`preparing`, `delegated`, `completed`, …); returns it.
+    pub fn wait_delegation(&self, state: &str, limit: Duration) -> orch8_mobile::DelegationStatus {
+        let mut last = Vec::new();
+        wait_for_opt(limit, || {
+            last = self.engine.list_delegations().expect("list delegations");
+            last.iter()
+                .find(|delegation| delegation.state == state)
+                .cloned()
+        })
+        .unwrap_or_else(|| panic!("no delegation reached {state}; journal: {last:?}"))
+    }
+}
+
+/// Read access to a phone's own database next to its running engine (the
+/// file is in WAL mode), for asserting on local outputs and receipts.
+pub struct PhoneDb {
+    rt: tokio::runtime::Runtime,
+    pool: sqlx::SqlitePool,
+}
+
+impl PhoneDb {
+    #[must_use]
+    pub fn open(db_path: &str) -> Self {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("phone db runtime");
+        let pool = rt
+            .block_on(sqlx::SqlitePool::connect(&format!("sqlite:{db_path}")))
+            .expect("open phone db");
+        Self { rt, pool }
+    }
+
+    /// Real outputs of a local block (no in-progress sentinel or retry
+    /// markers), oldest first.
+    #[must_use]
+    pub fn block_outputs(&self, instance: &str, block: &str) -> Vec<Value> {
+        let rows: Vec<String> = self
+            .rt
+            .block_on(
+                sqlx::query_scalar(
+                    "SELECT output FROM block_outputs WHERE instance_id = ?1 AND block_id = ?2 \
+                     AND output_ref IS NULL ORDER BY created_at",
+                )
+                .bind(instance)
+                .bind(block)
+                .fetch_all(&self.pool),
+            )
+            .expect("local outputs");
+        rows.iter()
+            .map(|text| serde_json::from_str(text).expect("output json"))
+            .collect()
+    }
+
+    /// Local effect receipt states of a block, by attempt.
+    #[must_use]
+    pub fn receipt_states(&self, instance: &str, block: &str) -> Vec<String> {
+        let rows: Vec<(String, String)> = self
+            .rt
+            .block_on(
+                sqlx::query_as("SELECT state, record FROM effect_receipts WHERE instance_id = ?1")
+                    .bind(instance)
+                    .fetch_all(&self.pool),
+            )
+            .expect("local receipts");
+        let mut states: Vec<(u64, String)> = rows
+            .into_iter()
+            .filter_map(|(state, record)| {
+                let record: Value = serde_json::from_str(&record).ok()?;
+                (record["block_id"] == block)
+                    .then(|| (record["attempt"].as_u64().unwrap_or_default(), state))
+            })
+            .collect();
+        states.sort();
+        states.into_iter().map(|(_, state)| state).collect()
+    }
+
+    /// Replay a resolved delegation: put its journal row back to `claimed`,
+    /// as if the result had never been applied (a duplicate delivery).
+    pub fn replay_delegation(&self, delegation_id: &str) {
+        self.rt
+            .block_on(
+                sqlx::query(
+                    "UPDATE mobile_delegations SET state = 'claimed', outcome = NULL \
+                     WHERE delegation_id = ?1",
+                )
+                .bind(delegation_id)
+                .execute(&self.pool),
+            )
+            .expect("replay delegation");
     }
 }
 

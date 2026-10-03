@@ -2,6 +2,10 @@ package io.orch8.kmp.internal
 
 import io.orch8.kmp.BackgroundRunResult
 import io.orch8.kmp.ContinuityImportResult
+import io.orch8.kmp.DelegateRequest
+import io.orch8.kmp.DelegationOptions
+import io.orch8.kmp.DelegationStats
+import io.orch8.kmp.DelegationStatus
 import io.orch8.kmp.DeviceContext
 import io.orch8.kmp.EngineConfig
 import io.orch8.kmp.EngineEvent
@@ -93,6 +97,9 @@ internal interface EngineBackend {
 
     fun nodeRuntimeId(): String
 
+    /** Install the node credential's token source (device sessions). */
+    fun setTokenProvider(tokens: Orch8TokenSource)
+
     fun registerNode(capabilities: NodeCapabilities): NodeRegistration
 
     fun updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: Int?)
@@ -110,6 +117,20 @@ internal interface EngineBackend {
     fun onPushWake(envelopeJson: String): Boolean
 
     fun enableBuiltin(name: String)
+
+    // Delegation from phone-local workflows (engine release after 0.7.1).
+
+    fun startDelegation(options: DelegationOptions)
+
+    fun stopDelegation()
+
+    fun delegate(request: DelegateRequest): String
+
+    fun delegationStatus(delegationId: String): DelegationStatus
+
+    fun listDelegations(): List<DelegationStatus>
+
+    fun delegationStats(): DelegationStats
 }
 
 /**

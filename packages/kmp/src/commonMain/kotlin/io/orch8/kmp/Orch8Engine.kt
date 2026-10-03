@@ -192,9 +192,36 @@ class Orch8Engine internal constructor(
     suspend fun nodeRuntimeId(): String = offload { backend.nodeRuntimeId() }
 
     /**
+     * Authenticate every control-plane call (node registration, worker
+     * leases, delegation, sync reporting) with short-lived **device
+     * sessions** instead of the static, legacy `EngineConfig.syncApiKey`.
+     *
+     * [fetchToken] should ask the app's backend for a fresh `dst_…` token;
+     * the backend holds the operator key and mints it with
+     * `POST /runtimes/device-sessions` for this device id and [nodeRuntimeId].
+     * It is awaited once here for the initial token and again whenever the
+     * control plane answers `401` (the request is then retried once); each
+     * refresh is bounded by [refreshTimeout]. Call it before [registerNode].
+     * Never ship an operator key in an app.
+     *
+     * Needs the engine release after 0.7.1.
+     */
+    suspend fun setTokenProvider(
+        refreshTimeout: Duration = 30.seconds,
+        fetchToken: suspend () -> String,
+    ) {
+        require(refreshTimeout.isPositive()) { "refreshTimeout must be greater than zero" }
+        val initial = fetchToken()
+        require(initial.isNotBlank()) { "fetchToken returned an empty token" }
+        val tokens = DeviceSessionTokens(initial, fetchToken, refreshTimeout)
+        offload { backend.setTokenProvider(tokens) }
+    }
+
+    /**
      * Join the runtime mesh: registers the device and its capabilities with
-     * `EngineConfig.syncUrl` + `syncApiKey`, then re-advertises before the
-     * five-minute capability TTL. Safe to call on every launch.
+     * `EngineConfig.syncUrl` and the node credential ([setTokenProvider], or
+     * the legacy `syncApiKey`), then re-advertises before the five-minute
+     * capability TTL. Safe to call on every launch.
      */
     suspend fun registerNode(capabilities: NodeCapabilities = NodeCapabilities()): NodeRegistration =
         offload { backend.registerNode(capabilities) }
@@ -246,6 +273,56 @@ class Orch8Engine internal constructor(
 
     /** Enable an opt-in builtin handler (`http_request`) before [resume]. */
     fun enableBuiltin(name: String) = backend.enableBuiltin(name)
+
+    // -- Delegation from phone-local workflows ------------------------------
+    //
+    // Needs the engine release after 0.7.1. A step of a workflow running on
+    // this engine whose `$runtime` places it on another runtime is handed to
+    // that runtime through the server mailbox; the local instance parks and
+    // resumes exactly once with the result.
+
+    /**
+     * Start the delegation pump. Requires [registerNode] and a node credential
+     * allowed to call the continuity API. Delegations are journaled locally
+     * and survive disconnects and app kills: call again after every launch.
+     */
+    suspend fun startDelegation(options: DelegationOptions) = offload { backend.startDelegation(options) }
+
+    /** Pause the pump. Journaled delegations resume with the next [startDelegation]. */
+    suspend fun stopDelegation() = offload { backend.stopDelegation() }
+
+    /**
+     * Delegate a server-side sub-sequence on behalf of a local instance
+     * without parking a step. Returns the delegation id; read the outcome
+     * with [delegationStatus]. Requires [startDelegation].
+     */
+    suspend fun delegate(request: DelegateRequest): String = offload { backend.delegate(request) }
+
+    /** The locally journaled state of a delegation (NOT_FOUND when unknown). */
+    suspend fun delegationStatus(delegationId: String): DelegationStatus {
+        require(delegationId.isNotBlank()) { "delegationId must not be blank" }
+        return offload { backend.delegationStatus(delegationId) }
+    }
+
+    /** Every journaled delegation, oldest first. */
+    suspend fun listDelegations(): List<DelegationStatus> = offload { backend.listDelegations() }
+
+    /** Pump counters (zeros while it is not running). */
+    suspend fun delegationStats(): DelegationStats = offload { backend.delegationStats() }
+
+    /**
+     * Cold flow of distinct statuses of one delegation, polled every
+     * [pollInterval]. Completes after emitting a terminal state.
+     */
+    fun observeDelegation(delegationId: String, pollInterval: Duration = 1.seconds): Flow<DelegationStatus> =
+        flow {
+            while (true) {
+                val status = backend.delegationStatus(delegationId)
+                emit(status)
+                if (status.state.isTerminal) return@flow
+                delay(pollInterval)
+            }
+        }.distinctUntilChanged().flowOn(ioDispatcher)
 
     /**
      * Cold flow of distinct snapshots of one instance, polled every

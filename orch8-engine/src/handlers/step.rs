@@ -876,7 +876,6 @@ mod tests {
         }
 
         let capture = SpanCapture::default();
-        let subscriber = tracing_subscriber::registry().with(capture.clone());
 
         let storage: Arc<dyn orch8_storage::StorageBackend> = Arc::new(
             orch8_storage::sqlite::SqliteStorage::in_memory()
@@ -889,7 +888,7 @@ mod tests {
         });
 
         let instance_id = InstanceId::new();
-        let exec = StepExecParams {
+        let exec = || StepExecParams {
             instance_id,
             tenant_id: TenantId::unchecked("tenant-a"),
             block_id: BlockId::new("step-1"),
@@ -904,11 +903,31 @@ mod tests {
             output_schema: None,
         };
 
-        let output = execute_step_dry(&storage, &handlers, exec)
-            .with_subscriber(subscriber)
-            .await
-            .unwrap();
-        assert_eq!(output.output["ok"], true);
+        // tracing-core caches each callsite's interest process-wide. While a
+        // single dispatcher is live (this test's scoped one), a callsite
+        // registered for the first time on another test thread computes its
+        // interest from *that thread's* default dispatcher only — none — and
+        // caches `never` process-wide, so this test's span is never created
+        // (the flake seen under full-workspace parallel load). A stale
+        // `never` observed here means that registration has completed:
+        // rebuilding the cache from inside this test's dispatcher scope
+        // re-derives the interest with it included, and the second run is
+        // deterministic.
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(capture.clone()));
+        let mut output = None;
+        for _ in 0..2 {
+            capture.spans.lock().unwrap().clear();
+            let run = execute_step_dry(&storage, &handlers, exec())
+                .with_subscriber(dispatch.clone())
+                .await
+                .unwrap();
+            output = Some(run);
+            if !capture.spans.lock().unwrap().is_empty() {
+                break;
+            }
+            tracing::dispatcher::with_default(&dispatch, tracing::callsite::rebuild_interest_cache);
+        }
+        assert_eq!(output.expect("ran").output["ok"], true);
 
         let spans = capture.spans.lock().unwrap();
         assert_eq!(spans.len(), 1, "expected exactly one orch8.step span");

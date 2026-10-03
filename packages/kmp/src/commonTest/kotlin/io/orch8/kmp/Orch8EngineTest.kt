@@ -99,6 +99,12 @@ private class FakeBackend : EngineBackend {
 
     override fun nodeRuntimeId() = "rt-1"
 
+    var tokens: Orch8TokenSource? = null
+
+    override fun setTokenProvider(tokens: Orch8TokenSource) {
+        this.tokens = tokens
+    }
+
     override fun registerNode(capabilities: NodeCapabilities): NodeRegistration {
         registered = capabilities
         return NodeRegistration("rt-1", "dev-1", capabilities.handlers, "2026-01-01T00:05:00Z")
@@ -129,6 +135,34 @@ private class FakeBackend : EngineBackend {
     override fun enableBuiltin(name: String) {
         builtins += name
     }
+
+    var delegationOptions: DelegationOptions? = null
+    var delegated: DelegateRequest? = null
+    var delegationStopped = false
+    val delegationStates = ArrayDeque<DelegationState>()
+
+    override fun startDelegation(options: DelegationOptions) {
+        delegationOptions = options
+    }
+
+    override fun stopDelegation() {
+        delegationStopped = true
+    }
+
+    override fun delegate(request: DelegateRequest): String {
+        delegated = request
+        return "d-1"
+    }
+
+    override fun delegationStatus(delegationId: String): DelegationStatus {
+        val state = if (delegationStates.size > 1) delegationStates.removeFirst() else delegationStates.first()
+        val output = if (state == DelegationState.COMPLETED) "{}" else null
+        return DelegationStatus(delegationId, state, "i1", null, "rt-2", output, null)
+    }
+
+    override fun listDelegations() = listOf(delegationStatus("d-1"))
+
+    override fun delegationStats() = DelegationStats(true, 1, 1, 0, 0, 1)
 }
 
 class Orch8EngineTest {
@@ -245,6 +279,51 @@ class Orch8EngineTest {
     }
 
     @Test
+    fun delegationCallsReachTheBackend() = runTest {
+        val backend = FakeBackend()
+        backend.delegationStates.add(DelegationState.COMPLETED)
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        engine.startDelegation(DelegationOptions(tenantId = "acme", ttl = 30.seconds))
+        assertEquals(30.seconds, backend.delegationOptions!!.ttl)
+        assertEquals(2.seconds, backend.delegationOptions!!.pollInterval)
+
+        val id = engine.delegate(DelegateRequest("i1", "rt-2", "seq-1", """{"photo":"p"}"""))
+        assertEquals("d-1", id)
+        assertEquals("seq-1", backend.delegated!!.subSequenceId)
+        assertEquals(DelegationState.COMPLETED, engine.delegationStatus(id).state)
+        assertEquals(1, engine.listDelegations().size)
+        assertEquals(1L, engine.delegationStats().resumed)
+        engine.stopDelegation()
+        assertTrue(backend.delegationStopped)
+    }
+
+    @Test
+    fun observeDelegationStopsAtTerminalState() = runTest {
+        val backend = FakeBackend()
+        backend.delegationStates.addAll(
+            listOf(DelegationState.PREPARING, DelegationState.DELEGATED, DelegationState.DELEGATED, DelegationState.FAILED),
+        )
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        val seen = engine.observeDelegation("d-1", pollInterval = 100.milliseconds).toList().map { it.state }
+        assertEquals(listOf(DelegationState.PREPARING, DelegationState.DELEGATED, DelegationState.FAILED), seen)
+    }
+
+    @Test
+    fun delegationArgumentsAreValidated() = runTest {
+        val engine = Orch8Engine(FakeBackend(), UnconfinedTestDispatcher(testScheduler))
+        assertFailsWith<IllegalArgumentException> { DelegationOptions(tenantId = " ") }
+        assertFailsWith<IllegalArgumentException> { DelegationOptions(tenantId = "t", ttl = 86_401.seconds) }
+        assertFailsWith<IllegalArgumentException> { DelegationOptions(tenantId = "t", ttl = 500.milliseconds) }
+        assertFailsWith<IllegalArgumentException> { DelegationOptions(tenantId = "t", pollInterval = 0.seconds) }
+        assertFailsWith<IllegalArgumentException> { DelegateRequest("i", "r", "s", "[1]") }
+        assertFailsWith<IllegalArgumentException> { DelegateRequest("i", "r", "s", "nope") }
+        assertFailsWith<IllegalArgumentException> { DelegateRequest("", "r", "s") }
+        assertFailsWith<IllegalArgumentException> { engine.delegationStatus("") }
+        assertEquals(DelegationState.ABANDONED, DelegationState.fromWire("abandoned"))
+        assertEquals(Orch8ErrorKind.ENGINE, assertFailsWith<Orch8Exception> { DelegationState.fromWire("x") }.kind)
+    }
+
+    @Test
     fun taskContextIsParsedFromHandlerInput() {
         val ctx = Orch8TaskContext.fromInput(
             """{"doc":"passport","__orch8":{"effect_id":"eff-1","task_id":"t","instance_id":"i",
@@ -258,6 +337,43 @@ class Orch8EngineTest {
         assertEquals(null, Orch8TaskContext.fromInput("[]"))
         assertEquals(null, Orch8TaskContext.fromInput("nope"))
         assertEquals(null, Orch8TaskContext.fromInput("""{"__orch8":{"effect_id":null}}""")!!.effectId)
+    }
+
+    @Test
+    fun tokenProviderAwaitsTheFirstTokenAndRefreshesThroughTheSuspendFetch() = runTest {
+        val backend = FakeBackend()
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        var fetched = 0
+        engine.setTokenProvider { "dst_${++fetched}" }
+        val tokens = backend.tokens!!
+        assertEquals("dst_1", tokens.currentToken())
+        // A 401 on the engine's blocking thread runs the suspend fetch again.
+        assertEquals("dst_2", tokens.refreshToken())
+        assertEquals("dst_2", tokens.currentToken())
+        assertEquals(2, fetched)
+    }
+
+    @Test
+    fun tokenProviderRejectsEmptyTokensAndBoundsRefreshes() = runTest {
+        val backend = FakeBackend()
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        assertFailsWith<IllegalArgumentException> { engine.setTokenProvider { " " } }
+        assertEquals(null, backend.tokens)
+        assertFailsWith<IllegalArgumentException> { engine.setTokenProvider(0.seconds) { "dst_1" } }
+
+        var calls = 0
+        engine.setTokenProvider(refreshTimeout = 50.milliseconds) {
+            if (++calls > 1) kotlinx.coroutines.delay(10.seconds)
+            "dst_1"
+        }
+        val timedOut = assertFailsWith<Orch8Exception> { backend.tokens!!.refreshToken() }
+        assertEquals(Orch8ErrorKind.NETWORK, timedOut.kind)
+        // The cached token survives a failed refresh.
+        assertEquals("dst_1", backend.tokens!!.currentToken())
+
+        var empty = 0
+        engine.setTokenProvider { if (++empty == 1) "dst_1" else "" }
+        assertEquals(Orch8ErrorKind.INVALID_INPUT, assertFailsWith<Orch8Exception> { backend.tokens!!.refreshToken() }.kind)
     }
 
     @Test

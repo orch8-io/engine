@@ -451,6 +451,12 @@ pub struct NodeConfig {
     pub managed_control_worker_id: String,
     #[serde(default)]
     pub managed_control_runtime_id: String,
+    /// Routing headers sent on every managed-control and worker request (gRPC
+    /// metadata and REST headers), e.g. `fly-force-instance-id` when several
+    /// engines share one load-balanced host. Not secrets; never credentials.
+    /// Usually set from a join token's `headers`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub managed_control_headers: std::collections::BTreeMap<String, String>,
     /// Operator placement labels for this node (e.g. from an executor join
     /// token). Advertised coarsely; never contain workload data.
     #[serde(default)]
@@ -1053,6 +1059,18 @@ impl EngineConfig {
                     "node.role=gateway requires api.http_addr on loopback behind a TLS proxy"
                         .into(),
                 );
+            }
+        }
+        if !self.node.managed_control_headers.is_empty() {
+            if self.node.managed_control_endpoint.is_empty() {
+                errors.push(
+                    "node.managed_control_headers requires node.managed_control_endpoint".into(),
+                );
+            }
+            if let Err(crate::join_token::JoinTokenError::Field { reason, .. }) =
+                crate::join_token::validate_routing_headers(&self.node.managed_control_headers)
+            {
+                errors.push(format!("node.managed_control_headers: {reason}"));
             }
         }
         if !self.node.managed_control_endpoint.is_empty() {

@@ -13,6 +13,7 @@ pub mod continuity;
 pub mod credentials;
 pub mod cron;
 pub mod dataflow;
+pub mod device_sessions;
 pub mod diagnosis;
 pub mod dlq_groups;
 pub mod embed;
@@ -128,6 +129,12 @@ pub struct AppState {
     pub publisher: Option<Arc<orch8_publisher::SequencePublisher>>,
     pub push_provider: Arc<dyn orch8_push::PushProvider>,
     pub mobile_sync_enabled: bool,
+    /// Resolve `credentials://` references for `/mobile/sync`
+    /// `step_delegations` and hand the plaintext back to the device
+    /// (`ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS`, default off). Device
+    /// credentials live in app binaries, so this is opt-in; device sessions
+    /// are refused regardless.
+    pub mobile_sync_resolve_credentials: bool,
     /// Provider-neutral tenant plan catalog used for API admission.
     pub entitlements: Arc<dyn entitlements::EntitlementProvider>,
     /// Names of handlers the engine executes in-process. Served by
@@ -162,6 +169,17 @@ pub struct AppState {
     pub embedded: Arc<embed::EmbeddedRuntime>,
 }
 
+impl AppState {
+    /// Signer for provenance entries (the continuity signing key), when
+    /// continuity crypto is configured.
+    #[must_use]
+    pub fn provenance_signer(&self) -> Option<orch8_engine::provenance::ProvenanceSigner<'_>> {
+        self.continuity_crypto
+            .as_deref()
+            .map(ContinuityCrypto::provenance_signer)
+    }
+}
+
 /// Default bound on browser-reported step output (1 MiB).
 pub const DEFAULT_BROWSER_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
 
@@ -186,6 +204,15 @@ impl std::fmt::Debug for ContinuityCrypto {
 }
 
 impl ContinuityCrypto {
+    /// The provenance signer backed by this continuity signing key.
+    #[must_use]
+    pub fn provenance_signer(&self) -> orch8_engine::provenance::ProvenanceSigner<'_> {
+        orch8_engine::provenance::ProvenanceSigner {
+            key_id: &self.signing_key_id,
+            signing_key: &self.signing_key,
+        }
+    }
+
     /// Derive domain-separated capsule keys from the engine master key. The
     /// derivation is stable across restarts; the master key itself is never
     /// stored in this structure or exposed through debug output.
@@ -283,6 +310,7 @@ fn api_routes() -> Router<AppState> {
         .merge(queue_dispatch::routes())
         .merge(mcp_server::routes())
         .merge(browser_sessions::routes())
+        .merge(device_sessions::routes())
         .merge(sub_tenants::routes())
         .merge(embed::routes())
         .merge(license::routes())

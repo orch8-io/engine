@@ -17,7 +17,20 @@
   `registerNode`, `updateNodeStatus`, `unregisterNode`, `nodeRuntimeId`,
   `startWorker`, `stopWorker`, `runWorkerWindow`, `workerStats`, `onPushWake`,
   `enableBuiltin`, and `Orch8TaskContext.fromInput` (`effectId`).
+- Delegation from phone-local workflows (needs the engine release after
+  0.7.1): `startDelegation`, `stopDelegation`, `delegate`, `delegationStatus`,
+  `listDelegations`, `delegationStats`, with `DelegationOptions`,
+  `DelegateRequest`, `DelegationState`, `DelegationStatus` and
+  `DelegationStats`. Arguments are validated in Dart before reaching the
+  platform channel.
 - `flushTelemetry` now returns `FlushResult`.
+- Device sessions (needs the engine release after 0.7.1):
+  `setTokenProvider(fetchToken, refreshTimeout:)` authenticates node, worker,
+  delegation and sync calls with short-lived `dst_…` tokens your backend
+  mints (`POST /runtimes/device-sessions`); the native plugins ask Dart for a
+  fresh token on `401` (`refreshToken` over the method channel, bounded by
+  `refreshTimeout`). `Orch8Config.syncApiKey` is now documented as legacy and
+  not for production apps.
 
 ## 0.7.1
 

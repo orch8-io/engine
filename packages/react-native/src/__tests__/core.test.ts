@@ -225,3 +225,113 @@ describe("engine calls", () => {
     expect(native.loadSequencesFromUrl).toHaveBeenCalledWith("");
   });
 });
+
+describe("delegation", () => {
+  const IDS = {
+    instanceId: "0192a000-0000-7000-8000-000000000001",
+    destinationRuntimeId: "0192a000-0000-7000-8000-000000000002",
+    subSequenceId: "0192a000-0000-7000-8000-000000000003",
+  };
+
+  it("forwards options and serialises the explicit input", async () => {
+    const { client, native } = setup();
+    await client.startDelegation({ tenantId: "acme" });
+    expect(native.startDelegation).toHaveBeenCalledWith({ tenantId: "acme" });
+    await client.startDelegation({ tenantId: "acme", pollIntervalMs: 500, ttlSecs: 86_400 });
+    expect(native.startDelegation).toHaveBeenLastCalledWith({ tenantId: "acme", pollIntervalMs: 500, ttlSecs: 86_400 });
+
+    native.delegate.mockResolvedValue("d-1");
+    await expect(client.delegate({ ...IDS, input: { photo: { id: "p" } } })).resolves.toBe("d-1");
+    expect(native.delegate).toHaveBeenCalledWith({ ...IDS, inputJson: '{"photo":{"id":"p"}}' });
+    await client.delegate(IDS);
+    expect(native.delegate).toHaveBeenLastCalledWith({ ...IDS, inputJson: "{}" });
+    await client.delegate({ ...IDS, input: '{"a":1}' });
+    expect(native.delegate).toHaveBeenLastCalledWith({ ...IDS, inputJson: '{"a":1}' });
+
+    const status = {
+      delegationId: "d-1",
+      state: "completed",
+      localInstanceId: IDS.instanceId,
+      blockId: null,
+      destinationRuntimeId: IDS.destinationRuntimeId,
+      outputJson: '{"labels":["cat"]}',
+      error: null,
+    };
+    native.delegationStatus.mockResolvedValue(status);
+    native.listDelegations.mockResolvedValue([status]);
+    await expect(client.delegationStatus("d-1")).resolves.toEqual(status);
+    expect(native.delegationStatus).toHaveBeenCalledWith("d-1");
+    await expect(client.listDelegations()).resolves.toEqual([status]);
+
+    await client.delegationStats();
+    await client.stopDelegation();
+    expect(native.delegationStats).toHaveBeenCalled();
+    expect(native.stopDelegation).toHaveBeenCalled();
+  });
+
+  it("rejects invalid options and requests before crossing the bridge", async () => {
+    const { client, native } = setup();
+    await expect(client.startDelegation({ tenantId: "" })).rejects.toThrow(TypeError);
+    await expect(client.startDelegation({ tenantId: "t", ttlSecs: 86_401 })).rejects.toThrow(RangeError);
+    await expect(client.startDelegation({ tenantId: "t", ttlSecs: 0 })).rejects.toThrow(RangeError);
+    await expect(client.startDelegation({ tenantId: "t", pollIntervalMs: 1.5 })).rejects.toThrow(RangeError);
+    expect(native.startDelegation).not.toHaveBeenCalled();
+
+    await expect(client.delegate({ ...IDS, input: "[1]" })).rejects.toThrow(TypeError);
+    await expect(client.delegate({ ...IDS, input: "nope" })).rejects.toThrow(TypeError);
+    await expect(client.delegate({ ...IDS, input: [1] as never })).rejects.toThrow(TypeError);
+    await expect(client.delegate({ ...IDS, subSequenceId: "" })).rejects.toThrow(TypeError);
+    await expect(client.delegationStatus("")).rejects.toThrow(TypeError);
+    expect(native.delegate).not.toHaveBeenCalled();
+    expect(native.delegationStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("token provider", () => {
+  it("installs the first token and answers refresh events with a fresh one", async () => {
+    const { client, native, emit, listeners } = setup();
+    await client.initialize();
+    const fetchToken = vi.fn().mockResolvedValueOnce("dst_first").mockResolvedValueOnce("dst_second");
+    await client.setTokenProvider(fetchToken);
+    expect(native.setTokenProvider).toHaveBeenCalledWith("dst_first");
+
+    emit(EVENTS.refreshToken, { requestId: "r1" });
+    await flush();
+    expect(native.resolveToken).toHaveBeenCalledWith("r1", "dst_second", null);
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+
+    // Installing again replaces the fetcher without a second subscription.
+    await client.setTokenProvider(async () => "dst_other");
+    expect(listeners.get(EVENTS.refreshToken)?.size).toBe(1);
+
+    await client.shutdown();
+    expect(listeners.get(EVENTS.refreshToken)?.size).toBe(0);
+  });
+
+  it("reports a failed or empty refresh to the native side", async () => {
+    const { client, native, emit } = setup();
+    const fetchToken = vi
+      .fn()
+      .mockResolvedValueOnce("dst_first")
+      .mockRejectedValueOnce(new Error("backend down"))
+      .mockResolvedValueOnce("");
+    await client.setTokenProvider(fetchToken);
+
+    emit(EVENTS.refreshToken, { requestId: "r1" });
+    await flush();
+    expect(native.resolveToken).toHaveBeenCalledWith("r1", null, "backend down");
+
+    emit(EVENTS.refreshToken, { requestId: "r2" });
+    await flush();
+    expect(native.resolveToken).toHaveBeenCalledWith("r2", null, "token provider returned an empty token");
+  });
+
+  it("does not install a provider whose first fetch fails", async () => {
+    const { client, native } = setup();
+    await expect(client.setTokenProvider(async () => Promise.reject(new Error("no session")))).rejects.toThrow(
+      "no session"
+    );
+    await expect(client.setTokenProvider("dst_x" as never)).rejects.toThrow(TypeError);
+    expect(native.setTokenProvider).not.toHaveBeenCalled();
+  });
+});

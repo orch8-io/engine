@@ -20,6 +20,11 @@
 //!    key verifies every token;
 //! 3. neither (`--insecure` without a secret): a process-random key, so a
 //!    token only verifies on the replica that minted it (logged at startup).
+//!
+//! The same signer also mints **device sessions** (`dst_…`, see
+//! [`crate::device_sessions`]): the claim set names its runtime kind, and a
+//! token only verifies under the prefix of its own kind, so a browser token
+//! can never be replayed as a device token or vice versa.
 
 use std::sync::{Arc, OnceLock};
 
@@ -46,9 +51,9 @@ use crate::error::ApiError;
 pub const TOKEN_PREFIX: &str = "bst_";
 pub const DEFAULT_TTL_SECS: u32 = 900;
 pub const MAX_TTL_SECS: u32 = 3_600;
-const MAX_HANDLERS: usize = 64;
+pub(crate) const MAX_HANDLERS: usize = 64;
 const MAX_QUEUES: usize = 16;
-const MAX_NAME_BYTES: usize = 256;
+pub(crate) const MAX_NAME_BYTES: usize = 256;
 /// Shared browser-session signing secret (all replicas, ≥ 32 bytes).
 pub const SECRET_ENV: &str = "ORCH8_BROWSER_SESSION_SECRET";
 /// Minimum length of [`SECRET_ENV`].
@@ -65,14 +70,17 @@ pub enum SignerSource {
     ProcessRandom,
 }
 
-/// Verified identity a browser-session token binds a request to. Inserted
-/// into request extensions by the auth middleware; worker handlers reject any
-/// runtime identity, kind, handler, or queue that conflicts with it.
+/// Verified identity a browser- or device-session token binds a request to.
+/// Inserted into request extensions by the auth middleware; worker, mobile,
+/// and continuity handlers reject any runtime identity, device, kind,
+/// handler, or queue that conflicts with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeBinding {
     pub tenant_id: TenantId,
     pub kind: RuntimeKind,
     pub runtime_id: RuntimeId,
+    /// The mobile device a device session is bound to (`None` for browsers).
+    pub device_id: Option<String>,
     pub handlers: Vec<String>,
     pub queues: Vec<String>,
     pub expires_at: DateTime<Utc>,
@@ -94,6 +102,21 @@ impl RuntimeBinding {
     pub fn is_runtime(&self, worker_id: &str) -> bool {
         worker_id == self.runtime_id.to_string()
     }
+
+    /// Whether this is a device session (a phone runtime node).
+    #[must_use]
+    pub fn is_device(&self) -> bool {
+        self.kind == RuntimeKind::Mobile
+    }
+}
+
+/// The binding of a device-session principal, if the request carries one.
+#[must_use]
+pub fn device_binding(binding: &OptionalBinding) -> Option<&RuntimeBinding> {
+    binding
+        .as_ref()
+        .map(|Extension(binding)| binding)
+        .filter(|binding| binding.is_device())
 }
 
 pub type OptionalBinding = Option<Extension<RuntimeBinding>>;
@@ -105,23 +128,30 @@ pub fn enforce_bound_worker(binding: &OptionalBinding, worker_id: &str) -> Resul
         && !binding.is_runtime(worker_id)
     {
         return Err(ApiError::Forbidden(
-            "worker_id conflicts with the browser session's runtime_id".into(),
+            "worker_id conflicts with the session's runtime_id".into(),
         ));
     }
     Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct Claims {
-    v: u8,
-    jti: uuid::Uuid,
-    tenant_id: String,
-    runtime_id: RuntimeId,
-    handlers: Vec<String>,
+pub(crate) struct Claims {
+    pub(crate) v: u8,
+    pub(crate) jti: uuid::Uuid,
+    pub(crate) tenant_id: String,
+    pub(crate) runtime_id: RuntimeId,
+    pub(crate) handlers: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    queues: Vec<String>,
-    iat: i64,
-    exp: i64,
+    pub(crate) queues: Vec<String>,
+    /// Runtime kind of the session; absent on browser tokens (the original
+    /// claim set), `mobile` on device sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<RuntimeKind>,
+    /// Device a device session is bound to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) device_id: Option<String>,
+    pub(crate) iat: i64,
+    pub(crate) exp: i64,
 }
 
 /// HMAC-SHA256 signer/verifier for browser-session tokens.
@@ -225,21 +255,40 @@ impl BrowserSessionSigner {
         mac
     }
 
-    fn mint(&self, claims: &Claims) -> Result<String, ApiError> {
+    /// Sign `claims` under the token prefix of their kind (`bst_` for
+    /// browsers, `dst_` for devices).
+    pub(crate) fn mint(&self, claims: &Claims) -> Result<String, ApiError> {
+        let prefix = match claims.kind {
+            None | Some(RuntimeKind::Browser) => TOKEN_PREFIX,
+            Some(RuntimeKind::Mobile) => crate::device_sessions::TOKEN_PREFIX,
+            Some(other) => {
+                return Err(ApiError::Internal(format!(
+                    "no session token kind for runtime kind {other:?}"
+                )));
+            }
+        };
         let payload = serde_json::to_vec(claims)
-            .map_err(|error| ApiError::Internal(format!("encode browser session: {error}")))?;
+            .map_err(|error| ApiError::Internal(format!("encode runtime session: {error}")))?;
         let signature = self.mac(&payload).finalize().into_bytes();
         Ok(format!(
-            "{TOKEN_PREFIX}{}.{}",
+            "{prefix}{}.{}",
             URL_SAFE_NO_PAD.encode(&payload),
             URL_SAFE_NO_PAD.encode(signature)
         ))
     }
 
-    /// Verify a token's signature and expiry. `None` for anything invalid.
+    /// Verify a browser- or device-session token's signature, expiry, and
+    /// prefix/kind agreement. `None` for anything invalid.
     #[must_use]
     pub fn verify(&self, token: &str, now: DateTime<Utc>) -> Option<RuntimeBinding> {
-        let body = token.strip_prefix(TOKEN_PREFIX)?;
+        let (expected_kind, body) = if let Some(body) = token.strip_prefix(TOKEN_PREFIX) {
+            (RuntimeKind::Browser, body)
+        } else {
+            (
+                RuntimeKind::Mobile,
+                token.strip_prefix(crate::device_sessions::TOKEN_PREFIX)?,
+            )
+        };
         let (payload_b64, signature_b64) = body.split_once('.')?;
         let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
         let signature = URL_SAFE_NO_PAD.decode(signature_b64).ok()?;
@@ -248,10 +297,22 @@ impl BrowserSessionSigner {
         if claims.v != 1 || claims.exp <= now.timestamp() {
             return None;
         }
+        let kind = claims.kind.unwrap_or(RuntimeKind::Browser);
+        if kind != expected_kind {
+            return None;
+        }
+        // A device session is always bound to one device; a browser session
+        // never is.
+        let device_id = match (kind, claims.device_id) {
+            (RuntimeKind::Mobile, Some(device_id)) if !device_id.is_empty() => Some(device_id),
+            (RuntimeKind::Browser, None) => None,
+            _ => return None,
+        };
         Some(RuntimeBinding {
             tenant_id: TenantId::new(claims.tenant_id).ok()?,
-            kind: RuntimeKind::Browser,
+            kind,
             runtime_id: claims.runtime_id,
+            device_id,
             handlers: claims.handlers,
             queues: claims.queues,
             expires_at: DateTime::from_timestamp(claims.exp, 0)?,
@@ -311,7 +372,7 @@ pub(crate) struct CreateBrowserSessionResponse {
     queues: Vec<String>,
 }
 
-fn validate_names(label: &str, names: &[String], max: usize) -> Result<(), ApiError> {
+pub(crate) fn validate_names(label: &str, names: &[String], max: usize) -> Result<(), ApiError> {
     if names.len() > max {
         return Err(ApiError::InvalidArgument(format!(
             "at most {max} {label} may be granted"
@@ -384,6 +445,8 @@ pub(crate) async fn create_browser_session(
         runtime_id,
         handlers: handlers.clone(),
         queues: queues.clone(),
+        kind: None,
+        device_id: None,
         iat: now.timestamp(),
         exp: expires_at.timestamp(),
     };
@@ -422,6 +485,8 @@ mod tests {
             runtime_id: RuntimeId::new(),
             handlers: vec!["read_dom".into()],
             queues: Vec::new(),
+            kind: None,
+            device_id: None,
             iat: 0,
             exp,
         }

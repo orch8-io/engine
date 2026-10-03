@@ -804,6 +804,43 @@ mod distribution_tests {
         ));
     }
 
+    /// A hard-placed step whose `credentials://` references are deferred to
+    /// the claiming executor still carries credentials: a browser advertising
+    /// every required fact (labels, credential names) never claims it.
+    #[test]
+    fn browser_never_claims_executor_resolved_credential_tasks() {
+        let now = Utc::now();
+        let requirements = CapsuleRequirements {
+            credentials: vec!["stripe".into()],
+            labels: [("residency".to_owned(), "eu".to_owned())].into(),
+            ..CapsuleRequirements::default()
+        };
+        let matching = |kind| {
+            let mut caps = caps(kind);
+            caps.credentials = vec!["stripe".into()];
+            caps.labels = [("residency".to_owned(), "eu".to_owned())].into();
+            caps
+        };
+        assert!(!claim_allowed(
+            &requirements,
+            true,
+            &matching(RuntimeKind::Browser),
+            now
+        ));
+        assert!(claim_allowed(
+            &requirements,
+            true,
+            &matching(RuntimeKind::Server),
+            now
+        ));
+        assert!(!claim_allowed(
+            &requirements,
+            true,
+            &caps(RuntimeKind::Server),
+            now
+        ));
+    }
+
     #[test]
     fn credential_references_are_detected_anywhere() {
         assert!(contains_credential_reference(&serde_json::json!({

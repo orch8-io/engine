@@ -693,6 +693,52 @@ pub(super) async fn list_timed_out(
     rows.into_iter().map(WorkerTaskRow::into_task).collect()
 }
 
+/// Retry rows still awaiting dispatch, created before `created_before`.
+pub(super) async fn list_stranded_dispatches(
+    store: &PostgresStorage,
+    created_before: chrono::DateTime<chrono::Utc>,
+    limit: u32,
+) -> Result<Vec<WorkerTask>, StorageError> {
+    let rows = sqlx::query_as::<_, WorkerTaskRow>(concat!(
+        "SELECT ",
+        worker_task_columns!(),
+        r" FROM worker_tasks
+           WHERE state = 'pending' AND awaiting_dispatch AND created_at < $1
+           ORDER BY created_at ASC
+           LIMIT $2"
+    ))
+    .bind(created_before)
+    .bind(i64::from(limit).min(REAPER_BATCH_SIZE))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.into_iter().map(WorkerTaskRow::into_task).collect()
+}
+
+/// Bind a stranded retry row and make it claimable (fenced, idempotent).
+pub(super) async fn finalize_stranded_dispatch(
+    store: &PostgresStorage,
+    task_id: Uuid,
+    attempt: u16,
+    effect_id: Option<orch8_types::continuity::EffectId>,
+    continuity_epoch: Option<u64>,
+) -> Result<bool, StorageError> {
+    let affected = sqlx::query(
+        r"UPDATE worker_tasks
+             SET effect_id = COALESCE(effect_id, $3),
+                 continuity_epoch = COALESCE(continuity_epoch, $4),
+                 awaiting_dispatch = FALSE
+           WHERE id = $1 AND attempt = $2 AND state = 'pending' AND awaiting_dispatch",
+    )
+    .bind(task_id)
+    .bind(i16::try_from(attempt).unwrap_or(i16::MAX))
+    .bind(effect_id.map(orch8_types::continuity::EffectId::into_uuid))
+    .bind(continuity_epoch.map(|epoch| i64::try_from(epoch).unwrap_or(i64::MAX)))
+    .execute(&store.pool)
+    .await?
+    .rows_affected();
+    Ok(affected == 1)
+}
+
 /// Apply one fenced worker-task resolution atomically. See
 /// `WorkerStore::resolve_worker_task`.
 #[allow(clippy::too_many_lines)] // one transaction: fence, action, evidence

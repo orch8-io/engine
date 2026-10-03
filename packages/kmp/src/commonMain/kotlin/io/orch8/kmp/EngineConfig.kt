@@ -25,6 +25,12 @@ data class EngineConfig(
     val sequencesUrl: String = "",
     val syncUrl: String = "",
     val deviceId: String = "",
+    /**
+     * Static API key for sync and runtime-node calls. **Legacy, not for
+     * production apps**: a key stored in the app is extractable from the
+     * binary. Use [Orch8Engine.setTokenProvider] with device sessions minted
+     * by your backend instead, and never put an operator key here.
+     */
     val syncApiKey: String = "",
 ) {
     /**

@@ -145,6 +145,12 @@ fn browser_caps(runtime_id: RuntimeId, handler: &str) -> RuntimeCapabilities {
     }
 }
 
+/// Serializes the tests that reap with a zero default lease: on the shared
+/// Postgres table such a reaper expires *every* claimed task, so it could
+/// resolve another scenario's task between its claim and its next step
+/// (e.g. before a checkpoint lands).
+static ZERO_LEASE_REAPER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn claim(storage: &Arc<dyn StorageBackend>, task: &WorkerTask) -> WorkerTask {
     // Claim this exact row: other parallel tests share the Postgres table, so
     // target it through a unique handler name per scenario.
@@ -192,6 +198,7 @@ async fn dispatch_binds_effect_id_and_ownership_epoch() {
 
 #[tokio::test]
 async fn lease_expiry_with_side_effect_goes_unknown_and_fails_node() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.charge");
         let (seq, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
@@ -234,6 +241,7 @@ async fn lease_expiry_with_side_effect_goes_unknown_and_fails_node() {
 
 #[tokio::test]
 async fn lease_expiry_with_retry_policy_schedules_a_fresh_attempt() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.charge");
         let (seq, inst) = start(&storage, vec![mk_step_with_retry("charge", &handler, 3)]).await;
@@ -301,6 +309,7 @@ async fn lease_expiry_with_retry_policy_schedules_a_fresh_attempt() {
 
 #[tokio::test]
 async fn pure_task_lease_expiry_requeues() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let (_, inst) = start(&storage, vec![mk_step("noop", "noop")]).await;
         let handler = unique_handler("pure");
@@ -459,6 +468,7 @@ async fn claimant_kind_sets_the_per_task_lease() {
 
 #[tokio::test]
 async fn legacy_reaper_never_requeues_an_ambiguous_side_effect() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.charge");
         let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
@@ -956,6 +966,7 @@ async fn placed_step_dispatches_remotely_even_when_handler_is_local() {
 
 #[tokio::test]
 async fn targeted_task_is_a_per_node_mailbox() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.capture");
         let device = caps_of(RuntimeKind::Mobile, &handler);
@@ -1289,6 +1300,170 @@ async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
     }
 }
 
+/// A parent hosted by a runtime has no instance on the server: its
+/// delegation is anchored on a proxy (id = delegation id) that holds the
+/// integrated outcome and turns terminal. On the hosting runtime the parked
+/// step is resumed by `resume_local_parent`, exactly once.
+#[tokio::test]
+async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
+    use orch8_engine::delegation::{
+        DELEGATION_HANDLER, enqueue_delegation_task, ensure_delegation_proxy,
+        integrate_delegation_outcome, is_delegation_proxy, resume_local_parent,
+    };
+    use orch8_types::worker::WorkerClaim;
+    for (backend, storage) in backends().await {
+        // Server side: the parent lives on a phone (never stored here).
+        let (seq, _) = start(&storage, vec![mk_step("classify", &unique_handler("ext"))]).await;
+        let phone_parent = mk_instance(seq.id);
+        let execution = orch8_types::continuity::ContinuityExecution {
+            continuity_id: orch8_types::continuity::ContinuityId::new(),
+            tenant_id: phone_parent.tenant_id.clone(),
+            current_instance_id: phone_parent.id,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: orch8_types::continuity::ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: Utc::now(),
+        };
+        storage
+            .create_continuity_execution(&execution)
+            .await
+            .unwrap();
+        let destination = caps_of(RuntimeKind::Desktop, DELEGATION_HANDLER);
+        let delegation = delegation_for(
+            &phone_parent,
+            &execution,
+            destination.runtime_id,
+            seq.id,
+            chrono::Duration::minutes(5),
+        );
+        let proxy = ensure_delegation_proxy(storage.as_ref(), &execution, &delegation, &seq)
+            .await
+            .unwrap();
+        assert_eq!(proxy.id.into_uuid(), delegation.id.into_uuid(), "{backend}");
+        assert!(is_delegation_proxy(&proxy), "{backend}");
+        assert_eq!(proxy.state, InstanceState::Waiting, "{backend}");
+        let again = ensure_delegation_proxy(storage.as_ref(), &execution, &delegation, &seq)
+            .await
+            .unwrap();
+        assert_eq!(again.id, proxy.id, "{backend}: a retried claim reuses it");
+        let task = enqueue_delegation_task(storage.as_ref(), &proxy, &delegation, &seq, json!({}))
+            .await
+            .unwrap();
+        let claimed = storage
+            .claim_worker_tasks_matching(
+                DELEGATION_HANDLER,
+                &destination.runtime_id.to_string(),
+                None,
+                None,
+                &destination,
+                100,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == task.id)
+            .expect("destination claims the proxy's mailbox task");
+        let output = json!({"labels": ["cat"]});
+        commit_external_worker_effect(storage.as_ref(), &proxy.tenant_id, &claimed, &output)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .complete_worker_task(
+                    claimed.id,
+                    &WorkerClaim::new(destination.runtime_id.to_string(), claimed.claim_epoch),
+                    &output,
+                )
+                .await
+                .unwrap()
+        );
+        integrate_delegation_outcome(storage.as_ref(), &claimed, Ok(&output))
+            .await
+            .unwrap();
+        let after = storage.get_instance(proxy.id).await.unwrap().unwrap();
+        assert_eq!(
+            after.state,
+            InstanceState::Completed,
+            "{backend}: the proxy never runs; it turns terminal"
+        );
+        assert_eq!(
+            receipt_state(&storage, &claimed).await,
+            EffectState::Committed
+        );
+
+        // Runtime side: a parked step placed on the desktop resumes once —
+        // with the output, or with a retryable failure (retry policy).
+        let handler = unique_handler("ext.classify");
+        let placed = json!({"$runtime": {"runtime_id": destination.runtime_id}});
+        for (retryable_failure, block) in [(false, "classify"), (true, "flaky")] {
+            let step = match common::mk_step_with_retry(block, &handler, 2) {
+                BlockDefinition::Step(mut step) => {
+                    step.params = placed.clone();
+                    BlockDefinition::Step(step)
+                }
+                other => other,
+            };
+            let (_, local) = start(&storage, vec![step]).await;
+            let parked = only_task(&storage, local.id).await;
+            let mut caps = caps_of(RuntimeKind::Desktop, &handler);
+            caps.runtime_id = destination.runtime_id;
+            let held = storage
+                .claim_worker_tasks_matching(&handler, "pump", None, None, &caps, 100)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|t| t.id == parked.id)
+                .expect("the pump holds the parked step");
+            let claim = WorkerClaim::new("pump".to_owned(), held.claim_epoch);
+            let result = json!({"status": "completed", "output": output});
+            let outcome = if retryable_failure {
+                Err(("destination failed", true))
+            } else {
+                Ok(&output)
+            };
+            for (delivery, expected) in [(1, true), (2, false)] {
+                assert_eq!(
+                    resume_local_parent(storage.as_ref(), held.id, &claim, "d1", &result, outcome)
+                        .await
+                        .unwrap(),
+                    expected,
+                    "{backend}/{block}: delivery {delivery}"
+                );
+            }
+            let resumed = storage.get_instance(local.id).await.unwrap().unwrap();
+            assert_eq!(resumed.state, InstanceState::Scheduled, "{backend}/{block}");
+            assert_eq!(
+                resumed.context.data["delegations"]["d1"], result,
+                "{backend}/{block}"
+            );
+            if retryable_failure {
+                assert_eq!(
+                    receipt_state(&storage, &held).await,
+                    EffectState::Unknown,
+                    "{backend}"
+                );
+                let retry = only_task(&storage, local.id).await;
+                assert_eq!(retry.attempt, held.attempt + 1, "{backend}: retry policy");
+            } else {
+                assert_eq!(
+                    receipt_state(&storage, &held).await,
+                    EffectState::Committed,
+                    "{backend}"
+                );
+                let outputs = storage
+                    .get_all_outputs(local.id)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|o| o.block_id.as_str() == block && o.output_ref.is_none())
+                    .count();
+                assert_eq!(outputs, 1, "{backend}: one output despite two deliveries");
+                assert_eq!(resumed.context.data["labels"], json!(["cat"]), "{backend}");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn expired_delegation_integrates_a_failure_without_failing_the_parent() {
     use orch8_engine::delegation::enqueue_delegation_task;
@@ -1333,6 +1508,7 @@ async fn expired_delegation_integrates_a_failure_without_failing_the_parent() {
 
 #[tokio::test]
 async fn checkpointed_activity_resumes_on_lease_expiry_with_unknown_receipt() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
     for (backend, storage) in backends().await {
         let handler = unique_handler("ext.batch");
         let (_, inst) = start(&storage, vec![mk_step("batch", &handler)]).await;

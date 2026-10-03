@@ -84,6 +84,7 @@ released on the next launch, and polls immediately on push.
 ```swift
 try engine.registerHandler(name: "scan_document", handler: ScanHandler())
 let node = Orch8RuntimeNode(engine: engine)
+try await node.setTokenProvider { try await backend.deviceSession(runtimeId: node.runtimeId()) }
 try await node.join(capabilities: NodeCapabilities(hardware: ["camera"], pushToken: apnsToken))
 try node.startWorker()
 
@@ -94,6 +95,70 @@ _ = try await node.runBackgroundWindow(seconds: 25)
 
 Handlers get the task params plus `__orch8.effect_id`, the idempotency key to
 forward to downstream APIs.
+
+### Authenticating the node: device sessions
+
+**Never ship an operator key (or any long-lived API key) in the app** — anyone
+can extract it from the binary and act on your tenant. The recommended flow:
+
+1. Your app backend holds the operator key.
+2. After authenticating the user its own way, it mints a short-lived device
+   session (`dst_…`) for this device's `deviceId` and `node.runtimeId()`,
+   limited to the handlers the phone runs
+   (`POST /api/v1/runtimes/device-sessions`).
+3. The app fetches it through `Orch8RuntimeNode.setTokenProvider` **before**
+   `join`. Every control-plane call (registration, worker leases, delegation,
+   `/mobile/sync`) carries the token; on a `401` (expired session) the SDK
+   awaits your closure again, off the main thread, and retries once.
+
+```swift
+// App
+let node = Orch8RuntimeNode(engine: engine)
+let runtimeId = try node.runtimeId()
+try await node.setTokenProvider(refreshTimeout: 30) {
+    var request = URLRequest(url: URL(string: "https://app.example.com/orch8/device-session")!)
+    request.httpMethod = "POST"
+    request.setValue("Bearer \(userSession)", forHTTPHeaderField: "authorization")
+    request.setValue("application/json", forHTTPHeaderField: "content-type")
+    request.httpBody = try JSONEncoder().encode(["deviceId": deviceId, "runtimeId": runtimeId])
+    let (data, _) = try await URLSession.shared.data(for: request)
+    return try JSONDecoder().decode(DeviceSession.self, from: data).token
+}
+try await node.join()
+```
+
+```ts
+// Your backend (Node), with @orch8.io/sdk. The operator key never leaves it.
+import { Orch8Client } from "@orch8.io/sdk";
+
+const orch8 = new Orch8Client({
+  baseUrl: "https://orch8.example.com",
+  tenantId: "my-tenant",
+  headers: { "x-api-key": process.env.ORCH8_OPERATOR_KEY! },
+});
+
+app.post("/orch8/device-session", requireUser, async (req, res) => {
+  // Check that req.body.deviceId belongs to the signed-in user first.
+  const session = await orch8.createDeviceSession({
+    deviceId: req.body.deviceId,
+    runtimeId: req.body.runtimeId,
+    handlers: ["scan_document"], // [] = delegation-only phone
+    ttlSecs: 3600, // default 3600, max 86400
+  });
+  res.json({ token: session.token, expiresAt: session.expiresAt });
+});
+```
+
+The raw call is `POST /api/v1/runtimes/device-sessions` with
+`{"device_id", "runtime_id", "handlers", "ttl_secs"}` and the operator key in
+`x-api-key`; it answers `{"token", "device_id", "runtime_id", "expires_at",
+"handlers"}`. A synchronous `TokenProvider` can be passed to
+`node.setTokenProvider(_:)` (or `MobileEngine.setTokenProvider`) instead; its
+`refreshToken()` runs on a background thread and may block on I/O.
+
+`MobileEngineConfig.syncApiKey` is the **legacy** path and not for production
+apps: a stored key in the app is extractable, and an operator-capable key makes
+the SDK log a warning.
 
 ## Distributed work pickup (low level)
 

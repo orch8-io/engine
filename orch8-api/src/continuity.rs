@@ -222,6 +222,7 @@ pub fn routes() -> Router<AppState> {
         .route("/continuity/federation/verify", post(verify_federation))
         .route("/continuity/federation/sign", post(sign_federation))
         .route("/continuity/delegations/claim", post(claim_delegation))
+        .route("/continuity/delegations/{id}", get(get_delegation))
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,37 +270,16 @@ pub(crate) async fn append_provenance_digest(
     summary: &str,
     payload_sha256: &str,
 ) -> Result<(), ApiError> {
-    for attempt in 0..8 {
-        let previous = state
-            .storage
-            .get_provenance_head(&execution.tenant_id, execution.continuity_id)
-            .await
-            .map_err(|error| ApiError::from_storage(error, "provenance head"))?
-            .map(|entry| entry.entry_sha256);
-        let mut entry = orch8_engine::continuity::build_provenance_entry_with_summary(
-            execution,
-            kind,
-            Some(summary.into()),
-            payload_sha256,
-            previous,
-            Utc::now(),
-        );
-        if let Some(crypto) = &state.continuity_crypto {
-            entry = orch8_engine::continuity::sign_provenance_entry(
-                entry,
-                crypto.signing_key_id.clone(),
-                &crypto.signing_key,
-            );
-        }
-        match state.storage.append_provenance(&entry).await {
-            Ok(()) => return Ok(()),
-            Err(error) if attempt == 7 => {
-                return Err(ApiError::from_storage(error, "provenance append"));
-            }
-            Err(_) => tokio::task::yield_now().await,
-        }
-    }
-    unreachable!("bounded provenance append loop always returns")
+    orch8_engine::provenance::append_provenance_digest(
+        state.storage.as_ref(),
+        state.provenance_signer(),
+        execution,
+        kind,
+        summary,
+        payload_sha256,
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "provenance append"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,9 +302,18 @@ struct IssueGrantResponse {
 async fn issue_continuation_grant(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(body): Json<IssueGrantRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let device = crate::browser_sessions::device_binding(&binding);
+    // A device session only grants a destination the right to accept a
+    // delegation of an execution its own runtime owns (checked below).
+    if device.is_some() && body.allowed_actions != [GrantAction::Accept] {
+        return Err(ApiError::Forbidden(
+            "device sessions may only issue accept grants".into(),
+        ));
+    }
     if !(1..=86_400).contains(&body.ttl_seconds) {
         return Err(ApiError::InvalidArgument(
             "grant ttl_seconds must be between 1 and 86400".into(),
@@ -359,6 +348,11 @@ async fn issue_continuation_grant(
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    if let Some(device) = device
+        && execution.owner_runtime_id != device.runtime_id
+    {
+        return Err(ApiError::NotFound("continuity execution".into()));
+    }
     let now = Utc::now();
     let destination_is_known = state
         .storage
@@ -469,23 +463,62 @@ struct CreateExecutionRequest {
     tenant_id: TenantId,
     instance_id: InstanceId,
     runtime_id: RuntimeId,
+    /// The instance is hosted by `runtime_id` (a phone's local engine, a
+    /// desktop node) rather than by this server: register its continuity
+    /// identity so the runtime can delegate and hand off through the control
+    /// plane. The instance must not exist on the server and the runtime must
+    /// hold a live registration. Idempotent for the same owner.
+    #[serde(default)]
+    hosted_by_runtime: bool,
 }
 
 async fn create_execution(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(body): Json<CreateExecutionRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    // A device session registers only executions its own runtime hosts; it
+    // can never attach a continuity identity to a server-hosted instance.
+    if crate::browser_sessions::device_binding(&binding).is_some() {
+        if !body.hosted_by_runtime {
+            return Err(ApiError::Forbidden(
+                "device sessions may only register runtime-hosted executions".into(),
+            ));
+        }
+        crate::device_sessions::enforce_bound_runtime(&binding, body.runtime_id)?;
+    }
     let instance = state
         .storage
         .get_instance(body.instance_id)
         .await
-        .map_err(|error| ApiError::from_storage(error, "instance"))?
-        .ok_or_else(|| ApiError::NotFound(format!("instance {}", body.instance_id)))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, "instance")?;
-    if instance.tenant_id != tenant_id {
-        return Err(ApiError::NotFound("instance".into()));
+        .map_err(|error| ApiError::from_storage(error, "instance"))?;
+    if body.hosted_by_runtime {
+        if instance.is_some() {
+            return Err(ApiError::Conflict(
+                "a runtime-hosted execution cannot name an instance hosted by this server".into(),
+            ));
+        }
+        let registered = state
+            .storage
+            .list_runtime_capabilities(&tenant_id, Utc::now(), 10_000)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?
+            .iter()
+            .any(|runtime| runtime.runtime_id == body.runtime_id);
+        if !registered {
+            return Err(ApiError::Conflict(
+                "the hosting runtime must have a live capability registration".into(),
+            ));
+        }
+    } else {
+        let instance =
+            instance.ok_or_else(|| ApiError::NotFound(format!("instance {}", body.instance_id)))?;
+        crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, "instance")?;
+        if instance.tenant_id != tenant_id {
+            return Err(ApiError::NotFound("instance".into()));
+        }
     }
     if let Some(existing) = state
         .storage
@@ -493,6 +526,14 @@ async fn create_execution(
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
     {
+        // A runtime re-registering its own hosted execution (the first
+        // response was lost to a disconnect) gets the same identity back.
+        if body.hosted_by_runtime
+            && existing.owner_runtime_id == body.runtime_id
+            && existing.current_instance_id == body.instance_id
+        {
+            return Ok((StatusCode::OK, Json(existing)).into_response());
+        }
         return Err(ApiError::Conflict(format!(
             "instance already belongs to continuity execution {}",
             existing.continuity_id
@@ -515,12 +556,20 @@ async fn create_execution(
     append_provenance_boundary(
         &state,
         &execution,
-        "execution_created",
-        "continuity execution created",
+        if body.hosted_by_runtime {
+            "execution_registered_by_runtime"
+        } else {
+            "execution_created"
+        },
+        if body.hosted_by_runtime {
+            "runtime-hosted continuity execution registered"
+        } else {
+            "continuity execution created"
+        },
         &execution,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(execution)))
+    Ok((StatusCode::CREATED, Json(execution)).into_response())
 }
 
 async fn get_execution(
@@ -677,14 +726,25 @@ async fn register_runtime(
 async fn list_runtimes(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Query(query): Query<TenantQuery>,
 ) -> Result<Json<Vec<RuntimeCapabilities>>, ApiError> {
     let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let now = Utc::now();
     let runtimes = state
         .storage
-        .list_runtime_capabilities(&tenant_id, Utc::now(), 1_000)
+        .list_runtime_capabilities(&tenant_id, now, 1_000)
         .await
         .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    // A device session gets only live delegation destinations, reduced to
+    // the facts it matches on — never the tenant's runtime inventory.
+    if let Some(binding) = crate::browser_sessions::device_binding(&binding) {
+        return Ok(Json(crate::device_sessions::destination_view(
+            runtimes,
+            binding.runtime_id,
+            now,
+        )));
+    }
     Ok(Json(runtimes))
 }
 
@@ -6658,6 +6718,71 @@ struct ClaimDelegationRequest {
     /// never shares mutable execution state with its parent).
     #[serde(default)]
     input: serde_json::Value,
+    /// An isolated step delegated as a one-step sequence: the control plane
+    /// publishes it (idempotently) under the deterministic id
+    /// `delegation.sub_sequence_id` must carry, so the delegating runtime
+    /// needs no sequence-authoring rights.
+    #[serde(default)]
+    step: Option<DelegatedStep>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DelegatedStep {
+    handler: String,
+    block_id: String,
+}
+
+/// Publish the one-step sequence of an isolated delegated step, if it does
+/// not exist yet. Its id must be the deterministic one the delegation names.
+async fn ensure_delegated_step_sequence(
+    state: &AppState,
+    tenant_id: &TenantId,
+    delegation: &DeviceDelegation,
+    step: &DelegatedStep,
+) -> Result<(), ApiError> {
+    const MAX_NAME_BYTES: usize = 256;
+    if [&step.handler, &step.block_id]
+        .iter()
+        .any(|name| name.trim().is_empty() || name.len() > MAX_NAME_BYTES)
+    {
+        return Err(ApiError::InvalidArgument(format!(
+            "delegated step handler and block_id must be non-empty and at most {MAX_NAME_BYTES} bytes"
+        )));
+    }
+    let id = orch8_engine::delegation::step_sequence_id(
+        tenant_id.as_str(),
+        &step.handler,
+        &step.block_id,
+    );
+    if delegation.sub_sequence_id.into_uuid() != id {
+        return Err(ApiError::InvalidArgument(
+            "delegation.sub_sequence_id is not the delegated step's sequence id".into(),
+        ));
+    }
+    if state
+        .storage
+        .get_sequence(delegation.sub_sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegated step sequence"))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let sequence: orch8_types::sequence::SequenceDefinition =
+        serde_json::from_value(orch8_engine::delegation::step_sequence_document(
+            tenant_id.as_str(),
+            &step.handler,
+            &step.block_id,
+        ))
+        .map_err(|error| ApiError::InvalidArgument(format!("delegated step sequence: {error}")))?;
+    sequence
+        .validate()
+        .map_err(|error| ApiError::validation(error.catalog_key(), error.to_string()))?;
+    match state.storage.create_sequence(&sequence).await {
+        // A concurrent claim may have published it first.
+        Ok(()) | Err(orch8_types::error::StorageError::Conflict(_)) => Ok(()),
+        Err(error) => Err(ApiError::from_storage(error, "delegated step sequence")),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -6670,31 +6795,50 @@ struct ClaimDelegationResponse {
     mailbox_task_id: Option<uuid::Uuid>,
 }
 
+/// The claim's grant is signed by this control plane and authorizes exactly
+/// this delegation, now.
+fn verify_delegation_grant(
+    trusted_key: &str,
+    body: &ClaimDelegationRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), ApiError> {
+    verify_signed_continuation_grant(&body.signed_grant, &[trusted_key.to_owned()])
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    orch8_engine::continuity_advanced::validate_device_delegation(
+        &body.delegation,
+        &body.signed_grant.grant,
+        now,
+    )
+    .map_err(|error| ApiError::Conflict(error.to_string()))
+}
+
 async fn claim_delegation(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
     Json(body): Json<ClaimDelegationRequest>,
 ) -> Result<Json<ClaimDelegationResponse>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
     if body.delegation.tenant_id != tenant_id {
         return Err(ApiError::NotFound("delegation".into()));
     }
-    let execution = validate_delegation_control_plane(&state, &tenant_id, &body.delegation).await?;
+    // A device session delegates only as the source runtime; the control
+    // plane check below then requires that runtime to own the parent.
+    crate::device_sessions::enforce_bound_runtime(&binding, body.delegation.source_runtime_id)?;
     let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
         ApiError::Unavailable(
             "device delegation is disabled without a configured engine encryption key".into(),
         )
     })?;
     let trusted_key = BASE64.encode(crypto.signing_key.verifying_key().to_bytes());
-    verify_signed_continuation_grant(&body.signed_grant, &[trusted_key])
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
     let now = Utc::now();
-    orch8_engine::continuity_advanced::validate_device_delegation(
-        &body.delegation,
-        &body.signed_grant.grant,
-        now,
-    )
-    .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    if let Some(step) = &body.step {
+        // Publish the step's sequence only for an authentic, live grant.
+        verify_delegation_grant(&trusted_key, &body, now)?;
+        ensure_delegated_step_sequence(&state, &tenant_id, &body.delegation, step).await?;
+    }
+    let execution = validate_delegation_control_plane(&state, &tenant_id, &body.delegation).await?;
+    verify_delegation_grant(&trusted_key, &body, now)?;
     let token = BASE64
         .decode(&body.token)
         .map_err(|_| ApiError::InvalidArgument("delegation token is not valid base64".into()))?;
@@ -6720,35 +6864,45 @@ async fn claim_delegation(
     }
     // Route through the server mailbox: a task targeted at the destination
     // runtime, claimable only by it, settled through the regular fenced
-    // lease protocol. Parents hosted by an external runtime keep the
-    // validation-only contract (their result travels on the source device).
-    let parent = state
+    // lease protocol. A parent hosted by a runtime (e.g. a phone's local
+    // engine) has no instance here: the task is anchored on a delegation
+    // proxy the hosting runtime reads the outcome from.
+    let sub_sequence = state
+        .storage
+        .get_sequence(body.delegation.sub_sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegated sub-sequence"))?
+        .ok_or_else(|| ApiError::NotFound("delegated sub-sequence".into()))?;
+    let hosted_parent = state
         .storage
         .get_instance(execution.current_instance_id)
         .await
         .map_err(|error| ApiError::from_storage(error, "delegation parent"))?
-        .filter(|instance| instance.tenant_id == tenant_id);
-    let mailbox_task_id = match parent {
-        Some(parent) => {
-            let sub_sequence = state
-                .storage
-                .get_sequence(body.delegation.sub_sequence_id)
-                .await
-                .map_err(|error| ApiError::from_storage(error, "delegated sub-sequence"))?
-                .ok_or_else(|| ApiError::NotFound("delegated sub-sequence".into()))?;
-            let task = orch8_engine::delegation::enqueue_delegation_task(
-                state.storage.as_ref(),
-                &parent,
-                &body.delegation,
-                &sub_sequence,
-                body.input,
-            )
-            .await
-            .map_err(|error| ApiError::Conflict(error.to_string()))?;
-            Some(task.id)
-        }
-        None => None,
+        .filter(|instance| {
+            instance.tenant_id == tenant_id
+                && !orch8_engine::delegation::is_delegation_proxy(instance)
+        });
+    let parent = match hosted_parent {
+        Some(parent) => parent,
+        None => orch8_engine::delegation::ensure_delegation_proxy(
+            state.storage.as_ref(),
+            &execution,
+            &body.delegation,
+            &sub_sequence,
+        )
+        .await
+        .map_err(|error| ApiError::Conflict(error.to_string()))?,
     };
+    let task = orch8_engine::delegation::enqueue_delegation_task(
+        state.storage.as_ref(),
+        &parent,
+        &body.delegation,
+        &sub_sequence,
+        body.input,
+    )
+    .await
+    .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    let mailbox_task_id = Some(task.id);
     append_provenance_boundary(
         &state,
         &execution,
@@ -6760,6 +6914,106 @@ async fn claim_delegation(
     Ok(Json(ClaimDelegationResponse {
         delegation: body.delegation,
         mailbox_task_id,
+    }))
+}
+
+/// Where a delegation stands, as its hosting runtime reads it.
+#[derive(Debug, Serialize)]
+struct DelegationStatusResponse {
+    delegation_id: uuid::Uuid,
+    /// `pending` (in the destination's mailbox), `claimed` (a destination
+    /// holds the lease), `completed`, or `failed`.
+    status: String,
+    delegation: DeviceDelegation,
+    parent_instance_id: serde_json::Value,
+    /// Current owner and epoch of the parent execution: the hosting runtime
+    /// integrates the outcome only while it still owns the parent at the
+    /// delegation's epoch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_owner_runtime_id: Option<RuntimeId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_epoch_now: Option<ExecutionEpoch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mailbox_task_id: Option<uuid::Uuid>,
+    /// The integrated outcome (`status`, `runtime_id`, `output` | `error`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<serde_json::Value>,
+}
+
+/// `GET /continuity/delegations/{id}` — the outcome of a delegation whose
+/// parent is hosted by a runtime (read by that runtime to resume its parked
+/// step). Idempotent; answers the same until the proxy is purged.
+async fn get_delegation(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    binding: crate::browser_sessions::OptionalBinding,
+    Path(id): Path<uuid::Uuid>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<DelegationStatusResponse>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let proxy = state
+        .storage
+        .get_instance(InstanceId::from_uuid(id))
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegation"))?
+        .filter(|instance| {
+            instance.tenant_id == tenant_id
+                && orch8_engine::delegation::is_delegation_proxy(instance)
+        })
+        .ok_or_else(|| ApiError::NotFound(format!("delegation {id}")))?;
+    let marker = &proxy.metadata[orch8_engine::delegation::DELEGATION_PROXY_KEY];
+    let delegation: DeviceDelegation = serde_json::from_value(marker["delegation"].clone())
+        .map_err(|error| ApiError::Internal(format!("corrupt delegation proxy: {error}")))?;
+    // A device session reads only delegations its runtime is the source or
+    // the destination of; any other is indistinguishable from a missing one.
+    if let Some(device) = crate::browser_sessions::device_binding(&binding)
+        && delegation.source_runtime_id != device.runtime_id
+        && delegation.destination_runtime_id != device.runtime_id
+    {
+        return Err(ApiError::NotFound(format!("delegation {id}")));
+    }
+    let block_id = orch8_engine::delegation::delegation_block_id(&delegation);
+    let result = state
+        .storage
+        .get_block_output(proxy.id, &block_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegation result"))?
+        .map(|output| output.output);
+    let tasks = state
+        .storage
+        .list_worker_tasks(
+            &orch8_types::worker_filter::WorkerTaskFilter {
+                instance_id: Some(proxy.id),
+                ..orch8_types::worker_filter::WorkerTaskFilter::default()
+            },
+            &orch8_types::filter::Pagination::default(),
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegation mailbox"))?;
+    let mailbox = tasks
+        .iter()
+        .find(|task| orch8_engine::delegation::is_delegation_task(task));
+    let status = match (&result, mailbox.map(|task| task.state)) {
+        (Some(result), _) => result["status"].as_str().unwrap_or("failed").to_owned(),
+        (None, Some(orch8_types::worker::WorkerTaskState::Claimed)) => "claimed".to_owned(),
+        _ => "pending".to_owned(),
+    };
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, delegation.parent_continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegation execution"))?;
+    Ok(Json(DelegationStatusResponse {
+        delegation_id: id,
+        status,
+        parent_instance_id: marker["parent_instance_id"].clone(),
+        parent_owner_runtime_id: execution
+            .as_ref()
+            .map(|execution| execution.owner_runtime_id),
+        parent_epoch_now: execution.as_ref().map(|execution| execution.epoch),
+        mailbox_task_id: mailbox.map(|task| task.id),
+        result,
+        delegation,
     }))
 }
 

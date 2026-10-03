@@ -5,6 +5,11 @@ package io.orch8.kmp.internal
 
 import io.orch8.kmp.BackgroundRunResult
 import io.orch8.kmp.ContinuityImportResult
+import io.orch8.kmp.DelegateRequest
+import io.orch8.kmp.DelegationOptions
+import io.orch8.kmp.DelegationState
+import io.orch8.kmp.DelegationStats
+import io.orch8.kmp.DelegationStatus
 import io.orch8.kmp.DeviceContext
 import io.orch8.kmp.EngineConfig
 import io.orch8.kmp.EngineEvent
@@ -29,6 +34,9 @@ import io.orch8.kmp.WorkerWindowResult
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import io.orch8.mobile.DelegateRequest as UDelegateRequest
+import io.orch8.mobile.DelegationOptions as UDelegationOptions
+import io.orch8.mobile.DelegationStatus as UDelegationStatus
 import io.orch8.mobile.DeviceContext as UDeviceContext
 import io.orch8.mobile.EngineListener as UEngineListener
 import io.orch8.mobile.HandlerException as UHandlerException
@@ -144,19 +152,7 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
     }
 
     override fun sync(manifestUrl: String, tokens: Orch8TokenSource?): SyncResult = mapErrors {
-        val provider = tokens?.let { source ->
-            object : UTokenProvider {
-                override fun currentToken(): String = source.currentToken()
-
-                override fun refreshToken(): String =
-                    try {
-                        source.refreshToken()
-                    } catch (e: Exception) {
-                        throw UMobileException.Engine(e.message ?: "token refresh failed")
-                    }
-            }
-        }
-        engine.sync(manifestUrl, provider).let {
+        engine.sync(manifestUrl, tokens?.toUniffi()).let {
             SyncResult(
                 added = it.added.toInt(),
                 updated = it.updated.toInt(),
@@ -195,6 +191,10 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         mapErrors { engine.activateContinuityCapsule(capsuleId, destinationRuntimeId, destinationInstanceId) }
 
     override fun nodeRuntimeId(): String = mapErrors { engine.nodeRuntimeId() }
+
+    override fun setTokenProvider(tokens: Orch8TokenSource) = mapErrors {
+        engine.setTokenProvider(tokens.toUniffi())
+    }
 
     override fun registerNode(capabilities: NodeCapabilities): NodeRegistration = mapErrors {
         engine.registerNode(capabilities.toUniffi()).let {
@@ -247,7 +247,57 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
     override fun onPushWake(envelopeJson: String): Boolean = engine.onPushWake(envelopeJson)
 
     override fun enableBuiltin(name: String) = mapErrors { engine.enableBuiltin(name) }
+
+    override fun startDelegation(options: DelegationOptions) = mapErrors {
+        engine.startDelegation(
+            UDelegationOptions(
+                tenantId = options.tenantId,
+                pollIntervalMs = options.pollInterval.inWholeMilliseconds.toULong(),
+                ttlSecs = options.ttl.inWholeSeconds.toUInt(),
+            ),
+        )
+    }
+
+    override fun stopDelegation() = engine.stopDelegation()
+
+    override fun delegate(request: DelegateRequest): String = mapErrors {
+        engine.delegate(
+            UDelegateRequest(
+                instanceId = request.instanceId,
+                destinationRuntimeId = request.destinationRuntimeId,
+                subSequenceId = request.subSequenceId,
+                inputJson = request.inputJson,
+            ),
+        )
+    }
+
+    override fun delegationStatus(delegationId: String): DelegationStatus =
+        mapErrors { engine.delegationStatus(delegationId).toCommon() }
+
+    override fun listDelegations(): List<DelegationStatus> =
+        mapErrors { engine.listDelegations().map { it.toCommon() } }
+
+    override fun delegationStats(): DelegationStats = engine.delegationStats().let {
+        DelegationStats(
+            running = it.running,
+            delegated = it.delegated.toLong(),
+            completed = it.completed.toLong(),
+            failed = it.failed.toLong(),
+            abandoned = it.abandoned.toLong(),
+            resumed = it.resumed.toLong(),
+        )
+    }
 }
+
+private fun UDelegationStatus.toCommon(): DelegationStatus = DelegationStatus(
+    delegationId = delegationId,
+    state = DelegationState.fromWire(state),
+    localInstanceId = localInstanceId,
+    blockId = blockId,
+    destinationRuntimeId = destinationRuntimeId,
+    outputJson = outputJson,
+    error = error,
+)
 
 private fun NodeConnectivity.toUniffi(): UNodeConnectivity = when (this) {
     NodeConnectivity.OFFLINE -> UNodeConnectivity.OFFLINE
@@ -329,4 +379,18 @@ internal fun USyncException.toKind(): Orch8ErrorKind = when (this) {
     is USyncException.Network -> Orch8ErrorKind.NETWORK
     is USyncException.SignatureInvalid -> Orch8ErrorKind.SIGNATURE_INVALID
     is USyncException.InvalidManifest -> Orch8ErrorKind.INVALID_MANIFEST
+}
+
+private fun Orch8TokenSource.toUniffi(): UTokenProvider {
+    val source = this
+    return object : UTokenProvider {
+        override fun currentToken(): String = source.currentToken()
+
+        override fun refreshToken(): String =
+            try {
+                source.refreshToken()
+            } catch (e: Exception) {
+                throw UMobileException.Engine(e.message ?: "token refresh failed")
+            }
+    }
 }

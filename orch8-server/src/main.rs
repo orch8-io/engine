@@ -293,6 +293,7 @@ async fn main() -> anyhow::Result<()> {
                 orch8_types::continuity::RuntimeKind::Server
             },
             ca_pem: None,
+            headers: config.node.managed_control_headers.clone(),
         })
     };
     config.node.managed_control_api_key = orch8_types::SecretString::default();
@@ -388,6 +389,7 @@ async fn main() -> anyhow::Result<()> {
                 require_tenant,
                 engine_ready.clone(),
                 assembly.grpc,
+                app_state.continuity_crypto.clone(),
             )
             .await?,
         )
@@ -566,6 +568,26 @@ fn build_embedded_runtime(
     Ok(embedded)
 }
 
+/// `ORCH8_MOBILE_SYNC_ENABLED` and the opt-in
+/// `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS`, logged.
+fn mobile_sync_flags() -> (bool, bool) {
+    let flag = |name: &str| std::env::var(name).is_ok_and(|v| v == "true" || v == "1");
+    let enabled = flag("ORCH8_MOBILE_SYNC_ENABLED");
+    let resolve_credentials = flag("ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS");
+    if enabled {
+        tracing::info!("Mobile sync endpoints enabled");
+    }
+    if enabled && resolve_credentials {
+        tracing::warn!(
+            "ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS is on: any API key with the `device` \
+             capability — a credential that ships inside mobile apps — can have the server \
+             resolve tenant credentials:// secrets through /mobile/sync step_delegations and \
+             read them back in plaintext. Turn it off unless a legacy client still needs it"
+        );
+    }
+    (enabled, resolve_credentials)
+}
+
 fn build_app_state(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
@@ -573,8 +595,7 @@ fn build_app_state(
     cb_registry: Arc<CircuitBreakerRegistry>,
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<AppState> {
-    let mobile_sync_enabled =
-        std::env::var("ORCH8_MOBILE_SYNC_ENABLED").is_ok_and(|v| v == "true" || v == "1");
+    let (mobile_sync_enabled, mobile_sync_resolve_credentials) = mobile_sync_flags();
 
     // Build the push provider from ORCH8_APNS_* / ORCH8_FCM_* env vars. With
     // nothing configured this is the Noop provider: the outbox worker then
@@ -587,10 +608,6 @@ fn build_app_state(
     );
     if push_provider.is_configured() {
         tracing::info!("Push provider configured");
-    }
-
-    if mobile_sync_enabled {
-        tracing::info!("Mobile sync endpoints enabled");
     }
 
     let env_key = std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default();
@@ -659,6 +676,7 @@ fn build_app_state(
         publisher: None,
         push_provider,
         mobile_sync_enabled,
+        mobile_sync_resolve_credentials,
         entitlements: orch8_api::entitlements::unlimited_provider(),
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
         engine_ready,
@@ -1063,6 +1081,8 @@ const GRPC_KEEPALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 const GRPC_MAX_CONNECTION_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 const GRPC_MAX_CONNECTION_AGE_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
+// Every argument is an independent piece of process wiring shared with HTTP.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_grpc_server(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
@@ -1071,6 +1091,7 @@ async fn spawn_grpc_server(
     require_tenant: bool,
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
     surface: GrpcSurface,
+    continuity_crypto: Option<Arc<orch8_api::ContinuityCrypto>>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let grpc_addr: std::net::SocketAddr = config
         .api
@@ -1122,10 +1143,16 @@ async fn spawn_grpc_server(
         None
     };
 
-    let grpc_service =
+    let mut grpc_service =
         Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes)
             .with_shutdown(shutdown.clone())
             .with_engine_ready(engine_ready.clone());
+    // Remote-output provenance entries are signed with the same continuity
+    // key the HTTP surface uses.
+    if let Some(crypto) = continuity_crypto {
+        grpc_service = grpc_service
+            .with_provenance_signer(crypto.signing_key_id.clone(), crypto.signing_key.clone());
+    }
     let mut auth_layer =
         orch8_grpc::auth::GrpcAuthLayer::new(storage, root_key_digest, require_tenant)
             .with_workload_identities(workload_identities);
@@ -1451,7 +1478,7 @@ fn apply_join_token(config: &mut EngineConfig, raw: &str) -> anyhow::Result<()> 
         .filter(|h| !h.trim().is_empty())
         .unwrap_or_default();
     let keep_edge = config.node.role == NodeRole::Edge;
-    token.apply_to(&mut config.node, &host);
+    token.apply_to_config(config, &host);
     if keep_edge {
         config.node.role = NodeRole::Edge;
     }
@@ -2160,6 +2187,8 @@ mod tests {
             worker_id_prefix: "acme-dc1".into(),
             labels: std::collections::BTreeMap::from([("gpu".into(), "a10".into())]),
             region: Some("eu-west-1".into()),
+            api_url: None,
+            headers: std::collections::BTreeMap::new(),
         };
         let mut config = EngineConfig::default();
         apply_join_token(&mut config, &token.encode()).unwrap();
@@ -2282,6 +2311,7 @@ mod tests {
             false,
             engine_ready,
             GrpcSurface::Full,
+            None,
         )
         .await;
         assert!(

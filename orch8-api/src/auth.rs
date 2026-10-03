@@ -121,10 +121,11 @@ pub async fn api_key_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    // Browser-session tokens are verified first (also in `--insecure` mode,
-    // so a tab is always bound to its runtime identity and route allowlist).
-    if let Some(token) = browser_session_token(&request) {
-        return authenticate_browser_session(root_key_digest, &token, request, next).await;
+    // Browser- and device-session tokens are verified first (also in
+    // `--insecure` mode, so a tab or phone is always bound to its runtime
+    // identity and route allowlist).
+    if let Some(token) = runtime_session_token(&request) {
+        return authenticate_runtime_session(root_key_digest, &token, request, next).await;
     }
 
     // Embed tokens are verified by the embed handlers themselves (they own
@@ -160,7 +161,12 @@ pub async fn api_key_middleware(
     // manage per-tenant keys.
     if orch8_types::auth::verify_secret_against_digest(&provided, &expected_digest) {
         request.extensions_mut().insert(AdminContext);
-        return Ok(next.run(request).await);
+        let mobile = is_mobile_path(request.uri().path());
+        let mut response = next.run(request).await;
+        if mobile {
+            mark_operator_scope(&mut response, "root");
+        }
+        return Ok(response);
     }
 
     // Otherwise it must be a per-tenant key. Resolve it by hash (cached);
@@ -192,11 +198,17 @@ pub async fn api_key_middleware(
                     "API key does not grant this capability".into(),
                 ));
             }
+            let operator = record.capabilities.contains(&ApiCapability::Operator);
+            let mobile = is_mobile_path(request.uri().path());
             request.extensions_mut().insert(PrincipalContext {
                 key_id: record.id.clone(),
                 capabilities: record.capabilities.clone(),
             });
-            Ok(next.run(request).await)
+            let mut response = next.run(request).await;
+            if operator && mobile {
+                mark_operator_scope(&mut response, "operator");
+            }
+            Ok(response)
         }
         // No match, revoked, or expired.
         Ok(_) => Err(ApiError::Unauthorized),
@@ -207,26 +219,48 @@ pub async fn api_key_middleware(
     }
 }
 
-/// A `bst_…` browser-session token from `x-api-key` or
-/// `Authorization: Bearer`.
-fn browser_session_token(request: &Request) -> Option<String> {
+/// Response header telling a mobile SDK that it authenticated to a
+/// `/mobile/*` route with an operator-capable stored key or the root key, so
+/// it can warn that such a key must not ship inside an app.
+pub const PRINCIPAL_SCOPE_HEADER: &str = "x-orch8-principal-scope";
+
+fn is_mobile_path(path: &str) -> bool {
+    path.strip_prefix(crate::API_V1_PREFIX)
+        .unwrap_or(path)
+        .starts_with("/mobile/")
+}
+
+fn mark_operator_scope(response: &mut Response, scope: &'static str) {
+    response.headers_mut().insert(
+        PRINCIPAL_SCOPE_HEADER,
+        axum::http::HeaderValue::from_static(scope),
+    );
+}
+
+/// A `bst_…` browser-session or `dst_…` device-session token from
+/// `x-api-key` or `Authorization: Bearer`.
+fn runtime_session_token(request: &Request) -> Option<String> {
+    let is_session = |value: &&str| {
+        value.starts_with(crate::browser_sessions::TOKEN_PREFIX)
+            || value.starts_with(crate::device_sessions::TOKEN_PREFIX)
+    };
     let headers = request.headers();
     let from_key = headers
         .get("x-api-key")
         .and_then(|value| value.to_str().ok())
-        .filter(|value| value.starts_with(crate::browser_sessions::TOKEN_PREFIX));
+        .filter(is_session);
     let from_bearer = || {
         headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .map(str::trim)
-            .filter(|value| value.starts_with(crate::browser_sessions::TOKEN_PREFIX))
+            .filter(is_session)
     };
     from_key.or_else(from_bearer).map(ToOwned::to_owned)
 }
 
-async fn authenticate_browser_session(
+async fn authenticate_runtime_session(
     root_key_digest: Option<[u8; 32]>,
     token: &str,
     mut request: Request,
@@ -244,21 +278,39 @@ async fn authenticate_browser_session(
         && header != binding.tenant_id.as_str()
     {
         return Err(ApiError::Forbidden(
-            "X-Tenant-Id does not match the browser session".into(),
+            "X-Tenant-Id does not match the runtime session".into(),
         ));
     }
-    if !crate::browser_sessions::route_allowed(request.method(), request.uri().path()) {
-        return Err(ApiError::Forbidden(
-            "browser sessions may only poll, complete, fail, heartbeat, or release worker tasks"
-                .into(),
-        ));
-    }
+    let (capability, key_id) = if binding.is_device() {
+        if !crate::device_sessions::route_allowed(request.method(), request.uri().path()) {
+            return Err(ApiError::Forbidden(
+                "device sessions may only use their device's mobile routes, the worker lease \
+                 protocol, and delegation of executions their runtime owns"
+                    .into(),
+            ));
+        }
+        (
+            ApiCapability::DeviceNode,
+            format!("device-session:{}", binding.runtime_id),
+        )
+    } else {
+        if !crate::browser_sessions::route_allowed(request.method(), request.uri().path()) {
+            return Err(ApiError::Forbidden(
+                "browser sessions may only poll, complete, fail, heartbeat, or release worker tasks"
+                    .into(),
+            ));
+        }
+        (
+            ApiCapability::BrowserWorker,
+            format!("browser-session:{}", binding.runtime_id),
+        )
+    };
     request.extensions_mut().insert(TenantContext {
         tenant_id: binding.tenant_id.clone(),
     });
     request.extensions_mut().insert(PrincipalContext {
-        key_id: format!("browser-session:{}", binding.runtime_id),
-        capabilities: vec![ApiCapability::BrowserWorker],
+        key_id,
+        capabilities: vec![capability],
     });
     request.extensions_mut().insert(binding);
     Ok(next.run(request).await)
@@ -300,6 +352,7 @@ fn capabilities_allow(
         }
         ApiCapability::Auditor => is_read_method(method),
         ApiCapability::BrowserWorker => crate::browser_sessions::route_allowed(method, path),
+        ApiCapability::DeviceNode => crate::device_sessions::route_allowed(method, path),
     })
 }
 

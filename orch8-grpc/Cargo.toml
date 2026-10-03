@@ -24,6 +24,8 @@ tower.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 sha2.workspace = true
+# Signs remote-output provenance entries (the continuity signing key).
+ed25519-dalek.workspace = true
 
 [dev-dependencies]
 

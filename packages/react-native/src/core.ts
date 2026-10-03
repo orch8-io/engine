@@ -1,5 +1,9 @@
 import type {
   BackgroundRunResult,
+  DelegateRequest,
+  DelegationOptions,
+  DelegationStats,
+  DelegationStatus,
   DeviceContext,
   FlushResult,
   HandlerContext,
@@ -27,7 +31,15 @@ export const EVENTS = {
   instanceFailed: "orch8:instanceFailed",
   stepPending: "orch8:stepPending",
   executeStep: "orch8:executeStep",
+  refreshToken: "orch8:refreshToken",
 } as const;
+
+/**
+ * Returns a fresh device-session token (`dst_…`) for this device. Typically
+ * calls the app's own backend, which mints it with its operator key through
+ * `POST /runtimes/device-sessions`. Never return an operator key.
+ */
+export type TokenFetcher = () => Promise<string>;
 
 /** Throw from a handler to fail the step permanently (no retry). */
 export class PermanentHandlerError extends Error {
@@ -80,6 +92,24 @@ export interface NativeOrch8 {
   workerStats(): Promise<WorkerStats>;
   onPushWake(envelopeJson: string): Promise<boolean>;
   enableBuiltin(name: string): Promise<void>;
+  // Delegation from phone-local workflows.
+  startDelegation(options: DelegationOptions): Promise<void>;
+  stopDelegation(): Promise<void>;
+  delegate(request: NativeDelegateRequest): Promise<string>;
+  delegationStatus(delegationId: string): Promise<DelegationStatus>;
+  listDelegations(): Promise<DelegationStatus[]>;
+  delegationStats(): Promise<DelegationStats>;
+  // Node credential (engine release after 0.7.1).
+  setTokenProvider(initialToken: string): Promise<void>;
+  resolveToken(requestId: string, token: string | null, error: string | null): void;
+}
+
+/** `DelegateRequest` as it crosses the bridge: the input is already JSON. */
+export interface NativeDelegateRequest {
+  instanceId: string;
+  destinationRuntimeId: string;
+  subSequenceId: string;
+  inputJson: string;
 }
 
 export interface Subscription {
@@ -88,6 +118,10 @@ export interface Subscription {
 
 export interface EventSource {
   addListener(event: string, listener: (event: any) => void): Subscription;
+}
+
+interface RefreshTokenEvent {
+  requestId: string;
 }
 
 interface ExecuteStepEvent {
@@ -132,6 +166,59 @@ function toOutputJson(result: unknown): string {
   return JSON.stringify(result);
 }
 
+/** Maximum delegation / grant lifetime the control plane accepts. */
+export const MAX_DELEGATION_TTL_SECS = 86_400;
+
+function nonEmpty(name: string, value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new TypeError(`${name} must be a non-empty string`);
+  }
+  return value;
+}
+
+/** Validates delegation options before they reach the native module. */
+export function validateDelegationOptions(options: DelegationOptions): DelegationOptions {
+  if (!options || typeof options !== "object") throw new TypeError("options must be an object");
+  nonEmpty("tenantId", options.tenantId);
+  if (options.pollIntervalMs !== undefined) positiveInt("pollIntervalMs", options.pollIntervalMs);
+  if (options.ttlSecs !== undefined) {
+    positiveInt("ttlSecs", options.ttlSecs);
+    if (options.ttlSecs > MAX_DELEGATION_TTL_SECS) {
+      throw new RangeError(`ttlSecs must be at most ${MAX_DELEGATION_TTL_SECS}`);
+    }
+  }
+  return options;
+}
+
+/** Serialises a `DelegateRequest` for the bridge; the input must be a JSON object. */
+export function toNativeDelegateRequest(request: DelegateRequest): NativeDelegateRequest {
+  if (!request || typeof request !== "object") throw new TypeError("request must be an object");
+  const input = request.input ?? {};
+  let inputJson: string;
+  if (typeof input === "string") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      throw new TypeError("input must be a JSON object");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new TypeError("input must be a JSON object");
+    }
+    inputJson = input;
+  } else if (typeof input === "object" && !Array.isArray(input)) {
+    inputJson = JSON.stringify(input);
+  } else {
+    throw new TypeError("input must be a JSON object");
+  }
+  return {
+    instanceId: nonEmpty("instanceId", request.instanceId),
+    destinationRuntimeId: nonEmpty("destinationRuntimeId", request.destinationRuntimeId),
+    subSequenceId: nonEmpty("subSequenceId", request.subSequenceId),
+    inputJson,
+  };
+}
+
 function positiveInt(name: string, value: number): number {
   if (!Number.isInteger(value) || value <= 0) {
     throw new RangeError(`${name} must be a positive integer`);
@@ -142,6 +229,8 @@ function positiveInt(name: string, value: number): number {
 export class Orch8Client {
   private readonly handlers = new Map<string, StepHandler>();
   private stepSubscription: Subscription | null = null;
+  private tokenSubscription: Subscription | null = null;
+  private tokenFetcher: TokenFetcher | null = null;
 
   constructor(
     private readonly native: NativeOrch8,
@@ -243,6 +332,9 @@ export class Orch8Client {
   async shutdown(): Promise<void> {
     this.stepSubscription?.remove();
     this.stepSubscription = null;
+    this.tokenSubscription?.remove();
+    this.tokenSubscription = null;
+    this.tokenFetcher = null;
     await this.native.shutdown();
   }
 
@@ -254,8 +346,50 @@ export class Orch8Client {
   }
 
   /**
+   * Authenticate every control-plane call (node registration, worker leases,
+   * delegation, sync) with device sessions from `fetchToken` instead of the
+   * legacy static `syncApiKey`. `fetchToken` is awaited once now for the
+   * first token and again whenever the control plane answers `401` (expired
+   * session); the request is then retried once. Call it after `initialize`
+   * and before `registerNode`. A rejected or empty refresh leaves the stale
+   * token in place (the call fails with 401).
+   */
+  async setTokenProvider(fetchToken: TokenFetcher): Promise<void> {
+    if (typeof fetchToken !== "function") throw new TypeError("fetchToken must be a function");
+    const initial = await fetchToken();
+    if (typeof initial !== "string") throw new TypeError("fetchToken must resolve a string");
+    this.tokenFetcher = fetchToken;
+    if (!this.tokenSubscription) {
+      this.tokenSubscription = this.events.addListener(EVENTS.refreshToken, (event: RefreshTokenEvent) => {
+        void this.answerTokenRefresh(event);
+      });
+    }
+    await this.native.setTokenProvider(initial);
+  }
+
+  /** @internal exposed for tests */
+  async answerTokenRefresh(event: RefreshTokenEvent): Promise<void> {
+    const fetchToken = this.tokenFetcher;
+    if (!fetchToken) {
+      this.native.resolveToken(event.requestId, null, "no token provider installed");
+      return;
+    }
+    try {
+      const token = await fetchToken();
+      if (typeof token !== "string" || token === "") {
+        this.native.resolveToken(event.requestId, null, "token provider returned an empty token");
+      } else {
+        this.native.resolveToken(event.requestId, token, null);
+      }
+    } catch (e: unknown) {
+      this.native.resolveToken(event.requestId, null, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
    * Join the runtime mesh: registers the device and its capabilities using
-   * `syncUrl` + `syncApiKey`, then re-advertises before the 5-minute TTL.
+   * `syncUrl` and the node credential (the `setTokenProvider` device session,
+   * else the legacy `syncApiKey`), then re-advertises before the 5-minute TTL.
    */
   async registerNode(capabilities: NodeCapabilities = {}): Promise<NodeRegistration> {
     if (
@@ -318,6 +452,48 @@ export class Orch8Client {
   /** Enable an opt-in builtin handler (`http_request`) before `resume()`. */
   enableBuiltin(name: string): Promise<void> {
     return this.native.enableBuiltin(name);
+  }
+
+  // -- Delegation from phone-local workflows (engine release after 0.7.1) ---
+
+  /**
+   * Start the delegation pump: a step of a workflow running on this engine
+   * whose `$runtime` places it on another runtime is handed to that runtime
+   * through the server mailbox; the local instance parks and resumes exactly
+   * once with the result. Requires `registerNode`. Journaled delegations
+   * survive app kills: call again after relaunch.
+   */
+  async startDelegation(options: DelegationOptions): Promise<void> {
+    return this.native.startDelegation(validateDelegationOptions(options));
+  }
+
+  /** Pause the pump. Journaled delegations resume with the next `startDelegation`. */
+  stopDelegation(): Promise<void> {
+    return this.native.stopDelegation();
+  }
+
+  /**
+   * Delegate a server-side sub-sequence on behalf of a local instance without
+   * parking a step. Resolves the delegation id; read the outcome with
+   * `delegationStatus`. Requires `startDelegation`.
+   */
+  async delegate(request: DelegateRequest): Promise<string> {
+    return this.native.delegate(toNativeDelegateRequest(request));
+  }
+
+  /** The locally journaled state of a delegation (rejects when unknown). */
+  async delegationStatus(delegationId: string): Promise<DelegationStatus> {
+    return this.native.delegationStatus(nonEmpty("delegationId", delegationId));
+  }
+
+  /** Every journaled delegation, oldest first. */
+  listDelegations(): Promise<DelegationStatus[]> {
+    return this.native.listDelegations();
+  }
+
+  /** Pump counters (zeros while it is not running). */
+  delegationStats(): Promise<DelegationStats> {
+    return this.native.delegationStats();
   }
 
   // -- Events ---------------------------------------------------------------

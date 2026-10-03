@@ -350,7 +350,28 @@ pub(crate) const CONTINUITY_OPERATIONS: &[(&str, HttpMethod, &str)] = &[
         HttpMethod::Post,
         "claim_delegation",
     ),
+    (
+        "/continuity/delegations/{id}",
+        HttpMethod::Get,
+        "get_delegation",
+    ),
 ];
+
+/// Caller-visible behavior worth stating on an otherwise generic
+/// continuity operation.
+fn continuity_operation_description(operation_id: &str) -> Option<&'static str> {
+    match operation_id {
+        "list_runtimes" => Some(
+            "List the tenant's live runtime advertisements (`RuntimeCapabilities`). \
+             A device-session (`dst_`) caller receives only the runtimes it could \
+             delegate to now — other than itself, not draining, not expired, at least \
+             `registered` trust, advertising `orch8.delegation` — reduced to \
+             `runtime_id`, `kind`, `handlers`, `observed_at` and `expires_at`, with \
+             `trust` reported as `registered` and every other fact omitted.",
+        ),
+        _ => None,
+    }
+}
 
 impl Modify for ContinuityOpenApi {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
@@ -361,6 +382,7 @@ impl Modify for ContinuityOpenApi {
             let operation = OperationBuilder::new()
                 .operation_id(Some(*operation_id))
                 .tag("continuity")
+                .description(continuity_operation_description(operation_id))
                 .responses(responses)
                 .build();
             openapi
@@ -546,6 +568,7 @@ impl Modify for EmbedSecurity {
         crate::workers::heartbeat_task,
         crate::workers::release_task,
         crate::browser_sessions::create_browser_session,
+        crate::device_sessions::create_device_session,
         crate::workers::list_tasks,
         crate::workers::task_stats,
         crate::workers::list_task_attempts,
@@ -836,6 +859,8 @@ impl Modify for EmbedSecurity {
         crate::workers::ReleaseRequest,
         crate::browser_sessions::CreateBrowserSessionRequest,
         crate::browser_sessions::CreateBrowserSessionResponse,
+        crate::device_sessions::CreateDeviceSessionRequest,
+        crate::device_sessions::CreateDeviceSessionResponse,
         orch8_types::continuity::RuntimeKind,
         // Audit
         orch8_types::audit::AuditLogEntry,

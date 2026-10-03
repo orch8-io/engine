@@ -2,6 +2,11 @@ package io.orch8.kmp.internal
 
 import io.orch8.kmp.BackgroundRunResult
 import io.orch8.kmp.ContinuityImportResult
+import io.orch8.kmp.DelegateRequest
+import io.orch8.kmp.DelegationOptions
+import io.orch8.kmp.DelegationState
+import io.orch8.kmp.DelegationStats
+import io.orch8.kmp.DelegationStatus
 import io.orch8.kmp.DeviceContext
 import io.orch8.kmp.EngineConfig
 import io.orch8.kmp.EngineEvent
@@ -27,6 +32,7 @@ import io.orch8.kmp.bridge.ORCH8_BRIDGE_PROTOCOL
 import io.orch8.kmp.bridge.Orch8BridgeCallbacks
 import io.orch8.kmp.bridge.Orch8JsonBridge
 import io.orch8.kmp.lenientJson
+import kotlin.concurrent.Volatile
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -239,6 +245,40 @@ internal object BridgeCodec {
         )
     }
 
+    private fun JsonObject.optStr(method: String, key: String): String? = when (val e = this[key]) {
+        null, is JsonNull -> null
+        is JsonPrimitive -> if (e.isString) e.content else throw malformed(method, "non-string '$key'")
+        else -> throw malformed(method, "non-string '$key'")
+    }
+
+    fun delegationStatus(method: String, v: JsonElement): DelegationStatus = v.obj(method).let {
+        DelegationStatus(
+            delegationId = it.str(method, "delegationId"),
+            state = DelegationState.fromWire(it.str(method, "state")),
+            localInstanceId = it.str(method, "localInstanceId"),
+            blockId = it.optStr(method, "blockId"),
+            destinationRuntimeId = it.optStr(method, "destinationRuntimeId"),
+            outputJson = it.optStr(method, "outputJson"),
+            error = it.optStr(method, "error"),
+        )
+    }
+
+    fun delegationList(v: JsonElement): List<DelegationStatus> =
+        (v as? JsonArray ?: throw malformed("listDelegations", "expected array"))
+            .map { delegationStatus("listDelegations", it) }
+
+    fun delegationStats(v: JsonElement): DelegationStats = v.obj("delegationStats").let {
+        val m = "delegationStats"
+        DelegationStats(
+            running = it.bool(m, "running"),
+            delegated = it.long(m, "delegated"),
+            completed = it.long(m, "completed"),
+            failed = it.long(m, "failed"),
+            abandoned = it.long(m, "abandoned"),
+            resumed = it.long(m, "resumed"),
+        )
+    }
+
     fun continuityImport(v: JsonElement): ContinuityImportResult = v.obj("importContinuityCapsule").let {
         val m = "importContinuityCapsule"
         ContinuityImportResult(
@@ -264,6 +304,10 @@ internal class JsonBridgeBackend private constructor(
     // Only read while a sync() call is in flight; sync calls are serialized by the engine.
     private var activeTokens: Orch8TokenSource? = null
 
+    // The node credential installed by setTokenProvider; read from engine threads.
+    @Volatile
+    private var nodeTokens: Orch8TokenSource? = null
+
     private val callbacks = object : Orch8BridgeCallbacks {
         override fun executeHandler(handlerName: String, stepName: String, inputJson: String): String {
             val handler = handlers[handlerName]
@@ -288,8 +332,14 @@ internal class JsonBridgeBackend private constructor(
 
         override fun currentToken(): String = activeTokens?.currentToken().orEmpty()
 
-        override fun refreshToken(): String {
-            val tokens = activeTokens ?: return BridgeCodec.error("invalid_input", "no token source")
+        override fun refreshToken(): String = refreshEnvelope(activeTokens)
+
+        override fun currentNodeToken(): String = nodeTokens?.currentToken().orEmpty()
+
+        override fun refreshNodeToken(): String = refreshEnvelope(nodeTokens)
+
+        private fun refreshEnvelope(tokens: Orch8TokenSource?): String {
+            tokens ?: return BridgeCodec.error("invalid_input", "no token source")
             return try {
                 BridgeCodec.ok(JsonPrimitive(tokens.refreshToken()))
             } catch (e: Orch8Exception) {
@@ -472,6 +522,52 @@ internal class JsonBridgeBackend private constructor(
     override fun enableBuiltin(name: String) {
         call("enableBuiltin") { put("name", name) }
     }
+
+    override fun setTokenProvider(tokens: Orch8TokenSource) {
+        val previous = nodeTokens
+        nodeTokens = tokens
+        try {
+            // The bridge installs a provider that reads currentNodeToken() /
+            // refreshNodeToken() through the callbacks.
+            call("setTokenProvider")
+        } catch (e: Exception) {
+            nodeTokens = previous
+            throw e
+        }
+    }
+
+    override fun startDelegation(options: DelegationOptions) {
+        call("startDelegation") {
+            put("tenantId", options.tenantId)
+            put("pollIntervalMs", options.pollInterval.inWholeMilliseconds)
+            put("ttlSecs", options.ttl.inWholeSeconds)
+        }
+    }
+
+    override fun stopDelegation() {
+        call("stopDelegation")
+    }
+
+    override fun delegate(request: DelegateRequest): String =
+        (
+            call("delegate") {
+                put("instanceId", request.instanceId)
+                put("destinationRuntimeId", request.destinationRuntimeId)
+                put("subSequenceId", request.subSequenceId)
+                put("inputJson", request.inputJson)
+            } as? JsonPrimitive
+            )?.takeIf { it.isString }?.content
+            ?: throw Orch8Exception(Orch8ErrorKind.ENGINE, "bridge delegate returned no delegation id")
+
+    override fun delegationStatus(delegationId: String): DelegationStatus =
+        BridgeCodec.delegationStatus(
+            "delegationStatus",
+            call("delegationStatus") { put("delegationId", delegationId) },
+        )
+
+    override fun listDelegations(): List<DelegationStatus> = BridgeCodec.delegationList(call("listDelegations"))
+
+    override fun delegationStats(): DelegationStats = BridgeCodec.delegationStats(call("delegationStats"))
 
     companion object {
         /** Open the engine through [bridge] and install the callbacks. */

@@ -1061,6 +1061,48 @@ fail / heartbeat / release; polls must use `worker_id = runtime_id`, kind
 `browser`, and an allowlisted handler/queue (`403` otherwise). See
 [Distributed runtimes](DISTRIBUTED_RUNTIMES.md).
 
+### Device Sessions
+
+```
+POST /runtimes/device-sessions
+```
+
+Operator/Admin only — called by the customer's app backend, never by the
+phone. The phone must not ship an operator (or any stored) API key.
+
+```json
+{ "device_id": "iphone-7F3A", "runtime_id": "uuid", "handlers": ["scan_document"], "ttl_secs": 3600 }
+```
+
+Returns `201 {token, device_id, runtime_id, expires_at, handlers}`.
+`runtime_id` is the phone's persisted runtime id (`MobileEngine.nodeRuntimeId()`);
+`handlers` may be empty (a delegation-only node); `ttl_secs` defaults to 3600
+(max 86400). `400` for an empty `device_id`, a blank handler, or a ttl out of
+range; `409` when the device is registered to another tenant. The `dst_…`
+token (`x-api-key` or `Authorization: Bearer`) reaches only the device's own
+`/mobile/devices/register`, `/mobile/devices/{device_id}/runtime` and
+`/mobile/sync`, the lease protocol (poll / complete / fail / heartbeat /
+release as its runtime, allowlisted handlers), `POST /continuity/executions`
+(runtime-hosted, own runtime), `POST /continuity/grants` (accept, own
+executions), `POST /continuity/delegations/claim` (own runtime as source),
+`GET /continuity/delegations/{id}` (source or destination), and
+`GET /runtimes`; everything else is `403`, expired or forged tokens `401`.
+For a device session `GET /runtimes` lists only the runtimes it could
+delegate to now (not itself, not draining or expired, at least `registered`
+trust, advertising `orch8.delegation`) with only `runtime_id`, `kind`,
+`handlers`, `observed_at` and `expires_at` (`trust` reported as
+`registered`); other callers get the full records.
+`POST /continuity/delegations/claim` also accepts
+`"step": {"handler", "block_id"}` to have the control plane publish an
+isolated delegated step's one-step sequence. See
+[Distributed runtimes](DISTRIBUTED_RUNTIMES.md#phone-runtimes-device-sessions).
+
+`device_node` (like `browser_worker`) is a session-only capability: `POST
+/api-keys` refuses it (`400`). Stored keys with Operator capability (and the
+root key) calling `/mobile/*` get the response header
+`x-orch8-principal-scope: operator|root`, which the mobile SDK reports as a
+warning.
+
 ---
 
 ## Metrics
@@ -1524,7 +1566,7 @@ Mobile sync endpoints require `ORCH8_MOBILE_SYNC_ENABLED=true`. All endpoints ar
 | `device_id` | string | Device identifier (required) |
 | `status_updates` | array | Instance status updates from device |
 | `approval_requests` | array | Human-in-the-loop approval requests |
-| `step_delegations` | array | Step delegation requests |
+| `step_delegations` | array | Step delegation requests: the server resolves `credentials://` references in `params` and returns them in a `step_result` command. **Off by default** — enable with `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` (any `device` key could then read tenant secrets); otherwise each gets a failed `step_result`. Always refused for device sessions |
 | `command_acks` | array | Command IDs the device has processed |
 
 **Response:** `{ "commands": [...], "sync_interval_secs": 30 }`

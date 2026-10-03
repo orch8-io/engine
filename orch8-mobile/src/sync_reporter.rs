@@ -44,7 +44,7 @@ pub(crate) struct SyncReporter {
     http: OnceLock<reqwest::Client>,
     sync_url: String,
     device_id: String,
-    api_key: String,
+    credential: Arc<crate::credential::Credential>,
     sync_interval_secs: AtomicU64,
     last_sync_attempt: StdMutex<chrono::DateTime<chrono::Utc>>,
     last_command_prune: StdMutex<Option<chrono::DateTime<chrono::Utc>>>,
@@ -124,15 +124,38 @@ struct ScanOutboxEntries {
 }
 
 impl SyncReporter {
+    #[cfg(test)]
     pub fn new(pool: SqlitePool, sync_url: String, device_id: String, api_key: String) -> Self {
-        Self::new_with_clock(pool, sync_url, device_id, api_key, SharedClock::default())
+        Self::with_credential(
+            pool,
+            sync_url,
+            device_id,
+            crate::credential::Credential::new(api_key),
+        )
+    }
+
+    /// A reporter sharing the engine's node credential (refreshed through
+    /// the host's token provider on `401`).
+    pub fn with_credential(
+        pool: SqlitePool,
+        sync_url: String,
+        device_id: String,
+        credential: Arc<crate::credential::Credential>,
+    ) -> Self {
+        Self::new_with_clock(
+            pool,
+            sync_url,
+            device_id,
+            credential,
+            SharedClock::default(),
+        )
     }
 
     fn new_with_clock(
         pool: SqlitePool,
         sync_url: String,
         device_id: String,
-        api_key: String,
+        credential: Arc<crate::credential::Credential>,
         clock: SharedClock,
     ) -> Self {
         let now = clock.now();
@@ -142,7 +165,7 @@ impl SyncReporter {
             http: OnceLock::new(),
             sync_url,
             device_id,
-            api_key,
+            credential,
             sync_interval_secs: AtomicU64::new(u64::from(default_interval())),
             last_sync_attempt: StdMutex::new(now),
             last_command_prune: StdMutex::new(None),
@@ -426,12 +449,14 @@ impl SyncReporter {
         };
 
         let result = self
-            .http_client()
-            .post(&self.sync_url)
-            .header("x-api-key", &self.api_key)
-            .header("x-device-id", &self.device_id)
-            .json(&req)
-            .send()
+            .credential
+            .send(|token| {
+                self.http_client()
+                    .post(&self.sync_url)
+                    .header("x-api-key", token)
+                    .header("x-device-id", &self.device_id)
+                    .json(&req)
+            })
             .await;
 
         let resp = match result {
@@ -1410,7 +1435,7 @@ mod tests {
             pool,
             sync_url,
             "device-1".to_string(),
-            "key".to_string(),
+            crate::credential::Credential::new("key".to_string()),
             clock,
         );
         reporter.init_tables().await;
@@ -2076,7 +2101,7 @@ mod tests {
             pool,
             "http://127.0.0.1:1/sync".into(),
             "device-1".into(),
-            "key".into(),
+            crate::credential::Credential::new("key".into()),
             clock,
         );
 

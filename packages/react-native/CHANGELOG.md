@@ -15,6 +15,16 @@
   `registerNode`, `updateNodeStatus`, `unregisterNode`, `nodeRuntimeId`,
   `startWorker`, `stopWorker`, `runWorkerWindow`, `workerStats`, `onPushWake`,
   `enableBuiltin`. Handlers receive `ctx.task.effectId` (from `__orch8`).
+- Delegation from phone-local workflows (needs the engine release after
+  0.7.1): `startDelegation`, `stopDelegation`, `delegate`, `delegationStatus`,
+  `listDelegations`, `delegationStats`, with `DelegationOptions`,
+  `DelegateRequest`, `DelegationStatus` and `DelegationStats` types. Options
+  and requests are validated before crossing the bridge.
+- Device sessions (needs the engine release after 0.7.1):
+  `setTokenProvider(fetchToken)` authenticates registration, worker, delegation
+  and sync calls with short-lived `dst_` tokens your backend mints; on a `401`
+  the native side asks JS for a fresh token (`orch8:refreshToken`) and retries
+  once. `syncApiKey` is documented as legacy, not for production apps.
 - Android adds Orch8's Maven repository to every project of the app build
   (opt out with `orch8.addMavenRepository=false`); the pod and AAR versions
   follow the package version.

@@ -20,6 +20,14 @@
 //! applied atomically with the instance/node change by
 //! [`orch8_storage::WorkerStore::resolve_worker_task`], so a racing completion always
 //! wins cleanly and two reapers never double-apply.
+//!
+//! **Rolling upgrades.** A retry row is inserted unclaimable
+//! (`awaiting_dispatch`) and only a current scheduler's re-dispatch binds its
+//! effect id and clears the flag. A node from before that column re-dispatches
+//! with `ON CONFLICT DO NOTHING`, so in a mixed-version fleet the row would stay
+//! unclaimable forever. [`finalize_stranded_dispatches`] (run on every reaper
+//! pass) heals such rows once they are older than
+//! [`STRANDED_DISPATCH_GRACE`] and their step was demonstrably re-dispatched.
 
 use std::time::Duration;
 
@@ -40,6 +48,13 @@ use crate::error::EngineError;
 /// Upper bound of tasks examined per reaper pass (per category).
 const REAPER_BATCH: u32 = 500;
 
+/// How long a retry row may stay `awaiting_dispatch` before the reaper
+/// treats it as stranded by an older node and finalizes it. A current
+/// scheduler binds the row in the same statement that re-dispatches it, so
+/// any healthy row clears within one scheduler tick; the grace only absorbs
+/// clock skew between the node that wrote the row and the reaper.
+pub const STRANDED_DISPATCH_GRACE: Duration = Duration::from_secs(120);
+
 pub const LEASE_EXPIRED_REASON: &str = "heartbeat lease expired";
 pub const LEASE_EXPIRED_RESUMABLE_REASON: &str =
     "heartbeat lease expired; checkpointed activity requeued to resume (effect receipt unknown)";
@@ -59,12 +74,15 @@ pub struct ReapReport {
     pub ambiguous: u64,
     /// Timed-out tasks whose instance was advanced.
     pub timed_out: u64,
+    /// Retry rows stranded by an older node's re-dispatch, now bound and
+    /// claimable (see [`finalize_stranded_dispatches`]).
+    pub stranded_finalized: u64,
 }
 
 impl ReapReport {
     #[must_use]
     pub const fn total(&self) -> u64 {
-        self.requeued + self.ambiguous + self.timed_out
+        self.requeued + self.ambiguous + self.timed_out + self.stranded_finalized
     }
 }
 
@@ -96,7 +114,88 @@ pub async fn reap_worker_tasks(
             }
         }
     }
+    report.stranded_finalized =
+        finalize_stranded_dispatches(storage, STRANDED_DISPATCH_GRACE).await?;
     Ok(report)
+}
+
+/// Self-healing for rolling upgrades: finalize retry rows left
+/// `awaiting_dispatch` for longer than `grace` whose step was already
+/// re-dispatched (a flat instance parked `waiting`, or the step's tree node
+/// `waiting`) — i.e. an older node re-dispatched the attempt without binding
+/// it. Each row gets the attempt's effect id (the receipt the older dispatch
+/// created, or a fresh one) and ownership epoch, and becomes claimable, in
+/// one fenced update (same pending attempt, still awaiting) — idempotent and
+/// safe against a concurrent current-version re-dispatch. Rows whose step
+/// was not re-dispatched yet (backoff, paused, terminal instance) are left
+/// for the regular scheduler. Returns the number of rows finalized.
+pub async fn finalize_stranded_dispatches(
+    storage: &dyn StorageBackend,
+    grace: Duration,
+) -> Result<u64, EngineError> {
+    let cutoff =
+        Utc::now() - chrono::Duration::from_std(grace).unwrap_or_else(|_| chrono::Duration::zero());
+    let mut finalized = 0;
+    for task in storage
+        .list_stranded_worker_dispatches(cutoff, REAPER_BATCH)
+        .await?
+    {
+        match finalize_stranded_dispatch(storage, &task).await {
+            Ok(true) => finalized += 1,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "stranded dispatch finalization failed");
+            }
+        }
+    }
+    Ok(finalized)
+}
+
+async fn finalize_stranded_dispatch(
+    storage: &dyn StorageBackend,
+    task: &WorkerTask,
+) -> Result<bool, EngineError> {
+    let Some(instance) = storage.get_instance(task.instance_id).await? else {
+        return Ok(false);
+    };
+    if instance.state != orch8_types::instance::InstanceState::Waiting {
+        return Ok(false);
+    }
+    let tree = storage.get_execution_tree(task.instance_id).await?;
+    let redispatched = tree.is_empty()
+        || tree
+            .iter()
+            .any(|node| node.block_id == task.block_id && node.state == NodeState::Waiting);
+    if !redispatched {
+        return Ok(false);
+    }
+    let effect_id = match task.effect_id {
+        Some(id) => Some(id),
+        None => {
+            crate::effect_guard::stranded_attempt_effect_id(storage, &instance.tenant_id, task)
+                .await?
+        }
+    };
+    let continuity_epoch = match task.continuity_epoch {
+        Some(epoch) => Some(epoch),
+        None => storage
+            .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+            .await?
+            .map(|execution| execution.epoch.get()),
+    };
+    let applied = storage
+        .finalize_stranded_worker_dispatch(task.id, task.attempt, effect_id, continuity_epoch)
+        .await?;
+    if applied {
+        tracing::warn!(
+            task_id = %task.id,
+            instance_id = %task.instance_id,
+            block_id = %task.block_id,
+            attempt = task.attempt,
+            "finalized a retry row stranded by an older node's re-dispatch"
+        );
+    }
+    Ok(applied)
 }
 
 /// Resolve one expired lease. `Some(ambiguous)` when applied, `None` when the

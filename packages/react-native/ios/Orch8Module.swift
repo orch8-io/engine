@@ -27,6 +27,7 @@ class Orch8Module: RCTEventEmitter {
             "orch8:instanceFailed",
             "orch8:stepPending",
             "orch8:executeStep",
+            "orch8:refreshToken",
         ]
     }
 
@@ -240,6 +241,30 @@ class Orch8Module: RCTEventEmitter {
             try engine.registerHandler(name: name, handler: RNStepHandler(module: self, timeoutMs: timeout))
             resolve(nil)
         }
+    }
+
+    // MARK: - Node credential
+
+    /// Install a device-session token provider: `initialToken` is used now,
+    /// and a `401` from the control plane emits `orch8:refreshToken`, which JS
+    /// answers through `resolveToken`.
+    @objc(setTokenProvider:resolver:rejecter:)
+    func setTokenProvider(
+        _ initialToken: String,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        lock.lock(); let timeout = handlerTimeoutMs; lock.unlock()
+        withEngine(reject) { engine in
+            engine.setTokenProvider(provider: RNTokenProvider(module: self, initialToken: initialToken, timeoutMs: timeout))
+            resolve(nil)
+        }
+    }
+
+    /// JS answer for an `orch8:refreshToken` event.
+    @objc(resolveToken:token:error:)
+    func resolveToken(_ requestId: String, token: String?, error: String?) {
+        pending.resolve(requestId, output: token, error: error, permanent: false)
     }
 
     /// JS answer for an `orch8:executeStep` event.
@@ -526,6 +551,87 @@ class Orch8Module: RCTEventEmitter {
     ) {
         withEngine(reject) { try $0.enableBuiltin(name: name); resolve(nil) }
     }
+
+    // MARK: - Delegation from phone-local workflows
+
+    private static func delegationStatus(_ s: DelegationStatus) -> [String: Any] {
+        [
+            "delegationId": s.delegationId,
+            "state": s.state,
+            "localInstanceId": s.localInstanceId,
+            "blockId": s.blockId ?? NSNull(),
+            "destinationRuntimeId": s.destinationRuntimeId ?? NSNull(),
+            "outputJson": s.outputJson ?? NSNull(),
+            "error": s.error ?? NSNull(),
+        ]
+    }
+
+    @objc(startDelegation:resolver:rejecter:)
+    func startDelegation(
+        _ options: NSDictionary,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        let opts = DelegationOptions(
+            tenantId: options["tenantId"] as? String ?? "",
+            pollIntervalMs: Self.u64(options, "pollIntervalMs", 2000),
+            ttlSecs: Self.u32(options, "ttlSecs", 600)
+        )
+        background(reject) { try $0.startDelegation(options: opts); resolve(nil) }
+    }
+
+    @objc(stopDelegation:rejecter:)
+    func stopDelegation(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+        background(reject) { $0.stopDelegation(); resolve(nil) }
+    }
+
+    @objc(delegate:resolver:rejecter:)
+    func delegate(
+        _ request: NSDictionary,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        let req = DelegateRequest(
+            instanceId: request["instanceId"] as? String ?? "",
+            destinationRuntimeId: request["destinationRuntimeId"] as? String ?? "",
+            subSequenceId: request["subSequenceId"] as? String ?? "",
+            inputJson: request["inputJson"] as? String ?? "{}"
+        )
+        background(reject) { resolve(try $0.delegate(request: req)) }
+    }
+
+    @objc(delegationStatus:resolver:rejecter:)
+    func delegationStatus(
+        _ delegationId: String,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        background(reject) { engine in
+            resolve(Self.delegationStatus(try engine.delegationStatus(delegationId: delegationId)))
+        }
+    }
+
+    @objc(listDelegations:rejecter:)
+    func listDelegations(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+        background(reject) { engine in
+            resolve(try engine.listDelegations().map(Self.delegationStatus))
+        }
+    }
+
+    @objc(delegationStats:rejecter:)
+    func delegationStats(_ resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+        withEngine(reject) { engine in
+            let s = engine.delegationStats()
+            resolve([
+                "running": s.running,
+                "delegated": s.delegated,
+                "completed": s.completed,
+                "failed": s.failed,
+                "abandoned": s.abandoned,
+                "resumed": s.resumed,
+            ])
+        }
+    }
 }
 
 // MARK: - Handler bridge
@@ -607,6 +713,43 @@ final class RNStepHandler: StepHandler, @unchecked Sendable {
                 : HandlerError.Retryable(message: error)
         }
         return outcome.output ?? "{}"
+    }
+}
+
+/// Serves the cached device session and, when the control plane answers
+/// `401`, asks JS for a fresh one (`orch8:refreshToken`). `refreshToken` runs
+/// on a Rust blocking thread, so waiting here never blocks JS or the UI.
+final class RNTokenProvider: TokenProvider, @unchecked Sendable {
+    private weak var module: Orch8Module?
+    private let timeoutMs: UInt64
+    private let lock = NSLock()
+    private var token: String
+
+    init(module: Orch8Module, initialToken: String, timeoutMs: UInt64) {
+        self.module = module
+        self.token = initialToken
+        self.timeoutMs = timeoutMs
+    }
+
+    func currentToken() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return token
+    }
+
+    func refreshToken() throws -> String {
+        guard let module else { throw MobileError.Engine(message: "React Native module released") }
+        let requestId = UUID().uuidString
+        module.pending.open(requestId)
+        module.sendEvent(withName: "orch8:refreshToken", body: ["requestId": requestId])
+        guard let outcome = module.pending.wait(requestId, timeoutMs: timeoutMs) else {
+            throw MobileError.Engine(message: "JS token provider timed out after \(timeoutMs) ms")
+        }
+        if let error = outcome.error { throw MobileError.Engine(message: error) }
+        guard let fresh = outcome.output, !fresh.isEmpty else {
+            throw MobileError.Engine(message: "JS token provider returned an empty token")
+        }
+        lock.lock(); token = fresh; lock.unlock()
+        return fresh
     }
 }
 

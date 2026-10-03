@@ -163,6 +163,44 @@ class JsonBridgeBackendTest {
     }
 
     @Test
+    fun nodeTokenProviderIsInstalledThroughTheBridgeAndOutlivesSync() {
+        val (bridge, backend) = open()
+        var refreshed = 0
+        val tokens = object : Orch8TokenSource {
+            override fun currentToken() = "dst_0"
+
+            override fun refreshToken(): String = "dst_${++refreshed}"
+        }
+        backend.setTokenProvider(tokens)
+        assertEquals("setTokenProvider", bridge.calls.last().first)
+        val callbacks = bridge.installed!!
+        assertEquals("dst_0", callbacks.currentNodeToken())
+        assertEquals("dst_1", Json.parseToJsonElement(callbacks.refreshNodeToken()).jsonObject["ok"]!!.jsonPrimitive.content)
+        // The manifest-sync token source is separate: none is active outside sync.
+        assertEquals("", callbacks.currentToken())
+        bridge.replies["sync"] =
+            """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
+        backend.sync("https://api.example.com/manifest.json", null)
+        assertEquals("dst_0", callbacks.currentNodeToken())
+    }
+
+    @Test
+    fun olderBridgeWithoutTokenProviderLeavesNoNodeCredential() {
+        val (bridge, backend) = open()
+        bridge.replies["setTokenProvider"] =
+            """{"error":{"kind":"InvalidInput","message":"unknown bridge method setTokenProvider"}}"""
+        val tokens = object : Orch8TokenSource {
+            override fun currentToken() = "dst_0"
+
+            override fun refreshToken() = "dst_1"
+        }
+        val e = assertFailsWith<Orch8Exception> { backend.setTokenProvider(tokens) }
+        assertEquals(Orch8ErrorKind.INVALID_INPUT, e.kind)
+        assertEquals("", bridge.installed!!.currentNodeToken())
+        assertTrue("error" in Json.parseToJsonElement(bridge.installed!!.refreshNodeToken()).jsonObject)
+    }
+
+    @Test
     fun runtimeNodeMethodsUseTheBridgeProtocol() {
         val (bridge, backend) = open()
         bridge.replies["registerNode"] =
@@ -203,6 +241,49 @@ class JsonBridgeBackendTest {
         assertEquals(
             Orch8ErrorKind.INVALID_INPUT,
             assertFailsWith<Orch8Exception> { backend.registerNode(NodeCapabilities()) }.kind,
+        )
+    }
+
+    @Test
+    fun delegationMethodsUseTheBridgeProtocol() {
+        val (bridge, backend) = open()
+        val status = """{"delegationId":"d","state":"completed","localInstanceId":"i","blockId":null,""" +
+            """"destinationRuntimeId":"rt","outputJson":"{\"a\":1}","error":null}"""
+        bridge.replies["delegate"] = """{"ok":"d"}"""
+        bridge.replies["delegationStatus"] = """{"ok":$status}"""
+        bridge.replies["listDelegations"] = """{"ok":[$status]}"""
+        bridge.replies["delegationStats"] =
+            """{"ok":{"running":true,"delegated":2,"completed":1,"failed":0,"abandoned":1,"resumed":1}}"""
+
+        backend.startDelegation(DelegationOptions(tenantId = "acme"))
+        val opts = bridge.calls.last { it.first == "startDelegation" }.second
+        assertEquals("acme", opts["tenantId"]!!.jsonPrimitive.content)
+        assertEquals("2000", opts["pollIntervalMs"]!!.jsonPrimitive.content)
+        assertEquals("600", opts["ttlSecs"]!!.jsonPrimitive.content)
+
+        assertEquals("d", backend.delegate(DelegateRequest("i", "rt", "s", """{"a":1}""")))
+        val req = bridge.calls.last { it.first == "delegate" }.second
+        assertEquals("s", req["subSequenceId"]!!.jsonPrimitive.content)
+        assertEquals("""{"a":1}""", req["inputJson"]!!.jsonPrimitive.content)
+
+        val s = backend.delegationStatus("d")
+        assertEquals(DelegationState.COMPLETED, s.state)
+        assertEquals("""{"a":1}""", s.outputJson)
+        assertEquals(null, s.blockId)
+        assertEquals("d", bridge.calls.last { it.first == "delegationStatus" }.second["delegationId"]!!.jsonPrimitive.content)
+        assertEquals(listOf(s), backend.listDelegations())
+        assertEquals(1L, backend.delegationStats().abandoned)
+        backend.stopDelegation()
+        assertEquals("stopDelegation", bridge.calls.last().first)
+
+        bridge.replies["delegationStatus"] = """{"ok":{"delegationId":"d","state":"completed"}}"""
+        assertEquals(Orch8ErrorKind.ENGINE, assertFailsWith<Orch8Exception> { backend.delegationStatus("d") }.kind)
+        bridge.replies["delegate"] = """{"ok":null}"""
+        assertFailsWith<Orch8Exception> { backend.delegate(DelegateRequest("i", "rt", "s")) }
+        bridge.replies["delegationStatus"] = BridgeCodec.error("NotFound", "delegation d")
+        assertEquals(
+            Orch8ErrorKind.NOT_FOUND,
+            assertFailsWith<Orch8Exception> { backend.delegationStatus("d") }.kind,
         )
     }
 }

@@ -123,6 +123,8 @@ pub struct TestServerOptions {
     pub root_api_key: Option<String>,
     /// Mount the `/mobile/*` device endpoints.
     pub mobile_sync_enabled: bool,
+    /// `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS`.
+    pub mobile_sync_resolve_credentials: bool,
     /// Embedded runtime (embed signer, license); `None` = disabled.
     pub embedded: Option<Arc<crate::embed::EmbeddedRuntime>>,
 }
@@ -148,6 +150,7 @@ pub async fn spawn_test_server_with(
         0,
         root_key_digest,
     );
+    state.mobile_sync_resolve_credentials = options.mobile_sync_resolve_credentials;
     if let Some(embedded) = options.embedded {
         state.embedded = embedded;
     }
@@ -180,6 +183,7 @@ fn test_state(
         publisher: None,
         push_provider: Arc::new(orch8_push::NoopPushProvider),
         mobile_sync_enabled,
+        mobile_sync_resolve_credentials: false,
         entitlements: crate::entitlements::unlimited_provider(),
         builtin_handlers: Arc::new(crate::builtin_handler_names()),
         engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),

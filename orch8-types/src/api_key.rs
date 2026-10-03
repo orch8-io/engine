@@ -34,6 +34,13 @@ pub enum ApiCapability {
     /// `/workers/tasks*` only, bound to one browser runtime. Never granted
     /// to stored API keys and never part of [`Self::all`].
     BrowserWorker,
+    /// Short-lived device-session principal (`POST
+    /// /runtimes/device-sessions`): a phone runtime node bound to one
+    /// `device_id` and one `runtime_id` — mobile register/sync/runtime
+    /// advertisement for that device, the worker lease protocol, and the
+    /// continuity delegation calls for executions the runtime owns. Never
+    /// granted to stored API keys and never part of [`Self::all`].
+    DeviceNode,
 }
 
 impl ApiCapability {

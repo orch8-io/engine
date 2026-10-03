@@ -16,6 +16,7 @@ orch8-publisher = { path = "../orch8-publisher" }
 uniffi = "0.32"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-util = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 chrono = { workspace = true }

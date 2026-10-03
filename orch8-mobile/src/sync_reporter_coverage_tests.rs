@@ -275,7 +275,7 @@ async fn coverage_reporter_017_command_prune_runs_once_then_waits_a_day() {
         pool,
         "http://127.0.0.1:1/sync".to_string(),
         "device-1".to_string(),
-        "key".to_string(),
+        crate::credential::Credential::new("key".to_string()),
         clock,
     );
 

@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 See [docs/HYBRID.md](docs/HYBRID.md).
 
+- **Join-token routing fields** (backward compatible, still `o8x1`): optional
+  `api_url` (REST base for the HTTP fallback when gRPC is on another port) and
+  `headers` (routing headers such as `fly-force-instance-id`, sent on every
+  gRPC call and REST request, stored as `[node] managed_control_headers`).
+  Lets executors reach engines behind a shared, header-routed load balancer
+  (Orch8 Cloud's managed engines). Older tokens parse unchanged; older
+  executors ignore the new fields.
+
 - **Remote executor mode**: an `executor` joined with a join token
   (`ORCH8_JOIN_TOKEN`, `orch8 executor join --run`) and no `database.url`
   needs nothing else — no database, API key or encryption key. It dials out
@@ -282,6 +290,68 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
 - **Device-mesh delegation** (Feature 29): a claimed delegation with a
   server-hosted parent becomes a mailbox task for the destination runtime whose
   result is integrated into the parent (`context.data.delegations.<id>`).
+- **Delegation from phone-local parents** (Feature 29): a workflow running on
+  the phone's own engine delegates a step placed off the phone
+  (`$runtime.runtime_id` of another node, or `runtime_kinds` without
+  `mobile`) through the server mailbox, parks, and resumes exactly once with
+  the result — handler `orch8.delegation` delegates the server-side
+  sub-sequence `params.sequence_id` with `params.input`; any other handler
+  delegates just that step (as a published one-step sequence). The mobile SDK
+  adds `startDelegation` / `stopDelegation`, the explicit `delegate` +
+  `delegationStatus` / `listDelegations` / `delegationStats` API, and a
+  crash-safe local journal (`mobile_delegations`); the resume is fenced on
+  the parent's owner epoch and the local claim, and commits the local effect
+  receipt once. Server side: `POST /continuity/executions` accepts
+  `hosted_by_runtime: true` (idempotent per owner), a claim for a
+  runtime-hosted parent anchors its mailbox task on a delegation proxy
+  (instance id = delegation id, terminal once the outcome is integrated), and
+  the new `GET /continuity/delegations/{id}` returns the outcome and the
+  parent's current owner/epoch. The runtime polls it (no sync-command
+  fan-out). e2e: phone-local parent → desktop across repeated disconnects on
+  both sides, duplicate deliveries, and app kills while parked (SQLite and
+  Postgres).
+- **Security: phones no longer need an operator key** (device sessions).
+  Phone-local delegation required the app's API key to carry `operator`, so
+  anyone extracting it from the app binary controlled the tenant. The app
+  backend now mints a short-lived, signed per-device token with
+  `POST /runtimes/device-sessions` (`dst_…`, Operator/Admin only, bound to
+  tenant + `device_id` + the phone's `runtime_id` + a handler allowlist,
+  default 1 h, max 24 h, same signer as browser sessions). Its principal
+  (`device_node`, never storable on an API key) is denied by default and
+  reaches only the device's own mobile register / sync / runtime
+  advertisement (handlers clamped to the allowlist, no credential-resolving
+  `step_delegations`), the lease protocol as its runtime, and the delegation
+  calls for executions its runtime owns (runtime-hosted execution
+  registration, `accept` grants, claims as the source, delegation reads as
+  source or destination) plus `GET /runtimes`. The delegation claim accepts
+  `step: {handler, block_id}` so the control plane publishes an isolated
+  step's one-step sequence (a device needs no sequence rights). The mobile
+  SDK adds `MobileEngine.setTokenProvider`: every node, worker, delegation
+  and sync call carries the provider's device session and refreshes it once
+  on `401`. `syncApiKey` keeps working; stored operator keys (and the root
+  key) on `/mobile/*` get `x-orch8-principal-scope`, and the SDK warns once.
+  e2e: every phone scenario (a–f, h–j) now runs on device
+  sessions, plus a legacy-key round trip, a refresh-on-expiry round trip, and
+  a scope matrix of refused actions on both backends.
+- **Device sessions see only delegation destinations on `GET /runtimes`**:
+  a `dst_` caller gets the runtimes it could delegate to right now (not
+  itself, not draining or expired, at least `registered` trust, advertising
+  `orch8.delegation`), reduced to `runtime_id`, `kind`, `handlers`,
+  `observed_at` and `expires_at`, with `trust` reported as `registered`.
+  Regions, hardware, plugins, credential references, connectivity, battery,
+  cost/latency estimates and capsule keys are no longer exposed to phones.
+  Operator and other callers see the full list as before.
+- **Token providers in every mobile wrapper**: the Swift
+  `Orch8RuntimeNode.setTokenProvider`, React Native, Expo (gated on
+  `orch8RuntimeNodeMinVersion`), KMP and Flutter take an async host callback
+  that fetches a device session from the app's backend and is asked again
+  after a `401`. The UniFFI Swift/Kotlin bindings are regenerated with
+  `MobileEngine.setTokenProvider`. `syncApiKey` is documented as legacy and
+  not for production apps.
+- Fixed a flaky test (`execute_step_dry_emits_orch8_step_span_around_handler`):
+  tracing's process-wide callsite-interest cache could record `never` for the
+  `orch8.step` span when another test thread registered it while this test's
+  scoped dispatcher was the only live one.
 - Poll responses echo `target_runtime_id` / `runtime_kinds`; re-sending a
   failure for an already-failed task (same lease) is idempotent.
 - **Worker `fail` is one fenced transaction** (HTTP and gRPC), shared with the
@@ -293,6 +363,24 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
   pre-inserted by a resolution wait (`awaiting_dispatch`) for the scheduler's
   re-dispatch, which binds `effect_id` in the same statement that makes them
   claimable. Settlement never recomputes an effect id.
+- **Rolling-upgrade self-healing for retry rows**: a node from before
+  migration 096 re-dispatches a retry attempt with `ON CONFLICT DO NOTHING`,
+  leaving the pre-inserted row `awaiting_dispatch` with no effect id —
+  unclaimable for current pollers. The worker reaper now finalizes such rows
+  once they are older than two minutes and their step was demonstrably
+  re-dispatched (flat instance `waiting`, or the step's tree node `waiting`):
+  it binds the attempt's receipt (the one the older dispatch created, or a
+  fresh one) and the owner epoch and clears the flag in one fenced,
+  idempotent update. **Upgrade note:** during a rolling upgrade, retry
+  attempts dispatched by not-yet-upgraded nodes become claimable by upgraded
+  workers within one reaper pass after that grace period; older nodes ignore
+  the new columns (explicit column lists) and their pollers may claim a retry
+  row before it is bound — its settlement then falls back to the attempt's
+  open receipt.
+- **gRPC completions record output provenance**: the runtime kind/id audit
+  event (`worker_output_provenance`) and the `remote_step_output`
+  provenance-chain entry now live in `orch8_engine::provenance`, shared by
+  HTTP and gRPC `CompleteTask` (signed with the continuity key on both).
 - **gRPC worker parity**: `CompleteTask` commits the effect receipt (and
   integrates delegation results), `FailTask` uses the fenced resolution, and a
   new `ReleaseTask` RPC mirrors `POST /workers/tasks/{id}/release`.
@@ -321,6 +409,35 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
 
 ### Security
 
+- **Browser and device sessions cannot assert placement labels.** Labels
+  such as `residency=eu` are matched by hard placement and never relaxed, so
+  a self-asserted label from an end-user tab or phone could pull
+  residency-restricted steps onto it. Session-bound polls and phone runtime
+  advertisements now drop `labels`, and the device-session `GET /runtimes`
+  view never includes them. Hybrid executors (join token / API key) keep
+  advertising labels.
+- **Phones keep refreshing device sessions on the shared lease client.** The
+  lease client shared with the hybrid executor takes a pluggable
+  `LeaseAuth`: executors send static headers, while phones send the current
+  device-session token on every poll, heartbeat, complete, fail, release,
+  registration, and delegation call, and refresh it and retry once on `401`.
+- **Breaking — `/mobile/sync` no longer resolves credentials by default.**
+  `step_delegations` asked the server to resolve `credentials://` references
+  and returned the plaintext in a `step_result` command. Any key with the
+  `device` capability could do it, and that key ships inside the app, so
+  anyone who extracted it could read any tenant secret they could name.
+  Credential resolution is now opt-in with
+  `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` (default off). When it is off,
+  each delegation gets a failed `step_result` (`success: false`, error naming
+  the flag) and the rest of the sync proceeds. Device sessions stay refused
+  either way, and the server logs a warning at startup when the flag is on.
+  **Migration:** no Orch8 mobile SDK sends `step_delegations` (the 0.7.1
+  outbox path had no caller and was removed), so SDK apps need no change.
+  If a custom client relies on it, move the secret-using step to a server
+  or edge runtime (placement / delegation), where credentials resolve at
+  dispatch and never reach the device. If you must keep it for now, set
+  `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` and treat every `device` key
+  as able to read tenant secrets.
 - **WASM plugin loading** only accepts binary modules (`\0asm` magic, 32 MiB cap,
   regular files); WAT text, devices and `/proc` paths are refused and load
   errors no longer echo paths or file contents. `ORCH8_WASM_PLUGIN_DIR` pins

@@ -13,6 +13,8 @@ mod builtins;
 mod capabilities;
 mod config;
 mod continuity;
+mod credential;
+mod delegation;
 mod error;
 mod handlers;
 mod lifecycle;
@@ -55,6 +57,9 @@ pub use crate::capabilities::{
 };
 pub use crate::config::MobileEngineConfig;
 pub use crate::continuity::{CapsuleSigner, ContinuityExportResult, ContinuityImportResult};
+pub use crate::delegation::{
+    DelegateRequest, DelegationOptions, DelegationStats, DelegationStatus,
+};
 pub use crate::error::{HandlerError, MobileError, SyncError, TokenProvider};
 pub use crate::handlers::{EngineListener, StepHandler};
 pub use crate::node::{NodeCapabilities, NodeConnectivity, NodeRegistration};
@@ -240,6 +245,12 @@ pub struct MobileEngine {
     /// Handler calls still running after a device-side timeout; the worker
     /// claims nothing new for their handler until they return.
     stragglers: Arc<stragglers::Stragglers>,
+    /// Device-mesh delegation of placed local steps (`start_delegation`).
+    delegation: StdMutex<Option<Arc<delegation::DelegationPump>>>,
+    /// Control-plane credential shared by the node client and the sync
+    /// reporter: `sync_api_key`, or a device session from the host's
+    /// token provider (`set_token_provider`).
+    credential: Arc<credential::Credential>,
 }
 
 /// A registered runtime node and its re-advertisement task.
@@ -362,6 +373,7 @@ impl MobileEngine {
         let mobile_storage = Arc::new(storage::MobileStorage::new(sqlite.clone()));
 
         let node_pool = sqlite.pool().clone();
+        let credential = credential::Credential::new(config.sync_api_key.clone());
         let claims = worker::ClaimStore::new(node_pool.clone());
         rt.block_on(init_node_tables(&node_pool, &claims));
 
@@ -425,11 +437,11 @@ impl MobileEngine {
             // would let a MITM inject commands. Require https up front and fail
             // engine construction rather than silently downgrading trust.
             crate::validate_https_url(&config.sync_url)?;
-            let reporter = Arc::new(sync_reporter::SyncReporter::new(
+            let reporter = Arc::new(sync_reporter::SyncReporter::with_credential(
                 sqlite.pool().clone(),
                 config.sync_url.clone(),
                 config.device_id.clone(),
-                config.sync_api_key.clone(),
+                Arc::clone(&credential),
             ));
             rt.block_on(async { reporter.init_tables().await });
             info!(sync_url = %config.sync_url, "mobile sync reporter enabled");
@@ -464,6 +476,8 @@ impl MobileEngine {
             node: StdMutex::new(None),
             worker: StdMutex::new(None),
             stragglers: Arc::new(stragglers::Stragglers::default()),
+            delegation: StdMutex::new(None),
+            credential,
         });
         engine.release_orphaned_claims_in_background();
         Ok(engine)
@@ -687,6 +701,9 @@ impl MobileEngine {
             self.tick_controller.wake();
         }
         self.wake_worker();
+        if let Some(pump) = self.current_delegation() {
+            pump.wake();
+        }
     }
 
     /// Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
@@ -1114,6 +1131,7 @@ impl MobileEngine {
     pub fn shutdown(&self) {
         info!("mobile engine shutting down");
         self.stop_worker();
+        self.stop_delegation();
         if let Some(slot) = self
             .node
             .lock()
@@ -1141,10 +1159,27 @@ impl MobileEngine {
         })
     }
 
+    /// Authenticate every control-plane call (node registration, worker
+    /// leases, delegation, sync) with tokens from `provider` instead of the
+    /// static `sync_api_key`. The provider should return a short-lived device
+    /// session minted by the app's backend with an operator key
+    /// (`POST /runtimes/device-sessions` for this `device_id` and
+    /// [`Self::node_runtime_id`]); `refresh_token` is called when the control
+    /// plane answers `401` (expired session) and the request is retried once.
+    /// Call it before `register_node`. Never ship an operator key in an app.
+    pub fn set_token_provider(&self, provider: Arc<dyn TokenProvider>) {
+        self.credential.set_provider(provider);
+        info!(
+            device_session = self.credential.is_device_session(),
+            "mobile node token provider installed"
+        );
+    }
+
     /// Join the distributed runtime mesh: registers the device
     /// (`/mobile/devices/register`) and its runtime capabilities
     /// (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
-    /// `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+    /// `device_id`, and the node credential (the token provider's device
+    /// session, else `sync_api_key`). The advertisement is refreshed in the
     /// background before its five-minute TTL (that refresh is the node's
     /// liveness signal) until `unregister_node` / `shutdown`. Calling it again
     /// updates the advertised facts. Also settles any remote task a previous
@@ -1171,9 +1206,10 @@ impl MobileEngine {
                 .ok_or_else(|| MobileError::InvalidInput {
                     message: "set api_base_url, or a sync_url ending in /mobile/sync".into(),
                 })?;
-            if self.config.sync_api_key.is_empty() || self.config.device_id.is_empty() {
+            if !self.credential.is_configured() || self.config.device_id.is_empty() {
                 return Err(MobileError::InvalidInput {
-                    message: "register_node requires device_id and sync_api_key in the config"
+                    message: "register_node requires device_id in the config and a credential \
+                              (set_token_provider, or sync_api_key)"
                         .into(),
                 });
             }
@@ -1182,7 +1218,7 @@ impl MobileEngine {
             })?;
             node::NodeClient::new(
                 api_base,
-                self.config.sync_api_key.clone(),
+                Arc::clone(&self.credential),
                 self.config.device_id.clone(),
                 runtime_id,
                 node::Advertisement {
@@ -1319,6 +1355,135 @@ impl MobileEngine {
         let budget = Duration::from_millis(time_budget_ms.max(1));
         Ok(self.runtime.block_on(worker.run_window(budget)))
     }
+
+    // ------------------------------------------------------------------
+    // Device-mesh delegation (Feature 29)
+    // ------------------------------------------------------------------
+
+    /// Start delegating placed local steps: a step of a workflow running on
+    /// this engine whose `$runtime` places it on another runtime
+    /// (`runtime_id` of another node, or `runtime_kinds` without `mobile`)
+    /// is handed to that runtime through the server mailbox while the local
+    /// instance stays parked, and resumed exactly once with the result. A
+    /// step with handler `orch8.delegation` delegates the server-side
+    /// sequence `params.sequence_id` with input `params.input`; any other
+    /// handler delegates just that step. Requires `register_node` (and a
+    /// credential that may call the continuity API). Survives disconnects
+    /// and app kills: delegations are journaled locally and picked up again
+    /// by the next `start_delegation`.
+    pub fn start_delegation(&self, options: DelegationOptions) -> Result<(), MobileError> {
+        let client = self
+            .node_client()
+            .ok_or_else(|| MobileError::InvalidInput {
+                message: "register_node before start_delegation".into(),
+            })?;
+        let pump = delegation::DelegationPump::new(
+            client,
+            Arc::clone(&self.storage),
+            self.node_pool.clone(),
+            options,
+            self.tick_controller.work_handle(),
+        )?;
+        let previous = self
+            .delegation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(Arc::clone(&pump));
+        if let Some(previous) = previous {
+            previous.stop();
+        }
+        pump.spawn(&self.runtime.handle());
+        Ok(())
+    }
+
+    /// Stop advancing delegations. Journaled delegations resume with the
+    /// next `start_delegation`.
+    pub fn stop_delegation(&self) {
+        if let Some(pump) = self
+            .delegation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            pump.stop();
+        }
+    }
+
+    /// Explicitly delegate a server-side sub-sequence on behalf of a local
+    /// instance, without parking any step. Returns the delegation id; read
+    /// the outcome with `delegation_status`. Requires `start_delegation`.
+    pub fn delegate(&self, request: DelegateRequest) -> Result<String, MobileError> {
+        let pump = self
+            .current_delegation()
+            .ok_or_else(|| MobileError::InvalidInput {
+                message: "start_delegation before delegate".into(),
+            })?;
+        for (value, field) in [
+            (&request.instance_id, "instance_id"),
+            (&request.destination_runtime_id, "destination_runtime_id"),
+            (&request.sub_sequence_id, "sub_sequence_id"),
+        ] {
+            uuid::Uuid::parse_str(value).map_err(|e| MobileError::InvalidInput {
+                message: format!("invalid {field}: {e}"),
+            })?;
+        }
+        let input: serde_json::Value = serde_json::from_str(&request.input_json)?;
+        if !input.is_object() {
+            return Err(MobileError::InvalidInput {
+                message: "delegation input must be a JSON object".into(),
+            });
+        }
+        let id = self.run_with_timeout(async {
+            let local = orch8_types::ids::InstanceId::from_uuid(
+                uuid::Uuid::parse_str(&request.instance_id).map_err(|e| {
+                    MobileError::InvalidInput {
+                        message: format!("invalid instance_id: {e}"),
+                    }
+                })?,
+            );
+            self.storage
+                .get_instance(local)
+                .await?
+                .ok_or_else(|| MobileError::NotFound {
+                    message: format!("instance {}", request.instance_id),
+                })?;
+            delegation::DelegationPump::record_explicit(
+                &self.node_pool,
+                &request,
+                &input,
+                pump.ttl_secs(),
+            )
+            .await
+        })?;
+        pump.wake();
+        Ok(id)
+    }
+
+    /// The locally journaled state of a delegation.
+    pub fn delegation_status(
+        &self,
+        delegation_id: String,
+    ) -> Result<DelegationStatus, MobileError> {
+        self.run_with_timeout(async {
+            delegation::DelegationPump::status(&self.node_pool, &delegation_id)
+                .await?
+                .ok_or_else(|| MobileError::NotFound {
+                    message: format!("delegation {delegation_id}"),
+                })
+        })
+    }
+
+    /// Every journaled delegation, oldest first.
+    pub fn list_delegations(&self) -> Result<Vec<DelegationStatus>, MobileError> {
+        self.run_with_timeout(async { delegation::DelegationPump::list(&self.node_pool).await })
+    }
+
+    /// Counters for the delegation pump (zeros when it is not running).
+    pub fn delegation_stats(&self) -> DelegationStats {
+        self.current_delegation()
+            .map(|pump| pump.stats())
+            .unwrap_or_default()
+    }
 }
 
 impl MobileEngine {
@@ -1394,6 +1559,13 @@ impl MobileEngine {
             .clone()
     }
 
+    fn current_delegation(&self) -> Option<Arc<delegation::DelegationPump>> {
+        self.delegation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn wake_worker(&self) {
         if let Some(worker) = self.current_worker() {
             worker.wake();
@@ -1447,7 +1619,7 @@ impl MobileEngine {
         };
         let pool = self.node_pool.clone();
         let store = self.claims.clone();
-        let api_key = self.config.sync_api_key.clone();
+        let credential = Arc::clone(&self.credential);
         let device_id = self.config.device_id.clone();
         self.runtime.handle().spawn(async move {
             if !matches!(store.count().await, Ok(count) if count > 0) {
@@ -1458,7 +1630,7 @@ impl MobileEngine {
             };
             let Ok(client) = node::NodeClient::new(
                 api_base,
-                api_key,
+                credential,
                 device_id,
                 runtime_id,
                 node::Advertisement {
@@ -1550,6 +1722,9 @@ async fn init_node_tables(pool: &sqlx::SqlitePool, claims: &worker::ClaimStore) 
     }
     if let Err(e) = claims.init_tables().await {
         warn!(error = %e, "failed to create mobile worker claim journal");
+    }
+    if let Err(e) = delegation::init_tables(pool).await {
+        warn!(error = %e, "failed to create mobile delegation journal");
     }
 }
 

@@ -1211,6 +1211,23 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func completeStep(instanceId: String, stepName: String, output: String) throws 
     
     /**
+     * Explicitly delegate a server-side sub-sequence on behalf of a local
+     * instance, without parking any step. Returns the delegation id; read
+     * the outcome with `delegation_status`. Requires `start_delegation`.
+     */
+    func delegate(request: DelegateRequest) throws  -> String
+    
+    /**
+     * Counters for the delegation pump (zeros when it is not running).
+     */
+    func delegationStats()  -> DelegationStats
+    
+    /**
+     * The locally journaled state of a delegation.
+     */
+    func delegationStatus(delegationId: String) throws  -> DelegationStatus
+    
+    /**
      * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
      * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
      * registered. Must be called before `resume()` / `start_worker()`.
@@ -1242,6 +1259,11 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * loaded, and the destination-generated transfer key never persists.
      */
     func importContinuityCapsule(capsuleJson: String, payloadBase64: String, payloadKeyBase64: String, destinationRuntimeId: String, destinationInstanceId: String) throws  -> ContinuityImportResult
+    
+    /**
+     * Every journaled delegation, oldest first.
+     */
+    func listDelegations() throws  -> [DelegationStatus]
     
     /**
      * Load a sequence directly from a JSON string, bypassing sync.
@@ -1300,7 +1322,8 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * Join the distributed runtime mesh: registers the device
      * (`/mobile/devices/register`) and its runtime capabilities
      * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
-     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * `device_id`, and the node credential (the token provider's device
+     * session, else `sync_api_key`). The advertisement is refreshed in the
      * background before its five-minute TTL (that refresh is the node's
      * liveness signal) until `unregister_node` / `shutdown`. Calling it again
      * updates the advertised facts. Also settles any remote task a previous
@@ -1350,6 +1373,18 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func setListener(listener: EngineListener) 
     
     /**
+     * Authenticate every control-plane call (node registration, worker
+     * leases, delegation, sync) with tokens from `provider` instead of the
+     * static `sync_api_key`. The provider should return a short-lived device
+     * session minted by the app's backend with an operator key
+     * (`POST /runtimes/device-sessions` for this `device_id` and
+     * [`Self::node_runtime_id`]); `refresh_token` is called when the control
+     * plane answers `401` (expired session) and the request is retried once.
+     * Call it before `register_node`. Never ship an operator key in an app.
+     */
+    func setTokenProvider(provider: TokenProvider) 
+    
+    /**
      * Shut down the engine.
      */
     func shutdown() 
@@ -1360,12 +1395,33 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func start(sequenceName: String, input: String, dedupKey: String?) throws  -> String
     
     /**
+     * Start delegating placed local steps: a step of a workflow running on
+     * this engine whose `$runtime` places it on another runtime
+     * (`runtime_id` of another node, or `runtime_kinds` without `mobile`)
+     * is handed to that runtime through the server mailbox while the local
+     * instance stays parked, and resumed exactly once with the result. A
+     * step with handler `orch8.delegation` delegates the server-side
+     * sequence `params.sequence_id` with input `params.input`; any other
+     * handler delegates just that step. Requires `register_node` (and a
+     * credential that may call the continuity API). Survives disconnects
+     * and app kills: delegations are journaled locally and picked up again
+     * by the next `start_delegation`.
+     */
+    func startDelegation(options: DelegationOptions) throws 
+    
+    /**
      * Start the remote worker loop: poll the control plane as this `mobile`
      * runtime, run claimed tasks with the registered handlers, heartbeat
      * per the task lease, and complete / fail / release them. Requires
      * `register_node` first. Handlers must be registered before this call.
      */
     func startWorker(options: WorkerOptions) throws 
+    
+    /**
+     * Stop advancing delegations. Journaled delegations resume with the
+     * next `start_delegation`.
+     */
+    func stopDelegation() 
     
     /**
      * Stop claiming remote tasks. Tasks already executing finish and are
@@ -1531,6 +1587,46 @@ open func completeStep(instanceId: String, stepName: String, output: String)thro
 }
     
     /**
+     * Explicitly delegate a server-side sub-sequence on behalf of a local
+     * instance, without parking any step. Returns the delegation id; read
+     * the outcome with `delegation_status`. Requires `start_delegation`.
+     */
+open func delegate(request: DelegateRequest)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_delegate(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDelegateRequest_lower(request),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Counters for the delegation pump (zeros when it is not running).
+     */
+open func delegationStats() -> DelegationStats  {
+    return try!  FfiConverterTypeDelegationStats_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_delegation_stats(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * The locally journaled state of a delegation.
+     */
+open func delegationStatus(delegationId: String)throws  -> DelegationStatus  {
+    return try  FfiConverterTypeDelegationStatus_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_delegation_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(delegationId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
      * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
      * registered. Must be called before `resume()` / `start_worker()`.
@@ -1606,6 +1702,18 @@ open func importContinuityCapsule(capsuleJson: String, payloadBase64: String, pa
         FfiConverterString.lower(payloadKeyBase64),
         FfiConverterString.lower(destinationRuntimeId),
         FfiConverterString.lower(destinationInstanceId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Every journaled delegation, oldest first.
+     */
+open func listDelegations()throws  -> [DelegationStatus]  {
+    return try  FfiConverterSequenceTypeDelegationStatus.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_list_delegations(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
@@ -1724,7 +1832,8 @@ open func registerHandler(name: String, handler: StepHandler)throws   {try rustC
      * Join the distributed runtime mesh: registers the device
      * (`/mobile/devices/register`) and its runtime capabilities
      * (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,
-     * `device_id`, and `sync_api_key`. The advertisement is refreshed in the
+     * `device_id`, and the node credential (the token provider's device
+     * session, else `sync_api_key`). The advertisement is refreshed in the
      * background before its five-minute TTL (that refresh is the node's
      * liveness signal) until `unregister_node` / `shutdown`. Calling it again
      * updates the advertised facts. Also settles any remote task a previous
@@ -1826,6 +1935,25 @@ open func setListener(listener: EngineListener)  {try! rustCall() {
 }
     
     /**
+     * Authenticate every control-plane call (node registration, worker
+     * leases, delegation, sync) with tokens from `provider` instead of the
+     * static `sync_api_key`. The provider should return a short-lived device
+     * session minted by the app's backend with an operator key
+     * (`POST /runtimes/device-sessions` for this `device_id` and
+     * [`Self::node_runtime_id`]); `refresh_token` is called when the control
+     * plane answers `401` (expired session) and the request is retried once.
+     * Call it before `register_node`. Never ship an operator key in an app.
+     */
+open func setTokenProvider(provider: TokenProvider)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_set_token_provider(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeTokenProvider_lower(provider),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Shut down the engine.
      */
 open func shutdown()  {try! rustCall() {
@@ -1852,6 +1980,28 @@ open func start(sequenceName: String, input: String, dedupKey: String?)throws  -
 }
     
     /**
+     * Start delegating placed local steps: a step of a workflow running on
+     * this engine whose `$runtime` places it on another runtime
+     * (`runtime_id` of another node, or `runtime_kinds` without `mobile`)
+     * is handed to that runtime through the server mailbox while the local
+     * instance stays parked, and resumed exactly once with the result. A
+     * step with handler `orch8.delegation` delegates the server-side
+     * sequence `params.sequence_id` with input `params.input`; any other
+     * handler delegates just that step. Requires `register_node` (and a
+     * credential that may call the continuity API). Survives disconnects
+     * and app kills: delegations are journaled locally and picked up again
+     * by the next `start_delegation`.
+     */
+open func startDelegation(options: DelegationOptions)throws   {try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_start_delegation(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDelegationOptions_lower(options),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Start the remote worker loop: poll the control plane as this `mobile`
      * runtime, run claimed tasks with the registered handlers, heartbeat
      * per the task lease, and complete / fail / release them. Requires
@@ -1862,6 +2012,18 @@ open func startWorker(options: WorkerOptions)throws   {try rustCallWithError(Ffi
     uniffi_orch8_mobile_fn_method_mobileengine_start_worker(
             self.uniffiCloneHandle(),
         FfiConverterTypeWorkerOptions_lower(options),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Stop advancing delegations. Journaled delegations resume with the
+     * next `start_delegation`.
+     */
+open func stopDelegation()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_stop_delegation(
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
@@ -2731,6 +2893,366 @@ public func FfiConverterTypeContinuityImportResult_lift(_ buf: RustBuffer) throw
 #endif
 public func FfiConverterTypeContinuityImportResult_lower(_ value: ContinuityImportResult) -> RustBuffer {
     return FfiConverterTypeContinuityImportResult.lower(value)
+}
+
+
+/**
+ * An explicit delegation requested by the host (`delegate`).
+ */
+public struct DelegateRequest: Equatable, Hashable {
+    /**
+     * Local parent instance the delegation belongs to (must exist).
+     */
+    public let instanceId: String
+    /**
+     * Destination runtime id (a live registration of the same tenant).
+     */
+    public let destinationRuntimeId: String
+    /**
+     * Server-side sequence the destination runs.
+     */
+    public let subSequenceId: String
+    /**
+     * Explicit input (JSON object) handed to the sub-sequence.
+     */
+    public let inputJson: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Local parent instance the delegation belongs to (must exist).
+         */instanceId: String, 
+        /**
+         * Destination runtime id (a live registration of the same tenant).
+         */destinationRuntimeId: String, 
+        /**
+         * Server-side sequence the destination runs.
+         */subSequenceId: String, 
+        /**
+         * Explicit input (JSON object) handed to the sub-sequence.
+         */inputJson: String = "{}") {
+        self.instanceId = instanceId
+        self.destinationRuntimeId = destinationRuntimeId
+        self.subSequenceId = subSequenceId
+        self.inputJson = inputJson
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DelegateRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDelegateRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegateRequest {
+        return
+            try DelegateRequest(
+                instanceId: FfiConverterString.read(from: &buf), 
+                destinationRuntimeId: FfiConverterString.read(from: &buf), 
+                subSequenceId: FfiConverterString.read(from: &buf), 
+                inputJson: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DelegateRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.instanceId, into: &buf)
+        FfiConverterString.write(value.destinationRuntimeId, into: &buf)
+        FfiConverterString.write(value.subSequenceId, into: &buf)
+        FfiConverterString.write(value.inputJson, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegateRequest_lift(_ buf: RustBuffer) throws -> DelegateRequest {
+    return try FfiConverterTypeDelegateRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegateRequest_lower(_ value: DelegateRequest) -> RustBuffer {
+    return FfiConverterTypeDelegateRequest.lower(value)
+}
+
+
+/**
+ * Options for `start_delegation`.
+ */
+public struct DelegationOptions: Equatable, Hashable {
+    /**
+     * Tenant of the node credential (the control plane scopes every
+     * continuity call to it).
+     */
+    public let tenantId: String
+    /**
+     * How often pending delegations are advanced and their outcomes read
+     * (default 2 s). Push wake-ups advance them immediately.
+     */
+    public let pollIntervalMs: UInt64
+    /**
+     * Lifetime of each grant and delegation (default 600 s, max 86400). A
+     * destination that has not reported by then fails the delegation, and
+     * the parked step follows its retry policy.
+     */
+    public let ttlSecs: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Tenant of the node credential (the control plane scopes every
+         * continuity call to it).
+         */tenantId: String, 
+        /**
+         * How often pending delegations are advanced and their outcomes read
+         * (default 2 s). Push wake-ups advance them immediately.
+         */pollIntervalMs: UInt64 = UInt64(2000), 
+        /**
+         * Lifetime of each grant and delegation (default 600 s, max 86400). A
+         * destination that has not reported by then fails the delegation, and
+         * the parked step follows its retry policy.
+         */ttlSecs: UInt32 = UInt32(600)) {
+        self.tenantId = tenantId
+        self.pollIntervalMs = pollIntervalMs
+        self.ttlSecs = ttlSecs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DelegationOptions: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDelegationOptions: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegationOptions {
+        return
+            try DelegationOptions(
+                tenantId: FfiConverterString.read(from: &buf), 
+                pollIntervalMs: FfiConverterUInt64.read(from: &buf), 
+                ttlSecs: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DelegationOptions, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.tenantId, into: &buf)
+        FfiConverterUInt64.write(value.pollIntervalMs, into: &buf)
+        FfiConverterUInt32.write(value.ttlSecs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegationOptions_lift(_ buf: RustBuffer) throws -> DelegationOptions {
+    return try FfiConverterTypeDelegationOptions.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegationOptions_lower(_ value: DelegationOptions) -> RustBuffer {
+    return FfiConverterTypeDelegationOptions.lower(value)
+}
+
+
+/**
+ * Counters exposed through `delegation_stats`.
+ */
+public struct DelegationStats: Equatable, Hashable {
+    public let running: Bool
+    /**
+     * Delegations accepted by the control plane.
+     */
+    public let delegated: UInt64
+    public let completed: UInt64
+    public let failed: UInt64
+    public let abandoned: UInt64
+    /**
+     * Parked local steps resumed with an outcome (exactly once each).
+     */
+    public let resumed: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(running: Bool, 
+        /**
+         * Delegations accepted by the control plane.
+         */delegated: UInt64, completed: UInt64, failed: UInt64, abandoned: UInt64, 
+        /**
+         * Parked local steps resumed with an outcome (exactly once each).
+         */resumed: UInt64) {
+        self.running = running
+        self.delegated = delegated
+        self.completed = completed
+        self.failed = failed
+        self.abandoned = abandoned
+        self.resumed = resumed
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DelegationStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDelegationStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegationStats {
+        return
+            try DelegationStats(
+                running: FfiConverterBool.read(from: &buf), 
+                delegated: FfiConverterUInt64.read(from: &buf), 
+                completed: FfiConverterUInt64.read(from: &buf), 
+                failed: FfiConverterUInt64.read(from: &buf), 
+                abandoned: FfiConverterUInt64.read(from: &buf), 
+                resumed: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DelegationStats, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.running, into: &buf)
+        FfiConverterUInt64.write(value.delegated, into: &buf)
+        FfiConverterUInt64.write(value.completed, into: &buf)
+        FfiConverterUInt64.write(value.failed, into: &buf)
+        FfiConverterUInt64.write(value.abandoned, into: &buf)
+        FfiConverterUInt64.write(value.resumed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegationStats_lift(_ buf: RustBuffer) throws -> DelegationStats {
+    return try FfiConverterTypeDelegationStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegationStats_lower(_ value: DelegationStats) -> RustBuffer {
+    return FfiConverterTypeDelegationStats.lower(value)
+}
+
+
+/**
+ * Where a delegation stands, as recorded on this device.
+ */
+public struct DelegationStatus: Equatable, Hashable {
+    public let delegationId: String
+    /**
+     * `preparing` (not yet accepted by the control plane), `delegated`
+     * (in the destination's mailbox or running there), `completed`,
+     * `failed`, or `abandoned` (never placed before its deadline).
+     */
+    public let state: String
+    public let localInstanceId: String
+    /**
+     * The parked local step, for delegations made by a sequence.
+     */
+    public let blockId: String?
+    public let destinationRuntimeId: String?
+    /**
+     * The destination's reported output (JSON), once completed.
+     */
+    public let outputJson: String?
+    public let error: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(delegationId: String, 
+        /**
+         * `preparing` (not yet accepted by the control plane), `delegated`
+         * (in the destination's mailbox or running there), `completed`,
+         * `failed`, or `abandoned` (never placed before its deadline).
+         */state: String, localInstanceId: String, 
+        /**
+         * The parked local step, for delegations made by a sequence.
+         */blockId: String?, destinationRuntimeId: String?, 
+        /**
+         * The destination's reported output (JSON), once completed.
+         */outputJson: String?, error: String?) {
+        self.delegationId = delegationId
+        self.state = state
+        self.localInstanceId = localInstanceId
+        self.blockId = blockId
+        self.destinationRuntimeId = destinationRuntimeId
+        self.outputJson = outputJson
+        self.error = error
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DelegationStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDelegationStatus: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegationStatus {
+        return
+            try DelegationStatus(
+                delegationId: FfiConverterString.read(from: &buf), 
+                state: FfiConverterString.read(from: &buf), 
+                localInstanceId: FfiConverterString.read(from: &buf), 
+                blockId: FfiConverterOptionString.read(from: &buf), 
+                destinationRuntimeId: FfiConverterOptionString.read(from: &buf), 
+                outputJson: FfiConverterOptionString.read(from: &buf), 
+                error: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DelegationStatus, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.delegationId, into: &buf)
+        FfiConverterString.write(value.state, into: &buf)
+        FfiConverterString.write(value.localInstanceId, into: &buf)
+        FfiConverterOptionString.write(value.blockId, into: &buf)
+        FfiConverterOptionString.write(value.destinationRuntimeId, into: &buf)
+        FfiConverterOptionString.write(value.outputJson, into: &buf)
+        FfiConverterOptionString.write(value.error, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegationStatus_lift(_ buf: RustBuffer) throws -> DelegationStatus {
+    return try FfiConverterTypeDelegationStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDelegationStatus_lower(_ value: DelegationStatus) -> RustBuffer {
+    return FfiConverterTypeDelegationStatus.lower(value)
 }
 
 
@@ -4786,6 +5308,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeDelegationStatus: FfiConverterRustBuffer {
+    typealias SwiftType = [DelegationStatus]
+
+    public static func write(_ value: [DelegationStatus], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDelegationStatus.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DelegationStatus] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DelegationStatus]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDelegationStatus.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeInstanceSummary: FfiConverterRustBuffer {
     typealias SwiftType = [InstanceSummary]
 
@@ -4860,6 +5407,15 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_complete_step() != 37083) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_delegate() != 27416) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_delegation_stats() != 23865) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_delegation_status() != 39993) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_enable_builtin() != 55786) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4873,6 +5429,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule() != 19841) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_list_delegations() != 23937) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json() != 44133) {
@@ -4899,7 +5458,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_register_handler() != 16855) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_orch8_mobile_checksum_method_mobileengine_register_node() != 1315) {
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_register_node() != 6344) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state() != 30406) {
@@ -4920,13 +5479,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_set_listener() != 6834) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider() != 808) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_shutdown() != 65418) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_start() != 15754) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_start_delegation() != 65279) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_start_worker() != 51564) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_stop_delegation() != 947) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_stop_worker() != 30469) {

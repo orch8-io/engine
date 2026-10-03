@@ -112,6 +112,52 @@ struct PollBody<'a> {
     capabilities: &'a RuntimeCapabilities,
 }
 
+/// Credential headers of one request, plus an opaque `generation` naming
+/// the credential they carry so a `401` refreshes exactly that one.
+#[derive(Debug, Clone, Default)]
+pub struct AuthHeaders {
+    pub headers: Vec<(&'static str, String)>,
+    pub generation: String,
+}
+
+/// A credential that can change while the node runs (e.g. a phone's
+/// short-lived device session delivered by a host token provider).
+#[async_trait::async_trait]
+pub trait RefreshingAuth: Send + Sync {
+    /// Headers for the next request, sent with the current credential.
+    fn headers(&self) -> AuthHeaders;
+    /// A `401` answered a request sent with `stale` (an
+    /// [`AuthHeaders::generation`]). Obtain a fresh credential unless another
+    /// request already did; `true` when a different credential is now
+    /// current and the request is worth one retry.
+    async fn refresh_after_unauthorized(&self, stale: &str) -> bool;
+    /// Inspect every response (e.g. warn about an over-privileged key).
+    fn observe(&self, _response: &reqwest::Response) {}
+}
+
+/// How a lease client authenticates.
+#[derive(Clone)]
+pub enum LeaseAuth {
+    /// Fixed headers (`x-api-key`, `x-tenant-id`, …): the hybrid executor's
+    /// join token / API key. A `401` is final.
+    Static(Vec<(&'static str, String)>),
+    /// A refreshable credential: every request carries the current one, and
+    /// a `401` refreshes it and retries the request once.
+    Refreshing(Arc<dyn RefreshingAuth>),
+}
+
+impl LeaseAuth {
+    fn headers(&self) -> AuthHeaders {
+        match self {
+            Self::Static(headers) => AuthHeaders {
+                headers: headers.clone(),
+                generation: String::new(),
+            },
+            Self::Refreshing(auth) => auth.headers(),
+        }
+    }
+}
+
 /// HTTP client for the lease protocol, bound to one API base, credential,
 /// and worker identity. Transport hardening (TLS roots, timeouts) is the
 /// caller's `reqwest::Client`.
@@ -119,7 +165,7 @@ struct PollBody<'a> {
 pub struct HttpLeaseClient {
     http: reqwest::Client,
     api_base: String,
-    headers: Vec<(&'static str, String)>,
+    auth: LeaseAuth,
     worker_id: String,
 }
 
@@ -143,10 +189,21 @@ impl HttpLeaseClient {
         headers: Vec<(&'static str, String)>,
         worker_id: String,
     ) -> Self {
+        Self::with_auth(http, api_base, LeaseAuth::Static(headers), worker_id)
+    }
+
+    /// Like [`Self::new`] with any [`LeaseAuth`].
+    #[must_use]
+    pub fn with_auth(
+        http: reqwest::Client,
+        api_base: &str,
+        auth: LeaseAuth,
+        worker_id: String,
+    ) -> Self {
         Self {
             http,
             api_base: api_base.trim_end_matches('/').to_string(),
-            headers,
+            auth,
             worker_id,
         }
     }
@@ -165,13 +222,64 @@ impl HttpLeaseClient {
         format!("{}/{}", self.api_base, path.trim_start_matches('/'))
     }
 
-    /// A `POST` to `path` (relative to the API base) with the node headers.
-    pub fn post(&self, path: &str) -> reqwest::RequestBuilder {
-        let mut request = self.http.post(self.url(path));
-        for (name, value) in &self.headers {
-            request = request.header(*name, value);
+    /// Send `method` to `path` (relative to the API base) with the current
+    /// credential; `build` adds the body. On `401` with a refreshable
+    /// credential, refresh it and send the request once more.
+    ///
+    /// # Errors
+    /// Transport failures only; every HTTP status is an `Ok` response.
+    pub async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        build: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder + Send,
+    ) -> reqwest::Result<reqwest::Response> {
+        let url = self.url(path);
+        let attempt = |auth: &AuthHeaders| {
+            let mut request = self.http.request(method.clone(), &url);
+            for (name, value) in &auth.headers {
+                request = request.header(*name, value);
+            }
+            build(request)
+        };
+        let sent = self.auth.headers();
+        let response = attempt(&sent).send().await?;
+        let LeaseAuth::Refreshing(refreshing) = &self.auth else {
+            return Ok(response);
+        };
+        refreshing.observe(&response);
+        if response.status() != reqwest::StatusCode::UNAUTHORIZED
+            || !refreshing
+                .refresh_after_unauthorized(&sent.generation)
+                .await
+        {
+            return Ok(response);
         }
-        request
+        let response = attempt(&refreshing.headers()).send().await?;
+        refreshing.observe(&response);
+        Ok(response)
+    }
+
+    /// `POST` a JSON `body` to `path` (see [`Self::send`]).
+    ///
+    /// # Errors
+    /// Transport failures only.
+    pub async fn post_json<B: Serialize + Sync + ?Sized>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> reqwest::Result<reqwest::Response> {
+        self.send(reqwest::Method::POST, path, |request| request.json(body))
+            .await
+    }
+
+    /// `GET` `path` (see [`Self::send`]).
+    ///
+    /// # Errors
+    /// Transport failures only.
+    pub async fn get(&self, path: &str) -> reqwest::Result<reqwest::Response> {
+        self.send(reqwest::Method::GET, path, |request| request)
+            .await
     }
 
     /// Claim up to `limit` tasks of `handler` as `capabilities`.
@@ -194,9 +302,7 @@ impl HttpLeaseClient {
             capabilities,
         };
         let resp = self
-            .post("workers/tasks/poll")
-            .json(&body)
-            .send()
+            .post_json("workers/tasks/poll", &body)
             .await
             .map_err(|e| network_err("poll tasks", &e))?;
         let resp = expect_success("poll tasks", resp).await?;
@@ -216,9 +322,10 @@ impl HttpLeaseClient {
         capabilities: &RuntimeCapabilities,
     ) -> Result<(), String> {
         let resp = self
-            .post("runtimes/register")
-            .json(&serde_json::json!({ "tenant_id": tenant_id, "capabilities": capabilities }))
-            .send()
+            .post_json(
+                "runtimes/register",
+                &serde_json::json!({ "tenant_id": tenant_id, "capabilities": capabilities }),
+            )
             .await
             .map_err(|e| network_err("register runtime", &e))?;
         expect_success("register runtime", resp).await.map(|_| ())
@@ -298,7 +405,7 @@ impl HttpLeaseClient {
         body: &Value,
         missing_route_is_unsupported: bool,
     ) -> LeaseResponse {
-        match self.post(path).json(body).send().await {
+        match self.post_json(path, body).await {
             Ok(resp) => classify_lease_status(resp.status().as_u16(), missing_route_is_unsupported),
             Err(e) => {
                 debug!(path, error = %crate::outbound::redact_error(&e), "lease call failed");
