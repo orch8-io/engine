@@ -81,7 +81,7 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 70
     services:
       postgres:
         image: postgres:16
@@ -139,6 +139,11 @@ jobs:
       # HTTP and gRPC): each scenario runs the real API + scheduler on SQLite
       # and, via DATABASE_URL above, on Postgres in a throwaway schema, with
       # a real MobileEngine as the phone.
+      # The hybrid/executor e2e suites spawn the real `orch8-server` binary.
+      # Build it as its own step so a cold compile is not hidden inside a
+      # single test (which looks like a hang and eats the job timeout).
+      - name: Build orch8-server
+        run: cargo build --locked -p orch8-server --bin orch8-server
       - name: Test
         run: cargo test --locked --workspace
 

@@ -21,7 +21,7 @@ use std::time::Duration;
 use orch8_e2e::{
     Backend, Cloud, Delivery, Desktop, Link, Phone, PhoneAuth, PhoneDb, backends, wait_for,
 };
-use orch8_mobile::InstanceStateKind;
+use orch8_mobile::{DelegationStatus, InstanceStateKind};
 use orch8_types::continuity::EffectState;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -672,15 +672,20 @@ fn run_isolated_step(backend: &Backend) {
     node.phone
         .wait_local_state(&local, InstanceStateKind::Completed, LONG);
 
-    let journal = node.phone.engine.list_delegations().unwrap();
-    assert_eq!(
+    // The pump journals the outcome *after* it resumes the local parent (so
+    // a crash in between replays the resume rather than losing it): the
+    // instance can complete a beat before its delegation row reads
+    // `completed`. Wait for the journal instead of racing it.
+    let journal_states = |journal: &[DelegationStatus]| {
         journal
             .iter()
-            .map(|delegation| delegation.state.as_str())
-            .collect::<Vec<_>>(),
-        ["failed", "completed"],
-        "{backend}: {journal:?}"
-    );
+            .map(|delegation| delegation.state.clone())
+            .collect::<Vec<_>>()
+    };
+    let journal = wait_for("the delegation journal to settle", LONG, || {
+        let journal = node.phone.engine.list_delegations().unwrap();
+        (journal_states(&journal) == ["failed", "completed"]).then_some(journal)
+    });
     assert!(
         journal[0]
             .error

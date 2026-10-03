@@ -108,6 +108,8 @@ pub struct Cloud {
     raw: RawPool,
     /// Isolated Postgres schema (dropped with the cloud).
     pg_schema: Option<(sqlx::PgPool, String)>,
+    /// Backing directory of the `SQLite` database (removed with the cloud).
+    _sqlite_dir: Option<tempfile::TempDir>,
 }
 
 /// Knobs of a [`Cloud`] beyond the defaults.
@@ -151,7 +153,7 @@ impl Cloud {
             .enable_all()
             .build()
             .expect("cloud runtime");
-        let (storage, raw, pg_schema) = rt.block_on(open_storage(backend));
+        let (storage, raw, pg_schema, sqlite_dir) = rt.block_on(open_storage(backend));
 
         let mut handlers = HandlerRegistry::new();
         orch8_engine::handlers::builtin::register_builtins(&mut handlers);
@@ -193,6 +195,7 @@ impl Cloud {
             tenant: format!("e2e-{}", Uuid::now_v7().simple()),
             raw,
             pg_schema,
+            _sqlite_dir: sqlite_dir,
         }
     }
 
@@ -1047,12 +1050,19 @@ async fn open_storage(
     Arc<dyn StorageBackend>,
     RawPool,
     Option<(sqlx::PgPool, String)>,
+    Option<tempfile::TempDir>,
 ) {
     match backend {
         Backend::Sqlite => {
-            let sqlite = SqliteStorage::in_memory().await.expect("sqlite");
+            // File-backed like the standalone server: an in-memory database
+            // vanishes whenever its single pooled connection is recycled.
+            let dir = tempfile::tempdir().expect("sqlite dir");
+            let path = dir.path().join("cloud.db");
+            let sqlite = SqliteStorage::file(path.to_str().expect("utf-8 path"))
+                .await
+                .expect("sqlite");
             let raw = RawPool::Sqlite(sqlite.pool().clone());
-            (Arc::new(sqlite), raw, None)
+            (Arc::new(sqlite), raw, None, Some(dir))
         }
         Backend::Postgres(url) => {
             let admin = sqlx::PgPool::connect(url).await.expect("connect postgres");
@@ -1066,7 +1076,7 @@ async fn open_storage(
                 .expect("postgres storage");
             pg.run_migrations().await.expect("migrations");
             let raw = RawPool::Postgres(pg.pool().clone());
-            (Arc::new(pg), raw, Some((admin, schema)))
+            (Arc::new(pg), raw, Some((admin, schema)), None)
         }
     }
 }
