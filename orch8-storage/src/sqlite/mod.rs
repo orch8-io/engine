@@ -134,6 +134,33 @@ pub struct SqliteStorage {
     artifact_store: Option<std::sync::Arc<crate::artifacts::ObjectArtifactStore>>,
 }
 
+/// Pool options shared by every SQLite constructor.
+///
+/// `begin_immediate` hands the `BEGIN IMMEDIATE` to the connection's worker
+/// thread. If the calling future is dropped after that command is queued
+/// (client disconnect, timeout) the transaction still opens, but no
+/// `Transaction` exists to roll it back, so the connection would return to the
+/// pool inside a transaction and every later `begin_with` on it fails with
+/// "attempted to call begin_with at non-zero transaction depth" (permanently,
+/// on a single-connection in-memory pool). Settle the worker queue on release
+/// and roll back whatever was left open.
+fn pool_options(max_connections: u32) -> SqlitePoolOptions {
+    use sqlx::Connection as _;
+    use sqlx::TransactionManager as _;
+    SqlitePoolOptions::new()
+        .max_connections(max_connections)
+        .after_release(|conn, _meta| {
+            Box::pin(async move {
+                // Queue behind any in-flight BEGIN before reading the depth.
+                conn.ping().await?;
+                while conn.is_in_transaction() {
+                    <sqlx::Sqlite as sqlx::Database>::TransactionManager::rollback(conn).await?;
+                }
+                Ok(true)
+            })
+        })
+}
+
 impl SqliteStorage {
     /// Access the underlying `SqlitePool`.
     pub fn pool(&self) -> &SqlitePool {
@@ -161,8 +188,7 @@ impl SqliteStorage {
             // fires when a task_instances row is deleted. Must match file mode.
             .foreign_keys(true);
 
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1) // SQLite in-memory requires single connection
+        let pool = pool_options(1) // SQLite in-memory requires single connection
             .connect_with(opts)
             .await
             .map_err(|e| StorageError::Connection(e.to_string()))?;
@@ -185,8 +211,7 @@ impl SqliteStorage {
             // FK enforcement is off by default in SQLite. Mirror in_memory().
             .foreign_keys(true);
 
-        let pool = SqlitePoolOptions::new()
-            .max_connections(8)
+        let pool = pool_options(8)
             .connect_with(opts)
             .await
             .map_err(|e| StorageError::Connection(e.to_string()))?;
@@ -213,8 +238,7 @@ impl SqliteStorage {
             .busy_timeout(Duration::from_secs(5))
             .foreign_keys(true);
 
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+        let pool = pool_options(5)
             .idle_timeout(Duration::from_secs(30))
             .connect_with(opts)
             .await
