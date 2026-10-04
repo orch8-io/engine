@@ -1477,10 +1477,22 @@ pub async fn reset_subtree_to_pending(
     instance_id: InstanceId,
     root_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
+    // ⚡ Bolt: Build a sorted index of parent -> child to avoid O(N^2)
+    // full tree scans on every popped parent during deep traversals.
+    let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = tree
+        .iter()
+        .filter_map(|n| n.parent_id.map(|p| (p, n)))
+        .collect();
+    children_of.sort_unstable_by_key(|&(p, _)| p);
+
     let mut frontier = vec![root_id];
     let mut descendants: Vec<(ExecutionNodeId, BlockType, BlockId)> = Vec::new();
     while let Some(parent) = frontier.pop() {
-        for node in tree.iter().filter(|node| node.parent_id == Some(parent)) {
+        let start = children_of.partition_point(|&(p, _)| p < parent);
+        for &(p, node) in children_of.iter().skip(start) {
+            if p != parent {
+                break;
+            }
             descendants.push((node.id, node.block_type, node.block_id.clone()));
             frontier.push(node.id);
         }
@@ -1760,12 +1772,24 @@ pub async fn settle_live_descendants(
     tree: &[ExecutionNode],
     root_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
+    // ⚡ Bolt: Build a sorted index of parent -> child to avoid O(N^2)
+    // full tree scans on every popped parent during deep traversals.
+    let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = tree
+        .iter()
+        .filter_map(|n| n.parent_id.map(|p| (p, n)))
+        .collect();
+    children_of.sort_unstable_by_key(|&(p, _)| p);
+
     let mut to_skip: Vec<ExecutionNodeId> = Vec::new();
     let mut to_cancel: Vec<ExecutionNodeId> = Vec::new();
     let mut live_block_ids: Vec<String> = Vec::new();
     let mut frontier = vec![root_id];
     while let Some(parent) = frontier.pop() {
-        for n in tree.iter().filter(|n| n.parent_id == Some(parent)) {
+        let start = children_of.partition_point(|&(p, _)| p < parent);
+        for &(p, n) in children_of.iter().skip(start) {
+            if p != parent {
+                break;
+            }
             frontier.push(n.id);
             match n.state {
                 NodeState::Pending => to_skip.push(n.id),

@@ -20,3 +20,6 @@
 ## 2025-11-06 - [Avoid Intermediate Allocations when Checking Child Node States]
 **Learning:** In execution hot paths, checking if children nodes satisfy a condition was previously done by collecting them into an intermediate vector via `children_of` and then calling `all_terminal` or `any_failed`. This results in unnecessary heap allocations on highly concurrent evaluation paths.
 **Action:** When checking properties of child nodes in hot loops, use the zero-allocation helper functions `all_children_terminal` and `any_child_failed` (which iterate directly over the tree slice) instead of chaining `children_of` with array inspection functions.
+## 2025-11-06 - [Optimize deep tree BFS traversals using pre-computed sorted index]
+**Learning:** In functions that perform a Breadth-First Search (BFS) over the execution tree (like `reset_subtree_to_pending` and `settle_live_descendants`), using `tree.iter().filter(...)` inside the loop to find child nodes results in `O(N^2)` time complexity for deep trees.
+**Action:** To prevent O(N²) traversal overhead during deep tree BFS iterations, do not use `tree.iter().filter(...)` inside `while` loops to find child nodes. Pre-compute a sorted flat index (e.g., `Vec<(ParentId, &Node)>`) outside the loop and use `.partition_point()` for O(log N) lookups.
