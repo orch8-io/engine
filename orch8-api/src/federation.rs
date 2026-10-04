@@ -100,7 +100,14 @@ pub(crate) struct TenantQuery {
     tenant_id: Option<String>,
 }
 
-fn tenant_of(tenant_ctx: &OptionalTenant, query: Option<&str>) -> Result<TenantId, ApiError> {
+fn tenant_of(
+    tenant_ctx: &OptionalTenant,
+    admin: &OptionalAdmin,
+    query: Option<&str>,
+) -> Result<TenantId, ApiError> {
+    if tenant_ctx.is_none() {
+        require_admin(admin)?;
+    }
     crate::auth::scoped_tenant_id(tenant_ctx, query)
         .ok_or_else(|| ApiError::InvalidArgument("tenant_id (or X-Tenant-Id) is required".into()))
 }
@@ -189,10 +196,11 @@ fn map_peer_storage(error: StorageError) -> ApiError {
 )]
 pub(crate) async fn list_peers(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     tenant_ctx: OptionalTenant,
     Query(query): Query<TenantQuery>,
 ) -> Result<Json<Vec<FederationPeerRecord>>, ApiError> {
-    let tenant = tenant_of(&tenant_ctx, query.tenant_id.as_deref())?;
+    let tenant = tenant_of(&tenant_ctx, &admin, query.tenant_id.as_deref())?;
     Ok(Json(
         state
             .storage
@@ -218,7 +226,7 @@ pub(crate) async fn create_peer(
     Json(req): Json<PeerRequest>,
 ) -> Result<(StatusCode, Json<FederationPeerRecord>), ApiError> {
     require_admin(&admin)?;
-    let tenant = tenant_of(&tenant_ctx, req.tenant_id.as_deref())?;
+    let tenant = tenant_of(&tenant_ctx, &admin, req.tenant_id.as_deref())?;
     if state
         .storage
         .get_federation_peer(&tenant, req.peer_id)
@@ -245,11 +253,12 @@ pub(crate) async fn create_peer(
 )]
 pub(crate) async fn get_peer(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     tenant_ctx: OptionalTenant,
     Path(peer_id): Path<Uuid>,
     Query(query): Query<TenantQuery>,
 ) -> Result<Json<FederationPeerRecord>, ApiError> {
-    let tenant = tenant_of(&tenant_ctx, query.tenant_id.as_deref())?;
+    let tenant = tenant_of(&tenant_ctx, &admin, query.tenant_id.as_deref())?;
     state
         .storage
         .get_federation_peer(&tenant, FederationPeerId::from_uuid(peer_id))
@@ -281,7 +290,7 @@ pub(crate) async fn update_peer(
             "peer_id in body does not match the path".into(),
         ));
     }
-    let tenant = tenant_of(&tenant_ctx, req.tenant_id.as_deref())?;
+    let tenant = tenant_of(&tenant_ctx, &admin, req.tenant_id.as_deref())?;
     let existing = state
         .storage
         .get_federation_peer(&tenant, req.peer_id)
@@ -313,7 +322,7 @@ pub(crate) async fn delete_peer(
     Query(query): Query<TenantQuery>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&admin)?;
-    let tenant = tenant_of(&tenant_ctx, query.tenant_id.as_deref())?;
+    let tenant = tenant_of(&tenant_ctx, &admin, query.tenant_id.as_deref())?;
     if state
         .storage
         .delete_federation_peer(&tenant, FederationPeerId::from_uuid(peer_id))
@@ -332,11 +341,12 @@ pub(crate) async fn delete_peer(
 )]
 pub(crate) async fn get_call(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     tenant_ctx: OptionalTenant,
     Path(call_id): Path<Uuid>,
     Query(query): Query<TenantQuery>,
 ) -> Result<Json<FederationCall>, ApiError> {
-    let tenant = tenant_of(&tenant_ctx, query.tenant_id.as_deref())?;
+    let tenant = tenant_of(&tenant_ctx, &admin, query.tenant_id.as_deref())?;
     state
         .storage
         .get_federation_call(&tenant, call_id)
