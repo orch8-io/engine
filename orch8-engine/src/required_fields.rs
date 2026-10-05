@@ -17,8 +17,6 @@
 //! runtime state. A change in the sequence definition should invalidate the
 //! cached tree (the scheduler keys its `DashMap` by
 //! `(SequenceId, version)` so structural changes naturally invalidate).
-use std::collections::HashMap;
-
 use orch8_types::ids::BlockId;
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 
@@ -28,15 +26,19 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 /// `Some(empty)` = fetch nothing.
 #[derive(Debug, Clone, Default)]
 pub struct RequiredFieldTree {
-    per_block: HashMap<BlockId, Option<Vec<String>>>,
+    // ⚡ Bolt: A sorted `Vec` is used instead of a `HashMap` to eliminate massive
+    // hashing and allocation overhead on the hot path (DashMap caching). Lookups are
+    // performed in O(log N) time using `binary_search_by_key`.
+    per_block: Vec<(BlockId, Option<Vec<String>>)>,
 }
 
 impl RequiredFieldTree {
     /// Build an RFT by walking every step in the sequence recursively.
     #[must_use]
     pub fn from_sequence(seq: &SequenceDefinition) -> Self {
-        let mut per_block = HashMap::new();
+        let mut per_block = Vec::new();
         visit_blocks(&seq.blocks, &mut per_block);
+        per_block.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         Self { per_block }
     }
 
@@ -46,7 +48,10 @@ impl RequiredFieldTree {
     /// - `None` — full fetch required (All access or unknown block)
     #[must_use]
     pub fn fields_for(&self, block: &BlockId) -> Option<&[String]> {
-        self.per_block.get(block)?.as_deref()
+        match self.per_block.binary_search_by_key(&block, |(id, _)| id) {
+            Ok(idx) => self.per_block[idx].1.as_deref(),
+            Err(_) => None,
+        }
     }
 
     /// Number of blocks recorded. Exposed for metrics / tests.
@@ -65,7 +70,7 @@ impl RequiredFieldTree {
 /// Recurse into composite blocks so that every nested Step contributes to
 /// the RFT. Only Step blocks carry `context_access`; composites are
 /// transparent wrappers for sequencing.
-fn visit_blocks(blocks: &[BlockDefinition], out: &mut HashMap<BlockId, Option<Vec<String>>>) {
+fn visit_blocks(blocks: &[BlockDefinition], out: &mut Vec<(BlockId, Option<Vec<String>>)>) {
     for block in blocks {
         match block {
             BlockDefinition::Step(step) => {
@@ -89,7 +94,7 @@ fn visit_blocks(blocks: &[BlockDefinition], out: &mut HashMap<BlockId, Option<Ve
                         }
                     },
                 };
-                out.insert(step.id.clone(), entry);
+                out.push((step.id.clone(), entry));
             }
             BlockDefinition::Parallel(p) => {
                 for branch in &p.branches {
