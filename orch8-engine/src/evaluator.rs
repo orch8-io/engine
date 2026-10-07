@@ -1618,20 +1618,29 @@ pub async fn skip_subtrees(
     subtree_ids.sort_unstable();
     subtree_ids.dedup();
 
-    let nodes_to_skip: Vec<&ExecutionNode> = tree
-        .iter()
-        .filter(|node| {
-            subtree_ids.binary_search(&node.id).is_ok()
-                && !matches!(
-                    node.state,
-                    NodeState::Skipped
-                        | NodeState::Cancelled
-                        | NodeState::Completed
-                        | NodeState::Failed
-                )
-        })
-        .collect();
-    let node_ids: Vec<ExecutionNodeId> = nodes_to_skip.iter().map(|node| node.id).collect();
+    // ⚡ Bolt: Avoid intermediate `Vec` allocation for nodes_to_skip.
+    // Instead of allocating a Vec of references, then mapping to a Vec of IDs,
+    // we can filter and map directly into a Vec of IDs, using `Vec::with_capacity`
+    // to prevent reallocation overhead since we can bound it by `tree.len()`.
+    let mut node_ids = Vec::with_capacity(tree.len());
+    let mut waiting_block_ids = Vec::new();
+
+    for node in tree {
+        if subtree_ids.binary_search(&node.id).is_ok()
+            && !matches!(
+                node.state,
+                NodeState::Skipped
+                    | NodeState::Cancelled
+                    | NodeState::Completed
+                    | NodeState::Failed
+            )
+        {
+            node_ids.push(node.id);
+            if node.state == NodeState::Waiting {
+                waiting_block_ids.push(node.block_id.to_string());
+            }
+        }
+    }
 
     if node_ids.is_empty() {
         return Ok(());
@@ -1641,11 +1650,6 @@ pub async fn skip_subtrees(
         .update_nodes_state(&node_ids, NodeState::Skipped)
         .await?;
 
-    let waiting_block_ids: Vec<String> = nodes_to_skip
-        .iter()
-        .filter(|node| node.state == NodeState::Waiting)
-        .map(|node| node.block_id.to_string())
-        .collect();
     if !waiting_block_ids.is_empty() {
         storage
             .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &waiting_block_ids)
@@ -1665,11 +1669,15 @@ pub async fn activate_pending_children(
     storage: &dyn StorageBackend,
     children: &[&ExecutionNode],
 ) -> Result<(), EngineError> {
-    let pending_ids: Vec<ExecutionNodeId> = children
-        .iter()
-        .filter(|c| c.state == NodeState::Pending)
-        .map(|c| c.id)
-        .collect();
+    // ⚡ Bolt: Replace `.filter().collect()` with a manual loop and `Vec::with_capacity`
+    // to avoid reallocation overhead. We know the max capacity is `children.len()`.
+    let mut pending_ids = Vec::with_capacity(children.len());
+    for c in children {
+        if c.state == NodeState::Pending {
+            pending_ids.push(c.id);
+        }
+    }
+
     if !pending_ids.is_empty() {
         storage.batch_activate_nodes(&pending_ids).await?;
     }
