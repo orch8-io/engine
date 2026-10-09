@@ -1665,11 +1665,13 @@ pub async fn activate_pending_children(
     storage: &dyn StorageBackend,
     children: &[&ExecutionNode],
 ) -> Result<(), EngineError> {
-    let pending_ids: Vec<ExecutionNodeId> = children
-        .iter()
-        .filter(|c| c.state == NodeState::Pending)
-        .map(|c| c.id)
-        .collect();
+    // ⚡ Bolt: Replace `.filter().map().collect()` with a manual loop to avoid intermediate allocations
+    let mut pending_ids = Vec::with_capacity(children.len());
+    for c in children {
+        if c.state == NodeState::Pending {
+            pending_ids.push(c.id);
+        }
+    }
     if !pending_ids.is_empty() {
         storage.batch_activate_nodes(&pending_ids).await?;
     }
