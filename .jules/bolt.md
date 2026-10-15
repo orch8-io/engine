@@ -26,3 +26,6 @@
 ## 2025-11-06 - [Replace HashMap with Vec in RequiredFieldTree]
 **Learning:** In the `RequiredFieldTree` struct (used heavily by the scheduler's preload path and cached in a `DashMap`), using a `HashMap<BlockId, Option<Vec<String>>>` introduces unnecessary hashing and memory allocation overhead. A `HashMap` requires hashing operations on every lookup and significant memory reallocation during construction.
 **Action:** When a static map is built once and queried heavily (especially when cached), replace the `HashMap` with a flat `Vec<(Key, Value)>`. Sort it by the key during construction (`Vec::sort_unstable_by`) and use `.binary_search_by_key()` for O(log N) lookups. This entirely eliminates hashing overhead and improves cache locality.
+## 2025-11-06 - [Avoid Intermediate Vec in Handler Evaluation]
+**Learning:** In the `race_outcome` function (and similar execution tree handlers), accepting a slice of references (`&[&ExecutionNode]`) forced the caller to evaluate an iterator via `.collect()` to pass the arguments. This introduced unnecessary intermediate `Vec` allocations on hot execution paths.
+**Action:** Modify internal handler functions to accept `impl IntoIterator<Item = &T>` instead of `&[&T]`. This allows callers to pass iterators (such as `.iter().filter(...)`) directly, avoiding intermediate heap allocations and minimizing allocator overhead.
