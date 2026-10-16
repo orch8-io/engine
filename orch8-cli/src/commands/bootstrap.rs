@@ -140,19 +140,267 @@ pub async fn run(command: BootstrapCmd) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    //! Bootstrap probes readiness on a reachable address, fails closed on any
+    //! preflight problem before spawning the server, and bounds the wait.
     use super::*;
+
+    fn config_with_addr(addr: &str) -> orch8_types::config::EngineConfig {
+        let mut config = orch8_types::config::EngineConfig::default();
+        config.api.http_addr = addr.into();
+        config
+    }
+
+    fn bootstrap_cmd(dir: &Path, server_bin: &Path, timeout_secs: u64) -> BootstrapCmd {
+        BootstrapCmd {
+            dir: dir.to_path_buf(),
+            template: "default".into(),
+            server_bin: server_bin.to_path_buf(),
+            timeout_secs,
+        }
+    }
+
+    fn missing_server() -> PathBuf {
+        PathBuf::from("definitely-missing-orch8-server")
+    }
+
+    async fn run_error(dir: &Path) -> String {
+        let error = run(bootstrap_cmd(dir, &missing_server(), 1))
+            .await
+            .unwrap_err();
+        format!("{error:#}")
+    }
+
+    /// A loopback port nothing listens on: bind, read the port, release it.
+    fn unused_loopback_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
 
     #[test]
     fn readiness_uses_loopback_for_wildcard_listener() {
-        let mut config = orch8_types::config::EngineConfig::default();
-        config.api.http_addr = "0.0.0.0:8080".into();
         assert_eq!(
-            readiness_url(&config).unwrap(),
+            readiness_url(&config_with_addr("0.0.0.0:8080")).unwrap(),
             "http://127.0.0.1:8080/health/ready"
         );
     }
-}
 
-#[cfg(test)]
-#[path = "bootstrap_coverage_tests.rs"]
-mod bootstrap_coverage_tests;
+    #[test]
+    fn readiness_url_probes_loopback_for_wildcards_and_the_exact_address_otherwise() {
+        let cases = [
+            ("[::]:8080", "http://[::1]:8080/health/ready"),
+            ("192.168.1.50:9000", "http://192.168.1.50:9000/health/ready"),
+            (
+                "[2001:db8::1]:9090",
+                "http://[2001:db8::1]:9090/health/ready",
+            ),
+        ];
+        for (addr, expected) in cases {
+            assert_eq!(
+                readiness_url(&config_with_addr(addr)).unwrap(),
+                expected,
+                "case {addr}"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_url_rejects_addresses_that_are_not_socket_addresses() {
+        for addr in ["127.0.0.1", "localhost:8080"] {
+            let error = readiness_url(&config_with_addr(addr)).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("api.http_addr is not a socket address"),
+                "case {addr}: {error:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn config_without_generated_keys_fails_before_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("orch8.toml"), "").unwrap();
+
+        let rendered = run_error(dir.path()).await;
+
+        assert!(
+            rendered.contains("bootstrap requires generated API and encryption keys"),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unparseable_config_fails_naming_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("orch8.toml");
+        std::fs::write(&config_path, "[[[not toml").unwrap();
+
+        let rendered = run_error(dir.path()).await;
+
+        assert!(
+            rendered.contains(&format!("parse {}", config_path.display())),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_role_without_secrets_fails_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("orch8.toml"),
+            "[node]\nrole = \"gateway\"\n",
+        )
+        .unwrap();
+
+        let rendered = run_error(dir.path()).await;
+
+        assert!(
+            rendered.contains("bootstrap preflight failed"),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_encryption_key_fails_preflight_naming_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = format!(
+            "[engine]\nencryption_key = \"abcd\"\n\n[api]\napi_key = \"{}\"\n",
+            "a".repeat(64)
+        );
+        std::fs::write(dir.path().join("orch8.toml"), toml).unwrap();
+
+        let rendered = run_error(dir.path()).await;
+
+        assert!(
+            rendered.contains("bootstrap preflight failed"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("encryption_key"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn valid_scaffold_passes_preflight_and_reaches_the_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        super::super::init::run(dir.path().to_str().unwrap(), "default").unwrap();
+
+        let rendered = run_error(dir.path()).await;
+
+        assert!(
+            rendered.contains("start definitely-missing-orch8-server"),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_project_is_scaffolded_before_the_spawn() {
+        let base = tempfile::tempdir().unwrap();
+        let project = base.path().join("new-project");
+
+        let rendered = run_error(&project).await;
+
+        assert!(project.join("orch8.toml").exists());
+        assert!(project.join("sequence.json").exists());
+        assert!(
+            rendered.contains("start definitely-missing-orch8-server"),
+            "{rendered}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_wait_stops_as_soon_as_the_server_exits() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 3"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        // Let the child exit before the first poll.
+        child.wait().await.unwrap();
+        let url = format!("http://127.0.0.1:{}/health/ready", unused_loopback_port());
+
+        let error = await_readiness(&mut child, &url, Duration::from_secs(60))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("exited before readiness"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_wait_times_out_when_the_server_never_becomes_ready() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}/health/ready", unused_loopback_port());
+
+        let error = await_readiness(&mut child, &url, Duration::ZERO)
+            .await
+            .unwrap_err();
+        terminate(&mut child).await;
+
+        assert!(
+            error.to_string().contains("readiness timed out after 0s"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn readiness_wait_succeeds_once_the_endpoint_answers_2xx() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/health/ready", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+
+        let result = await_readiness(&mut child, &url, Duration::from_secs(10)).await;
+        terminate(&mut child).await;
+        server.await.unwrap();
+
+        result.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn zero_timeout_is_clamped_to_one_second_of_readiness_wait() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        super::super::init::run(dir.path().to_str().unwrap(), "default").unwrap();
+        let config_path = dir.path().join("orch8.toml");
+        let config = std::fs::read_to_string(&config_path).unwrap().replace(
+            "0.0.0.0:8080",
+            &format!("127.0.0.1:{}", unused_loopback_port()),
+        );
+        std::fs::write(&config_path, config).unwrap();
+        let server = dir.path().join("fake-server.sh");
+        std::fs::write(&server, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = run(bootstrap_cmd(dir.path(), &server, 0))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("readiness timed out after 1s"),
+            "{error:#}"
+        );
+    }
+}

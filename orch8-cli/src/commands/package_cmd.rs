@@ -750,8 +750,8 @@ async fn install(
 }
 
 #[cfg(test)]
-#[path = "package_cmd_coverage_tests.rs"]
-mod package_cmd_coverage_tests;
+#[path = "package_cmd_build_tests.rs"]
+mod package_cmd_build_tests;
 
 #[cfg(test)]
 mod yaml_source_tests {

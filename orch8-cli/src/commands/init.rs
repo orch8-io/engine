@@ -433,6 +433,146 @@ mod tests {
         assert!(!command.contains("\n+"));
     }
 
+    fn scaffold(dir: &Path) {
+        run(dir.to_str().unwrap(), "default").unwrap();
+    }
+
+    /// `(ORCH8_API_KEY, ORCH8_ENCRYPTION_KEY)` from a scaffolded compose file.
+    fn compose_keys(dir: &Path) -> (String, String) {
+        let compose = fs::read_to_string(dir.join("docker-compose.yml")).unwrap();
+        let value = |name: &str| {
+            compose
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(&format!("{name}: ")))
+                .unwrap_or_else(|| panic!("{name} missing from compose"))
+                .trim_matches('"')
+                .to_string()
+        };
+        (value("ORCH8_API_KEY"), value("ORCH8_ENCRYPTION_KEY"))
+    }
+
+    fn toml_keys(dir: &Path) -> (String, String) {
+        let text = fs::read_to_string(dir.join("orch8.toml")).unwrap();
+        let cfg: orch8_types::config::EngineConfig = toml::from_str(&text).unwrap();
+        (
+            cfg.api.api_key.expose().to_string(),
+            cfg.engine.encryption_key.expose().to_string(),
+        )
+    }
+
+    #[test]
+    fn generated_secrets_are_unique_32_byte_lowercase_hex() {
+        let secrets: std::collections::BTreeSet<String> =
+            (0..16).map(|_| generate_secret_hex()).collect();
+
+        assert_eq!(secrets.len(), 16, "secrets must not repeat");
+        for secret in &secrets {
+            assert_eq!(secret.len(), 64, "{secret}");
+            assert!(
+                secret
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "unexpected character in {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn independent_scaffolds_never_share_secrets() {
+        let one = tempfile::tempdir().unwrap();
+        let two = tempfile::tempdir().unwrap();
+
+        scaffold(one.path());
+        scaffold(two.path());
+
+        let (key_one, enc_one) = toml_keys(one.path());
+        let (key_two, enc_two) = toml_keys(two.path());
+        assert_ne!(key_one, key_two);
+        assert_ne!(enc_one, enc_two);
+    }
+
+    #[test]
+    fn reinit_never_rotates_existing_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold(dir.path());
+        let first = fs::read_to_string(dir.path().join("orch8.toml")).unwrap();
+
+        scaffold(dir.path());
+
+        let second = fs::read_to_string(dir.path().join("orch8.toml")).unwrap();
+        assert_eq!(
+            first, second,
+            "re-running init must keep the original secrets"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_config_is_left_untouched_including_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("orch8.toml");
+        fs::write(&config, "# my existing config\n").unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
+
+        scaffold(dir.path());
+
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "# my existing config\n"
+        );
+        assert_eq!(
+            fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "permissions of a pre-existing config are the operator's responsibility"
+        );
+    }
+
+    #[test]
+    fn every_template_scaffolds_a_parseable_config_and_its_own_sequence() {
+        for template in templates::TEMPLATES {
+            let dir = tempfile::tempdir().unwrap();
+
+            run(dir.path().to_str().unwrap(), template.name).unwrap();
+
+            let toml_text = fs::read_to_string(dir.path().join("orch8.toml")).unwrap();
+            let cfg: orch8_types::config::EngineConfig =
+                toml::from_str(&toml_text).unwrap_or_else(|e| {
+                    panic!("template {} scaffolded invalid config: {e}", template.name)
+                });
+            assert_eq!(cfg.api.api_key.expose().len(), 64, "{}", template.name);
+            assert_eq!(
+                cfg.engine.encryption_key.expose().len(),
+                64,
+                "{}",
+                template.name
+            );
+            let sequence = fs::read_to_string(dir.path().join("sequence.json")).unwrap();
+            assert_eq!(sequence, template.json, "{}", template.name);
+        }
+    }
+
+    #[test]
+    fn compose_stack_uses_the_same_keys_as_the_scaffolded_config() {
+        let dir = tempfile::tempdir().unwrap();
+
+        scaffold(dir.path());
+
+        assert_eq!(compose_keys(dir.path()), toml_keys(dir.path()));
+    }
+
+    #[test]
+    #[ignore = "BUG: init regenerates keys, so a compose file written next to an existing orch8.toml gets mismatched keys — fixed on test/bugs"]
+    fn compose_written_next_to_an_existing_config_reuses_its_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        scaffold(dir.path());
+        fs::remove_file(dir.path().join("docker-compose.yml")).unwrap();
+
+        scaffold(dir.path());
+
+        assert_eq!(compose_keys(dir.path()), toml_keys(dir.path()));
+    }
+
     #[test]
     fn quick_start_never_passes_the_api_key_as_a_flag() {
         let command = sequence_apply_command("sequence.json");
@@ -440,7 +580,3 @@ mod tests {
         assert!(command.contains("ORCH8_API_KEY"));
     }
 }
-
-#[cfg(test)]
-#[path = "init_coverage_tests.rs"]
-mod init_coverage_tests;

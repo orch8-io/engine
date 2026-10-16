@@ -464,6 +464,73 @@ async fn agent_runtime_preset_executes_bounded_dry_run() {
     assert_eq!(outputs[0].output["iterations"], 0);
 }
 
+async fn tick_until_terminal(engine: &Engine, id: InstanceId) -> InstanceState {
+    for _ in 0..50 {
+        engine.tick_once().await.expect("tick");
+        let state = engine.get_instance(id).await.expect("snapshot").state;
+        if matches!(
+            state,
+            InstanceState::Completed | InstanceState::Failed | InstanceState::Cancelled
+        ) {
+            return state;
+        }
+    }
+    panic!("instance {id} did not reach a terminal state");
+}
+
+/// A handler registered on the agent-runtime builder is the one the engine
+/// dispatches to (the preset must forward registrations, not drop them).
+#[tokio::test]
+async fn agent_runtime_builder_handler_is_dispatched_by_the_engine() {
+    let runtime = AgentRuntime::builder(Storage::sqlite_in_memory())
+        .handler("custom_step", |_ctx: StepContext| async move {
+            Ok(serde_json::json!({ "from": "agent-runtime-builder" }))
+        })
+        .build()
+        .await
+        .expect("agent runtime");
+    let sequence_id = runtime
+        .upsert_sequence(two_step_sequence("preset-handler", "custom_step"))
+        .await
+        .expect("upsert");
+    let id = runtime
+        .create_instance(sequence_id, CreateInstanceOptions::default())
+        .await
+        .expect("create");
+
+    assert_eq!(
+        tick_until_terminal(&runtime, id).await,
+        InstanceState::Completed
+    );
+    let outputs = runtime.block_outputs(id).await.expect("outputs");
+    let s1 = outputs
+        .iter()
+        .find(|o| o.block_id.as_str() == "s1")
+        .expect("s1 output");
+    assert_eq!(s1.output["from"], "agent-runtime-builder");
+}
+
+/// `AgentRuntimeBuilder::tenant` scopes every instance the runtime creates.
+#[tokio::test]
+async fn agent_runtime_builder_tenant_scopes_created_instances() {
+    let runtime = AgentRuntime::builder(Storage::sqlite_in_memory())
+        .tenant("agent-tenant")
+        .build()
+        .await
+        .expect("agent runtime");
+    let sequence_id = runtime
+        .upsert_sequence(two_step_sequence("preset-tenant", "noop"))
+        .await
+        .expect("upsert");
+    let id = runtime
+        .create_instance(sequence_id, CreateInstanceOptions::default())
+        .await
+        .expect("create");
+
+    let instance = runtime.get_instance(id).await.expect("snapshot");
+    assert_eq!(instance.tenant_id.as_str(), "agent-tenant");
+}
+
 /// `send_signal` resolves a `wait_for_input` gate: the instance parks
 /// waiting for human input, a custom `human_input:<block>` signal wakes it,
 /// and the sequence then runs to completion (mirrors the engine's HITL

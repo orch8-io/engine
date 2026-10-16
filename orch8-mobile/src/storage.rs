@@ -876,8 +876,184 @@ mod tests {
         assert_eq!(events[0].event_type, "C");
         assert_eq!(storage.delete_oldest_telemetry_events(0).await.unwrap(), 0);
     }
-}
 
-#[cfg(test)]
-#[path = "storage_coverage_tests.rs"]
-mod storage_coverage_tests;
+    async fn setup_with_backend() -> (MobileStorage, Arc<dyn orch8_storage::StorageBackend>) {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        (MobileStorage::new(sqlite.clone()), sqlite)
+    }
+
+    fn sequence(
+        name: &str,
+        version: i32,
+        created_at: DateTime<Utc>,
+    ) -> orch8_types::sequence::SequenceDefinition {
+        orch8_types::sequence::SequenceDefinition {
+            embed: None,
+            sub_tenant: None,
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
+            id: SequenceId::new(),
+            tenant_id: TenantId::new("mobile").unwrap(),
+            namespace: Namespace::new("default"),
+            name: name.to_string(),
+            version,
+            deprecated: false,
+            status: orch8_types::sequence::SequenceStatus::default(),
+            blocks: vec![],
+            interceptors: None,
+            input_schema: None,
+            sla: None,
+            on_failure: None,
+            on_cancel: None,
+            placement: None,
+            created_at,
+        }
+    }
+
+    async fn insert_instance(storage: &MobileStorage, id: &str, state: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO task_instances
+             (id, sequence_id, tenant_id, namespace, state, context, created_at, updated_at)
+             VALUES (?1, ?2, 'mobile', 'default', ?3, '{}', ?4, ?4)",
+        )
+        .bind(id)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(state)
+        .bind(now)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    }
+
+    fn mobile_tenant() -> TenantId {
+        TenantId::new("mobile").unwrap()
+    }
+
+    #[tokio::test]
+    async fn version_manifest_reports_the_highest_version_per_name_sorted_and_limited() {
+        let (storage, backend) = setup_with_backend().await;
+        for (name, version) in [("gamma", 1), ("beta", 1), ("alpha", 1), ("alpha", 3)] {
+            backend
+                .create_sequence(&sequence(name, version, Utc::now()))
+                .await
+                .unwrap();
+        }
+        let ns = Namespace::new("default");
+
+        let all = storage
+            .list_local_sequence_versions(&mobile_tenant(), &ns, 1000)
+            .await
+            .unwrap();
+        let limited = storage
+            .list_local_sequence_versions(&mobile_tenant(), &ns, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            all,
+            vec![
+                ("alpha".to_string(), 3),
+                ("beta".to_string(), 1),
+                ("gamma".to_string(), 1)
+            ],
+            "one row per name carrying MAX(version)"
+        );
+        assert_eq!(
+            limited,
+            vec![("alpha".to_string(), 3), ("beta".to_string(), 1)],
+            "the limit counts names, not versions"
+        );
+    }
+
+    #[tokio::test]
+    async fn version_manifest_is_scoped_to_the_tenant() {
+        let (storage, backend) = setup_with_backend().await;
+        backend
+            .create_sequence(&sequence("alpha", 1, Utc::now()))
+            .await
+            .unwrap();
+
+        let other = storage
+            .list_local_sequence_versions(
+                &TenantId::new("other").unwrap(),
+                &Namespace::new("default"),
+                1000,
+            )
+            .await
+            .unwrap();
+
+        assert!(other.is_empty());
+    }
+
+    #[tokio::test]
+    async fn excess_sequence_candidates_are_empty_at_exactly_the_retain_limit() {
+        let (storage, backend) = setup_with_backend().await;
+        for index in 0..3 {
+            let created_at = Utc::now() - chrono::Duration::hours(index);
+            backend
+                .create_sequence(&sequence(&format!("seq-{index}"), 1, created_at))
+                .await
+                .unwrap();
+        }
+
+        let candidates = storage
+            .list_excess_oldest_local_sequences(&mobile_tenant(), &Namespace::new("default"), 3)
+            .await
+            .unwrap();
+
+        assert!(candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dedup_prune_keeps_rows_of_active_instances() {
+        let (storage, _backend) = setup_with_backend().await;
+        let id = InstanceId::new().to_string();
+        insert_instance(&storage, &id, "scheduled").await;
+        storage.set_dedup("dk-active", &id).await.unwrap();
+
+        assert_eq!(storage.prune_stale_dedup().await.unwrap(), 0);
+        assert_eq!(
+            storage.get_dedup_instance("dk-active").await.unwrap(),
+            Some(id)
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_prune_removes_rows_of_failed_and_cancelled_instances() {
+        let (storage, _backend) = setup_with_backend().await;
+        let failed = InstanceId::new().to_string();
+        let cancelled = InstanceId::new().to_string();
+        insert_instance(&storage, &failed, "failed").await;
+        insert_instance(&storage, &cancelled, "cancelled").await;
+        storage.set_dedup("dk-failed", &failed).await.unwrap();
+        storage.set_dedup("dk-cancelled", &cancelled).await.unwrap();
+
+        assert_eq!(storage.prune_stale_dedup().await.unwrap(), 2);
+        assert!(storage.list_all_dedup().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn execution_steps_for_an_empty_id_list_return_empty_without_an_in_clause() {
+        let (storage, _backend) = setup_with_backend().await;
+
+        let steps = storage.list_sync_execution_steps(&[]).await.unwrap();
+
+        assert!(steps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_projection_rejects_a_malformed_instance_id_naming_the_column() {
+        let (storage, _backend) = setup_with_backend().await;
+        insert_instance(&storage, "not-a-uuid", "completed").await;
+
+        let error = storage
+            .list_terminal_instance_states(100)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("task_instances.id"), "{error}");
+        assert!(error.contains("'not-a-uuid'"), "{error}");
+    }
+}

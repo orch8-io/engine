@@ -230,7 +230,8 @@ async fn residency_waits_and_never_dispatches_to_a_non_matching_runtime() {
 /// handler is registered in-process ran locally — bypassing residency.
 #[tokio::test]
 async fn malformed_runtime_param_cannot_bypass_residency() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let tenant = TenantId::unchecked(unique("tenant"));
         let mut step = placed_step(
             "charge",

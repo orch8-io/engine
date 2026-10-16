@@ -740,3 +740,131 @@ async fn grpc_worker_stream_closes_on_shutdown_and_health_tracks_readiness() {
         .unwrap()
         .unwrap();
 }
+
+/// Open an artifact transfer over a real channel for `bytes`; returns the
+/// client-side frame sender and the server stream (hello already consumed).
+async fn open_artifact_transfer(
+    bytes: Vec<u8>,
+    seq_id: &str,
+    inst_id: &str,
+) -> (
+    tokio::sync::mpsc::Sender<orch8_grpc::proto::ArtifactTransferClient>,
+    tonic::Streaming<orch8_grpc::proto::ArtifactTransferServer>,
+) {
+    use orch8_grpc::proto::artifact_transfer_client::Payload as ClientPayload;
+    use orch8_grpc::proto::artifact_transfer_server::Payload as ServerPayload;
+
+    let (addr, storage) = spawn_test_server().await;
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    create_seq_and_instance(&mut client, seq_id, inst_id).await;
+    let instance_id = InstanceId::from_uuid(uuid::Uuid::parse_str(inst_id).unwrap());
+    let artifact = storage
+        .put_artifact(instance_id, "application/octet-stream", bytes.into())
+        .await
+        .unwrap();
+    let (sender, outbound) = tokio::sync::mpsc::channel(4);
+    sender
+        .send(orch8_grpc::proto::ArtifactTransferClient {
+            payload: Some(ClientPayload::Open(
+                orch8_grpc::proto::ArtifactTransferOpen {
+                    object_key: artifact.key,
+                    resume_offset: 0,
+                    chunk_bytes: 4096,
+                    expected_sha256: Vec::new(),
+                    transfer_kind: "continuity".into(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    let mut inbound = client
+        .artifact_transfer(tokio_stream::wrappers::ReceiverStream::new(outbound))
+        .await
+        .unwrap()
+        .into_inner();
+    let hello = inbound.message().await.unwrap().unwrap();
+    assert!(matches!(hello.payload, Some(ServerPayload::Hello(_))));
+    (sender, inbound)
+}
+
+#[tokio::test]
+async fn grpc_artifact_ack_off_the_chunk_boundary_is_failed_precondition() {
+    use orch8_grpc::proto::artifact_transfer_client::Payload as ClientPayload;
+    use orch8_grpc::proto::artifact_transfer_server::Payload as ServerPayload;
+
+    let (sender, mut inbound) = open_artifact_transfer(
+        vec![7_u8; 10_000],
+        "00000000-0000-0000-0000-000000000031",
+        "00000000-0000-0000-0000-000000000032",
+    )
+    .await;
+    let first = inbound.message().await.unwrap().unwrap();
+    let Some(ServerPayload::Chunk(chunk)) = first.payload else {
+        panic!("expected the first chunk");
+    };
+    assert_eq!((chunk.offset, chunk.data.len()), (0, 4096));
+
+    sender
+        .send(orch8_grpc::proto::ArtifactTransferClient {
+            payload: Some(ClientPayload::Ack(orch8_grpc::proto::ArtifactTransferAck {
+                next_offset: 4095,
+            })),
+        })
+        .await
+        .unwrap();
+
+    let status = inbound.message().await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn grpc_artifact_transfer_without_an_open_frame_is_invalid_argument() {
+    use orch8_grpc::proto::artifact_transfer_client::Payload as ClientPayload;
+
+    let (addr, _storage) = spawn_test_server().await;
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let ack_first = orch8_grpc::proto::ArtifactTransferClient {
+        payload: Some(ClientPayload::Ack(orch8_grpc::proto::ArtifactTransferAck {
+            next_offset: 0,
+        })),
+    };
+    let status = client
+        .artifact_transfer(tokio_stream::iter(vec![ack_first]))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn grpc_empty_artifact_streams_exactly_one_final_chunk() {
+    use orch8_grpc::proto::artifact_transfer_client::Payload as ClientPayload;
+    use orch8_grpc::proto::artifact_transfer_server::Payload as ServerPayload;
+
+    let (sender, mut inbound) = open_artifact_transfer(
+        Vec::new(),
+        "00000000-0000-0000-0000-000000000033",
+        "00000000-0000-0000-0000-000000000034",
+    )
+    .await;
+    let frame = inbound.message().await.unwrap().unwrap();
+    let Some(ServerPayload::Chunk(chunk)) = frame.payload else {
+        panic!("expected a chunk");
+    };
+    assert!(chunk.final_chunk);
+    assert_eq!(chunk.offset, 0);
+    assert!(chunk.data.is_empty());
+
+    sender
+        .send(orch8_grpc::proto::ArtifactTransferClient {
+            payload: Some(ClientPayload::Ack(orch8_grpc::proto::ArtifactTransferAck {
+                next_offset: 0,
+            })),
+        })
+        .await
+        .unwrap();
+    assert!(inbound.message().await.unwrap().is_none());
+}

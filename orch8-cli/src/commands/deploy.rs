@@ -127,5 +127,5 @@ async fn response_json(response: reqwest::Response) -> Result<Value> {
 }
 
 #[cfg(test)]
-#[path = "deploy_coverage_tests.rs"]
-mod deploy_coverage_tests;
+#[path = "deploy_flow_tests.rs"]
+mod deploy_flow_tests;

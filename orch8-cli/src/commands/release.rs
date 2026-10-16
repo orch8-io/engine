@@ -522,5 +522,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "release_gate_coverage_tests.rs"]
-mod release_gate_coverage_tests;
+#[path = "release_gate_tests.rs"]
+mod release_gate_tests;

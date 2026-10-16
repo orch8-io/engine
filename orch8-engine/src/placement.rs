@@ -786,8 +786,197 @@ mod tests {
         assert!(preferred.score_factors.latency_rank > other.score_factors.latency_rank);
         assert!(preferred.score > other.score);
     }
-}
 
-#[cfg(test)]
-#[path = "placement_coverage_tests.rs"]
-mod placement_coverage_tests;
+    fn ordered_id(n: u128) -> RuntimeId {
+        RuntimeId::from_uuid(uuid::Uuid::from_u128(n))
+    }
+
+    fn choose_unconstrained(
+        candidates: &[RuntimeCapabilities],
+        current: Option<RuntimeId>,
+    ) -> PlacementDecision {
+        choose_runtime(
+            TenantId::new("tenant-a").unwrap(),
+            ContinuityId::new(),
+            ExecutionEpoch::initial(),
+            &CapsuleRequirements::default(),
+            None,
+            DataClassification::Internal,
+            candidates,
+            current,
+            Utc::now(),
+        )
+    }
+
+    fn battery(id: RuntimeId, percent: Option<u8>) -> RuntimeCapabilities {
+        let mut candidate = runtime(id, "br-south", RuntimeTrustLevel::Registered);
+        candidate.battery_percent = percent;
+        candidate
+    }
+
+    #[test]
+    fn metric_rank_omits_candidates_without_a_known_value() {
+        let known = RuntimeId::new();
+        let unknown = RuntimeId::new();
+
+        let empty = rank_candidate_metric(&[], |r| r.battery_percent.map(u64::from), true);
+        let ranks = rank_candidate_metric(
+            &[battery(known, Some(42)), battery(unknown, None)],
+            |r| r.battery_percent.map(u64::from),
+            true,
+        );
+
+        assert!(empty.is_empty());
+        assert!(ranks.contains_key(&known));
+        assert!(!ranks.contains_key(&unknown));
+    }
+
+    #[test]
+    fn metric_rank_favours_the_preferred_direction() {
+        let (high, low) = (RuntimeId::new(), RuntimeId::new());
+        let mut cheap = runtime(low, "br-south", RuntimeTrustLevel::Registered);
+        cheap.estimated_cost_microunits = Some(10);
+        let mut pricey = runtime(high, "br-south", RuntimeTrustLevel::Registered);
+        pricey.estimated_cost_microunits = Some(1_000);
+        let solo = rank_candidate_metric(
+            &[battery(high, Some(50))],
+            |r| r.battery_percent.map(u64::from),
+            true,
+        );
+
+        let prefer_high = rank_candidate_metric(
+            &[battery(high, Some(90)), battery(low, Some(20))],
+            |r| r.battery_percent.map(u64::from),
+            true,
+        );
+        let prefer_low =
+            rank_candidate_metric(&[cheap, pricey], |r| r.estimated_cost_microunits, false);
+
+        assert!(prefer_high[&high] > prefer_high[&low], "{prefer_high:?}");
+        assert!(prefer_low[&low] > prefer_low[&high], "{prefer_low:?}");
+        assert_eq!(
+            solo[&high], prefer_high[&high],
+            "a lone known value ranks as the best"
+        );
+    }
+
+    #[test]
+    fn tied_metric_values_share_one_rank() {
+        let (first, second, third) = (RuntimeId::new(), RuntimeId::new(), RuntimeId::new());
+
+        let ranks = rank_candidate_metric(
+            &[
+                battery(first, Some(80)),
+                battery(second, Some(80)),
+                battery(third, Some(10)),
+            ],
+            |r| r.battery_percent.map(u64::from),
+            true,
+        );
+
+        assert_eq!(ranks[&first], ranks[&second]);
+        assert!(ranks[&first] > ranks[&third]);
+    }
+
+    #[test]
+    fn placement_score_is_the_sum_of_its_reported_factors() {
+        let id = RuntimeId::new();
+        let mut candidate = runtime(id, "br-south", RuntimeTrustLevel::Signed);
+        candidate.battery_percent = Some(100);
+        candidate.estimated_cost_microunits = Some(5);
+        candidate.estimated_latency_ms = Some(5);
+
+        let decision = choose_unconstrained(&[candidate], Some(id));
+
+        let evidence = &decision.candidates[0];
+        let factors = &evidence.score_factors;
+        assert_eq!(
+            evidence.score,
+            factors.trust
+                + factors.current_runtime
+                + factors.offline_capable
+                + factors.battery_rank
+                + factors.cost_rank
+                + factors.latency_rank
+        );
+    }
+
+    #[test]
+    fn current_runtime_wins_an_otherwise_tied_placement() {
+        // Without stickiness the lower id would win the deterministic tie-break.
+        let (lower, current) = (ordered_id(1), ordered_id(2));
+        let candidates = [
+            runtime(lower, "br-south", RuntimeTrustLevel::Registered),
+            runtime(current, "br-south", RuntimeTrustLevel::Registered),
+        ];
+
+        let without = choose_unconstrained(&candidates, None);
+        let with = choose_unconstrained(&candidates, Some(current));
+
+        assert_eq!(without.selected_runtime_id, Some(lower));
+        assert_eq!(with.selected_runtime_id, Some(current));
+    }
+
+    #[test]
+    fn offline_capable_runtime_wins_an_otherwise_tied_placement() {
+        let (online_only, offline) = (ordered_id(1), ordered_id(2));
+        let mut online = runtime(online_only, "br-south", RuntimeTrustLevel::Registered);
+        online.offline_capable = false;
+
+        let decision = choose_unconstrained(
+            &[
+                online,
+                runtime(offline, "br-south", RuntimeTrustLevel::Registered),
+            ],
+            None,
+        );
+
+        assert_eq!(decision.selected_runtime_id, Some(offline));
+    }
+
+    #[test]
+    fn higher_trust_ranks_ahead_of_lower_trust() {
+        let levels = [
+            RuntimeTrustLevel::Unverified,
+            RuntimeTrustLevel::Registered,
+            RuntimeTrustLevel::Signed,
+            RuntimeTrustLevel::Attested,
+        ];
+        // Ids ascend with trust so the id tie-break alone would pick Unverified.
+        let candidates: Vec<_> = levels
+            .iter()
+            .enumerate()
+            .map(|(index, trust)| runtime(ordered_id(index as u128 + 1), "br-south", *trust))
+            .collect();
+
+        let decision = choose_unconstrained(&candidates, None);
+
+        let ranked: Vec<_> = decision.candidates.iter().map(|c| c.runtime_id).collect();
+        let expected: Vec<_> = (1..=4).rev().map(ordered_id).collect();
+        assert_eq!(
+            ranked, expected,
+            "candidates must be ordered Attested..Unverified"
+        );
+        assert_eq!(decision.selected_runtime_id, Some(ordered_id(4)));
+    }
+
+    #[test]
+    fn only_the_first_max_candidates_are_considered() {
+        let mut candidates: Vec<_> = (0..MAX_CANDIDATES)
+            .map(|_| runtime(RuntimeId::new(), "br-south", RuntimeTrustLevel::Unverified))
+            .collect();
+        let beyond_cap = RuntimeId::new();
+        candidates.push(runtime(beyond_cap, "br-south", RuntimeTrustLevel::Attested));
+
+        let decision = choose_unconstrained(&candidates, Some(beyond_cap));
+
+        assert_eq!(decision.candidates.len(), MAX_CANDIDATES);
+        assert!(
+            decision
+                .candidates
+                .iter()
+                .all(|candidate| candidate.runtime_id != beyond_cap)
+        );
+        assert_ne!(decision.selected_runtime_id, Some(beyond_cap));
+    }
+}

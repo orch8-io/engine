@@ -1071,30 +1071,36 @@ impl SyncOrchestrator {
 
     #[allow(clippy::unused_self)]
     fn version_meets_min(&self, sdk: &str, min: &str) -> bool {
-        // Fail closed: a version string with an unparseable component must not
-        // silently compare as if the component were absent. Keep consuming
-        // both iterators after the first difference so a late invalid component
-        // still rejects the entire version without allocating component vectors.
-        let mut sdk_parts = sdk.split('.');
-        let mut min_parts = min.split('.');
-        let mut ordering = std::cmp::Ordering::Equal;
-        loop {
-            let (sdk_part, min_part) = (sdk_parts.next(), min_parts.next());
-            if sdk_part.is_none() && min_part.is_none() {
-                break;
-            }
-            let Some(sdk_part) = sdk_part.map_or(Some(0), |part| part.parse::<u32>().ok()) else {
-                return false;
-            };
-            let Some(min_part) = min_part.map_or(Some(0), |part| part.parse::<u32>().ok()) else {
-                return false;
-            };
-            if ordering == std::cmp::Ordering::Equal {
-                ordering = sdk_part.cmp(&min_part);
-            }
-        }
-        ordering != std::cmp::Ordering::Less
+        sdk_version_meets_min(sdk, min)
     }
+}
+
+/// Numeric dotted-version comparison: missing components count as zero and
+/// any unparseable component fails closed.
+fn sdk_version_meets_min(sdk: &str, min: &str) -> bool {
+    // Fail closed: a version string with an unparseable component must not
+    // silently compare as if the component were absent. Keep consuming
+    // both iterators after the first difference so a late invalid component
+    // still rejects the entire version without allocating component vectors.
+    let mut sdk_parts = sdk.split('.');
+    let mut min_parts = min.split('.');
+    let mut ordering = std::cmp::Ordering::Equal;
+    loop {
+        let (sdk_part, min_part) = (sdk_parts.next(), min_parts.next());
+        if sdk_part.is_none() && min_part.is_none() {
+            break;
+        }
+        let Some(sdk_part) = sdk_part.map_or(Some(0), |part| part.parse::<u32>().ok()) else {
+            return false;
+        };
+        let Some(min_part) = min_part.map_or(Some(0), |part| part.parse::<u32>().ok()) else {
+            return false;
+        };
+        if ordering == std::cmp::Ordering::Equal {
+            ordering = sdk_part.cmp(&min_part);
+        }
+    }
+    ordering != std::cmp::Ordering::Less
 }
 
 #[cfg(test)]
@@ -2322,8 +2328,134 @@ mod tests {
 
         server.await.unwrap();
     }
-}
 
-#[cfg(test)]
-#[path = "sync_coverage_tests.rs"]
-mod sync_coverage_tests;
+    #[test]
+    fn redacted_url_drops_everything_from_the_first_question_mark() {
+        let cases = [
+            (
+                "https://cdn.example.com/manifest?token=secret",
+                "https://cdn.example.com/manifest",
+            ),
+            (
+                "https://cdn.example.com/manifest",
+                "https://cdn.example.com/manifest",
+            ),
+            (
+                "https://cdn.example.com/m?a=1?b=2",
+                "https://cdn.example.com/m",
+            ),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(redacted_url(url), expected, "case: {url}");
+        }
+    }
+
+    #[test]
+    fn to_hex_emits_lowercase_byte_pairs() {
+        assert_eq!(to_hex(&[]), "");
+        assert_eq!(to_hex(&[0xde, 0xad, 0x00, 0xff]), "dead00ff");
+    }
+
+    #[test]
+    fn sdk_version_comparison_is_numeric_and_fails_closed() {
+        let cases = [
+            ("0.4.10", "0.4.9", true, "numeric, not lexicographic"),
+            ("1.0.0.0", "1.0", true, "missing components are zero"),
+            ("1..0", "0.1", false, "empty component fails closed"),
+            (
+                "4294967296.0",
+                "0.1",
+                false,
+                "u32-overflowing component fails closed",
+            ),
+            (
+                "0.1",
+                "4294967296.0",
+                false,
+                "overflow in the minimum fails closed",
+            ),
+        ];
+        for (sdk, min, expected, case) in cases {
+            assert_eq!(
+                sdk_version_meets_min(sdk, min),
+                expected,
+                "{case}: {sdk} >= {min}"
+            );
+        }
+    }
+
+    fn signed_manifest_bytes(signing_key: &ed25519_dalek::SigningKey, body: &[u8]) -> Vec<u8> {
+        use ed25519_dalek::Signer;
+        let signature = signing_key.sign(body);
+        let mut bytes = BASE64.encode(signature.to_bytes()).into_bytes();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    fn minimal_manifest_json() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "signing_keys": [],
+            "sequences": [],
+            "removed": [],
+            "manifest_version": 7,
+            "generated_at": Utc::now(),
+        }))
+        .unwrap()
+    }
+
+    async fn orchestrator_trusting(pubkey: VerifyingKey) -> SyncOrchestrator {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        SyncOrchestrator::new(
+            mobile_storage,
+            sqlite,
+            RootKey { pubkey },
+            "0.4.0".to_string(),
+            50,
+        )
+    }
+
+    #[tokio::test]
+    async fn manifest_signed_by_the_root_key_parses() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let orch = orchestrator_trusting(signing_key.verifying_key()).await;
+        let bytes = signed_manifest_bytes(&signing_key, &minimal_manifest_json());
+
+        let manifest = orch.verify_and_parse_manifest(&bytes).unwrap();
+
+        assert_eq!(manifest.manifest_version, 7);
+        assert!(manifest.sequences.is_empty());
+    }
+
+    #[tokio::test]
+    async fn manifest_signed_by_another_key_is_rejected_as_a_signature_failure() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let other = ed25519_dalek::SigningKey::from_bytes(&[3u8; 32]);
+        let orch = orchestrator_trusting(other.verifying_key()).await;
+        let bytes = signed_manifest_bytes(&signing_key, &minimal_manifest_json());
+
+        let error = orch
+            .verify_and_parse_manifest(&bytes)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("signature verification failed"), "{error}");
+        assert!(
+            !error.contains("base64"),
+            "a well-formed signature from the wrong key fails at verification, not decoding: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_with_a_non_base64_signature_is_rejected_before_verification() {
+        let orch = orchestrator_trusting(VerifyingKey::from_bytes(&[0u8; 32]).unwrap()).await;
+
+        let error = orch
+            .verify_and_parse_manifest(b"!!!not-base64!!!\n{}")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("base64 decode failed"), "{error}");
+    }
+}

@@ -207,5 +207,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "support_bundle_coverage_tests.rs"]
-mod support_bundle_coverage_tests;
+#[path = "support_bundle_redaction_tests.rs"]
+mod support_bundle_redaction_tests;

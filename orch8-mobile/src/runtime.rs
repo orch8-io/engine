@@ -82,10 +82,12 @@ mod tests {
     fn blocking_pool_is_bounded_for_mobile_memory() {
         assert_eq!(blocking_thread_limit(0), 4);
         assert_eq!(blocking_thread_limit(4), 8);
+        assert_eq!(blocking_thread_limit(28), 32, "exactly at the ceiling");
         assert_eq!(blocking_thread_limit(128), 32);
+        assert_eq!(
+            blocking_thread_limit(u32::MAX),
+            32,
+            "headroom addition saturates instead of overflowing"
+        );
     }
 }
-
-#[cfg(test)]
-#[path = "runtime_coverage_tests.rs"]
-mod runtime_coverage_tests;

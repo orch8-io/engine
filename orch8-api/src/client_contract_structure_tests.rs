@@ -257,3 +257,34 @@ fn coverage_contract_028_required_operation_set_is_pinned_at_four() {
     // representative set must update generators and this pin together.
     assert_eq!(REQUIRED_OPERATIONS.len(), 4);
 }
+
+// --- JSON-pointer escaping (RFC 6901). ---
+
+#[test]
+fn escape_follows_rfc6901_order() {
+    // `~` must become `~0` BEFORE `/` becomes `~1`; the reverse order would
+    // turn `/` into `~1` and then into `~01`.
+    let cases = [
+        ("empty", "", ""),
+        ("nested path", "/instances/{id}", "~1instances~1{id}"),
+        ("tilde then slash", "~/", "~0~1"),
+        ("slash then tilde", "/~", "~1~0"),
+        ("literal escape text", "~1", "~01"),
+        ("already escaped input", "~0", "~00"),
+    ];
+    for (case, input, expected) in cases {
+        assert_eq!(escape(input), expected, "case: {case}");
+    }
+}
+
+#[test]
+fn escaped_path_with_tilde_resolves_as_one_pointer_segment() {
+    let document = serde_json::json!({
+        "paths": { "/a~b/{id}": { "get": { "responses": {} } } }
+    });
+    let pointer = format!("/paths/{}/get", escape("/a~b/{id}"));
+    assert!(
+        document.pointer(&pointer).is_some(),
+        "pointer {pointer} must resolve the `/a~b/{{id}}` path item"
+    );
+}

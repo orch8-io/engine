@@ -464,7 +464,7 @@ fault_impl! {
         async fn enqueue_collapsible_wake(&self, wake: &orch8_push::CollapsibleWake) -> Result<Uuid, String>;
         async fn claim_due_wakes(&self, now: DateTime<Utc>, lease_until: DateTime<Utc>, limit: u32) -> Result<Vec<orch8_push::ClaimedWake>, String>;
         async fn record_wake_outcome(&self, wake: &orch8_push::ClaimedWake, outcome: &orch8_push::WakeAttemptOutcome, recorded_at: DateTime<Utc>) -> Result<(), String>;
-        async fn record_command_acks(&self, device_id: &str, command_ids: &[String], acked_at: DateTime<Utc>) -> Result<u64, String>;
+        async fn record_command_acks(&self, tenant_id: &str, device_id: &str, command_ids: &[String], acked_at: DateTime<Utc>) -> Result<u64, String>;
         async fn prune_wakes(&self, created_before: DateTime<Utc>) -> Result<u64, String>;
     }
 }

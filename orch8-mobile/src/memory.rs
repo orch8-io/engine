@@ -153,8 +153,80 @@ mod tests {
         assert_eq!(sampler.over_budget(0), None);
         assert!(sampler.state.lock().unwrap().checked_at.is_none());
     }
-}
 
-#[cfg(test)]
-#[path = "memory_coverage_tests.rs"]
-mod memory_coverage_tests;
+    #[test]
+    fn tiny_budget_reports_the_sampled_rss_as_over_budget() {
+        if current_rss_bytes().is_some() {
+            let sampler = MemoryBudgetSampler::default();
+
+            let reported = sampler.over_budget(1);
+
+            assert!(
+                reported.is_some_and(|rss| rss > 1),
+                "a 1-byte budget is always exceeded"
+            );
+            assert!(rss_over_budget(1).is_some());
+        }
+    }
+
+    #[test]
+    fn sampler_serves_a_cached_over_budget_sample_without_reprobing() {
+        if current_rss_bytes().is_some() {
+            let sampler = MemoryBudgetSampler::default();
+            let first = sampler.over_budget(1);
+            let first_check = sampler.state.lock().unwrap().checked_at;
+
+            let second = sampler.over_budget(1);
+
+            assert_eq!(first, second);
+            assert_eq!(sampler.state.lock().unwrap().checked_at, first_check);
+        }
+    }
+
+    #[test]
+    fn cached_rss_is_reevaluated_against_a_changed_budget_without_reprobing() {
+        let sampler = MemoryBudgetSampler::default();
+        let checked_at = Instant::now();
+        *sampler.state.lock().unwrap() = MemorySampleState {
+            checked_at: Some(checked_at),
+            rss: Some(1_024),
+            exceeded: true,
+        };
+
+        assert_eq!(sampler.over_budget(u64::MAX), None);
+        assert_eq!(sampler.state.lock().unwrap().checked_at, Some(checked_at));
+        assert_eq!(sampler.over_budget(1), Some(1_024));
+        assert_eq!(sampler.state.lock().unwrap().checked_at, Some(checked_at));
+    }
+
+    fn sampler_checked(ago: Duration, exceeded: bool) -> (MemoryBudgetSampler, Instant) {
+        let checked_at = Instant::now()
+            .checked_sub(ago)
+            .expect("monotonic clock is past the test offset");
+        let sampler = MemoryBudgetSampler::default();
+        *sampler.state.lock().unwrap() = MemorySampleState {
+            checked_at: Some(checked_at),
+            rss: Some(1_024),
+            exceeded,
+        };
+        (sampler, checked_at)
+    }
+
+    #[test]
+    fn exceeded_sampler_reprobes_after_the_short_interval() {
+        let (sampler, checked_at) = sampler_checked(Duration::from_secs(6), true);
+
+        sampler.over_budget(1);
+
+        assert_ne!(sampler.state.lock().unwrap().checked_at, Some(checked_at));
+    }
+
+    #[test]
+    fn healthy_sampler_keeps_its_sample_until_the_long_interval() {
+        let (sampler, checked_at) = sampler_checked(Duration::from_secs(6), false);
+
+        sampler.over_budget(u64::MAX);
+
+        assert_eq!(sampler.state.lock().unwrap().checked_at, Some(checked_at));
+    }
+}

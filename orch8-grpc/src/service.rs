@@ -2493,14 +2493,14 @@ mod tests {
 }
 
 #[cfg(test)]
-mod artifact_transfer_coverage_tests;
+mod artifact_transfer_tests;
 #[cfg(test)]
-mod runtime_session_coverage_tests;
+mod request_guard_tests;
+#[cfg(test)]
+mod runtime_session_tests;
 #[cfg(test)]
 mod sanitize_tests;
 #[cfg(test)]
-mod service_helpers_coverage_tests;
+mod telemetry_ingest_tests;
 #[cfg(test)]
-mod telemetry_coverage_tests;
-#[cfg(test)]
-mod worker_session_coverage_tests;
+mod worker_stream_protocol_tests;

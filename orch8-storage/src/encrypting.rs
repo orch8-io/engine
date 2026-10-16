@@ -3246,7 +3246,3 @@ mod tests {
         assert!(enc.artifacts_enabled(), "wrapper must delegate to inner");
     }
 }
-
-#[cfg(test)]
-#[path = "encrypting_push_coverage_tests.rs"]
-mod encrypting_push_coverage_tests;

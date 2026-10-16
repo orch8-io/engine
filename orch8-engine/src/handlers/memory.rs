@@ -191,7 +191,7 @@ pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
         &metadata,
         &authorization,
         retention_secs,
-        &ctx,
+        &ctx.block_id,
     )?;
     match scope {
         MemoryScope::Instance => {
@@ -886,7 +886,7 @@ fn memory_record(
     metadata: &Value,
     authorization: &MemoryAuthorization,
     retention_secs: u64,
-    ctx: &StepContext,
+    block_id: &orch8_types::ids::BlockId,
 ) -> Result<Value, StepError> {
     let created_at = Utc::now();
     let retention = i64::try_from(retention_secs)
@@ -913,7 +913,7 @@ fn memory_record(
             "tenant_id": authorization.tenant_id,
             "sequence_id": authorization.sequence_id,
             "instance_id": authorization.instance_id,
-            "block_id": ctx.block_id,
+            "block_id": block_id,
             "policy_version": authorization.policy_version,
             "residency": authorization.residency,
             "created_at": created_at,
@@ -1601,55 +1601,408 @@ mod tests {
         }
     }
 
-    #[test]
-    fn governance_filters_expired_and_legacy_shared_records() {
-        let now = Utc::now();
-        let authorization = MemoryAuthorization {
-            sequence_id: orch8_types::ids::SequenceId::new(),
-            tenant_id: "tenant-a".into(),
-            instance_id: "instance-a".into(),
-            residency: "br-south-1".into(),
-            policy_version: 1,
-            default_retention_secs: 60,
-            max_retention_secs: 120,
-        };
-        let governed = |expires_at: DateTime<Utc>| {
-            json!({
-                "text": "fact",
-                "embedding": [1.0],
-                "metadata": {},
-                "governance": {
-                    "tenant_id": "tenant-a",
-                    "instance_id": "instance-a",
-                    "residency": "br-south-1",
-                    "expires_at": expires_at,
+    mod governance {
+        //! Governed durable memory: records carry a v1 provenance envelope
+        //! (tenant, residency, instance, expiry, content commitment). Reads
+        //! keep only records that match the caller's authorization, purge
+        //! expired ones, and fail closed on anything else. Unversioned
+        //! records without an envelope are readable only from instance scope.
+
+        use super::*;
+        use chrono::{Duration, TimeZone};
+        use orch8_types::ids::{BlockId, SequenceId};
+
+        fn authorization() -> MemoryAuthorization {
+            MemoryAuthorization {
+                sequence_id: SequenceId::new(),
+                tenant_id: "tenant-a".into(),
+                instance_id: "instance-a".into(),
+                residency: "br-south-1".into(),
+                policy_version: 3,
+                default_retention_secs: 60,
+                max_retention_secs: 120,
+            }
+        }
+
+        fn now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 7, 25, 12, 0, 0).unwrap()
+        }
+
+        fn block() -> BlockId {
+            BlockId::new("mem")
+        }
+
+        /// A record exactly as `memory_store` writes it (schema v1), with
+        /// its expiry moved to `expires_at`. Expiry is not part of the
+        /// content commitment, so the record stays valid.
+        fn governed_record(auth: &MemoryAuthorization, expires_at: DateTime<Utc>) -> Value {
+            let mut record =
+                memory_record(Some("fact"), &[1.0], None, &json!({}), auth, 60, &block()).unwrap();
+            record["governance"]["expires_at"] = json!(expires_at.to_rfc3339());
+            record
+        }
+
+        fn legacy_record() -> Value {
+            json!({"text": "old", "embedding": [1.0], "metadata": {}})
+        }
+
+        fn filter(records: Vec<(&str, Value)>, scope: MemoryScope) -> (Vec<String>, Vec<String>) {
+            let records = records
+                .into_iter()
+                .map(|(key, record)| (key.to_string(), record))
+                .collect();
+            let (active, expired) = governed_records(records, &authorization(), scope, now());
+            (active.into_iter().map(|(key, _)| key).collect(), expired)
+        }
+
+        #[test]
+        fn retention_defaults_to_policy_and_must_be_within_policy_bounds() {
+            let auth = authorization();
+            let cases = [
+                ("missing uses policy default", json!({}), Some(60)),
+                ("inside range", json!({"retention_secs": 30}), Some(30)),
+                ("policy maximum", json!({"retention_secs": 120}), Some(120)),
+                ("zero", json!({"retention_secs": 0}), None),
+                ("above policy maximum", json!({"retention_secs": 121}), None),
+                ("string", json!({"retention_secs": "soon"}), None),
+                ("negative", json!({"retention_secs": -1}), None),
+                ("null", json!({"retention_secs": null}), None),
+            ];
+            for (case, params, expected) in cases {
+                let result = retention_secs(&params, &auth);
+                match expected {
+                    Some(secs) => assert_eq!(result.unwrap(), secs, "{case}"),
+                    None => assert!(
+                        matches!(result, Err(StepError::Permanent { .. })),
+                        "{case}: {result:?}"
+                    ),
                 }
-            })
-        };
-        let records = vec![
-            (
-                "active".into(),
-                governed(now + chrono::Duration::seconds(1)),
-            ),
-            (
-                "expired".into(),
-                governed(now - chrono::Duration::seconds(1)),
-            ),
-            (
-                "legacy".into(),
-                json!({"text": "old", "embedding": [1.0], "metadata": {}}),
-            ),
-        ];
+            }
+        }
 
-        let (active, expired) =
-            governed_records(records.clone(), &authorization, MemoryScope::Tenant, now);
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].0, "active");
-        assert_eq!(expired, vec!["expired"]);
+        #[test]
+        fn out_of_range_retention_error_names_the_policy_bound() {
+            let error =
+                retention_secs(&json!({"retention_secs": 121}), &authorization()).unwrap_err();
 
-        let (instance_active, _) =
-            governed_records(records, &authorization, MemoryScope::Instance, now);
-        assert!(instance_active.iter().any(|(key, _)| key == "legacy"));
+            assert!(error.to_string().contains("1..=120"), "{error}");
+        }
+
+        #[test]
+        fn reads_keep_active_records_and_purge_expired_ones() {
+            let auth = authorization();
+            let records = vec![
+                (
+                    "fresh",
+                    governed_record(&auth, now() + Duration::seconds(10)),
+                ),
+                (
+                    "stale",
+                    governed_record(&auth, now() - Duration::seconds(10)),
+                ),
+                ("edge", governed_record(&auth, now())),
+                ("legacy", legacy_record()),
+            ];
+
+            let tenant = filter(records.clone(), MemoryScope::Tenant);
+            let instance = filter(records, MemoryScope::Instance);
+
+            assert_eq!(
+                tenant.0,
+                vec!["fresh"],
+                "legacy records fail closed in tenant scope"
+            );
+            assert_eq!(
+                tenant.1,
+                vec!["stale", "edge"],
+                "expiry at exactly now is expired"
+            );
+            assert_eq!(instance.0, vec!["fresh", "legacy"]);
+        }
+
+        #[test]
+        fn records_outside_the_authorization_are_dropped_without_purging() {
+            type Mutate = fn(&mut Value);
+            let cases: &[(&str, MemoryScope, Mutate, bool)] = &[
+                ("unchanged", MemoryScope::Tenant, |_| {}, true),
+                (
+                    "foreign tenant",
+                    MemoryScope::Tenant,
+                    |r| r["governance"]["tenant_id"] = json!("tenant-b"),
+                    false,
+                ),
+                (
+                    "other residency",
+                    MemoryScope::Tenant,
+                    |r| r["governance"]["residency"] = json!("eu-west-1"),
+                    false,
+                ),
+                (
+                    "missing expiry",
+                    MemoryScope::Tenant,
+                    |r| {
+                        r["governance"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("expires_at");
+                    },
+                    false,
+                ),
+                (
+                    "malformed expiry",
+                    MemoryScope::Tenant,
+                    |r| r["governance"]["expires_at"] = json!("not-a-date"),
+                    false,
+                ),
+                (
+                    "other instance in instance scope",
+                    MemoryScope::Instance,
+                    |r| r["governance"]["instance_id"] = json!("instance-b"),
+                    false,
+                ),
+                (
+                    "other instance in tenant scope",
+                    MemoryScope::Tenant,
+                    |r| r["governance"]["instance_id"] = json!("instance-b"),
+                    true,
+                ),
+            ];
+            for (case, scope, mutate, kept) in cases {
+                let mut record = governed_record(&authorization(), now() + Duration::seconds(10));
+                mutate(&mut record);
+
+                let (active, expired) = filter(vec![("k", record)], *scope);
+
+                assert_eq!(active.len() == 1, *kept, "{case}");
+                assert!(
+                    expired.is_empty(),
+                    "{case}: rejected records are never purged"
+                );
+            }
+        }
+
+        #[test]
+        fn governed_records_reject_tampered_committed_content() {
+            let auth = authorization();
+            let record = memory_record(
+                Some("fact"),
+                &[1.0, 0.0],
+                Some("model-a"),
+                &json!({"source": "trusted"}),
+                &auth,
+                60,
+                &block(),
+            )
+            .unwrap();
+            let mut changed_vector = record.clone();
+            changed_vector["embedding"] = json!([0.0, 1.0]);
+            let mut changed_metadata = record.clone();
+            changed_metadata["metadata"] = json!({"source": "forged"});
+            let mut malformed_hash = record.clone();
+            malformed_hash["governance"]["content_sha256"] = json!(42);
+            let mut missing_hash = record.clone();
+            missing_hash["governance"]
+                .as_object_mut()
+                .unwrap()
+                .remove("content_sha256");
+            let mut unknown_schema = record.clone();
+            unknown_schema["governance"]["schema_version"] = json!(2);
+
+            let (active, expired) = governed_records(
+                vec![
+                    ("valid".into(), record),
+                    ("vector".into(), changed_vector),
+                    ("metadata".into(), changed_metadata),
+                    ("malformed".into(), malformed_hash),
+                    ("missing".into(), missing_hash),
+                    ("unknown-schema".into(), unknown_schema),
+                ],
+                &auth,
+                MemoryScope::Instance,
+                Utc::now(),
+            );
+            assert_eq!(active.len(), 1);
+            assert_eq!(active[0].0, "valid");
+            assert!(expired.is_empty());
+        }
+
+        #[test]
+        #[ignore = "BUG: governed record with schema_version and content_sha256 stripped is accepted as legacy (T4 #6) — fixed on test/bugs"]
+        fn stripping_the_schema_version_does_not_bypass_the_content_commitment() {
+            let mut record = governed_record(&authorization(), now() + Duration::seconds(10));
+            let governance = record["governance"].as_object_mut().unwrap();
+            governance.remove("schema_version");
+            governance.remove("content_sha256");
+            record["text"] = json!("forged");
+
+            let (active, expired) = filter(vec![("forged", record)], MemoryScope::Tenant);
+
+            assert!(
+                active.is_empty(),
+                "tampered record served from shared memory"
+            );
+            assert!(expired.is_empty());
+        }
+
+        #[test]
+        fn record_envelope_records_full_provenance() {
+            let auth = authorization();
+
+            let record = memory_record(
+                Some("the sky"),
+                &[0.1, 0.2],
+                None,
+                &json!({"src": "test"}),
+                &auth,
+                60,
+                &block(),
+            )
+            .unwrap();
+
+            let governance = &record["governance"];
+            assert_eq!(governance["schema_version"], 1);
+            assert_eq!(governance["tenant_id"], "tenant-a");
+            assert_eq!(
+                governance["sequence_id"],
+                json!(auth.sequence_id.to_string())
+            );
+            assert_eq!(governance["instance_id"], "instance-a");
+            assert_eq!(governance["block_id"], "mem");
+            assert_eq!(governance["policy_version"], 3);
+            assert_eq!(governance["residency"], "br-south-1");
+            assert_eq!(record["text"], "the sky");
+            assert_eq!(record["embedding"][1], 0.2);
+        }
+
+        #[test]
+        fn record_expires_exactly_retention_seconds_after_creation() {
+            let record = memory_record(
+                None,
+                &[1.0],
+                None,
+                &json!({}),
+                &authorization(),
+                90,
+                &block(),
+            )
+            .unwrap();
+
+            let at = |field: &str| {
+                DateTime::parse_from_rfc3339(record["governance"][field].as_str().unwrap()).unwrap()
+            };
+            assert_eq!(at("expires_at") - at("created_at"), Duration::seconds(90));
+        }
+
+        #[test]
+        fn content_commitment_covers_content_but_not_provenance_or_retention() {
+            let auth = authorization();
+            let mut other_auth = authorization();
+            other_auth.instance_id = "instance-b".into();
+            other_auth.policy_version = 9;
+            let hash = |text: &str,
+                        embedding: &[f64],
+                        model: Option<&str>,
+                        metadata: Value,
+                        auth: &MemoryAuthorization,
+                        retention: u64| {
+                memory_record(
+                    Some(text),
+                    embedding,
+                    model,
+                    &metadata,
+                    auth,
+                    retention,
+                    &block(),
+                )
+                .unwrap()["governance"]["content_sha256"]
+                    .clone()
+            };
+            let base = hash("fact", &[1.0], None, json!({"a": 1}), &auth, 60);
+
+            let same = [
+                (
+                    "repeat",
+                    hash("fact", &[1.0], None, json!({"a": 1}), &auth, 60),
+                ),
+                (
+                    "other provenance",
+                    hash("fact", &[1.0], None, json!({"a": 1}), &other_auth, 60),
+                ),
+                (
+                    "other retention",
+                    hash("fact", &[1.0], None, json!({"a": 1}), &auth, 120),
+                ),
+            ];
+            let different = [
+                (
+                    "text",
+                    hash("other", &[1.0], None, json!({"a": 1}), &auth, 60),
+                ),
+                (
+                    "embedding",
+                    hash("fact", &[0.5], None, json!({"a": 1}), &auth, 60),
+                ),
+                (
+                    "model",
+                    hash("fact", &[1.0], Some("m"), json!({"a": 1}), &auth, 60),
+                ),
+                (
+                    "metadata",
+                    hash("fact", &[1.0], None, json!({"a": 2}), &auth, 60),
+                ),
+            ];
+            for (case, value) in same {
+                assert_eq!(value, base, "{case}");
+            }
+            for (case, value) in different {
+                assert_ne!(value, base, "{case}");
+            }
+        }
+
+        #[test]
+        fn unrepresentable_retention_is_rejected() {
+            let cases = [
+                (u64::MAX, "too large"),
+                (i64::MAX as u64, "supported duration range"),
+                ((i64::MAX / 1_000) as u64, "supported timestamp range"),
+            ];
+            for (retention, needle) in cases {
+                let error = memory_record(
+                    Some("fact"),
+                    &[1.0],
+                    None,
+                    &json!({}),
+                    &authorization(),
+                    retention,
+                    &block(),
+                )
+                .unwrap_err();
+
+                assert!(
+                    error.to_string().contains(needle),
+                    "retention {retention}: {error}"
+                );
+            }
+        }
+
+        #[test]
+        fn ranked_results_expose_provenance_and_null_for_legacy_records() {
+            let auth = authorization();
+            let records = vec![
+                (
+                    "governed".to_string(),
+                    governed_record(&auth, now() + Duration::seconds(10)),
+                ),
+                ("legacy".to_string(), legacy_record()),
+            ];
+
+            let results = rank_memories(&[1.0], records, 5, None);
+
+            let provenance =
+                |key: &str| results.iter().find(|r| r["key"] == key).unwrap()["provenance"].clone();
+            assert_eq!(provenance("governed")["residency"], "br-south-1");
+            assert_eq!(provenance("legacy"), Value::Null);
+        }
     }
 }
 
@@ -2386,7 +2739,7 @@ mod net_tests {
             &json!({}),
             &authorization,
             3_600,
-            &ctx,
+            &ctx.block_id,
         )
         .unwrap();
         for index in 0..MAX_SHARED_RECORDS {
@@ -2673,7 +3026,3 @@ mod net_tests {
         assert_eq!(resolve_model(&json!({ "model": "custom" })), "custom");
     }
 }
-
-#[cfg(test)]
-#[path = "memory_coverage_tests.rs"]
-mod memory_coverage_tests;

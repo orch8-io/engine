@@ -125,7 +125,7 @@ fault_impl! {
         async fn upsert_event_wait(&self, wait: &orch8_types::event_correlation::EventWait) -> Result<(), StorageError>;
         async fn get_event_wait(&self, instance_id: InstanceId, block_id: &str) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError>;
         async fn find_waiting_event_waits(&self, tenant_id: &str, event_name: &str, correlation_key: &str) -> Result<Vec<orch8_types::event_correlation::EventWait>, StorageError>;
-        async fn update_event_wait(&self, wait: &orch8_types::event_correlation::EventWait, expected_status: orch8_types::event_correlation::WaitStatus) -> Result<bool, StorageError>;
+        async fn update_event_wait(&self, wait: &orch8_types::event_correlation::EventWait, expected_status: orch8_types::event_correlation::WaitStatus, expected_matched_event_ids: &[Uuid]) -> Result<bool, StorageError>;
         async fn expire_events_before(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<u64, StorageError>;
         async fn get_pending_signals_batch(&self, instance_ids: &[InstanceId]) -> Result<std::collections::HashMap<InstanceId, Vec<Signal>>, StorageError>;
         async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;

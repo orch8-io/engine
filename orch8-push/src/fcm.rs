@@ -435,6 +435,16 @@ mod tests {
             classify_fcm_response(StatusCode::OK, ""),
             FcmOutcome::Success
         );
+        assert_eq!(
+            classify_fcm_response(StatusCode::CREATED, ""),
+            FcmOutcome::Success
+        );
+        // A 2xx is never misread as retryable even if the body mentions quota.
+        let quota_looking = r#"{"name":"projects/p/messages/1","status":"RESOURCE_EXHAUSTED"}"#;
+        assert_eq!(
+            classify_fcm_response(StatusCode::OK, quota_looking),
+            FcmOutcome::Success
+        );
     }
 
     /// M-21: only the structured per-token error
@@ -461,10 +471,41 @@ mod tests {
             classify_fcm_response(StatusCode::NOT_FOUND, body),
             FcmOutcome::Permanent
         );
-        let body2 = r#"{"error":{"code":404,"message":"UNREGISTERED"}}"#;
+        let cases = [
+            (
+                "UNREGISTERED only in the message string",
+                StatusCode::NOT_FOUND,
+                r#"{"error":{"code":404,"message":"UNREGISTERED"}}"#,
+            ),
+            (
+                "details is an object, not an array",
+                StatusCode::NOT_FOUND,
+                r#"{"error":{"details":{"errorCode":"UNREGISTERED"}}}"#,
+            ),
+            (
+                "malformed JSON body",
+                StatusCode::NOT_FOUND,
+                "not json at all",
+            ),
+            ("bare 410", StatusCode::GONE, ""),
+        ];
+        for (case, status, body) in cases {
+            assert_eq!(
+                classify_fcm_response(status, body),
+                FcmOutcome::Permanent,
+                "{case}"
+            );
+        }
+    }
+
+    /// The structured dead-token signal takes precedence over 429/5xx retry
+    /// handling: retrying a token FCM says is unregistered can never succeed.
+    #[test]
+    fn classify_fcm_response_unregistered_detail_wins_over_retryable_status() {
+        let body = r#"{"error":{"code":429,"details":[{"errorCode":"UNREGISTERED"}]}}"#;
         assert_eq!(
-            classify_fcm_response(StatusCode::NOT_FOUND, body2),
-            FcmOutcome::Permanent
+            classify_fcm_response(StatusCode::TOO_MANY_REQUESTS, body),
+            FcmOutcome::InvalidToken
         );
     }
 
@@ -490,6 +531,12 @@ mod tests {
         let body3 = r#"{"error":{"code":500,"status":"QUOTA_EXCEEDED"}}"#;
         assert_eq!(
             classify_fcm_response(StatusCode::INTERNAL_SERVER_ERROR, body3),
+            FcmOutcome::Retryable
+        );
+        // Quota exhaustion on a non-auth 4xx still backs off.
+        let body4 = r#"{"error":{"code":400,"status":"RESOURCE_EXHAUSTED"}}"#;
+        assert_eq!(
+            classify_fcm_response(StatusCode::BAD_REQUEST, body4),
             FcmOutcome::Retryable
         );
     }
@@ -520,6 +567,10 @@ mod tests {
             classify_fcm_response(StatusCode::SERVICE_UNAVAILABLE, "{}"),
             FcmOutcome::Retryable
         );
+        assert_eq!(
+            classify_fcm_response(StatusCode::BAD_GATEWAY, "{}"),
+            FcmOutcome::Retryable
+        );
     }
 
     /// Other 4xx (malformed request, etc.) are permanent — retrying an
@@ -532,11 +583,67 @@ mod tests {
             FcmOutcome::Permanent
         );
     }
-}
 
-#[cfg(test)]
-#[path = "fcm_coverage_tests.rs"]
-mod fcm_coverage_tests;
+    #[test]
+    fn unsigned_wake_payload_is_a_data_only_sync_message() {
+        let payload = FcmProvider::wake_payload("token-a", None).expect("valid payload");
+        let message = &payload["message"];
+
+        assert_eq!(message["token"], "token-a");
+        assert_eq!(message["data"]["type"], "sync");
+        assert!(message.get("notification").is_none(), "silent wake only");
+        assert!(message["data"].get("orch8").is_none());
+    }
+
+    /// Error bodies are capped at `MAX_ERROR_BODY_LEN` bytes, cut on a char
+    /// boundary, and marked as truncated; bodies within the cap pass through.
+    #[test]
+    fn error_preview_caps_bodies_on_a_char_boundary() {
+        let at_limit = "a".repeat(MAX_ERROR_BODY_LEN);
+        assert_eq!(error_preview(&at_limit), at_limit);
+
+        let over = "a".repeat(MAX_ERROR_BODY_LEN + 1);
+        assert_eq!(error_preview(&over), format!("{at_limit}… (truncated)"));
+
+        // 'é' is two bytes, so a byte cut at the limit could split one.
+        let multibyte = "é".repeat(MAX_ERROR_BODY_LEN);
+        let preview = error_preview(&multibyte);
+        let prefix = preview
+            .strip_suffix("… (truncated)")
+            .expect("oversized body is marked truncated");
+        assert!(prefix.len() <= MAX_ERROR_BODY_LEN);
+        assert!(prefix.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn retry_backoff_saturates_instead_of_overflowing() {
+        assert_eq!(retry_backoff(63), Duration::from_millis(u64::MAX));
+    }
+
+    #[test]
+    fn malformed_service_account_json_is_a_config_error() {
+        let cases = [
+            ("not JSON", "{not json"),
+            (
+                "missing token_uri",
+                r#"{"client_email":"x@p.iam.gserviceaccount.com","private_key":"k"}"#,
+            ),
+        ];
+        for (case, json) in cases {
+            let result = FcmProvider::new(FcmConfig {
+                project_id: "p".into(),
+                service_account_json: json.to_owned().into(),
+            });
+            let Err(PushError::Config(message)) = result else {
+                panic!("{case}: expected a config error");
+            };
+            assert!(
+                message.contains("invalid FCM service account JSON"),
+                "{case}: {message}"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 #[path = "fcm_protocol_tests.rs"]
