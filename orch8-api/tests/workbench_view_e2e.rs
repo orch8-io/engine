@@ -262,6 +262,14 @@ async fn workbench_state_scheduled_for_fresh_instance() {
     assert_eq!(view["state"], "scheduled");
 }
 
+/// Move an instance to a terminal state (sequence deletion requires it).
+async fn finish(srv: &TestServer, inst: Uuid) {
+    srv.storage
+        .update_instance_state(InstanceId::from_uuid(inst), InstanceState::Cancelled, None)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn workbench_after_sequence_delete_is_404_for_the_cascaded_instance() {
     // `delete_sequence` explicitly deletes the sequence's instances
@@ -272,6 +280,8 @@ async fn workbench_after_sequence_delete_is_404_for_the_cascaded_instance() {
     let client = reqwest::Client::new();
     let (seq, inst) = fixture(&srv, &client, json!({"k": "v"})).await;
     record_output(&srv, inst, "a", json!({"ok": 1})).await;
+    // Storage refuses to delete a sequence that live instances still run.
+    finish(&srv, inst).await;
     srv.storage
         .delete_sequence(SequenceId::from_uuid(seq))
         .await
@@ -1378,6 +1388,7 @@ async fn fork_preview_missing_sequence_404() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
     let (seq, inst) = fixture(&srv, &client, json!({})).await;
+    finish(&srv, inst).await;
     srv.storage
         .delete_sequence(SequenceId::from_uuid(seq))
         .await
