@@ -89,6 +89,19 @@ pub const QUEUE_DEPTH: &str = "orch8_queue_depth";
 /// Pending placed tasks no live runtime satisfies, `{capability,region}`.
 pub const PLACEMENT_UNSATISFIED: &str = "orch8_placement_unsatisfied";
 pub const ACTIVE_TASKS: &str = "orch8_active_tasks";
+/// `{loop}`: unix time of the last completed pass of a background loop.
+pub const BACKGROUND_LOOP_LAST_RUN: &str = "orch8_background_loop_last_run_timestamp_seconds";
+/// `{loop}`: restarts of a supervised background loop after it panicked or
+/// returned while the engine was still running.
+pub const BACKGROUND_LOOP_RESTARTS: &str = "orch8_background_loop_restarts_total";
+
+/// Stamp a completed pass of background loop `name` (the per-loop liveness
+/// gauge operators alert on: `time() - gauge > N × period`).
+pub fn loop_pass(name: &'static str) {
+    #[allow(clippy::cast_precision_loss)]
+    let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+    gauge!(BACKGROUND_LOOP_LAST_RUN, "loop" => name).set(now);
+}
 
 /// Record a counter increment.
 pub fn inc(name: &'static str) {

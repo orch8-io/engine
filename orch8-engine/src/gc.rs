@@ -162,6 +162,7 @@ pub async fn run_gc_loop_with_ttl(
                     sweep_event_inbox(storage.as_ref()),
                     sweep_llm_cache(storage.as_ref()),
                 );
+                crate::metrics::loop_pass("gc");
             }
         }
     }

@@ -1136,6 +1136,7 @@ When `ORCH8_API_KEY` is set, the scraper must send it as `x-api-key` (and an `x-
 | `orch8_cron_triggered_total` | Cron instances created |
 | `orch8_cron_skipped_total` | Cron fires skipped by the `skip` overlap policy |
 | `orch8_sla_breached_total` | SLA breach events (`type` label: runtime vs step runtime) |
+| `orch8_background_loop_restarts_total{loop}` | Supervised background loop restarted after it panicked or exited while the engine was running |
 
 **Histograms:**
 
@@ -1153,6 +1154,7 @@ When `ORCH8_API_KEY` is set, the scraper must send it as `x-api-key` (and an `x-
 | `orch8_queue_depth{capability,region,priority_lane}` | Pending worker backlog for autoscaling ([Placement](PLACEMENT.md)) |
 | `orch8_placement_unsatisfied{capability,region}` | Pending placed tasks no live runtime satisfies |
 | `orch8_active_tasks` | Currently in-flight step executions |
+| `orch8_background_loop_last_run_timestamp_seconds{loop}` | Unix time of the last completed pass of a background loop (`tick`, `cron`, `node_heartbeat`, `node_reaper`, `worker_reaper`, `instance_reaper`, `gc`, `backlog_metrics`); alert on `time() - x > N × period` |
 
 ---
 

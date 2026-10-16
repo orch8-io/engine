@@ -252,32 +252,43 @@ impl Engine {
     #[allow(clippy::too_many_lines)]
     fn spawn_background_tasks(&self) -> JoinSet<()> {
         let mut set: JoinSet<()> = JoinSet::new();
+        // Every loop runs under `supervise` (L2-05): a loop that panics or
+        // returns while the engine is still running is restarted with
+        // backoff and counted in `orch8_background_loop_restarts_total{loop}`
+        // instead of silently disappearing until the next process restart.
+        let cancel = &self.cancel;
+
         // Cluster heartbeat + drain check (every 10 seconds).
         let hb_storage = Arc::clone(&self.storage);
-        let hb_cancel = self.cancel.clone();
         let hb_node_id = self.node_id;
         let drain_cancel = self.cancel.clone();
-        set.spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
-            loop {
-                tokio::select! {
-                    () = hb_cancel.cancelled() => break,
-                    _ = ticker.tick() => {
-                        if let Err(e) = hb_storage.heartbeat_node(hb_node_id).await {
-                            tracing::error!(error = %e, "cluster heartbeat failed");
-                        }
-                        match hb_storage.should_drain(hb_node_id).await {
-                            Ok(true) => {
-                                tracing::info!(node_id = %hb_node_id, "drain signal received — initiating shutdown");
-                                drain_cancel.cancel();
+        set.spawn(supervise("node_heartbeat", cancel.clone(), move || {
+            let hb_storage = Arc::clone(&hb_storage);
+            let hb_cancel = drain_cancel.clone();
+            let drain_cancel = drain_cancel.clone();
+            async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+                loop {
+                    tokio::select! {
+                        () = hb_cancel.cancelled() => break,
+                        _ = ticker.tick() => {
+                            if let Err(e) = hb_storage.heartbeat_node(hb_node_id).await {
+                                tracing::error!(error = %e, "cluster heartbeat failed");
                             }
-                            Ok(false) => {}
-                            Err(e) => tracing::error!(error = %e, "drain check failed"),
+                            match hb_storage.should_drain(hb_node_id).await {
+                                Ok(true) => {
+                                    tracing::info!(node_id = %hb_node_id, "drain signal received — initiating shutdown");
+                                    drain_cancel.cancel();
+                                }
+                                Ok(false) => {}
+                                Err(e) => tracing::error!(error = %e, "drain check failed"),
+                            }
+                            metrics::loop_pass("node_heartbeat");
                         }
                     }
                 }
             }
-        });
+        }));
 
         // Stale node reaper. Tick cadence + stale threshold come from
         // SchedulerConfig so tight-loop integration tests can shrink them.
@@ -285,24 +296,29 @@ impl Engine {
         let node_reaper_cancel = self.cancel.clone();
         let node_reaper_tick = Duration::from_secs(self.config.node_reaper_tick_secs);
         let node_reaper_stale = Duration::from_secs(self.config.node_reaper_stale_secs);
-        set.spawn(async move {
-            let mut ticker = tokio::time::interval(node_reaper_tick);
-            loop {
-                tokio::select! {
-                    () = node_reaper_cancel.cancelled() => break,
-                    _ = ticker.tick() => {
-                        match node_reaper_storage
-                            .reap_stale_nodes(node_reaper_stale)
-                            .await
-                        {
-                            Ok(0) => {}
-                            Ok(n) => tracing::info!(count = n, "reaped stale cluster nodes"),
-                            Err(e) => tracing::error!(error = %e, "cluster node reaper error"),
+        set.spawn(supervise("node_reaper", cancel.clone(), move || {
+            let node_reaper_storage = Arc::clone(&node_reaper_storage);
+            let node_reaper_cancel = node_reaper_cancel.clone();
+            async move {
+                let mut ticker = tokio::time::interval(node_reaper_tick);
+                loop {
+                    tokio::select! {
+                        () = node_reaper_cancel.cancelled() => break,
+                        _ = ticker.tick() => {
+                            match node_reaper_storage
+                                .reap_stale_nodes(node_reaper_stale)
+                                .await
+                            {
+                                Ok(0) => {}
+                                Ok(n) => tracing::info!(count = n, "reaped stale cluster nodes"),
+                                Err(e) => tracing::error!(error = %e, "cluster node reaper error"),
+                            }
+                            metrics::loop_pass("node_reaper");
                         }
                     }
                 }
             }
-        });
+        }));
 
         // Worker task reaper (resets stale claimed tasks). Tick + threshold
         // come from SchedulerConfig for the same reason as the node reaper.
@@ -310,37 +326,42 @@ impl Engine {
         let reaper_cancel = self.cancel.clone();
         let worker_reaper_tick = Duration::from_secs(self.config.worker_reaper_tick_secs);
         let worker_reaper_stale = Duration::from_secs(self.config.worker_reaper_stale_secs);
-        set.spawn(async move {
-            let mut ticker = tokio::time::interval(worker_reaper_tick);
-            loop {
-                tokio::select! {
-                    () = reaper_cancel.cancelled() => break,
-                    _ = ticker.tick() => {
-                        // Expired leases (per-task lease wins over the
-                        // default) and timed-out tasks. Side-effecting
-                        // tasks are never blindly requeued: their receipt
-                        // goes `unknown` and the step's retry policy
-                        // decides; timed-out tasks always advance.
-                        match crate::worker_lease::reap_worker_tasks(
-                            reaper_storage.as_ref(),
-                            worker_reaper_stale,
-                        )
-                        .await
-                        {
-                            Ok(report) if report.total() == 0 => {}
-                            Ok(report) => tracing::info!(
-                                requeued = report.requeued,
-                                ambiguous = report.ambiguous,
-                                timed_out = report.timed_out,
-                                stranded_finalized = report.stranded_finalized,
-                                "resolved expired worker tasks"
-                            ),
-                            Err(e) => tracing::error!(error = %e, "worker task reaper error"),
+        set.spawn(supervise("worker_reaper", cancel.clone(), move || {
+            let reaper_storage = Arc::clone(&reaper_storage);
+            let reaper_cancel = reaper_cancel.clone();
+            async move {
+                let mut ticker = tokio::time::interval(worker_reaper_tick);
+                loop {
+                    tokio::select! {
+                        () = reaper_cancel.cancelled() => break,
+                        _ = ticker.tick() => {
+                            // Expired leases (per-task lease wins over the
+                            // default) and timed-out tasks. Side-effecting
+                            // tasks are never blindly requeued: their receipt
+                            // goes `unknown` and the step's retry policy
+                            // decides; timed-out tasks always advance.
+                            match crate::worker_lease::reap_worker_tasks(
+                                reaper_storage.as_ref(),
+                                worker_reaper_stale,
+                            )
+                            .await
+                            {
+                                Ok(report) if report.total() == 0 => {}
+                                Ok(report) => tracing::info!(
+                                    requeued = report.requeued,
+                                    ambiguous = report.ambiguous,
+                                    timed_out = report.timed_out,
+                                    stranded_finalized = report.stranded_finalized,
+                                    "resolved expired worker tasks"
+                                ),
+                                Err(e) => tracing::error!(error = %e, "worker task reaper error"),
+                            }
+                            metrics::loop_pass("worker_reaper");
                         }
                     }
                 }
             }
-        });
+        }));
 
         // Stale instance reaper. Resets instances stuck in Running
         // back to Scheduled so the scheduler can re-process them. This is the
@@ -352,58 +373,72 @@ impl Engine {
         let inst_reaper_storage = Arc::clone(&self.storage);
         let inst_reaper_cancel = self.cancel.clone();
         let inst_reaper_threshold = Duration::from_secs(self.config.stale_instance_threshold_secs);
-        set.spawn(async move {
-            // Tick at half the threshold so detection latency is at most
-            // threshold + threshold/2 in the worst case.
-            let tick = std::cmp::max(inst_reaper_threshold / 2, Duration::from_secs(10));
-            let mut ticker = tokio::time::interval(tick);
-            loop {
-                tokio::select! {
-                    () = inst_reaper_cancel.cancelled() => break,
-                    _ = ticker.tick() => {
-                        match inst_reaper_storage
-                            .recover_stale_instances(inst_reaper_threshold)
-                            .await
-                        {
-                            Ok(0) => {}
-                            Ok(n) => tracing::warn!(
-                                count = n,
-                                threshold_secs = inst_reaper_threshold.as_secs(),
-                                "recovered stale instances (runtime reaper)"
-                            ),
-                            Err(e) => tracing::error!(error = %e, "stale instance reaper error"),
+        set.spawn(supervise("instance_reaper", cancel.clone(), move || {
+            let inst_reaper_storage = Arc::clone(&inst_reaper_storage);
+            let inst_reaper_cancel = inst_reaper_cancel.clone();
+            async move {
+                // Tick at half the threshold so detection latency is at most
+                // threshold + threshold/2 in the worst case.
+                let tick = std::cmp::max(inst_reaper_threshold / 2, Duration::from_secs(10));
+                let mut ticker = tokio::time::interval(tick);
+                loop {
+                    tokio::select! {
+                        () = inst_reaper_cancel.cancelled() => break,
+                        _ = ticker.tick() => {
+                            match inst_reaper_storage
+                                .recover_stale_instances(inst_reaper_threshold)
+                                .await
+                            {
+                                Ok(0) => {}
+                                Ok(n) => tracing::warn!(
+                                    count = n,
+                                    threshold_secs = inst_reaper_threshold.as_secs(),
+                                    "recovered stale instances (runtime reaper)"
+                                ),
+                                Err(e) => tracing::error!(error = %e, "stale instance reaper error"),
+                            }
+                            metrics::loop_pass("instance_reaper");
                         }
                     }
                 }
             }
-        });
+        }));
 
         // Cron loop.
         let cron_storage = Arc::clone(&self.storage);
         let cron_cancel = self.cancel.clone();
         let cron_tick = std::time::Duration::from_secs(self.config.cron_tick_secs);
         let cron_clock = self.config.clock.clone();
-        set.spawn(async move {
-            if let Err(e) =
-                cron::run_cron_loop_with_clock(cron_storage, cron_tick, cron_clock, cron_cancel)
-                    .await
-            {
-                tracing::error!(error = %e, "cron loop exited with error");
+        set.spawn(supervise("cron", cancel.clone(), move || {
+            let cron_storage = Arc::clone(&cron_storage);
+            let cron_cancel = cron_cancel.clone();
+            let cron_clock = cron_clock.clone();
+            async move {
+                if let Err(e) =
+                    cron::run_cron_loop_with_clock(cron_storage, cron_tick, cron_clock, cron_cancel)
+                        .await
+                {
+                    tracing::error!(error = %e, "cron loop exited with error");
+                }
             }
-        });
+        }));
 
         // Trigger processor loop (syncs trigger definitions every 15 seconds).
         let trigger_storage = Arc::clone(&self.storage);
         let trigger_cancel = self.cancel.clone();
-        set.spawn(async move {
-            triggers::run_trigger_loop(
-                trigger_storage,
-                std::time::Duration::from_secs(15),
-                trigger_cancel,
-            )
-            .await;
-            tracing::info!("trigger processor loop exited");
-        });
+        set.spawn(supervise("triggers", cancel.clone(), move || {
+            let trigger_storage = Arc::clone(&trigger_storage);
+            let trigger_cancel = trigger_cancel.clone();
+            async move {
+                triggers::run_trigger_loop(
+                    trigger_storage,
+                    std::time::Duration::from_secs(15),
+                    trigger_cancel,
+                )
+                .await;
+                tracing::info!("trigger processor loop exited");
+            }
+        }));
 
         // Durable webhook outbox. Terminal events are committed alongside the
         // instance state transition; this loop owns network delivery and
@@ -411,10 +446,15 @@ impl Engine {
         let webhook_storage = Arc::clone(&self.storage);
         let webhook_config = self.config.webhooks.clone();
         let webhook_cancel = self.cancel.clone();
-        set.spawn(async move {
-            webhooks::run_outbox_loop(webhook_storage, webhook_config, webhook_cancel).await;
-            tracing::info!("webhook outbox loop exited");
-        });
+        set.spawn(supervise("webhook_outbox", cancel.clone(), move || {
+            let webhook_storage = Arc::clone(&webhook_storage);
+            let webhook_config = webhook_config.clone();
+            let webhook_cancel = webhook_cancel.clone();
+            async move {
+                webhooks::run_outbox_loop(webhook_storage, webhook_config, webhook_cancel).await;
+                tracing::info!("webhook outbox loop exited");
+            }
+        }));
 
         Self::spawn_credentials_refresh(&mut set, Arc::clone(&self.storage), self.cancel.clone());
 
@@ -434,30 +474,38 @@ impl Engine {
         // instance history, so a deployment must opt in explicitly.
         let instance_retention = (self.config.instance_retention_secs > 0)
             .then(|| Duration::from_secs(self.config.instance_retention_secs));
-        set.spawn(async move {
-            gc::run_gc_loop(
-                gc_storage,
-                gc::GC_DEFAULT_INTERVAL,
-                artifact_retention,
-                instance_retention,
-                gc_cancel,
-            )
-            .await;
-            tracing::info!("externalized gc loop exited");
-        });
+        set.spawn(supervise("gc", cancel.clone(), move || {
+            let gc_storage = Arc::clone(&gc_storage);
+            let gc_cancel = gc_cancel.clone();
+            async move {
+                gc::run_gc_loop(
+                    gc_storage,
+                    gc::GC_DEFAULT_INTERVAL,
+                    artifact_retention,
+                    instance_retention,
+                    gc_cancel,
+                )
+                .await;
+                tracing::info!("externalized gc loop exited");
+            }
+        }));
 
         // Autoscaling backlog gauges (`orch8_queue_depth{capability,region,
         // priority_lane}`, `orch8_placement_unsatisfied`) for KEDA/HPA.
         let backlog_storage = Arc::clone(&self.storage);
         let backlog_cancel = self.cancel.clone();
-        set.spawn(async move {
-            step_placement::run_backlog_metrics_loop(
-                backlog_storage,
-                step_placement::BACKLOG_METRICS_INTERVAL,
-                backlog_cancel,
-            )
-            .await;
-        });
+        set.spawn(supervise("backlog_metrics", cancel.clone(), move || {
+            let backlog_storage = Arc::clone(&backlog_storage);
+            let backlog_cancel = backlog_cancel.clone();
+            async move {
+                step_placement::run_backlog_metrics_loop(
+                    backlog_storage,
+                    step_placement::BACKLOG_METRICS_INTERVAL,
+                    backlog_cancel,
+                )
+                .await;
+            }
+        }));
 
         set
     }
@@ -470,16 +518,24 @@ impl Engine {
         storage: Arc<dyn StorageBackend>,
         cancel: CancellationToken,
     ) {
-        set.spawn(async move {
-            credentials::run_refresh_loop(
-                storage,
-                std::time::Duration::from_secs(60),
-                std::time::Duration::from_secs(300),
-                cancel,
-            )
-            .await;
-            tracing::info!("credentials refresh loop exited");
-        });
+        set.spawn(supervise(
+            "credentials_refresh",
+            cancel.clone(),
+            move || {
+                let storage = Arc::clone(&storage);
+                let cancel = cancel.clone();
+                async move {
+                    credentials::run_refresh_loop(
+                        storage,
+                        std::time::Duration::from_secs(60),
+                        std::time::Duration::from_secs(300),
+                        cancel,
+                    )
+                    .await;
+                    tracing::info!("credentials refresh loop exited");
+                }
+            },
+        ));
     }
 
     /// Register this engine instance as a cluster node.
@@ -513,6 +569,68 @@ impl Engine {
         } else {
             tracing::info!(node_id = %self.node_id, "cluster node deregistered");
         }
+    }
+}
+
+/// First delay before restarting a background loop that died.
+const LOOP_RESTART_INITIAL: Duration = Duration::from_secs(1);
+/// Cap on the restart delay.
+const LOOP_RESTART_MAX: Duration = Duration::from_secs(60);
+/// A loop that ran at least this long before dying restarts from the
+/// initial delay again (it was healthy; this is a fresh failure).
+const LOOP_HEALTHY_RUN: Duration = Duration::from_secs(60);
+
+/// Aborts the wrapped task when dropped, so aborting the supervisor (the
+/// engine's bounded shutdown drain calls `abort_all`) also stops the loop it
+/// runs instead of leaving it detached.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Run a background loop built by `make` until `cancel` fires, restarting it
+/// with capped exponential backoff whenever it panics or returns early
+/// (L2-05). Each restart increments
+/// `orch8_background_loop_restarts_total{loop=name}` and logs at `error!`.
+pub async fn supervise<F, Fut>(name: &'static str, cancel: CancellationToken, mut make: F)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut delay = LOOP_RESTART_INITIAL;
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let started = tokio::time::Instant::now();
+        let mut task = AbortOnDrop(tokio::spawn(make()));
+        let outcome = (&mut task.0).await;
+        if cancel.is_cancelled() {
+            return;
+        }
+        match outcome {
+            Ok(()) => tracing::error!(
+                background_loop = name,
+                "background loop exited while the engine is running; restarting"
+            ),
+            Err(e) => tracing::error!(
+                background_loop = name,
+                error = %e,
+                "background loop panicked; restarting"
+            ),
+        }
+        metrics::inc_with(metrics::BACKGROUND_LOOP_RESTARTS, &[("loop", name)]);
+        if started.elapsed() >= LOOP_HEALTHY_RUN {
+            delay = LOOP_RESTART_INITIAL;
+        }
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = tokio::time::sleep(delay) => {}
+        }
+        delay = (delay * 2).min(LOOP_RESTART_MAX);
     }
 }
 
@@ -628,6 +746,37 @@ mod shutdown_tests {
             0,
             "drain_background must always leave the set empty, even after timeout"
         );
+    }
+
+    /// L2-05: a background loop that panics (or returns) while the engine is
+    /// running is restarted; once cancel fires the supervisor exits.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn supervise_restarts_a_panicking_loop_until_cancelled() {
+        let cancel = CancellationToken::new();
+        let runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let runs_in = Arc::clone(&runs);
+        let token = cancel.clone();
+        let sup = tokio::spawn(supervise("test_loop", cancel.clone(), move || {
+            let runs = Arc::clone(&runs_in);
+            let token = token.clone();
+            async move {
+                let n = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match n {
+                    0 => panic!("loop bug"),
+                    1 => {} // early return: also restarted
+                    _ => token.cancelled().await,
+                }
+            }
+        }));
+        // Two restarts back off 1 s then 2 s (virtual time).
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 3);
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), sup)
+            .await
+            .expect("supervisor exits on cancel")
+            .unwrap();
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     /// L2-04: transient storage errors during startup are retried with

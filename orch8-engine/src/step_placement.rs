@@ -513,5 +513,6 @@ pub async fn run_backlog_metrics_loop(
             }
             Err(error) => tracing::warn!(%error, "queue backlog metrics scrape failed"),
         }
+        crate::metrics::loop_pass("backlog_metrics");
     }
 }

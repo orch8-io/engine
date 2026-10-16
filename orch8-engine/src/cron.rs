@@ -58,6 +58,7 @@ pub async fn run_cron_loop_with_clock(
                 if let Err(e) = process_cron_tick(&storage, &clock).await {
                     error!(error = %e, "cron tick failed");
                 }
+                crate::metrics::loop_pass("cron");
             }
         }
     }

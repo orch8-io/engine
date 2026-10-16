@@ -350,6 +350,7 @@ pub async fn run_tick_loop_with_liveness(
                 if let Some(liveness) = &liveness {
                     liveness.record_tick();
                 }
+                crate::metrics::loop_pass("tick");
             }
         }
     }

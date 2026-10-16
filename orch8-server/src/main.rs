@@ -1326,10 +1326,22 @@ fn spawn_engine_now(
         let alert_storage = Arc::clone(&storage);
         let alert_config = config.alerts.clone();
         let alert_cancel = shutdown.clone();
-        tokio::spawn(async move {
-            orch8_engine::alerts::run_alert_loop(alert_storage, alert_config, alert_cancel).await;
-            tracing::info!("alert evaluator loop exited");
-        });
+        // Supervised (L2-05): a panic restarts the loop with backoff instead
+        // of silently ending alert evaluation for the process lifetime.
+        tokio::spawn(orch8_engine::supervise(
+            "alerts",
+            alert_cancel.clone(),
+            move || {
+                let alert_storage = Arc::clone(&alert_storage);
+                let alert_config = alert_config.clone();
+                let alert_cancel = alert_cancel.clone();
+                async move {
+                    orch8_engine::alerts::run_alert_loop(alert_storage, alert_config, alert_cancel)
+                        .await;
+                    tracing::info!("alert evaluator loop exited");
+                }
+            },
+        ));
     }
     let mut engine = Engine::new(storage, config.engine.clone(), handlers, shutdown.clone());
     if let Some(liveness) = liveness {
