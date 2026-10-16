@@ -8,6 +8,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use orch8_storage::sqlite::SqliteStorage;
+use orch8_storage::testing::fixtures::{InstanceBuilder, SequenceBuilder};
 use orch8_storage::{
     AdminStore, ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore, SchedulingStore,
     SequenceStore, SignalStore, WorkerStore,
@@ -31,7 +32,7 @@ use orch8_types::pool::{PoolResource, ResourcePool, RotationStrategy};
 use orch8_types::queue_dispatch::{DispatchMode, QueueDispatchConfig};
 use orch8_types::rate_limit::RateLimit;
 use orch8_types::rate_limit::RateLimitCheck;
-use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
+use orch8_types::sequence::SequenceDefinition;
 use orch8_types::session::{Session, SessionState};
 use orch8_types::signal::{Signal, SignalType};
 use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskState};
@@ -101,49 +102,10 @@ async fn seed_instance(s: &SqliteStorage, inst_id: InstanceId) {
 }
 
 fn make_sequence(tenant: &str) -> SequenceDefinition {
-    SequenceDefinition {
-        embed: None,
-        sub_tenant: None,
-        schema: None,
-        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
-        id: SequenceId::new(),
-        tenant_id: TenantId::unchecked(tenant),
-        namespace: Namespace::new("default"),
-        name: "seq".into(),
-        version: 1,
-        deprecated: false,
-        blocks: vec![BlockDefinition::Step(Box::new(StepDef {
-            id: BlockId::new("s1"),
-            handler: "noop".into(),
-            params: json!({}),
-            delay: None,
-            retry: None,
-            timeout: None,
-            rate_limit_key: None,
-            rate_budget: None,
-            placement: None,
-            send_window: None,
-            context_access: None,
-            cancellable: true,
-            wait_for_input: None,
-            queue_name: None,
-            deadline: None,
-            on_deadline_breach: None,
-            fallback_handler: None,
-            cache_key: None,
-            output_schema: None,
-            when: None,
-            compensation: None,
-        }))],
-        interceptors: None,
-        input_schema: None,
-        sla: None,
-        on_failure: None,
-        on_cancel: None,
-        placement: None,
-        created_at: Utc::now(),
-        status: orch8_types::sequence::SequenceStatus::Production,
-    }
+    SequenceBuilder::new(tenant)
+        .name("seq")
+        .step("s1", "noop")
+        .build()
 }
 
 fn distributed_runtime(now: chrono::DateTime<Utc>, region: &str) -> RuntimeCapabilities {
@@ -214,28 +176,9 @@ fn distributed_task(
 }
 
 fn make_instance(tenant: &str, seq_id: SequenceId) -> TaskInstance {
-    let now = Utc::now();
-    TaskInstance {
-        sub_tenant: None,
-        id: InstanceId::new(),
-        sequence_id: seq_id,
-        tenant_id: TenantId::unchecked(tenant),
-        namespace: Namespace::new("default"),
-        state: InstanceState::Scheduled,
-        next_fire_at: Some(now - Duration::seconds(10)),
-        priority: Priority::Normal,
-        timezone: "UTC".into(),
-        metadata: json!({}),
-        context: ExecutionContext::default(),
-        concurrency_key: None,
-        max_concurrency: None,
-        idempotency_key: None,
-        session_id: None,
-        parent_instance_id: None,
-        budget: None,
-        created_at: now,
-        updated_at: now,
-    }
+    InstanceBuilder::new(tenant, "default", seq_id)
+        .due_at(Utc::now() - Duration::seconds(10))
+        .build()
 }
 
 fn make_instance_in_state(tenant: &str, state: InstanceState) -> TaskInstance {

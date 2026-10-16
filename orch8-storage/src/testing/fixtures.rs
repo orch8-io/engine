@@ -116,6 +116,12 @@ impl SequenceBuilder {
         self
     }
 
+    /// Append several blocks.
+    pub fn blocks(mut self, blocks: impl IntoIterator<Item = BlockDefinition>) -> Self {
+        self.seq.blocks.extend(blocks);
+        self
+    }
+
     /// Append a block.
     pub fn block(mut self, block: BlockDefinition) -> Self {
         self.seq.blocks.push(block);
@@ -202,6 +208,18 @@ impl InstanceBuilder {
 
     pub fn data(mut self, data: Value) -> Self {
         self.inst.context.data = data;
+        self
+    }
+
+    /// Set `context.config` (default `null`).
+    pub fn config(mut self, config: Value) -> Self {
+        self.inst.context.config = config;
+        self
+    }
+
+    /// Replace the whole execution context.
+    pub fn context(mut self, context: ExecutionContext) -> Self {
+        self.inst.context = context;
         self
     }
 
