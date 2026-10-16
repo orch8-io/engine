@@ -20,7 +20,13 @@
 //! the root key, through [`DeviceSessions`]) and handed to the SDK through a
 //! `TokenProvider` — or, for the legacy path, with a stored API key
 //! ([`PhoneAuth::ApiKey`]).
+//!
+//! [`control_plane`] runs the real `orch8-server` binary as separate
+//! processes on one database: `SIGKILL` + restart on the same database, and
+//! two schedulers side by side.
 #![allow(clippy::missing_panics_doc)]
+
+pub mod control_plane;
 
 use sqlx::AssertSqlSafe;
 use std::net::SocketAddr;
@@ -916,8 +922,14 @@ impl Drop for RoutedFront {
 // ---------------------------------------------------------------------------
 
 /// Path of the `orch8-server` binary: `ORCH8_SERVER_BIN`, else the binary
-/// next to this test's profile directory (run `cargo build -p orch8-server`
-/// first), else build it.
+/// in this test binary's own profile directory, built there on demand.
+///
+/// The test binary lives at `<target-dir>[/<triple>]/<profile>/deps/<test>`,
+/// so the server is looked up (and, if missing, built with a matching
+/// `--target-dir`, `--target` and profile) right next to it. That keeps the
+/// lookup correct under `CARGO_TARGET_DIR`, a configured `build.target`, and
+/// `cargo llvm-cov` (whose `llvm-cov-target` dir the old fixed
+/// `cargo build -p orch8-server` never wrote to).
 #[must_use]
 pub fn server_binary() -> std::path::PathBuf {
     static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
@@ -925,17 +937,16 @@ pub fn server_binary() -> std::path::PathBuf {
         if let Ok(path) = std::env::var("ORCH8_SERVER_BIN") {
             return path.into();
         }
-        // <target>/<profile>/deps/<test binary> → <target>/<profile>/orch8-server
         let exe = std::env::current_exe().expect("test binary path");
         let profile_dir = exe
             .parent()
             .and_then(std::path::Path::parent)
             .expect("target profile dir");
-        let bin = profile_dir.join("orch8-server");
+        let bin = profile_dir.join(format!("orch8-server{}", std::env::consts::EXE_SUFFIX));
         if !bin.exists() {
             let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
             let status = std::process::Command::new(cargo)
-                .args(["build", "-q", "-p", "orch8-server", "--bin", "orch8-server"])
+                .args(server_build_args(profile_dir))
                 .status()
                 .expect("run cargo build");
             assert!(status.success(), "building orch8-server failed");
@@ -944,6 +955,46 @@ pub fn server_binary() -> std::path::PathBuf {
         bin
     })
     .clone()
+}
+
+/// `cargo build` arguments that put `orch8-server` into `profile_dir`
+/// (`<target-dir>[/<triple>]/<profile>`). The target-dir root is the
+/// nearest ancestor holding cargo's `CACHEDIR.TAG`; a directory between it
+/// and the profile dir is the target triple.
+#[must_use]
+pub fn server_build_args(profile_dir: &std::path::Path) -> Vec<String> {
+    let name = |p: &std::path::Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let parent = profile_dir.parent().unwrap_or(profile_dir);
+    let (target_dir, triple) = match parent.parent() {
+        Some(grand)
+            if !parent.join("CACHEDIR.TAG").exists() && grand.join("CACHEDIR.TAG").exists() =>
+        {
+            (grand, Some(name(parent)))
+        }
+        _ => (parent, None),
+    };
+    let mut args: Vec<String> = ["build", "-q", "-p", "orch8-server", "--bin", "orch8-server"]
+        .map(String::from)
+        .into();
+    args.push("--target-dir".into());
+    args.push(target_dir.display().to_string());
+    if let Some(triple) = triple {
+        args.push("--target".into());
+        args.push(triple);
+    }
+    match name(profile_dir).as_str() {
+        "debug" => {}
+        "release" => args.push("--release".into()),
+        other => {
+            args.push("--profile".into());
+            args.push(other.to_owned());
+        }
+    }
+    args
 }
 
 /// A remote executor process started from a join token, with no database.
@@ -1869,5 +1920,83 @@ impl Desktop {
             assert!(Instant::now() < deadline, "delegated run never finished");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod server_binary_tests {
+    use super::server_build_args;
+
+    fn layout(parts: &[&str], tag_at: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let mut dir = root.path().to_path_buf();
+        for (i, part) in parts.iter().enumerate() {
+            dir.push(part);
+            std::fs::create_dir_all(&dir).unwrap();
+            if i == tag_at {
+                std::fs::write(dir.join("CACHEDIR.TAG"), "").unwrap();
+            }
+        }
+        (root, dir)
+    }
+
+    fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args[i + 1].as_str())
+    }
+
+    #[test]
+    fn plain_target_dir_builds_into_the_same_target_dir() {
+        let (_root, profile) = layout(&["target", "debug"], 0);
+
+        let args = server_build_args(&profile);
+
+        assert_eq!(
+            arg_after(&args, "--target-dir"),
+            Some(profile.parent().unwrap().to_str().unwrap())
+        );
+        assert_eq!(arg_after(&args, "--target"), None);
+        assert!(!args.iter().any(|a| a == "--release" || a == "--profile"));
+    }
+
+    #[test]
+    fn triple_subdir_adds_the_target_flag() {
+        let (_root, profile) = layout(&["target", "aarch64-apple-darwin", "debug"], 0);
+
+        let args = server_build_args(&profile);
+
+        let target_dir = profile.parent().unwrap().parent().unwrap();
+        assert_eq!(
+            arg_after(&args, "--target-dir"),
+            Some(target_dir.to_str().unwrap())
+        );
+        assert_eq!(arg_after(&args, "--target"), Some("aarch64-apple-darwin"));
+    }
+
+    #[test]
+    fn llvm_cov_target_dir_is_honoured() {
+        let (_root, profile) = layout(&["target", "llvm-cov-target", "debug"], 1);
+
+        let args = server_build_args(&profile);
+
+        assert!(
+            arg_after(&args, "--target-dir")
+                .unwrap()
+                .ends_with("llvm-cov-target")
+        );
+        assert_eq!(arg_after(&args, "--target"), None);
+    }
+
+    #[test]
+    fn release_and_custom_profiles_are_passed_through() {
+        let (_r1, release) = layout(&["target", "release"], 0);
+        let (_r2, custom) = layout(&["target", "ci"], 0);
+
+        assert!(server_build_args(&release).iter().any(|a| a == "--release"));
+        assert_eq!(
+            arg_after(&server_build_args(&custom), "--profile"),
+            Some("ci")
+        );
     }
 }

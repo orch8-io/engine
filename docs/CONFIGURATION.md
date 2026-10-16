@@ -224,6 +224,7 @@ mount a config file for those settings.
 | `ORCH8_WASM_MAX_OUTPUT_BYTES` | `4194304` | Largest output a WASM plugin may return |
 | `ORCH8_CRON_TICK_SECS` | `10` | Cron loop check interval (seconds) |
 | `ORCH8_LIVENESS_STALE_SECS` | `300` | `/health/live` returns 503 when the engine tick loop has not completed an iteration for this long; `0` disables. If the engine stops before shutdown (panic, permanent startup error), the process exits non-zero so the orchestrator restarts it; transient storage errors at startup are retried with backoff |
+| `ORCH8_STALE_INSTANCE_THRESHOLD_SECS` | `300` | Overrides `engine.stale_instance_threshold_secs`: a `running` instance whose lease was not renewed for this long is recovered by another node / after a restart (seconds) |
 | `ORCH8_WORKER_REAPER_TICK_SECS` | `30` | How often the stale worker-task reaper runs (seconds) |
 | `ORCH8_WORKER_REAPER_STALE_SECS` | `60` | Claimed task is reclaimed after this long without a heartbeat (seconds) |
 | `ORCH8_NODE_REAPER_TICK_SECS` | `60` | How often the stale cluster-node reaper runs (seconds) |
