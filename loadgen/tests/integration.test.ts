@@ -56,15 +56,17 @@ test("loadgen smoke: ~12s in light preset produces work", async (t) => {
 
   const { byName } = await bootstrap(client, cfg, rng, templates);
   const alive = new Set<string>();
+  const aliveTemplates = new Map<string, string>();
+  const aliveSpawnTimes = new Map<string, number>();
 
   // Let all roles run for the full duration, then force shutdown.
   setTimeout(() => requestShutdown("test duration reached"), 12_000).unref();
 
   await Promise.allSettled([
-    runProducer({ client, cfg, rng, counters, templates, sequences: byName, alive }),
+    runProducer({ client, cfg, rng, counters, templates, sequences: byName, alive, aliveTemplates, aliveSpawnTimes }),
     runWorkerPool({ client, cfg, rng, counters, handlers }),
     runSignaller({ client, cfg, rng, counters, alive }),
-    runAlivePoller({ client, counters, alive }),
+    runAlivePoller({ client, counters, alive, aliveTemplates, aliveSpawnTimes }),
   ]);
 
   // Give any in-flight HTTP a moment to settle.

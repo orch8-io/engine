@@ -7,14 +7,15 @@
     "deploy": "tsx --env-file=.env deploy.ts",
     "worker": "tsx --env-file=.env worker.ts",
     "trigger": "tsx --env-file=.env trigger.ts",
-    "webhook": "tsx --env-file=.env webhook.ts"
+    "webhook": "tsx --env-file=.env webhook.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@orch8.io/sdk": "^0.1.0"
+    "@orch8.io/sdk": "^0.7.0"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0",
-    "tsx": "^4.7.0",
-    "typescript": "^5.4.0"
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3"
   }
 }
