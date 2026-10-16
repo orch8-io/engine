@@ -412,6 +412,7 @@ fn cfg_36_config_serde_with_all_sections() {
         artifacts: orch8_types::config::ArtifactConfig::default(),
         telemetry: orch8_types::config::TelemetryConfig::default(),
         alerts: orch8_types::config::AlertsConfig::default(),
+        circuit_breaker: orch8_types::config::CircuitBreakerConfig::default(),
         cloud_observability: orch8_types::config::CloudObservabilityConfig::default(),
         executor: orch8_types::config::ExecutorConfig::default(),
     };
@@ -532,6 +533,7 @@ fn cfg_44_secret_string_not_leaked_in_serialized_config() {
         artifacts: orch8_types::config::ArtifactConfig::default(),
         telemetry: orch8_types::config::TelemetryConfig::default(),
         alerts: orch8_types::config::AlertsConfig::default(),
+        circuit_breaker: orch8_types::config::CircuitBreakerConfig::default(),
         cloud_observability: orch8_types::config::CloudObservabilityConfig::default(),
         executor: orch8_types::config::ExecutorConfig::default(),
     };

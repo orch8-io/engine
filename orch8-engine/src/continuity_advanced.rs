@@ -1028,6 +1028,21 @@ pub fn assign_attention_task(
     task.assignee.clone()
 }
 
+/// Default clock-skew allowance for federation envelope freshness.
+pub const DEFAULT_FEDERATION_CLOCK_SKEW_SECS: i64 = 60;
+
+/// Clock-skew allowance for federation envelopes: `ORCH8_FEDERATION_CLOCK_SKEW_SECS`
+/// (clamped to `0..=300`), default [`DEFAULT_FEDERATION_CLOCK_SKEW_SECS`].
+fn federation_clock_skew() -> chrono::Duration {
+    static SKEW: std::sync::LazyLock<i64> = std::sync::LazyLock::new(|| {
+        std::env::var("ORCH8_FEDERATION_CLOCK_SKEW_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .map_or(DEFAULT_FEDERATION_CLOCK_SKEW_SECS, |secs| secs.clamp(0, 300))
+    });
+    chrono::Duration::seconds(*SKEW)
+}
+
 pub fn verify_federation_envelope(
     peer: &FederationPeer,
     envelope: &FederationEnvelope,
@@ -1035,9 +1050,12 @@ pub fn verify_federation_envelope(
     now: DateTime<Utc>,
 ) -> Result<(), AdvancedContinuityError> {
     const MAX_FEDERATION_TTL_SECONDS: i64 = 300;
-    if envelope.issued_at > now
-        || envelope.expires_at <= now
-        || envelope.issued_at < now - chrono::Duration::seconds(MAX_FEDERATION_TTL_SECONDS)
+    // Peers run on independent clocks: tolerate bounded drift on both
+    // freshness edges, or a sender running slightly ahead fails every call.
+    let skew = federation_clock_skew();
+    if envelope.issued_at > now + skew
+        || envelope.expires_at + skew <= now
+        || envelope.issued_at < now - chrono::Duration::seconds(MAX_FEDERATION_TTL_SECONDS) - skew
         || envelope.expires_at - envelope.issued_at
             > chrono::Duration::seconds(MAX_FEDERATION_TTL_SECONDS)
     {
@@ -1704,6 +1722,17 @@ mod tests {
         assert_eq!(
             verify_federation_envelope(&peer, &envelope, b"tampered", now),
             Err(AdvancedContinuityError::FederationEnvelopeInvalid)
+        );
+        // L5-03: a sender clock a few seconds ahead is tolerated; one far
+        // beyond the skew allowance is not.
+        verify_federation_envelope(&peer, &envelope, payload, now - Duration::seconds(2)).unwrap();
+        assert_eq!(
+            verify_federation_envelope(&peer, &envelope, payload, now - Duration::minutes(10)),
+            Err(AdvancedContinuityError::FederationEnvelopeExpired)
+        );
+        assert_eq!(
+            verify_federation_envelope(&peer, &envelope, payload, now + Duration::minutes(7)),
+            Err(AdvancedContinuityError::FederationEnvelopeExpired)
         );
     }
 

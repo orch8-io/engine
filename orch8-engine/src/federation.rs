@@ -62,6 +62,13 @@ const POLL_BATCH: u32 = 100;
 /// Cancel delivery attempts before the local side gives up on telling the
 /// peer (the local call is still marked cancelled).
 const MAX_CANCEL_ATTEMPTS: u32 = 10;
+/// A 401/404 from the peer is retried this many times (with back-off, about
+/// five minutes in total) before the call fails: it may be a clock-skew
+/// refusal or the peer deploying the sequence, both of which clear up.
+const MAX_REFUSALS: u32 = 8;
+/// How long a node's claim on a due call holds off the other nodes' pollers
+/// (longer than a request with its timeout).
+const CALL_CLAIM_HOLD: chrono::Duration = chrono::Duration::seconds(60);
 
 /// Public identity derived from an engine signing key.
 #[must_use]
@@ -140,6 +147,10 @@ pub enum TransportError {
     Rejected(String),
     /// Network failure, timeout, 5xx/429, or an unverifiable response.
     Unavailable(String),
+    /// 401 (envelope outside the peer's validity window: clock skew) or 404
+    /// (sequence not deployed yet) from the peer. Retried a bounded number
+    /// of times.
+    Refused(String),
 }
 
 impl std::fmt::Display for TransportError {
@@ -147,6 +158,7 @@ impl std::fmt::Display for TransportError {
         match self {
             Self::Rejected(message) => write!(f, "peer rejected the request: {message}"),
             Self::Unavailable(message) => write!(f, "peer unavailable: {message}"),
+            Self::Refused(message) => write!(f, "peer refused the request: {message}"),
         }
     }
 }
@@ -230,13 +242,14 @@ impl FederationClient {
             .map_err(|error| TransportError::Unavailable(format!("{error:?}")))?;
         if !status.is_success() {
             let text: String = String::from_utf8_lossy(&body).chars().take(256).collect();
-            return Err(
-                if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    TransportError::Rejected(format!("HTTP {}: {text}", status.as_u16()))
-                } else {
-                    TransportError::Unavailable(format!("HTTP {}", status.as_u16()))
-                },
-            );
+            let code = status.as_u16();
+            return Err(match code {
+                401 | 404 => TransportError::Refused(format!("HTTP {code}: {text}")),
+                _ if crate::outbound::is_retryable_status(code) || !status.is_client_error() => {
+                    TransportError::Unavailable(format!("HTTP {code}"))
+                }
+                _ => TransportError::Rejected(format!("HTTP {code}: {text}")),
+            });
         }
         let signed: SignedFederationMessage = serde_json::from_slice(&body)
             .map_err(|_| TransportError::Unavailable("malformed peer response".into()))?;
@@ -600,7 +613,7 @@ async fn propagate_cancel(
             next.notified = true;
             info!(call_id = %call.call_id, "federation cancel propagated to peer");
         }
-        Err(TransportError::Unavailable(reason)) => {
+        Err(TransportError::Unavailable(reason) | TransportError::Refused(reason)) => {
             next.attempts = call.attempts.saturating_add(1);
             if next.attempts >= MAX_CANCEL_ATTEMPTS {
                 warn!(call_id = %call.call_id, %reason, "giving up propagating federation cancel");
@@ -687,6 +700,16 @@ async fn advance_call(
         return Ok(());
     };
 
+    // Claim the call before talking to the peer: every engine node runs the
+    // poller, and the version CAS lets exactly one of them send this pass's
+    // request. A node that crashes mid-request leaves the claim to expire
+    // after `CALL_CLAIM_HOLD`.
+    let mut claim = call.clone();
+    claim.next_poll_at = now + CALL_CLAIM_HOLD;
+    let Some(call) = commit(storage, &call, claim).await? else {
+        return Ok(());
+    };
+
     if parent_gone {
         // Cancellation propagates to the peer (which cascades to the remote
         // instance's own children through its normal cancel path).
@@ -726,6 +749,18 @@ async fn advance_call(
             next.state = FederationCallState::Failed;
             next.error = Some(format!("federate: {reason}"));
             next.next_poll_at = now;
+        }
+        Err(TransportError::Refused(reason)) => {
+            next.attempts = call.attempts.saturating_add(1);
+            if next.attempts >= MAX_REFUSALS {
+                next.state = FederationCallState::Failed;
+                next.error = Some(format!("federate: peer refused the request: {reason}"));
+                next.next_poll_at = now;
+            } else {
+                next.next_poll_at = now + failure_backoff(next.attempts);
+                warn!(call_id = %call.call_id, attempts = next.attempts, %reason,
+                    "federation peer refused the request (clock skew or sequence not deployed?); retrying");
+            }
         }
         Err(TransportError::Unavailable(reason)) => {
             next.attempts = call.attempts.saturating_add(1);
@@ -880,5 +915,148 @@ mod tests {
         call_time = now - chrono::Duration::hours(1);
         assert_eq!(delay(call_time), 30);
         assert_eq!(failure_backoff(20).num_seconds(), 64);
+    }
+
+    /// A peer that answers every request with `status`, counting requests.
+    async fn peer_answering(status: u16) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let app = axum::Router::new().fallback(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::http::StatusCode::from_u16(status).unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), hits)
+    }
+
+    async fn seeded_call(
+        endpoint: String,
+        with_parent: bool,
+    ) -> (Arc<dyn StorageBackend>, FederationCall) {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let tenant = TenantId::new("t").unwrap();
+        let now = Utc::now();
+        let peer_identity = identity_for(&SigningKey::from_bytes(&[9; 32]));
+        storage
+            .upsert_federation_peer(&FederationPeerRecord {
+                tenant_id: tenant.clone(),
+                peer_id: peer_identity.peer_id,
+                name: "peer".into(),
+                relationship: PeerRelationship::Cluster,
+                endpoint,
+                public_key: peer_identity.public_key.clone(),
+                remote_tenant_id: tenant.clone(),
+                outbound: orch8_types::federation::PeerOutboundPolicy::default(),
+                inbound: orch8_types::federation::PeerInboundPolicy::default(),
+                expires_at: None,
+                revoked_at: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        let instance_id = InstanceId::new();
+        if with_parent {
+            storage
+                .create_instance(&TaskInstance {
+                    sub_tenant: None,
+                    id: instance_id,
+                    sequence_id: orch8_types::ids::SequenceId::new(),
+                    tenant_id: tenant.clone(),
+                    namespace: orch8_types::ids::Namespace::new("default"),
+                    state: InstanceState::Waiting,
+                    next_fire_at: None,
+                    priority: orch8_types::instance::Priority::Normal,
+                    timezone: "UTC".into(),
+                    metadata: Value::Null,
+                    context: orch8_types::context::ExecutionContext::default(),
+                    concurrency_key: None,
+                    max_concurrency: None,
+                    idempotency_key: None,
+                    session_id: None,
+                    parent_instance_id: None,
+                    budget: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .unwrap();
+        }
+        let call = FederationCall {
+            call_id: uuid::Uuid::now_v7(),
+            tenant_id: tenant,
+            instance_id,
+            block_id: BlockId::new("b"),
+            peer_id: peer_identity.peer_id,
+            sequence: "s".into(),
+            sequence_version: None,
+            input: json!({}),
+            withheld_sha256: vec![],
+            state: FederationCallState::Pending,
+            remote_instance_id: None,
+            result: None,
+            error: None,
+            attempts: 0,
+            notified: false,
+            next_poll_at: now,
+            created_at: now,
+            updated_at: now,
+            version: 0,
+        };
+        assert!(storage.create_federation_call(&call).await.unwrap());
+        let call = storage
+            .get_federation_call(&call.tenant_id, call.call_id)
+            .await
+            .unwrap()
+            .unwrap();
+        (storage, call)
+    }
+
+    /// L2-12: every node runs the poller; two nodes advancing the same due
+    /// call must send one request, not two.
+    #[tokio::test]
+    async fn concurrent_pollers_send_one_request_per_due_call() {
+        let (endpoint, hits) = peer_answering(503).await;
+        let (storage, call) = seeded_call(endpoint, true).await;
+        let client = FederationClient::new(SigningKey::from_bytes(&[3; 32]), true).unwrap();
+        let now = Utc::now();
+        let (a, b) = tokio::join!(
+            advance_call(storage.as_ref(), &client, call.clone(), now),
+            advance_call(storage.as_ref(), &client, call.clone(), now),
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// L5-03: a 401 (stale envelope: clock skew) or a 404 (sequence not
+    /// deployed yet) is retried with back-off instead of failing the call.
+    #[tokio::test]
+    async fn refusal_is_retried_before_failing() {
+        for status in [401, 404] {
+            let (endpoint, _) = peer_answering(status).await;
+            let (storage, call) = seeded_call(endpoint, true).await;
+            let client = FederationClient::new(SigningKey::from_bytes(&[3; 32]), true).unwrap();
+            advance_call(storage.as_ref(), &client, call.clone(), Utc::now())
+                .await
+                .unwrap();
+            let after = storage
+                .get_federation_call(&call.tenant_id, call.call_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.state, FederationCallState::Pending, "{status}");
+            assert_eq!(after.attempts, 1);
+            assert!(after.next_poll_at > Utc::now());
+        }
     }
 }
