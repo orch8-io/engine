@@ -188,7 +188,7 @@ pub fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     Some(wait.min(MAX_RETRY_AFTER))
 }
 
-/// The error for a non-2xx response: [`StepError::Retryable`] for
+/// The error for a non-2xx response: [`StepError::Retryable`](orch8_types::error::StepError::Retryable) for
 /// [`is_retryable_status`] (with the `Retry-After` hint folded into the
 /// details under [`RETRY_AFTER_MS_KEY`]), otherwise permanent. `details` is
 /// extended when it is an object.
