@@ -161,7 +161,9 @@ impl ReleaseChannel {
         if self.releases.iter().any(|existing| {
             existing.package_name == release.package_name
                 && existing.version == release.version
-                && existing.content_hash != release.content_hash
+                && !existing
+                    .content_hash
+                    .eq_ignore_ascii_case(&release.content_hash)
         }) {
             return Err(DistributionError::Invalid(
                 "a package version cannot resolve to different content".into(),
@@ -261,7 +263,7 @@ impl ReleaseChannel {
         let index = self
             .releases
             .iter()
-            .rposition(|release| release.content_hash == content_hash)
+            .rposition(|release| release.content_hash.eq_ignore_ascii_case(content_hash))
             .ok_or(DistributionError::UnknownRelease)?;
         self.head = Some(index);
         Ok(&self.releases[index])
@@ -321,7 +323,7 @@ impl DeltaPackage {
                 "delta exceeds 10000 files/64 MiB or has no full-package fallback".into(),
             ));
         }
-        if hash_files(base_files)? != self.base_hash {
+        if !hash_files(base_files)?.eq_ignore_ascii_case(&self.base_hash) {
             return Ok(DeltaApplication::FullPackageRequired {
                 url: self.full_package_url.clone(),
                 expected_hash: self.target_hash.clone(),
@@ -339,7 +341,7 @@ impl DeltaPackage {
                 }
             }
         }
-        if hash_files(&target)? != self.target_hash {
+        if !hash_files(&target)?.eq_ignore_ascii_case(&self.target_hash) {
             return Ok(DeltaApplication::FullPackageRequired {
                 url: self.full_package_url.clone(),
                 expected_hash: self.target_hash.clone(),
@@ -602,6 +604,8 @@ fn hash_lock_entries(entries: &[LockedDependency]) -> Result<String, Distributio
     Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
 }
 
+/// Validate a SHA-256 hex digest. Either case is accepted, so every digest
+/// comparison in this module is case-insensitive.
 fn validate_hash(hash: &str) -> Result<(), DistributionError> {
     if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         Ok(())
@@ -616,7 +620,11 @@ fn validate_relative_path(path: &str) -> Result<(), DistributionError> {
     if path.is_empty()
         || path.starts_with('/')
         || path.contains(['\\', '\0'])
-        || path.split('/').any(|part| part.is_empty() || part == "..")
+        // `.` components alias another path (`./a.txt` is `a.txt`) or name
+        // the package root itself.
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
         Err(DistributionError::Invalid(format!(
             "invalid delta path {path}"
@@ -778,6 +786,70 @@ mod tests {
             delta.apply(&BTreeMap::new()).unwrap(),
             DeltaApplication::FullPackageRequired { .. }
         ));
+    }
+
+    fn release(version: &str, content_hash: String) -> ChannelRelease {
+        ChannelRelease {
+            package_name: "acme/app".into(),
+            version: version.into(),
+            content_hash,
+            package_url: "/full".into(),
+            requirements: CapsuleRequirements::default(),
+            selected_runtime_id: None,
+            promoted_at: Utc::now(),
+        }
+    }
+
+    /// T4 #9: hashes are accepted in either case, so they must compare
+    /// case-insensitively too.
+    #[test]
+    fn rollback_finds_a_release_by_its_hash_in_either_case() {
+        let mut channel = ReleaseChannel::new("tenant-a", ReleaseChannelName::Stable);
+        channel.promote(release("1.0.0", hash('a'))).unwrap();
+        channel.promote(release("1.1.0", hash('b'))).unwrap();
+
+        let restored = channel.rollback_to(&hash('A')).map(|r| r.version.clone());
+
+        assert_eq!(restored, Ok("1.0.0".to_string()));
+    }
+
+    #[test]
+    fn republishing_a_version_with_the_same_hash_in_another_case_is_not_a_conflict() {
+        let mut channel = ReleaseChannel::new("tenant-a", ReleaseChannelName::Stable);
+        channel.promote(release("1.0.0", hash('a'))).unwrap();
+
+        let republished = channel.promote(release("1.0.0", hash('A')));
+
+        assert_eq!(republished, Ok(()));
+    }
+
+    #[test]
+    fn delta_with_uppercase_hashes_applies_instead_of_forcing_a_full_download() {
+        let base = BTreeMap::from([("a.txt".into(), "old".into())]);
+        let target = BTreeMap::from([("a.txt".into(), "new".into())]);
+        let delta = DeltaPackage {
+            base_hash: hash_files(&base).unwrap().to_ascii_uppercase(),
+            target_hash: hash_files(&target).unwrap().to_ascii_uppercase(),
+            full_package_url: "/full.orch8pkg".into(),
+            changed_files: BTreeMap::from([("a.txt".into(), Some("new".into()))]),
+        };
+
+        assert_eq!(
+            delta.apply(&base).unwrap(),
+            DeltaApplication::Applied(target)
+        );
+    }
+
+    /// T4 #9: `./a.txt` and `a.txt` would be distinct keys of the delta map
+    /// for the same file; `.` names the package root itself.
+    #[test]
+    fn delta_paths_with_dot_components_are_rejected() {
+        let verdicts: Vec<bool> = ["./a.txt", ".", "dir/./a.txt"]
+            .into_iter()
+            .map(|path| validate_relative_path(path).is_err())
+            .collect();
+
+        assert_eq!(verdicts, [true, true, true]);
     }
 
     #[test]
