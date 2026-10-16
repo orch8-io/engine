@@ -325,18 +325,145 @@ mod tests {
         ack
     }
 
-    #[test]
-    fn managed_advertisement_contains_no_protected_workload_data() {
-        let config = ManagedControlConfig {
-            endpoint: "https://control.example.com".into(),
-            api_key: "secret".into(),
-            tenant_id: "acme".into(),
-            worker_id: "edge-1".into(),
+    fn config() -> ManagedControlConfig {
+        ManagedControlConfig {
+            endpoint: "https://control.orch8.example:443".into(),
+            api_key: "super-secret-managed-key".into(),
+            tenant_id: "tenant-acme".into(),
+            worker_id: "worker-edge-7".into(),
             runtime_id: RuntimeId::new(),
             region: None,
             kind: RuntimeKind::Edge,
             ca_pem: None,
             headers: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn configured_region_is_advertised_for_region_placement() {
+        let config = ManagedControlConfig {
+            region: Some("eu".into()),
+            ..config()
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&capabilities_json(&config, false).unwrap()).unwrap();
+
+        assert_eq!(value["regions"], serde_json::json!(["eu"]));
+    }
+
+    #[test]
+    fn missing_region_advertises_no_regions() {
+        assert!(safe_capabilities(&config(), false).regions.is_empty());
+    }
+
+    #[test]
+    fn managed_runtime_never_claims_verified_trust() {
+        for draining in [false, true] {
+            assert_eq!(
+                safe_capabilities(&config(), draining).trust,
+                RuntimeTrustLevel::Unverified,
+                "draining={draining}"
+            );
+        }
+    }
+
+    /// The graceful-drain heartbeat must differ from the steady-state
+    /// heartbeat ONLY in the `draining` flag (and the fresh timestamps): the
+    /// cloud records the drain evidence against an otherwise identical
+    /// capability snapshot.
+    #[test]
+    fn drain_evidence_differs_from_steady_state_only_in_draining_and_timestamps() {
+        let config = ManagedControlConfig {
+            region: Some("eu".into()),
+            ..config()
+        };
+        let mut steady: serde_json::Value =
+            serde_json::from_str(&capabilities_json(&config, false).unwrap()).unwrap();
+        let mut drain: serde_json::Value =
+            serde_json::from_str(&capabilities_json(&config, true).unwrap()).unwrap();
+
+        assert_eq!(drain["draining"], serde_json::json!(true));
+        assert_eq!(steady["draining"], serde_json::json!(false));
+        for key in ["observed_at", "expires_at", "draining"] {
+            steady.as_object_mut().unwrap().remove(key);
+            drain.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(steady, drain);
+    }
+
+    #[test]
+    fn advertised_capabilities_never_leak_session_identity_or_credentials() {
+        for draining in [false, true] {
+            let json = capabilities_json(&config(), draining).unwrap();
+            for secret in [
+                "super-secret-managed-key",
+                "tenant-acme",
+                "worker-edge-7",
+                "control.orch8.example",
+            ] {
+                assert!(
+                    !json.contains(secret),
+                    "draining={draining} leaked {secret:?}: {json}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn open_frame_identifies_the_session_and_limits_in_flight_work_to_one() {
+        let frame = open_frame(&config()).unwrap();
+
+        let Some(ClientPayload::Open(open)) = frame.payload else {
+            panic!("expected an open frame");
+        };
+        assert_eq!(open.worker_id, "worker-edge-7");
+        assert_eq!(open.tenant_id, "tenant-acme");
+        assert_eq!(
+            open.protocol_version,
+            orch8_grpc::WORKER_STREAM_PROTOCOL_VERSION
+        );
+        assert!(open.supported_features.iter().any(|f| f == "task_delivery"));
+        assert_eq!(open.max_in_flight, 1);
+        let advertised: RuntimeCapabilities =
+            serde_json::from_str(&open.runtime_capabilities_json).unwrap();
+        assert!(!advertised.draining);
+    }
+
+    #[test]
+    fn undecodable_command_with_an_id_yields_that_id_for_acknowledgment() {
+        let id = uuid::Uuid::new_v4();
+        let json = serde_json::json!({
+            "id": id, "worker_id": "edge-1", "command": "shutdown",
+            "created_at": chrono::Utc::now(),
+        })
+        .to_string();
+
+        assert_eq!(decode_command(&json).unwrap_err(), Some(id.to_string()));
+    }
+
+    #[test]
+    fn undecodable_command_without_an_id_yields_nothing_to_acknowledge() {
+        let json = serde_json::json!({"worker_id": "edge-1", "command": "drain"}).to_string();
+
+        assert_eq!(decode_command(&json).unwrap_err(), None);
+    }
+
+    #[tokio::test]
+    async fn unsupported_command_without_an_id_sends_no_acknowledgment() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+
+        ack_unsupported(None, &sender).await.unwrap();
+
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn managed_advertisement_contains_no_protected_workload_data() {
+        let config = ManagedControlConfig {
+            endpoint: "https://control.example.com".into(),
+            api_key: "secret".into(),
+            ..config()
         };
         let value = serde_json::to_value(safe_capabilities(&config, false)).unwrap();
         let rendered = value.to_string();
@@ -408,7 +535,3 @@ mod tests {
         assert!(!shutdown.is_cancelled());
     }
 }
-
-#[cfg(test)]
-#[path = "managed_control_coverage_tests.rs"]
-mod managed_control_coverage_tests;

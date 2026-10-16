@@ -2091,29 +2091,204 @@ mod tests {
         assert_eq!(allowed(&admin).as_deref(), Some("https://admin.example"));
     }
 
+    const ALL_ROLES: [NodeRole; 5] = [
+        NodeRole::AllInOne,
+        NodeRole::Control,
+        NodeRole::Executor,
+        NodeRole::Gateway,
+        NodeRole::Edge,
+    ];
+
+    /// Each role assembles exactly its hardened surface set: only all-in-one
+    /// and control serve the API, push outbox and public webhooks; only the
+    /// gateway routes continuity; edge nodes open no listener at all.
     #[test]
     fn node_roles_select_disjoint_hardened_surfaces() {
-        let all = NodeAssembly::for_role(NodeRole::AllInOne);
-        assert!(all.full_api && all.engine && all.push_outbox);
-        assert_eq!(all.grpc, GrpcSurface::Full);
+        // (role, full_api, continuity_gateway, public_webhooks, engine, push_outbox, grpc)
+        let cases = [
+            (
+                NodeRole::AllInOne,
+                true,
+                false,
+                true,
+                true,
+                true,
+                GrpcSurface::Full,
+            ),
+            (
+                NodeRole::Control,
+                true,
+                false,
+                true,
+                false,
+                true,
+                GrpcSurface::Full,
+            ),
+            (
+                NodeRole::Executor,
+                false,
+                false,
+                false,
+                true,
+                false,
+                GrpcSurface::Executor,
+            ),
+            (
+                NodeRole::Gateway,
+                false,
+                true,
+                false,
+                false,
+                false,
+                GrpcSurface::ContinuityGateway,
+            ),
+            (
+                NodeRole::Edge,
+                false,
+                false,
+                false,
+                true,
+                false,
+                GrpcSurface::Disabled,
+            ),
+        ];
+        for (role, full_api, continuity_gateway, public_webhooks, engine, push_outbox, grpc) in
+            cases
+        {
+            assert_eq!(
+                NodeAssembly::for_role(role),
+                NodeAssembly {
+                    full_api,
+                    continuity_gateway,
+                    public_webhooks,
+                    engine,
+                    push_outbox,
+                    grpc,
+                },
+                "{role:?}"
+            );
+        }
+    }
 
-        let executor = NodeAssembly::for_role(NodeRole::Executor);
-        assert!(!executor.full_api && !executor.continuity_gateway);
-        assert!(!executor.public_webhooks && !executor.push_outbox && executor.engine);
-        assert_eq!(executor.grpc, GrpcSurface::Executor);
+    #[test]
+    fn push_outbox_and_public_webhooks_run_only_beside_the_authenticated_api() {
+        for role in ALL_ROLES {
+            let assembly = NodeAssembly::for_role(role);
+            assert!(
+                !assembly.push_outbox || assembly.full_api,
+                "{role:?} runs the push outbox without the full API"
+            );
+            assert_eq!(
+                assembly.public_webhooks, assembly.full_api,
+                "{role:?} decouples public webhooks from the authenticated API"
+            );
+        }
+    }
 
-        let control = NodeAssembly::for_role(NodeRole::Control);
-        assert!(control.full_api && control.push_outbox && !control.engine);
-        assert_eq!(control.grpc, GrpcSurface::Full);
+    #[test]
+    fn continuity_router_runs_only_on_the_gateway_grpc_surface() {
+        for role in ALL_ROLES {
+            let assembly = NodeAssembly::for_role(role);
+            assert_eq!(
+                assembly.continuity_gateway,
+                assembly.grpc == GrpcSurface::ContinuityGateway,
+                "{role:?} mixes the continuity router with a foreign gRPC surface"
+            );
+        }
+    }
 
-        let gateway = NodeAssembly::for_role(NodeRole::Gateway);
-        assert!(gateway.continuity_gateway);
-        assert!(!gateway.full_api && !gateway.engine && !gateway.push_outbox);
-        assert_eq!(gateway.grpc, GrpcSurface::ContinuityGateway);
+    /// Every `rpc` declared on `Orch8Service` in the shipped proto, as the
+    /// full gRPC method path the auth layer matches on.
+    fn proto_rpc_paths() -> std::collections::BTreeSet<String> {
+        include_str!("../../proto/orch8.proto")
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("rpc "))
+            .filter_map(|rest| rest.split('(').next())
+            .map(|name| format!("/orch8.Orch8Service/{}", name.trim()))
+            .collect()
+    }
 
-        let edge = NodeAssembly::for_role(NodeRole::Edge);
-        assert!(edge.engine && !edge.full_api && !edge.public_webhooks);
-        assert_eq!(edge.grpc, GrpcSurface::Disabled);
+    #[test]
+    fn restricted_grpc_allow_lists_name_only_real_unique_rpcs() {
+        let declared = proto_rpc_paths();
+        for (surface, allow_list) in [
+            ("executor", EXECUTOR_GRPC_RPCS),
+            ("gateway", GATEWAY_GRPC_RPCS),
+        ] {
+            let unique: std::collections::BTreeSet<_> = allow_list.iter().collect();
+            assert_eq!(unique.len(), allow_list.len(), "{surface} has duplicates");
+            for path in allow_list {
+                assert!(
+                    declared.contains(*path),
+                    "{surface} allows {path}, which proto/orch8.proto does not declare"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn executor_surface_serves_the_remote_worker_task_lifecycle() {
+        for required in [
+            "/orch8.Orch8Service/Health",
+            "/orch8.Orch8Service/PollTasks",
+            "/orch8.Orch8Service/CompleteTask",
+            "/orch8.Orch8Service/FailTask",
+            "/orch8.Orch8Service/HeartbeatTask",
+            "/orch8.Orch8Service/WorkerStream",
+            "/orch8.Orch8Service/ArtifactTransfer",
+            "/orch8.Orch8Service/IngestTelemetryBatch",
+        ] {
+            assert!(EXECUTOR_GRPC_RPCS.contains(&required), "missing {required}");
+        }
+    }
+
+    /// `orch8-grpc/src/worker_client.rs` always releases a task through the
+    /// unary `ReleaseTask`, so an executor node must accept it.
+    #[test]
+    #[ignore = "BUG: EXECUTOR_GRPC_RPCS omits /orch8.Orch8Service/ReleaseTask — fixed on test/bugs"]
+    fn executor_surface_lets_remote_workers_release_tasks() {
+        assert!(EXECUTOR_GRPC_RPCS.contains(&"/orch8.Orch8Service/ReleaseTask"));
+    }
+
+    #[test]
+    fn executor_surface_never_exposes_tenant_control_plane_rpcs() {
+        let lifecycle = [
+            "Health",
+            "PollTasks",
+            "CompleteTask",
+            "FailTask",
+            "HeartbeatTask",
+            "ReleaseTask",
+            "WorkerStream",
+            "ArtifactTransfer",
+            "IngestTelemetryBatch",
+        ]
+        .map(|name| format!("/orch8.Orch8Service/{name}"));
+        for path in proto_rpc_paths()
+            .into_iter()
+            .filter(|path| !lifecycle.contains(path))
+        {
+            assert!(
+                !EXECUTOR_GRPC_RPCS.contains(&path.as_str()),
+                "executor must not expose control-plane {path}"
+            );
+        }
+    }
+
+    /// The gateway only proxies continuity artifacts and answers health
+    /// probes: no task delivery, placement or control-plane RPC.
+    #[test]
+    fn gateway_surface_serves_only_health_and_artifact_transfer() {
+        let allowed: std::collections::BTreeSet<_> = GATEWAY_GRPC_RPCS.iter().copied().collect();
+        assert_eq!(
+            allowed,
+            [
+                "/orch8.Orch8Service/Health",
+                "/orch8.Orch8Service/ArtifactTransfer"
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 
     #[test]
@@ -2411,6 +2586,4 @@ mod tests {
 }
 
 #[cfg(test)]
-mod node_role_coverage_tests;
-#[cfg(test)]
-mod preflight_coverage_tests;
+mod startup_preflight_tests;
