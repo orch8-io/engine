@@ -85,6 +85,53 @@ pub async fn run_trigger_loop(
     }
 }
 
+/// Spawn a trigger listener that deregisters its slug from `active` when it
+/// exits. The id guard keeps a cancelled OLD task from removing a NEWER
+/// registration for the same slug (config-edit restart race).
+fn spawn_deregistering_listener<F>(
+    listener_tasks: &mut JoinSet<()>,
+    active: Arc<RwLock<ActiveTriggers>>,
+    slug: String,
+    listener_id: uuid::Uuid,
+    kind: &'static str,
+    run: F,
+) where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    listener_tasks.spawn(async move {
+        // Run the body on its own task so a panic surfaces as a JoinError
+        // here instead of unwinding past the deregistration (T1-GAP-125):
+        // a slug left in `active` is never respawned by `sync_triggers`.
+        // The guard aborts the body if this task is itself aborted
+        // (shutdown), so it never outlives its supervisor.
+        struct AbortOnDrop(tokio::task::JoinHandle<()>);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let mut body = AbortOnDrop(tokio::spawn(run));
+        if let Err(error) = (&mut body.0).await
+            && error.is_panic()
+        {
+            error!(slug, listener = kind, %error, "trigger listener panicked");
+        }
+        let mut active = active.write().await;
+        if active
+            .listeners
+            .get(&slug)
+            .is_some_and(|l| l.id == listener_id)
+        {
+            info!(
+                slug,
+                listener = kind,
+                "trigger listener exited, deregistering"
+            );
+            active.listeners.remove(&slug);
+        }
+    });
+}
+
 async fn stop_listener_tasks(
     active: &Arc<RwLock<ActiveTriggers>>,
     listener_tasks: &mut JoinSet<()>,
@@ -189,24 +236,14 @@ async fn sync_triggers(
             // for the same slug (config-edit restart race).
             macro_rules! spawn_listener {
                 ($run:expr, $kind:literal) => {{
-                    let active = Arc::clone(&active_shared);
-                    let slug = slug.clone();
-                    listener_tasks.spawn(async move {
-                        ($run).await;
-                        let mut active = active.write().await;
-                        if active
-                            .listeners
-                            .get(&slug)
-                            .is_some_and(|l| l.id == listener_id)
-                        {
-                            info!(
-                                slug,
-                                listener = $kind,
-                                "trigger listener exited, deregistering"
-                            );
-                            active.listeners.remove(&slug);
-                        }
-                    });
+                    spawn_deregistering_listener(
+                        listener_tasks,
+                        Arc::clone(&active_shared),
+                        slug.clone(),
+                        listener_id,
+                        $kind,
+                        $run,
+                    );
                 }};
             }
 
@@ -740,6 +777,37 @@ mod tests {
     use orch8_storage::{AdminStore, InstanceStore, SequenceStore, sqlite::SqliteStorage};
     use orch8_types::ids::SequenceId;
     use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
+
+    /// T1-GAP-125: a listener whose body panics must still deregister, or
+    /// its slug stays "active" and `sync_triggers` never respawns it.
+    #[tokio::test]
+    async fn panicking_listener_deregisters_so_the_next_sync_respawns_it() {
+        let listener_id = uuid::Uuid::now_v7();
+        let active = Arc::new(RwLock::new(ActiveTriggers {
+            listeners: HashMap::from([(
+                "slug-a".to_string(),
+                ActiveListener {
+                    id: listener_id,
+                    cancel: CancellationToken::new(),
+                    trigger_type: TriggerType::ActivepiecesPoll,
+                    config: serde_json::Value::Null,
+                },
+            )]),
+        }));
+        let mut tasks = JoinSet::new();
+
+        spawn_deregistering_listener(
+            &mut tasks,
+            Arc::clone(&active),
+            "slug-a".into(),
+            listener_id,
+            "test",
+            async { panic!("listener body panicked") },
+        );
+        while tasks.join_next().await.is_some() {}
+
+        assert!(active.read().await.listeners.is_empty());
+    }
 
     fn mk_trigger(slug: &str, seq_name: &str, tt: TriggerType) -> TriggerDef {
         let now = chrono::Utc::now();
