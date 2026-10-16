@@ -52,7 +52,7 @@ use orch8_types::credential::{CredentialDef, CredentialKind};
 use orch8_types::error::StepError;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const SCHEME: &str = "credentials://";
 
@@ -84,6 +84,25 @@ const REFRESH_LEASE: chrono::TimeDelta = chrono::TimeDelta::seconds(120);
 
 /// Cap on a token-endpoint response body.
 const MAX_REFRESH_BODY_BYTES: usize = 64 * 1024;
+
+/// Credentials refreshed concurrently in one pass.
+const REFRESH_CONCURRENCY: usize = 4;
+
+/// Consecutive refresh failures after which each further failure logs at
+/// `error` (the credential most likely needs re-authorizing).
+const REFRESH_FAILURES_WARN: u32 = 5;
+
+/// Lifetime assumed for an access token whose response has no `expires_in`
+/// (e.g. Salesforce). Without it `expires_at` stayed in the past and the
+/// credential was refreshed, rotating its refresh token, on every pass.
+const DEFAULT_TOKEN_LIFETIME: chrono::TimeDelta = chrono::TimeDelta::hours(1);
+
+/// Back-off after the `failures`-th consecutive failed refresh: 2 min,
+/// doubling, capped at 6 h.
+fn refresh_failure_backoff(failures: u32) -> chrono::TimeDelta {
+    let minutes = 1_i64 << failures.clamp(1, 9);
+    chrono::TimeDelta::minutes(minutes).min(chrono::TimeDelta::hours(6))
+}
 
 /// Recursively walk `value` and replace every `credentials://<id>[/<key>]`
 /// string with the resolved credential material.
@@ -137,9 +156,21 @@ async fn resolve_string(
     let credential = storage
         .get_credential(owned_tenant.as_ref(), id)
         .await
-        .map_err(|e| StepError::Permanent {
-            message: format!("credentials: storage lookup for '{id}' failed: {e}"),
-            details: None,
+        .map_err(|e| {
+            let message = format!("credentials: storage lookup for '{id}' failed: {e}");
+            // A failover or pool blip must not permanently fail every step
+            // that references a credential.
+            if e.is_transient() {
+                StepError::Retryable {
+                    message,
+                    details: None,
+                }
+            } else {
+                StepError::Permanent {
+                    message,
+                    details: None,
+                }
+            }
         })?;
     let credential = credential.ok_or_else(|| StepError::Permanent {
         message: format!("credentials: no credential registered with id '{id}'"),
@@ -359,24 +390,49 @@ pub async fn run_refresh_loop(
                 break;
             }
             _ = ticker.tick() => {
-                match storage.list_credentials_due_for_refresh(refresh_ahead).await {
-                    Ok(due) if due.is_empty() => {}
-                    Ok(due) => {
-                        debug!(count = due.len(), "refreshing oauth2 credentials");
-                        for credential in due {
-                            if let Err(e) =
-                                refresh_due_credential(storage.as_ref(), &credential, refresh_ahead)
-                                    .await
-                            {
-                                warn!(error = %e, "credential refresh failed");
-                            }
-                        }
+                tokio::select! {
+                    () = cancel.cancelled() => {
+                        info!("credentials refresh loop cancelled");
+                        break;
                     }
-                    Err(e) => warn!(error = %e, "failed to list credentials due for refresh"),
+                    () = refresh_pass(&storage, refresh_ahead) => {}
                 }
             }
         }
     }
+}
+
+/// One refresh pass over the due credentials, a few at a time: one hanging
+/// token endpoint (up to the 35 s client timeout) must not hold up the rest
+/// until they expire. Dropping the future aborts the in-flight refreshes.
+async fn refresh_pass(storage: &Arc<dyn StorageBackend>, refresh_ahead: std::time::Duration) {
+    let due = match storage
+        .list_credentials_due_for_refresh(refresh_ahead)
+        .await
+    {
+        Ok(due) if due.is_empty() => return,
+        Ok(due) => due,
+        Err(e) => {
+            warn!(error = %e, "failed to list credentials due for refresh");
+            return;
+        }
+    };
+    debug!(count = due.len(), "refreshing oauth2 credentials");
+    let mut in_flight = tokio::task::JoinSet::new();
+    for credential in due {
+        if in_flight.len() >= REFRESH_CONCURRENCY {
+            in_flight.join_next().await;
+        }
+        let storage = Arc::clone(storage);
+        in_flight.spawn(async move {
+            if let Err(e) =
+                refresh_due_credential(storage.as_ref(), &credential, refresh_ahead).await
+            {
+                warn!(error = %e, "credential refresh failed");
+            }
+        });
+    }
+    while in_flight.join_next().await.is_some() {}
 }
 
 /// Claim, re-read, and refresh one credential listed as due. Returns
@@ -411,7 +467,29 @@ async fn refresh_due_credential(
     if !fresh.enabled || fresh.expires_at.is_none_or(|t| t > cutoff) {
         return Ok(false);
     }
-    refresh_credential(storage, fresh).await?;
+    if let Err(error) = refresh_credential(storage, fresh).await {
+        // Back off: a dead credential (revoked app, `invalid_grant`, dead
+        // token endpoint) must not be retried, and listed ahead of healthy
+        // ones, every pass.
+        match storage
+            .record_credential_refresh_failure(&listed.id, now, refresh_failure_backoff)
+            .await
+        {
+            Ok(failures) if failures >= REFRESH_FAILURES_WARN => {
+                error!(credential_id = %listed.id, failures,
+                    retry_in_secs = refresh_failure_backoff(failures).num_seconds(),
+                    "oauth2 credential keeps failing to refresh; check or re-authorize it");
+            }
+            Ok(_) => {}
+            Err(e) => warn!(credential_id = %listed.id, error = %e,
+                "failed to record the credential refresh failure"),
+        }
+        crate::metrics::inc(crate::metrics::CREDENTIAL_REFRESH_FAILURES);
+        return Err(error);
+    }
+    if let Err(e) = storage.reset_credential_refresh_failures(&listed.id).await {
+        warn!(credential_id = %listed.id, error = %e, "failed to reset the credential refresh back-off");
+    }
     Ok(true)
 }
 
@@ -518,14 +596,18 @@ fn apply_token_response(credential: &mut CredentialDef, token: &TokenResponse) {
     if let Some(ref rt) = token.refresh_token {
         credential.refresh_token = Some(SecretString::new(rt.clone()));
     }
-    if let Some(expires_in) = token.expires_in {
-        // `DateTime + Duration` panics on overflow, and `expires_in` comes
-        // from the token endpoint's response — never let a hostile or buggy
-        // value kill the refresh loop. Keep the previous expiry in that case.
-        credential.expires_at = chrono::Duration::try_seconds(expires_in)
-            .and_then(|delta| chrono::Utc::now().checked_add_signed(delta))
-            .or(credential.expires_at);
-    }
+    // `DateTime + Duration` panics on overflow, and `expires_in` comes from
+    // the token endpoint's response — never let a hostile or buggy value
+    // kill the refresh loop. A missing (or unusable) `expires_in` assumes
+    // `DEFAULT_TOKEN_LIFETIME` rather than keeping a past expiry.
+    let lifetime = token
+        .expires_in
+        .and_then(chrono::Duration::try_seconds)
+        .filter(|delta| *delta > chrono::TimeDelta::zero())
+        .unwrap_or(DEFAULT_TOKEN_LIFETIME);
+    credential.expires_at = chrono::Utc::now()
+        .checked_add_signed(lifetime)
+        .or(credential.expires_at);
 }
 
 /// Persist refreshed tokens with a CAS on `updated_at`. If a concurrent
@@ -1080,6 +1162,107 @@ mod tests {
         assert_eq!(stored.refresh_token.as_ref().unwrap().expose(), "rt-2");
         let value: Value = serde_json::from_str(stored.value.expose()).unwrap();
         assert_eq!(value["access_token"], "at-2");
+    }
+
+    /// L5-06: a credential whose refresh fails backs off and leaves the due
+    /// listing, so it is not retried every pass ahead of healthy ones.
+    #[tokio::test]
+    async fn failed_refresh_backs_off_and_leaves_the_due_list() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let mut dead = due_oauth("dead");
+        // Fails fast without network access (blocked internal endpoint).
+        dead.refresh_url = Some("http://127.0.0.1/token".into());
+        dead.expires_at = Some(chrono::Utc::now() - chrono::Duration::days(30));
+        storage.create_credential(&dead).await.unwrap();
+        storage
+            .create_credential(&due_oauth("healthy"))
+            .await
+            .unwrap();
+        let ahead = std::time::Duration::from_secs(300);
+
+        let due = storage
+            .list_credentials_due_for_refresh(ahead)
+            .await
+            .unwrap();
+        assert_eq!(due.len(), 2);
+        assert!(
+            refresh_due_credential(&storage, &dead, ahead)
+                .await
+                .is_err()
+        );
+
+        let due = storage
+            .list_credentials_due_for_refresh(ahead)
+            .await
+            .unwrap();
+        let ids: Vec<_> = due.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["healthy"], "the failing credential is backed off");
+        // The back-off holds the lease: no node may retry it yet.
+        let now = chrono::Utc::now();
+        assert!(
+            !storage
+                .claim_credential_refresh("dead", now, now + REFRESH_LEASE)
+                .await
+                .unwrap()
+        );
+        let failures = storage
+            .record_credential_refresh_failure("dead", now, refresh_failure_backoff)
+            .await
+            .unwrap();
+        assert_eq!(failures, 2, "failures accumulate");
+        storage
+            .reset_credential_refresh_failures("dead")
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .list_credentials_due_for_refresh(ahead)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "a reset makes it due again"
+        );
+    }
+
+    #[test]
+    fn refresh_backoff_doubles_and_is_capped() {
+        assert_eq!(refresh_failure_backoff(1), chrono::TimeDelta::minutes(2));
+        assert_eq!(refresh_failure_backoff(2), chrono::TimeDelta::minutes(4));
+        assert_eq!(refresh_failure_backoff(50), chrono::TimeDelta::hours(6));
+    }
+
+    /// A token response without `expires_in` must move `expires_at` into the
+    /// future instead of leaving the credential due (and refreshed) forever.
+    #[test]
+    fn token_without_expires_in_gets_a_default_lifetime() {
+        let mut cred = due_oauth("oa");
+        cred.expires_at = Some(chrono::Utc::now() - chrono::Duration::hours(2));
+        apply_token_response(
+            &mut cred,
+            &TokenResponse {
+                access_token: "at".into(),
+                refresh_token: None,
+                expires_in: None,
+            },
+        );
+        let left = cred.expires_at.unwrap() - chrono::Utc::now();
+        assert!(left > chrono::Duration::minutes(55) && left <= DEFAULT_TOKEN_LIFETIME);
+    }
+
+    /// L5-07: a storage blip while resolving a reference is retryable.
+    #[tokio::test]
+    async fn transient_storage_error_while_resolving_is_retryable() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        storage.pool().close().await;
+        let err = resolve_string(&storage, "", "credentials://api")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StepError::Retryable { .. }), "{err:?}");
     }
 
     /// A stale full-row write (the old PATCH behavior) must be rejected.

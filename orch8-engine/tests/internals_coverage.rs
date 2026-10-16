@@ -1450,6 +1450,7 @@ async fn webhook_76_emit_empty_urls() {
         timeout_secs: 5,
         max_retries: 0,
         secret: None,
+        ..WebhookConfig::default()
     };
     let event = instance_event("test", InstanceId::new(), json!({}));
     webhooks::emit(&config, &event, &CancellationToken::new()).await;
@@ -1496,6 +1497,7 @@ async fn webhook_80_cancelled_token_noop() {
         timeout_secs: 1,
         max_retries: 0,
         secret: None,
+        ..WebhookConfig::default()
     };
     let event = instance_event("x", InstanceId::new(), json!({}));
     let cancel = CancellationToken::new();

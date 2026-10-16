@@ -196,10 +196,10 @@ async fn handle_ap_at(ctx: StepContext, handler_name: &str, url: &str) -> Result
     }
 
     // Un-envelope-able response: classify purely by HTTP status.
-    if status >= 500 {
+    if crate::outbound::is_retryable_status(status) {
         return Err(StepError::Retryable {
             message: format!(
-                "activepieces: sidecar server error {status} from {}",
+                "activepieces: sidecar transient error {status} from {}",
                 crate::outbound::redact_url(url)
             ),
             details: Some(json!({ "status": status, "body": text })),

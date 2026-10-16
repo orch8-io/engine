@@ -174,6 +174,42 @@ pub(super) async fn claim_refresh(
     Ok(result.rows_affected() == 1)
 }
 
+pub(super) async fn record_refresh_failure(
+    store: &PostgresStorage,
+    id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    backoff: fn(u32) -> chrono::TimeDelta,
+) -> Result<u32, StorageError> {
+    let failures: Option<i32> = sqlx::query_scalar(
+        r"UPDATE credentials SET refresh_failures = refresh_failures + 1
+          WHERE id = $1 RETURNING refresh_failures",
+    )
+    .bind(id)
+    .fetch_optional(&store.pool)
+    .await?;
+    let failures = u32::try_from(failures.unwrap_or(0)).unwrap_or(0);
+    let retry_at = now.checked_add_signed(backoff(failures)).unwrap_or(now);
+    sqlx::query("UPDATE credentials SET refresh_claimed_until = $2 WHERE id = $1")
+        .bind(id)
+        .bind(retry_at)
+        .execute(&store.pool)
+        .await?;
+    Ok(failures)
+}
+
+pub(super) async fn reset_refresh_failures(
+    store: &PostgresStorage,
+    id: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE credentials SET refresh_failures = 0, refresh_claimed_until = NULL WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn delete(store: &PostgresStorage, id: &str) -> Result<(), StorageError> {
     sqlx::query("DELETE FROM credentials WHERE id = $1")
         .bind(id)
@@ -194,14 +230,24 @@ pub(super) async fn list_due_for_refresh(
           WHERE kind = 'oauth2' AND enabled = TRUE
             AND refresh_url IS NOT NULL AND refresh_token IS NOT NULL
             AND expires_at IS NOT NULL AND expires_at <= $1
-          ORDER BY expires_at",
+            AND (refresh_claimed_until IS NULL OR refresh_claimed_until < NOW())
+          ORDER BY refresh_failures, expires_at
+          LIMIT $2",
     )
     .bind(cutoff)
+    .bind(i64::from(crate::CREDENTIAL_REFRESH_BATCH))
     .fetch_all(&store.pool)
     .await?;
-    rows.into_iter()
-        .map(CredentialRow::into_credential)
-        .collect::<Result<Vec<_>, _>>()
+    // One undecodable row must not stop every other credential's refresh.
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let id = row.id.clone();
+            row.into_credential()
+                .map_err(|e| tracing::warn!(credential_id = %id, error = %e, "skipping undecodable credential"))
+                .ok()
+        })
+        .collect())
 }
 
 #[derive(sqlx::FromRow)]

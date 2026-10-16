@@ -1446,6 +1446,13 @@ impl crate::WorkerStore for PostgresStorage {
         webhook_outbox::recover_stale(self, stale_before).await
     }
 
+    async fn delete_parked_webhook_outbox_before(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        webhook_outbox::delete_parked_before(self, cutoff).await
+    }
+
     async fn record_webhook_attempt(
         &self,
         attempt: &orch8_types::webhook_delivery::WebhookDeliveryAttempt,
@@ -2061,6 +2068,19 @@ impl crate::AdminStore for PostgresStorage {
         lease_until: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, StorageError> {
         credentials::claim_refresh(self, id, now, lease_until).await
+    }
+
+    async fn record_credential_refresh_failure(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        backoff: fn(u32) -> chrono::TimeDelta,
+    ) -> Result<u32, StorageError> {
+        credentials::record_refresh_failure(self, id, now, backoff).await
+    }
+
+    async fn reset_credential_refresh_failures(&self, id: &str) -> Result<(), StorageError> {
+        credentials::reset_refresh_failures(self, id).await
     }
 
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError> {

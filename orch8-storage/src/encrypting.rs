@@ -2076,6 +2076,8 @@ passthrough_impl! {
     async fn fail_webhook_outbox_attempt_fenced(&self, id: Uuid, claimed_at: DateTime<Utc>, last_error: &str, next_attempt_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
     async fn complete_webhook_outbox_claim(&self, id: Uuid, claimed_at: DateTime<Utc>) -> Result<bool, StorageError>;
     async fn recover_stale_webhook_claims(&self, stale_before: DateTime<Utc>) -> Result<u64, StorageError>;
+
+    async fn delete_parked_webhook_outbox_before(&self, cutoff: DateTime<Utc>) -> Result<u64, StorageError>;
     async fn record_webhook_attempt(&self, attempt: &orch8_types::webhook_delivery::WebhookDeliveryAttempt) -> Result<(), StorageError>;
     async fn list_webhook_deliveries(&self, filter: &orch8_types::webhook_delivery::DeliveryFilter, limit: u32) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliverySummary>, StorageError>;
     async fn get_webhook_delivery_attempts(&self, delivery_id: Uuid) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliveryAttempt>, StorageError>;
@@ -2341,6 +2343,10 @@ passthrough_impl! {
     }
 
     async fn claim_credential_refresh(&self, id: &str, now: chrono::DateTime<chrono::Utc>, lease_until: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+
+    async fn record_credential_refresh_failure(&self, id: &str, now: chrono::DateTime<chrono::Utc>, backoff: fn(u32) -> chrono::TimeDelta) -> Result<u32, StorageError>;
+
+    async fn reset_credential_refresh_failures(&self, id: &str) -> Result<(), StorageError>;
 
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError>;
 

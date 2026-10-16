@@ -83,7 +83,9 @@ Webhook events are fired on instance state transitions.
 |-------|------|---------|-------------|
 | `urls` | array of strings | `[]` | Endpoint URLs to POST event payloads to |
 | `timeout_secs` | integer | `10` | Per-request timeout for webhook delivery |
-| `max_retries` | integer | `3` | Number of delivery retries before giving up |
+| `max_retries` | integer | `3` | Minimum delivery retries before a delivery may park |
+| `retry_window_secs` | integer | `86400` | Durable outbox: keep retrying a transiently failing delivery (jittered back-off from 5 s, capped at 1 h) for this long after it was enqueued before parking it. Env `ORCH8_WEBHOOK_RETRY_WINDOW_SECS` |
+| `parked_retention_secs` | integer | `1209600` | Delete parked outbox rows older than this (14 days); `0` keeps them. Env `ORCH8_WEBHOOK_PARKED_RETENTION_SECS` |
 | `secret` | string | — | Optional shared secret. When set, each delivery is signed: HMAC-SHA256 over `"{timestamp}.{body}"`, sent as `X-Orch8-Signature: sha256=<hex>` + `X-Orch8-Timestamp`, so receivers can verify authenticity and reject replays |
 
 ---
@@ -137,6 +139,17 @@ Built-in operational alerts evaluated on engine nodes; see [Alerts](ALERTS.md). 
 | `eval_interval_secs` | integer | `30` | Evaluation cadence (minimum 5) |
 | `pagerduty_events_url` | string | `https://events.pagerduty.com/v2/enqueue` | PagerDuty Events API v2 endpoint (override for proxies/tests only) |
 | `rules` | array | `[]` | `[[alerts.rules]]` entries: `name`, `tenant_id`, `condition`, `destination`, `cooldown_secs`, `enabled` — same shapes as the API |
+
+---
+
+## [circuit_breaker]
+
+Step circuit breaker, kept per tenant and handler. `http_request`, `tool_call` and `mcp_call` are further split by the destination host of a literal `url`; `llm_call`, `agent` and `embed` by a literal `provider`. Only transient failures (5xx, 408/425/429, timeouts, connection errors) count; a permanent 4xx means the dependency answered and does not trip the breaker.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `failure_threshold` | integer | `5` | Consecutive transient failures that open a breaker (env `ORCH8_CIRCUIT_BREAKER_FAILURE_THRESHOLD`) |
+| `cooldown_secs` | integer | `60` | How long an open breaker defers calls before one probe (env `ORCH8_CIRCUIT_BREAKER_COOLDOWN_SECS`) |
 
 ---
 
@@ -263,7 +276,7 @@ mount a config file for those settings.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ORCH8_LLM_DEFAULT_MODEL_<PROVIDER>` | per provider (below) | Default model for `llm_call` / `agent` when no `model` param is set, e.g. `ORCH8_LLM_DEFAULT_MODEL_MISTRAL`. Unknown (custom) provider names also honour `ORCH8_LLM_DEFAULT_MODEL_OPENAI`. Built-in defaults: `openai` `gpt-6-astra`, `anthropic` `claude-opus-5`, `gemini` `gemini-3.8-flash`, `mistral` `mistral-medium-latest`, `deepseek` `deepseek-v4-pro`, `qwen` `qwen3.7-max`, `groq` `openai/gpt-oss-120b`, `perplexity` `sonar-pro`; `together` / `openrouter` require an explicit `model` |
+| `ORCH8_LLM_DEFAULT_MODEL_<PROVIDER>` | per provider (below) | Default model for `llm_call` / `agent` when no `model` param is set, e.g. `ORCH8_LLM_DEFAULT_MODEL_MISTRAL`. Unknown (custom) provider names also honour `ORCH8_LLM_DEFAULT_MODEL_OPENAI`. Built-in defaults: `openai` `gpt-6-astra`, `anthropic` `claude-opus-5-5`, `gemini` `gemini-3.8-flash`, `mistral` `mistral-medium-latest`, `deepseek` `deepseek-v4-pro`, `qwen` `qwen3.7-max`, `groq` `openai/gpt-oss-120b`, `perplexity` `sonar-pro`; `together` / `openrouter` require an explicit `model` |
 | `ORCH8_MODEL_PRICING` | — | JSON map of model-prefix pricing overrides used by `GET /usage`, e.g. `{"model":{"input_per_1m":1.0,"output_per_1m":2.0}}`. Estimates only; read once on first use. |
 | `ORCH8_ACTIVEPIECES_URL` | `http://127.0.0.1:50052/execute` | Activepieces sidecar action endpoint used by `ap://` handlers and polling triggers. |
 | `ORCH8_ALLOW_INTERNAL_URLS` | `false` | Allows built-in outbound HTTP/tool handlers to target loopback or private addresses. Dangerous SSRF opt-out; use only for isolated local testing. |

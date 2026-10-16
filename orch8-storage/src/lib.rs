@@ -62,7 +62,11 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub(crate) const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 106;
+pub const STORAGE_SCHEMA_VERSION: u32 = 110;
+
+/// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
+/// first), so a backlog of dead credentials cannot starve the rest.
+pub const CREDENTIAL_REFRESH_BATCH: u32 = 100;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -1807,6 +1811,13 @@ pub trait WorkerStore: Send + Sync + 'static {
         stale_before: DateTime<Utc>,
     ) -> Result<u64, StorageError>;
 
+    /// Retention: delete `parked` rows created before `cutoff` (exhausted or
+    /// terminally failed deliveries nobody redelivered). Returns rows removed.
+    async fn delete_parked_webhook_outbox_before(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, StorageError>;
+
     // === Webhook Delivery Attempts (delivery inspector) ===
 
     /// Record one delivery attempt (bounded, redacted metadata only).
@@ -2391,6 +2402,20 @@ pub trait AdminStore: Send + Sync + 'static {
         now: chrono::DateTime<chrono::Utc>,
         lease_until: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, StorageError>;
+
+    /// Record a failed `OAuth2` refresh of credential `id`: increment its
+    /// consecutive-failure count and hold its refresh lease until
+    /// `now + backoff(count)`, so a dead credential is not retried (and
+    /// listed) every pass. Returns the new count.
+    async fn record_credential_refresh_failure(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        backoff: fn(u32) -> chrono::TimeDelta,
+    ) -> Result<u32, StorageError>;
+
+    /// Clear the refresh failure count and lease after a successful refresh.
+    async fn reset_credential_refresh_failures(&self, id: &str) -> Result<(), StorageError>;
 
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError>;
 

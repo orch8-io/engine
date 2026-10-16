@@ -2910,8 +2910,11 @@
               }
             }
           },
+          "401": {
+            "description": "Envelope outside its validity window (clock skew)"
+          },
           "403": {
-            "description": "Unknown/revoked/expired peer, bad signature, stale envelope, or policy denial"
+            "description": "Unknown/revoked/expired peer, bad signature, or policy denial"
           },
           "404": {
             "description": "Allowed sequence is not deployed"

@@ -11,6 +11,10 @@ struct FakeTransport {
     queue: Mutex<Vec<RemoteTask>>,
     calls: Mutex<Vec<(String, uuid::Uuid, Value)>>,
     advertisements: Mutex<Vec<RuntimeCapabilities>>,
+    /// `complete` answers `Retry` this many times before accepting.
+    retry_completes: AtomicUsize,
+    /// Override for every `heartbeat` answer (default `Accepted`).
+    heartbeat_response: Mutex<Option<LeaseResponse>>,
 }
 
 impl FakeTransport {
@@ -79,11 +83,21 @@ impl LeaseTransport for FakeTransport {
 
     async fn heartbeat(&self, task: &ClaimedTask) -> LeaseResponse {
         self.record("heartbeat", task, Value::Null);
-        LeaseResponse::Accepted
+        self.heartbeat_response
+            .lock()
+            .unwrap()
+            .unwrap_or(LeaseResponse::Accepted)
     }
 
     async fn complete(&self, task: &ClaimedTask, output: &Value) -> LeaseResponse {
         self.record("complete", task, output.clone());
+        if self
+            .retry_completes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return LeaseResponse::Retry;
+        }
         LeaseResponse::Accepted
     }
 
@@ -400,4 +414,84 @@ async fn executor_with_vault_reports_references_not_plaintext() {
     assert!(!output.to_string().contains("confidential-payload"));
     assert!(is_vault_reference(&output["secret_report"]));
     assert_eq!(output["ok"], true);
+}
+
+/// L5-01: a control-plane blip longer than a few attempts must not drop a
+/// finished outcome. Delivery keeps retrying, renewing the lease, until the
+/// engine accepts it.
+#[tokio::test]
+async fn settle_retries_through_a_control_plane_outage_and_keeps_the_lease() {
+    let transport = Arc::new(FakeTransport::default());
+    // About 10 s of `Retry` with the capped back-off.
+    transport.retry_completes.store(6, Ordering::Relaxed);
+    let exec = executor(
+        Arc::clone(&transport),
+        LocalCredentials::default(),
+        None,
+        Duration::from_secs(5),
+    )
+    .await;
+    tokio::time::pause();
+    let claimed = ClaimedTask {
+        task: task("transform", json!({})),
+        session: 0,
+    };
+    let started = tokio::time::Instant::now();
+    exec.settle(
+        &claimed,
+        Outcome::Complete(json!({"ok": true})),
+        Duration::from_secs(2),
+    )
+    .await;
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    assert_eq!(
+        transport.calls("complete").len(),
+        7,
+        "retried until accepted"
+    );
+    assert!(
+        !transport.calls("heartbeat").is_empty(),
+        "the lease was renewed while reporting"
+    );
+    assert_eq!(exec.stats().completed, 1);
+}
+
+/// Delivery stops once the lease would lapse instead of retrying forever.
+#[tokio::test]
+async fn settle_gives_up_when_the_lease_runs_out() {
+    let transport = Arc::new(FakeTransport::default());
+    transport
+        .retry_completes
+        .store(usize::MAX, Ordering::Relaxed);
+    *transport.heartbeat_response.lock().unwrap() = Some(LeaseResponse::Retry);
+    let exec = executor(
+        Arc::clone(&transport),
+        LocalCredentials::default(),
+        None,
+        Duration::from_secs(5),
+    )
+    .await;
+    tokio::time::pause();
+    let mut short = task("transform", json!({}));
+    short.lease_secs = Some(6);
+    let claimed = ClaimedTask {
+        task: short,
+        session: 0,
+    };
+    let started = tokio::time::Instant::now();
+    exec.settle(
+        &claimed,
+        Outcome::Complete(json!({})),
+        Duration::from_secs(2),
+    )
+    .await;
+    assert!(started.elapsed() <= Duration::from_secs(4));
+    assert!(transport.calls("complete").len() > 4);
+    assert_eq!(exec.stats().completed, 0);
+
+    // A heartbeat answering LostOwnership ends delivery at once.
+    *transport.heartbeat_response.lock().unwrap() = Some(LeaseResponse::LostOwnership);
+    exec.settle(&claimed, Outcome::Complete(json!({})), Duration::ZERO)
+        .await;
+    assert_eq!(exec.stats().lost, 1);
 }

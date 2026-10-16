@@ -56,13 +56,17 @@ use orch8_types::ids::{InstanceId, TenantId};
 
 use crate::credentials::LocalCredentials;
 use crate::handlers::HandlerRegistry;
-use crate::remote_worker::{HttpLeaseClient, LeaseResponse, RemoteTask, heartbeat_interval};
+use crate::remote_worker::{
+    DEFAULT_LEASE_SECS, HttpLeaseClient, LeaseResponse, RemoteTask, heartbeat_interval,
+};
 
 /// Lifetime of one capability advertisement sent by an executor.
 const CAPABILITY_TTL: Duration = Duration::from_secs(120);
-/// Delivery attempts for complete/fail before leaving the task to the
-/// engine's lease reaper.
-const DELIVERY_ATTEMPTS: u32 = 4;
+/// First pause between complete/fail delivery attempts; doubles (with
+/// jitter) up to [`MAX_DELIVERY_BACKOFF`].
+const DELIVERY_BACKOFF: Duration = Duration::from_millis(250);
+/// Longest pause between complete/fail delivery attempts.
+const MAX_DELIVERY_BACKOFF: Duration = Duration::from_secs(5);
 /// Longest back-off after failed claims.
 const MAX_CLAIM_BACKOFF: Duration = Duration::from_secs(15);
 /// After the drain window: how long released tasks get to report.
@@ -808,6 +812,7 @@ impl RemoteExecutor {
                         message,
                         retryable: false,
                     },
+                    heartbeat,
                 )
                 .await;
                 return;
@@ -824,6 +829,7 @@ impl RemoteExecutor {
                     message,
                     retryable: false,
                 },
+                heartbeat,
             )
             .await;
             return;
@@ -877,7 +883,7 @@ impl RemoteExecutor {
             return;
         };
         let outcome = self.outcome(task, result).await;
-        self.settle(claimed, outcome).await;
+        self.settle(claimed, outcome, heartbeat).await;
     }
 
     /// The report for a handler result: output (sealed into the vault when
@@ -914,9 +920,27 @@ impl RemoteExecutor {
         }
     }
 
-    async fn settle(&self, claimed: &ClaimedTask, outcome: Outcome) {
-        let mut backoff = Duration::from_millis(250);
-        for attempt in 1..=DELIVERY_ATTEMPTS {
+    /// Report the outcome, retrying with a jittered, capped back-off until
+    /// the engine answers or the lease is about to run out. The outcome
+    /// stays buffered here and the lease keeps being renewed while the
+    /// control plane is unavailable (a deploy, a load-balancer drain), so a
+    /// finished side effect is not reaped as ambiguous and run again.
+    async fn settle(&self, claimed: &ClaimedTask, outcome: Outcome, heartbeat: Duration) {
+        let lease = Duration::from_secs(
+            claimed
+                .task
+                .lease_secs
+                .map_or(DEFAULT_LEASE_SECS, u64::from)
+                .max(1),
+        );
+        let now = tokio::time::Instant::now();
+        // The last renewal happened at most one heartbeat ago.
+        let mut lease_until = now + lease.saturating_sub(heartbeat);
+        let mut next_heartbeat = now + heartbeat;
+        let mut backoff = DELIVERY_BACKOFF;
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
             let response = match &outcome {
                 Outcome::Complete(output) => self.transport.complete(claimed, output).await,
                 Outcome::Fail { message, retryable } => {
@@ -937,20 +961,48 @@ impl RemoteExecutor {
                     self.counters.lost.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
-                LeaseResponse::Rejected | LeaseResponse::Unsupported => {
+                LeaseResponse::Unsupported => {
                     warn!(task_id = %claimed.task.id, "the engine rejected the task outcome");
                     return;
                 }
-                LeaseResponse::Retry if attempt < DELIVERY_ATTEMPTS => {
-                    tokio::time::sleep(backoff).await;
-                    backoff = backoff.saturating_mul(2);
-                }
-                LeaseResponse::Retry => {}
+                // `Rejected` also covers a 401/403 during API-key rotation or
+                // a gateway hiccup: a finished effect is worth retrying within
+                // the lease rather than dropping.
+                LeaseResponse::Retry | LeaseResponse::Rejected => {}
             }
+            if tokio::time::Instant::now() >= next_heartbeat {
+                match self.transport.heartbeat(claimed).await {
+                    LeaseResponse::Accepted => {
+                        lease_until = tokio::time::Instant::now() + lease;
+                    }
+                    LeaseResponse::LostOwnership => {
+                        warn!(task_id = %claimed.task.id, "lease lost while reporting the outcome");
+                        self.counters.lost.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                    _ => {}
+                }
+                next_heartbeat = tokio::time::Instant::now() + heartbeat;
+            }
+            let pause = jittered(backoff).min(heartbeat);
+            if tokio::time::Instant::now() + pause >= lease_until {
+                warn!(task_id = %claimed.task.id, attempts, last = ?response,
+                    "outcome undeliverable before the lease expires; \
+                     the engine's lease reaper will reclaim the task");
+                return;
+            }
+            debug!(task_id = %claimed.task.id, attempts, ?response,
+                "outcome not delivered yet; retrying");
+            tokio::time::sleep(pause).await;
+            backoff = backoff.saturating_mul(2).min(MAX_DELIVERY_BACKOFF);
         }
-        debug!(task_id = %claimed.task.id,
-            "outcome undeliverable; the engine's lease reaper will reclaim the task");
     }
+}
+
+/// `base` scaled by a random factor in `[0.5, 1.0]`.
+fn jittered(base: Duration) -> Duration {
+    use rand::RngExt as _;
+    base.mul_f64(rand::rng().random_range(0.5..=1.0))
 }
 
 #[cfg(test)]

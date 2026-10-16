@@ -333,7 +333,13 @@ async fn main() -> anyhow::Result<()> {
     // Inject storage so `Open` transitions survive process restarts, then
     // rehydrate any previously persisted rows. Load failures are non-fatal —
     // the registry logs and boots with an empty in-memory state.
-    let cb_registry = Arc::new(CircuitBreakerRegistry::new(5, 60).with_storage(storage.clone()));
+    let cb_registry = Arc::new(
+        CircuitBreakerRegistry::new(
+            config.circuit_breaker.failure_threshold.max(1),
+            config.circuit_breaker.cooldown_secs.max(1),
+        )
+        .with_storage(storage.clone()),
+    );
     cb_registry.load_from_storage().await;
 
     // cb_registry is already inside app_state.circuit_breakers below.
@@ -1054,6 +1060,17 @@ fn init_prometheus() -> anyhow::Result<MetricsState> {
     let handle = prometheus_handle.handle();
     metrics::set_global_recorder(prometheus_handle)
         .context("failed to install Prometheus recorder")?;
+    // `build_recorder` spawns no upkeep: histogram samples are drained only
+    // on render, so without a scraper they piled up in memory for ever.
+    let upkeep = handle.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            upkeep.run_upkeep();
+        }
+    });
     Ok(MetricsState { handle })
 }
 
@@ -1615,6 +1632,12 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Some(secs) = env_parse("ORCH8_INSTANCE_RETENTION_SECS") {
         config.engine.instance_retention_secs = secs;
     }
+    if let Some(n) = env_parse("ORCH8_CIRCUIT_BREAKER_FAILURE_THRESHOLD") {
+        config.circuit_breaker.failure_threshold = n;
+    }
+    if let Some(secs) = env_parse("ORCH8_CIRCUIT_BREAKER_COOLDOWN_SECS") {
+        config.circuit_breaker.cooldown_secs = secs;
+    }
     if let Ok(val) = std::env::var("ORCH8_STORAGE_BACKEND") {
         config.database.backend = val;
     }
@@ -1747,6 +1770,12 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     }
     if let Ok(val) = std::env::var("ORCH8_WEBHOOK_SECRET") {
         config.engine.webhooks.secret = (!val.is_empty()).then(|| val.into());
+    }
+    if let Some(secs) = env_parse("ORCH8_WEBHOOK_RETRY_WINDOW_SECS") {
+        config.engine.webhooks.retry_window_secs = secs;
+    }
+    if let Some(secs) = env_parse("ORCH8_WEBHOOK_PARKED_RETENTION_SECS") {
+        config.engine.webhooks.parked_retention_secs = secs;
     }
     if let Ok(val) = std::env::var("ORCH8_API_KEY") {
         config.api.api_key = val.into();

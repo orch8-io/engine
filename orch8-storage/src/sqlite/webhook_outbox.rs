@@ -247,3 +247,15 @@ pub(super) async fn recover_stale(
     .await?;
     Ok(result.rows_affected())
 }
+
+pub(super) async fn delete_parked_before(
+    storage: &SqliteStorage,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<u64, StorageError> {
+    let result =
+        sqlx::query("DELETE FROM webhook_outbox WHERE status='parked' AND created_at < ?1")
+            .bind(ts(cutoff))
+            .execute(&storage.pool)
+            .await?;
+    Ok(result.rows_affected())
+}

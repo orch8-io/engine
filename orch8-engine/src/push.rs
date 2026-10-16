@@ -9,9 +9,10 @@
 //! is the source of truth, so a failed push only means the task waits for the
 //! next regular poll (an operator can flip the queue back to `poll`).
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -70,11 +71,57 @@ pub async fn maybe_push_task(
             return;
         }
     };
+    // Bounded: a slow or black-holed push URL under a fan-out must not pile
+    // up one detached task (and socket) per enqueued task. When the pool is
+    // full the wake-up is skipped; the task still waits for the next poll.
+    let pool = push_pool();
+    let Ok(permit) = Arc::clone(&pool.permits).try_acquire_owned() else {
+        metrics::inc(metrics::TASKS_PUSH_SKIPPED);
+        debug!(queue, "push pool full; leaving task for poll");
+        return;
+    };
     let secret = cfg.secret;
-    let cancel = cancel.clone();
+    let caller = cancel.clone();
+    let shared = pool
+        .cancel
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     tokio::spawn(async move {
-        send_push(&url, &body, secret.as_deref(), &cancel).await;
+        let _permit = permit;
+        tokio::select! {
+            () = caller.cancelled() => {}
+            () = shared.cancelled() => {}
+            () = send_push(&url, &body, secret.as_deref(), &shared) => {}
+        }
     });
+}
+
+/// Most push wake-ups in flight per process.
+const MAX_IN_FLIGHT_PUSHES: usize = 64;
+
+struct PushPool {
+    permits: Arc<Semaphore>,
+    /// Cancelled (and replaced) by [`shutdown`]: every in-flight push stops.
+    cancel: std::sync::Mutex<CancellationToken>,
+}
+
+fn push_pool() -> &'static PushPool {
+    static POOL: OnceLock<PushPool> = OnceLock::new();
+    POOL.get_or_init(|| PushPool {
+        permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_PUSHES)),
+        cancel: std::sync::Mutex::new(CancellationToken::new()),
+    })
+}
+
+/// Stop every in-flight push wake-up (engine shutdown). Pushes started
+/// afterwards (another engine in the same process) are unaffected.
+pub fn shutdown() {
+    let mut current = push_pool()
+        .cancel
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::mem::replace(&mut *current, CancellationToken::new()).cancel();
 }
 
 /// Reason carried by a push wake-up for a newly enqueued task.
@@ -198,6 +245,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(push_pool)]
     async fn push_queue_posts_signed_envelope() {
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
 
@@ -328,5 +376,47 @@ mod tests {
             accepted.is_err(),
             "internal push target must not be contacted"
         );
+    }
+
+    /// L5-12: pushes are bounded; with the pool exhausted a wake-up is
+    /// skipped (the task waits for poll) instead of spawning another task.
+    #[tokio::test]
+    #[serial_test::serial(push_pool)]
+    async fn push_is_skipped_when_the_pool_is_full() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/push", listener.local_addr().unwrap());
+        let now = chrono::Utc::now();
+        storage
+            .upsert_queue_dispatch(&QueueDispatchConfig {
+                tenant_id: "t1".into(),
+                queue_name: "q1".into(),
+                mode: DispatchMode::Push,
+                push_url: Some(url.clone()),
+                secret: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        crate::handlers::builtin::mark_url_safe_for_test(&url).await;
+
+        let held = Arc::clone(&push_pool().permits)
+            .acquire_many_owned(u32::try_from(MAX_IN_FLIGHT_PUSHES).unwrap())
+            .await
+            .unwrap();
+        maybe_push_task(
+            storage.as_ref(),
+            "t1",
+            &mk_task(Some("q1")),
+            &CancellationToken::new(),
+        )
+        .await;
+        let accepted = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+        assert!(
+            accepted.is_err(),
+            "no push may start while the pool is full"
+        );
+        drop(held);
     }
 }

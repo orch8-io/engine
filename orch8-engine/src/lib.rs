@@ -216,6 +216,8 @@ impl Engine {
         // threaded through every `webhooks::emit` call) rather than letting
         // the process tear down mid-request underneath them.
         webhooks::wait_for_webhook_tasks(BACKGROUND_SHUTDOWN_TIMEOUT).await;
+        // Push wake-ups are best-effort hints: stop the in-flight ones.
+        push::shutdown();
 
         // Deregister this node on shutdown.
         self.deregister_node().await;

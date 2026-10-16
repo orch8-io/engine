@@ -10,7 +10,7 @@ use super::common::{
     merge_json_response_fields, permanent, retryable, safe_truncate,
 };
 use super::sse::{SseParser, charge_stream_bytes, next_chunk, stream_idle_timeout};
-use super::{DeltaSink, http_client};
+use super::{DeltaSink, client_for};
 
 /// Messages API version header. Still the current (and only) version.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -22,24 +22,49 @@ const SERVER_SIDE_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// a normal reply, while keeping non-streaming requests under HTTP timeouts.
 const DEFAULT_MAX_TOKENS: u64 = 16_000;
 
-/// Models that reject non-default sampling params (`temperature`, `top_p`,
-/// `top_k`) with a 400: Opus 4.7+, Sonnet 5, and the Fable/Mythos tier.
-fn rejects_sampling(model: &str) -> bool {
-    [
-        "claude-opus-5",
-        "claude-opus-4-7",
-        "claude-opus-4-8",
-        "claude-sonnet-5",
-        "claude-fable",
-        "claude-mythos",
-    ]
-    .iter()
-    .any(|prefix| model.starts_with(prefix))
+/// `(family, major, minor)` of a Claude model id such as `claude-opus-5-5`,
+/// `claude-haiku-4-5-20251001`, `us.anthropic.claude-sonnet-5-5` or
+/// `claude-opus-5@20260101`. A trailing date (8+ digits) is not a version.
+/// Parsing by family and version keeps capability detection working for
+/// model ids released after this build, instead of an exact-name list.
+fn claude_version(model: &str) -> Option<(&str, u32, u32)> {
+    let id = model.rsplit('.').next().unwrap_or(model);
+    let id = id.split('@').next().unwrap_or(id);
+    let mut parts = id.strip_prefix("claude-")?.split('-');
+    // Legacy ids (`claude-3-5-sonnet-...`) put the version first.
+    let family = parts
+        .next()
+        .filter(|f| f.chars().all(|c| c.is_ascii_lowercase()))?;
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts
+        .next()
+        .filter(|p| p.len() < 8)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    Some((family, major, minor))
 }
 
-/// Models on which server-side refusal fallbacks are enabled by default.
+/// Models that reject non-default sampling params (`temperature`, `top_p`,
+/// `top_k`) with a 400: Opus 4.7+, every 5.x-and-later model (Opus, Sonnet,
+/// Haiku), and the Fable/Mythos tier.
+fn rejects_sampling(model: &str) -> bool {
+    match claude_version(model) {
+        Some(("fable" | "mythos", ..)) => true,
+        Some(("opus", major, minor)) => (major, minor) >= (4, 7),
+        Some((_, major, _)) => major >= 5,
+        None => false,
+    }
+}
+
+/// Models on which server-side refusal fallbacks (`fallbacks: "default"`)
+/// are enabled by default: Opus 5+, Sonnet 5.5+ and Fable 5.1+.
 fn fallbacks_by_default(model: &str) -> bool {
-    matches!(model, "claude-opus-5" | "claude-fable-5-1")
+    match claude_version(model) {
+        Some(("opus", major, _)) => major >= 5,
+        Some(("sonnet", major, minor)) => (major, minor) >= (5, 5),
+        Some(("fable", major, minor)) => (major, minor) >= (5, 1),
+        _ => false,
+    }
 }
 
 /// `OpenAI`-shaped function tools → Messages API tools. Native Anthropic tool
@@ -288,7 +313,7 @@ pub(super) async fn call_anthropic(
 
     debug!(url = %crate::outbound::redact_url(&url), model = %model, streaming = deltas.is_some(), fallbacks, "llm_call: Anthropic");
 
-    let mut req = http_client()
+    let mut req = client_for(deltas.is_some())
         .post(&url)
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -823,6 +848,49 @@ mod tests {
                 .get("anthropic_content")
                 .is_none()
         );
+    }
+
+    /// L5-11: capability detection is family/version based, so current and
+    /// future ids are classified without an exact-name list.
+    #[test]
+    fn capabilities_follow_model_family_and_version() {
+        for m in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-fable-5-1",
+            "claude-opus-4-7",
+            "claude-opus-6",
+            "us.anthropic.claude-sonnet-5-5",
+            "claude-opus-5@20260101",
+        ] {
+            assert!(rejects_sampling(m), "{m} rejects sampling");
+        }
+        for m in [
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "claude-3-5-sonnet-20241022",
+            "my-proxy-model",
+        ] {
+            assert!(!rejects_sampling(m), "{m} accepts sampling");
+        }
+        for m in [
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-fable-5-1",
+            "claude-opus-6",
+        ] {
+            assert!(fallbacks_by_default(m), "{m} gets fallbacks");
+        }
+        for m in [
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-haiku-4-5-20251001",
+            "claude-mythos-5-1",
+        ] {
+            assert!(!fallbacks_by_default(m), "{m} gets no default fallbacks");
+        }
     }
 
     #[test]

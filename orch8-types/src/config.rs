@@ -148,6 +148,9 @@ pub struct EngineConfig {
     /// the `/alerts/rules` API.
     #[serde(default)]
     pub alerts: AlertsConfig,
+    /// Step circuit-breaker thresholds (`[circuit_breaker]`).
+    #[serde(default)]
+    pub circuit_breaker: CircuitBreakerConfig,
     /// Embedded (end-customer) surface: scoped embed tokens + CORS.
     #[serde(default)]
     pub embed: EmbedConfig,
@@ -362,6 +365,39 @@ const fn default_cloud_observability_interval_ms() -> u64 {
 
 const fn default_cloud_observability_buffer() -> usize {
     10_000
+}
+
+/// `[circuit_breaker]` section: thresholds of the per-(tenant, handler or
+/// destination) step circuit breaker. Only transient failures (5xx, 429,
+/// timeouts, connection errors) count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircuitBreakerConfig {
+    /// Consecutive transient failures that open a breaker. Default 5.
+    /// Env: `ORCH8_CIRCUIT_BREAKER_FAILURE_THRESHOLD`.
+    #[serde(default = "default_breaker_failure_threshold")]
+    pub failure_threshold: u32,
+    /// How long an open breaker defers calls before a probe. Default 60 s.
+    /// Env: `ORCH8_CIRCUIT_BREAKER_COOLDOWN_SECS`.
+    #[serde(default = "default_breaker_cooldown_secs")]
+    pub cooldown_secs: u64,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: default_breaker_failure_threshold(),
+            cooldown_secs: default_breaker_cooldown_secs(),
+        }
+    }
+}
+
+const fn default_breaker_failure_threshold() -> u32 {
+    5
+}
+
+const fn default_breaker_cooldown_secs() -> u64 {
+    60
 }
 
 /// `[alerts]` section.
@@ -838,6 +874,18 @@ pub struct WebhookConfig {
     /// signing secret would defeat the purpose of signing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<SecretString>,
+    /// How long the durable outbox keeps retrying a transiently failing
+    /// delivery (jittered exponential back-off from 5 s, capped at 1 h)
+    /// before parking it, measured from when the row was enqueued. At least
+    /// `max_retries` attempts are made either way. Default 86 400 (24 h).
+    /// Env: `ORCH8_WEBHOOK_RETRY_WINDOW_SECS`.
+    #[serde(default = "default_webhook_retry_window_secs")]
+    pub retry_window_secs: u64,
+    /// Parked outbox rows (exhausted or terminally failed deliveries) older
+    /// than this are deleted. `0` keeps them until removed by hand.
+    /// Default 1 209 600 (14 days). Env: `ORCH8_WEBHOOK_PARKED_RETENTION_SECS`.
+    #[serde(default = "default_webhook_parked_retention_secs")]
+    pub parked_retention_secs: u64,
 }
 
 impl Default for WebhookConfig {
@@ -847,8 +895,18 @@ impl Default for WebhookConfig {
             timeout_secs: default_webhook_timeout_secs(),
             max_retries: default_webhook_max_retries(),
             secret: None,
+            retry_window_secs: default_webhook_retry_window_secs(),
+            parked_retention_secs: default_webhook_parked_retention_secs(),
         }
     }
+}
+
+const fn default_webhook_retry_window_secs() -> u64 {
+    86_400
+}
+
+const fn default_webhook_parked_retention_secs() -> u64 {
+    14 * 86_400
 }
 
 const fn default_webhook_timeout_secs() -> u64 {

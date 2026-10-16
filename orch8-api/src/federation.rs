@@ -365,7 +365,8 @@ fn denied() -> ApiError {
     request_body = SignedFederationMessage,
     responses(
         (status = 200, description = "Signed response envelope", body = SignedFederationMessage),
-        (status = 403, description = "Unknown/revoked/expired peer, bad signature, stale envelope, or policy denial"),
+        (status = 401, description = "Envelope outside its validity window (clock skew)"),
+        (status = 403, description = "Unknown/revoked/expired peer, bad signature, or policy denial"),
         (status = 404, description = "Allowed sequence is not deployed"),
         (status = 503, description = "Federation disabled (no engine encryption key)"),
     ),
@@ -388,7 +389,16 @@ pub(crate) async fn inbound(
     let payload = orch8_engine::federation::open_message(&peer.inbound_trust_root(), &message, now)
         .map_err(|reason| {
             tracing::warn!(peer_id = %peer.peer_id, %reason, "federation envelope rejected");
-            denied()
+            // A stale envelope (clock skew beyond the allowance) is a 401 so
+            // the sender can tell it from a policy denial and retry.
+            if reason
+                == orch8_engine::continuity_advanced::AdvancedContinuityError::FederationEnvelopeExpired
+                    .to_string()
+            {
+                ApiError::Unauthorized
+            } else {
+                denied()
+            }
         })?;
     let request: FederationRequest = serde_json::from_slice(&payload)
         .map_err(|_| ApiError::InvalidArgument("malformed federation request".into()))?;

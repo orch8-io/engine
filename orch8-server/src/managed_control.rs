@@ -122,6 +122,11 @@ fn open_frame(config: &ManagedControlConfig) -> Result<WorkerStreamClient> {
 async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken) -> Result<()> {
     let endpoint = Endpoint::from_shared(config.endpoint.clone())?
         .connect_timeout(Duration::from_secs(10))
+        // Detect a half-open connection (NAT idle drop) in seconds, not
+        // after the kernel gives up retransmitting.
+        .http2_keep_alive_interval(Duration::from_secs(30))
+        .keep_alive_timeout(Duration::from_secs(10))
+        .keep_alive_while_idle(true)
         .tls_config(orch8_grpc::worker_client::client_tls(
             config.ca_pem.as_deref(),
         ))?;
@@ -178,9 +183,10 @@ async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken
                     anyhow::bail!("managed control stream closed");
                 };
                 if let Some(ServerPayload::Command(frame)) = message.payload {
-                    let command: WorkerCommand = serde_json::from_str(&frame.command_json)
-                        .context("decode managed control command")?;
-                    handle_command(&command, &sender, shutdown).await?;
+                    match decode_command(&frame.command_json) {
+                        Ok(command) => handle_command(&command, &sender, shutdown).await?,
+                        Err(unsupported) => ack_unsupported(unsupported, &sender).await?,
+                    }
                 }
             }
         }
@@ -202,13 +208,48 @@ pub(crate) fn spawn(
                     tracing::warn!(%error, retry_secs = backoff, "managed control session disconnected");
                     tokio::select! {
                         () = shutdown.cancelled() => break,
-                        () = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                        () = tokio::time::sleep(jittered(backoff)) => {}
                     }
                     backoff = (backoff * 2).min(MAX_BACKOFF_SECS);
                 }
             }
         }
     })
+}
+
+/// Decode a control command. An undecodable one (e.g. a command kind added
+/// by a newer control plane) yields its id when it has one, so it can be
+/// acked and dropped instead of failing (and replaying on) every session.
+fn decode_command(json: &str) -> Result<WorkerCommand, Option<String>> {
+    serde_json::from_str::<WorkerCommand>(json).map_err(|error| {
+        let id = serde_json::from_str::<serde_json::Value>(json)
+            .ok()
+            .and_then(|v| v.get("id").and_then(serde_json::Value::as_str).map(str::to_string));
+        tracing::warn!(%error, command_id = ?id, "unsupported managed control command; acknowledging and ignoring");
+        id
+    })
+}
+
+async fn ack_unsupported(
+    command_id: Option<String>,
+    sender: &tokio::sync::mpsc::Sender<WorkerStreamClient>,
+) -> Result<()> {
+    if let Some(command_id) = command_id {
+        sender
+            .send(client_frame(ClientPayload::CommandAck(WorkerCommandAck {
+                command_id,
+            })))
+            .await
+            .context("ack unsupported managed control command")?;
+    }
+    Ok(())
+}
+
+/// `secs` scaled into `[secs/2, secs]`: a control-plane restart must not
+/// make the whole fleet reconnect in the same one-second slots.
+fn jittered(secs: u64) -> Duration {
+    let unit = f64::from(uuid::Uuid::new_v4().as_bytes()[0]) / 255.0;
+    Duration::from_secs(secs).mul_f64(0.5 + unit / 2.0)
 }
 
 const MAX_BACKOFF_SECS: u64 = 30;
@@ -229,6 +270,33 @@ fn next_backoff(current: u64, session_len: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L5-15: an unknown command kind is acked and ignored, not fatal.
+    #[tokio::test]
+    async fn unknown_command_kind_is_acked_not_fatal() {
+        let id = uuid::Uuid::new_v4();
+        let json = serde_json::json!({
+            "id": id, "worker_id": "edge-1", "command": "rotate",
+            "created_at": chrono::Utc::now(),
+        })
+        .to_string();
+        let unsupported = decode_command(&json).unwrap_err();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        ack_unsupported(unsupported, &sender).await.unwrap();
+        assert_eq!(received_ack(&mut receiver).await.command_id, id.to_string());
+        assert!(decode_command("not json").unwrap_err().is_none());
+    }
+
+    #[test]
+    fn reconnect_backoff_is_jittered_within_bounds() {
+        let delays: std::collections::BTreeSet<_> = (0..50).map(|_| jittered(30)).collect();
+        assert!(
+            delays
+                .iter()
+                .all(|d| *d >= Duration::from_secs(15) && *d <= Duration::from_secs(30))
+        );
+        assert!(delays.len() > 5, "delays spread out");
+    }
 
     #[test]
     fn backoff_resets_after_healthy_session() {

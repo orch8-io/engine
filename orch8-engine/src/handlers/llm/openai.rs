@@ -10,16 +10,22 @@ use super::common::{
     retryable, safe_truncate,
 };
 use super::sse::{SseParser, charge_stream_bytes, next_chunk, stream_idle_timeout};
-use super::{DeltaSink, http_client};
+use super::{DeltaSink, client_for};
 
-/// `OpenAI` reasoning models (o-series, GPT-5/6) reject sampling params.
+/// `OpenAI` reasoning models (o-series, GPT-5 and later) reject sampling
+/// params. Version-based, so a newer `gpt-N` is covered without a release.
 fn openai_rejects_sampling(model: &str) -> bool {
     let m = model.rsplit('/').next().unwrap_or(model);
-    m.starts_with("gpt-5")
-        || m.starts_with("gpt-6")
-        || m.starts_with("o1")
-        || m.starts_with("o3")
-        || m.starts_with("o4")
+    let leading_number = |s: &str| {
+        let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u32>().ok()
+    };
+    if let Some(rest) = m.strip_prefix("gpt-") {
+        return leading_number(rest).is_some_and(|major| major >= 5);
+    }
+    m.strip_prefix('o')
+        .and_then(leading_number)
+        .is_some_and(|n| n >= 1)
 }
 
 /// Build the `/chat/completions` request body shared by the streaming and
@@ -136,7 +142,7 @@ pub(super) async fn call_openai_compat(
 
     debug!(url = %crate::outbound::redact_url(&url), model = %model, provider = %provider, streaming = deltas.is_some(), "llm_call: OpenAI-compatible");
 
-    let resp = http_client()
+    let resp = client_for(deltas.is_some())
         .post(&url)
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
@@ -358,6 +364,23 @@ async fn consume_openai_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampling_detection_covers_future_reasoning_models() {
+        for m in [
+            "gpt-5",
+            "gpt-6-astra",
+            "gpt-7",
+            "openai/gpt-8-mini",
+            "o3",
+            "o9-pro",
+        ] {
+            assert!(openai_rejects_sampling(m), "{m}");
+        }
+        for m in ["gpt-4o", "gpt-4.1", "omni", "mistral-medium-latest"] {
+            assert!(!openai_rejects_sampling(m), "{m}");
+        }
+    }
 
     #[test]
     fn openai_uses_max_completion_tokens_and_drops_sampling_on_reasoning_models() {
