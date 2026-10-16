@@ -426,13 +426,29 @@ pub async fn evaluate(
 }
 
 /// Evaluate an execution tree using the scheduler's injected time source.
-#[allow(clippy::too_many_lines)]
 pub async fn evaluate_with_clock(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
     sequence: &SequenceDefinition,
     clock: &orch8_types::clock::SharedClock,
+) -> Result<EvalOutcome, EngineError> {
+    let never = std::sync::atomic::AtomicBool::new(false);
+    evaluate_fenced(storage, handlers, instance, sequence, clock, &never).await
+}
+
+/// [`evaluate_with_clock`] that stops before each iteration once `stop` is
+/// set (the scheduler's lease-lost flag), so no further node is dispatched
+/// after the instance's lease is presumed lost. Stopping early reports
+/// [`EvalOutcome::MoreWork`].
+#[allow(clippy::too_many_lines)]
+pub async fn evaluate_fenced(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    instance: &TaskInstance,
+    sequence: &SequenceDefinition,
+    clock: &orch8_types::clock::SharedClock,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> Result<EvalOutcome, EngineError> {
     // Merge sequence blocks with any dynamically injected blocks.
     let blocks = merged_blocks(storage.as_ref(), instance.id, sequence).await?;
@@ -465,6 +481,12 @@ pub async fn evaluate_with_clock(
     let instance_id = instance.id;
 
     for _ in 0..max_iterations {
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
+            debug!(instance_id = %instance_id, "evaluate: lease lost, stopping before next iteration");
+            return Ok(EvalOutcome::MoreWork {
+                has_waiting_nodes: ctx.tree.iter().any(|n| n.state == NodeState::Waiting),
+            });
+        }
         let outputs_snapshot = OutputsSnapshot::new();
 
         // Refresh stale caches before this iteration.

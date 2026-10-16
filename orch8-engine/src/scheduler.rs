@@ -2866,32 +2866,13 @@ async fn execute_step_loop(
         // have re-dispatched this instance, so do not start another step.
         // Hand the instance back (best-effort — if storage is what's down,
         // the stale-instance reaper recovers it).
-        if ctx.lease_lost.load(std::sync::atomic::Ordering::Acquire) {
+        if lease_presumed_lost(ctx) {
             warn!(
                 instance_id = %instance_id,
                 block_id = %step_def.id,
                 "instance lease presumed lost; not starting further steps"
             );
-            // If another claim already owns the row, releasing it would yank
-            // the new owner's run back to Scheduled — leave it alone.
-            if let Some(token) = ctx.claim_token {
-                let lease = ctx.storage.heartbeat_instance(instance_id, token).await;
-                if matches!(lease, Ok(orch8_storage::InstanceLease::Lost)) {
-                    return Ok(false);
-                }
-            }
-            if let Err(e) = ctx
-                .storage
-                .conditional_update_instance_state(
-                    instance_id,
-                    InstanceState::Running,
-                    InstanceState::Scheduled,
-                    Some(ctx.clock.now()),
-                )
-                .await
-            {
-                warn!(instance_id = %instance_id, error = %e, "failed to release instance after lease loss");
-            }
+            hand_back_after_lease_loss(ctx, instance_id).await;
             return Ok(false);
         }
 
@@ -3333,6 +3314,37 @@ async fn fail_if_over_step_budget(
     Ok(false)
 }
 
+/// Whether this run's lease heartbeat has flagged the lease as lost.
+fn lease_presumed_lost(ctx: &InstanceRunCtx<'_>) -> bool {
+    ctx.lease_lost.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Lease presumed lost (heartbeats failing): another node may already have
+/// re-dispatched this instance. Hand it back to `Scheduled` (best-effort — if
+/// storage is what's down, the stale-instance reaper recovers it), unless
+/// another claim already owns the row: releasing it then would yank the new
+/// owner's run back to `Scheduled`.
+async fn hand_back_after_lease_loss(ctx: &InstanceRunCtx<'_>, instance_id: InstanceId) {
+    if let Some(token) = ctx.claim_token {
+        let lease = ctx.storage.heartbeat_instance(instance_id, token).await;
+        if matches!(lease, Ok(orch8_storage::InstanceLease::Lost)) {
+            return;
+        }
+    }
+    if let Err(e) = ctx
+        .storage
+        .conditional_update_instance_state(
+            instance_id,
+            InstanceState::Running,
+            InstanceState::Scheduled,
+            Some(ctx.clock.now()),
+        )
+        .await
+    {
+        warn!(instance_id = %instance_id, error = %e, "failed to release instance after lease loss");
+    }
+}
+
 /// Process an instance using the tree-based evaluator for composite blocks.
 ///
 /// The evaluator manages an execution tree (persisted in DB) and dispatches each
@@ -3352,9 +3364,30 @@ async fn process_instance_tree(
         return Ok(());
     }
 
-    match crate::evaluator::evaluate_with_clock(storage, handlers, instance, sequence, ctx.clock)
-        .await
+    // GAP-005: the L6-01 lease fence covers composite workflows too — do not
+    // start evaluating (and dispatching steps) once the lease is presumed lost.
+    if lease_presumed_lost(ctx) {
+        warn!(instance_id = %instance.id, "instance lease presumed lost; not evaluating tree");
+        hand_back_after_lease_loss(ctx, instance.id).await;
+        return Ok(());
+    }
+
+    match crate::evaluator::evaluate_fenced(
+        storage,
+        handlers,
+        instance,
+        sequence,
+        ctx.clock,
+        ctx.lease_lost,
+    )
+    .await
     {
+        // The evaluator stopped early because the lease was lost mid-tick:
+        // hand back instead of parking/rescheduling as if it were ours.
+        Ok(EvalOutcome::MoreWork { .. }) if lease_presumed_lost(ctx) => {
+            warn!(instance_id = %instance.id, "instance lease lost during tree evaluation; stopping");
+            hand_back_after_lease_loss(ctx, instance.id).await;
+        }
         Ok(EvalOutcome::MoreWork { has_waiting_nodes }) => {
             handle_tree_more_work(ctx, instance, sequence, has_waiting_nodes).await?;
         }
