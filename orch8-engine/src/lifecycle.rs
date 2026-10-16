@@ -358,6 +358,7 @@ mod tests {
             timeout_secs: 5,
             max_retries: 1,
             secret: None,
+            ..WebhookConfig::default()
         };
         let event = crate::webhooks::instance_event(
             "instance.completed",

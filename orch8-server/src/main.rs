@@ -1700,6 +1700,12 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_WEBHOOK_SECRET") {
         config.engine.webhooks.secret = (!val.is_empty()).then(|| val.into());
     }
+    if let Some(secs) = env_parse("ORCH8_WEBHOOK_RETRY_WINDOW_SECS") {
+        config.engine.webhooks.retry_window_secs = secs;
+    }
+    if let Some(secs) = env_parse("ORCH8_WEBHOOK_PARKED_RETENTION_SECS") {
+        config.engine.webhooks.parked_retention_secs = secs;
+    }
     if let Ok(val) = std::env::var("ORCH8_API_KEY") {
         config.api.api_key = val.into();
     }

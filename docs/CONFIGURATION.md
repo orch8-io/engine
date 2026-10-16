@@ -83,7 +83,9 @@ Webhook events are fired on instance state transitions.
 |-------|------|---------|-------------|
 | `urls` | array of strings | `[]` | Endpoint URLs to POST event payloads to |
 | `timeout_secs` | integer | `10` | Per-request timeout for webhook delivery |
-| `max_retries` | integer | `3` | Number of delivery retries before giving up |
+| `max_retries` | integer | `3` | Minimum delivery retries before a delivery may park |
+| `retry_window_secs` | integer | `86400` | Durable outbox: keep retrying a transiently failing delivery (jittered back-off from 5 s, capped at 1 h) for this long after it was enqueued before parking it. Env `ORCH8_WEBHOOK_RETRY_WINDOW_SECS` |
+| `parked_retention_secs` | integer | `1209600` | Delete parked outbox rows older than this (14 days); `0` keeps them. Env `ORCH8_WEBHOOK_PARKED_RETENTION_SECS` |
 | `secret` | string | — | Optional shared secret. When set, each delivery is signed: HMAC-SHA256 over `"{timestamp}.{body}"`, sent as `X-Orch8-Signature: sha256=<hex>` + `X-Orch8-Timestamp`, so receivers can verify authenticity and reject replays |
 
 ---

@@ -69,8 +69,8 @@ Block-level and signal events are not published.
 - **At-least-once.** A slow or flapping endpoint can receive duplicates.
 - **Non-blocking.** Each webhook URL is delivered in its own Tokio task — a slow subscriber does not slow the scheduler.
 - **Retries.** `max_retries` is the number of retries _after_ the first attempt. With the default `max_retries = 3` a single event is attempted up to 4 times total.
-- **Backoff.** Exponential starting at 500ms: `500ms → 1s → 2s → 4s → ...`. Doubles on each attempt.
-- **Success.** Any `2xx` or `3xx` HTTP status counts as success.
+- **Backoff.** Durable (outbox) deliveries back off exponentially from 5 s, doubling up to 1 h, jittered to 50–100 %. They keep retrying transient failures (`408`, `429`, `5xx`, transport errors) for `retry_window_secs` (default 24 h) after the event was enqueued, and at least `max_retries` times, before parking. The in-memory fallback path backs off from 500 ms.
+- **Success.** Only a `2xx` status counts as delivered. Redirects are not followed (signed bodies are never forwarded elsewhere): a `3xx` parks the event with a "redirect not followed" error, so update the URL to its new location.
 - **Failure.** `4xx` and `5xx` are both retried until `max_retries` is exhausted. On exhaustion the engine logs the failure, increments `orch8_webhooks_failed_total`, and **parks the event in the webhook outbox** (`orch8_webhooks_parked_total`) instead of dropping it. Inspect and act on parked events via the API: `GET /webhooks/outbox` to list, `POST /webhooks/outbox/{id}/redeliver` to retry, `DELETE /webhooks/outbox/{id}` to discard.
 - **Shutdown.** In-flight deliveries are tracked and awaited at shutdown (up to 10s) before the runtime exits. A retry loop interrupted by shutdown parks its event in the outbox rather than losing it.
 
@@ -82,7 +82,7 @@ Block-level and signal events are not published.
 2. **Return quickly.** Acknowledge within `timeout_secs` (default 10s) and do work asynchronously.
 3. **Return 2xx fast.** Any slow response eats into your subscriber's capacity and increases retry pressure.
 4. **Don't depend on webhooks alone for consistency.** Delivery is at-least-once and exhausted events require an operator (or automation) to redeliver from the outbox. Treat webhooks as a latency optimization on top of periodic `GET /instances` polling if you need guaranteed delivery.
-5. **Monitor the outbox.** Alert on `orch8_webhooks_parked_total` and drain `GET /webhooks/outbox` — parked events are not retried automatically.
+5. **Monitor the outbox.** Alert on `orch8_webhooks_parked_total` and drain `GET /webhooks/outbox` — parked events are not retried automatically, and are deleted after `parked_retention_secs` (default 14 days).
 
 ---
 
@@ -109,7 +109,8 @@ Exposed at `/metrics` in Prometheus format:
 
 | Metric | Type | Description |
 |---|---|---|
-| `orch8_webhooks_sent_total` | Counter | Successful deliveries (2xx/3xx response) |
+| `orch8_webhooks_sent_total` | Counter | Successful deliveries (2xx response) |
+| `orch8_gc_webhook_parked_deleted_total` | Counter | Parked outbox rows deleted after `parked_retention_secs` (default 14 days) |
 | `orch8_webhooks_failed_total` | Counter | Deliveries that exhausted all retries |
 | `orch8_webhooks_parked_total` | Counter | Exhausted deliveries parked in the webhook outbox |
 

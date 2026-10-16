@@ -361,6 +361,7 @@ fn cfg_33_webhook_config_serde_round_trip() {
         timeout_secs: 15,
         max_retries: 7,
         secret: None,
+        ..WebhookConfig::default()
     };
     let json = serde_json::to_string(&wh).unwrap();
     let back: WebhookConfig = serde_json::from_str(&json).unwrap();

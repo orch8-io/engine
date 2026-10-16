@@ -1738,6 +1738,13 @@ pub trait WorkerStore: Send + Sync + 'static {
         stale_before: DateTime<Utc>,
     ) -> Result<u64, StorageError>;
 
+    /// Retention: delete `parked` rows created before `cutoff` (exhausted or
+    /// terminally failed deliveries nobody redelivered). Returns rows removed.
+    async fn delete_parked_webhook_outbox_before(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, StorageError>;
+
     // === Webhook Delivery Attempts (delivery inspector) ===
 
     /// Record one delivery attempt (bounded, redacted metadata only).

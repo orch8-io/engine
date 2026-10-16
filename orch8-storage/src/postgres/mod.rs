@@ -1424,6 +1424,13 @@ impl crate::WorkerStore for PostgresStorage {
         webhook_outbox::recover_stale(self, stale_before).await
     }
 
+    async fn delete_parked_webhook_outbox_before(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        webhook_outbox::delete_parked_before(self, cutoff).await
+    }
+
     async fn record_webhook_attempt(
         &self,
         attempt: &orch8_types::webhook_delivery::WebhookDeliveryAttempt,

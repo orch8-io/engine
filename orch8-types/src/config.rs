@@ -862,6 +862,18 @@ pub struct WebhookConfig {
     /// signing secret would defeat the purpose of signing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<SecretString>,
+    /// How long the durable outbox keeps retrying a transiently failing
+    /// delivery (jittered exponential back-off from 5 s, capped at 1 h)
+    /// before parking it, measured from when the row was enqueued. At least
+    /// `max_retries` attempts are made either way. Default 86 400 (24 h).
+    /// Env: `ORCH8_WEBHOOK_RETRY_WINDOW_SECS`.
+    #[serde(default = "default_webhook_retry_window_secs")]
+    pub retry_window_secs: u64,
+    /// Parked outbox rows (exhausted or terminally failed deliveries) older
+    /// than this are deleted. `0` keeps them until removed by hand.
+    /// Default 1 209 600 (14 days). Env: `ORCH8_WEBHOOK_PARKED_RETENTION_SECS`.
+    #[serde(default = "default_webhook_parked_retention_secs")]
+    pub parked_retention_secs: u64,
 }
 
 impl Default for WebhookConfig {
@@ -871,8 +883,18 @@ impl Default for WebhookConfig {
             timeout_secs: default_webhook_timeout_secs(),
             max_retries: default_webhook_max_retries(),
             secret: None,
+            retry_window_secs: default_webhook_retry_window_secs(),
+            parked_retention_secs: default_webhook_parked_retention_secs(),
         }
     }
+}
+
+const fn default_webhook_retry_window_secs() -> u64 {
+    86_400
+}
+
+const fn default_webhook_parked_retention_secs() -> u64 {
+    14 * 86_400
 }
 
 const fn default_webhook_timeout_secs() -> u64 {
