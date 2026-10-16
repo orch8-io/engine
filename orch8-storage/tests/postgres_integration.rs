@@ -2465,3 +2465,52 @@ async fn postgres_create_api_key_rejects_an_empty_capability_grant() {
         "{err:?}"
     );
 }
+
+/// T1-GAP-131: the wait CAS also compares the stored match set, so a writer
+/// that read the wait before a sibling event matched cannot overwrite it.
+#[tokio::test]
+async fn postgres_update_event_wait_with_a_stale_match_set_returns_false() {
+    use orch8_storage::SignalStore as _;
+    use orch8_types::event_correlation::{EventWait, JoinMode, WaitStatus};
+    let storage = require_postgres!();
+    let instance_id = Uuid::now_v7();
+    let wait = EventWait {
+        id: Uuid::now_v7(),
+        tenant_id: format!("evt-{instance_id}"),
+        instance_id,
+        block_id: "wait_block".into(),
+        event_names: vec!["a".into(), "b".into()],
+        correlation_key: "order-1".into(),
+        join_mode: JoinMode::All,
+        status: WaitStatus::Waiting,
+        matched_names: vec![],
+        matched_event_ids: vec![],
+        created_at: Utc::now(),
+    };
+    storage.upsert_event_wait(&wait).await.unwrap();
+    let mut first = wait.clone();
+    first.matched_names = vec!["a".into()];
+    first.matched_event_ids = vec![Uuid::now_v7()];
+    assert!(
+        storage
+            .update_event_wait(&first, WaitStatus::Waiting, &[])
+            .await
+            .unwrap()
+    );
+    let mut stale = wait.clone();
+    stale.matched_names = vec!["b".into()];
+    stale.matched_event_ids = vec![Uuid::now_v7()];
+
+    let won = storage
+        .update_event_wait(&stale, WaitStatus::Waiting, &[])
+        .await
+        .unwrap();
+
+    let stored = storage
+        .get_event_wait(InstanceId::from_uuid(instance_id), "wait_block")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!won);
+    assert_eq!(stored.matched_names, vec!["a".to_string()]);
+}

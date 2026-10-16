@@ -1405,12 +1405,16 @@ pub trait SignalStore: Send + Sync + 'static {
     ) -> Result<Vec<orch8_types::event_correlation::EventWait>, StorageError>;
 
     /// Persist an updated wait iff its stored status is still
-    /// `expected_status` (CAS). Returns `false` when a concurrent writer
-    /// won.
+    /// `expected_status` **and** its stored `matched_event_ids` still equal
+    /// `expected_matched_event_ids` (the set the caller read). Returns
+    /// `false` when a concurrent writer won — e.g. a sibling event of an
+    /// all-join recorded its match first — so the caller re-reads and
+    /// re-applies instead of overwriting that match.
     async fn update_event_wait(
         &self,
         wait: &orch8_types::event_correlation::EventWait,
         expected_status: orch8_types::event_correlation::WaitStatus,
+        expected_matched_event_ids: &[Uuid],
     ) -> Result<bool, StorageError>;
 
     /// Retention: mark pending events received before `cutoff` as

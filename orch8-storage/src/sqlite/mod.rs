@@ -1377,8 +1377,9 @@ impl crate::SignalStore for SqliteStorage {
         &self,
         wait: &orch8_types::event_correlation::EventWait,
         expected_status: orch8_types::event_correlation::WaitStatus,
+        expected_matched_event_ids: &[Uuid],
     ) -> Result<bool, StorageError> {
-        events::update_wait(self, wait, expected_status).await
+        events::update_wait(self, wait, expected_status, expected_matched_event_ids).await
     }
 
     async fn expire_events_before(
