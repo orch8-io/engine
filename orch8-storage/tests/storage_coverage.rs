@@ -770,7 +770,9 @@ async fn sequence_deletion_removes_dependents_and_preserves_other_sequences() {
     storage.create_sequence(&other).await.unwrap();
     let mut instances = Vec::new();
     for sequence_id in [target.id, target.id, other.id] {
-        let instance = make_instance("t", sequence_id);
+        // Terminal: deleting a sequence refuses while live instances run it.
+        let mut instance = make_instance("t", sequence_id);
+        instance.state = InstanceState::Completed;
         storage.create_instance(&instance).await.unwrap();
         storage
             .create_execution_node(&make_execution_node(instance.id, "s1"))

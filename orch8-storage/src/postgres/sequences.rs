@@ -195,15 +195,33 @@ pub(super) async fn update_status(
 /// for atomicity).
 async fn delete_on(conn: &mut sqlx::PgConnection, id: SequenceId) -> Result<(), StorageError> {
     // Cascade: remove terminal instances (and their FK dependents) before
-    // deleting the sequence. Only terminal instances should remain at this
-    // point — the API handler rejects deletes if active instances exist.
+    // deleting the sequence. Refuse outright while any non-terminal instance
+    // still runs this sequence (L3-03): callers that skipped the API's
+    // active-instance check — or raced an instance create past it — must
+    // never cascade live work away. The FK from `task_instances.sequence_id`
+    // is the backstop for an instance inserted after this check: the final
+    // `DELETE FROM sequences` then fails instead of orphaning it.
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_instances \
+         WHERE sequence_id = $1 AND state NOT IN ('completed', 'failed', 'cancelled')",
+    )
+    .bind(id.into_uuid())
+    .fetch_one(&mut *conn)
+    .await?;
+    if active > 0 {
+        return Err(StorageError::Conflict(format!(
+            "sequence {id} still has {active} non-terminal instance(s)"
+        )));
+    }
 
-    // Gather instance IDs referencing this sequence.
-    let instance_ids: Vec<uuid::Uuid> =
-        sqlx::query_scalar("SELECT id FROM task_instances WHERE sequence_id = $1")
-            .bind(id.into_uuid())
-            .fetch_all(&mut *conn)
-            .await?;
+    // Gather the (terminal) instance IDs referencing this sequence.
+    let instance_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM task_instances \
+         WHERE sequence_id = $1 AND state IN ('completed', 'failed', 'cancelled')",
+    )
+    .bind(id.into_uuid())
+    .fetch_all(&mut *conn)
+    .await?;
 
     if !instance_ids.is_empty() {
         // Delete child tables that lack ON DELETE CASCADE.
@@ -248,8 +266,8 @@ async fn delete_on(conn: &mut sqlx::PgConnection, id: SequenceId) -> Result<(), 
         .execute(&mut *conn)
         .await?;
 
-        sqlx::query("DELETE FROM task_instances WHERE sequence_id = $1")
-            .bind(id.into_uuid())
+        sqlx::query("DELETE FROM task_instances WHERE id = ANY($1)")
+            .bind(&instance_ids)
             .execute(&mut *conn)
             .await?;
     }

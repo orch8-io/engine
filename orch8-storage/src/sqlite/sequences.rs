@@ -203,8 +203,25 @@ pub(super) async fn update_status(
 async fn delete_on(conn: &mut sqlx::SqliteConnection, id: SequenceId) -> Result<(), StorageError> {
     let id_str = id.to_string();
 
+    // Refuse while any non-terminal instance still runs this sequence
+    // (L3-03): a caller that skipped the API's active-instance check must
+    // never cascade live work away. Only terminal instances are removed below.
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM task_instances \
+         WHERE sequence_id = ?1 AND state NOT IN ('completed', 'failed', 'cancelled')",
+    )
+    .bind(&id_str)
+    .fetch_one(&mut *conn)
+    .await?;
+    if active > 0 {
+        return Err(StorageError::Conflict(format!(
+            "sequence {id} still has {active} non-terminal instance(s)"
+        )));
+    }
+
     // Select dependent IDs inside SQLite instead of expanding one bind per
     // instance. The query stays within the bind limit regardless of run count.
+    // (Every remaining instance of the sequence is terminal, per the check.)
     for sql in [
         "DELETE FROM block_outputs WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",
         "DELETE FROM execution_tree WHERE instance_id IN (SELECT id FROM task_instances WHERE sequence_id = ?1)",

@@ -611,6 +611,84 @@ async fn unpublish_sequence_works() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
+/// L3-03: `unpublish {delete:true}` must not cascade-delete live instances:
+/// 409 with the active count, nothing deprecated or deleted.
+#[tokio::test]
+async fn unpublish_delete_rejects_active_instances() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = Uuid::now_v7();
+    let body = json!({
+        "id": seq_id,
+        "tenant_id": "t1",
+        "namespace": "default",
+        "name": "seq-unpublish-live",
+        "version": 1,
+        "deprecated": false,
+        "blocks": [{ "type": "step", "id": "s1", "handler": "noop", "params": {}, "cancellable": true }],
+        "created_at": chrono::Utc::now().to_rfc3339()
+    });
+    let resp = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = client
+        .post(format!("{}/instances", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "sequence_id": seq_id,
+            "tenant_id": "t1",
+            "namespace": "default",
+            "context": { "data": {}, "config": {}, "audit": [] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let inst_id = created["id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .post(format!(
+            "{}/sequences/seq-unpublish-live/unpublish",
+            srv.base_url
+        ))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "delete": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("1 active instance"), "got {text}");
+
+    let resp = client
+        .get(format!("{}/instances/{inst_id}", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "the instance must survive");
+    let resp = client
+        .get(format!("{}/sequences/{seq_id}", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let seq: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        seq["deprecated"],
+        json!(false),
+        "a rejected unpublish changes nothing"
+    );
+}
+
 #[tokio::test]
 async fn promote_sequence_works() {
     let srv = spawn_test_server().await;

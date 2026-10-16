@@ -551,13 +551,43 @@ pub(crate) async fn unpublish_sequence(
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?;
 
-    for seq in versions {
+    for seq in &versions {
         crate::auth::enforce_tenant_access(
             &tenant_ctx,
             &seq.tenant_id,
             &format!("sequence {}", seq.id),
         )?;
+    }
 
+    // L3-03: deleting cascades every instance of every version, so refuse —
+    // before changing anything — while any of them is still live (same 409
+    // as `DELETE /sequences/{id}`). Storage re-checks inside the delete.
+    if req.delete {
+        let mut active_count = 0;
+        for seq in &versions {
+            active_count += state
+                .storage
+                .count_instances(&InstanceFilter {
+                    sequence_id: Some(seq.id),
+                    states: Some(vec![
+                        InstanceState::Scheduled,
+                        InstanceState::Running,
+                        InstanceState::Paused,
+                        InstanceState::Waiting,
+                    ]),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| ApiError::from_storage(e, "instance"))?;
+        }
+        if active_count > 0 {
+            return Err(ApiError::Conflict(format!(
+                "cannot unpublish and delete sequence '{name}': {active_count} active instance(s) still reference it"
+            )));
+        }
+    }
+
+    for seq in versions {
         state
             .storage
             .deprecate_sequence(seq.id)

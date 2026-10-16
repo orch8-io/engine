@@ -763,3 +763,108 @@ async fn create_instance_with_dedupe_second_call_returns_existing() {
     // The losing candidate must not have been persisted.
     assert!(s.get_instance(second_child.id).await.unwrap().is_none());
 }
+
+// I-C02: the worker-completion transitions must not undo a cancel that
+// landed while the step was completing.
+#[tokio::test]
+async fn save_output_and_transition_does_not_resurrect_cancelled_instance() {
+    let s = store().await;
+    for merge in [false, true] {
+        let inst = make_instance(InstanceState::Cancelled);
+        s.create_instance(&inst).await.unwrap();
+        let out = make_output(inst.id, "step");
+        let err = if merge {
+            s.save_output_merge_context_and_transition(
+                &out,
+                inst.id,
+                &inst.context,
+                InstanceState::Scheduled,
+                Some(Utc::now()),
+            )
+            .await
+            .unwrap_err()
+        } else {
+            s.save_output_and_transition(&out, inst.id, InstanceState::Scheduled, Some(Utc::now()))
+                .await
+                .unwrap_err()
+        };
+        assert!(
+            matches!(err, orch8_types::error::StorageError::TerminalTarget { .. }),
+            "got {err:?}"
+        );
+        let after = s.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(after.state, InstanceState::Cancelled);
+        assert!(
+            s.get_all_outputs(inst.id).await.unwrap().is_empty(),
+            "a rejected transition must not persist the output"
+        );
+
+        // A live instance still transitions.
+        let live = make_instance(InstanceState::Waiting);
+        s.create_instance(&live).await.unwrap();
+        let out = make_output(live.id, "step");
+        if merge {
+            s.save_output_merge_context_and_transition(
+                &out,
+                live.id,
+                &live.context,
+                InstanceState::Scheduled,
+                None,
+            )
+            .await
+            .unwrap();
+        } else {
+            s.save_output_and_transition(&out, live.id, InstanceState::Scheduled, None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            s.get_instance(live.id).await.unwrap().unwrap().state,
+            InstanceState::Scheduled
+        );
+    }
+}
+
+// L3-03: storage `delete_sequence` refuses while a non-terminal instance
+// runs the sequence (no caller can cascade live work away), and deletes the
+// sequence plus its terminal history once nothing is live.
+#[tokio::test]
+async fn delete_sequence_refuses_live_instances() {
+    use orch8_storage::SequenceStore;
+    let s = store().await;
+    let seq: orch8_types::sequence::SequenceDefinition = serde_json::from_value(json!({
+        "id": Uuid::now_v7(),
+        "tenant_id": "t",
+        "namespace": "default",
+        "name": "guarded",
+        "version": 1,
+        "deprecated": false,
+        "blocks": [],
+        "created_at": Utc::now().to_rfc3339()
+    }))
+    .unwrap();
+    s.create_sequence(&seq).await.unwrap();
+    let mut live = make_instance(InstanceState::Waiting);
+    live.sequence_id = seq.id;
+    s.create_instance(&live).await.unwrap();
+    let mut done = make_instance(InstanceState::Completed);
+    done.sequence_id = seq.id;
+    s.create_instance(&done).await.unwrap();
+
+    let err = s.delete_sequence(seq.id).await.unwrap_err();
+    assert!(
+        matches!(err, orch8_types::error::StorageError::Conflict(_)),
+        "got {err:?}"
+    );
+    assert!(s.get_instance(live.id).await.unwrap().is_some());
+    assert!(s.get_instance(done.id).await.unwrap().is_some());
+    assert!(s.get_sequence(seq.id).await.unwrap().is_some());
+
+    s.update_instance_state(live.id, InstanceState::Cancelled, None)
+        .await
+        .unwrap();
+    s.delete_sequence(seq.id).await.unwrap();
+    assert!(s.get_instance(live.id).await.unwrap().is_none());
+    assert!(s.get_instance(done.id).await.unwrap().is_none());
+    assert!(s.get_sequence(seq.id).await.unwrap().is_none());
+}

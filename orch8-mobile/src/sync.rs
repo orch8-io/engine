@@ -883,15 +883,94 @@ impl SyncOrchestrator {
             .map_err(|e| MobileError::Storage {
                 message: e.to_string(),
             })?;
-        if let Some(s) = seq {
-            self.backend
-                .delete_sequence(s.id)
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
+        if seq.is_none() {
+            return Ok(());
+        }
+        // Remove every stored version. A version that still has in-flight
+        // instances is kept (storage refuses the delete, L3-04) but
+        // deprecated so no new run starts on it; a later sync retries.
+        let versions = self
+            .backend
+            .list_sequence_versions(&tenant, &ns, name)
+            .await
+            .map_err(|e| MobileError::Storage {
+                message: e.to_string(),
+            })?;
+        for version in versions {
+            match self.backend.delete_sequence(version.id).await {
+                Ok(()) => {}
+                Err(orch8_types::error::StorageError::Conflict(message)) => {
+                    warn!(%name, version = version.version, %message, "keeping removed sequence version with in-flight instances");
+                    self.backend
+                        .deprecate_sequence(version.id)
+                        .await
+                        .map_err(|e| MobileError::Storage {
+                            message: e.to_string(),
+                        })?;
+                }
+                Err(e) => {
+                    return Err(MobileError::Storage {
+                        message: e.to_string(),
+                    });
+                }
+            }
         }
         Ok(())
+    }
+
+    /// True when any non-terminal instance still runs sequence `id`.
+    async fn has_live_instances(
+        &self,
+        id: orch8_types::ids::SequenceId,
+    ) -> Result<bool, MobileError> {
+        use orch8_types::instance::InstanceState;
+        let filter = orch8_types::filter::InstanceFilter {
+            sequence_id: Some(id),
+            states: Some(vec![
+                InstanceState::Scheduled,
+                InstanceState::Running,
+                InstanceState::Paused,
+                InstanceState::Waiting,
+            ]),
+            ..Default::default()
+        };
+        self.backend
+            .count_instances(&filter)
+            .await
+            .map(|n| n > 0)
+            .map_err(|e| MobileError::Storage {
+                message: e.to_string(),
+            })
+    }
+
+    /// Delete superseded versions of `name` (all but `keep`) once their
+    /// in-flight instances have finished. Versions still in use are skipped
+    /// (storage refuses the delete) and retried on the next upgrade.
+    async fn prune_superseded_versions(&self, name: &str, keep: orch8_types::ids::SequenceId) {
+        let tenant = crate::mobile_tenant_id();
+        let ns = Namespace::new("default");
+        let versions = match self
+            .backend
+            .list_sequence_versions(&tenant, &ns, name)
+            .await
+        {
+            Ok(versions) => versions,
+            Err(e) => {
+                warn!(%name, error = %e, "failed to list sequence versions for pruning");
+                return;
+            }
+        };
+        for version in versions.into_iter().filter(|v| v.id != keep) {
+            match self.backend.delete_sequence(version.id).await {
+                Ok(()) => {
+                    info!(%name, version = version.version, "pruned superseded sequence version");
+                }
+                Err(orch8_types::error::StorageError::Conflict(_)) => {}
+                Err(e) => {
+                    warn!(%name, version = version.version, error = %e, "failed to prune superseded sequence version");
+                }
+            }
+        }
     }
 
     async fn upsert_sequence(&self, seq: &SequenceDefinition) -> Result<(), MobileError> {
@@ -903,16 +982,36 @@ impl SyncOrchestrator {
             .await
         {
             Ok(Some(existing)) => {
-                // M-18: delete-then-create as two independent calls could
-                // leave the old row deleted with the new one never created if
-                // create_sequence failed in between. `replace_sequence` runs
-                // both in a single transaction so the upsert is all-or-nothing.
-                self.backend
-                    .replace_sequence(existing.id, seq)
-                    .await
-                    .map_err(|e| MobileError::Storage {
-                        message: format!("failed to replace sequence '{}': {e}", seq.name),
-                    })?;
+                // L3-04: never replace a version that in-flight instances
+                // still run — that cascade-deleted them. Install the new
+                // version alongside (new instances resolve the latest) and
+                // retire the old one once its instances finish.
+                let keep = if self.has_live_instances(existing.id).await? {
+                    let mut new = seq.clone();
+                    if new.id == existing.id {
+                        new.id = orch8_types::ids::SequenceId::new();
+                    }
+                    self.backend
+                        .create_sequence(&new)
+                        .await
+                        .map_err(|e| MobileError::Storage {
+                            message: format!("failed to add sequence '{}': {e}", seq.name),
+                        })?;
+                    new.id
+                } else {
+                    // M-18: delete-then-create as two independent calls could
+                    // leave the old row deleted with the new one never created
+                    // if create_sequence failed in between. `replace_sequence`
+                    // runs both in a single transaction (all-or-nothing).
+                    self.backend
+                        .replace_sequence(existing.id, seq)
+                        .await
+                        .map_err(|e| MobileError::Storage {
+                            message: format!("failed to replace sequence '{}': {e}", seq.name),
+                        })?;
+                    seq.id
+                };
+                self.prune_superseded_versions(&seq.name, keep).await;
             }
             Ok(None) => {
                 self.backend
@@ -2079,6 +2178,88 @@ mod tests {
         assert!(
             other_untouched.is_some(),
             "the unrelated sequence must be untouched"
+        );
+    }
+
+    /// L3-04: a manifest version bump must not cascade-delete instances that
+    /// are still running the old version. The new version is installed
+    /// alongside; the old one is pruned once its instances are terminal.
+    #[tokio::test]
+    async fn upsert_sequence_keeps_old_version_for_in_flight_instances() {
+        use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let backend: Arc<dyn StorageBackend> = sqlite.clone();
+        let orch = SyncOrchestrator::new(
+            mobile_storage,
+            backend.clone(),
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        );
+
+        let v1 = make_test_sequence("habit", Utc::now());
+        backend.create_sequence(&v1).await.unwrap();
+        let now = Utc::now();
+        let instance = TaskInstance {
+            id: orch8_types::ids::InstanceId::new(),
+            sub_tenant: None,
+            sequence_id: v1.id,
+            tenant_id: v1.tenant_id.clone(),
+            namespace: v1.namespace.clone(),
+            state: InstanceState::Waiting,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: orch8_types::context::ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: now,
+            updated_at: now,
+        };
+        backend.create_instance(&instance).await.unwrap();
+
+        let mut v2 = make_test_sequence("habit", Utc::now());
+        v2.version = 2;
+        orch.upsert_sequence(&v2).await.unwrap();
+
+        let kept = backend.get_instance(instance.id).await.unwrap();
+        assert!(
+            kept.is_some(),
+            "the in-flight instance must survive the upgrade"
+        );
+        assert_eq!(kept.unwrap().sequence_id, v1.id, "it keeps running v1");
+        assert!(backend.get_sequence(v1.id).await.unwrap().is_some());
+        let latest = backend
+            .get_sequence_by_name(&v1.tenant_id, &v1.namespace, "habit", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.version, 2, "new runs resolve the new version");
+
+        // Once the instance finishes, the next upgrade retires v1.
+        backend
+            .update_instance_state(instance.id, InstanceState::Completed, None)
+            .await
+            .unwrap();
+        let mut v3 = make_test_sequence("habit", Utc::now());
+        v3.version = 3;
+        orch.upsert_sequence(&v3).await.unwrap();
+        let versions = backend
+            .list_sequence_versions(&v1.tenant_id, &v1.namespace, "habit")
+            .await
+            .unwrap();
+        assert_eq!(
+            versions.iter().map(|v| v.version).collect::<Vec<_>>(),
+            vec![3],
+            "superseded versions without live instances are pruned"
         );
     }
 
