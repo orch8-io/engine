@@ -74,6 +74,9 @@ pub struct PostgresStorage {
     artifact_store: Option<std::sync::Arc<crate::artifacts::ObjectArtifactStore>>,
 }
 
+/// Embedded schema migrations.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../migrations");
+
 impl PostgresStorage {
     /// Attach a durable artifact backend (builder-style).
     #[must_use]
@@ -177,8 +180,13 @@ impl PostgresStorage {
         sqlx::query("SET idle_in_transaction_session_timeout = 0")
             .execute(&mut conn)
             .await?;
-        sqlx::migrate!("../migrations")
-            .run(&mut conn)
+        // `run_direct` instead of `run(&mut conn)`: the `Acquire<'a>` bound on
+        // `run` made every caller's future fail rustc's higher-ranked `Send`
+        // check ("implementation of `Acquire` is not general enough"), which
+        // broke axum handlers that build a storage in-process (sqlx documents
+        // `run_direct` as the workaround).
+        MIGRATOR
+            .run_direct(None, &mut conn, false)
             .await
             .map_err(|e| StorageError::Migration(e.to_string()))?;
         Ok(())
@@ -2566,3 +2574,4 @@ impl crate::ResourceStore for PostgresStorage {
 }
 
 // MobileSyncStore is implemented in mobile_sync.rs
+
