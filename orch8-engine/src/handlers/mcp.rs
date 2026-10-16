@@ -169,14 +169,20 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
     debug!(url = %crate::outbound::redact_url(&url), action = %action, "mcp_call: dispatching request");
 
     // 3. the actual request.
-    let (status, content_type, body, _) = post_jsonrpc(
+    let response = post_jsonrpc(
         &url,
         &primary,
         timeout,
         extra_headers,
         session_id.as_deref(),
     )
-    .await?;
+    .await;
+    // 4. end the session (best-effort): stateful servers otherwise keep one
+    //    session per call until their own TTL, and some cap them.
+    if let Some(sid) = session_id.as_deref() {
+        close_session(&url, extra_headers, sid).await;
+    }
+    let (status, content_type, body, _) = response?;
     let result = parse_jsonrpc_response(status, &content_type, &body, ID_REQUEST)?;
 
     match action {
@@ -187,6 +193,34 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
         )),
     }
 }
+
+/// `DELETE` the MCP session (Streamable HTTP session termination). Failures
+/// are ignored: a 405 means the server does not allow client-ended sessions.
+async fn close_session(
+    url: &str,
+    extra_headers: Option<&serde_json::Map<String, Value>>,
+    session_id: &str,
+) {
+    let mut req = super::llm::http_client()
+        .delete(url)
+        .header("Mcp-Session-Id", session_id)
+        .timeout(SESSION_CLOSE_TIMEOUT);
+    if let Some(headers) = extra_headers {
+        for (k, v) in headers {
+            if let Some(val) = v.as_str()
+                && super::builtin::outbound_header_name_allowed(k)
+            {
+                req = req.header(k.as_str(), val);
+            }
+        }
+    }
+    if let Err(e) = req.send().await {
+        debug!(error = %crate::outbound::redact_error(&e), "mcp_call: session close failed");
+    }
+}
+
+/// Bound on the best-effort session `DELETE`.
+const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// POST a JSON-RPC message to the MCP endpoint.
 ///
@@ -874,6 +908,47 @@ mod net_tests {
         assert_eq!(out["tool_name"], "echo");
         assert_eq!(out["is_error"], false);
         assert_eq!(out["result"][0]["text"], "ok");
+    }
+
+    /// L5-18: a stateful server's session is closed with `DELETE` +
+    /// `Mcp-Session-Id` after the call.
+    #[tokio::test]
+    async fn stateful_session_is_closed_after_the_call() {
+        let seen: Arc<std::sync::Mutex<Vec<(String, Option<String>)>>> = Arc::default();
+        let log = Arc::clone(&seen);
+        let app = axum::Router::new().fallback(
+            move |method: axum::http::Method, headers: axum::http::HeaderMap, body: String| {
+                let log = Arc::clone(&log);
+                async move {
+                    let sid = headers
+                        .get("mcp-session-id")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    log.lock().unwrap().push((method.to_string(), sid));
+                    if method == axum::http::Method::DELETE {
+                        return (
+                            axum::http::StatusCode::OK,
+                            axum::http::HeaderMap::new(),
+                            String::new(),
+                        );
+                    }
+                    let (status, resp) = mcp_router(body);
+                    let mut out = axum::http::HeaderMap::new();
+                    out.insert("content-type", "application/json".parse().unwrap());
+                    out.insert("mcp-session-id", "sess-1".parse().unwrap());
+                    (axum::http::StatusCode::from_u16(status).unwrap(), out, resp)
+                }
+            },
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let ctx = mk_ctx(json!({ "url": url, "tool_name": "echo", "arguments": {} })).await;
+        handle_mcp_call(ctx).await.unwrap();
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 4, "{seen:?}");
+        assert_eq!(seen[3], ("DELETE".to_string(), Some("sess-1".to_string())));
     }
 
     #[tokio::test]
