@@ -63,8 +63,9 @@ pub(crate) struct CreateReleaseRequest {
     pub in_flight_policy: InFlightPolicy,
     /// Optional sub-tenant staged rollout: sub-tenant scoped instances are
     /// routed by sub-tenant instead of per-instance cohorts; unscoped
-    /// instances stay on the baseline until promotion.
-    #[serde(default)]
+    /// instances stay on the baseline until promotion. Unknown fields in
+    /// the target are rejected (the persisted type itself is lenient).
+    #[serde(default, deserialize_with = "orch8_types::strict::deserialize")]
     pub target: Option<ReleaseTarget>,
 }
 
@@ -1026,7 +1027,9 @@ pub(crate) async fn set_release_target(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
-    Json(target): Json<Option<ReleaseTarget>>,
+    Json(orch8_types::strict::Strict(target)): Json<
+        orch8_types::strict::Strict<Option<ReleaseTarget>>,
+    >,
 ) -> Result<impl IntoResponse, ApiError> {
     if let Some(target) = &target {
         target.validate().map_err(ApiError::InvalidArgument)?;

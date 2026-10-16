@@ -175,8 +175,10 @@ pub struct WorkflowRelease {
 }
 
 /// Sub-tenant staged-rollout target of a release.
+///
+/// Persisted, so unknown fields are tolerated on read (binary rollback);
+/// the API decodes request bodies with [`crate::strict`] instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ReleaseTarget {
     /// Sub-tenants that always receive the candidate.
     #[serde(default)]

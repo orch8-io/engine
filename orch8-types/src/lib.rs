@@ -55,6 +55,7 @@ pub mod sequence_document;
 pub mod session;
 pub mod signal;
 pub mod step_log;
+pub mod strict;
 pub mod sub_tenant;
 pub mod suggest;
 pub mod template_trace;

@@ -97,8 +97,10 @@ pub struct PromptLabel {
 }
 
 /// How a step asked for a prompt (the `prompt` param of `llm_call`).
+///
+/// Persisted inside sequence definitions, so unknown fields are tolerated:
+/// a rolled-back binary must still run steps a newer binary authored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PromptRef {
     pub name: String,
     #[serde(default)]

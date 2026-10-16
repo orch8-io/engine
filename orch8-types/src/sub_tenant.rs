@@ -41,8 +41,10 @@ pub fn month_start(now: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// Per-sub-tenant caps. `None` = uncapped (the tenant pool still applies).
+///
+/// Persisted, so unknown fields are tolerated on read (binary rollback);
+/// the API decodes request bodies with [`crate::strict`] instead.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct SubTenantLimits {
     /// Executions (top-level instances) the sub-tenant may start per
     /// calendar month (UTC).
@@ -116,8 +118,10 @@ impl SequenceEmbed {
 }
 
 /// Tenant-wide embed theme served to embed-kit components.
+///
+/// Persisted, so unknown fields are tolerated on read (binary rollback);
+/// the API decodes request bodies with [`crate::strict`] instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct EmbedTheme {
     /// CSS custom properties (`--orch8-*`), name → value.
     #[serde(default)]

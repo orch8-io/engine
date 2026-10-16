@@ -173,7 +173,7 @@ pub(crate) async fn put_limits(
     State(state): State<AppState>,
     tenant_ctx: OptionalTenant,
     Path(sub): Path<String>,
-    Json(limits): Json<SubTenantLimits>,
+    Json(orch8_types::strict::Strict(limits)): Json<orch8_types::strict::Strict<SubTenantLimits>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let tenant = require_tenant(&tenant_ctx)?;
     path_sub_tenant(&sub)?;
