@@ -62,6 +62,9 @@ pub mod stream_windows;
 pub mod template;
 pub mod template_trace;
 pub mod tenant_budgets;
+// Test harness (scheduler-faithful driver, in-process engine); test-only.
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing;
 pub mod trace_context;
 pub mod trigger_sources;
 pub mod triggers;

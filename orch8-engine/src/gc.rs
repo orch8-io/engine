@@ -176,6 +176,11 @@ pub async fn run_gc_loop_with_ttl(
     instance_retention: Option<Duration>,
     cancel: CancellationToken,
 ) {
+    let options = GcOptions {
+        dedupe_ttl,
+        artifact_retention,
+        instance_retention,
+    };
     let mut ticker = tokio::time::interval(interval);
     // First tick fires immediately — skip it so startup isn't a DB burst.
     ticker.tick().await;
@@ -184,27 +189,61 @@ pub async fn run_gc_loop_with_ttl(
         tokio::select! {
             () = cancel.cancelled() => break,
             _ = ticker.tick() => {
-                tokio::join!(
-                    sweep_externalized(storage.as_ref()),
-                    sweep_emit_dedupe(storage.as_ref(), dedupe_ttl),
-                    sweep_artifacts_opt(storage.as_ref(), artifact_retention),
-                    sweep_telemetry_events(storage.as_ref()),
-                    sweep_mobile_devices(storage.as_ref()),
-                    sweep_mobile_approvals(storage.as_ref()),
-                    sweep_mobile_commands(storage.as_ref()),
-                    sweep_terminal_instances_opt(storage.as_ref(), instance_retention),
-                    sweep_webhook_attempts(storage.as_ref()),
-                    sweep_event_inbox(storage.as_ref()),
-                    sweep_llm_cache(storage.as_ref()),
-                    sweep_auxiliary(storage.as_ref()),
-                );
-                // After the deletes: return freed pages to the OS (SQLite).
-                if let Err(e) = storage.compact_storage().await {
-                    tracing::warn!(error = %e, "storage compaction after gc failed");
-                }
+                gc_tick(storage.as_ref(), &options, chrono::Utc::now()).await;
                 crate::metrics::loop_pass("gc");
             }
         }
+    }
+}
+
+/// Retention knobs of one GC pass (see [`run_gc_loop_with_ttl`]).
+#[derive(Debug, Clone, Copy)]
+pub struct GcOptions {
+    /// TTL of `emit_event_dedupe` rows.
+    pub dedupe_ttl: Duration,
+    /// Artifact retention after an instance turns terminal (`None` = off).
+    pub artifact_retention: Option<Duration>,
+    /// Terminal-instance retention (`None` = off).
+    pub instance_retention: Option<Duration>,
+}
+
+impl Default for GcOptions {
+    fn default() -> Self {
+        Self {
+            dedupe_ttl: EMIT_DEDUPE_DEFAULT_TTL,
+            artifact_retention: None,
+            instance_retention: None,
+        }
+    }
+}
+
+/// One GC pass, as the loop runs it every tick: all sweeps concurrently,
+/// then storage compaction. Retention cutoffs are computed from `now`, so a
+/// test can pass a virtual "now" instead of sleeping. (A few sweeps —
+/// mobile device / approval / command cleanup, externalized-state expiry —
+/// compare against the database clock and are not affected by `now`.)
+pub async fn gc_tick(
+    storage: &dyn StorageBackend,
+    options: &GcOptions,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    tokio::join!(
+        sweep_externalized(storage),
+        sweep_emit_dedupe(storage, options.dedupe_ttl, now),
+        sweep_artifacts_opt(storage, options.artifact_retention, now),
+        sweep_telemetry_events(storage, now),
+        sweep_mobile_devices(storage),
+        sweep_mobile_approvals(storage),
+        sweep_mobile_commands(storage),
+        sweep_terminal_instances_opt(storage, options.instance_retention, now),
+        sweep_webhook_attempts(storage, now),
+        sweep_event_inbox(storage, now),
+        sweep_llm_cache(storage, now),
+        sweep_auxiliary(storage, now),
+    );
+    // After the deletes: return freed pages to the OS (SQLite).
+    if let Err(e) = storage.compact_storage().await {
+        tracing::warn!(error = %e, "storage compaction after gc failed");
     }
 }
 
@@ -260,13 +299,20 @@ async fn sweep_externalized(storage: &dyn StorageBackend) {
 /// now), and an unchecked subtraction would panic and kill the GC task.
 /// Compile-time-constant retentions (telemetry, webhook, inbox) can hit
 /// neither case and use `from_std` directly.
-fn retention_cutoff(retention: Duration) -> Option<chrono::DateTime<chrono::Utc>> {
+fn retention_cutoff(
+    now: chrono::DateTime<chrono::Utc>,
+    retention: Duration,
+) -> Option<chrono::DateTime<chrono::Utc>> {
     let d = chrono::Duration::from_std(retention).ok()?;
-    chrono::Utc::now().checked_sub_signed(d)
+    now.checked_sub_signed(d)
 }
 
-async fn sweep_emit_dedupe(storage: &dyn StorageBackend, ttl: Duration) {
-    let Some(cutoff) = retention_cutoff(ttl) else {
+async fn sweep_emit_dedupe(
+    storage: &dyn StorageBackend,
+    ttl: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(cutoff) = retention_cutoff(now, ttl) else {
         tracing::warn!(
             ?ttl,
             "emit_event_dedupe gc: TTL unrepresentable; skipping sweep"
@@ -290,10 +336,10 @@ async fn sweep_emit_dedupe(storage: &dyn StorageBackend, ttl: Duration) {
 /// Delete `telemetry_events` rows older than [`TELEMETRY_EVENTS_DEFAULT_TTL`].
 /// Closes review finding L3: `delete_old_telemetry_events` had a real
 /// implementation on both backends but no caller outside tests.
-async fn sweep_telemetry_events(storage: &dyn StorageBackend) {
+async fn sweep_telemetry_events(storage: &dyn StorageBackend, now: chrono::DateTime<chrono::Utc>) {
     let ttl = chrono::Duration::from_std(TELEMETRY_EVENTS_DEFAULT_TTL)
         .unwrap_or_else(|_| chrono::Duration::zero());
-    let cutoff = chrono::Utc::now() - ttl;
+    let cutoff = now - ttl;
     match drain_batches(|| storage.delete_old_telemetry_events(cutoff, GC_BATCH_LIMIT)).await {
         Ok(0) => {}
         Ok(n) => {
@@ -310,8 +356,7 @@ async fn sweep_telemetry_events(storage: &dyn StorageBackend) {
 
 /// Delete expired `llm_call` response-cache entries. Reads already ignore
 /// expired rows; this only reclaims space.
-async fn sweep_llm_cache(storage: &dyn StorageBackend) {
-    let now = chrono::Utc::now();
+async fn sweep_llm_cache(storage: &dyn StorageBackend, now: chrono::DateTime<chrono::Utc>) {
     match drain_batches(|| storage.delete_expired_llm_cache(now, GC_BATCH_LIMIT)).await {
         Ok(0) => {}
         Ok(n) => tracing::info!(count = n, "llm cache gc: deleted expired entries"),
@@ -322,10 +367,10 @@ async fn sweep_llm_cache(storage: &dyn StorageBackend) {
 /// Delete webhook delivery attempt rows older than
 /// [`WEBHOOK_ATTEMPTS_DEFAULT_TTL`] so the delivery inspector's history
 /// stays bounded.
-async fn sweep_webhook_attempts(storage: &dyn StorageBackend) {
+async fn sweep_webhook_attempts(storage: &dyn StorageBackend, now: chrono::DateTime<chrono::Utc>) {
     let ttl = chrono::Duration::from_std(WEBHOOK_ATTEMPTS_DEFAULT_TTL)
         .unwrap_or_else(|_| chrono::Duration::zero());
-    let cutoff = chrono::Utc::now() - ttl;
+    let cutoff = now - ttl;
     match storage.delete_webhook_attempts_before(cutoff).await {
         Ok(0) => {}
         Ok(n) => {
@@ -340,10 +385,10 @@ async fn sweep_webhook_attempts(storage: &dyn StorageBackend) {
 
 /// Expire pending inbox events past retention so unmatched events don't
 /// accumulate forever. Consumed events are never touched.
-async fn sweep_event_inbox(storage: &dyn StorageBackend) {
+async fn sweep_event_inbox(storage: &dyn StorageBackend, now: chrono::DateTime<chrono::Utc>) {
     let ttl = chrono::Duration::from_std(EVENT_INBOX_DEFAULT_TTL)
         .unwrap_or_else(|_| chrono::Duration::zero());
-    let cutoff = chrono::Utc::now() - ttl;
+    let cutoff = now - ttl;
     match storage.expire_events_before(cutoff).await {
         Ok(0) => {}
         Ok(n) => {
@@ -430,9 +475,13 @@ async fn sweep_mobile_commands(storage: &dyn StorageBackend) {
 
 /// No-op wrapper so the artifact sweep can sit in the same `tokio::join!` as the
 /// other sweeps regardless of whether retention is enabled.
-async fn sweep_artifacts_opt(storage: &dyn StorageBackend, retention: Option<Duration>) {
+async fn sweep_artifacts_opt(
+    storage: &dyn StorageBackend,
+    retention: Option<Duration>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
     if let Some(retention) = retention {
-        sweep_artifacts(storage, retention).await;
+        sweep_artifacts(storage, retention, now).await;
     }
 }
 
@@ -441,8 +490,12 @@ async fn sweep_artifacts_opt(storage: &dyn StorageBackend, retention: Option<Dur
 /// `_artifacts_gced` marker so swept instances aren't re-scanned. Best-effort —
 /// errors are logged, the marker is only set after a successful delete so a
 /// failed instance retries next tick.
-async fn sweep_artifacts(storage: &dyn StorageBackend, retention: Duration) {
-    let Some(cutoff) = retention_cutoff(retention) else {
+async fn sweep_artifacts(
+    storage: &dyn StorageBackend,
+    retention: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(cutoff) = retention_cutoff(now, retention) else {
         tracing::warn!(
             ?retention,
             "artifact gc: retention unrepresentable; skipping sweep"
@@ -493,9 +546,13 @@ async fn sweep_artifacts(storage: &dyn StorageBackend, retention: Duration) {
 /// `tokio::join!` as the other sweeps regardless of whether retention is
 /// enabled. Off by default (`retention: None`) -- see
 /// `SchedulerConfig::instance_retention_secs`.
-async fn sweep_terminal_instances_opt(storage: &dyn StorageBackend, retention: Option<Duration>) {
+async fn sweep_terminal_instances_opt(
+    storage: &dyn StorageBackend,
+    retention: Option<Duration>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
     if let Some(retention) = retention {
-        sweep_terminal_instances(storage, retention).await;
+        sweep_terminal_instances(storage, retention, now).await;
     }
 }
 
@@ -510,8 +567,12 @@ async fn sweep_terminal_instances_opt(storage: &dyn StorageBackend, retention: O
 /// row is the blobs' only index, so deleting it first would orphan them
 /// forever. An instance whose blobs could not be deleted is kept for the
 /// next pass.
-async fn sweep_terminal_instances(storage: &dyn StorageBackend, retention: Duration) {
-    let Some(cutoff) = retention_cutoff(retention) else {
+async fn sweep_terminal_instances(
+    storage: &dyn StorageBackend,
+    retention: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(cutoff) = retention_cutoff(now, retention) else {
         tracing::warn!(
             ?retention,
             "instance gc: retention unrepresentable; skipping sweep"
@@ -581,8 +642,8 @@ pub async fn drain_terminal_instances(
 /// Bounded retention for append-only tables with no other cleanup path
 /// (L1-02, L1-04, L1-14, L1-15, L1-16). Fixed default horizons; see the
 /// `*_DEFAULT_TTL` constants.
-async fn sweep_auxiliary(storage: &dyn StorageBackend) {
-    let before = |ttl: Duration| retention_cutoff(ttl);
+async fn sweep_auxiliary(storage: &dyn StorageBackend, now: chrono::DateTime<chrono::Utc>) {
+    let before = |ttl: Duration| retention_cutoff(now, ttl);
     let retention = orch8_storage::AuxiliaryRetention {
         worker_attempt_events_before: before(WORKER_ATTEMPT_EVENTS_DEFAULT_TTL),
         settled_events_before: before(SETTLED_EVENTS_DEFAULT_TTL),
@@ -965,11 +1026,21 @@ mod tests {
         storage.create_instance(&inst).await.unwrap();
 
         // Overflows chrono's i64-millisecond Duration range.
-        sweep_terminal_instances(storage.as_ref(), Duration::from_secs(u64::MAX)).await;
+        sweep_terminal_instances(
+            storage.as_ref(),
+            Duration::from_secs(u64::MAX),
+            chrono::Utc::now(),
+        )
+        .await;
         // Representable as a chrono Duration (~317k years) but `now -
         // retention` would overflow chrono's ~±262k-year date range
         // (previously: panic).
-        sweep_terminal_instances(storage.as_ref(), Duration::from_secs(10_000_000_000_000)).await;
+        sweep_terminal_instances(
+            storage.as_ref(),
+            Duration::from_secs(10_000_000_000_000),
+            chrono::Utc::now(),
+        )
+        .await;
 
         assert!(
             storage.get_instance(inst.id).await.unwrap().is_some(),

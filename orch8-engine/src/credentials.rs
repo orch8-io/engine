@@ -47,6 +47,7 @@
 use std::sync::Arc;
 
 use orch8_storage::StorageBackend;
+use orch8_types::clock::SharedClock;
 use orch8_types::config::SecretString;
 use orch8_types::credential::{CredentialDef, CredentialKind};
 use orch8_types::error::StepError;
@@ -406,6 +407,18 @@ pub async fn run_refresh_loop(
 /// token endpoint (up to the 35 s client timeout) must not hold up the rest
 /// until they expire. Dropping the future aborts the in-flight refreshes.
 async fn refresh_pass(storage: &Arc<dyn StorageBackend>, refresh_ahead: std::time::Duration) {
+    refresh_pass_at(storage, refresh_ahead, &SharedClock::default()).await;
+}
+
+/// The single-pass entry point of [`run_refresh_loop`], reading "now" (the
+/// refresh lease, the due cutoff, the failure back-off) from `clock`. Which
+/// credentials are *listed* as due is still decided by the database clock
+/// (`list_credentials_due_for_refresh`), so tests back-date `expires_at`.
+pub async fn refresh_pass_at(
+    storage: &Arc<dyn StorageBackend>,
+    refresh_ahead: std::time::Duration,
+    clock: &SharedClock,
+) {
     let due = match storage
         .list_credentials_due_for_refresh(refresh_ahead)
         .await
@@ -424,9 +437,11 @@ async fn refresh_pass(storage: &Arc<dyn StorageBackend>, refresh_ahead: std::tim
             in_flight.join_next().await;
         }
         let storage = Arc::clone(storage);
+        let clock = clock.clone();
         in_flight.spawn(async move {
             if let Err(e) =
-                refresh_due_credential(storage.as_ref(), &credential, refresh_ahead).await
+                refresh_due_credential(storage.as_ref(), &credential, refresh_ahead, clock.now())
+                    .await
             {
                 warn!(error = %e, "credential refresh failed");
             }
@@ -442,8 +457,8 @@ async fn refresh_due_credential(
     storage: &dyn StorageBackend,
     listed: &CredentialDef,
     refresh_ahead: std::time::Duration,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, String> {
-    let now = chrono::Utc::now();
     let lease_until = now.checked_add_signed(REFRESH_LEASE).unwrap_or(now);
     let claimed = storage
         .claim_credential_refresh(&listed.id, now, lease_until)
@@ -1121,10 +1136,14 @@ mod tests {
                 .unwrap(),
             "first claim wins"
         );
-        let refreshed =
-            refresh_due_credential(&storage, &cred, std::time::Duration::from_secs(300))
-                .await
-                .expect("a held lease is a skip, not an error");
+        let refreshed = refresh_due_credential(
+            &storage,
+            &cred,
+            std::time::Duration::from_secs(300),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("a held lease is a skip, not an error");
         assert!(!refreshed);
     }
 
@@ -1188,7 +1207,7 @@ mod tests {
             .unwrap();
         assert_eq!(due.len(), 2);
         assert!(
-            refresh_due_credential(&storage, &dead, ahead)
+            refresh_due_credential(&storage, &dead, ahead, chrono::Utc::now())
                 .await
                 .is_err()
         );

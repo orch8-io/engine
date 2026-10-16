@@ -3288,6 +3288,7 @@ dependencies = [
  "moka",
  "notify",
  "opentelemetry",
+ "orch8-engine",
  "orch8-publisher",
  "orch8-storage",
  "orch8-types",
