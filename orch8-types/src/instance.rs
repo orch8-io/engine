@@ -81,8 +81,13 @@ impl InstanceState {
                     | Self::Paused
                     | Self::Cancelled
             ) | (
+                // Waiting -> Paused (L3-13): an operator can freeze an
+                // instance parked on a gate, worker or child. Resume goes
+                // Paused -> Scheduled; re-evaluation re-parks it on whatever
+                // it was waiting for, and answers that arrived meanwhile stay
+                // pending until then.
                 Self::Waiting,
-                Self::Running | Self::Scheduled | Self::Cancelled | Self::Failed
+                Self::Running | Self::Scheduled | Self::Cancelled | Self::Failed | Self::Paused
             ) | (Self::Paused, Self::Scheduled | Self::Cancelled)
                 // Failed -> Scheduled is retry from the DLQ.
                 // Completed / Cancelled -> Scheduled is resume-from-block
@@ -431,6 +436,12 @@ mod tests {
     #[test]
     fn waiting_to_running_is_valid() {
         assert!(InstanceState::Waiting.can_transition_to(InstanceState::Running));
+    }
+
+    #[test]
+    fn waiting_to_paused_is_valid() {
+        // L3-13: a Pause signal for a parked instance used to be dropped.
+        assert!(InstanceState::Waiting.can_transition_to(InstanceState::Paused));
     }
 
     #[test]

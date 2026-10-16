@@ -3087,10 +3087,11 @@ async fn handle_tree_more_work(
         .get_instance(instance_id)
         .await?
         .map_or(InstanceState::Running, |i| i.state);
-    if matches!(
-        current,
-        InstanceState::Paused | InstanceState::Cancelled | InstanceState::Failed
-    ) {
+    // Any terminal state, not just Cancelled/Failed (L3-12): a concurrent
+    // runner that completed the instance mid-evaluation must not be
+    // resurrected through the `Completed -> Scheduled` resume-from-block edge
+    // (duplicate `instance.completed` webhook and parent wake).
+    if current == InstanceState::Paused || current.is_terminal() {
         // Terminal/paused — leave state as-is.
     } else if has_waiting_nodes {
         match crate::lifecycle::transition_instance(

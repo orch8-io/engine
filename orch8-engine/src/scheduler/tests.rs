@@ -2268,6 +2268,15 @@ async fn run_more_work(
     parent: &TaskInstance,
     seq: &SequenceDefinition,
 ) {
+    run_more_work_with(storage, parent, seq, true).await;
+}
+
+async fn run_more_work_with(
+    storage: &Arc<dyn StorageBackend>,
+    parent: &TaskInstance,
+    seq: &SequenceDefinition,
+    has_waiting_nodes: bool,
+) {
     let registry = HandlerRegistry::new();
     let webhook_config = WebhookConfig::default();
     let cache = crate::sequence_cache::SequenceCache::new(16, Duration::from_secs(60));
@@ -2285,7 +2294,7 @@ async fn run_more_work(
         clock: &clock,
         lease_lost: &lease_lost,
     };
-    handle_tree_more_work(&ctx, parent, seq, true)
+    handle_tree_more_work(&ctx, parent, seq, has_waiting_nodes)
         .await
         .unwrap();
 }
@@ -2657,4 +2666,61 @@ async fn cancel_hooks_run_off_the_signal_sweep() {
         1,
         "the on_cancel hook was spawned off the tick"
     );
+}
+
+/// L3-12: a tree pass that ends with more work must not resurrect an
+/// instance a concurrent runner already completed.
+#[tokio::test]
+async fn tree_more_work_leaves_completed_instance_alone() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), id, None, InstanceState::Completed).await;
+    let inst = storage.get_instance(id).await.unwrap().unwrap();
+    run_more_work_with(&storage, &inst, &mk_sequence(vec![]), false).await;
+    assert_eq!(
+        storage.get_instance(id).await.unwrap().unwrap().state,
+        InstanceState::Completed
+    );
+}
+
+/// L3-13: a Pause signal for a `Waiting` instance pauses it (it used to be
+/// marked delivered and dropped), and Resume re-schedules it.
+#[tokio::test]
+async fn pause_and_resume_a_waiting_instance() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), id, None, InstanceState::Waiting).await;
+    let handlers = Arc::new(HandlerRegistry::new());
+    let cache = SequenceCache::new(16, Duration::from_secs(60));
+    for (signal_type, expected) in [
+        (SignalType::Pause, InstanceState::Paused),
+        (SignalType::Resume, InstanceState::Scheduled),
+    ] {
+        storage
+            .enqueue_signal(&Signal {
+                id: Uuid::now_v7(),
+                instance_id: id,
+                signal_type,
+                payload: serde_json::Value::Null,
+                delivered: false,
+                created_at: Utc::now(),
+                delivered_at: None,
+            })
+            .await
+            .unwrap();
+        process_signalled_instances(
+            &storage,
+            &handlers,
+            &cache,
+            16,
+            &SharedClock::default(),
+            &HookTasks::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage.get_instance(id).await.unwrap().unwrap().state,
+            expected
+        );
+    }
 }

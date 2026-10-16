@@ -489,7 +489,7 @@ PATCH /instances/{id}/state
 |------|----|
 | Scheduled | Running, Paused, Cancelled |
 | Running | Scheduled, Waiting, Completed, Failed, Paused, Cancelled |
-| Waiting | Running, Scheduled, Cancelled, Failed |
+| Waiting | Running, Scheduled, Cancelled, Failed, Paused (resume re-schedules it; it re-parks on whatever it was waiting for, and answers that arrived while paused stay pending) |
 | Paused | Scheduled, Cancelled |
 | Failed | Scheduled (retry) |
 | Completed | _(terminal)_ |
