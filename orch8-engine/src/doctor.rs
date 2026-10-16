@@ -1453,6 +1453,8 @@ mod tests {
     #[test]
     fn humanize_formats_ranges() {
         assert_eq!(humanize(Duration::seconds(42)), "42s");
+        assert_eq!(humanize(Duration::seconds(60)), "1m 0s");
+        assert_eq!(humanize(Duration::seconds(86_400)), "1d 0h");
         assert_eq!(humanize(Duration::seconds(190)), "3m 10s");
         assert_eq!(humanize(Duration::seconds(7500)), "2h 5m");
         assert_eq!(humanize(Duration::days(3) + Duration::hours(4)), "3d 4h");
@@ -1488,8 +1490,103 @@ mod tests {
             Some(format!("orch8 signal {} resume", report.instance_id).as_str())
         );
     }
-}
 
-#[cfg(test)]
-#[path = "doctor_coverage_tests.rs"]
-mod doctor_coverage_tests;
+    #[test]
+    fn budget_paused_preview_classifies_resume() {
+        let mut inst = instance(InstanceState::Paused);
+        inst.metadata = json!({"paused_reason": "budget_exceeded"});
+
+        let previews = remediation_previews(&diagnose(&full_ctx(inst), t0()));
+
+        assert_eq!(previews[0].finding_code, "BUDGET_PAUSED");
+        assert_eq!(previews[0].action, RemediationAction::ResumeInstance);
+    }
+
+    #[test]
+    fn remediation_without_command_previews_as_manual() {
+        // WORKER_BELOW_VERSION_PIN carries a remediation with no command.
+        let mut ctx = full_ctx(instance(InstanceState::Waiting));
+        ctx.worker_tasks = Some(vec![task(WorkerTaskState::Pending, "charge_card", 10)]);
+        ctx.worker_registrations = Some(vec![registration("charge_card", Some("1.0.0"))]);
+        ctx.version_pins = Some(vec![WorkerVersionPin {
+            tenant_id: "t1".into(),
+            handler_name: "charge_card".into(),
+            min_version: "2.0.0".into(),
+            created_at: t0(),
+            updated_at: t0(),
+        }]);
+
+        let previews = remediation_previews(&diagnose(&ctx, t0()));
+
+        let pin = previews
+            .iter()
+            .find(|p| p.finding_code == "WORKER_BELOW_VERSION_PIN")
+            .expect("pin preview");
+        assert_eq!(pin.action, RemediationAction::Manual);
+        assert!(pin.command.is_none());
+    }
+
+    #[test]
+    fn unclassified_command_previews_as_manual() {
+        // PENDING_APPROVAL's command embeds a block-specific signal name, which
+        // is neither a retry nor a resume.
+        let mut ctx = full_ctx(instance(InstanceState::Waiting));
+        ctx.pending_approval_blocks = Some(vec!["approve_payment".into()]);
+
+        let previews = remediation_previews(&diagnose(&ctx, t0()));
+
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].action, RemediationAction::Manual);
+        assert!(
+            previews[0]
+                .command
+                .as_deref()
+                .unwrap()
+                .contains("custom:human_input:approve_payment")
+        );
+    }
+
+    #[test]
+    fn preview_ids_follow_ranked_diagnosis_order_and_keep_per_finding_risk() {
+        let mut ctx = full_ctx(instance(InstanceState::Waiting));
+        ctx.worker_tasks = Some(vec![task(WorkerTaskState::Claimed, "claimed_handler", 900)]);
+        ctx.pending_approval_blocks = Some(vec!["gate".into()]);
+        let report = diagnose(&ctx, t0());
+
+        let previews = remediation_previews(&report);
+
+        assert_eq!(report.diagnoses.len(), 2);
+        assert_eq!(previews.len(), 2);
+        for (diagnosis_index, diagnosis) in report.diagnoses.iter().enumerate() {
+            assert_eq!(
+                previews[diagnosis_index].finding_code,
+                diagnosis.finding.code
+            );
+            assert!(
+                previews[diagnosis_index]
+                    .preview_id
+                    .ends_with(&format!(":{diagnosis_index}:0"))
+            );
+        }
+        let risk = |code: &str| {
+            previews
+                .iter()
+                .find(|p| p.finding_code == code)
+                .unwrap()
+                .side_effect_risk
+        };
+        assert!(risk("STALE_WORKER_CLAIM"));
+        assert!(!risk("PENDING_APPROVAL"));
+    }
+
+    #[test]
+    fn diagnosis_without_remediation_yields_no_preview() {
+        let mut inst = instance(InstanceState::Scheduled);
+        inst.next_fire_at = Some(t0() - Duration::seconds(1));
+
+        let report = diagnose(&full_ctx(inst), t0());
+
+        assert_eq!(codes(&report), vec!["NO_BLOCKER_FOUND"]);
+        assert!(remediation_previews(&report).is_empty());
+    }
+}

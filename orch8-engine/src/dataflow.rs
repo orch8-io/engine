@@ -1790,8 +1790,206 @@ mod tests {
         let error = generate_types(&sequence(&json!([]), Some(schema))).unwrap_err();
         assert_eq!(error, DataflowGenerationError::DepthLimit);
     }
-}
 
-#[cfg(test)]
-#[path = "dataflow_coverage_tests.rs"]
-mod dataflow_coverage_tests;
+    fn render_root(language: NativeLanguage, schema: &Value) -> (String, Vec<String>) {
+        let mut ctx = NativeContext::new(language);
+        let rendered = render_native(schema, "Root", 0, &mut ctx).unwrap();
+        (rendered, ctx.definitions)
+    }
+
+    #[test]
+    fn native_type_mapping_matches_each_language() {
+        use NativeLanguage::{Kotlin, Swift};
+        let cases = [
+            ("bool", json!({"type": "boolean"}), "Bool", "Boolean"),
+            ("integer", json!({"type": "integer"}), "Int64", "Long"),
+            ("number", json!({"type": "number"}), "Double", "Double"),
+            ("string", json!({"type": "string"}), "String", "String"),
+            (
+                "array",
+                json!({"type": "array", "items": {"type": "integer"}}),
+                "[Int64]",
+                "List<Long>",
+            ),
+            ("true schema", Value::Bool(true), "JSONValue", "JsonElement"),
+            (
+                "false schema",
+                Value::Bool(false),
+                "JSONValue",
+                "JsonElement",
+            ),
+            (
+                "string enum",
+                json!({"enum": ["high", "low"]}),
+                "String",
+                "String",
+            ),
+            (
+                "mixed enum",
+                json!({"enum": ["high", 1]}),
+                "JSONValue",
+                "JsonElement",
+            ),
+            (
+                "nullable anyOf",
+                json!({"anyOf": [{"type": "string"}, {"type": "null"}]}),
+                "String?",
+                "String?",
+            ),
+            (
+                "nullable type array",
+                json!({"type": ["number", "null"]}),
+                "Double?",
+                "Double?",
+            ),
+            (
+                "multi-type union",
+                json!({"anyOf": [{"type": "string"}, {"type": "number"}]}),
+                "JSONValue",
+                "JsonElement",
+            ),
+            (
+                "bare object",
+                json!({"type": "object"}),
+                "[String: JSONValue]",
+                "Map<String, JsonElement>",
+            ),
+        ];
+        for (case, schema, swift, kotlin) in cases {
+            assert_eq!(render_root(Swift, &schema).0, swift, "swift {case}");
+            assert_eq!(render_root(Kotlin, &schema).0, kotlin, "kotlin {case}");
+        }
+    }
+
+    #[test]
+    fn renamed_fields_keep_their_wire_name_in_both_languages() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"order-id": {"type": "string"}},
+            "required": ["order-id"]
+        });
+
+        let (_, swift) = render_root(NativeLanguage::Swift, &schema);
+        let (_, kotlin) = render_root(NativeLanguage::Kotlin, &schema);
+
+        assert!(swift[0].contains("public let order_id: String"));
+        assert!(swift[0].contains("case order_id = \"order-id\""));
+        assert!(kotlin[0].contains("@SerialName(\"order-id\") val order_id: String"));
+    }
+
+    #[test]
+    #[ignore = "BUG: `order-id` and `order_id` both sanitize to `order_id`, emitting duplicate native fields — fixed on test/bugs"]
+    fn colliding_sanitized_field_names_get_distinct_native_identifiers() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"order-id": {"type": "string"}, "order_id": {"type": "string"}},
+            "required": ["order-id", "order_id"]
+        });
+
+        let (_, swift) = render_root(NativeLanguage::Swift, &schema);
+        let (_, kotlin) = render_root(NativeLanguage::Kotlin, &schema);
+
+        assert_eq!(
+            swift[0].matches("public let order_id:").count(),
+            1,
+            "{}",
+            swift[0]
+        );
+        assert_eq!(
+            kotlin[0].matches("val order_id:").count(),
+            1,
+            "{}",
+            kotlin[0]
+        );
+    }
+
+    #[test]
+    fn swift_empty_object_renders_an_empty_initializer_without_coding_keys() {
+        let (_, swift) = render_root(
+            NativeLanguage::Swift,
+            &json!({"type": "object", "properties": {}}),
+        );
+
+        assert!(swift[0].contains("public init() {}"));
+        assert!(!swift[0].contains("CodingKeys"));
+    }
+
+    #[test]
+    fn render_budget_rejects_the_first_node_past_the_limit() {
+        let mut budget = RenderBudget::default();
+        for _ in 0..MAX_SCHEMA_NODES {
+            budget.enter(0).unwrap();
+        }
+
+        assert_eq!(budget.enter(0), Err(DataflowGenerationError::NodeLimit));
+    }
+
+    #[test]
+    fn render_budget_allows_exactly_the_maximum_depth() {
+        let mut budget = RenderBudget::default();
+
+        assert_eq!(budget.enter(MAX_SCHEMA_DEPTH), Ok(()));
+        assert_eq!(
+            budget.enter(MAX_SCHEMA_DEPTH + 1),
+            Err(DataflowGenerationError::DepthLimit)
+        );
+    }
+
+    #[test]
+    fn native_identifier_sanitizes_and_escapes_reserved_words() {
+        let cases = [
+            ("order_id", "order_id"),
+            ("order-id.v2", "order_id_v2"),
+            ("9lives", "_9lives"),
+            ("", "_"),
+            ("class", "_class"),
+            ("struct", "_struct"),
+            ("func", "_func"),
+            ("when", "_when"),
+            ("data", "_data"),
+            ("sealed", "_sealed"),
+            ("self", "_self"),
+            ("Self", "_Self"),
+            ("classes", "classes"),
+            ("dataflow", "dataflow"),
+            ("SELF", "SELF"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(native_identifier(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn make_nullable_is_idempotent() {
+        assert_eq!(make_nullable("String"), "String?");
+        assert_eq!(make_nullable("String?"), "String?");
+    }
+
+    #[test]
+    fn unique_type_names_get_numeric_suffixes_on_collision() {
+        let mut ctx = NativeContext::new(NativeLanguage::Swift);
+
+        let names = [
+            ctx.unique_name("order"),
+            ctx.unique_name("order"),
+            ctx.unique_name("order"),
+            ctx.unique_name("order-id"),
+        ];
+
+        assert_eq!(names, ["Order", "Order2", "Order3", "OrderId"]);
+    }
+
+    #[test]
+    fn pascal_case_joins_segments_and_never_starts_with_a_digit() {
+        let cases = [
+            ("order_id", "OrderId"),
+            ("foo-bar_baz", "FooBarBaz"),
+            ("123abc", "Generated123abc"),
+            ("", "Generated"),
+            ("!!!", "Generated"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(pascal_case(input), expected, "input {input:?}");
+        }
+    }
+}

@@ -1022,6 +1022,37 @@ fn breaker_with_elapsed_cooldown_omits_resume_text() {
 }
 
 #[test]
+fn breaker_opened_in_the_future_reports_a_resume_hint_without_panicking() {
+    // Clock skew: `opened_at` after `now` makes the elapsed time negative.
+    let mut ctx = full_ctx(instance(InstanceState::Waiting));
+    let mut b = breaker("t1", "h", BreakerState::Open);
+    b.opened_at = Some(t0() + Duration::seconds(60));
+    ctx.open_breakers = Some(vec![b]);
+    let report = diagnose(&ctx, t0());
+    let d = find(&report, "OPEN_CIRCUIT_BREAKER");
+    assert!(
+        d.finding.summary.contains("retries resume in 6m 0s"),
+        "{}",
+        d.finding.summary
+    );
+}
+
+#[test]
+fn breaker_with_maximum_stored_cooldown_clamps_instead_of_panicking() {
+    let mut ctx = full_ctx(instance(InstanceState::Waiting));
+    let mut b = breaker("t1", "h", BreakerState::Open);
+    b.cooldown_secs = u64::MAX;
+    ctx.open_breakers = Some(vec![b]);
+    let report = diagnose(&ctx, t0());
+    let d = find(&report, "OPEN_CIRCUIT_BREAKER");
+    assert!(
+        d.finding.summary.contains("retries resume in"),
+        "{}",
+        d.finding.summary
+    );
+}
+
+#[test]
 fn breaker_without_opened_at_has_no_evidence_and_no_resume_text() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     let mut b = breaker("t1", "h", BreakerState::Open);
