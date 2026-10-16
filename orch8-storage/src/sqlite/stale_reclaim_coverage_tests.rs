@@ -300,8 +300,22 @@ macro_rules! heartbeat_case {
             storage.create_instance(&instance).await.unwrap();
             let stale_at = Utc::now() - Duration::hours(1);
             set_row_clock(&storage, instance.id, stale_at, None).await;
+            let token = Utc::now() - Duration::hours(2);
+            sqlx::query("UPDATE task_instances SET claimed_at = ?1 WHERE id = ?2")
+                .bind(super::helpers::ts(token))
+                .bind(instance.id.into_uuid().to_string())
+                .execute(&storage.pool)
+                .await
+                .unwrap();
 
-            storage.heartbeat_instance(instance.id).await.unwrap();
+            assert_eq!(
+                storage
+                    .heartbeat_instance(instance.id, token)
+                    .await
+                    .unwrap(),
+                crate::InstanceLease::Held,
+                "the claim holder keeps its lease whatever the state"
+            );
             let after = storage.get_instance(instance.id).await.unwrap().unwrap();
             assert_eq!(
                 after.updated_at > stale_at,
@@ -343,7 +357,13 @@ heartbeat_case!(
 #[tokio::test]
 async fn coverage_reclaim_017_heartbeat_unknown_instance_is_ok() {
     let storage = store().await;
-    assert!(storage.heartbeat_instance(InstanceId::new()).await.is_ok());
+    assert_eq!(
+        storage
+            .heartbeat_instance(InstanceId::new(), Utc::now())
+            .await
+            .unwrap(),
+        crate::InstanceLease::Lost
+    );
 }
 
 // ---------------------------------------------------------------------------

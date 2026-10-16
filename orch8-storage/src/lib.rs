@@ -455,6 +455,10 @@ pub trait InstanceStore: Send + Sync + 'static {
     /// Hot path. Uses `FOR UPDATE SKIP LOCKED` on Postgres.
     /// Returns instances with `next_fire_at <= now`, ordered by priority DESC, `next_fire_at` ASC.
     /// When `max_per_tenant > 0`, applies per-tenant fairness cap (noisy-neighbor protection).
+    ///
+    /// Each claimed row records `now` as its claim token (`claimed_at`), and
+    /// the returned instances carry it as `updated_at`. Pass that value to
+    /// [`InstanceStore::heartbeat_instance`] to renew — and fence — the lease.
     async fn claim_due_instances(
         &self,
         now: DateTime<Utc>,
@@ -805,7 +809,19 @@ pub trait InstanceStore: Send + Sync + 'static {
     /// threshold. A no-op if the instance has already left `Running`/
     /// `Waiting` (e.g. it just completed) — this is a best-effort lease
     /// renewal, not a state transition.
-    async fn heartbeat_instance(&self, instance_id: InstanceId) -> Result<(), StorageError>;
+    ///
+    /// `claimed_at` is the claim token returned by
+    /// [`InstanceStore::claim_due_instances`] (the claimed instance's
+    /// `updated_at`). The renewal only applies while the row still carries
+    /// that token: once the stale-instance reaper has reset the row, or
+    /// another claim has replaced the token, this returns
+    /// [`InstanceLease::Lost`] and the caller must stop executing the
+    /// instance (L6-01: two nodes running the same instance after a stall).
+    async fn heartbeat_instance(
+        &self,
+        instance_id: InstanceId,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<InstanceLease, StorageError>;
 
     // === Sub-Sequences ===
 

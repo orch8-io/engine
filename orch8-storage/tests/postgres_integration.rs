@@ -907,6 +907,11 @@ async fn mobile_device_timestamps_are_rfc3339_with_fractional_seconds() {
     assert_eq!(parsed.timezone().local_minus_utc(), 0);
 }
 
+/// Serialises the tests that run the global instance reaper against the
+/// shared database (each one's stale fixture rows would otherwise be reaped
+/// by the other mid-test).
+static INSTANCE_REAPER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// C-1: `heartbeat_instance` must renew a `Running` instance's lease
 /// (`updated_at`) so `recover_stale_instances` does not reclaim a step that
 /// is still genuinely executing, and must be a no-op for a terminal
@@ -915,6 +920,7 @@ async fn mobile_device_timestamps_are_rfc3339_with_fractional_seconds() {
 #[tokio::test]
 async fn heartbeat_instance_renews_lease_on_postgres() {
     let s = require_postgres!();
+    let _reaper = INSTANCE_REAPER_LOCK.lock().await;
     let tenant = format!("t-{}", Uuid::new_v4());
     let seq_id = SequenceId::new();
     s.create_sequence(&mk_sequence(&tenant, seq_id))
@@ -925,8 +931,13 @@ async fn heartbeat_instance_renews_lease_on_postgres() {
     running.state = InstanceState::Running;
     running.updated_at = Utc::now() - chrono::Duration::hours(1);
     s.create_instance(&running).await.unwrap();
+    let token = Utc::now() - chrono::Duration::hours(1);
+    set_claim_token(running.id, Some(token)).await;
 
-    s.heartbeat_instance(running.id).await.unwrap();
+    assert_eq!(
+        s.heartbeat_instance(running.id, token).await.unwrap(),
+        orch8_storage::InstanceLease::Held
+    );
 
     // Assert on this instance specifically rather than the reaper's global
     // recovered-count: this integration suite runs against a shared,
@@ -947,11 +958,82 @@ async fn heartbeat_instance_renews_lease_on_postgres() {
     done.updated_at = Utc::now() - chrono::Duration::hours(1);
     s.create_instance(&done).await.unwrap();
 
-    s.heartbeat_instance(done.id).await.unwrap();
+    let _ = s.heartbeat_instance(done.id, token).await.unwrap();
     let refreshed_done = s.get_instance(done.id).await.unwrap().unwrap();
     assert!(
         refreshed_done.updated_at < Utc::now() - chrono::Duration::minutes(30),
         "heartbeat must not touch a non-running/waiting instance"
+    );
+}
+
+/// Set (or clear) an instance's lease claim token directly, simulating
+/// another node's `claim_due_instances` without claiming unrelated rows of
+/// the shared test database.
+async fn set_claim_token(id: InstanceId, token: Option<chrono::DateTime<Utc>>) {
+    let url = std::env::var("DATABASE_URL").unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    sqlx::query("UPDATE task_instances SET claimed_at = $1, state = 'running' WHERE id = $2")
+        .bind(token)
+        .bind(id.into_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+}
+
+/// L6-01: once the reaper reset a stalled claim and another node re-claimed
+/// the instance, the stalled node's heartbeat reports the lease lost and
+/// does not renew the new owner's row.
+#[tokio::test]
+async fn heartbeat_reports_lost_lease_after_reclaim_on_postgres() {
+    let s = require_postgres!();
+    let _reaper = INSTANCE_REAPER_LOCK.lock().await;
+    let tenant = format!("t-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let mut inst = mk_instance(&tenant, seq_id, None);
+    inst.state = InstanceState::Running;
+    inst.updated_at = Utc::now() - chrono::Duration::hours(1);
+    s.create_instance(&inst).await.unwrap();
+    let token_a = Utc::now() - chrono::Duration::hours(1);
+    set_claim_token(inst.id, Some(token_a)).await;
+
+    // Stalled: the reaper resets the claim, so A's lease is gone already.
+    s.recover_stale_instances(std::time::Duration::from_secs(300))
+        .await
+        .unwrap();
+    assert_eq!(
+        s.get_instance(inst.id).await.unwrap().unwrap().state,
+        InstanceState::Scheduled
+    );
+    assert_eq!(
+        s.heartbeat_instance(inst.id, token_a).await.unwrap(),
+        orch8_storage::InstanceLease::Lost
+    );
+
+    // B re-claims. A's heartbeat still reports lost and leaves B's row alone.
+    let token_b = Utc::now();
+    set_claim_token(inst.id, Some(token_b)).await;
+    let before = s.get_instance(inst.id).await.unwrap().unwrap().updated_at;
+    assert_eq!(
+        s.heartbeat_instance(inst.id, token_a).await.unwrap(),
+        orch8_storage::InstanceLease::Lost
+    );
+    assert_eq!(
+        s.get_instance(inst.id).await.unwrap().unwrap().updated_at,
+        before
+    );
+    assert_eq!(
+        s.heartbeat_instance(inst.id, token_b).await.unwrap(),
+        orch8_storage::InstanceLease::Held
+    );
+    assert_eq!(
+        s.heartbeat_instance(InstanceId::new(), token_b)
+            .await
+            .unwrap(),
+        orch8_storage::InstanceLease::Lost
     );
 }
 
@@ -1201,6 +1283,7 @@ async fn outputs_with_equal_timestamps_use_id_tiebreaker_postgres() {
 #[tokio::test]
 async fn stale_recovery_skips_waiting_instances_postgres() {
     let s = require_postgres!();
+    let _reaper = INSTANCE_REAPER_LOCK.lock().await;
     let tenant = format!("t-recovery-{}", Uuid::new_v4());
     let seq_id = SequenceId::new();
     s.create_sequence(&mk_sequence(&tenant, seq_id))

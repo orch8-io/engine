@@ -514,6 +514,9 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
 
             let _instance_timer = crate::metrics::Timer::start(crate::metrics::INSTANCE_DURATION);
             let instance_id = instance.id;
+            // Claim token (L6-01): `claim_due_instances` returns the claim
+            // time as `updated_at`; the heartbeat is fenced on it.
+            let claim_token = instance.updated_at;
 
             // Extract pre-fetched data for this instance (or use empty defaults).
             let data = prefetched
@@ -551,8 +554,19 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                         tokio::select! {
                             () = heartbeat_stop.cancelled() => break,
                             _ = ticker.tick() => {
-                                match heartbeat_storage.heartbeat_instance(instance_id).await {
-                                    Ok(()) => consecutive_failures = 0,
+                                match heartbeat_storage.heartbeat_instance(instance_id, claim_token).await {
+                                    Ok(orch8_storage::InstanceLease::Held) => consecutive_failures = 0,
+                                    Ok(orch8_storage::InstanceLease::Lost) => {
+                                        // Definitive: the reaper reset this claim or
+                                        // another claim replaced it. Stop starting
+                                        // steps; the new owner runs the instance.
+                                        lease_lost.store(true, std::sync::atomic::Ordering::Release);
+                                        error!(
+                                            instance_id = %instance_id,
+                                            "instance lease lost to another claim; not starting further steps"
+                                        );
+                                        break;
+                                    }
                                     Err(e) => {
                                         consecutive_failures = consecutive_failures.saturating_add(1);
                                         // The interval is a third of the reaper's
@@ -601,6 +615,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     cancel: &cancel,
                     clock: &clock,
                     lease_lost: &lease_lost_inner,
+                    claim_token: Some(claim_token),
                 };
                 process_instance(&ctx, instance, data).await
             })
@@ -1994,6 +2009,9 @@ struct InstanceRunCtx<'a> {
     /// Set once the instance's lease heartbeat has failed
     /// [`HEARTBEAT_LEASE_LOST_AFTER`] times in a row (ENG-R-N8).
     pub lease_lost: &'a std::sync::atomic::AtomicBool,
+    /// The claim token this run holds (see `heartbeat_instance`); `None`
+    /// when the instance was not claimed through `claim_due_instances`.
+    pub claim_token: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Process a single claimed instance: execute ALL pending steps in one go.
@@ -2379,6 +2397,14 @@ async fn execute_step_loop(
                 block_id = %step_def.id,
                 "instance lease presumed lost; not starting further steps"
             );
+            // If another claim already owns the row, releasing it would yank
+            // the new owner's run back to Scheduled — leave it alone.
+            if let Some(token) = ctx.claim_token {
+                let lease = ctx.storage.heartbeat_instance(instance_id, token).await;
+                if matches!(lease, Ok(orch8_storage::InstanceLease::Lost)) {
+                    return Ok(false);
+                }
+            }
             if let Err(e) = ctx
                 .storage
                 .conditional_update_instance_state(

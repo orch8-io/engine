@@ -354,7 +354,7 @@ pub(super) async fn claim_due(
         // Step 3: Only update the filtered instances to Running.
         let ids: Vec<uuid::Uuid> = instances.iter().map(|i| i.id.into_uuid()).collect();
         sqlx::query(
-            r"UPDATE task_instances SET state = 'running', updated_at = $1 WHERE id = ANY($2)",
+            r"UPDATE task_instances SET state = 'running', updated_at = $1, claimed_at = $1 WHERE id = ANY($2)",
         )
         .bind(now)
         .bind(&ids)
@@ -364,11 +364,13 @@ pub(super) async fn claim_due(
 
     tx.commit().await?;
 
-    // Return instances with state updated to Running.
+    // Return instances with state updated to Running. `updated_at` carries
+    // the claim token the lease heartbeat is fenced on.
     Ok(instances
         .into_iter()
         .map(|mut i| {
             i.state = InstanceState::Running;
+            i.updated_at = now;
             i
         })
         .collect())

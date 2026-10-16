@@ -1585,6 +1585,7 @@ async fn lease_lost_stops_flat_loop_before_next_step() {
         cancel: &cancel,
         clock: &clock,
         lease_lost: &lease_lost,
+        claim_token: None,
     };
 
     let finished = execute_step_loop(&ctx, &instance, &sequence, &blocks, Vec::new())
@@ -1601,6 +1602,62 @@ async fn lease_lost_stops_flat_loop_before_next_step() {
     );
     let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
     assert_eq!(refreshed.state, InstanceState::Scheduled);
+}
+
+/// L6-01: when the lease was taken over by another claim (the row no longer
+/// carries this run's claim token), the flat loop stops *without* handing the
+/// instance back — releasing it would yank the new owner's run to Scheduled.
+#[tokio::test]
+async fn lease_lost_to_other_claim_does_not_release_instance() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance_id = InstanceId::new();
+    // Seeded Running without this run's claim token: another node owns it.
+    seed_instance_in_state(storage.as_ref(), instance_id, None, InstanceState::Running).await;
+    let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    let blocks = vec![BlockDefinition::Step(Box::new(mk_step_def(
+        "s1",
+        "noop",
+        serde_json::json!({}),
+    )))];
+    let sequence = mk_sequence(blocks.clone());
+
+    let registry = HandlerRegistry::new();
+    let webhook_config = WebhookConfig::default();
+    let cache = crate::sequence_cache::SequenceCache::new(16, Duration::from_secs(60));
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+    let lease_lost = std::sync::atomic::AtomicBool::new(true);
+    let ctx = InstanceRunCtx {
+        storage: &storage,
+        handlers: &registry,
+        webhook_config: &webhook_config,
+        sequence_cache: &cache,
+        externalize_threshold: 0,
+        max_steps_per_instance: 0,
+        cancel: &cancel,
+        clock: &clock,
+        lease_lost: &lease_lost,
+        claim_token: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+    };
+
+    let finished = execute_step_loop(&ctx, &instance, &sequence, &blocks, Vec::new())
+        .await
+        .unwrap();
+    assert!(!finished);
+    assert!(
+        storage
+            .get_block_output(instance_id, &BlockId::new("s1"))
+            .await
+            .unwrap()
+            .is_none(),
+        "no step may start after lease loss"
+    );
+    let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
+    assert_eq!(
+        refreshed.state,
+        InstanceState::Running,
+        "the new owner's claim must be left alone"
+    );
 }
 
 /// A composite iteration reset clears the (otherwise final) delay marker of
@@ -2053,6 +2110,7 @@ async fn run_process_instance(storage: &Arc<dyn StorageBackend>, instance: TaskI
         cancel: &cancel,
         clock: &clock,
         lease_lost: &lease_lost,
+        claim_token: None,
     };
     process_instance(
         &ctx,

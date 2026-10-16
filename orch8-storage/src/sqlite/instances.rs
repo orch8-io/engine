@@ -264,7 +264,15 @@ pub(super) async fn claim_due(
     match result {
         Ok(instances) => {
             sqlx::query("COMMIT").execute(&mut *conn).await?;
-            Ok(instances)
+            // `updated_at` carries the claim token the lease heartbeat is
+            // fenced on (parity with Postgres).
+            Ok(instances
+                .into_iter()
+                .map(|mut i| {
+                    i.updated_at = now;
+                    i
+                })
+                .collect())
         }
         Err(e) => {
             // Best-effort rollback — if it fails the connection is returned
@@ -347,6 +355,9 @@ async fn claim_due_inner(
     if !instances.is_empty() {
         let mut qb =
             sqlx::QueryBuilder::new("UPDATE task_instances SET state='running', updated_at=");
+        qb.push_bind(now_s);
+        // Claim token for the lease heartbeat fence (L6-01).
+        qb.push(", claimed_at=");
         qb.push_bind(now_s);
         qb.push(" WHERE id IN (");
         let mut separated = qb.separated(",");

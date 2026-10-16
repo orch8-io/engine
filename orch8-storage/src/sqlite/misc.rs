@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::time::Duration;
 
@@ -126,7 +127,7 @@ pub(super) async fn recover_stale_instances(
     // claim_due would otherwise not pick the recovered instance up until that
     // time naturally arrives.
     let result = sqlx::query(
-        "UPDATE task_instances SET state='scheduled', next_fire_at=?1, updated_at=?1 WHERE state='running' AND updated_at < ?2",
+        "UPDATE task_instances SET state='scheduled', next_fire_at=?1, updated_at=?1, claimed_at=NULL WHERE state='running' AND updated_at < ?2",
     )
     .bind(ts(chrono::Utc::now()))
     .bind(ts(cutoff))
@@ -139,15 +140,35 @@ pub(super) async fn recover_stale_instances(
 pub(super) async fn heartbeat_instance(
     storage: &SqliteStorage,
     instance_id: InstanceId,
-) -> Result<(), StorageError> {
-    sqlx::query(
-        "UPDATE task_instances SET updated_at=?1 WHERE id=?2 AND state IN ('running', 'waiting')",
+    claimed_at: DateTime<Utc>,
+) -> Result<crate::InstanceLease, StorageError> {
+    let id = instance_id.into_uuid().to_string();
+    let token = ts(claimed_at);
+    let renewed = sqlx::query(
+        "UPDATE task_instances SET updated_at=?1 WHERE id=?2 AND state IN ('running', 'waiting') AND claimed_at=?3",
     )
     .bind(ts(chrono::Utc::now()))
-    .bind(instance_id.into_uuid().to_string())
+    .bind(&id)
+    .bind(&token)
     .execute(&storage.pool)
     .await?;
-    Ok(())
+    if renewed.rows_affected() > 0 {
+        return Ok(crate::InstanceLease::Held);
+    }
+    // Not renewed: either the instance legitimately left Running/Waiting
+    // under this claim (still ours), or the token was cleared/replaced.
+    let owned: Option<i64> =
+        sqlx::query_scalar("SELECT claimed_at = ?2 FROM task_instances WHERE id = ?1")
+            .bind(&id)
+            .bind(&token)
+            .fetch_optional(&storage.pool)
+            .await?
+            .flatten();
+    Ok(if owned == Some(1) {
+        crate::InstanceLease::Held
+    } else {
+        crate::InstanceLease::Lost
+    })
 }
 
 // === Sub-Sequences ===

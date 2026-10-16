@@ -659,8 +659,12 @@ impl crate::InstanceStore for PostgresStorage {
         misc::recover_stale_instances(self, stale_threshold).await
     }
 
-    async fn heartbeat_instance(&self, instance_id: InstanceId) -> Result<(), StorageError> {
-        misc::heartbeat_instance(self, instance_id).await
+    async fn heartbeat_instance(
+        &self,
+        instance_id: InstanceId,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<crate::InstanceLease, StorageError> {
+        misc::heartbeat_instance(self, instance_id, claimed_at).await
     }
 
     async fn get_child_instances(

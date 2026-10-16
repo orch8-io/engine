@@ -35,7 +35,8 @@ use uuid::Uuid;
 
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::{
-    DedupeScope, EmitDedupeOutcome, ExecutionTreeStore, InstanceStore, OutputStore, WorkerStore,
+    DedupeScope, EmitDedupeOutcome, ExecutionTreeStore, InstanceLease, InstanceStore, OutputStore,
+    WorkerStore,
 };
 use orch8_types::context::ExecutionContext;
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
@@ -405,15 +406,23 @@ async fn run_start_is_first_writer_wins_and_reset_clears_old_budget_state() {
 async fn heartbeat_instance_prevents_stale_recovery() {
     let s = store().await;
 
-    // A Running instance whose updated_at is already old enough to cross the
-    // stale threshold below — simulating a step that has been executing for
-    // a while (not one that crashed).
-    let mut inst = make_instance(InstanceState::Running);
-    inst.updated_at = Utc::now() - Duration::hours(1);
+    // A Running instance claimed long enough ago to cross the stale
+    // threshold below — simulating a step that has been executing for a
+    // while (not one that crashed).
+    let inst = make_instance(InstanceState::Scheduled);
     s.create_instance(&inst).await.unwrap();
+    let claimed = s
+        .claim_due_instances(Utc::now() - Duration::hours(1), 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    let token = claimed[0].updated_at;
 
     // The scheduler's heartbeat task renews the lease.
-    s.heartbeat_instance(inst.id).await.unwrap();
+    assert_eq!(
+        s.heartbeat_instance(inst.id, token).await.unwrap(),
+        InstanceLease::Held
+    );
 
     // A reaper pass with a threshold shorter than the instance's original
     // (pre-heartbeat) age must NOT reclaim it — the heartbeat's fresh
@@ -430,6 +439,72 @@ async fn heartbeat_instance_prevents_stale_recovery() {
     assert_eq!(refreshed.state, InstanceState::Running);
 }
 
+// L6-01: after a stall past the stale threshold the reaper resets the claim
+// and another node re-claims it. The stalled node's heartbeat must report
+// the lease lost (instead of silently renewing the new owner's row), and the
+// new owner's heartbeat must keep working.
+#[tokio::test]
+async fn heartbeat_reports_lost_lease_after_reclaim() {
+    let s = store().await;
+    let inst = make_instance(InstanceState::Scheduled);
+    s.create_instance(&inst).await.unwrap();
+
+    // Node A claims, then stalls (no heartbeat for over an hour).
+    let a = s
+        .claim_due_instances(Utc::now() - Duration::hours(1), 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(a.len(), 1);
+    let token_a = a[0].updated_at;
+
+    // The reaper resets it: A's lease is already gone before anyone re-claims.
+    assert_eq!(
+        s.recover_stale_instances(StdDuration::from_secs(300))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        s.heartbeat_instance(inst.id, token_a).await.unwrap(),
+        InstanceLease::Lost
+    );
+
+    // Node B claims it.
+    let b = s.claim_due_instances(Utc::now(), 10, 0).await.unwrap();
+    assert_eq!(b.len(), 1);
+    let token_b = b[0].updated_at;
+    assert_ne!(token_a, token_b);
+
+    // A resumes: its heartbeat must not renew B's claim.
+    let before = s.get_instance(inst.id).await.unwrap().unwrap().updated_at;
+    assert_eq!(
+        s.heartbeat_instance(inst.id, token_a).await.unwrap(),
+        InstanceLease::Lost
+    );
+    let after = s.get_instance(inst.id).await.unwrap().unwrap().updated_at;
+    assert_eq!(before, after, "a lost lease must not renew the row");
+    assert_eq!(
+        s.heartbeat_instance(inst.id, token_b).await.unwrap(),
+        InstanceLease::Held
+    );
+
+    // The owner keeps its lease after moving the instance on itself.
+    s.update_instance_state(inst.id, InstanceState::Completed, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.heartbeat_instance(inst.id, token_b).await.unwrap(),
+        InstanceLease::Held
+    );
+    // A deleted / unknown instance is never held.
+    assert_eq!(
+        s.heartbeat_instance(InstanceId::new(), token_b)
+            .await
+            .unwrap(),
+        InstanceLease::Lost
+    );
+}
+
 #[tokio::test]
 async fn heartbeat_instance_is_noop_for_terminal_state() {
     let s = store().await;
@@ -437,7 +512,10 @@ async fn heartbeat_instance_is_noop_for_terminal_state() {
     inst.updated_at = Utc::now() - Duration::hours(1);
     s.create_instance(&inst).await.unwrap();
 
-    s.heartbeat_instance(inst.id).await.unwrap();
+    let _ = s
+        .heartbeat_instance(inst.id, inst.updated_at)
+        .await
+        .unwrap();
 
     // A completed instance's updated_at must not be disturbed by a stray
     // heartbeat racing its own completion.

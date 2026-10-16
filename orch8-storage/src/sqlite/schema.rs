@@ -38,7 +38,11 @@ CREATE TABLE IF NOT EXISTS task_instances (
     budget TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    sub_tenant TEXT
+    sub_tenant TEXT,
+    -- Claim token of the scheduler lease (Postgres migration 100): set by
+    -- claim_due, cleared by the stale-instance reaper; the lease heartbeat
+    -- only renews while it still matches.
+    claimed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS execution_tree (

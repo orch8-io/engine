@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::TaskInstance;
@@ -119,7 +121,7 @@ pub(super) async fn recover_stale_instances(
     let result = sqlx::query(
         r"
         UPDATE task_instances
-        SET state = 'scheduled', next_fire_at = NOW(), updated_at = NOW()
+        SET state = 'scheduled', next_fire_at = NOW(), updated_at = NOW(), claimed_at = NULL
         WHERE state = 'running'
           AND updated_at < NOW() - make_interval(secs => $1::double precision)
         ",
@@ -133,15 +135,32 @@ pub(super) async fn recover_stale_instances(
 pub(super) async fn heartbeat_instance(
     store: &PostgresStorage,
     instance_id: InstanceId,
-) -> Result<(), StorageError> {
-    sqlx::query(
-        r"UPDATE task_instances SET updated_at = NOW()
-          WHERE id = $1 AND state IN ('running', 'waiting')",
+    claimed_at: DateTime<Utc>,
+) -> Result<crate::InstanceLease, StorageError> {
+    // One round trip: renew the lease only while the row still carries this
+    // claim's token, and report whether the token is still ours. The
+    // subselect reads the pre-update snapshot, but the UPDATE never changes
+    // `claimed_at`, so it reflects the current owner either way. A NULL
+    // result (row deleted, or token cleared by the reaper) is a lost lease.
+    let owned: Option<bool> = sqlx::query_scalar(
+        r"
+        WITH renewed AS (
+            UPDATE task_instances SET updated_at = NOW()
+            WHERE id = $1 AND state IN ('running', 'waiting') AND claimed_at = $2
+            RETURNING 1
+        )
+        SELECT (SELECT claimed_at = $2 FROM task_instances WHERE id = $1)
+        ",
     )
     .bind(instance_id.into_uuid())
-    .execute(&store.pool)
+    .bind(claimed_at)
+    .fetch_one(&store.pool)
     .await?;
-    Ok(())
+    Ok(if owned == Some(true) {
+        crate::InstanceLease::Held
+    } else {
+        crate::InstanceLease::Lost
+    })
 }
 
 // === Sub-Sequences ===

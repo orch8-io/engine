@@ -1,0 +1,11 @@
+-- L6-01: fence the scheduler's instance lease.
+--
+-- `claim_due_instances` stamps the claim time into `claimed_at`; the lease
+-- heartbeat only renews while the row still carries that token, and the
+-- stale-instance reaper clears it. A node that stalled past the stale
+-- threshold therefore learns its lease is gone instead of silently renewing
+-- another node's claim (two nodes executing the same instance).
+--
+-- Nullable with no default: a metadata-only ALTER (no table rewrite), safe
+-- online on large tables. Old binaries never read the column.
+ALTER TABLE task_instances ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
