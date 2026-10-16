@@ -251,7 +251,7 @@ async fn coverage_enc_push_011_record_command_acks_passthrough() {
         .await
         .unwrap();
     let acked = wrapped
-        .record_command_acks("device-a", &["cmd-1".into()], now)
+        .record_command_acks("tenant-a", "device-a", &["cmd-1".into()], now)
         .await
         .unwrap();
     assert_eq!(acked, 1);

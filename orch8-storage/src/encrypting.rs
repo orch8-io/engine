@@ -2866,12 +2866,13 @@ impl orch8_push::PushOutboxStore for EncryptingStorage {
 
     async fn record_command_acks(
         &self,
+        tenant_id: &str,
         device_id: &str,
         command_ids: &[String],
         acked_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64, String> {
         self.inner
-            .record_command_acks(device_id, command_ids, acked_at)
+            .record_command_acks(tenant_id, device_id, command_ids, acked_at)
             .await
     }
 

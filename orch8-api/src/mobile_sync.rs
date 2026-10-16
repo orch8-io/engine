@@ -276,10 +276,31 @@ async fn handle_sync(
             .ack_mobile_commands(&req.device_id, &req.command_acks)
             .await
             .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
-        storage
-            .record_command_acks(&req.device_id, &req.command_acks, chrono::Utc::now())
-            .await
-            .map_err(|error| ApiError::Internal(format!("push wake acknowledgements: {error}")))?;
+        // Wake rows are tenant-scoped; correlate acks only within the
+        // device's own tenant (resolved from the registration when the
+        // caller carries no tenant, e.g. insecure mode / root key).
+        let ack_tenant = if tenant_id.is_empty() {
+            storage
+                .get_mobile_device(&req.device_id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "mobile_devices"))?
+                .map(|device| device.tenant_id)
+        } else {
+            Some(tenant_id.clone())
+        };
+        if let Some(ack_tenant) = ack_tenant {
+            storage
+                .record_command_acks(
+                    &ack_tenant,
+                    &req.device_id,
+                    &req.command_acks,
+                    chrono::Utc::now(),
+                )
+                .await
+                .map_err(|error| {
+                    ApiError::Internal(format!("push wake acknowledgements: {error}"))
+                })?;
+        }
     }
 
     let pending = storage
