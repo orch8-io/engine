@@ -33,7 +33,7 @@ use crate::{Backend, ROOT_KEY, server_binary};
 pub const NODE_ENCRYPTION_KEY: &str =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// How long [`ServerProcess::spawn`] waits for `/health/ready`.
+/// How long [`ControlPlane::spawn`] waits for `/health/ready`.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 enum Db {
