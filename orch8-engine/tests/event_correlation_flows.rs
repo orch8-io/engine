@@ -943,9 +943,13 @@ async fn update_event_wait_cas_stale_expected_returns_false() {
     let mut updated = registered.clone();
     updated.status = WaitStatus::Cancelled;
     assert!(
-        !s.update_event_wait(&updated, WaitStatus::Satisfied)
-            .await
-            .unwrap()
+        !s.update_event_wait(
+            &updated,
+            WaitStatus::Satisfied,
+            &registered.matched_event_ids
+        )
+        .await
+        .unwrap()
     );
     // The row is untouched.
     let stored = s
@@ -965,7 +969,7 @@ async fn update_event_wait_cas_matching_expected_returns_true() {
     let mut updated = registered.clone();
     updated.status = WaitStatus::Cancelled;
     assert!(
-        s.update_event_wait(&updated, WaitStatus::Waiting)
+        s.update_event_wait(&updated, WaitStatus::Waiting, &registered.matched_event_ids)
             .await
             .unwrap()
     );
@@ -990,7 +994,7 @@ async fn update_event_wait_cas_fails_after_satisfaction() {
     let mut updated = registered.clone();
     updated.status = WaitStatus::Cancelled;
     assert!(
-        !s.update_event_wait(&updated, WaitStatus::Waiting)
+        !s.update_event_wait(&updated, WaitStatus::Waiting, &registered.matched_event_ids)
             .await
             .unwrap()
     );
@@ -1003,11 +1007,39 @@ async fn update_event_wait_cas_fails_after_satisfaction() {
 }
 
 #[tokio::test]
+async fn update_event_wait_with_a_stale_match_set_returns_false() {
+    let s = store().await;
+    let registered = register_wait(&s, wait(&["a", "b"], JoinMode::All))
+        .await
+        .unwrap();
+    ingest(&s, envelope("t1", "a", "p-a", "order-1", json!({})))
+        .await
+        .unwrap();
+    // A writer that read the wait before `a` matched must not overwrite it.
+    let mut stale = registered.clone();
+    stale.matched_names = vec!["b".into()];
+    stale.matched_event_ids = vec![Uuid::now_v7()];
+
+    let won = s
+        .update_event_wait(&stale, WaitStatus::Waiting, &registered.matched_event_ids)
+        .await
+        .unwrap();
+
+    assert!(!won);
+    let stored = s
+        .get_event_wait(InstanceId::from_uuid(registered.instance_id), "wait_block")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.matched_names, vec!["a".to_string()]);
+}
+
+#[tokio::test]
 async fn update_event_wait_unknown_id_returns_false() {
     let s = store().await;
     let unknown = wait(&["paid"], JoinMode::Any);
     assert!(
-        !s.update_event_wait(&unknown, WaitStatus::Waiting)
+        !s.update_event_wait(&unknown, WaitStatus::Waiting, &[])
             .await
             .unwrap()
     );

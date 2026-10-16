@@ -1799,7 +1799,7 @@ passthrough_impl! {
     async fn upsert_event_wait(&self, wait: &orch8_types::event_correlation::EventWait) -> Result<(), StorageError>;
     async fn get_event_wait(&self, instance_id: InstanceId, block_id: &str) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError>;
     async fn find_waiting_event_waits(&self, tenant_id: &str, event_name: &str, correlation_key: &str) -> Result<Vec<orch8_types::event_correlation::EventWait>, StorageError>;
-    async fn update_event_wait(&self, wait: &orch8_types::event_correlation::EventWait, expected_status: orch8_types::event_correlation::WaitStatus) -> Result<bool, StorageError>;
+    async fn update_event_wait(&self, wait: &orch8_types::event_correlation::EventWait, expected_status: orch8_types::event_correlation::WaitStatus, expected_matched_event_ids: &[Uuid]) -> Result<bool, StorageError>;
     async fn expire_events_before(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<u64, StorageError>;
     }
 }
@@ -2866,12 +2866,13 @@ impl orch8_push::PushOutboxStore for EncryptingStorage {
 
     async fn record_command_acks(
         &self,
+        tenant_id: &str,
         device_id: &str,
         command_ids: &[String],
         acked_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64, String> {
         self.inner
-            .record_command_acks(device_id, command_ids, acked_at)
+            .record_command_acks(tenant_id, device_id, command_ids, acked_at)
             .await
     }
 

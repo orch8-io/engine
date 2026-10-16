@@ -1083,16 +1083,30 @@ fn navigate_json<'v>(value: &'v serde_json::Value, path: &[&str]) -> Cow<'v, ser
 
 fn json_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     match (a, b) {
-        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => a.as_f64() == b.as_f64(),
+        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+            number_cmp(a, b) == Some(std::cmp::Ordering::Equal)
+        }
         _ => a == b,
+    }
+}
+
+/// Compare two JSON numbers exactly when both are integers (ids above 2^53
+/// are not representable as `f64`, T1-GAP-271), otherwise as `f64`.
+fn number_cmp(a: &serde_json::Number, b: &serde_json::Number) -> Option<std::cmp::Ordering> {
+    let as_int = |n: &serde_json::Number| {
+        n.as_i64()
+            .map(i128::from)
+            .or_else(|| n.as_u64().map(i128::from))
+    };
+    match (as_int(a), as_int(b)) {
+        (Some(a), Some(b)) => Some(a.cmp(&b)),
+        _ => a.as_f64()?.partial_cmp(&b.as_f64()?),
     }
 }
 
 fn json_cmp(a: &serde_json::Value, b: &serde_json::Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
-        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
-            a.as_f64()?.partial_cmp(&b.as_f64()?)
-        }
+        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => number_cmp(a, b),
         (serde_json::Value::String(a), serde_json::Value::String(b)) => Some(a.cmp(b)),
         _ => None,
     }
@@ -1286,6 +1300,56 @@ mod tests {
 
     fn outputs() -> serde_json::Value {
         json!({"step_1": {"result": "ok", "count": 42}})
+    }
+
+    /// T1-GAP-271: ids above 2^53 differ only beyond f64 precision.
+    fn big_ids() -> ExecutionContext {
+        ExecutionContext {
+            data: json!({
+                "a": 9_007_199_254_740_993_u64,
+                "b": 9_007_199_254_740_992_u64,
+                "ids": [9_007_199_254_740_992_u64],
+                "neg": -1,
+                "max": u64::MAX,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn integers_above_2_pow_53_are_not_equal_when_they_differ() {
+        let ctx = big_ids();
+
+        let verdicts = [
+            evaluate("a == b", &ctx, &json!({})),
+            evaluate("a != b", &ctx, &json!({})),
+            evaluate("a in ids", &ctx, &json!({})),
+        ];
+
+        assert_eq!(verdicts, [json!(false), json!(true), json!(false)]);
+    }
+
+    #[test]
+    fn integers_above_2_pow_53_order_exactly() {
+        let ctx = big_ids();
+
+        let verdicts = [
+            evaluate("a > b", &ctx, &json!({})),
+            evaluate("b < a", &ctx, &json!({})),
+            evaluate("neg < max", &ctx, &json!({})),
+        ];
+
+        assert_eq!(verdicts, [json!(true), json!(true), json!(true)]);
+    }
+
+    #[test]
+    fn integer_and_float_with_the_same_value_stay_equal() {
+        let ctx = ExecutionContext {
+            data: json!({"i": 5, "f": 5.0}),
+            ..Default::default()
+        };
+
+        assert_eq!(evaluate("i == f", &ctx, &json!({})), json!(true));
     }
 
     #[test]

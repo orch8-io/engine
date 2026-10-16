@@ -161,6 +161,7 @@ impl PushOutboxStore for PostgresStorage {
 
     async fn record_command_acks(
         &self,
+        tenant_id: &str,
         device_id: &str,
         command_ids: &[String],
         acked_at: DateTime<Utc>,
@@ -168,8 +169,8 @@ impl PushOutboxStore for PostgresStorage {
         if command_ids.is_empty() {
             return Ok(0);
         }
-        sqlx::query("UPDATE push_wake_outbox SET command_acked_at=$3 WHERE device_id=$1 AND command_id=ANY($2)")
-            .bind(device_id).bind(command_ids).bind(acked_at).execute(&self.pool).await.map(|result| result.rows_affected()).map_err(|error| error.to_string())
+        sqlx::query("UPDATE push_wake_outbox SET command_acked_at=$3 WHERE tenant_id=$4 AND device_id=$1 AND command_id=ANY($2)")
+            .bind(device_id).bind(command_ids).bind(acked_at).bind(tenant_id).execute(&self.pool).await.map(|result| result.rows_affected()).map_err(|error| error.to_string())
     }
 
     async fn prune_wakes(&self, created_before: DateTime<Utc>) -> Result<u64, String> {

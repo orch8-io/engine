@@ -2397,3 +2397,88 @@ async fn tenant_worker_claim_uses_denormalised_tenant_on_postgres() {
         vec![tasks[0].1]
     );
 }
+
+#[tokio::test]
+async fn postgres_stored_empty_capability_list_reads_back_as_no_capabilities() {
+    let storage = require_postgres!();
+    let hash = format!("empty-caps-{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO api_keys (id, tenant_id, name, capabilities_json, key_hash, created_at)
+         VALUES ($1, 'acme', 'raw', '[]', $2, NOW())",
+    )
+    .bind(format!("ak_{}", Uuid::new_v4().simple()))
+    .bind(&hash)
+    .execute(storage.pool())
+    .await
+    .unwrap();
+
+    let record = storage
+        .lookup_api_key_by_hash(&hash)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(record.capabilities.is_empty(), "{:?}", record.capabilities);
+}
+
+#[tokio::test]
+async fn postgres_create_api_key_rejects_an_empty_capability_grant() {
+    let storage = require_postgres!();
+    let minted = orch8_types::api_key::mint_scoped("acme", "empty", None, vec![]);
+
+    let err = storage.create_api_key(&minted.record).await.unwrap_err();
+
+    assert!(
+        matches!(err, orch8_types::error::StorageError::Constraint(_)),
+        "{err:?}"
+    );
+}
+
+/// T1-GAP-131: the wait CAS also compares the stored match set, so a writer
+/// that read the wait before a sibling event matched cannot overwrite it.
+#[tokio::test]
+async fn postgres_update_event_wait_with_a_stale_match_set_returns_false() {
+    use orch8_storage::SignalStore as _;
+    use orch8_types::event_correlation::{EventWait, JoinMode, WaitStatus};
+    let storage = require_postgres!();
+    let instance_id = Uuid::now_v7();
+    let wait = EventWait {
+        id: Uuid::now_v7(),
+        tenant_id: format!("evt-{instance_id}"),
+        instance_id,
+        block_id: "wait_block".into(),
+        event_names: vec!["a".into(), "b".into()],
+        correlation_key: "order-1".into(),
+        join_mode: JoinMode::All,
+        status: WaitStatus::Waiting,
+        matched_names: vec![],
+        matched_event_ids: vec![],
+        created_at: Utc::now(),
+    };
+    storage.upsert_event_wait(&wait).await.unwrap();
+    let mut first = wait.clone();
+    first.matched_names = vec!["a".into()];
+    first.matched_event_ids = vec![Uuid::now_v7()];
+    assert!(
+        storage
+            .update_event_wait(&first, WaitStatus::Waiting, &[])
+            .await
+            .unwrap()
+    );
+    let mut stale = wait.clone();
+    stale.matched_names = vec!["b".into()];
+    stale.matched_event_ids = vec![Uuid::now_v7()];
+
+    let won = storage
+        .update_event_wait(&stale, WaitStatus::Waiting, &[])
+        .await
+        .unwrap();
+
+    let stored = storage
+        .get_event_wait(InstanceId::from_uuid(instance_id), "wait_block")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!won);
+    assert_eq!(stored.matched_names, vec!["a".to_string()]);
+}

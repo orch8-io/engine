@@ -94,9 +94,13 @@ pub trait PushOutboxStore: Send + Sync + 'static {
         recorded_at: DateTime<Utc>,
     ) -> Result<(), String>;
 
-    /// Correlate device acknowledgements with all matching wake records.
+    /// Correlate device acknowledgements with the wake records of
+    /// `device_id` **within `tenant_id`**. Wake rows are unique per
+    /// `(tenant, device, command)`, so an ack must never mark another
+    /// tenant's row for a colliding device/command id.
     async fn record_command_acks(
         &self,
+        tenant_id: &str,
         device_id: &str,
         command_ids: &[String],
         acked_at: DateTime<Utc>,
@@ -348,6 +352,7 @@ mod tests {
 
         async fn record_command_acks(
             &self,
+            _tenant_id: &str,
             _device_id: &str,
             command_ids: &[String],
             _acked_at: DateTime<Utc>,

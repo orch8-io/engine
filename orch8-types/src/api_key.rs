@@ -84,7 +84,9 @@ pub struct ApiKeyRecord {
     pub tenant_id: String,
     /// Human label for the key.
     pub name: String,
-    /// Empty is never persisted; legacy rows migrate to [`ApiCapability::all`].
+    /// Never empty when persisted (storage rejects an empty grant); an empty
+    /// list read back grants nothing. Pre-scoping legacy rows are migrated to
+    /// [`ApiCapability::all`].
     pub capabilities: Vec<ApiCapability>,
     /// Hex SHA-256 of the secret.
     pub key_hash: String,

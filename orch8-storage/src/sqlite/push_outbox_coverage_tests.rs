@@ -840,7 +840,7 @@ async fn coverage_push_036_empty_ack_list_is_noop() {
     let storage = standard_storage().await;
     assert_eq!(
         storage
-            .record_command_acks("device-a", &[], Utc::now())
+            .record_command_acks("tenant-a", "device-a", &[], Utc::now())
             .await
             .unwrap(),
         0
@@ -858,7 +858,12 @@ async fn coverage_push_037_ack_marks_only_listed_commands() {
             .unwrap();
     }
     let acked = storage
-        .record_command_acks("device-a", &["cmd-1".into(), "cmd-3".into()], now)
+        .record_command_acks(
+            "tenant-a",
+            "device-a",
+            &["cmd-1".into(), "cmd-3".into()],
+            now,
+        )
         .await
         .unwrap();
     assert_eq!(acked, 2);
@@ -884,7 +889,7 @@ async fn coverage_push_038_ack_scoped_to_device() {
         .await
         .unwrap();
     let acked = storage
-        .record_command_acks("device-a", &["cmd-1".into()], now)
+        .record_command_acks("tenant-a", "device-a", &["cmd-1".into()], now)
         .await
         .unwrap();
     assert_eq!(acked, 1);
@@ -901,7 +906,7 @@ async fn coverage_push_038_ack_scoped_to_device() {
 async fn coverage_push_039_ack_unknown_command_matches_nothing() {
     let storage = standard_storage().await;
     let acked = storage
-        .record_command_acks("device-a", &["nope".into()], Utc::now())
+        .record_command_acks("tenant-a", "device-a", &["nope".into()], Utc::now())
         .await
         .unwrap();
     assert_eq!(acked, 0);

@@ -43,20 +43,20 @@ fn permanent(message: impl Into<String>) -> StepError {
 
 const MAX_ERROR_BODY_BYTES: usize = 512;
 
-/// Classify a non-2xx provider status: 408/429/5xx are transient, every
-/// other 4xx is a permanent request error. Shared with `email`.
-pub(crate) fn status_error(context: &str, status: u16, body: &[u8]) -> StepError {
+/// Classify a non-2xx provider status with the shared outbound policy
+/// ([`crate::outbound::status_error`]): 408/425/429/5xx are transient (with
+/// the `Retry-After` hint), every other 4xx is a permanent request error.
+/// Shared with `email`.
+pub(crate) fn status_error(
+    context: &str,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body: &[u8],
+) -> StepError {
     let snippet_len = body.len().min(MAX_ERROR_BODY_BYTES);
     let snippet = String::from_utf8_lossy(&body[..snippet_len]);
     let message = format!("{context}: provider returned HTTP {status}: {snippet}");
-    if status == 408 || status == 429 || status >= 500 {
-        StepError::Retryable {
-            message,
-            details: None,
-        }
-    } else {
-        permanent(message)
-    }
+    crate::outbound::status_error(message, status, headers, None)
 }
 
 /// Provider-neutral notification input.
@@ -357,10 +357,11 @@ pub(crate) async fn post_webhook(
     if (200..300).contains(&status) {
         return Ok(status);
     }
+    let headers = resp.headers().clone();
     let bytes = crate::outbound::read_body_capped(resp, 4096)
         .await
         .unwrap_or_default();
-    Err(status_error(context, status, &bytes))
+    Err(status_error(context, status, &headers, &bytes))
 }
 
 pub async fn handle_notify(ctx: StepContext) -> Result<Value, StepError> {
@@ -409,6 +410,39 @@ pub async fn handle_notify(ctx: StepContext) -> Result<Value, StepError> {
 mod tests {
     use super::*;
     use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
+
+    fn retry_after(secs: &str) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, secs.parse().unwrap());
+        headers
+    }
+
+    /// T1-GAP-344: notify/email follow the shared outbound status policy —
+    /// 425 Too Early is transient like 408/429/5xx.
+    #[test]
+    fn provider_425_is_retryable() {
+        let error = status_error(
+            "notify(slack)",
+            425,
+            &reqwest::header::HeaderMap::new(),
+            b"",
+        );
+
+        assert!(matches!(error, StepError::Retryable { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn provider_429_carries_the_retry_after_hint() {
+        let error = status_error("notify(slack)", 429, &retry_after("7"), b"");
+
+        let StepError::Retryable { details, .. } = error else {
+            panic!("429 must be retryable");
+        };
+        assert_eq!(
+            crate::outbound::retry_after_hint(details.as_ref()),
+            Some(std::time::Duration::from_secs(7))
+        );
+    }
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
     use std::sync::Arc;

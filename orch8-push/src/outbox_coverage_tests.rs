@@ -59,6 +59,7 @@ impl PushOutboxStore for NullStore {
 
     async fn record_command_acks(
         &self,
+        _tenant_id: &str,
         _device_id: &str,
         _command_ids: &[String],
         _acked_at: DateTime<Utc>,
@@ -312,6 +313,7 @@ impl PushOutboxStore for DrainRecorder {
 
     async fn record_command_acks(
         &self,
+        _tenant_id: &str,
         _device_id: &str,
         command_ids: &[String],
         _acked_at: DateTime<Utc>,

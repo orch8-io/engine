@@ -164,6 +164,21 @@ pub async fn execute_for_each(
         // re-clone items the loop can never reach.
         let user_max = fe_def.max_iterations.min(FOR_EACH_ABSOLUTE_MAX);
         items.truncate(usize::try_from(user_max).unwrap_or(usize::MAX));
+        // Remember a pre-existing value the item binding is about to shadow
+        // so completion restores it instead of deleting it (T1-GAP-071).
+        // Saved before the first bind, so a crash-and-retry of this first
+        // visit still sees the user's original value.
+        let shadowed = instance.context.data.get(&fe_def.item_var);
+        storage
+            .save_externalized_state(
+                instance.id,
+                &shadowed_item_var_key(instance.id, &fe_def.id),
+                &serde_json::json!({
+                    "present": shadowed.is_some(),
+                    "value": shadowed.cloned().unwrap_or(serde_json::Value::Null),
+                }),
+            )
+            .await?;
         // Externalize the collection snapshot so later ticks stay consistent
         // without duplicating the full array into every iteration marker.
         storage
@@ -251,7 +266,7 @@ pub async fn execute_for_each(
         // to subsequent steps. The last iteration's item value would
         // otherwise persist in `context.data` and be visible to steps that
         // run after the for_each block.
-        cleanup_item_var(storage, instance.id, &fe_def.item_var).await;
+        release_item_var(storage, instance.id, fe_def).await;
 
         debug!(
             instance_id = %instance.id,
@@ -282,7 +297,7 @@ pub async fn execute_for_each(
             // does not leak into on_failure handlers and later context
             // readers — the same cleanup the completion path performs.
             // Best-effort and idempotent.
-            cleanup_item_var(storage, instance.id, &fe_def.item_var).await;
+            release_item_var(storage, instance.id, fe_def).await;
             evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Failed)
                 .await?;
             return Ok(true);
@@ -372,6 +387,47 @@ async fn bind_item_var(
         .merge_context_data(instance.id, item_var, &item)
         .await?;
     Ok(())
+}
+
+fn shadowed_item_var_key(instance_id: InstanceId, block_id: &orch8_types::ids::BlockId) -> String {
+    format!(
+        "inst:{}:foreach:{}:shadowed_item_var",
+        instance_id.into_uuid(),
+        block_id.as_str()
+    )
+}
+
+/// Undo the item binding once the `for_each` finishes: restore the value
+/// `item_var` shadowed when the loop started, or remove the key when it had
+/// none. Best-effort, like [`cleanup_item_var`].
+async fn release_item_var(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    fe_def: &ForEachDef,
+) {
+    let saved = storage
+        .get_externalized_state(instance_id, &shadowed_item_var_key(instance_id, &fe_def.id))
+        .await;
+    match saved {
+        Ok(Some(saved)) if saved.get("present") == Some(&serde_json::Value::Bool(true)) => {
+            let original = saved
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            if let Err(e) = storage
+                .merge_context_data(instance_id, &fe_def.item_var, &original)
+                .await
+            {
+                warn!(
+                    instance_id = %instance_id,
+                    item_var = %fe_def.item_var,
+                    error = %e,
+                    "failed to restore the context value shadowed by a for_each item var"
+                );
+            }
+        }
+        _ => cleanup_item_var(storage, instance_id, &fe_def.item_var).await,
+    }
 }
 
 /// Remove the `item_var` key from `context.data` after `for_each` completes.

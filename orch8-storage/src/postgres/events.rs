@@ -220,16 +220,18 @@ pub(super) async fn update_wait(
     store: &PostgresStorage,
     w: &EventWait,
     expected: WaitStatus,
+    expected_matched: &[uuid::Uuid],
 ) -> Result<bool, StorageError> {
     let result = sqlx::query(
         r"UPDATE event_waits SET status = $2, matched_names = $3, matched_event_ids = $4
-          WHERE id = $1 AND status = $5",
+          WHERE id = $1 AND status = $5 AND matched_event_ids = $6",
     )
     .bind(w.id)
     .bind(w.status.as_str())
     .bind(serde_json::to_value(&w.matched_names)?)
     .bind(serde_json::to_value(&w.matched_event_ids)?)
     .bind(expected.as_str())
+    .bind(serde_json::to_value(expected_matched)?)
     .execute(&store.pool)
     .await?;
     Ok(result.rows_affected() == 1)

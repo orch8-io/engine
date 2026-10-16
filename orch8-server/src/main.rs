@@ -61,6 +61,9 @@ const EXECUTOR_GRPC_RPCS: &[&str] = &[
     "/orch8.Orch8Service/CompleteTask",
     "/orch8.Orch8Service/FailTask",
     "/orch8.Orch8Service/HeartbeatTask",
+    // The worker client always releases over unary ReleaseTask (the stream
+    // has no release frame).
+    "/orch8.Orch8Service/ReleaseTask",
     "/orch8.Orch8Service/WorkerStream",
     "/orch8.Orch8Service/ArtifactTransfer",
     "/orch8.Orch8Service/IngestTelemetryBatch",
@@ -758,7 +761,7 @@ fn parse_federation_peers(
 ) -> Result<Vec<orch8_types::continuity_advanced::FederationPeer>, String> {
     const MAX_PEERS: usize = 128;
     const MAX_TENANTS_PER_PEER: usize = 256;
-    let peers =
+    let mut peers =
         serde_json::from_str::<Vec<orch8_types::continuity_advanced::FederationPeer>>(encoded)
             .map_err(|error| error.to_string())?;
     if peers.len() > MAX_PEERS {
@@ -767,7 +770,9 @@ fn parse_federation_peers(
         ));
     }
     let mut ids = std::collections::HashSet::with_capacity(peers.len());
-    for peer in &peers {
+    for peer in &mut peers {
+        // Envelope verification compares against a lowercase hex digest.
+        peer.trust_root_sha256.make_ascii_lowercase();
         if !ids.insert(peer.id) {
             return Err(format!("duplicate federation peer id {}", peer.id));
         }
@@ -2006,6 +2011,22 @@ fn build_cors_layer(origins: &str, embed_origins: &str) -> CorsLayer {
 mod tests {
     use super::*;
 
+    /// `orch8_grpc::worker_client` releases a task over the unary
+    /// `ReleaseTask` RPC (the stream has no release frame), and falls back to
+    /// the unary mutation RPCs for tasks from an earlier stream session. An
+    /// executor node must admit every one of them.
+    #[test]
+    fn executor_grpc_surface_admits_every_unary_rpc_the_worker_client_calls() {
+        for rpc in [
+            "/orch8.Orch8Service/CompleteTask",
+            "/orch8.Orch8Service/FailTask",
+            "/orch8.Orch8Service/HeartbeatTask",
+            "/orch8.Orch8Service/ReleaseTask",
+        ] {
+            assert!(EXECUTOR_GRPC_RPCS.contains(&rpc), "executor denies {rpc}");
+        }
+    }
+
     #[tokio::test]
     async fn cors_preflight_admits_browser_session_tokens_and_is_cached() {
         use tower::Service as _;
@@ -2137,6 +2158,23 @@ mod tests {
         assert!(error.contains("absolute HTTP(S) URI"));
     }
     use serial_test::serial;
+
+    #[test]
+    fn federation_peer_trust_root_digest_is_normalised_to_lowercase() {
+        let peer = serde_json::json!({
+            "id": "018f0000-0000-7000-8000-000000000001",
+            "name": "peer-a",
+            "trust_root_sha256": "A1".repeat(32),
+            "public_key": "unused-at-configuration-time",
+            "endpoint": "https://peer.example",
+            "allowed_tenants": ["tenant-a"],
+            "revoked_at": null
+        });
+
+        let peers = parse_federation_peers(&serde_json::to_string(&[&peer]).unwrap()).unwrap();
+
+        assert_eq!(peers[0].trust_root_sha256, "a1".repeat(32));
+    }
 
     #[test]
     fn federation_peer_configuration_fails_closed_on_ambiguous_identity() {

@@ -32,7 +32,7 @@ path_case!(
 path_case!(
     coverage_distribution_004_dot_component_is_valid,
     "./a.txt",
-    true
+    false
 );
 path_case!(
     coverage_distribution_005_hidden_file_is_valid,
@@ -74,7 +74,7 @@ path_case!(
     "asset~backup",
     true
 );
-path_case!(coverage_distribution_013_single_dot_is_valid, ".", true);
+path_case!(coverage_distribution_013_single_dot_is_valid, ".", false);
 path_case!(
     coverage_distribution_014_parent_text_is_valid,
     "..file",

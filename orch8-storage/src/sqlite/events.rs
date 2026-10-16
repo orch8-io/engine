@@ -244,16 +244,20 @@ pub(super) async fn update_wait(
     storage: &SqliteStorage,
     w: &EventWait,
     expected: WaitStatus,
+    expected_matched: &[uuid::Uuid],
 ) -> Result<bool, StorageError> {
+    // `matched_event_ids` is only ever written by this module via
+    // `serde_json::to_string`, so text equality is value equality.
     let result = sqlx::query(
         "UPDATE event_waits SET status = ?2, matched_names = ?3, matched_event_ids = ?4
-         WHERE id = ?1 AND status = ?5",
+         WHERE id = ?1 AND status = ?5 AND matched_event_ids = ?6",
     )
     .bind(w.id.to_string())
     .bind(w.status.as_str())
     .bind(serde_json::to_string(&w.matched_names)?)
     .bind(serde_json::to_string(&w.matched_event_ids)?)
     .bind(expected.as_str())
+    .bind(serde_json::to_string(expected_matched)?)
     .execute(&storage.pool)
     .await?;
     Ok(result.rows_affected() == 1)

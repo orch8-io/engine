@@ -123,3 +123,33 @@ async fn prune_wakes_deletes_only_old_non_leased_rows_postgres() {
     assert_eq!(left, vec!["fresh".to_string()]);
     pool.close().await;
 }
+
+#[tokio::test]
+async fn command_ack_does_not_mark_another_tenants_wake_for_the_same_device_id_postgres() {
+    let s = require_postgres!();
+    let device_id = Uuid::new_v4().to_string();
+    let tenant_a = format!("a-{device_id}");
+    let tenant_b = format!("b-{device_id}");
+    let now = Utc::now();
+    s.enqueue_wake(&tenant_a, &device_id, "cmd-1", now)
+        .await
+        .unwrap();
+    s.enqueue_wake(&tenant_b, &device_id, "cmd-1", now)
+        .await
+        .unwrap();
+
+    let acked = s
+        .record_command_acks(&tenant_a, &device_id, &["cmd-1".into()], now)
+        .await
+        .unwrap();
+
+    let acked_tenants: Vec<String> = sqlx::query_scalar(
+        "SELECT tenant_id FROM push_wake_outbox WHERE device_id=$1 AND command_acked_at IS NOT NULL",
+    )
+    .bind(&device_id)
+    .fetch_all(s.pool())
+    .await
+    .unwrap();
+    assert_eq!(acked, 1);
+    assert_eq!(acked_tenants, vec![tenant_a]);
+}

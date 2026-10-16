@@ -1076,7 +1076,7 @@ pub fn verify_federation_envelope(
         .ok()
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or(AdvancedContinuityError::FederationEnvelopeInvalid)?;
-    if hex_sha256(&key_bytes) != peer.trust_root_sha256 {
+    if !hex_sha256(&key_bytes).eq_ignore_ascii_case(&peer.trust_root_sha256) {
         return Err(AdvancedContinuityError::FederationEnvelopeInvalid);
     }
     let key = VerifyingKey::from_bytes(&key_bytes)
@@ -1736,6 +1736,41 @@ mod tests {
             verify_federation_envelope(&peer, &envelope, payload, now + Duration::minutes(7)),
             Err(AdvancedContinuityError::FederationEnvelopeExpired)
         );
+    }
+
+    #[test]
+    fn federation_accepts_a_peer_whose_trust_root_digest_is_uppercase_hex() {
+        let now = Utc::now();
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let signing_key = SigningKey::from_bytes(&[9; 32]);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let peer = FederationPeer {
+            id: orch8_types::continuity_advanced::FederationPeerId::new(),
+            name: "peer".into(),
+            trust_root_sha256: hex_sha256(&public_key).to_ascii_uppercase(),
+            public_key: BASE64.encode(public_key),
+            endpoint: "https://peer.invalid".into(),
+            allowed_tenants: vec![tenant.clone()],
+            revoked_at: None,
+        };
+        let payload = b"ciphertext";
+        let envelope = sign_federation_envelope(
+            &signing_key,
+            FederationSigningRequest {
+                peer_id: peer.id,
+                tenant_id: tenant,
+                continuity_id: ContinuityId::new(),
+                epoch: ExecutionEpoch::initial(),
+                destination_runtime_id: orch8_types::continuity::RuntimeId::new(),
+                payload,
+                issued_at: now,
+                expires_at: now + Duration::minutes(5),
+            },
+        );
+
+        let verdict = verify_federation_envelope(&peer, &envelope, payload, now);
+
+        assert_eq!(verdict, Ok(()));
     }
 
     #[test]

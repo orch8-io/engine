@@ -225,6 +225,41 @@ async fn residency_waits_and_never_dispatches_to_a_non_matching_runtime() {
     }
 }
 
+/// T1-GAP-008: a malformed `$runtime` param on a residency-placed step used
+/// to make `apply_step_placement` answer "no placement", so a step whose
+/// handler is registered in-process ran locally — bypassing residency.
+#[tokio::test]
+async fn malformed_runtime_param_cannot_bypass_residency() {
+    for (backend, storage) in backends().await {
+        let tenant = TenantId::unchecked(unique("tenant"));
+        let mut step = placed_step(
+            "charge",
+            "noop",
+            Placement {
+                residency: Some("eu".into()),
+                ..Placement::default()
+            },
+        );
+        if let BlockDefinition::Step(def) = &mut step {
+            def.params = json!({"$runtime": "garbage"});
+        }
+
+        let (_, inst) = start(&storage, &tenant, mk_sequence(vec![step])).await;
+
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        let node = tree
+            .iter()
+            .find(|n| n.block_id.as_str() == "charge")
+            .unwrap();
+        assert_eq!(
+            node.state,
+            orch8_types::execution::NodeState::Failed,
+            "{backend}: the step must be rejected, not run in-process"
+        );
+        assert!(tasks_of(&storage, &inst).await.is_empty(), "{backend}");
+    }
+}
+
 #[tokio::test]
 async fn tenant_policies_add_labels_and_preferences() {
     for test_backend in backends().await {

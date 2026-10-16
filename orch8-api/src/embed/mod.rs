@@ -277,7 +277,7 @@ pub(crate) async fn put_theme(
     State(state): State<AppState>,
     tenant_ctx: OptionalTenant,
     principal: Option<Extension<crate::auth::PrincipalContext>>,
-    Json(theme): Json<EmbedTheme>,
+    Json(orch8_types::strict::Strict(theme)): Json<orch8_types::strict::Strict<EmbedTheme>>,
 ) -> Result<impl IntoResponse, ApiError> {
     if state.embedded.signer.is_none() {
         return Err(ApiError::NotFound("embed routes are disabled".into()));

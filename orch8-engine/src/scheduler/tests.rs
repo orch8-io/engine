@@ -1661,6 +1661,132 @@ async fn lease_lost_to_other_claim_does_not_release_instance() {
     );
 }
 
+/// A Parallel with one branch `[first, second]`: forces the tree path and
+/// runs the two steps in separate evaluator iterations.
+fn two_step_composite_sequence() -> SequenceDefinition {
+    mk_sequence(vec![BlockDefinition::Parallel(Box::new(
+        orch8_types::sequence::ParallelDef {
+            id: BlockId::new("par"),
+            branches: vec![vec![
+                BlockDefinition::Step(Box::new(mk_step_def(
+                    "first",
+                    "trip_lease",
+                    serde_json::json!({}),
+                ))),
+                BlockDefinition::Step(Box::new(mk_step_def(
+                    "second",
+                    "trip_lease",
+                    serde_json::json!({}),
+                ))),
+            ]],
+        },
+    ))])
+}
+
+async fn run_tree_with_lease_flag(
+    storage: &Arc<dyn StorageBackend>,
+    instance: &TaskInstance,
+    registry: &HandlerRegistry,
+    lease_lost: &std::sync::atomic::AtomicBool,
+    claim_token: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    let webhook_config = WebhookConfig::default();
+    let cache = crate::sequence_cache::SequenceCache::new(16, Duration::from_secs(60));
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+    let ctx = InstanceRunCtx {
+        storage,
+        handlers: registry,
+        webhook_config: &webhook_config,
+        sequence_cache: &cache,
+        externalize_threshold: 0,
+        max_steps_per_instance: 0,
+        cancel: &cancel,
+        clock: &clock,
+        lease_lost,
+        claim_token,
+    };
+    process_instance_tree(&ctx, instance, &two_step_composite_sequence())
+        .await
+        .unwrap();
+}
+
+/// GAP-005 (L6-01 follow-up): the lease-lost fence also covers composite
+/// workflows. A flag already set when the tree run starts dispatches nothing
+/// and hands the instance back.
+#[tokio::test]
+async fn lease_lost_stops_tree_path_before_first_step() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance_id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), instance_id, None, InstanceState::Running).await;
+    let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    let mut registry = HandlerRegistry::new();
+    registry.register("trip_lease", |_ctx| async { Ok(serde_json::json!({})) });
+    let lease_lost = std::sync::atomic::AtomicBool::new(true);
+
+    run_tree_with_lease_flag(&storage, &instance, &registry, &lease_lost, None).await;
+
+    assert!(
+        storage
+            .get_block_output(instance_id, &BlockId::new("first"))
+            .await
+            .unwrap()
+            .is_none(),
+        "no step may start after lease loss"
+    );
+    let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
+    assert_eq!(refreshed.state, InstanceState::Scheduled);
+}
+
+/// GAP-005: a lease lost *while* the evaluator is running (the heartbeat
+/// flips the flag mid-tick) stops it before the next step is dispatched.
+#[tokio::test]
+async fn lease_lost_mid_tree_evaluation_stops_before_next_step() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance_id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), instance_id, None, InstanceState::Running).await;
+    let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    let lease_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut registry = HandlerRegistry::new();
+    let flag = Arc::clone(&lease_lost);
+    registry.register("trip_lease", move |_ctx| {
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        async { Ok(serde_json::json!({})) }
+    });
+
+    run_tree_with_lease_flag(&storage, &instance, &registry, &lease_lost, None).await;
+
+    assert!(
+        storage
+            .get_block_output(instance_id, &BlockId::new("second"))
+            .await
+            .unwrap()
+            .is_none(),
+        "the step after the lease loss must not start"
+    );
+    let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
+    assert_eq!(refreshed.state, InstanceState::Scheduled);
+}
+
+/// GAP-005: when another claim already owns the row, the tree path stops
+/// without releasing the instance (mirrors the flat-loop rule).
+#[tokio::test]
+async fn lease_lost_to_other_claim_leaves_tree_instance_running() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance_id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), instance_id, None, InstanceState::Running).await;
+    let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    let mut registry = HandlerRegistry::new();
+    registry.register("trip_lease", |_ctx| async { Ok(serde_json::json!({})) });
+    let lease_lost = std::sync::atomic::AtomicBool::new(true);
+    let stale_token = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+
+    run_tree_with_lease_flag(&storage, &instance, &registry, &lease_lost, stale_token).await;
+
+    let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
+    assert_eq!(refreshed.state, InstanceState::Running);
+}
+
 /// A composite iteration reset clears the (otherwise final) delay marker of
 /// its step descendants, so a delayed loop-body step waits every iteration.
 #[tokio::test]

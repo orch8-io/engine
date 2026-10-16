@@ -228,9 +228,19 @@ fn storage_err(e: &StorageError) -> StepError {
 }
 
 /// Parse the `prompt` param of an `llm_call` step.
+///
+/// Unknown fields are tolerated (and logged): the param is persisted in the
+/// sequence, so a rolled-back binary must not fail steps that a newer binary
+/// authored with a field it does not know yet.
 pub fn parse_prompt_ref(value: &Value) -> Result<PromptRef, StepError> {
-    let r: PromptRef = serde_json::from_value(value.clone())
-        .map_err(|e| permanent(format!("llm_call: invalid `prompt` param: {e}")))?;
+    let mut unknown = Vec::new();
+    let r: PromptRef = serde_ignored::deserialize(value.clone(), |path| {
+        unknown.push(path.to_string());
+    })
+    .map_err(|e| permanent(format!("llm_call: invalid `prompt` param: {e}")))?;
+    if !unknown.is_empty() {
+        tracing::warn!(?unknown, "llm_call: ignoring unknown `prompt` fields");
+    }
     validate_prompt_identifier("prompt.name", &r.name).map_err(permanent)?;
     if r.version.is_some() && r.label.is_some() {
         return Err(permanent(
@@ -613,7 +623,13 @@ mod tests {
         assert!(parse_prompt_ref(&json!({"name": "p", "label": "production"})).is_ok());
         assert!(parse_prompt_ref(&json!({"name": "p", "version": 1, "label": "x"})).is_err());
         assert!(parse_prompt_ref(&json!({"name": "p", "variables": [1]})).is_err());
-        assert!(parse_prompt_ref(&json!({"name": "p", "bogus": 1})).is_err());
+        assert_eq!(
+            parse_prompt_ref(&json!({"name": "p", "bogus": 1}))
+                .unwrap()
+                .name,
+            "p",
+            "unknown fields from a newer writer are tolerated"
+        );
         assert!(parse_prompt_ref(&json!({"name": "bad name"})).is_err());
     }
 }

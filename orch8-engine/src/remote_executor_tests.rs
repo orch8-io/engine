@@ -495,3 +495,49 @@ async fn settle_gives_up_when_the_lease_runs_out() {
         .await;
     assert_eq!(exec.stats().lost, 1);
 }
+
+/// T1-GAP-236: a handler that panics must not leave its task in the
+/// `running` map, or `in_flight()` (drain accounting) stays inflated.
+#[tokio::test]
+async fn panicking_handler_does_not_leak_an_in_flight_slot() {
+    let mut registry = HandlerRegistry::new();
+    registry.register("boom", |_ctx| async { panic!("handler panicked") });
+    let exec = RemoteExecutor::new(RemoteExecutorParts {
+        identity: ExecutorIdentity {
+            runtime_id: replica_runtime_id(uuid::Uuid::now_v7(), "acme-dc1-host"),
+            host: "acme-dc1-host".into(),
+            tenant_id: "acme".into(),
+            labels: BTreeMap::new(),
+            regions: vec![],
+            handlers: vec!["boom".into()],
+            credentials: vec![],
+        },
+        settings: RemoteExecutorSettings::default(),
+        transport: Arc::new(FakeTransport::default()),
+        registry,
+        credentials: LocalCredentials::default(),
+        vault: None,
+        scratch: Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        ),
+    })
+    .unwrap();
+    let claimed = ClaimedTask {
+        task: task("boom", json!({})),
+        session: 0,
+    };
+    let permit = Arc::clone(&exec.slots).try_acquire_owned().unwrap();
+    let runner = Arc::clone(&exec);
+
+    let joined = tokio::spawn(async move {
+        runner
+            .execute(claimed, permit, Duration::from_secs(30))
+            .await;
+    })
+    .await;
+
+    assert!(joined.unwrap_err().is_panic());
+    assert_eq!(exec.in_flight(), 0);
+}

@@ -266,3 +266,49 @@ async fn r2_for_each_3_over_loop_0_items_completes_immediately() {
         "root for_each must complete on empty collection"
     );
 }
+
+/// `build_sequence` with the for_each's `item_var` renamed.
+fn sequence_with_item_var(item_var: &str) -> SequenceDefinition {
+    let mut seq = build_sequence();
+    if let BlockDefinition::ForEach(fe) = &mut seq.blocks[0] {
+        fe.item_var = item_var.into();
+    }
+    seq
+}
+
+async fn run_for_each_over(data: serde_json::Value, item_var: &str) -> serde_json::Value {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let mut registry = HandlerRegistry::new();
+    register_builtins(&mut registry);
+    let seq = sequence_with_item_var(item_var);
+    storage.create_sequence(&seq).await.unwrap();
+    let mut inst = mk_instance(seq.id, &json!(["x", "y"]));
+    inst.context.data = data;
+    storage.create_instance(&inst).await.unwrap();
+
+    drive_to_completion(&storage, &registry, inst.id, &seq).await;
+
+    storage
+        .get_instance(inst.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .context
+        .data
+}
+
+/// T1-GAP-071: an `item_var` that shadows an existing context key used to be
+/// deleted on completion, destroying the user's original value.
+#[tokio::test]
+async fn item_var_shadowing_an_existing_context_key_is_restored_after_completion() {
+    let data = run_for_each_over(json!({"items": ["x", "y"], "user": "alice"}), "user").await;
+
+    assert_eq!(data["user"], json!("alice"));
+}
+
+#[tokio::test]
+async fn item_var_without_a_prior_value_is_removed_after_completion() {
+    let data = run_for_each_over(json!({"items": ["x", "y"]}), "item").await;
+
+    assert!(data.get("item").is_none(), "{data}");
+}

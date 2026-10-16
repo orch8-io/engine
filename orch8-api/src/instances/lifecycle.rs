@@ -743,7 +743,9 @@ pub async fn list_instances(
     }
     .capped();
 
-    let limit = pagination.limit;
+    // At least one row: `limit=0` would return an empty page with
+    // `has_more: true` and loop a paging client forever (API-07).
+    let limit = pagination.limit.max(1);
     pagination.limit = limit.saturating_add(1);
     let instances = state
         .storage

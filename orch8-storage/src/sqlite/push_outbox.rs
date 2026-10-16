@@ -150,6 +150,7 @@ impl PushOutboxStore for SqliteStorage {
 
     async fn record_command_acks(
         &self,
+        tenant_id: &str,
         device_id: &str,
         command_ids: &[String],
         acked_at: DateTime<Utc>,
@@ -160,7 +161,9 @@ impl PushOutboxStore for SqliteStorage {
         let mut builder = sqlx::QueryBuilder::new("UPDATE push_wake_outbox SET command_acked_at=");
         builder
             .push_bind(ts(acked_at))
-            .push(" WHERE device_id=")
+            .push(" WHERE tenant_id=")
+            .push_bind(tenant_id)
+            .push(" AND device_id=")
             .push_bind(device_id)
             .push(" AND command_id IN (");
         let mut separated = builder.separated(",");
@@ -258,6 +261,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_ack_does_not_mark_another_tenants_wake_for_the_same_device_id() {
+        let storage = storage_with_device().await;
+        let now = Utc::now();
+        storage
+            .enqueue_wake("tenant-a", "device-a", "cmd-1", now)
+            .await
+            .unwrap();
+        storage
+            .enqueue_wake("tenant-b", "device-a", "cmd-1", now)
+            .await
+            .unwrap();
+
+        let acked = storage
+            .record_command_acks("tenant-a", "device-a", &["cmd-1".into()], now)
+            .await
+            .unwrap();
+
+        let acked_tenants: Vec<String> = sqlx::query_scalar(
+            "SELECT tenant_id FROM push_wake_outbox WHERE command_acked_at IS NOT NULL",
+        )
+        .fetch_all(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(acked, 1);
+        assert_eq!(acked_tenants, vec!["tenant-a".to_string()]);
+    }
+
+    #[tokio::test]
     async fn atomic_command_wake_claim_retry_delivery_and_ack() {
         let storage = storage_with_device().await;
         let now = Utc::now();
@@ -308,7 +339,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .record_command_acks("device-a", &["command-a".into()], retry_at)
+            .record_command_acks("tenant-a", "device-a", &["command-a".into()], retry_at)
             .await
             .unwrap();
 
