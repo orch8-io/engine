@@ -1535,6 +1535,7 @@ async fn deadline_breach_lost_cas_skips_escalation_side_effects() {
         None,
         InstanceState::Waiting,
         &SharedClock::default(),
+        None,
     )
     .await
     .expect("lost CAS is not an error");
@@ -2386,6 +2387,7 @@ async fn sweep_waiting(
             cancel: &cancel,
             batch_size,
             clock: &clock,
+            hooks: &HookTasks::default(),
         },
         cursor,
         max_pages,
@@ -2526,5 +2528,133 @@ fn transient_retry_policy_backs_off_and_eventually_exhausts() {
         Decision::Exhausted {
             attempts: MAX_ATTEMPTS
         }
+    );
+}
+
+/// L2-11: an instance whose signals cannot be applied (here: a context
+/// written under a different encryption key, the H-10 class) must not block
+/// signal delivery to the instances after it.
+#[tokio::test]
+async fn poison_instance_does_not_block_signal_sweep() {
+    use orch8_storage::encrypting::EncryptingStorage;
+    use orch8_types::encryption::FieldEncryptor;
+    let raw: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let old_key: Arc<dyn StorageBackend> = Arc::new(EncryptingStorage::new(
+        Arc::clone(&raw),
+        FieldEncryptor::from_hex_key(&"11".repeat(32)).unwrap(),
+    ));
+    let storage: Arc<dyn StorageBackend> = Arc::new(EncryptingStorage::new(
+        Arc::clone(&raw),
+        FieldEncryptor::from_hex_key(&"22".repeat(32)).unwrap(),
+    ));
+    let poison = InstanceId::new();
+    let healthy = InstanceId::new();
+    for (writer, id) in [(&old_key, poison), (&storage, healthy)] {
+        seed_instance_in_state(writer.as_ref(), id, None, InstanceState::Paused).await;
+        let mut inst = writer.get_instance(id).await.unwrap().unwrap();
+        inst.context.data = serde_json::json!({ "secret": "s3cr3t" });
+        writer
+            .update_instance_context(id, &inst.context)
+            .await
+            .unwrap();
+    }
+    assert!(
+        storage.get_instance(poison).await.is_err(),
+        "precondition: the poison row is unreadable under the current key"
+    );
+    // The poison row's signal is older, so it sorts first in the sweep.
+    for (id, age) in [(poison, 10), (healthy, 5)] {
+        storage
+            .enqueue_signal(&Signal {
+                id: Uuid::now_v7(),
+                instance_id: id,
+                signal_type: SignalType::Resume,
+                payload: serde_json::Value::Null,
+                delivered: false,
+                created_at: Utc::now() - chrono::Duration::seconds(age),
+                delivered_at: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    let handlers = Arc::new(HandlerRegistry::new());
+    let cache = SequenceCache::new(16, Duration::from_secs(60));
+    let hooks = HookTasks::default();
+    process_signalled_instances(
+        &storage,
+        &handlers,
+        &cache,
+        16,
+        &SharedClock::default(),
+        &hooks,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        storage.get_instance(healthy).await.unwrap().unwrap().state,
+        InstanceState::Scheduled,
+        "the healthy instance's resume is delivered despite the poison row"
+    );
+}
+
+/// L2-06: an `on_cancel` hook against a hung target runs off the tick; the
+/// signal sweep returns at once instead of waiting out the hook timeout.
+#[tokio::test]
+async fn cancel_hooks_run_off_the_signal_sweep() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let mut seq = mk_sequence(vec![]);
+    seq.on_cancel = Some(vec![BlockDefinition::Step(Box::new(mk_step_def(
+        "cleanup",
+        "hang",
+        serde_json::json!({}),
+    )))]);
+    storage.create_sequence(&seq).await.unwrap();
+    let mut inst = mk_waiting_instance(seq.id, chrono::Duration::minutes(1), Utc::now());
+    inst.state = InstanceState::Paused;
+    storage.create_instance(&inst).await.unwrap();
+    storage
+        .enqueue_signal(&Signal {
+            id: Uuid::now_v7(),
+            instance_id: inst.id,
+            signal_type: SignalType::Cancel,
+            payload: serde_json::Value::Null,
+            delivered: false,
+            created_at: Utc::now(),
+            delivered_at: None,
+        })
+        .await
+        .unwrap();
+
+    let mut registry = HandlerRegistry::new();
+    registry.register("hang", |_ctx| async {
+        std::future::pending::<()>().await;
+        Ok(serde_json::json!({}))
+    });
+    let handlers = Arc::new(registry);
+    let cache = SequenceCache::new(16, Duration::from_secs(60));
+    let hooks = HookTasks::default();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        process_signalled_instances(
+            &storage,
+            &handlers,
+            &cache,
+            16,
+            &SharedClock::default(),
+            &hooks,
+        ),
+    )
+    .await
+    .expect("the sweep must not wait for the hung hook")
+    .unwrap();
+    assert_eq!(
+        storage.get_instance(inst.id).await.unwrap().unwrap().state,
+        InstanceState::Cancelled
+    );
+    assert_eq!(
+        hooks.0.lock().unwrap().len(),
+        1,
+        "the on_cancel hook was spawned off the tick"
     );
 }

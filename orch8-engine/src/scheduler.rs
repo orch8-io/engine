@@ -128,12 +128,14 @@ pub async fn tick_once(
 
     retry_deferred_parent_wakes(storage).await;
 
+    let hooks = HookTasks::default();
     process_signalled_instances(
         storage,
         handlers,
         sequence_cache,
         config.batch_size,
         &config.clock,
+        &hooks,
     )
     .await?;
 
@@ -148,11 +150,15 @@ pub async fn tick_once(
             cancel,
             batch_size: config.batch_size,
             clock: &config.clock,
+            hooks: &hooks,
         },
         &mut WaitingSweepCursor::default(),
         u32::MAX,
     )
     .await?;
+    // Single-shot callers expect the cleanup/escalation hooks of this pass
+    // to have run when the call returns.
+    hooks.join_all().await;
 
     // `tick_once` is the single-shot mobile entry point — no cursor is
     // carried between calls, so each call scans the full active set
@@ -313,6 +319,10 @@ pub async fn run_tick_loop_with_liveness(
                     }
                 }
                 retry_deferred_parent_wakes(&storage).await;
+                // Hooks spawned by this iteration's sweeps run off the tick
+                // (bounded); dropping the handles at the end of the
+                // iteration detaches them.
+                let hooks = HookTasks::default();
                 // Process signals for paused/waiting instances that won't be
                 // picked up by claim_due_instances (which only claims
                 // scheduled instances). Without this, resume/cancel signals
@@ -323,6 +333,7 @@ pub async fn run_tick_loop_with_liveness(
                     &sequence_cache,
                     batch_size,
                     &config.clock,
+                    &hooks,
                 )
                 .await
                 {
@@ -340,6 +351,7 @@ pub async fn run_tick_loop_with_liveness(
                         cancel: &cancel,
                         batch_size,
                         clock: &config.clock,
+                        hooks: &hooks,
                     },
                     &mut waiting_cursor,
                     MAX_SWEEP_PAGES,
@@ -1043,10 +1055,11 @@ fn wakes_scheduled_instance(signal_type: &orch8_types::signal::SignalType) -> bo
 /// no such signals exist (single indexed query returning empty).
 async fn process_signalled_instances(
     storage: &Arc<dyn StorageBackend>,
-    handlers: &HandlerRegistry,
+    handlers: &Arc<HandlerRegistry>,
     sequence_cache: &SequenceCache,
     batch_size: u32,
     clock: &SharedClock,
+    hooks: &HookTasks,
 ) -> Result<(), EngineError> {
     let signalled = storage.get_signalled_instance_ids(batch_size).await?;
     if signalled.is_empty() {
@@ -1067,97 +1080,182 @@ async fn process_signalled_instances(
         if signals.is_empty() {
             continue;
         }
-
-        // Scheduled instances with a pending *control* signal just need a
-        // wake-up so the normal tick processes it immediately. Skip the full
-        // signal processor to avoid invalid state transitions.
-        //
-        // Only pause/cancel justify cutting a delay, send window, or retry
-        // backoff short. Everything else (update_context, custom signals and
-        // `human_input:<step>` responses for a step not reached yet) is
-        // consumed when the instance next runs naturally — waking for those
-        // re-armed a parked instance on every sweep, which together with a
-        // step delay was a livelock (ENG-R-N1). Storage already filters
-        // these rows; this is the backend-independent guard.
-        if current_state == InstanceState::Scheduled {
-            if !signals
-                .iter()
-                .any(|s| wakes_scheduled_instance(&s.signal_type))
-            {
-                continue;
-            }
-            debug!(
+        // L2-11: one instance whose signals cannot be applied (undecodable
+        // context or sequence, a failing write) used to abort the whole
+        // sweep with `?` — every tick, at the head of the oldest-first batch
+        // — so pauses, resumes, cancels and approvals of every instance
+        // after it were never delivered. Isolate per-instance failures.
+        if let Err(e) = process_one_signalled_instance(
+            storage,
+            handlers,
+            sequence_cache,
+            clock,
+            hooks,
+            instance_id,
+            current_state,
+            signals,
+        )
+        .await
+        {
+            warn!(
                 instance_id = %instance_id,
-                "waking scheduled instance with pending signal"
+                state = %current_state,
+                error = %e,
+                "signal sweep: failed to apply signals for instance; continuing sweep"
             );
-            if let Err(e) = storage
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply the pending signals of one paused/waiting (or signalled scheduled)
+/// instance for [`process_signalled_instances`].
+#[allow(clippy::too_many_arguments)]
+async fn process_one_signalled_instance(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &Arc<HandlerRegistry>,
+    sequence_cache: &SequenceCache,
+    clock: &SharedClock,
+    hooks: &HookTasks,
+    instance_id: InstanceId,
+    current_state: InstanceState,
+    signals: Vec<Signal>,
+) -> Result<(), EngineError> {
+    // Scheduled instances with a pending *control* signal just need a
+    // wake-up so the normal tick processes it immediately. Skip the full
+    // signal processor to avoid invalid state transitions.
+    //
+    // Only pause/cancel justify cutting a delay, send window, or retry
+    // backoff short. Everything else (update_context, custom signals and
+    // `human_input:<step>` responses for a step not reached yet) is
+    // consumed when the instance next runs naturally — waking for those
+    // re-armed a parked instance on every sweep, which together with a
+    // step delay was a livelock (ENG-R-N1). Storage already filters
+    // these rows; this is the backend-independent guard.
+    if current_state == InstanceState::Scheduled {
+        if !signals
+            .iter()
+            .any(|s| wakes_scheduled_instance(&s.signal_type))
+        {
+            return Ok(());
+        }
+        debug!(
+            instance_id = %instance_id,
+            "waking scheduled instance with pending signal"
+        );
+        if let Err(e) = storage
+            .conditional_update_instance_state(
+                instance_id,
+                InstanceState::Scheduled,
+                InstanceState::Scheduled,
+                Some(clock.now()),
+            )
+            .await
+        {
+            warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "failed to re-arm signalled scheduled instance"
+            );
+        }
+        return Ok(());
+    }
+
+    let abort = crate::signals::process_signals_prefetched(
+        storage.as_ref(),
+        instance_id,
+        current_state,
+        signals,
+        None,
+    )
+    .await?;
+    if abort {
+        // Signal handling owns state transitions but deliberately has no
+        // scheduler clock parameter. Normalize any wake-up here so a
+        // virtual-time engine never inherits `Utc::now()` as its next
+        // fire time and interprets an immediate signal as a months-long
+        // delay.
+        if let Some(inst) = storage.get_instance(instance_id).await?
+            && inst.state == InstanceState::Scheduled
+        {
+            storage
                 .conditional_update_instance_state(
                     instance_id,
                     InstanceState::Scheduled,
                     InstanceState::Scheduled,
                     Some(clock.now()),
                 )
-                .await
-            {
-                warn!(
-                    instance_id = %instance_id,
-                    error = %e,
-                    "failed to re-arm signalled scheduled instance"
-                );
-            }
-            continue;
+                .await?;
         }
-
-        let abort = crate::signals::process_signals_prefetched(
-            storage.as_ref(),
-            instance_id,
-            current_state,
-            signals,
-            None,
-        )
-        .await?;
-        if abort {
-            // Signal handling owns state transitions but deliberately has no
-            // scheduler clock parameter. Normalize any wake-up here so a
-            // virtual-time engine never inherits `Utc::now()` as its next
-            // fire time and interprets an immediate signal as a months-long
-            // delay.
-            if let Some(inst) = storage.get_instance(instance_id).await?
-                && inst.state == InstanceState::Scheduled
-            {
-                storage
-                    .conditional_update_instance_state(
-                        instance_id,
-                        InstanceState::Scheduled,
-                        InstanceState::Scheduled,
-                        Some(clock.now()),
-                    )
-                    .await?;
-            }
-            debug!(
-                instance_id = %instance_id,
-                from_state = %current_state,
-                "signal processed for non-scheduled instance"
-            );
-            // A cancel signal may have just driven this instance terminal.
-            // Run the sequence's best-effort `on_cancel` cleanup if so — this
-            // covers the immediate (unscoped) cancel path that bypasses tree
-            // evaluation. (Scoped cancellations complete through the evaluator,
-            // whose terminal path runs the same hook.)
-            if current_state != InstanceState::Cancelled
-                && let Ok(Some(inst)) = storage.get_instance(instance_id).await
-                && inst.state == InstanceState::Cancelled
-                && let Ok(seq) = sequence_cache
-                    .get_by_id(storage.as_ref(), inst.sequence_id)
-                    .await
-                && let Some(ref blocks) = seq.on_cancel
-            {
-                run_cleanup_hooks(storage, handlers, &inst, blocks, "on_cancel").await;
-            }
+        debug!(
+            instance_id = %instance_id,
+            from_state = %current_state,
+            "signal processed for non-scheduled instance"
+        );
+        // A cancel signal may have just driven this instance terminal.
+        // Run the sequence's best-effort `on_cancel` cleanup if so — this
+        // covers the immediate (unscoped) cancel path that bypasses tree
+        // evaluation. (Scoped cancellations complete through the evaluator,
+        // whose terminal path runs the same hook.) The hooks run off the
+        // tick (L2-06): a bulk cancel against a slow hook target used to
+        // block scheduling for `instances × hooks × 30 s`.
+        if current_state != InstanceState::Cancelled
+            && let Ok(Some(inst)) = storage.get_instance(instance_id).await
+            && inst.state == InstanceState::Cancelled
+            && let Ok(seq) = sequence_cache
+                .get_by_id(storage.as_ref(), inst.sequence_id)
+                .await
+            && seq.on_cancel.is_some()
+        {
+            let storage = Arc::clone(storage);
+            let handlers = Arc::clone(handlers);
+            hooks.spawn(async move {
+                if let Some(ref blocks) = seq.on_cancel {
+                    run_cleanup_hooks(&storage, &handlers, &inst, blocks, "on_cancel").await;
+                }
+            });
         }
     }
-
     Ok(())
+}
+
+/// Max cleanup / escalation hooks the sweeps run concurrently off the tick
+/// (L2-06). Each hook is still bounded by [`HOOK_DISPATCH_TIMEOUT`].
+const HOOK_CONCURRENCY: usize = 16;
+static HOOK_PERMITS: Semaphore = Semaphore::const_new(HOOK_CONCURRENCY);
+
+/// Hooks a sweep pass spawned off the tick task. The tick loop drops the
+/// handles (the hooks keep running, at most [`HOOK_CONCURRENCY`] at a time);
+/// `tick_once` awaits them so single-shot callers observe the hook outcome.
+#[derive(Default)]
+pub(crate) struct HookTasks(std::sync::Mutex<Vec<JoinHandle<()>>>);
+
+impl HookTasks {
+    fn spawn<F>(&self, hook: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::spawn(async move {
+            // The semaphore is never closed, so acquire cannot fail.
+            let _permit = HOOK_PERMITS.acquire().await;
+            hook.await;
+        });
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(handle);
+    }
+
+    async fn join_all(self) {
+        let handles = self
+            .0
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
 }
 
 /// Max pages of Waiting instances swept for deadlines/timeouts per tick. Bounds
@@ -1407,6 +1505,7 @@ async fn check_waiting_instance(
                     ctx.cancel,
                     prev,
                     ctx.clock,
+                    ctx.hooks,
                 )
                 .await?
                 {
@@ -1759,6 +1858,8 @@ struct SweepContext<'a> {
     pub cancel: &'a CancellationToken,
     pub batch_size: u32,
     pub clock: &'a SharedClock,
+    /// Where escalation hooks fired by the sweep are spawned (L2-06).
+    pub hooks: &'a HookTasks,
 }
 
 /// Same idea as [`SweepContext`] but for the alert-only SLA sweep, which
@@ -2075,6 +2176,7 @@ async fn check_step_deadline_waiting(
     _cancel: &CancellationToken,
     prev_output: Option<&orch8_types::output::BlockOutput>,
     clock: &SharedClock,
+    hooks: &HookTasks,
 ) -> Result<bool, EngineError> {
     handle_deadline_breach(
         storage,
@@ -2084,6 +2186,7 @@ async fn check_step_deadline_waiting(
         prev_output,
         InstanceState::Waiting,
         clock,
+        Some(hooks),
     )
     .await
 }
@@ -2096,7 +2199,10 @@ async fn check_step_deadline_waiting(
 /// escalation handler if configured, record a breach output, and fail the
 /// instance. The only difference is the `from_state` passed to
 /// `transition_instance`. This function captures that shared logic.
-#[allow(clippy::too_many_lines)]
+///
+/// `hooks`: when `Some` (the Waiting sweep, which runs on the tick task) the
+/// escalation handler is spawned there instead of awaited inline (L2-06).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) async fn handle_deadline_breach(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -2105,6 +2211,7 @@ pub(crate) async fn handle_deadline_breach(
     prev_output: Option<&orch8_types::output::BlockOutput>,
     from_state: InstanceState,
     clock: &SharedClock,
+    hooks: Option<&HookTasks>,
 ) -> Result<bool, EngineError> {
     let Some(deadline) = step_def.deadline else {
         return Ok(false);
@@ -2203,10 +2310,18 @@ pub(crate) async fn handle_deadline_breach(
             storage: Arc::clone(storage),
             wait_for_input: None,
         };
-        // Bounded: this escalation runs inline on the deadline sweep (tick
-        // loop), so a hung escalation handler must not stall scheduling.
-        if let Err(e) = dispatch_hook_bounded(handler(step_ctx)).await {
-            warn!(instance_id = %instance_id, error = %e, "SLA escalation handler failed");
+        // Bounded and panic-isolated. From the Waiting sweep (tick task) it
+        // also runs in the background so a slow escalation target cannot
+        // stall scheduling.
+        let escalation = handler(step_ctx);
+        let run = async move {
+            if let Err(e) = dispatch_hook_bounded(escalation).await {
+                warn!(instance_id = %instance_id, error = %e, "SLA escalation handler failed");
+            }
+        };
+        match hooks {
+            Some(hooks) => hooks.spawn(run),
+            None => run.await,
         }
     }
 
