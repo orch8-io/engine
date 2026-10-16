@@ -14,6 +14,7 @@ mod sla;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use dispatch::awaited_sub_sequence_child_terminal;
 use dispatch::dispatch_block;
 use sla::check_sla_deadlines;
 

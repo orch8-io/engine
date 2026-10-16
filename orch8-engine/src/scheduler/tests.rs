@@ -2219,3 +2219,135 @@ async fn panicking_hook_is_isolated_and_reported_as_failure() {
         other => panic!("expected a permanent hook failure, got {other:?}"),
     }
 }
+
+/// Seed a sub-sequence parent (with a `Waiting` `SubSequence` node "sub")
+/// and one child in `child_state` linked to that node.
+async fn seed_sub_sequence_parent(
+    storage: &Arc<dyn StorageBackend>,
+    parent_state: InstanceState,
+    child_state: InstanceState,
+) -> (TaskInstance, SequenceDefinition, InstanceId) {
+    let seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
+        orch8_types::sequence::SubSequenceDef {
+            id: BlockId::new("sub"),
+            sequence_name: "child".into(),
+            version: None,
+            input: serde_json::json!({}),
+        },
+    ))]);
+    let parent_id = InstanceId::new();
+    let child_id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), parent_id, None, parent_state).await;
+    let mut child = storage.get_instance(parent_id).await.unwrap().unwrap();
+    child.id = child_id;
+    child.parent_instance_id = Some(parent_id);
+    child.state = child_state;
+    child.metadata = serde_json::json!({ "_parent_block_id": "sub" });
+    storage.create_instance(&child).await.unwrap();
+    storage
+        .create_execution_node(&orch8_types::execution::ExecutionNode {
+            id: orch8_types::ids::ExecutionNodeId::new(),
+            instance_id: parent_id,
+            block_id: BlockId::new("sub"),
+            parent_id: None,
+            block_type: orch8_types::execution::BlockType::SubSequence,
+            branch_index: None,
+            state: orch8_types::execution::NodeState::Waiting,
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+    let parent = storage.get_instance(parent_id).await.unwrap().unwrap();
+    (parent, seq, child_id)
+}
+
+async fn run_more_work(
+    storage: &Arc<dyn StorageBackend>,
+    parent: &TaskInstance,
+    seq: &SequenceDefinition,
+) {
+    let registry = HandlerRegistry::new();
+    let webhook_config = WebhookConfig::default();
+    let cache = crate::sequence_cache::SequenceCache::new(16, Duration::from_secs(60));
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+    let lease_lost = std::sync::atomic::AtomicBool::new(false);
+    let ctx = InstanceRunCtx {
+        storage,
+        handlers: &registry,
+        webhook_config: &webhook_config,
+        sequence_cache: &cache,
+        externalize_threshold: 0,
+        max_steps_per_instance: 0,
+        cancel: &cancel,
+        clock: &clock,
+        lease_lost: &lease_lost,
+    };
+    handle_tree_more_work(&ctx, parent, seq, true)
+        .await
+        .unwrap();
+}
+
+/// L3-01: the child finished while the parent was still `Running`, so its
+/// wake was dropped. Parking must re-check the awaited child and re-schedule
+/// the parent instead of leaving it `Waiting` forever.
+#[tokio::test]
+async fn parking_parent_rechecks_already_finished_sub_sequence_child() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let (parent, seq, _) =
+        seed_sub_sequence_parent(&storage, InstanceState::Running, InstanceState::Completed).await;
+    run_more_work(&storage, &parent, &seq).await;
+    let after = storage.get_instance(parent.id).await.unwrap().unwrap();
+    assert_eq!(after.state, InstanceState::Scheduled);
+
+    // A child that is still running keeps the parent parked.
+    let (parent, seq, _) =
+        seed_sub_sequence_parent(&storage, InstanceState::Running, InstanceState::Running).await;
+    run_more_work(&storage, &parent, &seq).await;
+    let after = storage.get_instance(parent.id).await.unwrap().unwrap();
+    assert_eq!(after.state, InstanceState::Waiting);
+}
+
+/// L3-01 safety net: a wake that found the parent `Running` is retried by
+/// the tick once the parent has parked.
+#[tokio::test]
+async fn dropped_parent_wake_is_retried_after_parent_parks() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let (parent, _, child_id) =
+        seed_sub_sequence_parent(&storage, InstanceState::Running, InstanceState::Completed).await;
+    let child = storage.get_instance(child_id).await.unwrap().unwrap();
+    wake_parent_if_child(storage.as_ref(), &child).await;
+    assert_eq!(
+        storage
+            .get_instance(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Running
+    );
+    // The parent parks without having seen the child (the lost wake-up).
+    assert!(
+        storage
+            .conditional_update_instance_state(
+                parent.id,
+                InstanceState::Running,
+                InstanceState::Waiting,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+    tokio::time::sleep(DEFERRED_WAKE_RETRY + Duration::from_millis(100)).await;
+    retry_deferred_parent_wakes(&storage).await;
+    assert_eq!(
+        storage
+            .get_instance(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Scheduled
+    );
+}

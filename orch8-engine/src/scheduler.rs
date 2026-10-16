@@ -126,6 +126,8 @@ pub async fn tick_once(
         let _ = handle.await;
     }
 
+    retry_deferred_parent_wakes(storage).await;
+
     process_signalled_instances(
         storage,
         handlers,
@@ -302,6 +304,7 @@ pub async fn run_tick_loop_with_liveness(
                         }
                     }
                 }
+                retry_deferred_parent_wakes(&storage).await;
                 // Process signals for paused/waiting instances that won't be
                 // picked up by claim_due_instances (which only claims
                 // scheduled instances). Without this, resume/cancel signals
@@ -2605,11 +2608,16 @@ async fn wake_parent_if_child(
                 );
             }
             Ok(false) => {
+                // Usually the parent already moved on, but it may still be
+                // `Running` (evaluating another branch) and about to park
+                // without having seen this child finish (L3-01): queue a
+                // retry the tick loop delivers once it parks.
                 debug!(
                     parent_id = %parent_id,
                     child_id = %instance.id,
-                    "parent no longer in Waiting state, skipping wake"
+                    "parent not in Waiting state; deferring wake retry"
                 );
+                defer_parent_wake(parent_id);
             }
             Err(e) => {
                 warn!(
@@ -2635,6 +2643,7 @@ async fn wake_parent_if_child(
 async fn handle_tree_more_work(
     ctx: &InstanceRunCtx<'_>,
     instance: &orch8_types::instance::TaskInstance,
+    sequence: &SequenceDefinition,
     has_waiting_nodes: bool,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
@@ -2649,7 +2658,7 @@ async fn handle_tree_more_work(
     ) {
         // Terminal/paused — leave state as-is.
     } else if has_waiting_nodes {
-        if let Err(e) = crate::lifecycle::transition_instance(
+        match crate::lifecycle::transition_instance(
             ctx.storage.as_ref(),
             instance_id,
             Some(&instance.tenant_id),
@@ -2659,13 +2668,16 @@ async fn handle_tree_more_work(
         )
         .await
         {
-            if !matches!(e, crate::error::EngineError::InvalidTransition { .. }) {
-                return Err(e);
+            Ok(()) => recheck_parked_sub_sequence_parent(ctx, instance, sequence).await,
+            Err(e) => {
+                if !matches!(e, crate::error::EngineError::InvalidTransition { .. }) {
+                    return Err(e);
+                }
+                debug!(
+                    instance_id = %instance_id,
+                    "concurrent writer moved instance before Running->Waiting transition"
+                );
             }
-            debug!(
-                instance_id = %instance_id,
-                "concurrent writer moved instance before Running->Waiting transition"
-            );
         }
     } else if let Err(e) = crate::lifecycle::transition_instance(
         ctx.storage.as_ref(),
@@ -2687,6 +2699,142 @@ async fn handle_tree_more_work(
         );
     }
     Ok(())
+}
+
+/// Park-then-recheck for sub-sequence parents (L3-01). A child that reaches a
+/// terminal state while its parent is still `Running` (evaluating another
+/// branch) finds the parent not `Waiting` and its wake CAS is a no-op; if the
+/// parent's last read of the child predates that, the parent then parks
+/// `Waiting` with nothing left to wake it. Re-reading the awaited children
+/// *after* the `Running -> Waiting` commit closes the window: either this read
+/// sees the terminal child, or the child's terminal write — and therefore its
+/// wake attempt — comes after the parent's park and succeeds.
+async fn recheck_parked_sub_sequence_parent(
+    ctx: &InstanceRunCtx<'_>,
+    instance: &orch8_types::instance::TaskInstance,
+    sequence: &SequenceDefinition,
+) {
+    let has_sub_sequence = crate::evaluator::flatten_blocks(&sequence.blocks)
+        .iter()
+        .any(|(_, b)| matches!(b, orch8_types::sequence::BlockDefinition::SubSequence(_)));
+    if !has_sub_sequence {
+        return;
+    }
+    match crate::evaluator::awaited_sub_sequence_child_terminal(ctx.storage.as_ref(), instance)
+        .await
+    {
+        Ok(false) => {}
+        Ok(true) => match ctx
+            .storage
+            .conditional_update_instance_state(
+                instance.id,
+                InstanceState::Waiting,
+                InstanceState::Scheduled,
+                Some(ctx.clock.now()),
+            )
+            .await
+        {
+            Ok(woke) => debug!(
+                instance_id = %instance.id,
+                woke,
+                "awaited sub-sequence child finished before the parent parked; re-scheduling"
+            ),
+            Err(e) => {
+                warn!(instance_id = %instance.id, error = %e, "failed to re-schedule parked parent");
+                defer_parent_wake(instance.id);
+            }
+        },
+        Err(e) => {
+            warn!(
+                instance_id = %instance.id,
+                error = %e,
+                "post-park sub-sequence recheck failed; deferring a wake retry"
+            );
+            defer_parent_wake(instance.id);
+        }
+    }
+}
+
+/// Parents whose wake could not be delivered yet: the child's
+/// `Waiting -> Scheduled` CAS found them still `Running`, or the post-park
+/// recheck failed. Value: when to try next. In-process safety net behind the
+/// park-then-recheck fix (L3-01); bounded and lost on restart.
+static DEFERRED_PARENT_WAKES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<InstanceId, (std::time::Instant, std::time::Instant)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// Delay between deferred parent-wake attempts.
+const DEFERRED_WAKE_RETRY: Duration = Duration::from_secs(1);
+/// Give up on a deferred parent wake after this long.
+const DEFERRED_WAKE_MAX_AGE: Duration = Duration::from_secs(300);
+/// Upper bound on tracked deferred parent wakes.
+const DEFERRED_WAKE_CAP: usize = 10_000;
+
+fn defer_parent_wake(parent_id: InstanceId) {
+    let now = std::time::Instant::now();
+    let mut map = DEFERRED_PARENT_WAKES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if map.len() >= DEFERRED_WAKE_CAP && !map.contains_key(&parent_id) {
+        return;
+    }
+    map.entry(parent_id)
+        .and_modify(|(_, next)| *next = now + DEFERRED_WAKE_RETRY)
+        .or_insert((now, now + DEFERRED_WAKE_RETRY));
+}
+
+/// Retry deferred parent wakes that are due. A parent still `Running` (or
+/// `Scheduled`, about to run) keeps its entry until it parks; a `Waiting`
+/// parent is re-scheduled so it re-evaluates its finished child; anything
+/// else (paused, terminal, gone) is dropped. Called once per tick.
+async fn retry_deferred_parent_wakes(storage: &Arc<dyn StorageBackend>) {
+    let now = std::time::Instant::now();
+    let due: Vec<InstanceId> = {
+        let mut map = DEFERRED_PARENT_WAKES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if map.is_empty() {
+            return;
+        }
+        map.retain(|_, (first, _)| now.duration_since(*first) < DEFERRED_WAKE_MAX_AGE);
+        map.iter()
+            .filter(|(_, (_, next))| *next <= now)
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    for parent_id in due {
+        let keep = match storage.get_instance(parent_id).await {
+            Ok(Some(p)) if p.state == InstanceState::Waiting => {
+                if let Err(e) = storage
+                    .conditional_update_instance_state(
+                        parent_id,
+                        InstanceState::Waiting,
+                        InstanceState::Scheduled,
+                        Some(Utc::now()),
+                    )
+                    .await
+                {
+                    warn!(parent_id = %parent_id, error = %e, "deferred parent wake failed");
+                    true
+                } else {
+                    info!(parent_id = %parent_id, "delivered deferred sub-sequence parent wake");
+                    false
+                }
+            }
+            Ok(Some(p)) => p.state == InstanceState::Running,
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        let mut map = DEFERRED_PARENT_WAKES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if keep {
+            if let Some((_, next)) = map.get_mut(&parent_id) {
+                *next = now + DEFERRED_WAKE_RETRY;
+            }
+        } else {
+            map.remove(&parent_id);
+        }
+    }
 }
 
 /// Pre-flight step-budget check for the tree path: a fresh read guards
@@ -2747,7 +2895,7 @@ async fn process_instance_tree(
         .await
     {
         Ok(EvalOutcome::MoreWork { has_waiting_nodes }) => {
-            handle_tree_more_work(ctx, instance, has_waiting_nodes).await?;
+            handle_tree_more_work(ctx, instance, sequence, has_waiting_nodes).await?;
         }
         Ok(EvalOutcome::Done { reason }) => {
             handle_tree_done(ctx, instance, sequence, reason).await?;
