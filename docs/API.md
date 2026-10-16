@@ -61,9 +61,9 @@ least-privilege keys.
 GET /health/live
 ```
 
-Always returns 200 if the process is running.
+Returns 200 while the process is running. On nodes that run the engine it returns 503 once the scheduler tick loop has not completed an iteration for `engine.liveness_stale_secs` (default 300, `ORCH8_LIVENESS_STALE_SECS`; `0` disables the check), so the orchestrator restarts a wedged scheduler.
 
-**Response:** `200 OK`
+**Response:** `200 OK` or `503 Service Unavailable`
 
 ---
 
@@ -73,7 +73,7 @@ Always returns 200 if the process is running.
 GET /health/ready
 ```
 
-Returns 200 only if the database is reachable **and** the engine tick loop is running. A server whose scheduler has died reports 503 even with a healthy database, so the load balancer stops routing work to a node that would accept instances but never execute them.
+Returns 200 only if the database is reachable **and** the engine tick loop is running and has completed an iteration within `max(10 × tick_interval, 30 s)`. A server whose scheduler has died reports 503 even with a healthy database, so the load balancer stops routing work to a node that would accept instances but never execute them.
 
 **Response:** `200 OK` or `503 Service Unavailable`
 

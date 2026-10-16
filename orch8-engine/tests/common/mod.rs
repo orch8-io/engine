@@ -897,6 +897,7 @@ pub fn default_config() -> SchedulerConfig {
         clock: orch8_types::clock::SharedClock::default(),
         artifact_retention_secs: 0,
         instance_retention_secs: 0,
+        liveness_stale_secs: 300,
     }
 }
 

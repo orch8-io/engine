@@ -191,12 +191,25 @@ struct PrefetchedData {
 /// 1. Claims a batch of due instances (`FOR UPDATE SKIP LOCKED`)
 /// 2. Spawns bounded concurrent tasks to process each instance
 /// 3. Overlapping ticks are safe — `SKIP LOCKED` prevents double-claiming
-#[allow(clippy::too_many_lines)]
 pub async fn run_tick_loop(
     storage: Arc<dyn StorageBackend>,
     handlers: Arc<HandlerRegistry>,
     config: &SchedulerConfig,
     cancel: CancellationToken,
+) -> Result<(), EngineError> {
+    run_tick_loop_with_liveness(storage, handlers, config, cancel, None).await
+}
+
+/// [`run_tick_loop`] that also stamps `liveness` at the end of every loop
+/// iteration (claim plus all sweeps), so the health probes can tell a
+/// wedged scheduler from a healthy one (I-H11).
+#[allow(clippy::too_many_lines)]
+pub async fn run_tick_loop_with_liveness(
+    storage: Arc<dyn StorageBackend>,
+    handlers: Arc<HandlerRegistry>,
+    config: &SchedulerConfig,
+    cancel: CancellationToken,
+    liveness: Option<Arc<crate::liveness::EngineLiveness>>,
 ) -> Result<(), EngineError> {
     let tick_duration = Duration::from_millis(config.tick_interval_ms);
     let batch_size = config.batch_size;
@@ -281,7 +294,12 @@ pub async fn run_tick_loop(
                             backoff_ms,
                             "tick processing failed, backing off"
                         );
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        // Inside a select so shutdown is not delayed by up
+                        // to the 5 s backoff.
+                        tokio::select! {
+                            () = cancel.cancelled() => {}
+                            () = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                        }
                     }
                 }
                 // Process signals for paused/waiting instances that won't be
@@ -328,6 +346,9 @@ pub async fn run_tick_loop(
                     SLA_SWEEP_MAX_PAGES_PER_TICK,
                 ).await {
                     error!(error = %e, "sla breach sweep failed");
+                }
+                if let Some(liveness) = &liveness {
+                    liveness.record_tick();
                 }
             }
         }
@@ -1236,9 +1257,12 @@ async fn check_waiting_instance(
 /// best-effort and already swallowed on error.
 const HOOK_DISPATCH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Await a hook handler future with [`HOOK_DISPATCH_TIMEOUT`], mapping an
-/// elapsed timeout to a `Permanent` error so callers treat it exactly like any
-/// other swallowed hook failure.
+/// Run a hook handler future on its own task, bounded by
+/// [`HOOK_DISPATCH_TIMEOUT`]. An elapsed timeout or a **panic** is mapped to a
+/// `Permanent` error so callers treat it exactly like any other swallowed
+/// hook failure. The separate task is what isolates panics: these hooks run
+/// tenant-authored handler code on scheduler-owned tasks, and an unwinding
+/// panic there used to kill the whole tick loop (L2-01).
 ///
 /// `pub(crate)`: shared with the tree-path SLA escalation dispatch
 /// (`evaluator::sla`), which runs inline in the per-instance evaluate loop and
@@ -1247,14 +1271,24 @@ pub(crate) async fn dispatch_hook_bounded<F>(
     fut: F,
 ) -> Result<serde_json::Value, orch8_types::error::StepError>
 where
-    F: std::future::Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
+    F: std::future::Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>
+        + Send
+        + 'static,
 {
-    match tokio::time::timeout(HOOK_DISPATCH_TIMEOUT, fut).await {
-        Ok(r) => r,
-        Err(_) => Err(orch8_types::error::StepError::Permanent {
-            message: "cleanup/escalation hook exceeded dispatch timeout".to_string(),
+    let mut task = tokio::spawn(fut);
+    match tokio::time::timeout(HOOK_DISPATCH_TIMEOUT, &mut task).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(join_err)) => Err(orch8_types::error::StepError::Permanent {
+            message: format!("cleanup/escalation hook panicked: {join_err}"),
             details: None,
         }),
+        Err(_) => {
+            task.abort();
+            Err(orch8_types::error::StepError::Permanent {
+                message: "cleanup/escalation hook exceeded dispatch timeout".to_string(),
+                details: None,
+            })
+        }
     }
 }
 
@@ -1316,8 +1350,11 @@ async fn dispatch_cleanup_step(
     let result = if let Some(handler) = handlers.get(&step.handler) {
         dispatch_hook_bounded(handler(ctx)).await
     } else if plugin_kind == Some(crate::handlers::PluginKind::ActivePieces) {
-        // ⚡ Bolt: Avoid cloning `step.handler` String just to pass a reference.
-        dispatch_hook_bounded(crate::handlers::activepieces::handle_ap(ctx, &step.handler)).await
+        let handler_name = step.handler.clone();
+        dispatch_hook_bounded(async move {
+            crate::handlers::activepieces::handle_ap(ctx, &handler_name).await
+        })
+        .await
     } else if plugin_kind == Some(crate::handlers::PluginKind::Grpc) {
         let Some(endpoint) = crate::handlers::step_dispatch::resolve_plugin_source(
             storage.as_ref(),
@@ -1358,9 +1395,9 @@ async fn dispatch_cleanup_step(
             );
             return None;
         };
-        dispatch_hook_bounded(crate::handlers::wasm_plugin::handle_wasm_plugin(
-            ctx, &wasm_path,
-        ))
+        dispatch_hook_bounded(async move {
+            crate::handlers::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path).await
+        })
         .await
     } else {
         warn!(

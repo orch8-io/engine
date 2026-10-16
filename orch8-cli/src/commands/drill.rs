@@ -355,6 +355,7 @@ async fn start_control(db: &std::path::Path) -> Result<Control> {
         entitlements: orch8_api::entitlements::unlimited_provider(),
         builtin_handlers: Arc::new(orch8_api::builtin_handler_names()),
         engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        engine_liveness: None,
         continuity_crypto: Some(Arc::new(crypto)),
         continuity_trusted_signing_keys: Arc::new(BTreeMap::new()),
         federation_peers: Arc::new(Vec::new()),

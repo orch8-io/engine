@@ -162,7 +162,7 @@ pub async fn spawn_test_server_with(
     }
 }
 
-fn test_state(
+pub(crate) fn test_state(
     storage: Arc<dyn orch8_storage::StorageBackend>,
     shutdown: CancellationToken,
     mobile_sync_enabled: bool,
@@ -187,6 +187,7 @@ fn test_state(
         entitlements: crate::entitlements::unlimited_provider(),
         builtin_handlers: Arc::new(crate::builtin_handler_names()),
         engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        engine_liveness: None,
         continuity_crypto: Some(Arc::new(
             crate::ContinuityCrypto::from_master_key(&"11".repeat(32))
                 .expect("test continuity key is valid"),

@@ -2200,3 +2200,22 @@ async fn scheduler_parks_instance_superseded_by_a_handoff() {
         );
     }
 }
+
+/// L2-01: a panicking cleanup/escalation hook is isolated on its own task
+/// and reported as a swallowed hook failure instead of unwinding the tick.
+#[tokio::test]
+async fn panicking_hook_is_isolated_and_reported_as_failure() {
+    let result = dispatch_hook_bounded(async {
+        if true {
+            panic!("tenant hook bug");
+        }
+        Ok(serde_json::json!({}))
+    })
+    .await;
+    match result {
+        Err(orch8_types::error::StepError::Permanent { message, .. }) => {
+            assert!(message.contains("panicked"), "{message}");
+        }
+        other => panic!("expected a permanent hook failure, got {other:?}"),
+    }
+}

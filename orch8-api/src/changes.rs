@@ -210,6 +210,7 @@ mod tests {
             entitlements: crate::entitlements::unlimited_provider(),
             builtin_handlers: Arc::new(Vec::new()),
             engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            engine_liveness: None,
             continuity_crypto: None,
             continuity_trusted_signing_keys: Arc::new(std::collections::BTreeMap::new()),
             federation_peers: Arc::new(Vec::new()),

@@ -81,6 +81,7 @@ impl DevServer {
             // Dev server runs the engine in-process for the lifetime of the
             // command; report ready unconditionally.
             engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            engine_liveness: None,
             continuity_crypto: None,
             continuity_trusted_signing_keys: Arc::new(std::collections::BTreeMap::new()),
             federation_peers: Arc::new(Vec::new()),

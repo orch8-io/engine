@@ -32,6 +32,7 @@ pub mod interceptors;
 pub mod jobs;
 pub mod lifecycle;
 pub mod lint;
+pub mod liveness;
 pub mod memory_governance;
 pub mod metrics;
 pub mod model_pricing;
@@ -93,7 +94,14 @@ pub struct Engine {
     node_id: Uuid,
     /// Human-readable node name.
     node_name: String,
+    /// Tick heartbeat read by the health probes (I-H11).
+    liveness: Arc<liveness::EngineLiveness>,
 }
+
+/// First delay between startup retries after a transient storage error.
+const STARTUP_RETRY_INITIAL: Duration = Duration::from_secs(1);
+/// Cap on the delay between startup retries.
+const STARTUP_RETRY_MAX: Duration = Duration::from_secs(30);
 
 impl Engine {
     pub fn new(
@@ -108,6 +116,10 @@ impl Engine {
             let id_str = node_id.to_string();
             format!("node-{}", &id_str[..8])
         });
+        let liveness = Arc::new(liveness::EngineLiveness::new(
+            Duration::from_millis(config.tick_interval_ms),
+            Duration::from_secs(config.liveness_stale_secs),
+        ));
         Self {
             storage,
             config,
@@ -115,7 +127,21 @@ impl Engine {
             cancel,
             node_id,
             node_name,
+            liveness,
         }
+    }
+
+    /// Share a caller-owned liveness handle (the server builds it before the
+    /// engine so the health routes can hold it).
+    #[must_use]
+    pub fn with_liveness(mut self, liveness: Arc<liveness::EngineLiveness>) -> Self {
+        self.liveness = liveness;
+        self
+    }
+
+    /// The tick heartbeat the health probes read.
+    pub fn liveness(&self) -> Arc<liveness::EngineLiveness> {
+        Arc::clone(&self.liveness)
     }
 
     pub fn storage(&self) -> &dyn StorageBackend {
@@ -131,27 +157,53 @@ impl Engine {
     }
 
     /// Start the engine: runs recovery, cron loop, and the main tick loop until cancelled.
+    ///
+    /// The startup steps (node registration, stale-instance recovery) retry
+    /// transient storage errors with capped exponential backoff until they
+    /// succeed or `cancel` fires (L2-04): a database restart during a rolling
+    /// deploy used to stop the engine for good while the API kept serving.
+    /// A permanent error still returns `Err`; the server treats any engine
+    /// exit before shutdown as fatal and exits non-zero. While startup keeps
+    /// retrying, the liveness heartbeat is armed but not stamped, so a startup
+    /// that never succeeds eventually fails `/health/live`.
     pub async fn run(&self) -> Result<(), error::EngineError> {
-        // Register this node in the cluster.
-        self.register_node().await?;
-
-        // Recover stale instances from previous crash
-        recovery::recover_stale_instances(
-            self.storage.as_ref(),
-            self.config.stale_instance_threshold_secs,
-        )
-        .await?;
+        self.liveness.arm();
+        let started = retry_transient_startup(&self.cancel, "engine startup", || async {
+            // Register this node in the cluster.
+            self.register_node().await?;
+            // Recover stale instances from previous crash
+            recovery::recover_stale_instances(
+                self.storage.as_ref(),
+                self.config.stale_instance_threshold_secs,
+            )
+            .await?;
+            Ok(())
+        })
+        .await;
+        match started {
+            Ok(true) => {}
+            Ok(false) => {
+                self.liveness.disarm();
+                return Ok(());
+            }
+            Err(e) => {
+                self.liveness.disarm();
+                return Err(e);
+            }
+        }
 
         let mut background = self.spawn_background_tasks();
 
         // Run the main tick loop
-        let result = scheduler::run_tick_loop(
+        let result = scheduler::run_tick_loop_with_liveness(
             Arc::clone(&self.storage),
             Arc::clone(&self.handlers),
             &self.config,
             self.cancel.clone(),
+            Some(Arc::clone(&self.liveness)),
         )
         .await;
+        self.liveness.disarm();
 
         // Drain background tasks. They all observe `self.cancel` (fired by
         // either scheduler exit, external caller, or drain signal) so this
@@ -464,6 +516,49 @@ impl Engine {
     }
 }
 
+/// Run `op` until it succeeds, retrying transient storage errors with capped,
+/// jittered exponential backoff. Returns `Ok(true)` on success, `Ok(false)`
+/// when `cancel` fired while waiting, and `Err` on a non-transient error.
+async fn retry_transient_startup<F, Fut>(
+    cancel: &CancellationToken,
+    what: &'static str,
+    mut op: F,
+) -> Result<bool, error::EngineError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), error::EngineError>>,
+{
+    let mut delay = STARTUP_RETRY_INITIAL;
+    let mut attempt: u32 = 0;
+    loop {
+        if cancel.is_cancelled() {
+            return Ok(false);
+        }
+        match op().await {
+            Ok(()) => return Ok(true),
+            Err(e) if e.is_transient_storage() => {
+                attempt = attempt.saturating_add(1);
+                // ±20% jitter so a fleet restarting together does not
+                // retry in lockstep against a recovering database.
+                let jittered =
+                    delay.mul_f64(rand::RngExt::random_range(&mut rand::rng(), 0.8..1.2));
+                tracing::warn!(
+                    error = %e,
+                    attempt,
+                    retry_in_ms = u64::try_from(jittered.as_millis()).unwrap_or(u64::MAX),
+                    "{what} hit a transient storage error; retrying"
+                );
+                tokio::select! {
+                    () = cancel.cancelled() => return Ok(false),
+                    () = tokio::time::sleep(jittered) => {}
+                }
+                delay = (delay * 2).min(STARTUP_RETRY_MAX);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Best-effort hostname retrieval.
 fn hostname() -> Option<String> {
     std::env::var("HOSTNAME")
@@ -533,6 +628,63 @@ mod shutdown_tests {
             0,
             "drain_background must always leave the set empty, even after timeout"
         );
+    }
+
+    /// L2-04: transient storage errors during startup are retried with
+    /// backoff instead of permanently stopping the engine.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn startup_retries_transient_errors_until_success() {
+        let cancel = CancellationToken::new();
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let started = retry_transient_startup(&cancel, "test", || async {
+            let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < 2 {
+                Err(error::EngineError::Storage(
+                    orch8_types::error::StorageError::Connection("db restarting".into()),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        assert!(started);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    /// A permanent error is not retried: the engine exits and the server
+    /// turns that into a non-zero process exit.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn startup_does_not_retry_permanent_errors() {
+        let cancel = CancellationToken::new();
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let result = retry_transient_startup(&cancel, "test", || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(error::EngineError::Storage(
+                orch8_types::error::StorageError::Query("bad schema".into()),
+            ))
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Cancellation while backing off ends the retry loop cleanly.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn startup_retry_stops_on_cancel() {
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let started = retry_transient_startup(&cancel, "test", move || {
+            token.cancel();
+            async {
+                Err(error::EngineError::Storage(
+                    orch8_types::error::StorageError::PoolExhausted,
+                ))
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!started);
     }
 
     /// An empty set must return immediately — no timeout, no spurious log.

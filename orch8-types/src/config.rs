@@ -749,6 +749,13 @@ pub struct SchedulerConfig {
     /// `ORCH8_INSTANCE_RETENTION_SECS`.
     #[serde(default)]
     pub instance_retention_secs: u64,
+    /// `/health/live` returns 503 once the scheduler tick loop has not
+    /// completed an iteration for this many seconds, so the orchestrator
+    /// restarts a wedged engine (readiness already fails after
+    /// `max(10 × tick_interval, 30 s)`). `0` disables the liveness check.
+    /// Default: 300. Set via `ORCH8_LIVENESS_STALE_SECS`.
+    #[serde(default = "default_liveness_stale_secs")]
+    pub liveness_stale_secs: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -775,8 +782,13 @@ impl Default for SchedulerConfig {
             clock: crate::clock::SharedClock::default(),
             artifact_retention_secs: 0,
             instance_retention_secs: 0,
+            liveness_stale_secs: default_liveness_stale_secs(),
         }
     }
+}
+
+const fn default_liveness_stale_secs() -> u64 {
+    300
 }
 
 const fn default_worker_reaper_tick_secs() -> u64 {
