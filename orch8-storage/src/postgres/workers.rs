@@ -1,3 +1,4 @@
+use sqlx::AssertSqlSafe;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -753,10 +754,10 @@ pub(super) async fn resolve(
     let fence = " WHERE id = $1 AND state = $2 AND claim_epoch = $3 \
                   AND ($4::text IS NULL OR worker_id = $4)";
     let affected = match &resolution.action {
-        Action::Requeue => sqlx::query(&format!(
+        Action::Requeue => sqlx::query(AssertSqlSafe(format!(
             "UPDATE worker_tasks SET state = 'pending', worker_id = NULL, claimed_at = NULL, \
                  heartbeat_at = NULL, lease_secs = NULL, claimed_runtime_kind = NULL{fence}"
-        ))
+        )))
         .bind(resolution.task_id)
         .bind(resolution.expected_state.to_string())
         .bind(expected_epoch)
@@ -764,19 +765,21 @@ pub(super) async fn resolve(
         .execute(&mut *tx)
         .await?
         .rows_affected(),
-        Action::Retry { .. } => sqlx::query(&format!("DELETE FROM worker_tasks{fence}"))
-            .bind(resolution.task_id)
-            .bind(resolution.expected_state.to_string())
-            .bind(expected_epoch)
-            .bind(resolution.expected_worker_id.as_deref())
-            .execute(&mut *tx)
-            .await?
-            .rows_affected(),
+        Action::Retry { .. } => {
+            sqlx::query(AssertSqlSafe(format!("DELETE FROM worker_tasks{fence}")))
+                .bind(resolution.task_id)
+                .bind(resolution.expected_state.to_string())
+                .bind(expected_epoch)
+                .bind(resolution.expected_worker_id.as_deref())
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+        }
         Action::FailNode { .. } | Action::FailInstance | Action::FailTaskOnly => {
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "UPDATE worker_tasks SET state = 'failed', error_message = $5, \
                  error_retryable = $6, completed_at = NOW(){fence}"
-            ))
+            )))
             .bind(resolution.task_id)
             .bind(resolution.expected_state.to_string())
             .bind(expected_epoch)
@@ -1057,9 +1060,9 @@ pub(super) async fn stats(
 }
 
 /// Apply `WorkerTaskFilter` conditions to a query builder.
-fn apply_worker_task_filter<'a>(
-    qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
-    filter: &'a orch8_types::worker_filter::WorkerTaskFilter,
+fn apply_worker_task_filter(
+    qb: &mut sqlx::QueryBuilder<sqlx::Postgres>,
+    filter: &orch8_types::worker_filter::WorkerTaskFilter,
 ) {
     if let Some(ref tid) = filter.tenant_id {
         qb.push(" AND instance_id IN (SELECT id FROM task_instances WHERE tenant_id =")

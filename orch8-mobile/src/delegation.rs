@@ -677,12 +677,13 @@ impl DelegationPump {
     async fn update(
         &self,
         delegation_id: &str,
-        sets: &str,
+        // `'static` keeps the interpolated SET clause a compile-time literal.
+        sets: &'static str,
         binds: Vec<Option<String>>,
     ) -> Result<(), MobileError> {
         let sql =
             format!("UPDATE mobile_delegations SET {sets}, updated_at = ? WHERE delegation_id = ?");
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
         for bind in binds {
             query = query.bind(bind);
         }

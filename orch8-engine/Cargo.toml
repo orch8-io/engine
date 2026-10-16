@@ -66,7 +66,7 @@ kafka = ["dep:rskafka", "dep:rustls", "dep:webpki-roots"]
 sqs = []
 pubsub = ["dep:jsonwebtoken"]
 redis-streams = ["dep:redis", "dep:rustls"]
-postgres-rows = ["dep:sqlx", "sqlx/postgres", "sqlx/runtime-tokio-rustls"]
+postgres-rows = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring-webpki"]
 file-watch = ["dep:notify"]
 wasm = ["dep:wasmtime"]
 

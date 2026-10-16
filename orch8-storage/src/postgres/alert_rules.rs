@@ -1,3 +1,4 @@
+use sqlx::AssertSqlSafe;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -28,9 +29,9 @@ fn row_to_rule(row: &sqlx::postgres::PgRow) -> Result<AlertRule, StorageError> {
 }
 
 pub(super) async fn create(store: &PostgresStorage, r: &AlertRule) -> Result<(), StorageError> {
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO alert_rules ({COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)"
-    ))
+    )))
     .bind(r.id)
     .bind(r.tenant_id.as_str())
     .bind(&r.name)
@@ -52,19 +53,21 @@ pub(super) async fn get(
 ) -> Result<Option<AlertRule>, StorageError> {
     let row = match tenant_id {
         Some(t) => {
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "SELECT {COLUMNS} FROM alert_rules WHERE id = $1 AND tenant_id = $2"
-            ))
+            )))
             .bind(id)
             .bind(t.as_str())
             .fetch_optional(&store.pool)
             .await?
         }
         None => {
-            sqlx::query(&format!("SELECT {COLUMNS} FROM alert_rules WHERE id = $1"))
-                .bind(id)
-                .fetch_optional(&store.pool)
-                .await?
+            sqlx::query(AssertSqlSafe(format!(
+                "SELECT {COLUMNS} FROM alert_rules WHERE id = $1"
+            )))
+            .bind(id)
+            .fetch_optional(&store.pool)
+            .await?
         }
     };
     row.as_ref().map(row_to_rule).transpose()
@@ -77,17 +80,17 @@ pub(super) async fn list(
 ) -> Result<Vec<AlertRule>, StorageError> {
     let cap = i64::from(limit.min(1000));
     let rows = match tenant_id {
-        Some(t) => sqlx::query(&format!(
+        Some(t) => sqlx::query(AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM alert_rules WHERE tenant_id = $1 ORDER BY created_at LIMIT $2"
-        ))
+        )))
         .bind(t.as_str())
         .bind(cap)
         .fetch_all(&store.pool)
         .await?,
         None => {
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "SELECT {COLUMNS} FROM alert_rules ORDER BY created_at LIMIT $1"
-            ))
+            )))
             .bind(cap)
             .fetch_all(&store.pool)
             .await?
@@ -102,17 +105,17 @@ pub(super) async fn list_all(
 ) -> Result<Vec<AlertRule>, StorageError> {
     let rows = match tenant_id {
         Some(tenant_id) => {
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "SELECT {COLUMNS} FROM alert_rules WHERE tenant_id = $1 ORDER BY created_at"
-            ))
+            )))
             .bind(tenant_id.as_str())
             .fetch_all(&store.pool)
             .await?
         }
         None => {
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "SELECT {COLUMNS} FROM alert_rules ORDER BY created_at"
-            ))
+            )))
             .fetch_all(&store.pool)
             .await?
         }

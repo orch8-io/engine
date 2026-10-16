@@ -475,7 +475,10 @@ mod listener {
              ORDER BY txid, id LIMIT $6",
             cfg.outbox_table.quoted()
         );
-        let rows = sqlx::query(&sql)
+        // Safe: the only interpolation is `outbox_table`, built by
+        // `QualifiedName::parse` (charset `[A-Za-z0-9_$]`, no quotes) and
+        // double-quoted; every value is a bind parameter.
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(&cfg.table.schema)
             .bind(&cfg.table.name)
             .bind(&ops)

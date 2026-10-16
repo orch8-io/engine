@@ -2,6 +2,7 @@
 //! backlog grouping used by the autoscaling metrics (Postgres migration 098).
 
 use chrono::{DateTime, Utc};
+use sqlx::AssertSqlSafe;
 use sqlx::Row;
 
 use orch8_types::error::StorageError;
@@ -78,9 +79,9 @@ pub(super) async fn upsert_budget(
     .bind(ts(budget.updated_at))
     .execute(&mut *tx)
     .await?;
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {BUDGET_COLUMNS} FROM rate_budgets WHERE tenant_id = ?1 AND budget_key = ?2"
-    ))
+    )))
     .bind(&budget.tenant_id)
     .bind(&budget.key)
     .fetch_one(&mut *tx)
@@ -94,9 +95,9 @@ pub(super) async fn list_budgets(
     storage: &SqliteStorage,
     tenant_id: &TenantId,
 ) -> Result<Vec<RateBudget>, StorageError> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {BUDGET_COLUMNS} FROM rate_budgets WHERE tenant_id = ?1 ORDER BY budget_key"
-    ))
+    )))
     .bind(tenant_id.as_str())
     .fetch_all(&storage.pool)
     .await?;
@@ -124,9 +125,9 @@ pub(super) async fn take_budget_token(
 ) -> Result<RateBudgetCheck, StorageError> {
     // BEGIN IMMEDIATE holds the write reservation across read-decide-write.
     let mut tx = begin_immediate(&storage.pool).await?;
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {BUDGET_COLUMNS} FROM rate_budgets WHERE tenant_id = ?1 AND budget_key = ?2"
-    ))
+    )))
     .bind(tenant_id.as_str())
     .bind(key)
     .fetch_optional(&mut *tx)

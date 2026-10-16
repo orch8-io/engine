@@ -5,6 +5,7 @@
 #![allow(clippy::type_complexity)]
 
 use orch8_types::error::StorageError;
+use sqlx::AssertSqlSafe;
 
 use super::SqliteStorage;
 
@@ -117,7 +118,7 @@ pub(super) async fn list_mobile_devices(
             Option<String>,
             String,
         ),
-    >(&sql);
+    >(AssertSqlSafe(sql.as_str()));
     if let Some(tid) = tenant_id {
         query = query.bind(tid);
     }
@@ -239,7 +240,7 @@ pub(super) async fn list_mobile_instance_status(
             Option<String>,
             String,
         ),
-    >(&sql);
+    >(AssertSqlSafe(sql.as_str()));
     if let Some(tid) = tenant_id {
         query = query.bind(tid);
     }
@@ -420,7 +421,7 @@ pub(super) async fn list_mobile_approvals_page(
             String,
             Option<String>,
         ),
-    >(&sql);
+    >(AssertSqlSafe(sql.as_str()));
     if let Some(tid) = tenant_id {
         query = query.bind(tid);
     }
@@ -580,7 +581,7 @@ pub(super) async fn ack_mobile_commands(
     if command_ids.is_empty() {
         return Ok(0);
     }
-    let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+    let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
         "UPDATE mobile_commands SET acked_at = datetime('now') WHERE device_id = ",
     );
     qb.push_bind(device_id);

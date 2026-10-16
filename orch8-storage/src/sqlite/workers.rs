@@ -1,4 +1,5 @@
 use chrono::Utc;
+use sqlx::AssertSqlSafe;
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing::instrument;
@@ -768,10 +769,10 @@ pub(super) async fn resolve(
     let fence = " WHERE id=?1 AND state=?2 AND claim_epoch=?3 AND (?4 IS NULL OR worker_id=?4)";
     let mut conn = begin_immediate(&storage.pool).await?;
     let affected = match &resolution.action {
-        Action::Requeue => sqlx::query(&format!(
+        Action::Requeue => sqlx::query(AssertSqlSafe(format!(
             "UPDATE worker_tasks SET state='pending', worker_id=NULL, claimed_at=NULL, \
              heartbeat_at=NULL, lease_secs=NULL, claimed_runtime_kind=NULL{fence}"
-        ))
+        )))
         .bind(resolution.task_id.to_string())
         .bind(resolution.expected_state.to_string())
         .bind(expected_epoch)
@@ -779,19 +780,21 @@ pub(super) async fn resolve(
         .execute(&mut *conn)
         .await?
         .rows_affected(),
-        Action::Retry { .. } => sqlx::query(&format!("DELETE FROM worker_tasks{fence}"))
-            .bind(resolution.task_id.to_string())
-            .bind(resolution.expected_state.to_string())
-            .bind(expected_epoch)
-            .bind(resolution.expected_worker_id.as_deref())
-            .execute(&mut *conn)
-            .await?
-            .rows_affected(),
+        Action::Retry { .. } => {
+            sqlx::query(AssertSqlSafe(format!("DELETE FROM worker_tasks{fence}")))
+                .bind(resolution.task_id.to_string())
+                .bind(resolution.expected_state.to_string())
+                .bind(expected_epoch)
+                .bind(resolution.expected_worker_id.as_deref())
+                .execute(&mut *conn)
+                .await?
+                .rows_affected()
+        }
         Action::FailNode { .. } | Action::FailInstance | Action::FailTaskOnly => {
-            sqlx::query(&format!(
+            sqlx::query(AssertSqlSafe(format!(
                 "UPDATE worker_tasks SET state='failed', error_message=?5, error_retryable=?6, \
              completed_at=?7{fence}"
-            ))
+            )))
             .bind(resolution.task_id.to_string())
             .bind(resolution.expected_state.to_string())
             .bind(expected_epoch)

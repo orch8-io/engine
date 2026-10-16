@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sqlx::AssertSqlSafe;
 use sqlx::Row;
 use sqlx::postgres::PgRow;
 
@@ -205,10 +206,10 @@ impl crate::AiStore for PostgresStorage {
         cache_key: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<LlmCacheEntry>, StorageError> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT {CACHE_COLUMNS} FROM llm_response_cache
              WHERE tenant_id = $1 AND cache_key = $2 AND expires_at > $3"
-        ))
+        )))
         .bind(tenant_id)
         .bind(cache_key)
         .bind(now)
@@ -259,11 +260,11 @@ impl crate::AiStore for PostgresStorage {
         now: DateTime<Utc>,
         limit: u32,
     ) -> Result<Vec<LlmCacheEntry>, StorageError> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {CACHE_COLUMNS} FROM llm_response_cache
              WHERE tenant_id = $1 AND partition_key = $2 AND expires_at > $3
              ORDER BY created_at DESC LIMIT $4"
-        ))
+        )))
         .bind(tenant_id)
         .bind(partition_key)
         .bind(now)

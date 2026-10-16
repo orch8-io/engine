@@ -1159,10 +1159,7 @@ pub(super) async fn bulk_reschedule(
 }
 
 /// Apply `InstanceFilter` conditions to a query builder.
-fn apply_instance_filter<'a>(
-    qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
-    filter: &'a InstanceFilter,
-) {
+fn apply_instance_filter(qb: &mut sqlx::QueryBuilder<sqlx::Postgres>, filter: &InstanceFilter) {
     if let Some(ref tid) = filter.tenant_id {
         qb.push(" AND tenant_id = ").push_bind(tid.as_str());
     }

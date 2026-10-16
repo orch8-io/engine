@@ -5,6 +5,7 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 use chrono::{DateTime, Utc};
+use sqlx::AssertSqlSafe;
 
 use orch8_types::error::StorageError;
 
@@ -257,7 +258,7 @@ pub(super) async fn list_rollback_history(
         " ORDER BY triggered_at DESC, id DESC LIMIT ${param_idx}"
     );
 
-    let mut q = sqlx::query_as(&query);
+    let mut q = sqlx::query_as(AssertSqlSafe(query.as_str()));
     if let Some(t) = tenant_id {
         q = q.bind(t);
     }

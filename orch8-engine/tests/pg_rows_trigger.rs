@@ -8,6 +8,7 @@
 //! ```
 #![cfg(feature = "postgres-rows")]
 
+use sqlx::AssertSqlSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -119,13 +120,13 @@ async fn row_changes_start_workflows_without_loss_or_duplicates() {
         .await
         .unwrap();
     let schema = format!("pgrows_{}", uuid::Uuid::now_v7().simple());
-    sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "CREATE TABLE \"{schema}\".orders (id SERIAL PRIMARY KEY, status TEXT NOT NULL)"
-    ))
+    )))
     .execute(&pool)
     .await
     .unwrap();
@@ -141,9 +142,15 @@ async fn row_changes_start_workflows_without_loss_or_duplicates() {
         &outbox,
         &channel,
     );
-    sqlx::raw_sql(&sql).execute(&pool).await.unwrap();
+    sqlx::raw_sql(AssertSqlSafe(sql.as_str()))
+        .execute(&pool)
+        .await
+        .unwrap();
     // Re-running the install script is idempotent.
-    sqlx::raw_sql(&sql).execute(&pool).await.unwrap();
+    sqlx::raw_sql(AssertSqlSafe(sql.as_str()))
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let (storage, trigger) = orch8_storage(json!({
         "database_url": url,
@@ -158,9 +165,9 @@ async fn row_changes_start_workflows_without_loss_or_duplicates() {
 
     // A change committed before the trigger ever ran is picked up
     // (start_from = beginning).
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO \"{schema}\".orders (status) VALUES ('new')"
-    ))
+    )))
     .execute(&pool)
     .await
     .unwrap();
@@ -172,9 +179,9 @@ async fn row_changes_start_workflows_without_loss_or_duplicates() {
     assert_eq!(got[0].context.data["new"]["status"], "new");
     assert_eq!(got[0].metadata["_trigger_type"], "postgres_rows");
 
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "UPDATE \"{schema}\".orders SET status = 'paid' WHERE id = 1"
-    ))
+    )))
     .execute(&pool)
     .await
     .unwrap();
@@ -191,15 +198,15 @@ async fn row_changes_start_workflows_without_loss_or_duplicates() {
     // on restart (no NOTIFY is ever received for them).
     cancel.cancel();
     task.await.unwrap().unwrap();
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO \"{schema}\".orders (status) VALUES ('while-down-1'), ('while-down-2')"
-    ))
+    )))
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "DELETE FROM \"{schema}\".orders WHERE status = 'while-down-2'"
-    ))
+    )))
     .execute(&pool)
     .await
     .unwrap();
@@ -210,15 +217,15 @@ async fn row_changes_start_workflows_without_loss_or_duplicates() {
     // Out-of-order commit: A takes the lower outbox id but commits after B.
     // The (txid, id) cursor must not skip A.
     let mut tx_a = pool.begin().await.unwrap();
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO \"{schema}\".orders (status) VALUES ('slow-a')"
-    ))
+    )))
     .execute(&mut *tx_a)
     .await
     .unwrap();
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO \"{schema}\".orders (status) VALUES ('fast-b')"
-    ))
+    )))
     .execute(&pool)
     .await
     .unwrap();
@@ -252,11 +259,11 @@ async fn row_changes_start_workflows_without_loss_or_duplicates() {
     cancel.cancel();
     task.await.unwrap().unwrap();
 
-    sqlx::raw_sql(&uninstall_sql(&table))
+    sqlx::raw_sql(AssertSqlSafe(uninstall_sql(&table)))
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA \"{schema}\" CASCADE")))
         .execute(&pool)
         .await
         .unwrap();

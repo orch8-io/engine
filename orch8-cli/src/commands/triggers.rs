@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
+use sqlx::AssertSqlSafe;
 
 use orch8_engine::trigger_sources::pg_rows::{
     DEFAULT_CHANNEL, DEFAULT_OUTBOX_TABLE, QualifiedName, RowEvent, install_sql, uninstall_sql,
@@ -80,7 +81,7 @@ pub async fn run(cmd: TriggersCmd) -> Result<()> {
                     .connect(&url)
                     .await
                     .context("connect to --database-url")?;
-                sqlx::raw_sql(&sql)
+                sqlx::raw_sql(AssertSqlSafe(sql.as_str()))
                     .execute(&pool)
                     .await
                     .context("apply row-change capture SQL")?;

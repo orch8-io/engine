@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use sqlx::AssertSqlSafe;
 use sqlx::Row;
 
 use orch8_types::approval_link::{ApprovalActionToken, ApprovalChannel};
@@ -42,9 +43,9 @@ pub(super) async fn create(
     .execute(&mut *tx)
     .await?;
     for t in tokens {
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO approval_action_tokens ({COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)"
-        ))
+        )))
         .bind(&t.token_hash)
         .bind(t.tenant_id.as_str())
         .bind(t.instance_id.into_uuid())
@@ -67,9 +68,9 @@ pub(super) async fn get(
     store: &PostgresStorage,
     token_hash: &str,
 ) -> Result<Option<ApprovalActionToken>, StorageError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM approval_action_tokens WHERE token_hash = $1"
-    ))
+    )))
     .bind(token_hash)
     .fetch_optional(&store.pool)
     .await?;
@@ -82,11 +83,11 @@ pub(super) async fn consume(
     now: DateTime<Utc>,
 ) -> Result<Option<ApprovalActionToken>, StorageError> {
     let mut tx = store.pool.begin().await?;
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "UPDATE approval_action_tokens SET used_at = $2
          WHERE token_hash = $1 AND used_at IS NULL AND expires_at > $2
          RETURNING {COLUMNS}"
-    ))
+    )))
     .bind(token_hash)
     .bind(now)
     .fetch_optional(&mut *tx)

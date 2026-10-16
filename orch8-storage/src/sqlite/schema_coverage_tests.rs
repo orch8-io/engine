@@ -5,17 +5,19 @@
 
 use super::SqliteStorage;
 use super::schema::{SCHEMA, SCHEMA_VERSION};
+use sqlx::AssertSqlSafe;
 
 async fn store() -> SqliteStorage {
     SqliteStorage::in_memory().await.unwrap()
 }
 
 async fn table_columns(storage: &SqliteStorage, table: &str) -> Vec<String> {
-    let rows: Vec<(String,)> =
-        sqlx::query_as(&format!("SELECT name FROM pragma_table_info('{table}')"))
-            .fetch_all(&storage.pool)
-            .await
-            .unwrap();
+    let rows: Vec<(String,)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT name FROM pragma_table_info('{table}')"
+    )))
+    .fetch_all(&storage.pool)
+    .await
+    .unwrap();
     rows.into_iter().map(|row| row.0).collect()
 }
 

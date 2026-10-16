@@ -33,7 +33,13 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # Database
 # Postgres + TLS are opted into by `orch8-storage/postgres` (default on) and the
 # server-side crates, so the mobile build links only the SQLite driver.
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono", "json", "migrate"] }
+# default-features off drops the unused `any` driver; `macros` stays for
+# `sqlx::migrate!` and the `FromRow`/`Type` derives.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "uuid", "chrono", "json", "migrate", "macros"] }
+
+# Direct dep only for `sqlx_core::transaction::TransactionManager`, which the
+# `sqlx` facade stopped re-exporting in 0.9. Keep in lockstep with `sqlx`.
+sqlx-core = { version = "0.9", default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -85,7 +91,9 @@ async-trait = "0.1"
 
 # OpenAPI
 utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
-utoipa-swagger-ui = { version = "10", features = ["axum"] }
+# `vendored` ships the Swagger UI bundle inside the crate so builds (Docker,
+# CI, offline) never fetch it from GitHub at compile time.
+utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
 
 # Encryption
 aes-gcm = "0.11"

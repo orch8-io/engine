@@ -146,7 +146,7 @@ impl crate::TelemetryStore for PostgresStorage {
         let mut total = 0u64;
         // Postgres limit: 65535 params. 9 params per row -> batch <= ~7000.
         for chunk in events.chunks(7000) {
-            let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> = sqlx::QueryBuilder::new(
+            let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
                 "INSERT INTO telemetry_mobile_events (event_type, payload, device_id, os_name, os_version, app_version, sdk_version, tenant_id, created_at) ",
             );
             qb.push_values(chunk, |mut b, event| {

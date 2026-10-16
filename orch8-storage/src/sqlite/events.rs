@@ -1,5 +1,6 @@
 //! Durable event correlation storage — SQLite.
 
+use sqlx::AssertSqlSafe;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -89,9 +90,9 @@ pub(super) async fn get(
     storage: &SqliteStorage,
     id: Uuid,
 ) -> Result<Option<EventEnvelope>, StorageError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {EVENT_COLUMNS} FROM event_inbox WHERE id = ?1"
-    ))
+    )))
     .bind(id.to_string())
     .fetch_optional(&storage.pool)
     .await?;
@@ -105,11 +106,11 @@ pub(super) async fn list(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<EventEnvelope>, StorageError> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {EVENT_COLUMNS} FROM event_inbox
          WHERE tenant_id = ?1 AND (?2 IS NULL OR status = ?2)
          ORDER BY received_at DESC, id DESC LIMIT ?3 OFFSET ?4"
-    ))
+    )))
     .bind(tenant_id)
     .bind(status.map(EventStatus::as_str))
     .bind(i64::from(limit))
@@ -204,9 +205,9 @@ pub(super) async fn get_wait(
     instance_id: InstanceId,
     block_id: &str,
 ) -> Result<Option<EventWait>, StorageError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {WAIT_COLUMNS} FROM event_waits WHERE instance_id = ?1 AND block_id = ?2"
-    ))
+    )))
     .bind(instance_id.into_uuid().to_string())
     .bind(block_id)
     .fetch_optional(&storage.pool)
@@ -220,11 +221,11 @@ pub(super) async fn find_waiting(
     event_name: &str,
     correlation_key: &str,
 ) -> Result<Vec<EventWait>, StorageError> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {WAIT_COLUMNS} FROM event_waits
          WHERE tenant_id = ?1 AND correlation_key = ?2 AND status = 'waiting'
          ORDER BY created_at ASC"
-    ))
+    )))
     .bind(tenant_id)
     .bind(correlation_key)
     .fetch_all(&storage.pool)

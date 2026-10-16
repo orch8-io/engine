@@ -39,7 +39,7 @@ orch8-push = { path = "../orch8-push" }
 orch8-publisher = { path = "../orch8-publisher" }
 ed25519-dalek = { workspace = true }
 base64 = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
+sqlx = { workspace = true, features = ["tls-rustls-ring-webpki", "postgres", "migrate"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
 tempfile = { workspace = true }
 # `orch8 dev --worker-watch <glob>` matching.

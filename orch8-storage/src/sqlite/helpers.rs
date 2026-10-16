@@ -440,10 +440,7 @@ pub(super) fn row_to_cluster_node(
 }
 
 /// Build a parameterized SQL filter.
-pub(super) fn apply_filter_sql<'q>(
-    qb: &mut sqlx::QueryBuilder<'q, sqlx::Sqlite>,
-    filter: &'q InstanceFilter,
-) {
+pub(super) fn apply_filter_sql(qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>, filter: &InstanceFilter) {
     if let Some(ref tid) = filter.tenant_id {
         qb.push(" AND tenant_id=");
         qb.push_bind(tid.as_str());
@@ -491,7 +488,7 @@ pub(super) fn apply_filter_sql<'q>(
 
 /// Push `'$."k1"."k2"...'` as a SQL string expression with each key bound
 /// (so keys are literals, even when they contain dots).
-fn push_json_path<'q>(qb: &mut sqlx::QueryBuilder<'q, sqlx::Sqlite>, path: &[&'q str]) {
+fn push_json_path(qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>, path: &[&str]) {
     qb.push("('$'");
     for key in path {
         qb.push(" || '.\"' || ");
@@ -504,10 +501,10 @@ fn push_json_path<'q>(qb: &mut sqlx::QueryBuilder<'q, sqlx::Sqlite>, path: &[&'q
 /// Scalar leaf of [`push_json_contains`]: `type_sql` / `value_sql` push the
 /// SQL expressions yielding the target's `json_type` and SQL value.
 fn push_json_scalar_eq<'q>(
-    qb: &mut sqlx::QueryBuilder<'q, sqlx::Sqlite>,
+    qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>,
     needle: &'q serde_json::Value,
-    type_sql: &dyn Fn(&mut sqlx::QueryBuilder<'q, sqlx::Sqlite>),
-    value_sql: &dyn Fn(&mut sqlx::QueryBuilder<'q, sqlx::Sqlite>),
+    type_sql: &dyn Fn(&mut sqlx::QueryBuilder<sqlx::Sqlite>),
+    value_sql: &dyn Fn(&mut sqlx::QueryBuilder<sqlx::Sqlite>),
 ) {
     use serde_json::Value;
     qb.push(" AND ");
@@ -544,7 +541,7 @@ fn push_json_scalar_eq<'q>(
 
 /// Append ` AND <src at path contains needle>` (Postgres `@>` semantics).
 fn push_json_contains<'q>(
-    qb: &mut sqlx::QueryBuilder<'q, sqlx::Sqlite>,
+    qb: &mut sqlx::QueryBuilder<sqlx::Sqlite>,
     src: &str,
     path: &mut Vec<&'q str>,
     needle: &'q serde_json::Value,

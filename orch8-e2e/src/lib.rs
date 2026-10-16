@@ -22,6 +22,7 @@
 //! ([`PhoneAuth::ApiKey`]).
 #![allow(clippy::missing_panics_doc)]
 
+use sqlx::AssertSqlSafe;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -532,7 +533,7 @@ impl Cloud {
                             .await
                             .expect("list tables");
                     for table in tables {
-                        let rows = sqlx::query(&format!("SELECT * FROM \"{table}\""))
+                        let rows = sqlx::query(AssertSqlSafe(format!("SELECT * FROM \"{table}\"")))
                             .fetch_all(pool)
                             .await
                             .expect("scan table");
@@ -571,10 +572,10 @@ impl Cloud {
                     .await
                     .expect("list tables");
                     for table in tables {
-                        let count: i64 = sqlx::query_scalar(&format!(
+                        let count: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
                             "SELECT COUNT(*) FROM \"{schema}\".\"{table}\" t \
                              WHERE strpos(t::text, $1) > 0"
-                        ))
+                        )))
                         .bind(needle)
                         .fetch_one(pool)
                         .await
@@ -1023,9 +1024,11 @@ impl Drop for Cloud {
             self.rt.block_on(async {
                 // Let the scheduler release its connections first.
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"))
-                    .execute(&admin)
-                    .await;
+                let _ = sqlx::query(AssertSqlSafe(format!(
+                    "DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"
+                )))
+                .execute(&admin)
+                .await;
             });
         }
     }
@@ -1067,7 +1070,7 @@ async fn open_storage(
         Backend::Postgres(url) => {
             let admin = sqlx::PgPool::connect(url).await.expect("connect postgres");
             let schema = format!("e2e_{}", Uuid::now_v7().simple());
-            sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+            sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
                 .execute(&admin)
                 .await
                 .expect("create schema");

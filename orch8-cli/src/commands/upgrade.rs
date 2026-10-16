@@ -220,7 +220,7 @@ pub fn diff_postgres(
                 report.checksum_mismatches.push(migration.version);
             }
         } else {
-            let (risk, statements) = classify_sql(&migration.sql);
+            let (risk, statements) = classify_sql(migration.sql.as_str());
             report.pending.push(PendingMigration {
                 version: migration.version,
                 description: migration.description.to_string(),

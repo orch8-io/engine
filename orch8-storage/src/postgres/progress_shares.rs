@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use sqlx::AssertSqlSafe;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -26,9 +27,9 @@ fn row_to_share(row: &sqlx::postgres::PgRow) -> Result<ProgressShare, StorageErr
 }
 
 pub(super) async fn create(store: &PostgresStorage, s: &ProgressShare) -> Result<(), StorageError> {
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "INSERT INTO progress_shares ({COLUMNS}) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)"
-    ))
+    )))
     .bind(s.id)
     .bind(&s.token_hash)
     .bind(s.tenant_id.as_str())
@@ -46,9 +47,9 @@ pub(super) async fn get_by_hash(
     store: &PostgresStorage,
     token_hash: &str,
 ) -> Result<Option<ProgressShare>, StorageError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM progress_shares WHERE token_hash = $1"
-    ))
+    )))
     .bind(token_hash)
     .fetch_optional(&store.pool)
     .await?;
@@ -60,10 +61,10 @@ pub(super) async fn list(
     tenant_id: &TenantId,
     instance_id: InstanceId,
 ) -> Result<Vec<ProgressShare>, StorageError> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM progress_shares WHERE tenant_id = $1 AND instance_id = $2
          ORDER BY created_at DESC LIMIT 100"
-    ))
+    )))
     .bind(tenant_id.as_str())
     .bind(instance_id.into_uuid())
     .fetch_all(&store.pool)

@@ -32,17 +32,17 @@ fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> Result<WebhookOutboxEntry, Sto
     })
 }
 
-fn insert_query<'a>() -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
+fn insert_query<'a>() -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
     sqlx::query(
         "INSERT INTO webhook_outbox (id, url, event_type, instance_id, payload, attempts, last_error, created_at, delivery_id, status, next_attempt_at, claimed_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
     )
 }
 
 fn bind_entry<'a>(
-    q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>>,
+    q: sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     entry: &'a WebhookOutboxEntry,
     payload: &'a str,
-) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'a>> {
+) -> sqlx::query::Query<'a, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
     q.bind(entry.id.to_string())
         .bind(&entry.url)
         .bind(&entry.event_type)

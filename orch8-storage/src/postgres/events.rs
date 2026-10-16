@@ -1,5 +1,6 @@
 //! Durable event correlation storage — `PostgreSQL`.
 
+use sqlx::AssertSqlSafe;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -78,9 +79,9 @@ pub(super) async fn get(
     store: &PostgresStorage,
     id: Uuid,
 ) -> Result<Option<EventEnvelope>, StorageError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {EVENT_COLUMNS} FROM event_inbox WHERE id = $1"
-    ))
+    )))
     .bind(id)
     .fetch_optional(&store.pool)
     .await?;
@@ -94,11 +95,11 @@ pub(super) async fn list(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<EventEnvelope>, StorageError> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {EVENT_COLUMNS} FROM event_inbox
          WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)
          ORDER BY received_at DESC, id DESC LIMIT $3 OFFSET $4"
-    ))
+    )))
     .bind(tenant_id)
     .bind(status.map(EventStatus::as_str))
     .bind(i64::from(limit))
@@ -117,12 +118,12 @@ pub(super) async fn find_pending(
     if event_names.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {EVENT_COLUMNS} FROM event_inbox
          WHERE tenant_id = $1 AND correlation_key = $2 AND status = 'pending'
            AND event_name = ANY($3)
          ORDER BY received_at ASC LIMIT 10000"
-    ))
+    )))
     .bind(tenant_id)
     .bind(correlation_key)
     .bind(event_names)
@@ -185,9 +186,9 @@ pub(super) async fn get_wait(
     instance_id: InstanceId,
     block_id: &str,
 ) -> Result<Option<EventWait>, StorageError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {WAIT_COLUMNS} FROM event_waits WHERE instance_id = $1 AND block_id = $2"
-    ))
+    )))
     .bind(instance_id.into_uuid())
     .bind(block_id)
     .fetch_optional(&store.pool)
@@ -201,12 +202,12 @@ pub(super) async fn find_waiting(
     event_name: &str,
     correlation_key: &str,
 ) -> Result<Vec<EventWait>, StorageError> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {WAIT_COLUMNS} FROM event_waits
          WHERE tenant_id = $1 AND correlation_key = $2 AND status = 'waiting'
            AND event_names @> to_jsonb($3::text)
          ORDER BY created_at ASC"
-    ))
+    )))
     .bind(tenant_id)
     .bind(correlation_key)
     .bind(event_name)

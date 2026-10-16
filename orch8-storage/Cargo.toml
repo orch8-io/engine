@@ -10,6 +10,7 @@ orch8-types = { path = "../orch8-types" }
 # Only the outbox/governance traits; APNs/FCM senders stay in the server.
 orch8-push = { path = "../orch8-push", default-features = false }
 sqlx.workspace = true
+sqlx-core.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 uuid.workspace = true
@@ -42,7 +43,7 @@ reqwest = { workspace = true, optional = true }
 default = ["compression", "postgres", "artifacts", "byok"]
 compression = ["dep:zstd"]
 # Postgres backend (`postgres` module, tenant partitioning) + sqlx TLS.
-postgres = ["sqlx/postgres", "sqlx/runtime-tokio-rustls", "artifacts"]
+postgres = ["sqlx/postgres", "sqlx/tls-rustls-ring-webpki", "artifacts"]
 # Object-store backed artifact store (local FS / S3 / in-memory).
 artifacts = ["dep:object_store"]
 # Customer-owned payload vault with envelope encryption (AWS KMS / static key).

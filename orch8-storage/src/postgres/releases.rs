@@ -1,5 +1,6 @@
 //! Workflow release storage (release control plane) — `PostgreSQL`.
 
+use sqlx::AssertSqlSafe;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
@@ -94,9 +95,9 @@ pub(super) async fn get(
     store: &PostgresStorage,
     id: Uuid,
 ) -> Result<Option<WorkflowRelease>, StorageError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {RELEASE_COLUMNS} FROM workflow_releases WHERE id = $1"
-    ))
+    )))
     .bind(id)
     .fetch_optional(&store.pool)
     .await?;
@@ -108,11 +109,11 @@ pub(super) async fn list(
     tenant_id: Option<&TenantId>,
     limit: u32,
 ) -> Result<Vec<WorkflowRelease>, StorageError> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT {RELEASE_COLUMNS} FROM workflow_releases
          WHERE ($1::text IS NULL OR tenant_id = $1)
          ORDER BY created_at DESC LIMIT $2"
-    ))
+    )))
     .bind(tenant_id.map(orch8_types::ids::TenantId::as_str))
     .bind(i64::from(limit))
     .fetch_all(&store.pool)
@@ -214,11 +215,11 @@ pub(super) async fn find_routing(
     store: &PostgresStorage,
     baseline_sequence_id: SequenceId,
 ) -> Result<Option<WorkflowRelease>, StorageError> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT {RELEASE_COLUMNS} FROM workflow_releases
          WHERE baseline_sequence_id = $1 AND state IN ('canary', 'promoted')
          ORDER BY created_at DESC LIMIT 1"
-    ))
+    )))
     .bind(baseline_sequence_id.as_uuid())
     .fetch_optional(&store.pool)
     .await?;

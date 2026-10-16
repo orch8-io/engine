@@ -125,7 +125,7 @@ pub(super) async fn ingest_telemetry_events_batch(
     let mut total = 0u64;
     // SQLite has a variable limit of 999 by default; 3 params per row -> batch <= 333.
     for chunk in events.chunks(333) {
-        let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+        let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
             "INSERT INTO telemetry_events (event_type, payload, created_at) ",
         );
         qb.push_values(chunk, |mut b, event| {

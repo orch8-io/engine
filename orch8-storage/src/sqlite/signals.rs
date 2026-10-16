@@ -20,9 +20,9 @@ const SIGNAL_ID_CHUNK_SIZE: usize = 500;
 /// Serialization errors surface as [`StorageError::Serialization`] before
 /// the query is ever issued.
 fn bind_signal_insert<'q>(
-    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     s: &'q Signal,
-) -> Result<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>, StorageError> {
+) -> Result<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>, StorageError> {
     Ok(q.bind(s.id.to_string())
         .bind(s.instance_id.into_uuid().to_string())
         .bind(serde_json::to_string(&s.signal_type)?)

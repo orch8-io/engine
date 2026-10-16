@@ -45,9 +45,9 @@ pub(super) const INSTANCE_INSERT_SQL: &str = "INSERT INTO task_instances (id,seq
 /// that callers can `.execute(...)` against either a pool or a transaction
 /// without duplicating the bind sequence.
 pub(super) fn bind_instance_insert<'q>(
-    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     i: &'q TaskInstance,
-) -> Result<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>, StorageError> {
+) -> Result<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>, StorageError> {
     Ok(q.bind(i.id.into_uuid().to_string())
         .bind(i.sequence_id.into_uuid().to_string())
         .bind(i.tenant_id.as_str())
@@ -1216,7 +1216,7 @@ pub(super) async fn delete_terminal_instances(
             }
             _ => unreachable!(),
         };
-        let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(sql);
+        let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(sql);
         let mut separated = qb.separated(",");
         for id in &ids {
             separated.push_bind(id);
@@ -1225,7 +1225,7 @@ pub(super) async fn delete_terminal_instances(
         qb.build().execute(&mut *tx).await?;
     }
 
-    let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> =
+    let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> =
         sqlx::QueryBuilder::new("DELETE FROM task_instances WHERE id IN (");
     let mut separated = qb.separated(",");
     for id in &ids {

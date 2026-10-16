@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_wrap)]
 
 use async_trait::async_trait;
+use sqlx::AssertSqlSafe;
 use std::fmt::Write;
 
 use super::PostgresStorage;
@@ -258,7 +259,7 @@ impl crate::MobileSyncStore for PostgresStorage {
                 Option<String>,
                 String,
             ),
-        >(&sql);
+        >(AssertSqlSafe(sql.as_str()));
         if let Some(tid) = tenant_id {
             query = query.bind(tid);
         }
@@ -453,7 +454,7 @@ impl crate::MobileSyncStore for PostgresStorage {
                 String,
                 Option<String>,
             ),
-        >(&sql);
+        >(AssertSqlSafe(sql.as_str()));
         if let Some(tid) = tenant_id {
             query = query.bind(tid);
         }

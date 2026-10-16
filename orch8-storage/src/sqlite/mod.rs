@@ -74,6 +74,7 @@ mod workers;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sqlx::AssertSqlSafe;
 use sqlx::Row;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -108,7 +109,7 @@ struct ColumnDef {
 /// trusted identifier (validated `[A-Za-z0-9_]`) — PRAGMA does not accept bind
 /// parameters, so it is interpolated directly.
 async fn column_defs(pool: &SqlitePool, table: &str) -> Result<Vec<ColumnDef>, StorageError> {
-    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+    let rows = sqlx::query(AssertSqlSafe(format!("PRAGMA table_info({table})")))
         .fetch_all(pool)
         .await?;
     Ok(rows
@@ -146,7 +147,8 @@ pub struct SqliteStorage {
 /// and roll back whatever was left open.
 fn pool_options(max_connections: u32) -> SqlitePoolOptions {
     use sqlx::Connection as _;
-    use sqlx::TransactionManager as _;
+    // sqlx 0.9 stopped re-exporting the trait from the facade crate.
+    use sqlx_core::transaction::TransactionManager as _;
     SqlitePoolOptions::new()
         .max_connections(max_connections)
         .after_release(|conn, _meta| {
@@ -280,7 +282,7 @@ impl SqliteStorage {
             });
 
         for stmt in &table_stmts {
-            sqlx::query(stmt)
+            sqlx::query(AssertSqlSafe(*stmt))
                 .execute(&self.pool)
                 .await
                 .map_err(|error| {
@@ -290,7 +292,7 @@ impl SqliteStorage {
         }
         self.reconcile_columns().await?;
         for stmt in &index_stmts {
-            if let Err(e) = sqlx::query(stmt).execute(&self.pool).await {
+            if let Err(e) = sqlx::query(AssertSqlSafe(*stmt)).execute(&self.pool).await {
                 // `reconcile_columns` deliberately skips a NOT NULL column
                 // without a schema-level default (e.g. created_at/updated_at,
                 // always supplied by the application, never defaulted) rather
@@ -377,7 +379,9 @@ impl SqliteStorage {
                     ddl.push_str(" DEFAULT ");
                     ddl.push_str(dflt);
                 }
-                sqlx::query(&ddl).execute(&self.pool).await?;
+                sqlx::query(AssertSqlSafe(ddl.as_str()))
+                    .execute(&self.pool)
+                    .await?;
                 tracing::info!(table = %table, column = %col.name, "sqlite reconcile: added missing column");
             }
         }

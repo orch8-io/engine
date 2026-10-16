@@ -7,6 +7,7 @@
 use super::SqliteStorage;
 use super::helpers::parse_ts;
 use orch8_types::error::StorageError;
+use sqlx::AssertSqlSafe;
 
 pub(super) async fn create_rollback_policy(
     storage: &SqliteStorage,
@@ -245,7 +246,7 @@ pub(super) async fn list_rollback_history(
     }
     query.push_str(" ORDER BY triggered_at DESC, id DESC LIMIT ?");
 
-    let mut q = sqlx::query_as(&query);
+    let mut q = sqlx::query_as(AssertSqlSafe(query.as_str()));
     if let Some(t) = tenant_id {
         q = q.bind(t);
     }
