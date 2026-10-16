@@ -914,7 +914,8 @@ mod net_tests {
     /// `Mcp-Session-Id` after the call.
     #[tokio::test]
     async fn stateful_session_is_closed_after_the_call() {
-        let seen: Arc<std::sync::Mutex<Vec<(String, Option<String>)>>> = Arc::default();
+        type Seen = std::sync::Mutex<Vec<(String, Option<String>)>>;
+        let seen: Arc<Seen> = Arc::default();
         let log = Arc::clone(&seen);
         let app = axum::Router::new().fallback(
             move |method: axum::http::Method, headers: axum::http::HeaderMap, body: String| {
