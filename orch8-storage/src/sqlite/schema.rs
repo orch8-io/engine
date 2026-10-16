@@ -144,6 +144,10 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     claimed_runtime_kind TEXT,
     -- Retry row not yet bound by its re-dispatch (Postgres migration 096).
     awaiting_dispatch INTEGER NOT NULL DEFAULT 0,
+    -- Owning tenant, denormalised from task_instances at insert (Postgres
+    -- migration 103). Informational on SQLite: tenant polls still join the
+    -- instance, so rows written before this column existed stay claimable.
+    tenant_id TEXT,
     UNIQUE(instance_id, block_id),
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
@@ -347,9 +351,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_task_instances_tenant_idemp ON task_instan
 CREATE INDEX IF NOT EXISTS idx_task_instances_concurrency ON task_instances(concurrency_key, state);
 CREATE INDEX IF NOT EXISTS idx_task_instances_parent ON task_instances(parent_instance_id);
 CREATE INDEX IF NOT EXISTS idx_task_instances_session ON task_instances(session_id);
+-- Scheduler claim (Postgres migration 101): `state = 'scheduled' ORDER BY
+-- priority DESC, next_fire_at ASC` served straight from the index instead of
+-- a temp B-tree sort of every scheduled row under BEGIN IMMEDIATE (L4-01).
+CREATE INDEX IF NOT EXISTS idx_task_instances_claim
+    ON task_instances(state, priority DESC, next_fire_at);
+-- GC candidate scan (Postgres migration 102, L1-05).
+CREATE INDEX IF NOT EXISTS idx_task_instances_terminal_updated
+    ON task_instances(updated_at) WHERE state IN ('completed', 'failed', 'cancelled');
+-- Index parity with Postgres (L4-13): sequence delete/count, tenant-scoped
+-- lists and admission counts, per-instance usage and checkpoint lookups.
+CREATE INDEX IF NOT EXISTS idx_task_instances_sequence ON task_instances(sequence_id, state);
+CREATE INDEX IF NOT EXISTS idx_task_instances_tenant_state ON task_instances(tenant_id, state);
+CREATE INDEX IF NOT EXISTS idx_task_instances_tenant_updated
+    ON task_instances(tenant_id, updated_at DESC, id DESC);
+-- Tenantless / DLQ lists (Postgres migration 104, L4-07).
+CREATE INDEX IF NOT EXISTS idx_task_instances_state_updated
+    ON task_instances(state, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_instance ON checkpoints(instance_id, created_at DESC);
+-- Cron Skip/Defer overlap probe (L4-08; Postgres uses the metadata GIN).
+CREATE INDEX IF NOT EXISTS idx_task_instances_cron_active
+    ON task_instances(json_extract(metadata, '$.cron_schedule_id'))
+    WHERE state IN ('scheduled', 'running', 'waiting', 'paused');
 CREATE INDEX IF NOT EXISTS idx_signal_inbox_instance ON signal_inbox(instance_id, delivered);
 CREATE INDEX IF NOT EXISTS idx_worker_tasks_handler ON worker_tasks(handler_name, state);
 CREATE INDEX IF NOT EXISTS idx_worker_tasks_instance_state ON worker_tasks(instance_id, state);
+-- Timeout reaper / stranded-dispatch sweep / task list (Postgres migration 103).
+CREATE INDEX IF NOT EXISTS idx_worker_tasks_inflight_created
+    ON worker_tasks(created_at) WHERE state IN ('pending', 'claimed') AND timeout_ms IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_worker_tasks_stranded
+    ON worker_tasks(created_at) WHERE state = 'pending' AND awaiting_dispatch = 1;
+CREATE INDEX IF NOT EXISTS idx_worker_tasks_created ON worker_tasks(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_block_outputs_instance ON block_outputs(instance_id);
 CREATE INDEX IF NOT EXISTS idx_execution_tree_instance ON execution_tree(instance_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_instance ON audit_log(instance_id);
@@ -392,6 +424,8 @@ CREATE TABLE IF NOT EXISTS emit_event_dedupe (
 );
 CREATE INDEX IF NOT EXISTS idx_emit_event_dedupe_created_at
     ON emit_event_dedupe(created_at);
+-- FK child column (Postgres migration 102): instance deletes stay indexed.
+CREATE INDEX IF NOT EXISTS idx_emit_event_dedupe_child ON emit_event_dedupe(child_instance_id);
 
 -- Ref#15: lightweight schema version registry. Full per-migration history
 -- isn't implemented yet; this table at least records which version of the
@@ -443,6 +477,8 @@ CREATE TABLE IF NOT EXISTS usage_events (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_usage_tenant_created ON usage_events(tenant_id, created_at);
+-- Per-instance purge and token-budget aggregate (Postgres migration 102).
+CREATE INDEX IF NOT EXISTS idx_usage_events_instance ON usage_events(instance_id, kind);
 
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
@@ -617,6 +653,11 @@ CREATE TABLE IF NOT EXISTS webhook_outbox (
     claimed_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_webhook_outbox_created ON webhook_outbox(created_at DESC);
+-- Drain claim / stale recovery (Postgres migration 104, L4-09).
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_pending_created
+    ON webhook_outbox(created_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_inflight
+    ON webhook_outbox(claimed_at) WHERE status = 'in_flight';
 CREATE INDEX IF NOT EXISTS idx_webhook_outbox_due
     ON webhook_outbox(next_attempt_at) WHERE status = 'pending';
 

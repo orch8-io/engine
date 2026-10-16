@@ -639,24 +639,44 @@ impl crate::MobileSyncStore for PostgresStorage {
     }
 
     async fn cleanup_acked_commands(&self, older_than_secs: i64) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "DELETE FROM mobile_commands WHERE acked_at IS NOT NULL AND acked_at < now() - make_interval(secs => $1::double precision)",
-        )
-        .bind(older_than_secs)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(result.rows_affected())
+        // Bounded statements (L4-15).
+        let mut total = 0;
+        loop {
+            let deleted = sqlx::query(
+                "DELETE FROM mobile_commands WHERE ctid IN (SELECT ctid FROM mobile_commands \
+                 WHERE acked_at IS NOT NULL AND acked_at < now() - make_interval(secs => $1::double precision) LIMIT $2)",
+            )
+            .bind(older_than_secs)
+            .bind(super::BULK_STATEMENT_BATCH)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?
+            .rows_affected();
+            total += deleted;
+            if deleted < super::BULK_STATEMENT_BATCH.unsigned_abs() {
+                return Ok(total);
+            }
+        }
     }
 
     async fn cleanup_expired_commands(&self, ttl_secs: i64) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "DELETE FROM mobile_commands WHERE acked_at IS NULL AND created_at < now() - make_interval(secs => $1::double precision)",
-        )
-        .bind(ttl_secs)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(result.rows_affected())
+        // Bounded statements (L4-15).
+        let mut total = 0;
+        loop {
+            let deleted = sqlx::query(
+                "DELETE FROM mobile_commands WHERE ctid IN (SELECT ctid FROM mobile_commands \
+                 WHERE acked_at IS NULL AND created_at < now() - make_interval(secs => $1::double precision) LIMIT $2)",
+            )
+            .bind(ttl_secs)
+            .bind(super::BULK_STATEMENT_BATCH)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?
+            .rows_affected();
+            total += deleted;
+            if deleted < super::BULK_STATEMENT_BATCH.unsigned_abs() {
+                return Ok(total);
+            }
+        }
     }
 }

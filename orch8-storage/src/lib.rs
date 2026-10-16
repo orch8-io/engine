@@ -729,6 +729,18 @@ pub trait InstanceStore: Send + Sync + 'static {
 
     async fn count_instances(&self, filter: &InstanceFilter) -> Result<u64, StorageError>;
 
+    /// True when at least one instance is in `state`. An `EXISTS` probe —
+    /// unlike `count_instances(..) > 0` it does not visit every matching row
+    /// (L4-16: the embedded drain loop asked this after every tick).
+    async fn any_instance_in_state(&self, state: InstanceState) -> Result<bool, StorageError> {
+        self.count_instances(&InstanceFilter {
+            states: Some(vec![state]),
+            ..InstanceFilter::default()
+        })
+        .await
+        .map(|n| n > 0)
+    }
+
     async fn bulk_update_state(
         &self,
         filter: &InstanceFilter,

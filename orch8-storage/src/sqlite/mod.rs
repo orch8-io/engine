@@ -877,6 +877,15 @@ impl crate::InstanceStore for SqliteStorage {
         instances::count(self, filter).await
     }
 
+    async fn any_instance_in_state(&self, state: InstanceState) -> Result<bool, StorageError> {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_instances WHERE state = ?1)")
+                .bind(state.to_string())
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(exists)
+    }
+
     async fn bulk_update_state(
         &self,
         filter: &InstanceFilter,

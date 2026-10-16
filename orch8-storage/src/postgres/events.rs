@@ -239,12 +239,22 @@ pub(super) async fn expire_before(
     store: &PostgresStorage,
     cutoff: DateTime<Utc>,
 ) -> Result<u64, StorageError> {
-    let result = sqlx::query(
-        "UPDATE event_inbox SET status = 'expired'
-         WHERE status = 'pending' AND received_at < $1",
-    )
-    .bind(cutoff)
-    .execute(&store.pool)
-    .await?;
-    Ok(result.rows_affected())
+    // Bounded statements (L4-15): see `webhook_deliveries::delete_before`.
+    let mut total = 0;
+    loop {
+        let expired = sqlx::query(
+            "UPDATE event_inbox SET status = 'expired'
+             WHERE ctid IN (SELECT ctid FROM event_inbox
+                            WHERE status = 'pending' AND received_at < $1 LIMIT $2)",
+        )
+        .bind(cutoff)
+        .bind(super::BULK_STATEMENT_BATCH)
+        .execute(&store.pool)
+        .await?
+        .rows_affected();
+        total += expired;
+        if expired < super::BULK_STATEMENT_BATCH.unsigned_abs() {
+            return Ok(total);
+        }
+    }
 }

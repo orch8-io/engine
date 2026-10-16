@@ -1130,13 +1130,17 @@ pub(super) async fn bulk_update_state(
     filter: &InstanceFilter,
     new_state: InstanceState,
 ) -> Result<u64, StorageError> {
-    let mut qb = sqlx::QueryBuilder::new("UPDATE task_instances SET state = ");
-    qb.push_bind(new_state.to_string());
-    qb.push(", updated_at = NOW() WHERE 1=1");
-    apply_instance_filter(&mut qb, filter);
-
-    let result = qb.build().execute(&store.pool).await?;
-    Ok(result.rows_affected())
+    bulk_update_in_batches(
+        filter,
+        None,
+        |qb| {
+            qb.push("UPDATE task_instances SET state = ");
+            qb.push_bind(new_state.to_string());
+            qb.push(", updated_at = NOW()");
+        },
+        store,
+    )
+    .await
 }
 
 pub(super) async fn bulk_reschedule(
@@ -1149,15 +1153,68 @@ pub(super) async fn bulk_reschedule(
     // only `double precision`, which silently truncates i64 values past 2^53 —
     // not a practical concern for seconds, but binding the native type is
     // simpler to reason about than an annotated precision-loss cast.
-    let mut qb = sqlx::QueryBuilder::new(
-        "UPDATE task_instances SET next_fire_at = next_fire_at + (INTERVAL '1 second' * ",
-    );
-    qb.push_bind(offset_secs);
-    qb.push("), updated_at = NOW() WHERE state = 'scheduled'");
-    apply_instance_filter(&mut qb, filter);
+    bulk_update_in_batches(
+        filter,
+        Some("state = 'scheduled'"),
+        |qb| {
+            qb.push(
+                "UPDATE task_instances SET next_fire_at = next_fire_at + (INTERVAL '1 second' * ",
+            );
+            qb.push_bind(offset_secs);
+            qb.push("), updated_at = NOW()");
+        },
+        store,
+    )
+    .await
+}
 
-    let result = qb.build().execute(&store.pool).await?;
-    Ok(result.rows_affected())
+/// Run a filtered bulk UPDATE as a sequence of keyset-paged statements of at
+/// most [`super::BULK_STATEMENT_BATCH`] rows, each committed on its own (L4-12).
+/// A single statement over millions of rows outlived `statement_timeout`
+/// after holding every row lock, then rolled back having done nothing. The
+/// filter is repeated on the outer UPDATE so a row that changed after the
+/// page was selected is re-checked, as the single statement did.
+async fn bulk_update_in_batches(
+    filter: &InstanceFilter,
+    extra: Option<&str>,
+    set: impl Fn(&mut sqlx::QueryBuilder<sqlx::Postgres>),
+    store: &PostgresStorage,
+) -> Result<u64, StorageError> {
+    let mut total = 0;
+    let mut after: Option<uuid::Uuid> = None;
+    loop {
+        let mut page_qb = sqlx::QueryBuilder::new("SELECT id FROM task_instances WHERE 1=1");
+        if let Some(extra) = extra {
+            page_qb.push(" AND ").push(extra);
+        }
+        apply_instance_filter(&mut page_qb, filter);
+        if let Some(after) = after {
+            page_qb.push(" AND id > ").push_bind(after);
+        }
+        page_qb
+            .push(" ORDER BY id LIMIT ")
+            .push_bind(super::BULK_STATEMENT_BATCH);
+        let page: Vec<uuid::Uuid> = page_qb.build_query_scalar().fetch_all(&store.pool).await?;
+        let Some(last) = page.last().copied() else {
+            return Ok(total);
+        };
+
+        let mut qb = sqlx::QueryBuilder::new("");
+        set(&mut qb);
+        qb.push(" WHERE id = ANY(")
+            .push_bind(page.clone())
+            .push(")");
+        if let Some(extra) = extra {
+            qb.push(" AND ").push(extra);
+        }
+        apply_instance_filter(&mut qb, filter);
+        total += qb.build().execute(&store.pool).await?.rows_affected();
+
+        if i64::try_from(page.len()).unwrap_or(i64::MAX) < super::BULK_STATEMENT_BATCH {
+            return Ok(total);
+        }
+        after = Some(last);
+    }
 }
 
 /// Apply `InstanceFilter` conditions to a query builder.

@@ -213,7 +213,10 @@ pub async fn execute_for_each(
             output,
             output_ref: None,
             output_size: 0,
-            attempt: u16::try_from(index).unwrap_or(u16::MAX),
+            // The counter lives in the JSON (`_index`); `attempt` is a
+            // SMALLINT on Postgres, so encoding it here failed the instance at 32,768
+            // iterations (L1-03). Markers are read by recency, never by attempt.
+            attempt: 0,
             created_at: chrono::Utc::now(),
         }
     };

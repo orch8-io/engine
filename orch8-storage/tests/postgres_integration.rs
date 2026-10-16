@@ -2232,3 +2232,200 @@ async fn worker_claims_skip_tasks_of_terminal_instances_postgres() {
             .is_empty()
     );
 }
+
+/// I-C02: worker-completion transitions are CAS-guarded on Postgres too — a
+/// cancel that landed while the step completed must stick, and the output
+/// must not be written.
+#[tokio::test]
+async fn save_output_and_transition_does_not_resurrect_cancelled_instance_on_postgres() {
+    use orch8_types::output::BlockOutput;
+    let s = require_postgres!();
+    let tenant = format!("t-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    for merge in [false, true] {
+        let mut inst = mk_instance(&tenant, seq_id, None);
+        inst.state = InstanceState::Cancelled;
+        s.create_instance(&inst).await.unwrap();
+        let out = BlockOutput {
+            id: Uuid::now_v7(),
+            instance_id: inst.id,
+            block_id: BlockId::new("step"),
+            output: serde_json::json!({"ok": true}),
+            output_ref: None,
+            output_size: 11,
+            attempt: 0,
+            created_at: Utc::now(),
+        };
+        let err = if merge {
+            s.save_output_merge_context_and_transition(
+                &out,
+                inst.id,
+                &inst.context,
+                InstanceState::Scheduled,
+                Some(Utc::now()),
+            )
+            .await
+            .unwrap_err()
+        } else {
+            s.save_output_and_transition(&out, inst.id, InstanceState::Scheduled, Some(Utc::now()))
+                .await
+                .unwrap_err()
+        };
+        assert!(
+            matches!(err, orch8_types::error::StorageError::TerminalTarget { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(
+            s.get_instance(inst.id).await.unwrap().unwrap().state,
+            InstanceState::Cancelled
+        );
+        assert!(s.get_all_outputs(inst.id).await.unwrap().is_empty());
+    }
+}
+
+/// L3-03 (Postgres): `delete_sequence` refuses while a non-terminal instance
+/// runs the sequence, and succeeds once only terminal history remains.
+#[tokio::test]
+async fn delete_sequence_refuses_live_instances_on_postgres() {
+    let s = require_postgres!();
+    let tenant = format!("t-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let mut live = mk_instance(&tenant, seq_id, None);
+    live.state = InstanceState::Waiting;
+    s.create_instance(&live).await.unwrap();
+    let mut done = mk_instance(&tenant, seq_id, None);
+    done.state = InstanceState::Completed;
+    s.create_instance(&done).await.unwrap();
+
+    let err = s.delete_sequence(seq_id).await.unwrap_err();
+    assert!(
+        matches!(err, orch8_types::error::StorageError::Conflict(_)),
+        "got {err:?}"
+    );
+    assert!(s.get_instance(live.id).await.unwrap().is_some());
+    assert!(s.get_instance(done.id).await.unwrap().is_some());
+
+    s.update_instance_state(live.id, InstanceState::Cancelled, None)
+        .await
+        .unwrap();
+    s.delete_sequence(seq_id).await.unwrap();
+    assert!(s.get_instance(live.id).await.unwrap().is_none());
+    assert!(s.get_instance(done.id).await.unwrap().is_none());
+    assert!(s.get_sequence(seq_id).await.unwrap().is_none());
+}
+
+/// L4-03: worker tasks carry their tenant, so a tenant-scoped poll filters on
+/// it directly; a row written without it (pre-103 binary during a rolling
+/// deploy) is filled in by the poll and stays claimable.
+#[tokio::test]
+async fn tenant_worker_claim_uses_denormalised_tenant_on_postgres() {
+    let s = require_postgres!();
+    let handler = format!("h-{}", Uuid::new_v4());
+    let mut tasks = Vec::new();
+    for tenant in [
+        format!("ta-{}", Uuid::new_v4()),
+        format!("tb-{}", Uuid::new_v4()),
+    ] {
+        let seq_id = SequenceId::new();
+        s.create_sequence(&mk_sequence(&tenant, seq_id))
+            .await
+            .unwrap();
+        let instance = mk_instance(&tenant, seq_id, None);
+        s.create_instance(&instance).await.unwrap();
+        let task = WorkerTask {
+            id: Uuid::new_v4(),
+            instance_id: instance.id,
+            block_id: BlockId::new("step_1"),
+            handler_name: handler.clone(),
+            queue_name: None,
+            requirements: orch8_types::continuity::CapsuleRequirements::default(),
+            params: serde_json::json!({}),
+            context: serde_json::json!({}),
+            attempt: 1,
+            timeout_ms: None,
+            state: WorkerTaskState::Pending,
+            worker_id: None,
+            claimed_at: None,
+            heartbeat_at: None,
+            claim_epoch: 0,
+            resume_checkpoint: None,
+            checkpoint_seq: 0,
+            completed_at: None,
+            output: None,
+            error_message: None,
+            error_retryable: None,
+            created_at: Utc::now(),
+            effect_id: None,
+            continuity_epoch: None,
+            lease_secs: None,
+            carries_credentials: false,
+            claimed_runtime_kind: None,
+        };
+        s.create_worker_task(&task).await.unwrap();
+        tasks.push((TenantId::unchecked(tenant), task.id));
+    }
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT tenant_id FROM worker_tasks WHERE id = $1")
+            .bind(tasks[0].1)
+            .fetch_one(s.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored.as_deref(), Some(tasks[0].0.as_str()));
+
+    // Simulate a row written by an older binary.
+    sqlx::query("UPDATE worker_tasks SET tenant_id = NULL WHERE id = $1")
+        .bind(tasks[1].1)
+        .execute(s.pool())
+        .await
+        .unwrap();
+
+    let claimed_b = s
+        .claim_worker_tasks_for_tenant(&handler, "w1", &tasks[1].0, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_b.iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![tasks[1].1],
+        "tenant B claims only its own (back-filled) task"
+    );
+    let claimed_a = s
+        .claim_worker_tasks_matching(
+            &handler,
+            "w2",
+            Some(&tasks[0].0),
+            None,
+            &RuntimeCapabilities {
+                runtime_id: RuntimeId::new(),
+                kind: RuntimeKind::Desktop,
+                trust: RuntimeTrustLevel::Registered,
+                handlers: vec![handler.clone()],
+                plugins: Vec::new(),
+                credentials: Vec::new(),
+                regions: Vec::new(),
+                hardware: Vec::new(),
+                offline_capable: false,
+                connectivity: Some(RuntimeConnectivity::Ethernet),
+                battery_percent: None,
+                estimated_cost_microunits: None,
+                estimated_latency_ms: None,
+                draining: false,
+                capsule_signing_public_key: None,
+                labels: std::collections::BTreeMap::new(),
+                observed_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::minutes(5),
+            },
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_a.iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![tasks[0].1]
+    );
+}

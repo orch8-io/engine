@@ -147,9 +147,23 @@ pub(super) async fn delete_before(
     store: &PostgresStorage,
     cutoff: DateTime<Utc>,
 ) -> Result<u64, StorageError> {
-    let result = sqlx::query("DELETE FROM webhook_delivery_attempts WHERE attempted_at < $1")
+    // Bounded statements (L4-15): the first sweep after enabling or an
+    // outage can cover months of rows; one unbounded DELETE would outlive
+    // statement_timeout, roll back, and fail the same way every tick.
+    let mut total = 0;
+    loop {
+        let deleted = sqlx::query(
+            "DELETE FROM webhook_delivery_attempts WHERE ctid IN \
+             (SELECT ctid FROM webhook_delivery_attempts WHERE attempted_at < $1 LIMIT $2)",
+        )
         .bind(cutoff)
+        .bind(super::BULK_STATEMENT_BATCH)
         .execute(&store.pool)
-        .await?;
-    Ok(result.rows_affected())
+        .await?
+        .rows_affected();
+        total += deleted;
+        if deleted < super::BULK_STATEMENT_BATCH.unsigned_abs() {
+            return Ok(total);
+        }
+    }
 }

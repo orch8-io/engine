@@ -73,8 +73,9 @@ fn insert_task_query(
         r"INSERT INTO worker_tasks
             (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
              attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at,
-             effect_id, continuity_epoch, carries_credentials, awaiting_dispatch)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+             effect_id, continuity_epoch, carries_credentials, awaiting_dispatch, tenant_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+                  (SELECT tenant_id FROM task_instances WHERE id = $2))
           ON CONFLICT (instance_id, block_id) DO UPDATE SET
               effect_id = COALESCE(worker_tasks.effect_id, EXCLUDED.effect_id),
               continuity_epoch = COALESCE(worker_tasks.continuity_epoch, EXCLUDED.continuity_epoch),
@@ -192,7 +193,11 @@ pub(super) async fn claim_for_tenant(
     tenant_id: &orch8_types::TenantId,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
+    fill_pending_tenants(store, handler_name).await?;
     let mut tx = store.pool.begin().await?;
+    // `wt.tenant_id` (L4-03) lets the poll walk only this tenant's pending
+    // rows (idx_worker_tasks_tenant_poll); the instance join only re-checks
+    // that the instance is still live.
     let rows = sqlx::query_as::<_, WorkerTaskRow>(concat!(
         r"UPDATE worker_tasks
           SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(),
@@ -201,6 +206,7 @@ pub(super) async fn claim_for_tenant(
               SELECT wt.id FROM worker_tasks wt
               JOIN task_instances ti ON ti.id = wt.instance_id
               WHERE wt.handler_name = $1
+                AND wt.tenant_id = $4
                 AND wt.state = 'pending'
                 AND NOT wt.awaiting_dispatch
                 AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
@@ -240,6 +246,29 @@ pub(super) async fn claim_for_tenant(
     Ok(tasks)
 }
 
+/// Stamp `tenant_id` onto pending rows of `handler_name` that lack it (rows
+/// inserted by a pre-103 binary during a rolling deploy), so tenant-scoped
+/// polls, which filter on `worker_tasks.tenant_id`, can see them. Served by
+/// the partial `idx_worker_tasks_untenanted_pending` index: once no such row
+/// is left this is an empty index probe.
+async fn fill_pending_tenants(
+    store: &PostgresStorage,
+    handler_name: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        r"UPDATE worker_tasks wt SET tenant_id = ti.tenant_id
+          FROM task_instances ti
+          WHERE ti.id = wt.instance_id
+            AND wt.handler_name = $1
+            AND wt.state = 'pending'
+            AND wt.tenant_id IS NULL",
+    )
+    .bind(handler_name)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
 /// Upper bound on pending rows one `claim_matching` poll inspects.
 const CLAIM_MATCHING_MAX_SCAN: usize = 4096;
 
@@ -265,6 +294,9 @@ pub(super) async fn claim_matching(
     // other worker. The scan is capped so a deep backlog of unsatisfiable
     // tasks can't turn one poll into a full-table walk. Over-collect a
     // little so rows lost to concurrent claimers can be backfilled.
+    if tenant_id.is_some() {
+        fill_pending_tenants(store, handler_name).await?;
+    }
     let want = (limit as usize).saturating_mul(2);
     let mut ids: Vec<Uuid> = Vec::with_capacity(want);
     let mut cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)> = None;
@@ -273,9 +305,6 @@ pub(super) async fn claim_matching(
         let mut query = sqlx::QueryBuilder::<Postgres>::new(
             "SELECT wt.id, wt.created_at, wt.requirements, wt.carries_credentials FROM worker_tasks wt",
         );
-        if tenant_id.is_some() {
-            query.push(" JOIN task_instances ti ON ti.id = wt.instance_id");
-        }
         query
             .push(" WHERE wt.handler_name = ")
             .push_bind(handler_name);
@@ -290,8 +319,10 @@ pub(super) async fn claim_matching(
             query.push(" AND wt.queue_name = ").push_bind(queue);
         }
         if let Some(tenant) = tenant_id {
+            // Denormalised tenant (L4-03): no per-row instance join, so the
+            // scan never walks other tenants' backlog.
             query
-                .push(" AND ti.tenant_id = ")
+                .push(" AND wt.tenant_id = ")
                 .push_bind(tenant.as_str());
         }
         if let Some((created_at, id)) = cursor {

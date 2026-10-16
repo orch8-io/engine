@@ -316,7 +316,10 @@ fn iteration_marker(
         output,
         output_ref: None,
         output_size: 0,
-        attempt: u16::try_from(iterations).unwrap_or(u16::MAX),
+        // The counter lives in the JSON (`_iterations`); `attempt` is a
+        // SMALLINT on Postgres, so encoding it here failed the instance at 32,768
+        // iterations (L1-03). Markers are read by recency, never by attempt.
+        attempt: 0,
         created_at: chrono::Utc::now(),
     }
 }
@@ -1156,6 +1159,17 @@ mod tests {
             when: None,
             compensation: None,
         }))
+    }
+
+    /// L1-03: a long-running loop's marker must stay storable past the
+    /// Postgres SMALLINT range — the counter rides in the JSON, not `attempt`.
+    #[test]
+    fn iteration_marker_keeps_counter_out_of_attempt() {
+        let instance = mk_instance_for(InstanceId::new(), json!({}));
+        let loop_def = two_step_loop("true", false);
+        let marker = iteration_marker(&instance, &loop_def, 40_000, false);
+        assert_eq!(marker.attempt, 0);
+        assert_eq!(marker.output["_iterations"], json!(40_000));
     }
 
     fn two_step_loop(condition: &str, continue_on_error: bool) -> LoopDef {

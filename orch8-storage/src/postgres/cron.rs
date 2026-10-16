@@ -195,7 +195,9 @@ pub(super) async fn record_skip(
 
 /// Non-terminal instances created by this schedule, attributed via the
 /// `metadata.cron_schedule_id` stamp the cron loop writes on every fire.
-/// Unindexed JSON probe — fine at cron-fire frequency.
+/// Containment (`@>`) so the `jsonb_path_ops` GIN index on `metadata` serves
+/// it; the previous `metadata->>'cron_schedule_id' = $1` form seq-scanned
+/// `task_instances` on every Skip/Defer fire (L4-08).
 pub(super) async fn active_instance_ids_for_cron(
     store: &PostgresStorage,
     cron_id: Uuid,
@@ -203,7 +205,7 @@ pub(super) async fn active_instance_ids_for_cron(
 ) -> Result<Vec<orch8_types::ids::InstanceId>, StorageError> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(
         r"SELECT id FROM task_instances
-          WHERE metadata->>'cron_schedule_id' = $1
+          WHERE metadata @> jsonb_build_object('cron_schedule_id', $1::text)
             AND state IN ('scheduled', 'running', 'waiting', 'paused')
           ORDER BY created_at
           LIMIT $2",

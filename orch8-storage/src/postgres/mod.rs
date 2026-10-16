@@ -67,6 +67,11 @@ use orch8_types::sequence::SequenceDefinition;
 use orch8_types::signal::Signal;
 use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 
+/// Rows per statement for maintenance DELETE/UPDATEs that loop until done
+/// (L4-12 / L4-15): small enough to stay far below `statement_timeout` and
+/// keep row locks short, large enough to drain a backlog quickly.
+pub(crate) const BULK_STATEMENT_BATCH: i64 = 5_000;
+
 pub struct PostgresStorage {
     pub(crate) pool: PgPool,
     /// Optional durable artifact backend (local FS / S3). `None` → artifact
@@ -603,6 +608,15 @@ impl crate::InstanceStore for PostgresStorage {
 
     async fn count_instances(&self, filter: &InstanceFilter) -> Result<u64, StorageError> {
         instances::count(self, filter).await
+    }
+
+    async fn any_instance_in_state(&self, state: InstanceState) -> Result<bool, StorageError> {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_instances WHERE state = $1)")
+                .bind(state.to_string())
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(exists)
     }
 
     async fn bulk_update_state(

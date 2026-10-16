@@ -163,13 +163,12 @@ pub async fn tick_once(
     )
     .await?;
 
-    let scheduled_filter = InstanceFilter {
-        states: Some(vec![InstanceState::Scheduled]),
-        ..InstanceFilter::default()
-    };
     // A failed query does not prove the queue is idle. Embedded callers use
     // this flag to stop draining, so propagate storage failures for retry.
-    let has_pending = storage.count_instances(&scheduled_filter).await? > 0;
+    // EXISTS probe, not a COUNT over every parked timer (L4-16).
+    let has_pending = storage
+        .any_instance_in_state(InstanceState::Scheduled)
+        .await?;
 
     Ok(TickOnceResult {
         instances_advanced: counters.instances_advanced.load(Ordering::Relaxed),
