@@ -178,7 +178,9 @@ starts again from `start_from`.
   "payload_field": "payload",
   "batch_size": 50,
   "block_ms": 5000,
-  "claim_idle_ms": 60000
+  "claim_idle_ms": 60000,
+  "max_deliveries": 10,
+  "dead_letter_stream": "orders:dlq"
 }
 ```
 
@@ -192,6 +194,11 @@ starts again from `start_from`.
   first re-reads its own pending entries. Entries left pending by a crashed
   consumer are taken over with `XAUTOCLAIM` once they have been idle for
   `claim_idle_ms`.
+- An entry that still fails after `max_deliveries` deliveries (default 10)
+  is a poison entry. It is copied to `dead_letter_stream` (default
+  `<stream>:dlq`) with `orch8_source_id`, `orch8_deliveries` and
+  `orch8_error` fields, then `XACK`ed, and counted in
+  `orch8_trigger_dead_lettered_total`.
 - `data` is the `payload_field` value (parsed as JSON when possible). If that
   field is absent, `data` is the whole field map. The message id is
   `stream/entry-id`.

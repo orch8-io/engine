@@ -9,6 +9,11 @@
 //! `XAUTOCLAIM`s entries idle longer than `claim_idle_ms` from crashed
 //! consumers.
 //!
+//! An entry that still cannot be delivered after `max_deliveries` deliveries
+//! (a poison entry: oversized payload, missing sequence) is copied to
+//! `dead_letter_stream` with the error, then `XACK`ed, so it stops being
+//! re-claimed every `claim_idle_ms` for ever.
+//!
 //! ```json
 //! {
 //!   "url": "credentials://redis-url",   // redis:// or rediss:// (TLS)
@@ -18,7 +23,9 @@
 //!   "payload_field": "payload",      // field holding the JSON body
 //!   "batch_size": 50,
 //!   "block_ms": 5000,
-//!   "claim_idle_ms": 60000
+//!   "claim_idle_ms": 60000,
+//!   "max_deliveries": 10,          // then dead-lettered
+//!   "dead_letter_stream": "orders:dlq" // default: <stream>:dlq
 //! }
 //! ```
 
@@ -39,6 +46,8 @@ pub struct RedisStreamsConfig {
     pub batch_size: usize,
     pub block_ms: usize,
     pub claim_idle_ms: usize,
+    pub max_deliveries: usize,
+    pub dead_letter_stream: String,
 }
 
 impl std::fmt::Debug for RedisStreamsConfig {
@@ -78,13 +87,16 @@ impl RedisStreamsConfig {
         let as_usize = |n: u64| usize::try_from(n).map_err(|_| "value out of range".to_string());
         Ok(Self {
             url,
-            stream,
+            stream: stream.clone(),
             group: opt_str(config, "group")?,
             start_id,
             payload_field: opt_str(config, "payload_field")?.unwrap_or_else(|| "payload".into()),
             batch_size: as_usize(opt_u64(config, "batch_size", 50, 1, 1000)?)?,
             block_ms: as_usize(opt_u64(config, "block_ms", 5000, 0, 60_000)?)?,
             claim_idle_ms: as_usize(opt_u64(config, "claim_idle_ms", 60_000, 1000, 86_400_000)?)?,
+            max_deliveries: as_usize(opt_u64(config, "max_deliveries", 10, 1, 1000)?)?,
+            dead_letter_stream: opt_str(config, "dead_letter_stream")?
+                .unwrap_or_else(|| format!("{stream}:dlq")),
         })
     }
 
@@ -125,6 +137,12 @@ pub fn map_entry(
     (data, meta, format!("{stream}/{id}"))
 }
 
+/// Whether an entry delivered `delivered` times has used up its budget.
+#[must_use]
+pub fn exhausted(delivered: usize, max_deliveries: usize) -> bool {
+    delivered >= max_deliveries
+}
+
 #[cfg(feature = "redis-streams")]
 pub use listener::run;
 
@@ -136,7 +154,8 @@ mod listener {
 
     use redis::AsyncCommands;
     use redis::streams::{
-        StreamAutoClaimOptions, StreamAutoClaimReply, StreamId, StreamReadOptions, StreamReadReply,
+        StreamAutoClaimOptions, StreamAutoClaimReply, StreamId, StreamPendingCountReply,
+        StreamReadOptions, StreamReadReply,
     };
     use tokio_util::sync::CancellationToken;
     use tracing::{error, info, warn};
@@ -180,7 +199,14 @@ mod listener {
             match deliver(storage, trigger, data, meta, &source_id).await {
                 Ok(_) => acks.push(entry.id.as_str()),
                 Err(e) => {
-                    error!(slug = %trigger.slug, id = %entry.id, error = %e, "redis stream entry not delivered; left pending");
+                    let message = e.to_string();
+                    if dead_letter_if_exhausted(con, trigger, cfg, group, entry, &fields, &message)
+                        .await?
+                    {
+                        acks.push(entry.id.as_str());
+                    } else {
+                        error!(slug = %trigger.slug, id = %entry.id, error = %message, "redis stream entry not delivered; left pending");
+                    }
                 }
             }
         }
@@ -188,6 +214,39 @@ mod listener {
             let _: usize = con.xack(&cfg.stream, group, &acks).await?;
         }
         Ok(entries.len())
+    }
+
+    /// When `entry` has been delivered `max_deliveries` times, copy it (with
+    /// the error) to the dead-letter stream and return `true` so the caller
+    /// `XACK`s it; otherwise leave it pending for another attempt.
+    async fn dead_letter_if_exhausted(
+        con: &mut redis::aio::MultiplexedConnection,
+        trigger: &TriggerDef,
+        cfg: &RedisStreamsConfig,
+        group: &str,
+        entry: &StreamId,
+        fields: &BTreeMap<String, String>,
+        error: &str,
+    ) -> Result<bool, redis::RedisError> {
+        let pending: StreamPendingCountReply = con
+            .xpending_count(&cfg.stream, group, &entry.id, &entry.id, 1)
+            .await?;
+        let delivered = pending.ids.first().map_or(0, |p| p.times_delivered);
+        if !super::exhausted(delivered, cfg.max_deliveries) {
+            return Ok(false);
+        }
+        let mut dead = fields.clone();
+        dead.insert("orch8_source_stream".into(), cfg.stream.clone());
+        dead.insert("orch8_source_id".into(), entry.id.clone());
+        dead.insert("orch8_trigger".into(), trigger.slug.clone());
+        dead.insert("orch8_deliveries".into(), delivered.to_string());
+        dead.insert("orch8_error".into(), error.chars().take(1024).collect());
+        let _: Option<String> = con.xadd_map(&cfg.dead_letter_stream, "*", &dead).await?;
+        crate::metrics::inc(crate::metrics::TRIGGER_DEAD_LETTERED);
+        warn!(slug = %trigger.slug, id = %entry.id, delivered,
+            dead_letter_stream = %cfg.dead_letter_stream,
+            "redis stream entry exceeded max_deliveries; moved to the dead-letter stream");
+        Ok(true)
     }
 
     /// Run the Redis Streams listener until cancelled.
@@ -355,12 +414,20 @@ mod tests {
         assert_eq!(c.payload_field, "payload");
         assert_eq!(c.batch_size, 50);
         assert_eq!(c.group_for("orders"), "orch8-orders");
+        assert_eq!(c.max_deliveries, 10);
+        assert_eq!(c.dead_letter_stream, "s:dlq");
+        assert!(!exhausted(9, c.max_deliveries) && exhausted(10, c.max_deliveries));
         let c = RedisStreamsConfig::parse(&json!({
             "url": "rediss://h:6380", "stream": "s", "group": "g", "start_id": "0",
-            "payload_field": "body", "batch_size": 5, "block_ms": 0, "claim_idle_ms": 5000
+            "payload_field": "body", "batch_size": 5, "block_ms": 0, "claim_idle_ms": 5000,
+            "max_deliveries": 3, "dead_letter_stream": "poison"
         }))
         .unwrap();
         assert_eq!(c.group_for("x"), "g");
+        assert_eq!(
+            (c.max_deliveries, c.dead_letter_stream.as_str()),
+            (3, "poison")
+        );
         assert_eq!(c.start_id, "0");
         assert!(!format!("{c:?}").contains("rediss://h"));
         assert!(
@@ -384,6 +451,7 @@ mod tests {
             json!({"url": "redis://h", "stream": "s", "start_id": "latest"}),
             json!({"url": "redis://h", "stream": "s", "batch_size": 0}),
             json!({"url": "redis://h", "stream": "s", "claim_idle_ms": 10}),
+            json!({"url": "redis://h", "stream": "s", "max_deliveries": 0}),
         ] {
             assert!(RedisStreamsConfig::parse(&bad).is_err(), "{bad}");
         }
