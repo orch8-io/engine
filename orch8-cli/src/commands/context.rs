@@ -51,29 +51,41 @@ pub const LEGACY_PATH: &str = ".orch8-contexts.json";
 /// used (with a warning) when the XDG file doesn't exist yet.
 #[must_use]
 pub fn default_path() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("ORCH8_CONTEXTS_FILE") {
-        return PathBuf::from(explicit);
-    }
-    let xdg = xdg_path(
+    select_path(
+        std::env::var_os("ORCH8_CONTEXTS_FILE"),
         std::env::var_os("XDG_CONFIG_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
-    );
-    match xdg {
+        Path::new(LEGACY_PATH),
+    )
+}
+
+/// [`default_path`] precedence with the environment and the legacy location
+/// passed in, so it can be exercised without mutating process state.
+fn select_path(
+    explicit: Option<std::ffi::OsString>,
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    legacy: &Path,
+) -> PathBuf {
+    if let Some(explicit) = explicit {
+        return PathBuf::from(explicit);
+    }
+    match xdg_path(xdg_config_home, home) {
         Some(path) if path.exists() => path,
         Some(path) => {
-            let legacy = PathBuf::from(LEGACY_PATH);
             if legacy.exists() {
                 eprintln!(
-                    "warning: using legacy contexts file {LEGACY_PATH} in the current directory; \
+                    "warning: using legacy contexts file {} in the current directory; \
                      move it to {} (chmod 600)",
+                    legacy.display(),
                     path.display()
                 );
-                legacy
+                legacy.to_path_buf()
             } else {
                 path
             }
         }
-        None => PathBuf::from(LEGACY_PATH),
+        None => legacy.to_path_buf(),
     }
 }
 
@@ -157,13 +169,8 @@ pub fn run(path: &Path, cmd: ContextCmd) -> Result<()> {
             println!("Selected fleet context {name}");
         }
         ContextCmd::List => {
-            for name in store.contexts.keys() {
-                let marker = if store.selected.as_deref() == Some(name) {
-                    "*"
-                } else {
-                    " "
-                };
-                println!("{marker} {name}");
+            for line in listing(&store) {
+                println!("{line}");
             }
         }
         ContextCmd::Remove { name } => {
@@ -178,6 +185,23 @@ pub fn run(path: &Path, cmd: ContextCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// One line per context name, `*` marking the selection. Never includes
+/// URLs, tenants or credentials.
+fn listing(store: &ContextStore) -> Vec<String> {
+    store
+        .contexts
+        .keys()
+        .map(|name| {
+            let marker = if store.selected.as_deref() == Some(name) {
+                "*"
+            } else {
+                " "
+            };
+            format!("{marker} {name}")
+        })
+        .collect()
 }
 
 fn save(path: &Path, store: &ContextStore) -> Result<()> {
@@ -313,5 +337,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "context_coverage_tests.rs"]
-mod context_coverage_tests;
+#[path = "context_store_tests.rs"]
+mod context_store_tests;
