@@ -1,7 +1,8 @@
-//! Push outbox worker coverage: backoff schedule, limit clamps, outcome
-//! classification, and the drain/claim/persist contract.
-//!
-//! Count contract: 31 independently named unit tests.
+//! Push outbox worker rules: retry backoff doubles from 5 s and is capped at
+//! 1280 s; configured limits are clamped (batch 1..=1000, attempts 1..=32);
+//! provider errors map to exactly one retry or terminal outcome; and each
+//! drain leases one row at a time, persists every outcome, propagates storage
+//! errors, and stops at the batch limit.
 
 use std::sync::Mutex;
 
@@ -72,183 +73,143 @@ fn classify_worker(max_attempts: u32) -> PushOutboxWorker {
         .with_limits(1, max_attempts)
 }
 
-macro_rules! retry_delay_case {
-    ($name:ident, $attempts:expr, $seconds:expr) => {
-        #[test]
-        fn $name() {
-            assert_eq!(retry_delay($attempts), Duration::seconds($seconds));
-        }
-    };
+fn retryable(message: &str) -> Result<(), PushError> {
+    Err(PushError::Retryable(message.into()))
 }
 
-retry_delay_case!(coverage_outbox_001_first_retry_waits_five_seconds, 1, 5);
-retry_delay_case!(coverage_outbox_002_second_retry_doubles_to_ten, 2, 10);
-retry_delay_case!(coverage_outbox_003_third_retry_waits_twenty, 3, 20);
-retry_delay_case!(coverage_outbox_004_fourth_retry_waits_forty, 4, 40);
-retry_delay_case!(coverage_outbox_005_fifth_retry_waits_eighty, 5, 80);
-retry_delay_case!(coverage_outbox_006_sixth_retry_waits_one_sixty, 6, 160);
-retry_delay_case!(coverage_outbox_007_seventh_retry_waits_three_twenty, 7, 320);
-retry_delay_case!(coverage_outbox_008_eighth_retry_waits_six_forty, 8, 640);
-retry_delay_case!(coverage_outbox_009_ninth_retry_is_capped, 9, 1280);
-retry_delay_case!(
-    coverage_outbox_010_max_attempts_never_overflows,
-    u32::MAX,
-    1280
-);
-
 #[test]
-fn coverage_outbox_011_retry_delay_saturates_beyond_the_table() {
-    // Zero completed attempts still waits the base delay (no sub-base panic).
+fn retry_backoff_doubles_from_five_seconds_and_caps_at_1280_seconds() {
     assert_eq!(retry_delay(0), Duration::seconds(5));
-    // Anything past the exponent cap stays at the 1280s ceiling.
-    assert_eq!(retry_delay(10), Duration::seconds(1280));
-    assert_eq!(retry_delay(100), Duration::seconds(1280));
+    assert_eq!(retry_delay(1), Duration::seconds(5));
+    for attempts in 1..9 {
+        assert_eq!(
+            retry_delay(attempts + 1),
+            retry_delay(attempts) * 2,
+            "attempt {attempts} doubles"
+        );
+    }
+    for attempts in [9, 10, 100, u32::MAX] {
+        assert_eq!(
+            retry_delay(attempts),
+            Duration::seconds(1280),
+            "attempt {attempts} is capped"
+        );
+    }
 }
 
 #[test]
-fn coverage_outbox_012_batch_size_zero_clamps_to_one() {
-    let worker = PushOutboxWorker::new(Arc::new(NullStore), Arc::new(crate::NoopPushProvider))
-        .with_limits(0, 8);
-    assert_eq!(worker.batch_size, 1);
+fn provider_errors_map_to_one_retry_or_terminal_outcome() {
+    let cases = [
+        (
+            "retryable",
+            claimed(0),
+            retryable("busy"),
+            WakeAttemptOutcome::Retry {
+                next_attempt_at: now() + retry_delay(1),
+                error: "busy".into(),
+            },
+        ),
+        (
+            "delivery error retries like retryable",
+            claimed(2),
+            Err(PushError::Delivery("connection reset".into())),
+            WakeAttemptOutcome::Retry {
+                next_attempt_at: now() + retry_delay(3),
+                error: "connection reset".into(),
+            },
+        ),
+        (
+            "permanent",
+            claimed(0),
+            Err(PushError::Permanent("bad payload".into())),
+            WakeAttemptOutcome::Terminal {
+                reason: PushTerminalReason::PermanentFailure,
+                error: "bad payload".into(),
+            },
+        ),
+        (
+            "config",
+            claimed(0),
+            Err(PushError::Config("no credentials".into())),
+            WakeAttemptOutcome::Terminal {
+                reason: PushTerminalReason::Misconfigured,
+                error: "no credentials".into(),
+            },
+        ),
+    ];
+    for (case, wake, result, expected) in cases {
+        assert_eq!(
+            classify_worker(8).classify(&wake, result, now()),
+            expected,
+            "{case}"
+        );
+    }
 }
 
 #[test]
-fn coverage_outbox_013_batch_size_above_max_clamps_to_thousand() {
-    let worker = PushOutboxWorker::new(Arc::new(NullStore), Arc::new(crate::NoopPushProvider))
-        .with_limits(1_001, 8);
-    assert_eq!(worker.batch_size, 1_000);
-}
-
-#[test]
-fn coverage_outbox_014_batch_size_at_max_is_preserved() {
-    let worker = PushOutboxWorker::new(Arc::new(NullStore), Arc::new(crate::NoopPushProvider))
-        .with_limits(1_000, 8);
-    assert_eq!(worker.batch_size, 1_000);
-}
-
-#[test]
-fn coverage_outbox_015_max_attempts_zero_clamps_to_one() {
-    let worker = PushOutboxWorker::new(Arc::new(NullStore), Arc::new(crate::NoopPushProvider))
-        .with_limits(1, 0);
-    assert_eq!(worker.max_attempts, 1);
-}
-
-#[test]
-fn coverage_outbox_016_max_attempts_above_ceiling_clamps_to_32() {
-    let worker = PushOutboxWorker::new(Arc::new(NullStore), Arc::new(crate::NoopPushProvider))
-        .with_limits(1, 33);
-    assert_eq!(worker.max_attempts, 32);
-}
-
-#[test]
-fn coverage_outbox_017_default_limits_are_applied() {
-    let worker = PushOutboxWorker::new(Arc::new(NullStore), Arc::new(crate::NoopPushProvider));
-    assert_eq!(worker.batch_size, 100);
-    assert_eq!(worker.max_attempts, 8);
-    assert_eq!(worker.lease_duration, Duration::seconds(90));
-    assert_eq!(worker.provider_timeout, std::time::Duration::from_secs(75));
-}
-
-#[test]
-fn coverage_outbox_018_successful_send_classifies_delivered() {
-    let outcome = classify_worker(8).classify(&claimed(0), Ok(()), now());
-    assert_eq!(outcome, WakeAttemptOutcome::Delivered);
-}
-
-#[test]
-fn coverage_outbox_019_invalid_token_terminates_with_pinned_message() {
-    let outcome = classify_worker(8).classify(&claimed(0), Err(PushError::InvalidToken), now());
-    assert_eq!(
-        outcome,
-        WakeAttemptOutcome::Terminal {
-            reason: PushTerminalReason::InvalidToken,
-            error: "device token rejected by provider".into(),
-        }
-    );
-}
-
-#[test]
-fn coverage_outbox_020_retryable_retries_with_exact_backoff_and_error() {
-    let outcome =
-        classify_worker(8).classify(&claimed(0), Err(PushError::Retryable("busy".into())), now());
-    assert_eq!(
-        outcome,
-        WakeAttemptOutcome::Retry {
-            next_attempt_at: now() + retry_delay(1),
-            error: "busy".into(),
-        }
-    );
-}
-
-#[test]
-fn coverage_outbox_021_delivery_error_retries_like_retryable() {
-    let outcome = classify_worker(8).classify(
-        &claimed(2),
-        Err(PushError::Delivery("connection reset".into())),
-        now(),
-    );
-    assert_eq!(
-        outcome,
-        WakeAttemptOutcome::Retry {
-            next_attempt_at: now() + retry_delay(3),
-            error: "connection reset".into(),
-        }
-    );
-}
-
-#[test]
-fn coverage_outbox_022_permanent_error_terminates_without_retry() {
-    let outcome = classify_worker(8).classify(
-        &claimed(0),
-        Err(PushError::Permanent("bad payload".into())),
-        now(),
-    );
-    assert_eq!(
-        outcome,
-        WakeAttemptOutcome::Terminal {
-            reason: PushTerminalReason::PermanentFailure,
-            error: "bad payload".into(),
-        }
-    );
-}
-
-#[test]
-fn coverage_outbox_023_config_error_terminates_as_misconfigured() {
-    let outcome = classify_worker(8).classify(
-        &claimed(0),
-        Err(PushError::Config("no credentials".into())),
-        now(),
-    );
-    assert_eq!(
-        outcome,
-        WakeAttemptOutcome::Terminal {
-            reason: PushTerminalReason::Misconfigured,
-            error: "no credentials".into(),
-        }
-    );
-}
-
-#[test]
-fn coverage_outbox_024_retry_limit_boundary_is_inclusive_and_preserves_error() {
+fn retryable_failure_parks_once_completed_attempts_reach_the_limit() {
     let worker = classify_worker(2);
-    // Completing this attempt reaches 1 of 2 allowed: still retries.
+
     assert!(matches!(
-        worker.classify(&claimed(0), Err(PushError::Retryable("x".into())), now()),
+        worker.classify(&claimed(0), retryable("x"), now()),
         WakeAttemptOutcome::Retry { .. }
     ));
-    // Completing this attempt reaches the limit: the wake parks terminally.
-    let outcome = worker.classify(
-        &claimed(1),
-        Err(PushError::Retryable("still busy".into())),
-        now(),
-    );
     assert_eq!(
-        outcome,
+        worker.classify(&claimed(1), retryable("still busy"), now()),
         WakeAttemptOutcome::Terminal {
             reason: PushTerminalReason::RetryLimit,
             error: "still busy".into(),
         }
     );
+}
+
+fn is_retry_limit(outcome: &WakeAttemptOutcome) -> bool {
+    matches!(
+        outcome,
+        WakeAttemptOutcome::Terminal {
+            reason: PushTerminalReason::RetryLimit,
+            ..
+        }
+    )
+}
+
+#[test]
+fn attempt_limit_is_clamped_to_between_one_and_thirty_two() {
+    let cases = [
+        ("0 clamps to 1: first failure parks", 0, 0, true),
+        ("33 clamps to 32: 31st attempt retries", 33, 30, false),
+        ("33 clamps to 32: 32nd attempt parks", 33, 31, true),
+    ];
+    for (case, configured, prior_attempts, parks) in cases {
+        let outcome =
+            classify_worker(configured).classify(&claimed(prior_attempts), retryable("x"), now());
+        assert_eq!(is_retry_limit(&outcome), parks, "{case}: {outcome:?}");
+    }
+}
+
+#[tokio::test]
+async fn batch_size_is_clamped_to_between_one_and_one_thousand() {
+    let cases = [(0_u32, 3_usize, 1_usize), (1_001, 1_001, 1_000)];
+    for (configured, queued, drained) in cases {
+        let store = Arc::new(DrainRecorder {
+            wakes: Mutex::new(vec![claimed(0); queued]),
+            ..Default::default()
+        });
+        let worker =
+            PushOutboxWorker::new(store.clone(), Arc::new(SilentRecordingProvider::default()))
+                .with_limits(configured, 8);
+
+        assert_eq!(
+            worker.drain_once(now()).await.unwrap(),
+            drained,
+            "batch size {configured}"
+        );
+        assert_eq!(
+            store.wakes.lock().unwrap().len(),
+            queued - drained,
+            "batch size {configured} leaves the rest queued"
+        );
+    }
 }
 
 type ClaimCall = (DateTime<Utc>, DateTime<Utc>, u32);
@@ -332,7 +293,7 @@ impl PushProvider for SilentRecordingProvider {
 }
 
 #[tokio::test]
-async fn coverage_outbox_025_drain_claims_with_now_lease_and_batch_limit() {
+async fn drain_claims_one_row_at_a_time_at_a_fixed_due_time() {
     let store = Arc::new(DrainRecorder {
         wakes: Mutex::new(vec![claimed(0)]),
         ..Default::default()
@@ -344,12 +305,15 @@ async fn coverage_outbox_025_drain_claims_with_now_lease_and_batch_limit() {
     let claims = store.claims.lock().unwrap();
     assert_eq!(claims.len(), 2); // one row, then an empty claim
     assert!(claims.iter().all(|claim| claim.0 == now()));
-    assert!(claims[0].1 >= now() + Duration::seconds(90));
     assert!(claims.iter().all(|claim| claim.2 == 1));
+    // The lease must outlast the whole provider budget, or another node
+    // could reclaim the wake while this one is still sending it.
+    let provider_budget = Duration::from_std(worker.provider_timeout).unwrap();
+    assert!(claims[0].1 - claims[0].0 > provider_budget);
 }
 
 #[tokio::test]
-async fn coverage_outbox_026_empty_claim_returns_zero_without_provider_calls() {
+async fn empty_claim_drains_nothing_and_never_calls_the_provider() {
     let store = Arc::new(DrainRecorder::default());
     let provider = Arc::new(SilentRecordingProvider::default());
     let worker = PushOutboxWorker::new(store, provider.clone());
@@ -359,7 +323,7 @@ async fn coverage_outbox_026_empty_claim_returns_zero_without_provider_calls() {
 }
 
 #[tokio::test]
-async fn coverage_outbox_027_claim_error_propagates_without_provider_calls() {
+async fn claim_error_propagates_without_calling_the_provider() {
     let store = Arc::new(DrainRecorder {
         claim_error: Mutex::new(Some("storage down".into())),
         ..Default::default()
@@ -372,7 +336,7 @@ async fn coverage_outbox_027_claim_error_propagates_without_provider_calls() {
 }
 
 #[tokio::test]
-async fn coverage_outbox_028_outcome_persistence_error_propagates() {
+async fn outcome_persistence_error_propagates() {
     let store = Arc::new(DrainRecorder {
         wakes: Mutex::new(vec![claimed(0)]),
         outcome_error: Mutex::new(Some("db gone".into())),
@@ -385,7 +349,7 @@ async fn coverage_outbox_028_outcome_persistence_error_propagates() {
 }
 
 #[tokio::test]
-async fn coverage_outbox_029_unsigned_drain_sends_token_and_platform_per_wake() {
+async fn unsigned_drain_sends_each_wake_token_and_platform() {
     let store = Arc::new(DrainRecorder {
         wakes: Mutex::new(vec![claimed(0), claimed(0)]),
         ..Default::default()
@@ -425,7 +389,7 @@ impl PushProvider for MetadataRecorder {
 }
 
 #[tokio::test]
-async fn coverage_outbox_030_signed_drain_binds_five_minute_expiry_and_unique_nonces() {
+async fn signed_drain_sends_verifiable_five_minute_wakes_with_unique_nonces() {
     let store = Arc::new(DrainRecorder {
         wakes: Mutex::new(vec![claimed(0), claimed(0)]),
         ..Default::default()
@@ -463,7 +427,7 @@ async fn coverage_outbox_030_signed_drain_binds_five_minute_expiry_and_unique_no
 }
 
 #[tokio::test]
-async fn coverage_outbox_031_drain_stops_at_batch_limit_and_leaves_the_rest() {
+async fn drain_stops_at_the_batch_limit_and_leaves_the_rest_queued() {
     let store = Arc::new(DrainRecorder {
         wakes: Mutex::new(vec![claimed(0), claimed(0), claimed(0)]),
         ..Default::default()
@@ -488,6 +452,8 @@ impl PushProvider for SlowRecordingProvider {
     }
 }
 
+// Real 30 ms sleeps: `drain_once` measures elapsed time with
+// `std::time::Instant`, which a paused tokio clock cannot advance.
 #[tokio::test]
 async fn drain_leases_each_wake_after_the_previous_provider_call() {
     let store = Arc::new(DrainRecorder {

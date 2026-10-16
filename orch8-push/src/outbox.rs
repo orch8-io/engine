@@ -449,5 +449,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "outbox_coverage_tests.rs"]
-mod outbox_coverage_tests;
+#[path = "outbox_drain_tests.rs"]
+mod outbox_drain_tests;

@@ -478,9 +478,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "governance_boundary_tests.rs"]
-mod boundary_tests;
-
-#[cfg(test)]
-#[path = "governance_coverage_tests.rs"]
-mod governance_coverage_tests;
+#[path = "governance_wake_tests.rs"]
+mod governance_wake_tests;
