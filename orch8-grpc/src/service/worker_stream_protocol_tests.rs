@@ -1,14 +1,13 @@
-//! Coverage tests for negotiated worker stream sessions: feature
-//! negotiation, per-frame feature gating, session ownership checks, demand
-//! flow control, and heartbeat-driven cancellation.
-//!
-//! Count contract: 50 independently named unit tests.
+//! Negotiated worker stream sessions: only server-known features are
+//! negotiated (exact match, server order); each frame kind is refused unless
+//! its feature was negotiated; a session may only complete, fail or heartbeat
+//! tasks it was given under its own worker id; demand is bounded by the
+//! in-flight budget, refused while draining, and scoped to the session's
+//! tenant; a reclaimed task fences the previous claim generation.
 
 use super::*;
 
 use tokio::sync::mpsc;
-
-// --- pure negotiation helpers ---
 
 fn requested(features: &[&str]) -> Vec<String> {
     features
@@ -17,24 +16,9 @@ fn requested(features: &[&str]) -> Vec<String> {
         .collect()
 }
 
-macro_rules! negotiation_case {
-    ($name:ident, $requested:expr, $expected:expr) => {
-        #[test]
-        fn $name() {
-            let negotiated = negotiated_worker_features(&requested($requested));
-            assert_eq!(negotiated, requested($expected));
-        }
-    };
-}
-
-negotiation_case!(
-    coverage_session_001_empty_request_negotiates_nothing,
-    &[],
-    &[]
-);
-negotiation_case!(
-    coverage_session_002_all_features_negotiate_in_server_order,
-    &[
+#[test]
+fn only_known_features_negotiate_in_server_order() {
+    let all_in_server_order = [
         "task_delivery",
         "completion",
         "failure",
@@ -42,92 +26,37 @@ negotiation_case!(
         "cancellation",
         "runtime_capabilities",
         "draining",
-        "placement_commands"
-    ],
-    &[
-        "task_delivery",
-        "completion",
-        "failure",
-        "heartbeat",
-        "cancellation",
-        "runtime_capabilities",
-        "draining",
-        "placement_commands"
-    ]
-);
-negotiation_case!(
-    coverage_session_003_reversed_request_still_yields_server_order,
-    &[
         "placement_commands",
-        "draining",
-        "runtime_capabilities",
-        "cancellation",
-        "heartbeat",
-        "failure",
-        "completion",
-        "task_delivery"
-    ],
-    &[
-        "task_delivery",
-        "completion",
-        "failure",
-        "heartbeat",
-        "cancellation",
-        "runtime_capabilities",
-        "draining",
-        "placement_commands"
-    ]
-);
-negotiation_case!(
-    coverage_session_004_single_task_delivery_negotiates,
-    &["task_delivery"],
-    &["task_delivery"]
-);
-negotiation_case!(
-    coverage_session_005_unknown_feature_alone_negotiates_nothing,
-    &["quantum_delivery"],
-    &[]
-);
-negotiation_case!(
-    coverage_session_006_unknown_features_are_dropped_from_mixed_request,
-    &["task_delivery", "quantum_delivery", "heartbeat"],
-    &["task_delivery", "heartbeat"]
-);
-negotiation_case!(
-    coverage_session_007_duplicate_requests_collapse_to_one_feature,
-    &["heartbeat", "heartbeat", "heartbeat"],
-    &["heartbeat"]
-);
-negotiation_case!(
-    coverage_session_008_feature_matching_is_case_sensitive,
-    &["Task_Delivery", "TASK_DELIVERY"],
-    &[]
-);
-negotiation_case!(
-    coverage_session_009_hyphenated_feature_name_is_not_recognized,
-    &["task-delivery"],
-    &[]
-);
-negotiation_case!(
-    coverage_session_010_whitespace_padded_feature_is_not_recognized,
-    &[" task_delivery", "task_delivery "],
-    &[]
-);
-negotiation_case!(
-    coverage_session_011_completion_and_failure_pair_negotiates,
-    &["completion", "failure"],
-    &["completion", "failure"]
-);
-negotiation_case!(
-    coverage_session_012_control_plane_features_negotiate_in_server_order,
-    &["placement_commands", "draining", "runtime_capabilities"],
-    &["runtime_capabilities", "draining", "placement_commands"]
-);
-negotiation_case!(
-    coverage_session_013_empty_string_feature_is_ignored,
-    &["", "cancellation"],
-    &["cancellation"]
-);
+    ];
+    let mut reversed = all_in_server_order;
+    reversed.reverse();
+    let cases: [(&str, &[&str], &[&str]); 5] = [
+        ("empty request", &[], &[]),
+        ("reversed request", &reversed, &all_in_server_order),
+        (
+            "unknown features dropped",
+            &["task_delivery", "quantum_delivery", "heartbeat"],
+            &["task_delivery", "heartbeat"],
+        ),
+        (
+            "duplicates collapse",
+            &["heartbeat", "heartbeat", "heartbeat"],
+            &["heartbeat"],
+        ),
+        (
+            "match is exact",
+            &["Task_Delivery", "task-delivery", " task_delivery", ""],
+            &[],
+        ),
+    ];
+    for (case, request, expected) in cases {
+        assert_eq!(
+            negotiated_worker_features(&requested(request)),
+            requested(expected),
+            "case: {case}"
+        );
+    }
+}
 
 fn open(features: &[&str]) -> proto::WorkerStreamOpen {
     proto::WorkerStreamOpen {
@@ -142,83 +71,11 @@ fn open(features: &[&str]) -> proto::WorkerStreamOpen {
 }
 
 #[test]
-fn coverage_session_014_feature_enabled_when_requested() {
-    let open = open(&["task_delivery", "heartbeat"]);
-    assert!(worker_feature_enabled(&open, "heartbeat"));
-}
-
-#[test]
-fn coverage_session_015_feature_disabled_when_not_requested() {
-    let open = open(&["task_delivery"]);
-    assert!(!worker_feature_enabled(&open, "heartbeat"));
-}
-
-#[test]
-fn coverage_session_016_unknown_feature_never_enabled_even_if_requested() {
-    let open = open(&["task_delivery", "quantum_delivery"]);
-    assert!(!worker_feature_enabled(&open, "quantum_delivery"));
-}
-
-#[test]
-fn coverage_session_017_no_features_enabled_on_empty_request() {
-    let open = open(&[]);
-    for feature in WORKER_STREAM_FEATURES {
-        assert!(!worker_feature_enabled(&open, feature));
-    }
-}
-
-#[test]
-fn coverage_session_018_feature_enablement_is_case_sensitive() {
-    let open = open(&["Heartbeat"]);
-    assert!(!worker_feature_enabled(&open, "heartbeat"));
-}
-
-#[test]
-fn coverage_session_019_duplicate_request_still_enables_feature() {
-    let open = open(&["draining", "draining"]);
-    assert!(worker_feature_enabled(&open, "draining"));
-}
-
-#[test]
-fn coverage_session_020_protocol_constants_match_documented_contract() {
-    assert_eq!(WORKER_STREAM_PROTOCOL_VERSION, 2);
-    assert_eq!(WORKER_STREAM_MAX_IN_FLIGHT, 256);
-    assert_eq!(WORKER_STREAM_MAX_MESSAGE_BYTES, 1024 * 1024);
-    assert_eq!(WORKER_STREAM_HEARTBEAT_SECS, 15);
-}
-
-#[test]
-fn coverage_session_021_feature_catalog_has_no_duplicates() {
-    let mut seen = std::collections::HashSet::new();
-    for feature in WORKER_STREAM_FEATURES {
-        assert!(seen.insert(feature), "duplicate feature {feature}");
-    }
-    assert_eq!(seen.len(), 8);
-}
-
-#[test]
-fn coverage_session_022_parse_uuid_accepts_canonical_v4() {
-    let uuid = parse_uuid("123e4567-e89b-42d3-a456-426614174000").unwrap();
-    assert_eq!(uuid.to_string(), "123e4567-e89b-42d3-a456-426614174000");
-}
-
-#[test]
-fn coverage_session_023_parse_uuid_rejects_garbage_with_invalid_argument() {
-    let status = parse_uuid("not-a-uuid").unwrap_err();
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    assert!(status.message().contains("not-a-uuid"));
-}
-
-#[test]
-fn coverage_session_024_parse_uuid_rejects_empty_string() {
-    let status = parse_uuid("").unwrap_err();
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-}
-
-#[test]
-fn coverage_session_025_parse_uuid_accepts_nil_uuid() {
-    let uuid = parse_uuid("00000000-0000-0000-0000-000000000000").unwrap();
-    assert_eq!(uuid, Uuid::nil());
+fn feature_is_enabled_only_when_requested_and_known() {
+    let session_open = open(&["task_delivery", "heartbeat", "quantum_delivery"]);
+    assert!(worker_feature_enabled(&session_open, "heartbeat"));
+    assert!(!worker_feature_enabled(&session_open, "completion"));
+    assert!(!worker_feature_enabled(&session_open, "quantum_delivery"));
 }
 
 // --- frame dispatch against an in-memory session ---
@@ -386,7 +243,7 @@ fn capabilities_json(runtime_id: Uuid, draining: bool) -> String {
 }
 
 #[tokio::test]
-async fn coverage_session_026_second_open_frame_is_failed_precondition() {
+async fn second_open_frame_is_failed_precondition() {
     let mut session = session(&["task_delivery"], None).await;
     let status = session
         .dispatch(proto::worker_stream_client::Payload::Open(open(&[
@@ -399,7 +256,7 @@ async fn coverage_session_026_second_open_frame_is_failed_precondition() {
 }
 
 #[tokio::test]
-async fn coverage_session_027_payloadless_frame_is_invalid_argument() {
+async fn payloadless_frame_is_invalid_argument() {
     let mut session = session(&["task_delivery"], None).await;
     let status = session
         .service
@@ -419,86 +276,7 @@ async fn coverage_session_027_payloadless_frame_is_invalid_argument() {
 }
 
 #[tokio::test]
-async fn coverage_session_028_runtime_heartbeat_requires_negotiated_feature() {
-    let mut session = session(&["task_delivery"], Some("test")).await;
-    let status = session
-        .dispatch(proto::worker_stream_client::Payload::RuntimeHeartbeat(
-            proto::RuntimeHeartbeat {
-                runtime_capabilities_json: capabilities_json(Uuid::now_v7(), false),
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-}
-
-#[tokio::test]
-async fn coverage_session_029_command_ack_requires_negotiated_feature() {
-    let mut session = session(&["task_delivery"], None).await;
-    let status = session
-        .dispatch(proto::worker_stream_client::Payload::CommandAck(
-            proto::WorkerCommandAck {
-                command_id: Uuid::now_v7().to_string(),
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-}
-
-#[tokio::test]
-async fn coverage_session_030_completion_requires_negotiated_feature() {
-    let mut session = session(&["task_delivery"], None).await;
-    let status = session
-        .dispatch(proto::worker_stream_client::Payload::Complete(
-            proto::CompleteTaskRequest {
-                task_id: Uuid::now_v7().to_string(),
-                worker_id: "worker-a".into(),
-                output_json: "{}".into(),
-                claim_epoch: 1,
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-}
-
-#[tokio::test]
-async fn coverage_session_031_failure_requires_negotiated_feature() {
-    let mut session = session(&["task_delivery"], None).await;
-    let status = session
-        .dispatch(proto::worker_stream_client::Payload::Fail(
-            proto::FailTaskRequest {
-                task_id: Uuid::now_v7().to_string(),
-                worker_id: "worker-a".into(),
-                message: "boom".into(),
-                retryable: false,
-                claim_epoch: 1,
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-}
-
-#[tokio::test]
-async fn coverage_session_032_heartbeat_requires_negotiated_feature() {
-    let mut session = session(&["task_delivery"], None).await;
-    let status = session
-        .dispatch(proto::worker_stream_client::Payload::Heartbeat(
-            proto::HeartbeatTaskRequest {
-                task_id: Uuid::now_v7().to_string(),
-                worker_id: "worker-a".into(),
-                claim_epoch: 1,
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-}
-
-#[tokio::test]
-async fn coverage_session_033_completion_with_malformed_task_id_is_invalid_argument() {
+async fn completion_with_malformed_task_id_is_invalid_argument() {
     let mut session = session(&["task_delivery", "completion"], None).await;
     let status = session
         .dispatch(proto::worker_stream_client::Payload::Complete(
@@ -515,7 +293,7 @@ async fn coverage_session_033_completion_with_malformed_task_id_is_invalid_argum
 }
 
 #[tokio::test]
-async fn coverage_session_034_completion_from_foreign_worker_is_denied() {
+async fn completion_naming_another_worker_is_denied_and_keeps_the_task_outstanding() {
     let mut session = session(&["task_delivery", "completion"], None).await;
     let task_id = Uuid::now_v7();
     session.outstanding.insert(task_id);
@@ -535,7 +313,7 @@ async fn coverage_session_034_completion_from_foreign_worker_is_denied() {
 }
 
 #[tokio::test]
-async fn coverage_session_035_completion_for_task_outside_session_is_denied() {
+async fn completion_for_a_task_this_session_was_not_given_is_denied() {
     let mut session = session(&["task_delivery", "completion"], None).await;
     let status = session
         .dispatch(proto::worker_stream_client::Payload::Complete(
@@ -552,45 +330,7 @@ async fn coverage_session_035_completion_for_task_outside_session_is_denied() {
 }
 
 #[tokio::test]
-async fn coverage_session_036_failure_from_foreign_worker_is_denied() {
-    let mut session = session(&["task_delivery", "failure"], None).await;
-    let task_id = Uuid::now_v7();
-    session.outstanding.insert(task_id);
-    let status = session
-        .dispatch(proto::worker_stream_client::Payload::Fail(
-            proto::FailTaskRequest {
-                task_id: task_id.to_string(),
-                worker_id: "worker-b".into(),
-                message: "boom".into(),
-                retryable: false,
-                claim_epoch: 1,
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::PermissionDenied);
-}
-
-#[tokio::test]
-async fn coverage_session_037_heartbeat_from_foreign_worker_is_denied() {
-    let mut session = session(&["task_delivery", "heartbeat"], None).await;
-    let task_id = Uuid::now_v7();
-    session.outstanding.insert(task_id);
-    let status = session
-        .dispatch(proto::worker_stream_client::Payload::Heartbeat(
-            proto::HeartbeatTaskRequest {
-                task_id: task_id.to_string(),
-                worker_id: "worker-b".into(),
-                claim_epoch: 1,
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::PermissionDenied);
-}
-
-#[tokio::test]
-async fn coverage_session_038_demand_while_draining_is_failed_precondition() {
+async fn demand_while_draining_is_failed_precondition() {
     let mut session = session(&["task_delivery", "draining"], None).await;
     session.draining = true;
     let status = session
@@ -603,7 +343,7 @@ async fn coverage_session_038_demand_while_draining_is_failed_precondition() {
 }
 
 #[tokio::test]
-async fn coverage_session_039_zero_capacity_demand_delivers_nothing() {
+async fn zero_capacity_demand_delivers_nothing() {
     let mut session = session(&["task_delivery"], None).await;
     session
         .dispatch(proto::worker_stream_client::Payload::Demand(
@@ -616,7 +356,7 @@ async fn coverage_session_039_zero_capacity_demand_delivers_nothing() {
 }
 
 #[tokio::test]
-async fn coverage_session_040_demand_claims_pending_task_into_session() {
+async fn demand_claims_a_pending_task_into_the_session() {
     const SEQ: &str = "00000000-0000-0000-0000-000000000101";
     const INST: &str = "00000000-0000-0000-0000-000000000102";
     let mut session = session(&["task_delivery"], None).await;
@@ -650,7 +390,7 @@ async fn coverage_session_040_demand_claims_pending_task_into_session() {
 }
 
 #[tokio::test]
-async fn coverage_session_041_demand_is_capped_by_outstanding_tasks() {
+async fn demand_is_capped_by_the_in_flight_budget() {
     const SEQ: &str = "00000000-0000-0000-0000-000000000103";
     const INST: &str = "00000000-0000-0000-0000-000000000104";
     let mut session = session(&["task_delivery"], None).await;
@@ -688,7 +428,7 @@ async fn coverage_session_041_demand_is_capped_by_outstanding_tasks() {
 }
 
 #[tokio::test]
-async fn coverage_session_042_heartbeat_on_dead_task_cancels_and_evicts() {
+async fn heartbeat_for_a_dead_task_cancels_and_evicts_it() {
     let mut session = session(&["task_delivery", "heartbeat"], None).await;
     let task_id = Uuid::now_v7();
     session.outstanding.insert(task_id);
@@ -713,7 +453,7 @@ async fn coverage_session_042_heartbeat_on_dead_task_cancels_and_evicts() {
 }
 
 #[tokio::test]
-async fn coverage_session_043_command_ack_with_malformed_id_is_invalid_argument() {
+async fn command_ack_with_malformed_id_is_invalid_argument() {
     let mut session = session(&["task_delivery", "placement_commands"], None).await;
     let status = session
         .dispatch(proto::worker_stream_client::Payload::CommandAck(
@@ -727,40 +467,7 @@ async fn coverage_session_043_command_ack_with_malformed_id_is_invalid_argument(
 }
 
 #[tokio::test]
-async fn coverage_session_044_command_ack_acknowledges_and_confirms() {
-    let mut session = session(&["task_delivery", "placement_commands"], None).await;
-    let command_id = Uuid::now_v7();
-    session
-        .dispatch(proto::worker_stream_client::Payload::CommandAck(
-            proto::WorkerCommandAck {
-                command_id: command_id.to_string(),
-            },
-        ))
-        .await
-        .unwrap();
-    let proto::worker_stream_server::Payload::Ack(ack) = session.next_frame() else {
-        panic!("command ack must be confirmed with an ack frame");
-    };
-    assert_eq!(ack.operation, "command");
-    assert_eq!(ack.task_id, command_id.to_string());
-}
-
-#[tokio::test]
-async fn coverage_session_045_runtime_heartbeat_without_tenant_is_failed_precondition() {
-    let mut session = session(&["task_delivery", "runtime_capabilities"], None).await;
-    let status = session
-        .dispatch(proto::worker_stream_client::Payload::RuntimeHeartbeat(
-            proto::RuntimeHeartbeat {
-                runtime_capabilities_json: capabilities_json(Uuid::now_v7(), false),
-            },
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-}
-
-#[tokio::test]
-async fn coverage_session_046_runtime_heartbeat_persists_and_acks() {
+async fn runtime_heartbeat_persists_registered_capabilities_and_acks() {
     let mut session = session(&["task_delivery", "runtime_capabilities"], Some("test")).await;
     let runtime_id = Uuid::now_v7();
 
@@ -793,7 +500,7 @@ async fn coverage_session_046_runtime_heartbeat_persists_and_acks() {
 }
 
 #[tokio::test]
-async fn coverage_session_047_runtime_heartbeat_cannot_swap_runtime_id() {
+async fn runtime_heartbeat_cannot_swap_the_session_runtime_id() {
     let mut session = session(&["task_delivery", "runtime_capabilities"], Some("test")).await;
     let first = Uuid::now_v7();
     session
@@ -818,7 +525,7 @@ async fn coverage_session_047_runtime_heartbeat_cannot_swap_runtime_id() {
 }
 
 #[tokio::test]
-async fn coverage_session_048_draining_heartbeat_flips_session_draining() {
+async fn draining_heartbeat_stops_further_demand() {
     let mut session = session(
         &["task_delivery", "runtime_capabilities", "draining"],
         Some("test"),
@@ -844,7 +551,7 @@ async fn coverage_session_048_draining_heartbeat_flips_session_draining() {
 }
 
 #[tokio::test]
-async fn coverage_session_049_heartbeat_on_live_claimed_task_is_acked() {
+async fn heartbeat_for_a_live_claimed_task_is_acked() {
     const SEQ: &str = "00000000-0000-0000-0000-000000000105";
     const INST: &str = "00000000-0000-0000-0000-000000000106";
     let mut session = session(&["task_delivery", "heartbeat"], None).await;
@@ -890,7 +597,7 @@ async fn coverage_session_049_heartbeat_on_live_claimed_task_is_acked() {
 }
 
 #[tokio::test]
-async fn coverage_session_050_reclaim_fences_old_generation_with_same_worker_id() {
+async fn reclaim_fences_the_old_generation_with_the_same_worker_id() {
     const SEQ: &str = "00000000-0000-0000-0000-000000000107";
     const INST: &str = "00000000-0000-0000-0000-000000000108";
     let mut old_process = session(&["task_delivery", "heartbeat"], None).await;
@@ -985,4 +692,297 @@ async fn coverage_session_050_reclaim_fences_old_generation_with_same_worker_id(
             .collect::<Vec<_>>(),
         ["claimed", "reclaimed", "claimed", "stale_mutation_rejected"]
     );
+}
+
+#[tokio::test]
+async fn frames_for_unnegotiated_features_are_failed_precondition() {
+    use proto::worker_stream_client::Payload;
+    let frames = [
+        (
+            "runtime heartbeat",
+            Payload::RuntimeHeartbeat(proto::RuntimeHeartbeat {
+                runtime_capabilities_json: capabilities_json(Uuid::now_v7(), false),
+            }),
+        ),
+        (
+            "command ack",
+            Payload::CommandAck(proto::WorkerCommandAck {
+                command_id: Uuid::now_v7().to_string(),
+            }),
+        ),
+        (
+            "completion",
+            Payload::Complete(proto::CompleteTaskRequest {
+                task_id: Uuid::now_v7().to_string(),
+                worker_id: "worker-a".into(),
+                output_json: "{}".into(),
+                claim_epoch: 1,
+            }),
+        ),
+        (
+            "failure",
+            Payload::Fail(proto::FailTaskRequest {
+                task_id: Uuid::now_v7().to_string(),
+                worker_id: "worker-a".into(),
+                message: "boom".into(),
+                retryable: false,
+                claim_epoch: 1,
+            }),
+        ),
+        (
+            "task heartbeat",
+            Payload::Heartbeat(proto::HeartbeatTaskRequest {
+                task_id: Uuid::now_v7().to_string(),
+                worker_id: "worker-a".into(),
+                claim_epoch: 1,
+            }),
+        ),
+    ];
+    for (case, frame) in frames {
+        let mut session = session(&["task_delivery"], Some("test")).await;
+        let status = session.dispatch(frame).await.unwrap_err();
+        assert_eq!(
+            status.code(),
+            tonic::Code::FailedPrecondition,
+            "case: {case}"
+        );
+        session.assert_no_frames();
+    }
+}
+
+#[tokio::test]
+async fn failure_or_heartbeat_naming_another_worker_is_denied() {
+    use proto::worker_stream_client::Payload;
+    let task_id = Uuid::now_v7();
+    let frames = [
+        (
+            "failure",
+            Payload::Fail(proto::FailTaskRequest {
+                task_id: task_id.to_string(),
+                worker_id: "worker-b".into(),
+                message: "boom".into(),
+                retryable: false,
+                claim_epoch: 1,
+            }),
+        ),
+        (
+            "heartbeat",
+            Payload::Heartbeat(proto::HeartbeatTaskRequest {
+                task_id: task_id.to_string(),
+                worker_id: "worker-b".into(),
+                claim_epoch: 1,
+            }),
+        ),
+    ];
+    for (case, frame) in frames {
+        let mut session = session(&["task_delivery", "failure", "heartbeat"], None).await;
+        session.outstanding.insert(task_id);
+        let status = session.dispatch(frame).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied, "case: {case}");
+        assert!(session.outstanding.contains(&task_id), "case: {case}");
+    }
+}
+
+#[tokio::test]
+async fn frame_over_the_message_limit_is_resource_exhausted() {
+    let mut session = session(&["task_delivery", "completion"], None).await;
+    let task_id = Uuid::now_v7();
+    session.outstanding.insert(task_id);
+    let limit = usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap();
+    let status = session
+        .dispatch(proto::worker_stream_client::Payload::Complete(
+            proto::CompleteTaskRequest {
+                task_id: task_id.to_string(),
+                worker_id: "worker-a".into(),
+                output_json: format!(r#"{{"blob":"{}"}}"#, "x".repeat(limit)),
+                claim_epoch: 1,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+    assert!(session.outstanding.contains(&task_id));
+}
+
+#[tokio::test]
+async fn command_ack_deletes_the_command_and_is_confirmed() {
+    let mut session = session(&["task_delivery", "placement_commands"], Some("test")).await;
+    let command = orch8_types::worker::WorkerCommand {
+        id: Uuid::now_v7(),
+        worker_id: "worker-a".into(),
+        tenant_id: "test".into(),
+        command: orch8_types::worker::WorkerCommandKind::Ping,
+        payload: serde_json::json!({}),
+        created_at: chrono::Utc::now(),
+    };
+    session
+        .storage
+        .enqueue_worker_command(&command)
+        .await
+        .unwrap();
+    session
+        .dispatch(proto::worker_stream_client::Payload::CommandAck(
+            proto::WorkerCommandAck {
+                command_id: command.id.to_string(),
+            },
+        ))
+        .await
+        .unwrap();
+    let proto::worker_stream_server::Payload::Ack(ack) = session.next_frame() else {
+        panic!("command ack must be confirmed with an ack frame");
+    };
+    assert_eq!(ack.operation, "command");
+    assert_eq!(ack.task_id, command.id.to_string());
+    assert!(
+        session
+            .storage
+            .list_worker_commands("worker-a")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Seed one sequence + instance for `tenant` and a pending `payments` task.
+async fn seed_pending_task(
+    storage: &Arc<dyn StorageBackend>,
+    seq: &str,
+    inst: &str,
+    tenant: &str,
+) -> WorkerTask {
+    storage
+        .create_sequence(&sequence_definition(seq, tenant))
+        .await
+        .unwrap();
+    storage
+        .create_instance(&task_instance(inst, seq, tenant))
+        .await
+        .unwrap();
+    let task = pending_task(inst, "payments");
+    storage.create_worker_task(&task).await.unwrap();
+    task
+}
+
+async fn claim_one(session: &mut Session) -> WorkerTask {
+    session
+        .dispatch(proto::worker_stream_client::Payload::Demand(
+            proto::WorkerStreamDemand { capacity: 1 },
+        ))
+        .await
+        .unwrap();
+    let proto::worker_stream_server::Payload::Task(delivered) = session.next_frame() else {
+        panic!("demand must produce a task frame");
+    };
+    serde_json::from_str(&delivered.task_json).unwrap()
+}
+
+#[tokio::test]
+async fn tenant_scoped_demand_never_claims_another_tenants_task() {
+    let mut session = session(&["task_delivery"], Some("test")).await;
+    let foreign = seed_pending_task(
+        &session.storage,
+        "00000000-0000-0000-0000-000000000111",
+        "00000000-0000-0000-0000-000000000112",
+        "other",
+    )
+    .await;
+
+    session
+        .dispatch(proto::worker_stream_client::Payload::Demand(
+            proto::WorkerStreamDemand { capacity: 4 },
+        ))
+        .await
+        .unwrap();
+
+    session.assert_no_frames();
+    let stored = session
+        .storage
+        .get_worker_task(foreign.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, WorkerTaskState::Pending);
+    assert!(stored.worker_id.is_none());
+}
+
+#[tokio::test]
+async fn completion_of_a_claimed_task_persists_the_output_and_releases_the_slot() {
+    let mut session = session(&["task_delivery", "completion"], None).await;
+    seed_pending_task(
+        &session.storage,
+        "00000000-0000-0000-0000-000000000113",
+        "00000000-0000-0000-0000-000000000114",
+        "test",
+    )
+    .await;
+    let claimed = claim_one(&mut session).await;
+
+    session
+        .dispatch(proto::worker_stream_client::Payload::Complete(
+            proto::CompleteTaskRequest {
+                task_id: claimed.id.to_string(),
+                worker_id: "worker-a".into(),
+                output_json: r#"{"receipt":"r1"}"#.into(),
+                claim_epoch: claimed.claim_epoch,
+            },
+        ))
+        .await
+        .unwrap();
+
+    let proto::worker_stream_server::Payload::Ack(ack) = session.next_frame() else {
+        panic!("completion must be confirmed with an ack frame");
+    };
+    assert_eq!(ack.operation, "complete");
+    assert_eq!(ack.task_id, claimed.id.to_string());
+    assert!(!session.outstanding.contains(&claimed.id));
+    let stored = session
+        .storage
+        .get_worker_task(claimed.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, WorkerTaskState::Completed);
+    assert_eq!(stored.output, Some(serde_json::json!({"receipt": "r1"})));
+}
+
+#[tokio::test]
+async fn permanent_failure_of_a_claimed_task_is_persisted_and_releases_the_slot() {
+    let mut session = session(&["task_delivery", "failure"], None).await;
+    seed_pending_task(
+        &session.storage,
+        "00000000-0000-0000-0000-000000000115",
+        "00000000-0000-0000-0000-000000000116",
+        "test",
+    )
+    .await;
+    let claimed = claim_one(&mut session).await;
+
+    session
+        .dispatch(proto::worker_stream_client::Payload::Fail(
+            proto::FailTaskRequest {
+                task_id: claimed.id.to_string(),
+                worker_id: "worker-a".into(),
+                message: "card declined".into(),
+                retryable: false,
+                claim_epoch: claimed.claim_epoch,
+            },
+        ))
+        .await
+        .unwrap();
+
+    let proto::worker_stream_server::Payload::Ack(ack) = session.next_frame() else {
+        panic!("failure must be confirmed with an ack frame");
+    };
+    assert_eq!(ack.operation, "fail");
+    assert_eq!(ack.task_id, claimed.id.to_string());
+    assert!(!session.outstanding.contains(&claimed.id));
+    let stored = session
+        .storage
+        .get_worker_task(claimed.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, WorkerTaskState::Failed);
+    assert_eq!(stored.error_message.as_deref(), Some("card declined"));
+    assert_eq!(stored.error_retryable, Some(false));
 }

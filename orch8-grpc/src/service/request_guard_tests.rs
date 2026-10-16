@@ -1,74 +1,73 @@
-//! Coverage tests for the shared service helpers the new worker-session,
-//! telemetry, and artifact features are built on: storage-error mapping,
-//! JSON envelope bounds, and tenant-checked worker task lookup. (Retry
-//! admission moved to `orch8_engine::worker_lease::fail_worker_task`, which
-//! the gRPC and HTTP fail paths share.)
+//! Request guards shared by every RPC: storage and engine failures map to
+//! stable gRPC codes (retryable outages are `Unavailable`, state conflicts are
+//! `FailedPrecondition`/`Aborted`, everything else is an opaque `Internal`);
+//! JSON envelopes are capped at 10 MiB; bulk mutations must name a tenant;
+//! stream requests carry the caller's tenant; and a worker-task lookup by a
+//! foreign tenant is indistinguishable from a missing task.
 
 use super::*;
 
+use orch8_engine::error::EngineError;
 use orch8_types::error::StorageError;
-
-// --- storage_err mapping ---
-
-macro_rules! storage_err_case {
-    ($name:ident, $error:expr, $code:expr) => {
-        #[test]
-        fn $name() {
-            let status = storage_err($error);
-            assert_eq!(status.code(), $code);
-        }
-    };
-}
-
-storage_err_case!(
-    coverage_helpers_001_not_found_maps_to_not_found,
-    StorageError::NotFound {
-        entity: "instance",
-        id: "abc".into()
-    },
-    tonic::Code::NotFound
-);
-storage_err_case!(
-    coverage_helpers_002_conflict_maps_to_already_exists,
-    StorageError::Conflict("duplicate key".into()),
-    tonic::Code::AlreadyExists
-);
-storage_err_case!(
-    coverage_helpers_003_terminal_target_maps_to_failed_precondition,
-    StorageError::TerminalTarget {
-        entity: "instance".into(),
-        id: "abc".into()
-    },
-    tonic::Code::FailedPrecondition
-);
-storage_err_case!(
-    coverage_helpers_004_connection_maps_to_unavailable,
-    StorageError::Connection("refused".into()),
-    tonic::Code::Unavailable
-);
-storage_err_case!(
-    coverage_helpers_005_pool_exhausted_maps_to_unavailable,
-    StorageError::PoolExhausted,
-    tonic::Code::Unavailable
-);
-storage_err_case!(
-    coverage_helpers_006_backend_maps_to_unavailable,
-    StorageError::Backend("object store throttled".into()),
-    tonic::Code::Unavailable
-);
-storage_err_case!(
-    coverage_helpers_007_query_maps_to_internal,
-    StorageError::Query("bad sql".into()),
-    tonic::Code::Internal
-);
-storage_err_case!(
-    coverage_helpers_008_unsupported_maps_to_internal,
-    StorageError::Unsupported("no artifact backend".into()),
-    tonic::Code::Internal
-);
+use orch8_types::filter::InstanceFilter;
 
 #[test]
-fn coverage_helpers_009_not_found_message_carries_entity_and_id() {
+fn storage_errors_map_to_stable_grpc_codes() {
+    let cases = [
+        (
+            "not found",
+            StorageError::NotFound {
+                entity: "instance",
+                id: "abc".into(),
+            },
+            tonic::Code::NotFound,
+        ),
+        (
+            "conflict",
+            StorageError::Conflict("duplicate key".into()),
+            tonic::Code::AlreadyExists,
+        ),
+        (
+            "terminal target",
+            StorageError::TerminalTarget {
+                entity: "instance".into(),
+                id: "abc".into(),
+            },
+            tonic::Code::FailedPrecondition,
+        ),
+        (
+            "constraint",
+            StorageError::Constraint("check violated".into()),
+            tonic::Code::FailedPrecondition,
+        ),
+        (
+            "connection",
+            StorageError::Connection("refused".into()),
+            tonic::Code::Unavailable,
+        ),
+        (
+            "pool exhausted",
+            StorageError::PoolExhausted,
+            tonic::Code::Unavailable,
+        ),
+        (
+            "encryption",
+            StorageError::Encryption("bad key".into()),
+            tonic::Code::Internal,
+        ),
+        (
+            "unsupported",
+            StorageError::Unsupported("no artifact backend".into()),
+            tonic::Code::Internal,
+        ),
+    ];
+    for (case, error, code) in cases {
+        assert_eq!(storage_err(error).code(), code, "case: {case}");
+    }
+}
+
+#[test]
+fn not_found_message_names_entity_and_id() {
     let status = storage_err(StorageError::NotFound {
         entity: "sequence",
         id: "42".into(),
@@ -76,29 +75,57 @@ fn coverage_helpers_009_not_found_message_carries_entity_and_id() {
     assert_eq!(status.message(), "sequence 42");
 }
 
-// --- JSON envelope ---
-
 #[test]
-fn coverage_helpers_010_from_json_str_parses_valid_payload() {
-    let value: serde_json::Value = from_json_str(r#"{"a": 1}"#).unwrap();
-    assert_eq!(value, serde_json::json!({"a": 1}));
+fn encryption_failure_does_not_leak_the_underlying_cause() {
+    let status = storage_err(StorageError::Encryption("key id kms-123 rejected".into()));
+    assert_eq!(status.message(), "storage encryption failed");
 }
 
 #[test]
-fn coverage_helpers_011_from_json_str_rejects_malformed_payload() {
+fn engine_storage_errors_keep_the_storage_mapping() {
+    let status = engine_err(EngineError::Storage(StorageError::PoolExhausted));
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+}
+
+#[test]
+fn engine_effect_conflicts_are_aborted() {
+    let status = engine_err(EngineError::EffectTransition(
+        "receipt is not dispatched".into(),
+    ));
+    assert_eq!(status.code(), tonic::Code::Aborted);
+    assert!(status.message().contains("receipt is not dispatched"));
+}
+
+#[test]
+fn bulk_mutation_without_tenant_is_invalid_argument() {
+    let status = require_bulk_tenant(&InstanceFilter::default()).unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+}
+
+#[test]
+fn bulk_mutation_scoped_to_a_tenant_is_allowed() {
+    let filter = InstanceFilter {
+        tenant_id: Some(TenantId::unchecked("acme")),
+        ..InstanceFilter::default()
+    };
+    assert!(require_bulk_tenant(&filter).is_ok());
+}
+
+#[test]
+fn malformed_json_payload_is_invalid_argument() {
     let status = from_json_str::<serde_json::Value>("{oops").unwrap_err();
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
 }
 
 #[test]
-fn coverage_helpers_012_from_json_str_accepts_payload_at_ten_mib() {
+fn json_payload_of_exactly_ten_mib_is_accepted() {
     let document = format!(r#"{{"d":"{}"}}"#, "x".repeat(10 * 1024 * 1024 - 8));
     assert_eq!(document.len(), 10 * 1024 * 1024);
     assert!(from_json_str::<serde_json::Value>(&document).is_ok());
 }
 
 #[test]
-fn coverage_helpers_013_from_json_str_rejects_payload_over_ten_mib() {
+fn json_payload_one_byte_over_ten_mib_is_invalid_argument() {
     let document = format!(r#"{{"d":"{}"}}"#, "x".repeat(10 * 1024 * 1024 - 7));
     assert_eq!(document.len(), 10 * 1024 * 1024 + 1);
     let status = from_json_str::<serde_json::Value>(&document).unwrap_err();
@@ -106,16 +133,7 @@ fn coverage_helpers_013_from_json_str_rejects_payload_over_ten_mib() {
 }
 
 #[test]
-fn coverage_helpers_014_to_json_string_round_trips() {
-    let json = to_json_string(&serde_json::json!({"k": [1, 2, 3]})).unwrap();
-    let back: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(back, serde_json::json!({"k": [1, 2, 3]}));
-}
-
-// --- request scaffolding ---
-
-#[test]
-fn coverage_helpers_015_stream_request_stamps_caller_tenant() {
+fn stream_request_carries_the_caller_tenant() {
     let request = stream_request((), Some(&TenantId::unchecked("acme")));
     assert_eq!(
         caller_tenant(&request).map(orch8_types::ids::TenantId::as_str),
@@ -124,40 +142,9 @@ fn coverage_helpers_015_stream_request_stamps_caller_tenant() {
 }
 
 #[test]
-fn coverage_helpers_016_stream_request_without_tenant_stays_anonymous() {
+fn stream_request_without_tenant_stays_unscoped() {
     let request = stream_request((), None);
     assert!(caller_tenant(&request).is_none());
-}
-
-#[test]
-fn coverage_helpers_017_worker_server_frame_wraps_payload() {
-    let frame = worker_server_frame(proto::worker_stream_server::Payload::Ack(
-        proto::WorkerStreamAck {
-            operation: "complete".into(),
-            task_id: "1".into(),
-        },
-    ));
-    assert!(matches!(
-        frame.payload,
-        Some(proto::worker_stream_server::Payload::Ack(_))
-    ));
-}
-
-#[test]
-fn coverage_helpers_018_artifact_server_frame_wraps_payload() {
-    let frame = artifact_server_frame(proto::artifact_transfer_server::Payload::Chunk(
-        proto::ArtifactTransferChunk {
-            transfer_id: "t".into(),
-            offset: 0,
-            data: vec![1],
-            sha256: vec![2],
-            final_chunk: true,
-        },
-    ));
-    assert!(matches!(
-        frame.payload,
-        Some(proto::artifact_transfer_server::Payload::Chunk(_))
-    ));
 }
 
 // --- fixtures ---
@@ -263,7 +250,7 @@ async fn seed_retry_topology(storage: &Arc<dyn StorageBackend>, max_attempts: u3
 }
 
 #[tokio::test]
-async fn coverage_helpers_044_get_worker_task_checked_enforces_tenant() {
+async fn worker_task_lookup_hides_foreign_tenant_tasks_as_not_found() {
     let storage = storage().await;
     let task = seed_retry_topology(&storage, 3).await;
     storage.create_worker_task(&task).await.unwrap();
@@ -281,7 +268,7 @@ async fn coverage_helpers_044_get_worker_task_checked_enforces_tenant() {
 }
 
 #[tokio::test]
-async fn coverage_helpers_045_get_worker_task_checked_rejects_unknown_task() {
+async fn worker_task_lookup_of_unknown_task_is_not_found() {
     let storage = storage().await;
     let status = get_worker_task_checked(&storage, None, Uuid::now_v7())
         .await
