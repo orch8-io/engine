@@ -1535,6 +1535,7 @@ async fn deadline_breach_lost_cas_skips_escalation_side_effects() {
         None,
         InstanceState::Waiting,
         &SharedClock::default(),
+        None,
     )
     .await
     .expect("lost CAS is not an error");
@@ -2255,6 +2256,533 @@ async fn scheduler_parks_instance_superseded_by_a_handoff() {
                 .unwrap()
                 .is_none(),
             "{backend}: superseded source never advances"
+        );
+    }
+}
+
+/// L2-01: a panicking cleanup/escalation hook is isolated on its own task
+/// and reported as a swallowed hook failure instead of unwinding the tick.
+#[tokio::test]
+async fn panicking_hook_is_isolated_and_reported_as_failure() {
+    let result = dispatch_hook_bounded(async {
+        let boom: Result<serde_json::Value, orch8_types::error::StepError> =
+            Err(orch8_types::error::StepError::Permanent {
+                message: String::new(),
+                details: None,
+            });
+        assert!(boom.is_ok(), "tenant hook bug");
+        boom
+    })
+    .await;
+    match result {
+        Err(orch8_types::error::StepError::Permanent { message, .. }) => {
+            assert!(message.contains("panicked"), "{message}");
+        }
+        other => panic!("expected a permanent hook failure, got {other:?}"),
+    }
+}
+
+/// Seed a sub-sequence parent (with a `Waiting` `SubSequence` node "sub")
+/// and one child in `child_state` linked to that node.
+async fn seed_sub_sequence_parent(
+    storage: &Arc<dyn StorageBackend>,
+    parent_state: InstanceState,
+    child_state: InstanceState,
+) -> (TaskInstance, SequenceDefinition, InstanceId) {
+    let seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
+        orch8_types::sequence::SubSequenceDef {
+            id: BlockId::new("sub"),
+            sequence_name: "child".into(),
+            version: None,
+            input: serde_json::json!({}),
+        },
+    ))]);
+    let parent_id = InstanceId::new();
+    let child_id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), parent_id, None, parent_state).await;
+    let mut child = storage.get_instance(parent_id).await.unwrap().unwrap();
+    child.id = child_id;
+    child.parent_instance_id = Some(parent_id);
+    child.state = child_state;
+    child.metadata = serde_json::json!({ "_parent_block_id": "sub" });
+    storage.create_instance(&child).await.unwrap();
+    storage
+        .create_execution_node(&orch8_types::execution::ExecutionNode {
+            id: orch8_types::ids::ExecutionNodeId::new(),
+            instance_id: parent_id,
+            block_id: BlockId::new("sub"),
+            parent_id: None,
+            block_type: orch8_types::execution::BlockType::SubSequence,
+            branch_index: None,
+            state: orch8_types::execution::NodeState::Waiting,
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+    let parent = storage.get_instance(parent_id).await.unwrap().unwrap();
+    (parent, seq, child_id)
+}
+
+async fn run_more_work(
+    storage: &Arc<dyn StorageBackend>,
+    parent: &TaskInstance,
+    seq: &SequenceDefinition,
+) {
+    run_more_work_with(storage, parent, seq, true).await;
+}
+
+async fn run_more_work_with(
+    storage: &Arc<dyn StorageBackend>,
+    parent: &TaskInstance,
+    seq: &SequenceDefinition,
+    has_waiting_nodes: bool,
+) {
+    let registry = HandlerRegistry::new();
+    let webhook_config = WebhookConfig::default();
+    let cache = crate::sequence_cache::SequenceCache::new(16, Duration::from_secs(60));
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+    let lease_lost = std::sync::atomic::AtomicBool::new(false);
+    let ctx = InstanceRunCtx {
+        storage,
+        handlers: &registry,
+        webhook_config: &webhook_config,
+        sequence_cache: &cache,
+        externalize_threshold: 0,
+        max_steps_per_instance: 0,
+        cancel: &cancel,
+        clock: &clock,
+        lease_lost: &lease_lost,
+        claim_token: None,
+    };
+    handle_tree_more_work(&ctx, parent, seq, has_waiting_nodes)
+        .await
+        .unwrap();
+}
+
+/// L3-01: the child finished while the parent was still `Running`, so its
+/// wake was dropped. Parking must re-check the awaited child and re-schedule
+/// the parent instead of leaving it `Waiting` forever.
+#[tokio::test]
+async fn parking_parent_rechecks_already_finished_sub_sequence_child() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let (parent, seq, _) =
+        seed_sub_sequence_parent(&storage, InstanceState::Running, InstanceState::Completed).await;
+    run_more_work(&storage, &parent, &seq).await;
+    let after = storage.get_instance(parent.id).await.unwrap().unwrap();
+    assert_eq!(after.state, InstanceState::Scheduled);
+
+    // A child that is still running keeps the parent parked.
+    let (parent, seq, _) =
+        seed_sub_sequence_parent(&storage, InstanceState::Running, InstanceState::Running).await;
+    run_more_work(&storage, &parent, &seq).await;
+    let after = storage.get_instance(parent.id).await.unwrap().unwrap();
+    assert_eq!(after.state, InstanceState::Waiting);
+}
+
+/// L3-01 safety net: a wake that found the parent `Running` is retried by
+/// the tick once the parent has parked.
+#[tokio::test]
+async fn dropped_parent_wake_is_retried_after_parent_parks() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let (parent, _, child_id) =
+        seed_sub_sequence_parent(&storage, InstanceState::Running, InstanceState::Completed).await;
+    let child = storage.get_instance(child_id).await.unwrap().unwrap();
+    wake_parent_if_child(storage.as_ref(), &child).await;
+    assert_eq!(
+        storage
+            .get_instance(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Running
+    );
+    // The parent parks without having seen the child (the lost wake-up).
+    assert!(
+        storage
+            .conditional_update_instance_state(
+                parent.id,
+                InstanceState::Running,
+                InstanceState::Waiting,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+    tokio::time::sleep(DEFERRED_WAKE_RETRY + Duration::from_millis(100)).await;
+    retry_deferred_parent_wakes(&storage).await;
+    assert_eq!(
+        storage
+            .get_instance(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Scheduled
+    );
+}
+
+fn gate_step_with_timeout(id: &str, timeout: std::time::Duration) -> StepDef {
+    let mut step = mk_step_def(id, "noop", serde_json::json!({}));
+    step.wait_for_input = Some(orch8_types::sequence::HumanInputDef {
+        prompt: "approve?".into(),
+        timeout: Some(timeout),
+        escalation_handler: None,
+        choices: None,
+        store_as: None,
+        allow_comment: false,
+        auto_decide: None,
+    });
+    step
+}
+
+async fn sweep_waiting(
+    storage: &Arc<dyn StorageBackend>,
+    cursor: &mut WaitingSweepCursor,
+    batch_size: u32,
+    max_pages: u32,
+) {
+    let handlers = HandlerRegistry::new();
+    let cache = SequenceCache::new(100, Duration::from_secs(60));
+    let webhook_config = WebhookConfig::default();
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+    process_waiting_deadlines(
+        &SweepContext {
+            storage,
+            handlers: &handlers,
+            sequence_cache: &cache,
+            webhook_config: &webhook_config,
+            cancel: &cancel,
+            batch_size,
+            clock: &clock,
+            hooks: &HookTasks::default(),
+        },
+        cursor,
+        max_pages,
+    )
+    .await
+    .unwrap();
+}
+
+/// L6-04: the Waiting sweep used to restart at offset 0 every tick and stop
+/// after a fixed page count, so instances sorted past the cap never had
+/// their timeouts checked. The cursor rotates the window across ticks.
+#[tokio::test]
+async fn waiting_sweep_rotates_past_the_page_cap() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![BlockDefinition::Step(Box::new(
+        gate_step_with_timeout("gate", std::time::Duration::from_secs(3600)),
+    ))]);
+    storage.create_sequence(&seq).await.unwrap();
+    // Three waiters on the gate; only the last-sorted one has expired.
+    let mut ids = Vec::new();
+    for (age_hours, sort_hours) in [(0, 3), (0, 2), (2, 1)] {
+        let mut inst = mk_waiting_instance(
+            seq.id,
+            chrono::Duration::hours(3),
+            Utc::now() - chrono::Duration::hours(sort_hours),
+        );
+        inst.context.runtime.current_step = Some(BlockId::new("gate"));
+        inst.context.runtime.current_step_started_at =
+            Some(Utc::now() - chrono::Duration::hours(age_hours));
+        storage.create_instance(&inst).await.unwrap();
+        ids.push(inst.id);
+    }
+    let state = |id: InstanceId| {
+        let storage = Arc::clone(&storage);
+        async move { storage.get_instance(id).await.unwrap().unwrap().state }
+    };
+
+    // One page of one row per tick: the old fixed window only ever saw ids[0].
+    let mut cursor = WaitingSweepCursor::default();
+    sweep_waiting(&storage, &mut cursor, 1, 1).await;
+    sweep_waiting(&storage, &mut cursor, 1, 1).await;
+    assert_eq!(state(ids[2]).await, InstanceState::Waiting);
+    sweep_waiting(&storage, &mut cursor, 1, 1).await;
+    assert_eq!(
+        state(ids[2]).await,
+        InstanceState::Scheduled,
+        "third tick reaches the instance past the page cap"
+    );
+    assert_eq!(state(ids[0]).await, InstanceState::Waiting);
+    assert_eq!(state(ids[1]).await, InstanceState::Waiting);
+}
+
+/// L3-02: a `wait_for_input.timeout` on a step nested in a composite fires
+/// while the instance is `Waiting` (the sweep wakes it so the evaluator's
+/// gate-timeout path runs); an unexpired nested gate stays parked.
+#[tokio::test]
+async fn waiting_sweep_wakes_instance_on_expired_nested_gate_timeout() {
+    use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![BlockDefinition::Parallel(Box::new(
+        orch8_types::sequence::ParallelDef {
+            id: BlockId::new("par"),
+            branches: vec![
+                vec![BlockDefinition::Step(Box::new(gate_step_with_timeout(
+                    "gate",
+                    std::time::Duration::from_secs(1),
+                )))],
+                vec![BlockDefinition::Step(Box::new(mk_step_def(
+                    "other",
+                    "noop",
+                    serde_json::json!({}),
+                )))],
+            ],
+        },
+    ))]);
+    storage.create_sequence(&seq).await.unwrap();
+
+    let mut seeded = Vec::new();
+    for gate_started in [Utc::now() - chrono::Duration::hours(1), Utc::now()] {
+        let inst = mk_waiting_instance(seq.id, chrono::Duration::hours(1), Utc::now());
+        storage.create_instance(&inst).await.unwrap();
+        let root = ExecutionNode {
+            id: orch8_types::ids::ExecutionNodeId::new(),
+            instance_id: inst.id,
+            block_id: BlockId::new("par"),
+            parent_id: None,
+            block_type: BlockType::Parallel,
+            branch_index: None,
+            state: NodeState::Running,
+            started_at: Some(gate_started),
+            completed_at: None,
+        };
+        let gate = ExecutionNode {
+            id: orch8_types::ids::ExecutionNodeId::new(),
+            instance_id: inst.id,
+            block_id: BlockId::new("gate"),
+            parent_id: Some(root.id),
+            block_type: BlockType::Step,
+            branch_index: Some(0),
+            state: NodeState::Waiting,
+            started_at: Some(gate_started),
+            completed_at: None,
+        };
+        storage.create_execution_node(&root).await.unwrap();
+        storage.create_execution_node(&gate).await.unwrap();
+        seeded.push(inst.id);
+    }
+
+    sweep_waiting(&storage, &mut WaitingSweepCursor::default(), 10, 1).await;
+    let expired = storage.get_instance(seeded[0]).await.unwrap().unwrap();
+    assert_eq!(expired.state, InstanceState::Scheduled);
+    let fresh = storage.get_instance(seeded[1]).await.unwrap().unwrap();
+    assert_eq!(fresh.state, InstanceState::Waiting);
+}
+
+/// L2-17: transient reschedules back off exponentially (capped) and the
+/// instance is failed only after both the attempt cap and the minimum age.
+#[test]
+fn transient_retry_policy_backs_off_and_eventually_exhausts() {
+    use transient_retries::{Decision, MAX_ATTEMPTS, MIN_AGE, decide};
+    let delay = |attempts| match decide(attempts, Duration::ZERO) {
+        Decision::Retry(d) => d,
+        Decision::Exhausted { .. } => panic!("must not exhaust before MIN_AGE"),
+    };
+    let first = delay(1);
+    assert!(first >= Duration::from_millis(160) && first <= Duration::from_millis(240));
+    assert!(delay(4) > delay(1));
+    assert!(
+        delay(MAX_ATTEMPTS + 5) <= Duration::from_secs(72),
+        "capped at 60s + jitter"
+    );
+    assert!(matches!(
+        decide(MAX_ATTEMPTS - 1, MIN_AGE * 2),
+        Decision::Retry(_)
+    ));
+    assert_eq!(
+        decide(MAX_ATTEMPTS, MIN_AGE),
+        Decision::Exhausted {
+            attempts: MAX_ATTEMPTS
+        }
+    );
+}
+
+/// L2-11: an instance whose signals cannot be applied (here: a context
+/// written under a different encryption key, the H-10 class) must not block
+/// signal delivery to the instances after it.
+#[tokio::test]
+async fn poison_instance_does_not_block_signal_sweep() {
+    use orch8_storage::encrypting::EncryptingStorage;
+    use orch8_types::encryption::FieldEncryptor;
+    let raw: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let old_key: Arc<dyn StorageBackend> = Arc::new(EncryptingStorage::new(
+        Arc::clone(&raw),
+        FieldEncryptor::from_hex_key(&"11".repeat(32)).unwrap(),
+    ));
+    let storage: Arc<dyn StorageBackend> = Arc::new(EncryptingStorage::new(
+        Arc::clone(&raw),
+        FieldEncryptor::from_hex_key(&"22".repeat(32)).unwrap(),
+    ));
+    let poison = InstanceId::new();
+    let healthy = InstanceId::new();
+    for (writer, id) in [(&old_key, poison), (&storage, healthy)] {
+        seed_instance_in_state(writer.as_ref(), id, None, InstanceState::Paused).await;
+        let mut inst = writer.get_instance(id).await.unwrap().unwrap();
+        inst.context.data = serde_json::json!({ "secret": "s3cr3t" });
+        writer
+            .update_instance_context(id, &inst.context)
+            .await
+            .unwrap();
+    }
+    assert!(
+        storage.get_instance(poison).await.is_err(),
+        "precondition: the poison row is unreadable under the current key"
+    );
+    // The poison row's signal is older, so it sorts first in the sweep.
+    for (id, age) in [(poison, 10), (healthy, 5)] {
+        storage
+            .enqueue_signal(&Signal {
+                id: Uuid::now_v7(),
+                instance_id: id,
+                signal_type: SignalType::Resume,
+                payload: serde_json::Value::Null,
+                delivered: false,
+                created_at: Utc::now() - chrono::Duration::seconds(age),
+                delivered_at: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    let handlers = Arc::new(HandlerRegistry::new());
+    let cache = SequenceCache::new(16, Duration::from_secs(60));
+    let hooks = HookTasks::default();
+    process_signalled_instances(
+        &storage,
+        &handlers,
+        &cache,
+        16,
+        &SharedClock::default(),
+        &hooks,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        storage.get_instance(healthy).await.unwrap().unwrap().state,
+        InstanceState::Scheduled,
+        "the healthy instance's resume is delivered despite the poison row"
+    );
+}
+
+/// L2-06: an `on_cancel` hook against a hung target runs off the tick; the
+/// signal sweep returns at once instead of waiting out the hook timeout.
+#[tokio::test]
+async fn cancel_hooks_run_off_the_signal_sweep() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let mut seq = mk_sequence(vec![]);
+    seq.on_cancel = Some(vec![BlockDefinition::Step(Box::new(mk_step_def(
+        "cleanup",
+        "hang",
+        serde_json::json!({}),
+    )))]);
+    storage.create_sequence(&seq).await.unwrap();
+    let mut inst = mk_waiting_instance(seq.id, chrono::Duration::minutes(1), Utc::now());
+    inst.state = InstanceState::Paused;
+    storage.create_instance(&inst).await.unwrap();
+    storage
+        .enqueue_signal(&Signal {
+            id: Uuid::now_v7(),
+            instance_id: inst.id,
+            signal_type: SignalType::Cancel,
+            payload: serde_json::Value::Null,
+            delivered: false,
+            created_at: Utc::now(),
+            delivered_at: None,
+        })
+        .await
+        .unwrap();
+
+    let mut registry = HandlerRegistry::new();
+    registry.register("hang", |_ctx| async {
+        std::future::pending::<()>().await;
+        Ok(serde_json::json!({}))
+    });
+    let handlers = Arc::new(registry);
+    let cache = SequenceCache::new(16, Duration::from_secs(60));
+    let hooks = HookTasks::default();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        process_signalled_instances(
+            &storage,
+            &handlers,
+            &cache,
+            16,
+            &SharedClock::default(),
+            &hooks,
+        ),
+    )
+    .await
+    .expect("the sweep must not wait for the hung hook")
+    .unwrap();
+    assert_eq!(
+        storage.get_instance(inst.id).await.unwrap().unwrap().state,
+        InstanceState::Cancelled
+    );
+    assert_eq!(
+        hooks.0.lock().unwrap().len(),
+        1,
+        "the on_cancel hook was spawned off the tick"
+    );
+}
+
+/// L3-12: a tree pass that ends with more work must not resurrect an
+/// instance a concurrent runner already completed.
+#[tokio::test]
+async fn tree_more_work_leaves_completed_instance_alone() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), id, None, InstanceState::Completed).await;
+    let inst = storage.get_instance(id).await.unwrap().unwrap();
+    run_more_work_with(&storage, &inst, &mk_sequence(vec![]), false).await;
+    assert_eq!(
+        storage.get_instance(id).await.unwrap().unwrap().state,
+        InstanceState::Completed
+    );
+}
+
+/// L3-13: a Pause signal for a `Waiting` instance pauses it (it used to be
+/// marked delivered and dropped), and Resume re-schedules it.
+#[tokio::test]
+async fn pause_and_resume_a_waiting_instance() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), id, None, InstanceState::Waiting).await;
+    let handlers = Arc::new(HandlerRegistry::new());
+    let cache = SequenceCache::new(16, Duration::from_secs(60));
+    for (signal_type, expected) in [
+        (SignalType::Pause, InstanceState::Paused),
+        (SignalType::Resume, InstanceState::Scheduled),
+    ] {
+        storage
+            .enqueue_signal(&Signal {
+                id: Uuid::now_v7(),
+                instance_id: id,
+                signal_type,
+                payload: serde_json::Value::Null,
+                delivered: false,
+                created_at: Utc::now(),
+                delivered_at: None,
+            })
+            .await
+            .unwrap();
+        process_signalled_instances(
+            &storage,
+            &handlers,
+            &cache,
+            16,
+            &SharedClock::default(),
+            &HookTasks::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage.get_instance(id).await.unwrap().unwrap().state,
+            expected
         );
     }
 }

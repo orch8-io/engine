@@ -344,14 +344,22 @@ async fn main() -> anyhow::Result<()> {
     // Shared engine-liveness flag: `/health/ready` reads it, the engine task
     // clears it on exit so the server stops reporting ready if the scheduler dies.
     let engine_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    // Tick heartbeat shared by the engine and the health probes (I-H11).
+    let engine_liveness = assembly.engine.then(|| {
+        Arc::new(orch8_engine::liveness::EngineLiveness::new(
+            std::time::Duration::from_millis(config.engine.tick_interval_ms),
+            std::time::Duration::from_secs(config.engine.liveness_stale_secs),
+        ))
+    });
 
-    let app_state = build_app_state(
+    let mut app_state = build_app_state(
         storage.clone(),
         &config,
         shutdown_token.clone(),
         cb_registry.clone(),
         engine_ready.clone(),
     )?;
+    app_state.engine_liveness.clone_from(&engine_liveness);
     let federation_client =
         federation_wiring::federation_client(app_state.continuity_crypto.as_deref());
     let push_outbox_handle = assembly.push_outbox.then(|| {
@@ -509,6 +517,7 @@ async fn main() -> anyhow::Result<()> {
             engine_ready.clone(),
             federation_client.clone(),
             failover.clone(),
+            engine_liveness.clone(),
         )
     });
 
@@ -544,9 +553,20 @@ async fn main() -> anyhow::Result<()> {
     otel.shutdown().await;
 
     served?;
+    if ENGINE_FAILED.load(std::sync::atomic::Ordering::SeqCst) {
+        // L2-01/L2-04: the engine stopped (panic, startup failure, or an
+        // unexpected return) while the server was still up. Exit non-zero so
+        // the orchestrator restarts the process instead of leaving a node
+        // that serves the API but executes nothing.
+        anyhow::bail!("engine stopped unexpectedly; exiting so the process is restarted");
+    }
     tracing::info!("Shutdown complete");
     Ok(())
 }
+
+/// Set when the engine task ends before shutdown was requested; `main` turns
+/// it into a non-zero exit after the graceful drain.
+static ENGINE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Embed tokens + license. An invalid embed secret refuses to start (never
 /// a silent disable); a bad license only logs (soft enforcement).
@@ -680,6 +700,8 @@ fn build_app_state(
         entitlements: orch8_api::entitlements::unlimited_provider(),
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
         engine_ready,
+        // Set by the caller once the engine role is known.
+        engine_liveness: None,
         continuity_crypto,
         continuity_trusted_signing_keys: Arc::new(trusted_signing_keys),
         federation_peers: Arc::new(federation_peers),
@@ -1205,6 +1227,7 @@ async fn spawn_grpc_server(
     Ok(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_engine(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
@@ -1213,6 +1236,7 @@ fn spawn_engine(
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
     federation: Option<Arc<orch8_engine::federation::FederationClient>>,
     failover: Option<federation_wiring::FailoverSettings>,
+    liveness: Option<Arc<orch8_engine::liveness::EngineLiveness>>,
 ) -> tokio::task::JoinHandle<()> {
     let Some(failover) = failover else {
         return spawn_engine_now(
@@ -1222,6 +1246,7 @@ fn spawn_engine(
             cb_registry,
             engine_ready,
             federation,
+            liveness,
         );
     };
     // Active-passive: a standby node reports not-ready and never runs the
@@ -1262,6 +1287,7 @@ fn spawn_engine(
             cb_registry,
             engine_ready,
             federation,
+            liveness,
         );
         let _ = engine.await;
         let _ = watcher.await;
@@ -1275,6 +1301,7 @@ fn spawn_engine_now(
     cb_registry: Arc<CircuitBreakerRegistry>,
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
     federation: Option<Arc<orch8_engine::federation::FederationClient>>,
+    liveness: Option<Arc<orch8_engine::liveness::EngineLiveness>>,
 ) -> tokio::task::JoinHandle<()> {
     if let Some(client) = federation {
         let poller_storage = Arc::clone(&storage);
@@ -1300,21 +1327,51 @@ fn spawn_engine_now(
         let alert_storage = Arc::clone(&storage);
         let alert_config = config.alerts.clone();
         let alert_cancel = shutdown.clone();
-        tokio::spawn(async move {
-            orch8_engine::alerts::run_alert_loop(alert_storage, alert_config, alert_cancel).await;
-            tracing::info!("alert evaluator loop exited");
-        });
+        // Supervised (L2-05): a panic restarts the loop with backoff instead
+        // of silently ending alert evaluation for the process lifetime.
+        tokio::spawn(orch8_engine::supervise(
+            "alerts",
+            alert_cancel.clone(),
+            move || {
+                let alert_storage = Arc::clone(&alert_storage);
+                let alert_config = alert_config.clone();
+                let alert_cancel = alert_cancel.clone();
+                async move {
+                    orch8_engine::alerts::run_alert_loop(alert_storage, alert_config, alert_cancel)
+                        .await;
+                    tracing::info!("alert evaluator loop exited");
+                }
+            },
+        ));
     }
-    let engine = Engine::new(storage, config.engine.clone(), handlers, shutdown);
+    let mut engine = Engine::new(storage, config.engine.clone(), handlers, shutdown.clone());
+    if let Some(liveness) = liveness {
+        engine = engine.with_liveness(liveness);
+    }
 
     tokio::spawn(async move {
-        let result = engine.run().await;
-        // The tick loop has exited. Whether by error or clean stop, the
-        // scheduler is no longer executing work — clear the readiness flag so
-        // `/health/ready` returns 503 and the load balancer drains this node.
+        // Run the engine on its own task so a panic surfaces here as a
+        // `JoinError` instead of unwinding past the readiness bookkeeping
+        // below (L2-01).
+        let outcome = tokio::spawn(async move { engine.run().await }).await;
+        // The tick loop has exited. Whether by error, panic or clean stop,
+        // the scheduler is no longer executing work — clear the readiness
+        // flag so `/health/ready` returns 503 and the load balancer drains
+        // this node.
         engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
-        if let Err(e) = result {
-            tracing::error!(error = %e, "Engine tick loop exited with error");
+        let unexpected = !shutdown.is_cancelled();
+        match outcome {
+            Ok(Ok(())) if !unexpected => {}
+            Ok(Ok(())) => tracing::error!("engine stopped while the server was still running"),
+            Ok(Err(e)) => tracing::error!(error = %e, "Engine tick loop exited with error"),
+            Err(join_err) => tracing::error!(error = %join_err, "Engine task panicked"),
+        }
+        if unexpected {
+            // Fail fast: stop the whole process (HTTP, gRPC, workers) and
+            // exit non-zero so the orchestrator restarts it, rather than
+            // keep serving an API whose scheduler is dead (L2-01/L2-04).
+            ENGINE_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+            shutdown.cancel();
         }
     })
 }
@@ -1653,6 +1710,9 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     }
     if let Some(n) = env_parse("ORCH8_CRON_TICK_SECS") {
         config.engine.cron_tick_secs = n;
+    }
+    if let Some(n) = env_parse("ORCH8_LIVENESS_STALE_SECS") {
+        config.engine.liveness_stale_secs = n;
     }
     // Reaper cadence/threshold overrides. Defaults (tick 30s / stale 60s for
     // worker tasks, 60s / 120s for nodes) are sane for production but make

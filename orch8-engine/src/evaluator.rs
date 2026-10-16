@@ -14,6 +14,7 @@ mod sla;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use dispatch::awaited_sub_sequence_child_terminal;
 use dispatch::dispatch_block;
 use sla::check_sla_deadlines;
 
@@ -484,8 +485,15 @@ pub async fn evaluate_with_clock(
         }
 
         // SLA deadline check: fail any step nodes that have breached their deadline.
-        let deadlines_breached =
-            check_sla_deadlines(storage, handlers, &ctx.instance, &block_map, &ctx.tree).await?;
+        let deadlines_breached = check_sla_deadlines(
+            storage,
+            handlers,
+            &ctx.instance,
+            &block_map,
+            &ctx.tree,
+            ctx.clock.now(),
+        )
+        .await?;
         if deadlines_breached {
             ctx.tree_stale = true;
             ctx.refresh_tree(storage.as_ref(), instance_id).await?;

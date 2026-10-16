@@ -202,6 +202,7 @@ pub async fn run_gc_loop_with_ttl(
                 if let Err(e) = storage.compact_storage().await {
                     tracing::warn!(error = %e, "storage compaction after gc failed");
                 }
+                crate::metrics::loop_pass("gc");
             }
         }
     }

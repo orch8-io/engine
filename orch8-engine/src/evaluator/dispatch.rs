@@ -89,6 +89,38 @@ fn find_activation_child<'c>(
         })
 }
 
+/// `true` when a `Waiting` `SubSequence` node of `instance` has a child (for
+/// its current activation) that is already terminal — i.e. the parent parked
+/// but its awaited child finished before the parent reached `Waiting`, so the
+/// child's `Waiting -> Scheduled` wake found the parent still `Running` and
+/// was dropped (L3-01). Uses the same activation matching as dispatch, so a
+/// consumed child of an earlier loop iteration never counts.
+pub(crate) async fn awaited_sub_sequence_child_terminal(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+) -> Result<bool, EngineError> {
+    use orch8_types::execution::BlockType;
+
+    let tree = storage.get_execution_tree(instance.id).await?;
+    let waiting: Vec<&ExecutionNode> = tree
+        .iter()
+        .filter(|n| n.block_type == BlockType::SubSequence && n.state == NodeState::Waiting)
+        .collect();
+    if waiting.is_empty() {
+        return Ok(false);
+    }
+    let children = storage.get_child_instances(instance.id).await?;
+    for node in waiting {
+        let activation = sub_sequence_activation_key(storage, instance, node, &tree).await?;
+        if find_activation_child(&children, node.block_id.as_str(), &activation)
+            .is_some_and(|c| c.state.is_terminal())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Build a spawned child's [`ExecutionContext`](orch8_types::context::ExecutionContext)
 /// from its parent, seeded with the child's `input` and inheriting execution-mode
 /// invariants from the parent.

@@ -315,6 +315,20 @@ fn lint_handler_params(
     warnings: &mut Vec<LintWarning>,
 ) {
     match handler {
+        "sleep"
+            if params
+                .get("duration_ms")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|ms| ms > crate::handlers::builtin::MAX_SLEEP_MS) =>
+        {
+            warnings.push(LintWarning {
+                block_id: block_id.into(),
+                message: format!(
+                    "sleep: duration_ms above {} ms fails at run time; use the step `delay` field for long waits",
+                    crate::handlers::builtin::MAX_SLEEP_MS
+                ),
+            });
+        }
         "http_request" | "tool_call" => {
             check_required_str(block_id, handler, params, "url", warnings);
         }

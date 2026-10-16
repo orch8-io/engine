@@ -377,6 +377,21 @@ pub(crate) async fn execute_step_node_with_clock(
     // transitions the instance back to Scheduled, and the next evaluator pass
     // finds the signal and completes the node.
     if let Some(ref human_def) = step_def.wait_for_input {
+        // A gate that already timed out and escalated during this activation
+        // is finished: its escalation marker is the step's output, exactly as
+        // the flat path skips the step once that marker exists. Re-checking
+        // the gate would find the timeout still expired and escalate again on
+        // every pass (L3-02 made the Waiting sweep wake such instances).
+        if human_def.escalation_handler.is_some()
+            && let Some(latest) = storage.get_block_output(instance.id, &step_def.id).await?
+            && latest.output.get("_escalated").is_some()
+            && node
+                .started_at
+                .is_none_or(|started| latest.created_at >= started)
+        {
+            evaluator::complete_node(storage.as_ref(), node.id).await?;
+            return Ok(true);
+        }
         // Evaluate the gate against this node's own start time. The shared
         // `current_step_started_at` runtime field is a single slot that
         // parallel branches overwrite, and at claim time it may still carry a

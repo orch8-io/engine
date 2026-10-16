@@ -48,6 +48,7 @@ pub(super) async fn check_step_deadline(
         prev_output,
         InstanceState::Running,
         clock,
+        None,
     )
     .await
 }

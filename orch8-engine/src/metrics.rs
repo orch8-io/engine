@@ -23,6 +23,14 @@ pub const WEBHOOKS_PARKED: &str = "orch8_webhooks_parked_total";
 /// Alert transitions (firing/resolved) enqueued by the alert evaluator.
 pub const ALERTS_EMITTED: &str = "orch8_alerts_emitted_total";
 pub const CRON_TRIGGERED: &str = "orch8_cron_triggered_total";
+/// `{kind}`: cron occurrences whose instance could not be created —
+/// `transient` (retried, schedule not advanced) or `permanent` (skipped).
+pub const CRON_FIRE_ERRORS: &str = "orch8_cron_fire_errors_total";
+/// Instance reschedules after a transient-classified storage error.
+pub const INSTANCE_TRANSIENT_RETRIES: &str = "orch8_instance_transient_retries_total";
+/// Instances failed because transient-classified errors kept recurring.
+pub const INSTANCE_TRANSIENT_RETRY_EXHAUSTED: &str =
+    "orch8_instance_transient_retry_exhausted_total";
 /// Occurrences skipped by a schedule's `skip` overlap policy.
 pub const CRON_SKIPPED: &str = "orch8_cron_skipped_total";
 /// Alert-only SLA breaches (sequence `max_runtime` / `max_step_runtime`).
@@ -89,6 +97,19 @@ pub const QUEUE_DEPTH: &str = "orch8_queue_depth";
 /// Pending placed tasks no live runtime satisfies, `{capability,region}`.
 pub const PLACEMENT_UNSATISFIED: &str = "orch8_placement_unsatisfied";
 pub const ACTIVE_TASKS: &str = "orch8_active_tasks";
+/// `{loop}`: unix time of the last completed pass of a background loop.
+pub const BACKGROUND_LOOP_LAST_RUN: &str = "orch8_background_loop_last_run_timestamp_seconds";
+/// `{loop}`: restarts of a supervised background loop after it panicked or
+/// returned while the engine was still running.
+pub const BACKGROUND_LOOP_RESTARTS: &str = "orch8_background_loop_restarts_total";
+
+/// Stamp a completed pass of background loop `name` (the per-loop liveness
+/// gauge operators alert on: `time() - gauge > N × period`).
+pub fn loop_pass(name: &'static str) {
+    #[allow(clippy::cast_precision_loss)]
+    let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+    gauge!(BACKGROUND_LOOP_LAST_RUN, "loop" => name).set(now);
+}
 
 /// Record a counter increment.
 pub fn inc(name: &'static str) {

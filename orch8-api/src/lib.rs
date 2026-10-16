@@ -146,6 +146,11 @@ pub struct AppState {
     /// a server whose scheduler has died — otherwise the process would keep
     /// answering HTTP while executing nothing.
     pub engine_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// Tick heartbeat of the engine running in this process (I-H11). `None`
+    /// on roles without an engine. `/health/ready` fails once it is older
+    /// than `max(10 × tick, 30 s)`; `/health/live` fails once it is older
+    /// than `engine.liveness_stale_secs`, so a wedged scheduler is restarted.
+    pub engine_liveness: Option<Arc<orch8_engine::liveness::EngineLiveness>>,
     /// Stable capsule signing and destination payload keys. Absent in
     /// explicitly insecure local mode, where export/import stays disabled.
     pub continuity_crypto: Option<Arc<ContinuityCrypto>>,

@@ -126,25 +126,39 @@ pub async fn tick_once(
         let _ = handle.await;
     }
 
+    retry_deferred_parent_wakes(storage).await;
+
+    let hooks = HookTasks::default();
     process_signalled_instances(
         storage,
         handlers,
         sequence_cache,
         config.batch_size,
         &config.clock,
+        &hooks,
     )
     .await?;
 
-    process_waiting_deadlines(&SweepContext {
-        storage,
-        handlers,
-        sequence_cache,
-        webhook_config: &webhook_config,
-        cancel,
-        batch_size: config.batch_size,
-        clock: &config.clock,
-    })
+    // Like the SLA sweep below, the single-shot path carries no cursor and
+    // scans the whole Waiting set.
+    process_waiting_deadlines(
+        &SweepContext {
+            storage,
+            handlers,
+            sequence_cache,
+            webhook_config: &webhook_config,
+            cancel,
+            batch_size: config.batch_size,
+            clock: &config.clock,
+            hooks: &hooks,
+        },
+        &mut WaitingSweepCursor::default(),
+        u32::MAX,
+    )
     .await?;
+    // Single-shot callers expect the cleanup/escalation hooks of this pass
+    // to have run when the call returns.
+    hooks.join_all().await;
 
     // `tick_once` is the single-shot mobile entry point — no cursor is
     // carried between calls, so each call scans the full active set
@@ -190,12 +204,25 @@ struct PrefetchedData {
 /// 1. Claims a batch of due instances (`FOR UPDATE SKIP LOCKED`)
 /// 2. Spawns bounded concurrent tasks to process each instance
 /// 3. Overlapping ticks are safe — `SKIP LOCKED` prevents double-claiming
-#[allow(clippy::too_many_lines)]
 pub async fn run_tick_loop(
     storage: Arc<dyn StorageBackend>,
     handlers: Arc<HandlerRegistry>,
     config: &SchedulerConfig,
     cancel: CancellationToken,
+) -> Result<(), EngineError> {
+    run_tick_loop_with_liveness(storage, handlers, config, cancel, None).await
+}
+
+/// [`run_tick_loop`] that also stamps `liveness` at the end of every loop
+/// iteration (claim plus all sweeps), so the health probes can tell a
+/// wedged scheduler from a healthy one (I-H11).
+#[allow(clippy::too_many_lines)]
+pub async fn run_tick_loop_with_liveness(
+    storage: Arc<dyn StorageBackend>,
+    handlers: Arc<HandlerRegistry>,
+    config: &SchedulerConfig,
+    cancel: CancellationToken,
+    liveness: Option<Arc<crate::liveness::EngineLiveness>>,
 ) -> Result<(), EngineError> {
     let tick_duration = Duration::from_millis(config.tick_interval_ms);
     let batch_size = config.batch_size;
@@ -232,6 +259,8 @@ pub async fn run_tick_loop(
     // covers the whole active set over successive ticks, a bounded number of
     // pages at a time.
     let mut sla_cursor = SlaSweepCursor::default();
+    // Rotating cursor for the Waiting deadline/timeout sweep (L6-04).
+    let mut waiting_cursor = WaitingSweepCursor::default();
 
     loop {
         tokio::select! {
@@ -280,9 +309,19 @@ pub async fn run_tick_loop(
                             backoff_ms,
                             "tick processing failed, backing off"
                         );
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        // Inside a select so shutdown is not delayed by up
+                        // to the 5 s backoff.
+                        tokio::select! {
+                            () = cancel.cancelled() => {}
+                            () = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                        }
                     }
                 }
+                retry_deferred_parent_wakes(&storage).await;
+                // Hooks spawned by this iteration's sweeps run off the tick
+                // (bounded); dropping the handles at the end of the
+                // iteration detaches them.
+                let hooks = HookTasks::default();
                 // Process signals for paused/waiting instances that won't be
                 // picked up by claim_due_instances (which only claims
                 // scheduled instances). Without this, resume/cancel signals
@@ -293,6 +332,7 @@ pub async fn run_tick_loop(
                     &sequence_cache,
                     batch_size,
                     &config.clock,
+                    &hooks,
                 )
                 .await
                 {
@@ -301,15 +341,20 @@ pub async fn run_tick_loop(
                 // Check SLA deadlines for waiting instances (external worker
                 // dispatch). These instances are not claimed by the normal
                 // tick, but deadlines should still fire.
-                if let Err(e) = process_waiting_deadlines(&SweepContext {
-                    storage: &storage,
-                    handlers: &handlers,
-                    sequence_cache: &sequence_cache,
-                    webhook_config: &webhook_config,
-                    cancel: &cancel,
-                    batch_size,
-                    clock: &config.clock,
-                }).await {
+                if let Err(e) = process_waiting_deadlines(
+                    &SweepContext {
+                        storage: &storage,
+                        handlers: &handlers,
+                        sequence_cache: &sequence_cache,
+                        webhook_config: &webhook_config,
+                        cancel: &cancel,
+                        batch_size,
+                        clock: &config.clock,
+                        hooks: &hooks,
+                    },
+                    &mut waiting_cursor,
+                    MAX_SWEEP_PAGES,
+                ).await {
                     error!(error = %e, "waiting deadline processing failed");
                 }
                 // Alert-only SLA sweep over active instances (max_runtime /
@@ -328,6 +373,10 @@ pub async fn run_tick_loop(
                 ).await {
                     error!(error = %e, "sla breach sweep failed");
                 }
+                if let Some(liveness) = &liveness {
+                    liveness.record_tick();
+                }
+                crate::metrics::loop_pass("tick");
             }
         }
     }
@@ -624,7 +673,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             let _ = heartbeat_handle.await;
 
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => transient_retries::clear(instance_id),
                 Ok(Err(e)) if e.is_transient_storage() => {
                     // A transient storage failure (connection loss, pool
                     // exhaustion, DB failover) is NOT a processing failure —
@@ -632,26 +681,50 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     // work on a momentary infrastructure blip. Reschedule it
                     // back to Scheduled so a later tick retries; the CAS guard
                     // (Running -> Scheduled) is a no-op if a concurrent writer
-                    // already moved it.
-                    warn!(
-                        instance_id = %instance_id,
-                        error = %e,
-                        "instance processing hit a transient storage error -- rescheduling instead of failing"
-                    );
-                    if let Err(te) = storage
-                        .conditional_update_instance_state(
-                            instance_id,
-                            InstanceState::Running,
-                            InstanceState::Scheduled,
-                            Some(clock_outer.now()),
-                        )
-                        .await
-                    {
-                        error!(
-                            instance_id = %instance_id,
-                            error = %te,
-                            "failed to reschedule instance after transient storage error"
-                        );
+                    // already moved it. Retries back off per instance and are
+                    // bounded (L2-17): an error that is "transient" by type
+                    // but recurs forever (a rotated artifact key, a deleted
+                    // payload blob) used to re-claim the instance ~10x/s.
+                    crate::metrics::inc(crate::metrics::INSTANCE_TRANSIENT_RETRIES);
+                    match transient_retries::record(instance_id) {
+                        transient_retries::Decision::Retry(delay) => {
+                            warn!(
+                                instance_id = %instance_id,
+                                error = %e,
+                                retry_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                                "instance processing hit a transient storage error -- rescheduling instead of failing"
+                            );
+                            let fire_at = clock_outer.now()
+                                + chrono::Duration::from_std(delay)
+                                    .unwrap_or(chrono::Duration::seconds(60));
+                            if let Err(te) = storage
+                                .conditional_update_instance_state(
+                                    instance_id,
+                                    InstanceState::Running,
+                                    InstanceState::Scheduled,
+                                    Some(fire_at),
+                                )
+                                .await
+                            {
+                                error!(
+                                    instance_id = %instance_id,
+                                    error = %te,
+                                    "failed to reschedule instance after transient storage error"
+                                );
+                            }
+                        }
+                        transient_retries::Decision::Exhausted { attempts } => {
+                            crate::metrics::inc(crate::metrics::INSTANCE_TRANSIENT_RETRY_EXHAUSTED);
+                            record_transient_exhaustion(&storage, instance_id, attempts, &e).await;
+                            mark_instance_failed(
+                                &storage,
+                                instance_id,
+                                &e,
+                                "instance kept failing with a transient-classified error; retries exhausted (transient_retry_exhausted)",
+                                "failed to transition instance to Failed after transient retries were exhausted",
+                            )
+                            .await;
+                        }
                     }
                 }
                 Ok(Err(e)) => {
@@ -700,6 +773,107 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
     }
 
     Ok(join_handles)
+}
+
+/// Per-instance backoff and cap for transient-error reschedules (L2-17).
+///
+/// In-process (per node, lost on restart): it bounds the hot loop on this
+/// node and eventually lands a persistently failing instance in the DLQ,
+/// without an extra storage write on a path that runs exactly when storage
+/// is misbehaving.
+mod transient_retries {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex, PoisonError};
+    use std::time::{Duration, Instant};
+
+    use orch8_types::ids::InstanceId;
+
+    /// Delay before the first transient retry; doubles per consecutive failure.
+    const BASE: Duration = Duration::from_millis(200);
+    /// Cap on the delay between transient retries.
+    const MAX: Duration = Duration::from_secs(60);
+    /// Fail the instance once it has failed this many times in a row...
+    pub(super) const MAX_ATTEMPTS: u32 = 30;
+    /// ...and the first of those failures is at least this old, so a short
+    /// database outage (where every instance fails transiently) never DLQs
+    /// healthy work.
+    pub(super) const MIN_AGE: Duration = Duration::from_secs(15 * 60);
+    /// Entries older than this are dropped when the map grows large (the
+    /// instance finished elsewhere or was cancelled).
+    const STALE_AFTER: Duration = Duration::from_secs(2 * 3600);
+    const PRUNE_AT: usize = 10_000;
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) enum Decision {
+        Retry(Duration),
+        Exhausted { attempts: u32 },
+    }
+
+    static STATE: LazyLock<Mutex<HashMap<InstanceId, (u32, Instant)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Pure policy: `attempts` consecutive transient failures, the first one
+    /// `since_first` ago.
+    pub(super) fn decide(attempts: u32, since_first: Duration) -> Decision {
+        if attempts >= MAX_ATTEMPTS && since_first >= MIN_AGE {
+            return Decision::Exhausted { attempts };
+        }
+        let exp = attempts.saturating_sub(1).min(16);
+        let delay = BASE.saturating_mul(1u32 << exp).min(MAX);
+        // 80-120% jitter so a batch that failed together does not retry in
+        // lockstep.
+        Decision::Retry(delay.mul_f64(rand::RngExt::random_range(&mut rand::rng(), 0.8..1.2)))
+    }
+
+    pub(super) fn record(id: InstanceId) -> Decision {
+        let now = Instant::now();
+        let mut map = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+        if map.len() >= PRUNE_AT {
+            map.retain(|_, (_, first)| now.duration_since(*first) < STALE_AFTER);
+        }
+        let entry = map.entry(id).or_insert((0, now));
+        entry.0 = entry.0.saturating_add(1);
+        let decision = decide(entry.0, now.duration_since(entry.1));
+        if matches!(decision, Decision::Exhausted { .. }) {
+            map.remove(&id);
+        }
+        decision
+    }
+
+    pub(super) fn clear(id: InstanceId) {
+        let mut map = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+        if !map.is_empty() {
+            map.remove(&id);
+        }
+    }
+}
+
+/// Persist why the instance was failed after exhausting transient retries,
+/// so the DLQ entry carries a distinct `transient_retry_exhausted` reason.
+/// Best-effort: storage is, by definition, misbehaving here.
+async fn record_transient_exhaustion(
+    storage: &Arc<dyn StorageBackend>,
+    instance_id: InstanceId,
+    attempts: u32,
+    error: &EngineError,
+) {
+    let output = BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id,
+        block_id: BlockId::new("_engine:transient_retry_exhausted"),
+        output: serde_json::json!({
+            "_error": "transient_retry_exhausted",
+            "attempts": attempts,
+            "last_error": error.to_string(),
+        }),
+        output_ref: None,
+        output_size: 0,
+        attempt: 0,
+        created_at: Utc::now(),
+    };
+    if let Err(e) = storage.save_block_output(&output).await {
+        warn!(instance_id = %instance_id, error = %e, "failed to record transient-retry exhaustion");
+    }
 }
 
 /// Return claimed instances to `Scheduled` without resurrecting a row that a
@@ -895,10 +1069,11 @@ fn wakes_scheduled_instance(signal_type: &orch8_types::signal::SignalType) -> bo
 /// no such signals exist (single indexed query returning empty).
 async fn process_signalled_instances(
     storage: &Arc<dyn StorageBackend>,
-    handlers: &HandlerRegistry,
+    handlers: &Arc<HandlerRegistry>,
     sequence_cache: &SequenceCache,
     batch_size: u32,
     clock: &SharedClock,
+    hooks: &HookTasks,
 ) -> Result<(), EngineError> {
     let signalled = storage.get_signalled_instance_ids(batch_size).await?;
     if signalled.is_empty() {
@@ -919,103 +1094,245 @@ async fn process_signalled_instances(
         if signals.is_empty() {
             continue;
         }
-
-        // Scheduled instances with a pending *control* signal just need a
-        // wake-up so the normal tick processes it immediately. Skip the full
-        // signal processor to avoid invalid state transitions.
-        //
-        // Only pause/cancel justify cutting a delay, send window, or retry
-        // backoff short. Everything else (update_context, custom signals and
-        // `human_input:<step>` responses for a step not reached yet) is
-        // consumed when the instance next runs naturally — waking for those
-        // re-armed a parked instance on every sweep, which together with a
-        // step delay was a livelock (ENG-R-N1). Storage already filters
-        // these rows; this is the backend-independent guard.
-        if current_state == InstanceState::Scheduled {
-            if !signals
-                .iter()
-                .any(|s| wakes_scheduled_instance(&s.signal_type))
-            {
-                continue;
-            }
-            debug!(
-                instance_id = %instance_id,
-                "waking scheduled instance with pending signal"
-            );
-            if let Err(e) = storage
-                .conditional_update_instance_state(
-                    instance_id,
-                    InstanceState::Scheduled,
-                    InstanceState::Scheduled,
-                    Some(clock.now()),
-                )
-                .await
-            {
-                warn!(
-                    instance_id = %instance_id,
-                    error = %e,
-                    "failed to re-arm signalled scheduled instance"
-                );
-            }
-            continue;
-        }
-
-        let abort = crate::signals::process_signals_prefetched(
-            storage.as_ref(),
+        // L2-11: one instance whose signals cannot be applied (undecodable
+        // context or sequence, a failing write) used to abort the whole
+        // sweep with `?` — every tick, at the head of the oldest-first batch
+        // — so pauses, resumes, cancels and approvals of every instance
+        // after it were never delivered. Isolate per-instance failures.
+        if let Err(e) = process_one_signalled_instance(
+            storage,
+            handlers,
+            sequence_cache,
+            clock,
+            hooks,
             instance_id,
             current_state,
             signals,
-            None,
         )
-        .await?;
-        if abort {
-            // Signal handling owns state transitions but deliberately has no
-            // scheduler clock parameter. Normalize any wake-up here so a
-            // virtual-time engine never inherits `Utc::now()` as its next
-            // fire time and interprets an immediate signal as a months-long
-            // delay.
-            if let Some(inst) = storage.get_instance(instance_id).await?
-                && inst.state == InstanceState::Scheduled
-            {
-                storage
-                    .conditional_update_instance_state(
-                        instance_id,
-                        InstanceState::Scheduled,
-                        InstanceState::Scheduled,
-                        Some(clock.now()),
-                    )
-                    .await?;
-            }
-            debug!(
+        .await
+        {
+            warn!(
                 instance_id = %instance_id,
-                from_state = %current_state,
-                "signal processed for non-scheduled instance"
+                state = %current_state,
+                error = %e,
+                "signal sweep: failed to apply signals for instance; continuing sweep"
             );
-            // A cancel signal may have just driven this instance terminal.
-            // Run the sequence's best-effort `on_cancel` cleanup if so — this
-            // covers the immediate (unscoped) cancel path that bypasses tree
-            // evaluation. (Scoped cancellations complete through the evaluator,
-            // whose terminal path runs the same hook.)
-            if current_state != InstanceState::Cancelled
-                && let Ok(Some(inst)) = storage.get_instance(instance_id).await
-                && inst.state == InstanceState::Cancelled
-                && let Ok(seq) = sequence_cache
-                    .get_by_id(storage.as_ref(), inst.sequence_id)
-                    .await
-                && let Some(ref blocks) = seq.on_cancel
-            {
-                run_cleanup_hooks(storage, handlers, &inst, blocks, "on_cancel").await;
-            }
         }
     }
 
     Ok(())
 }
 
+/// Apply the pending signals of one paused/waiting (or signalled scheduled)
+/// instance for [`process_signalled_instances`].
+#[allow(clippy::too_many_arguments)]
+async fn process_one_signalled_instance(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &Arc<HandlerRegistry>,
+    sequence_cache: &SequenceCache,
+    clock: &SharedClock,
+    hooks: &HookTasks,
+    instance_id: InstanceId,
+    current_state: InstanceState,
+    signals: Vec<Signal>,
+) -> Result<(), EngineError> {
+    // Scheduled instances with a pending *control* signal just need a
+    // wake-up so the normal tick processes it immediately. Skip the full
+    // signal processor to avoid invalid state transitions.
+    //
+    // Only pause/cancel justify cutting a delay, send window, or retry
+    // backoff short. Everything else (update_context, custom signals and
+    // `human_input:<step>` responses for a step not reached yet) is
+    // consumed when the instance next runs naturally — waking for those
+    // re-armed a parked instance on every sweep, which together with a
+    // step delay was a livelock (ENG-R-N1). Storage already filters
+    // these rows; this is the backend-independent guard.
+    if current_state == InstanceState::Scheduled {
+        if !signals
+            .iter()
+            .any(|s| wakes_scheduled_instance(&s.signal_type))
+        {
+            return Ok(());
+        }
+        debug!(
+            instance_id = %instance_id,
+            "waking scheduled instance with pending signal"
+        );
+        if let Err(e) = storage
+            .conditional_update_instance_state(
+                instance_id,
+                InstanceState::Scheduled,
+                InstanceState::Scheduled,
+                Some(clock.now()),
+            )
+            .await
+        {
+            warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "failed to re-arm signalled scheduled instance"
+            );
+        }
+        return Ok(());
+    }
+
+    let abort = crate::signals::process_signals_prefetched(
+        storage.as_ref(),
+        instance_id,
+        current_state,
+        signals,
+        None,
+    )
+    .await?;
+    if abort {
+        // Signal handling owns state transitions but deliberately has no
+        // scheduler clock parameter. Normalize any wake-up here so a
+        // virtual-time engine never inherits `Utc::now()` as its next
+        // fire time and interprets an immediate signal as a months-long
+        // delay.
+        if let Some(inst) = storage.get_instance(instance_id).await?
+            && inst.state == InstanceState::Scheduled
+        {
+            storage
+                .conditional_update_instance_state(
+                    instance_id,
+                    InstanceState::Scheduled,
+                    InstanceState::Scheduled,
+                    Some(clock.now()),
+                )
+                .await?;
+        }
+        debug!(
+            instance_id = %instance_id,
+            from_state = %current_state,
+            "signal processed for non-scheduled instance"
+        );
+        // A cancel signal may have just driven this instance terminal.
+        // Run the sequence's best-effort `on_cancel` cleanup if so — this
+        // covers the immediate (unscoped) cancel path that bypasses tree
+        // evaluation. (Scoped cancellations complete through the evaluator,
+        // whose terminal path runs the same hook.) The hooks run off the
+        // tick (L2-06): a bulk cancel against a slow hook target used to
+        // block scheduling for `instances × hooks × 30 s`.
+        if current_state != InstanceState::Cancelled
+            && let Ok(Some(inst)) = storage.get_instance(instance_id).await
+            && inst.state == InstanceState::Cancelled
+            && let Ok(seq) = sequence_cache
+                .get_by_id(storage.as_ref(), inst.sequence_id)
+                .await
+            && seq.on_cancel.is_some()
+        {
+            let storage = Arc::clone(storage);
+            let handlers = Arc::clone(handlers);
+            hooks.spawn(async move {
+                if let Some(ref blocks) = seq.on_cancel {
+                    run_cleanup_hooks(&storage, &handlers, &inst, blocks, "on_cancel").await;
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Max cleanup / escalation hooks the sweeps run concurrently off the tick
+/// (L2-06). Each hook is still bounded by [`HOOK_DISPATCH_TIMEOUT`].
+const HOOK_CONCURRENCY: usize = 16;
+static HOOK_PERMITS: Semaphore = Semaphore::const_new(HOOK_CONCURRENCY);
+
+/// Hooks a sweep pass spawned off the tick task. The tick loop drops the
+/// handles (the hooks keep running, at most [`HOOK_CONCURRENCY`] at a time);
+/// `tick_once` awaits them so single-shot callers observe the hook outcome.
+#[derive(Default)]
+pub(crate) struct HookTasks(std::sync::Mutex<Vec<JoinHandle<()>>>);
+
+impl HookTasks {
+    fn spawn<F>(&self, hook: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::spawn(async move {
+            // The semaphore is never closed, so acquire cannot fail.
+            let _permit = HOOK_PERMITS.acquire().await;
+            hook.await;
+        });
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(handle);
+    }
+
+    async fn join_all(self) {
+        let handles = self
+            .0
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+}
+
 /// Max pages of Waiting instances swept for deadlines/timeouts per tick. Bounds
-/// per-tick work while still covering a backlog larger than one batch (the old
-/// single-page cap permanently starved instances sorted past `batch_size`).
+/// per-tick work; the rotating [`WaitingSweepCursor`] carries the position
+/// across ticks so a backlog larger than this still gets fully covered.
 const MAX_SWEEP_PAGES: u32 = 64;
+
+/// Upper bound on the cursor's sequence -> has-nested-timers memo.
+const WAITING_SWEEP_MEMO_MAX: usize = 4096;
+
+/// Rotating-scan state for the Waiting deadline/timeout sweep, carried across
+/// ticks by the tick loop (`tick_once` uses a fresh one and scans everything).
+///
+/// - `offset`: where the next tick resumes paging the Waiting set. The sweep
+///   used to restart at offset 0 every tick and stop after
+///   [`MAX_SWEEP_PAGES`], so instances sorted past `64 × batch_size` never
+///   had their deadlines or `wait_for_input` timeouts checked (L6-04).
+/// - `nested_timers`: memo of `sequence_id` -> "has a step *nested* in a
+///   composite that declares a `deadline` or `wait_for_input.timeout`"
+///   (immutable per sequence id), so only those instances pay for an
+///   execution-tree read (L3-02).
+#[derive(Default)]
+pub(crate) struct WaitingSweepCursor {
+    offset: u64,
+    nested_timers: HashMap<orch8_types::ids::SequenceId, bool>,
+}
+
+impl WaitingSweepCursor {
+    fn has_nested_timers(&mut self, seq: &SequenceDefinition) -> bool {
+        if let Some(known) = self.nested_timers.get(&seq.id) {
+            return *known;
+        }
+        let has = sequence_has_nested_timers(seq);
+        if self.nested_timers.len() >= WAITING_SWEEP_MEMO_MAX {
+            self.nested_timers.clear();
+        }
+        self.nested_timers.insert(seq.id, has);
+        has
+    }
+}
+
+/// `true` when a step nested inside a composite block declares a `deadline`
+/// or a `wait_for_input.timeout`. Top-level steps are covered by
+/// [`check_waiting_instance`]'s root scan.
+fn sequence_has_nested_timers(seq: &SequenceDefinition) -> bool {
+    crate::evaluator::flatten_blocks(&seq.blocks)
+        .iter()
+        .any(|(id, block)| {
+            matches!(block, orch8_types::sequence::BlockDefinition::Step(step)
+                if step_has_timer(step))
+                && !seq.blocks.iter().any(|root| {
+                    matches!(root, orch8_types::sequence::BlockDefinition::Step(r) if &r.id == *id)
+                })
+        })
+}
+
+fn step_has_timer(step: &orch8_types::sequence::StepDef) -> bool {
+    step.deadline.is_some()
+        || step
+            .wait_for_input
+            .as_ref()
+            .is_some_and(|h| h.timeout.is_some())
+}
 
 /// Batch-fetch the deadline block outputs for `keys` in a single query. An
 /// empty key set short-circuits to an empty map without touching storage.
@@ -1062,7 +1379,11 @@ impl<'a> DeadlineOutputs<'a> {
 /// Check SLA deadlines for instances stuck in `Waiting` state (dispatched to
 /// external workers that never completed). Runs every tick with a bounded
 /// query to avoid overhead when no deadlines are configured.
-async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineError> {
+async fn process_waiting_deadlines(
+    ctx: &SweepContext<'_>,
+    cursor: &mut WaitingSweepCursor,
+    max_pages: u32,
+) -> Result<(), EngineError> {
     use orch8_types::filter::{InstanceFilter, Pagination};
 
     let SweepContext {
@@ -1082,10 +1403,12 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
     // `batch_size` rows (the old behaviour) permanently starved any due
     // instance sorted past position `batch_size` — its timeout never fired.
     // Woken instances leave the Waiting set mid-sweep, so an offset window can
-    // skip a few after wakes; those are picked up on the next tick
-    // (self-correcting, and this sweep runs every tick).
-    let mut offset: u64 = 0;
-    for _page in 0..MAX_SWEEP_PAGES {
+    // skip a few after wakes; those are picked up on the next rotation
+    // (self-correcting, and this sweep runs every tick). The window resumes
+    // from `cursor.offset` and wraps to 0 at the end of the set.
+    let mut offset: u64 = cursor.offset;
+    let mut wrapped = false;
+    for _page in 0..max_pages {
         let pagination = Pagination {
             offset,
             limit: batch_size,
@@ -1095,6 +1418,7 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
         let page_len = waiting.len();
         if waiting.is_empty() {
             // Idle / drained — skip the per-instance sequence-cache walk.
+            wrapped = true;
             break;
         }
 
@@ -1137,11 +1461,18 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
 
         for (instance, seq) in instance_sequences {
             let completed_ids = completed.remove(&instance.id).unwrap_or_default();
+            let nested_timers = cursor.has_nested_timers(&seq);
             // Per-instance failures (a lost CAS, a transient write error) must
             // not abort the sweep for every other Waiting instance.
-            if let Err(e) =
-                check_waiting_instance(ctx, instance, &seq, &deadline_outputs_ref, &completed_ids)
-                    .await
+            if let Err(e) = check_waiting_instance(
+                ctx,
+                instance,
+                &seq,
+                &deadline_outputs_ref,
+                &completed_ids,
+                nested_timers,
+            )
+            .await
             {
                 warn!(
                     instance_id = %instance.id,
@@ -1152,13 +1483,15 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
         }
 
         // A short page means we reached the end of the Waiting set; otherwise
-        // advance the window to the next page. `MAX_SWEEP_PAGES` bounds the
+        // advance the window to the next page. `max_pages` bounds the
         // per-tick work so a pathological backlog can't stall the tick loop.
         if u32::try_from(page_len).unwrap_or(u32::MAX) < batch_size {
+            wrapped = true;
             break;
         }
         offset += u64::from(batch_size);
     }
+    cursor.offset = if wrapped { 0 } else { offset };
     Ok(())
 }
 
@@ -1171,6 +1504,7 @@ async fn check_waiting_instance(
     seq: &SequenceDefinition,
     deadline_outputs_ref: &DeadlineOutputs<'_>,
     completed_block_ids: &[BlockId],
+    nested_timers: bool,
 ) -> Result<(), EngineError> {
     for block in &seq.blocks {
         if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
@@ -1185,10 +1519,11 @@ async fn check_waiting_instance(
                     ctx.cancel,
                     prev,
                     ctx.clock,
+                    ctx.hooks,
                 )
                 .await?
                 {
-                    break; // Instance was failed — no need to check more steps.
+                    return Ok(()); // Instance was failed — no need to check more steps.
                 }
             }
 
@@ -1223,6 +1558,8 @@ async fn check_waiting_instance(
                             block_id = %step_def.id,
                             "wait_for_input timeout expired, waking instance"
                         );
+                        reactivate_waiting_gate_node(ctx.storage, instance.id, &step_def.id)
+                            .await?;
                         crate::lifecycle::transition_instance(
                             ctx.storage.as_ref(),
                             instance.id,
@@ -1232,11 +1569,118 @@ async fn check_waiting_instance(
                             Some(ctx.clock.now()),
                         )
                         .await?;
-                        break;
+                        return Ok(());
                     }
                 }
             }
         }
+    }
+    if nested_timers {
+        wake_on_expired_nested_timer(ctx, instance, seq).await?;
+    }
+    Ok(())
+}
+
+/// L3-02: steps nested in a composite (`parallel`, `try_catch`, `loop`, a
+/// saga action, ...) park their *node* `Waiting`; their `deadline` and
+/// `wait_for_input.timeout` were only enforced inside `evaluate`, which never
+/// runs while the instance itself is `Waiting`. Walk the execution tree and,
+/// when a live node's timer (measured from the node's own `started_at`, the
+/// same baseline `evaluate` uses) has expired, wake the instance so the
+/// evaluator's own SLA / gate-timeout handling fires on the next claim.
+async fn wake_on_expired_nested_timer(
+    ctx: &SweepContext<'_>,
+    instance: &orch8_types::instance::TaskInstance,
+    seq: &SequenceDefinition,
+) -> Result<(), EngineError> {
+    use orch8_types::execution::NodeState;
+    use orch8_types::sequence::BlockDefinition;
+
+    let tree = ctx.storage.get_execution_tree(instance.id).await?;
+    let blocks = crate::evaluator::flatten_blocks(&seq.blocks);
+    let now = ctx.clock.now();
+    let exceeds = |started: chrono::DateTime<Utc>, limit: std::time::Duration| {
+        now - started >= chrono::Duration::from_std(limit).unwrap_or(chrono::TimeDelta::MAX)
+    };
+    let mut deadline_breached = false;
+    let mut timed_out_gates = Vec::new();
+    for node in &tree {
+        if !matches!(node.state, NodeState::Running | NodeState::Waiting) {
+            continue;
+        }
+        let Some(started) = node.started_at else {
+            continue;
+        };
+        let Ok(idx) = blocks.binary_search_by_key(&&node.block_id, |(id, _)| *id) else {
+            continue;
+        };
+        let BlockDefinition::Step(step) = blocks[idx].1 else {
+            continue;
+        };
+        // `evaluate`'s SLA check fails Running *and* Waiting nodes itself.
+        if step.deadline.is_some_and(|d| exceeds(started, d)) {
+            deadline_breached = true;
+        }
+        // The gate check (strict `>`) only runs when the node is re-dispatched,
+        // and the evaluator re-dispatches Running step nodes only.
+        if node.state == NodeState::Waiting
+            && let Some(timeout) = step.wait_for_input.as_ref().and_then(|h| h.timeout)
+            && now - started > chrono::Duration::from_std(timeout).unwrap_or(chrono::TimeDelta::MAX)
+        {
+            timed_out_gates.push(node.id);
+        }
+    }
+    if !deadline_breached && timed_out_gates.is_empty() {
+        return Ok(());
+    }
+    debug!(
+        instance_id = %instance.id,
+        deadline_breached,
+        timed_out_gates = timed_out_gates.len(),
+        "nested step deadline/timeout expired while Waiting, waking instance"
+    );
+    if !timed_out_gates.is_empty() {
+        // Same hand-off as a `human_input:` answer (`signals.rs`): flip the
+        // gate node back to Running so the evaluator re-runs its gate check,
+        // which now takes the timeout / escalation path.
+        ctx.storage
+            .update_nodes_state(&timed_out_gates, NodeState::Running)
+            .await?;
+    }
+    crate::lifecycle::transition_instance(
+        ctx.storage.as_ref(),
+        instance.id,
+        Some(&instance.tenant_id),
+        InstanceState::Waiting,
+        InstanceState::Scheduled,
+        Some(now),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Tree-path counterpart of the root gate-timeout wake: flip `block_id`'s
+/// `Waiting` gate node back to Running so the woken instance re-runs the gate
+/// check. Without it the evaluator (which only re-dispatches Running step
+/// nodes) re-parked the instance and the sweep woke it again every tick. A
+/// no-op for flat-path instances, which have no execution tree.
+async fn reactivate_waiting_gate_node(
+    storage: &Arc<dyn StorageBackend>,
+    instance_id: InstanceId,
+    block_id: &BlockId,
+) -> Result<(), EngineError> {
+    use orch8_types::execution::NodeState;
+    let nodes: Vec<_> = storage
+        .get_execution_tree(instance_id)
+        .await?
+        .into_iter()
+        .filter(|n| &n.block_id == block_id && n.state == NodeState::Waiting)
+        .map(|n| n.id)
+        .collect();
+    if !nodes.is_empty() {
+        storage
+            .update_nodes_state(&nodes, NodeState::Running)
+            .await?;
     }
     Ok(())
 }
@@ -1250,9 +1694,12 @@ async fn check_waiting_instance(
 /// best-effort and already swallowed on error.
 const HOOK_DISPATCH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Await a hook handler future with [`HOOK_DISPATCH_TIMEOUT`], mapping an
-/// elapsed timeout to a `Permanent` error so callers treat it exactly like any
-/// other swallowed hook failure.
+/// Run a hook handler future on its own task, bounded by
+/// [`HOOK_DISPATCH_TIMEOUT`]. An elapsed timeout or a **panic** is mapped to a
+/// `Permanent` error so callers treat it exactly like any other swallowed
+/// hook failure. The separate task is what isolates panics: these hooks run
+/// tenant-authored handler code on scheduler-owned tasks, and an unwinding
+/// panic there used to kill the whole tick loop (L2-01).
 ///
 /// `pub(crate)`: shared with the tree-path SLA escalation dispatch
 /// (`evaluator::sla`), which runs inline in the per-instance evaluate loop and
@@ -1261,14 +1708,24 @@ pub(crate) async fn dispatch_hook_bounded<F>(
     fut: F,
 ) -> Result<serde_json::Value, orch8_types::error::StepError>
 where
-    F: std::future::Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
+    F: std::future::Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>
+        + Send
+        + 'static,
 {
-    match tokio::time::timeout(HOOK_DISPATCH_TIMEOUT, fut).await {
-        Ok(r) => r,
-        Err(_) => Err(orch8_types::error::StepError::Permanent {
-            message: "cleanup/escalation hook exceeded dispatch timeout".to_string(),
+    let mut task = tokio::spawn(fut);
+    match tokio::time::timeout(HOOK_DISPATCH_TIMEOUT, &mut task).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(join_err)) => Err(orch8_types::error::StepError::Permanent {
+            message: format!("cleanup/escalation hook panicked: {join_err}"),
             details: None,
         }),
+        Err(_) => {
+            task.abort();
+            Err(orch8_types::error::StepError::Permanent {
+                message: "cleanup/escalation hook exceeded dispatch timeout".to_string(),
+                details: None,
+            })
+        }
     }
 }
 
@@ -1330,8 +1787,11 @@ async fn dispatch_cleanup_step(
     let result = if let Some(handler) = handlers.get(&step.handler) {
         dispatch_hook_bounded(handler(ctx)).await
     } else if plugin_kind == Some(crate::handlers::PluginKind::ActivePieces) {
-        // ⚡ Bolt: Avoid cloning `step.handler` String just to pass a reference.
-        dispatch_hook_bounded(crate::handlers::activepieces::handle_ap(ctx, &step.handler)).await
+        let handler_name = step.handler.clone();
+        dispatch_hook_bounded(async move {
+            crate::handlers::activepieces::handle_ap(ctx, &handler_name).await
+        })
+        .await
     } else if plugin_kind == Some(crate::handlers::PluginKind::Grpc) {
         let Some(endpoint) = crate::handlers::step_dispatch::resolve_plugin_source(
             storage.as_ref(),
@@ -1372,9 +1832,9 @@ async fn dispatch_cleanup_step(
             );
             return None;
         };
-        dispatch_hook_bounded(crate::handlers::wasm_plugin::handle_wasm_plugin(
-            ctx, &wasm_path,
-        ))
+        dispatch_hook_bounded(async move {
+            crate::handlers::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path).await
+        })
         .await
     } else {
         warn!(
@@ -1461,6 +1921,8 @@ struct SweepContext<'a> {
     pub cancel: &'a CancellationToken,
     pub batch_size: u32,
     pub clock: &'a SharedClock,
+    /// Where escalation hooks fired by the sweep are spawned (L2-06).
+    pub hooks: &'a HookTasks,
 }
 
 /// Same idea as [`SweepContext`] but for the alert-only SLA sweep, which
@@ -1777,6 +2239,7 @@ async fn check_step_deadline_waiting(
     _cancel: &CancellationToken,
     prev_output: Option<&orch8_types::output::BlockOutput>,
     clock: &SharedClock,
+    hooks: &HookTasks,
 ) -> Result<bool, EngineError> {
     handle_deadline_breach(
         storage,
@@ -1786,6 +2249,7 @@ async fn check_step_deadline_waiting(
         prev_output,
         InstanceState::Waiting,
         clock,
+        Some(hooks),
     )
     .await
 }
@@ -1798,7 +2262,10 @@ async fn check_step_deadline_waiting(
 /// escalation handler if configured, record a breach output, and fail the
 /// instance. The only difference is the `from_state` passed to
 /// `transition_instance`. This function captures that shared logic.
-#[allow(clippy::too_many_lines)]
+///
+/// `hooks`: when `Some` (the Waiting sweep, which runs on the tick task) the
+/// escalation handler is spawned there instead of awaited inline (L2-06).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) async fn handle_deadline_breach(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -1807,6 +2274,7 @@ pub(crate) async fn handle_deadline_breach(
     prev_output: Option<&orch8_types::output::BlockOutput>,
     from_state: InstanceState,
     clock: &SharedClock,
+    hooks: Option<&HookTasks>,
 ) -> Result<bool, EngineError> {
     let Some(deadline) = step_def.deadline else {
         return Ok(false);
@@ -1905,10 +2373,18 @@ pub(crate) async fn handle_deadline_breach(
             storage: Arc::clone(storage),
             wait_for_input: None,
         };
-        // Bounded: this escalation runs inline on the deadline sweep (tick
-        // loop), so a hung escalation handler must not stall scheduling.
-        if let Err(e) = dispatch_hook_bounded(handler(step_ctx)).await {
-            warn!(instance_id = %instance_id, error = %e, "SLA escalation handler failed");
+        // Bounded and panic-isolated. From the Waiting sweep (tick task) it
+        // also runs in the background so a slow escalation target cannot
+        // stall scheduling.
+        let escalation = handler(step_ctx);
+        let run = async move {
+            if let Err(e) = dispatch_hook_bounded(escalation).await {
+                warn!(instance_id = %instance_id, error = %e, "SLA escalation handler failed");
+            }
+        };
+        match hooks {
+            Some(hooks) => hooks.spawn(run),
+            None => run.await,
         }
     }
 
@@ -2592,11 +3068,16 @@ async fn wake_parent_if_child(
                 );
             }
             Ok(false) => {
+                // Usually the parent already moved on, but it may still be
+                // `Running` (evaluating another branch) and about to park
+                // without having seen this child finish (L3-01): queue a
+                // retry the tick loop delivers once it parks.
                 debug!(
                     parent_id = %parent_id,
                     child_id = %instance.id,
-                    "parent no longer in Waiting state, skipping wake"
+                    "parent not in Waiting state; deferring wake retry"
                 );
+                defer_parent_wake(parent_id);
             }
             Err(e) => {
                 warn!(
@@ -2622,6 +3103,7 @@ async fn wake_parent_if_child(
 async fn handle_tree_more_work(
     ctx: &InstanceRunCtx<'_>,
     instance: &orch8_types::instance::TaskInstance,
+    sequence: &SequenceDefinition,
     has_waiting_nodes: bool,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
@@ -2630,13 +3112,14 @@ async fn handle_tree_more_work(
         .get_instance(instance_id)
         .await?
         .map_or(InstanceState::Running, |i| i.state);
-    if matches!(
-        current,
-        InstanceState::Paused | InstanceState::Cancelled | InstanceState::Failed
-    ) {
+    // Any terminal state, not just Cancelled/Failed (L3-12): a concurrent
+    // runner that completed the instance mid-evaluation must not be
+    // resurrected through the `Completed -> Scheduled` resume-from-block edge
+    // (duplicate `instance.completed` webhook and parent wake).
+    if current == InstanceState::Paused || current.is_terminal() {
         // Terminal/paused — leave state as-is.
     } else if has_waiting_nodes {
-        if let Err(e) = crate::lifecycle::transition_instance(
+        match crate::lifecycle::transition_instance(
             ctx.storage.as_ref(),
             instance_id,
             Some(&instance.tenant_id),
@@ -2646,13 +3129,16 @@ async fn handle_tree_more_work(
         )
         .await
         {
-            if !matches!(e, crate::error::EngineError::InvalidTransition { .. }) {
-                return Err(e);
+            Ok(()) => recheck_parked_sub_sequence_parent(ctx, instance, sequence).await,
+            Err(e) => {
+                if !matches!(e, crate::error::EngineError::InvalidTransition { .. }) {
+                    return Err(e);
+                }
+                debug!(
+                    instance_id = %instance_id,
+                    "concurrent writer moved instance before Running->Waiting transition"
+                );
             }
-            debug!(
-                instance_id = %instance_id,
-                "concurrent writer moved instance before Running->Waiting transition"
-            );
         }
     } else if let Err(e) = crate::lifecycle::transition_instance(
         ctx.storage.as_ref(),
@@ -2674,6 +3160,142 @@ async fn handle_tree_more_work(
         );
     }
     Ok(())
+}
+
+/// Park-then-recheck for sub-sequence parents (L3-01). A child that reaches a
+/// terminal state while its parent is still `Running` (evaluating another
+/// branch) finds the parent not `Waiting` and its wake CAS is a no-op; if the
+/// parent's last read of the child predates that, the parent then parks
+/// `Waiting` with nothing left to wake it. Re-reading the awaited children
+/// *after* the `Running -> Waiting` commit closes the window: either this read
+/// sees the terminal child, or the child's terminal write — and therefore its
+/// wake attempt — comes after the parent's park and succeeds.
+async fn recheck_parked_sub_sequence_parent(
+    ctx: &InstanceRunCtx<'_>,
+    instance: &orch8_types::instance::TaskInstance,
+    sequence: &SequenceDefinition,
+) {
+    let has_sub_sequence = crate::evaluator::flatten_blocks(&sequence.blocks)
+        .iter()
+        .any(|(_, b)| matches!(b, orch8_types::sequence::BlockDefinition::SubSequence(_)));
+    if !has_sub_sequence {
+        return;
+    }
+    match crate::evaluator::awaited_sub_sequence_child_terminal(ctx.storage.as_ref(), instance)
+        .await
+    {
+        Ok(false) => {}
+        Ok(true) => match ctx
+            .storage
+            .conditional_update_instance_state(
+                instance.id,
+                InstanceState::Waiting,
+                InstanceState::Scheduled,
+                Some(ctx.clock.now()),
+            )
+            .await
+        {
+            Ok(woke) => debug!(
+                instance_id = %instance.id,
+                woke,
+                "awaited sub-sequence child finished before the parent parked; re-scheduling"
+            ),
+            Err(e) => {
+                warn!(instance_id = %instance.id, error = %e, "failed to re-schedule parked parent");
+                defer_parent_wake(instance.id);
+            }
+        },
+        Err(e) => {
+            warn!(
+                instance_id = %instance.id,
+                error = %e,
+                "post-park sub-sequence recheck failed; deferring a wake retry"
+            );
+            defer_parent_wake(instance.id);
+        }
+    }
+}
+
+/// Parents whose wake could not be delivered yet: the child's
+/// `Waiting -> Scheduled` CAS found them still `Running`, or the post-park
+/// recheck failed. Value: when to try next. In-process safety net behind the
+/// park-then-recheck fix (L3-01); bounded and lost on restart.
+static DEFERRED_PARENT_WAKES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<InstanceId, (std::time::Instant, std::time::Instant)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// Delay between deferred parent-wake attempts.
+const DEFERRED_WAKE_RETRY: Duration = Duration::from_secs(1);
+/// Give up on a deferred parent wake after this long.
+const DEFERRED_WAKE_MAX_AGE: Duration = Duration::from_secs(300);
+/// Upper bound on tracked deferred parent wakes.
+const DEFERRED_WAKE_CAP: usize = 10_000;
+
+fn defer_parent_wake(parent_id: InstanceId) {
+    let now = std::time::Instant::now();
+    let mut map = DEFERRED_PARENT_WAKES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if map.len() >= DEFERRED_WAKE_CAP && !map.contains_key(&parent_id) {
+        return;
+    }
+    map.entry(parent_id)
+        .and_modify(|(_, next)| *next = now + DEFERRED_WAKE_RETRY)
+        .or_insert((now, now + DEFERRED_WAKE_RETRY));
+}
+
+/// Retry deferred parent wakes that are due. A parent still `Running` (or
+/// `Scheduled`, about to run) keeps its entry until it parks; a `Waiting`
+/// parent is re-scheduled so it re-evaluates its finished child; anything
+/// else (paused, terminal, gone) is dropped. Called once per tick.
+async fn retry_deferred_parent_wakes(storage: &Arc<dyn StorageBackend>) {
+    let now = std::time::Instant::now();
+    let due: Vec<InstanceId> = {
+        let mut map = DEFERRED_PARENT_WAKES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if map.is_empty() {
+            return;
+        }
+        map.retain(|_, (first, _)| now.duration_since(*first) < DEFERRED_WAKE_MAX_AGE);
+        map.iter()
+            .filter(|(_, (_, next))| *next <= now)
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    for parent_id in due {
+        let keep = match storage.get_instance(parent_id).await {
+            Ok(Some(p)) if p.state == InstanceState::Waiting => {
+                if let Err(e) = storage
+                    .conditional_update_instance_state(
+                        parent_id,
+                        InstanceState::Waiting,
+                        InstanceState::Scheduled,
+                        Some(Utc::now()),
+                    )
+                    .await
+                {
+                    warn!(parent_id = %parent_id, error = %e, "deferred parent wake failed");
+                    true
+                } else {
+                    info!(parent_id = %parent_id, "delivered deferred sub-sequence parent wake");
+                    false
+                }
+            }
+            Ok(Some(p)) => p.state == InstanceState::Running,
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        let mut map = DEFERRED_PARENT_WAKES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if keep {
+            if let Some((_, next)) = map.get_mut(&parent_id) {
+                *next = now + DEFERRED_WAKE_RETRY;
+            }
+        } else {
+            map.remove(&parent_id);
+        }
+    }
 }
 
 /// Pre-flight step-budget check for the tree path: a fresh read guards
@@ -2734,11 +3356,16 @@ async fn process_instance_tree(
         .await
     {
         Ok(EvalOutcome::MoreWork { has_waiting_nodes }) => {
-            handle_tree_more_work(ctx, instance, has_waiting_nodes).await?;
+            handle_tree_more_work(ctx, instance, sequence, has_waiting_nodes).await?;
         }
         Ok(EvalOutcome::Done { reason }) => {
             handle_tree_done(ctx, instance, sequence, reason).await?;
         }
+        // L3-06: same classification as the flat path. A transient storage
+        // error (connection reset, failover, pool timeout) mid-evaluate must
+        // reach `process_tick`'s transient arm and be rescheduled with
+        // backoff, not fail the instance permanently.
+        Err(e) if e.is_transient_storage() => return Err(e),
         Err(e) => {
             handle_tree_eval_error(ctx, instance, sequence, &e).await?;
         }

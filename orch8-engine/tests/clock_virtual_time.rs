@@ -237,3 +237,117 @@ async fn loop_poll_interval_uses_manual_clock() {
         InstanceState::Completed
     );
 }
+
+/// L3-02 end to end: a human gate nested in a `parallel` parks the instance
+/// `Waiting`; once its `wait_for_input.timeout` passes (virtual time), the
+/// Waiting sweep must hand the gate back to the evaluator so the timeout
+/// path runs, instead of the instance waiting forever.
+#[tokio::test]
+async fn nested_gate_timeout_fires_while_waiting() {
+    let s = storage().await;
+    let BlockDefinition::Step(mut gate) = mk_step("approve", "noop") else {
+        unreachable!()
+    };
+    gate.wait_for_input = Some(orch8_types::sequence::HumanInputDef {
+        prompt: "approve?".into(),
+        timeout: Some(Duration::from_secs(3600)),
+        escalation_handler: None,
+        choices: None,
+        store_as: None,
+        allow_comment: false,
+        auto_decide: None,
+    });
+    let seq = mk_sequence(vec![BlockDefinition::Parallel(Box::new(
+        orch8_types::sequence::ParallelDef {
+            id: BlockId::new("par"),
+            branches: vec![
+                vec![BlockDefinition::Step(gate)],
+                vec![mk_step("other", "noop")],
+            ],
+        },
+    ))]);
+    s.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance_scheduled(seq.id, serde_json::json!({}));
+    s.create_instance(&inst).await.unwrap();
+
+    let manual = Arc::new(ManualClock::new(Utc::now() + chrono::Duration::seconds(1)));
+    let config = config_with_clock(&manual);
+    let h = Arc::new(registry());
+    for _ in 0..4 {
+        tick(&s, &h, &config).await;
+    }
+    assert_eq!(
+        s.get_instance(inst.id).await.unwrap().unwrap().state,
+        InstanceState::Waiting,
+        "the nested gate parks the instance"
+    );
+
+    manual.advance(chrono::Duration::hours(2));
+    for _ in 0..4 {
+        tick(&s, &h, &config).await;
+    }
+    let state = s.get_instance(inst.id).await.unwrap().unwrap().state;
+    assert_eq!(
+        state,
+        InstanceState::Failed,
+        "an unanswered nested gate past its timeout (no escalation) fails"
+    );
+}
+/// L3-02 with an escalation handler: the timed-out nested gate escalates
+/// once, its escalation marker completes the step, and the instance finishes
+/// (rather than re-escalating on every evaluation).
+#[tokio::test]
+async fn nested_gate_timeout_escalates_once_and_completes() {
+    let s = storage().await;
+    let BlockDefinition::Step(mut gate) = mk_step("approve", "noop") else {
+        unreachable!()
+    };
+    gate.wait_for_input = Some(orch8_types::sequence::HumanInputDef {
+        prompt: "approve?".into(),
+        timeout: Some(Duration::from_secs(3600)),
+        escalation_handler: Some("oncall".into()),
+        choices: None,
+        store_as: None,
+        allow_comment: false,
+        auto_decide: None,
+    });
+    let seq = mk_sequence(vec![BlockDefinition::Parallel(Box::new(
+        orch8_types::sequence::ParallelDef {
+            id: BlockId::new("par"),
+            branches: vec![
+                vec![BlockDefinition::Step(gate)],
+                vec![mk_step("other", "noop")],
+            ],
+        },
+    ))]);
+    s.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance_scheduled(seq.id, serde_json::json!({}));
+    s.create_instance(&inst).await.unwrap();
+
+    let manual = Arc::new(ManualClock::new(Utc::now() + chrono::Duration::seconds(1)));
+    let config = config_with_clock(&manual);
+    let h = Arc::new(registry());
+    for _ in 0..4 {
+        tick(&s, &h, &config).await;
+    }
+    assert_eq!(
+        s.get_instance(inst.id).await.unwrap().unwrap().state,
+        InstanceState::Waiting,
+        "the nested gate parks the instance"
+    );
+
+    manual.advance(chrono::Duration::hours(2));
+    for _ in 0..4 {
+        tick(&s, &h, &config).await;
+    }
+    let state = s.get_instance(inst.id).await.unwrap().unwrap().state;
+    assert_eq!(state, InstanceState::Completed);
+    let escalations = s
+        .get_all_outputs(inst.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|o| o.output.get("_escalated").is_some())
+        .count();
+    assert_eq!(escalations, 1, "the gate escalates exactly once");
+}
