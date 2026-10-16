@@ -761,7 +761,7 @@ fn parse_federation_peers(
 ) -> Result<Vec<orch8_types::continuity_advanced::FederationPeer>, String> {
     const MAX_PEERS: usize = 128;
     const MAX_TENANTS_PER_PEER: usize = 256;
-    let peers =
+    let mut peers =
         serde_json::from_str::<Vec<orch8_types::continuity_advanced::FederationPeer>>(encoded)
             .map_err(|error| error.to_string())?;
     if peers.len() > MAX_PEERS {
@@ -770,7 +770,9 @@ fn parse_federation_peers(
         ));
     }
     let mut ids = std::collections::HashSet::with_capacity(peers.len());
-    for peer in &peers {
+    for peer in &mut peers {
+        // Envelope verification compares against a lowercase hex digest.
+        peer.trust_root_sha256.make_ascii_lowercase();
         if !ids.insert(peer.id) {
             return Err(format!("duplicate federation peer id {}", peer.id));
         }
@@ -2150,6 +2152,23 @@ mod tests {
         assert!(error.contains("absolute HTTP(S) URI"));
     }
     use serial_test::serial;
+
+    #[test]
+    fn federation_peer_trust_root_digest_is_normalised_to_lowercase() {
+        let peer = serde_json::json!({
+            "id": "018f0000-0000-7000-8000-000000000001",
+            "name": "peer-a",
+            "trust_root_sha256": "A1".repeat(32),
+            "public_key": "unused-at-configuration-time",
+            "endpoint": "https://peer.example",
+            "allowed_tenants": ["tenant-a"],
+            "revoked_at": null
+        });
+
+        let peers = parse_federation_peers(&serde_json::to_string(&[&peer]).unwrap()).unwrap();
+
+        assert_eq!(peers[0].trust_root_sha256, "a1".repeat(32));
+    }
 
     #[test]
     fn federation_peer_configuration_fails_closed_on_ambiguous_identity() {
