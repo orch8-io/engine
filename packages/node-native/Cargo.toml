@@ -18,3 +18,8 @@ tokio = { version = "1", features = ["sync", "time"] }
 
 [build-dependencies]
 napi-build = "2"
+
+# Used by `../native-common/durable.rs`, compiled in via `#[path]` and so
+# invisible to cargo-machete.
+[package.metadata.cargo-machete]
+ignored = ["chrono", "tokio"]
