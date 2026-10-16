@@ -5,7 +5,9 @@
  * The lifecycle suite (circuit_breaker_lifecycle.test.ts) lists and resets
  * breakers but never trips one through real worker failures. This suite
  * opens a breaker by reporting `failure_threshold` (server default: 5)
- * permanent worker-task failures for a unique handler, then asserts the
+ * retryable worker-task failures for a unique handler (permanent failures
+ * are caller errors and deliberately do not trip the breaker); each step has
+ * a single attempt so every instance fails on its first report, then asserts the
  * diagnosis endpoint surfaces the open breaker:
  *   - directly-involved handler (instance has a pending worker task for it)
  *     → direct_evidence / high confidence / warning severity, with a
@@ -31,6 +33,9 @@ const client = new Orch8Client();
 /** Server default (orch8-server/src/main.rs): threshold 5, cooldown 60s. */
 const FAILURE_THRESHOLD = 5;
 
+/** A retryable failure on the only attempt fails the instance immediately. */
+const ONE_ATTEMPT = { retry: { max_attempts: 1, initial_backoff: 5, max_backoff: 20 } };
+
 /**
  * Poll `getDiagnosis` until `predicate` holds or the deadline passes.
  * Returns the last report either way so callers can assert on it.
@@ -52,7 +57,7 @@ async function waitForDiagnosis(
 
 /**
  * Trip the breaker for `handler` by running `FAILURE_THRESHOLD` instances
- * whose only step is permanently failed by a worker.
+ * whose only step fails retryably with no attempts left.
  */
 async function openBreakerViaFailures(
   handler: string,
@@ -69,7 +74,7 @@ async function openBreakerViaFailures(
     await client.waitForState(id, "waiting", { timeoutMs: 10_000 });
     const tasks = await client.pollWorkerTasks(handler, workerId);
     assert.equal(tasks.length, 1, `failure round ${i}: expected one task`);
-    await client.failWorkerTask(tasks[0]!.id, workerId, "permanent boom", false);
+    await client.failWorkerTask(tasks[0]!.id, workerId, "transient boom", true);
     await client.waitForState(id, "failed", { timeoutMs: 10_000 });
   }
 }
@@ -89,7 +94,7 @@ describe("Execution Doctor — open circuit breaker evidence", () => {
     const tenantId = `doc-cb-${uuid().slice(0, 8)}`;
     const handler = `doc_breaker_${uuid().slice(0, 8)}`;
     const workerId = `wb-${uuid().slice(0, 6)}`;
-    const seq = testSequence("doc-cb-involved", [step("s1", handler, {})], {
+    const seq = testSequence("doc-cb-involved", [step("s1", handler, {}, ONE_ATTEMPT)], {
       tenantId,
     });
     await client.createSequence(seq);
@@ -170,7 +175,7 @@ describe("Execution Doctor — open circuit breaker evidence", () => {
     const tenantId = `doc-cb-${uuid().slice(0, 8)}`;
     const handler = `doc_breaker_${uuid().slice(0, 8)}`;
     const workerId = `wb-${uuid().slice(0, 6)}`;
-    const seq = testSequence("doc-cb-uninvolved", [step("s1", handler, {})], {
+    const seq = testSequence("doc-cb-uninvolved", [step("s1", handler, {}, ONE_ATTEMPT)], {
       tenantId,
     });
     await client.createSequence(seq);
