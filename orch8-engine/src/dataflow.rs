@@ -894,7 +894,18 @@ fn render_native_object(
     let required = required_set(schema);
     let sorted = sorted_properties(schema);
     let mut fields = Vec::with_capacity(sorted.len());
+    // Distinct wire names can sanitize to the same identifier (`order-id`
+    // and `order_id`); suffix later ones so the type still compiles. The
+    // wire name is kept for CodingKeys / @SerialName.
+    let mut identifiers = std::collections::BTreeSet::new();
     for (field, field_schema) in sorted {
+        let base = native_identifier(field);
+        let mut identifier = base.clone();
+        let mut suffix = 2;
+        while !identifiers.insert(identifier.clone()) {
+            identifier = format!("{base}_{suffix}");
+            suffix += 1;
+        }
         let value = render_native(
             field_schema,
             &format!("{name}{}", pascal_case(field)),
@@ -903,7 +914,7 @@ fn render_native_object(
         )?;
         fields.push((
             field.clone(),
-            native_identifier(field),
+            identifier,
             if required.contains(field.as_str()) {
                 value
             } else {
@@ -1506,6 +1517,54 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// T4 #7: `order-id` and `order_id` both sanitize to `order_id`; the
+    /// generated type must not declare the same member twice.
+    fn colliding_schema() -> Value {
+        json!({
+            "input": {
+                "type": "object",
+                "properties": {
+                    "order-id": {"type": "string"},
+                    "order_id": {"type": "string"}
+                },
+                "required": ["order-id", "order_id"]
+            },
+            "outputs": {}
+        })
+    }
+
+    #[test]
+    fn swift_bindings_give_colliding_fields_distinct_members() {
+        let swift = render_swift_bindings(&colliding_schema(), "sha").unwrap();
+
+        assert_eq!(
+            swift.matches("public let order_id: String").count(),
+            1,
+            "{swift}"
+        );
+        assert_eq!(
+            swift.matches("public let order_id_2: String").count(),
+            1,
+            "{swift}"
+        );
+    }
+
+    #[test]
+    fn kotlin_bindings_give_colliding_fields_distinct_members() {
+        let kotlin = render_kotlin_bindings(&colliding_schema(), "sha").unwrap();
+
+        assert_eq!(
+            kotlin.matches("val order_id: String").count(),
+            1,
+            "{kotlin}"
+        );
+        assert_eq!(
+            kotlin.matches("val order_id_2: String").count(),
+            1,
+            "{kotlin}"
+        );
+    }
 
     fn sequence(blocks: &Value, input_schema: Option<Value>) -> SequenceDefinition {
         let mut value = json!({
