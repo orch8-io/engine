@@ -301,8 +301,7 @@ async fn cancel_scoped(
     let mut has_non_cancellable_active = false;
     let mut cancellable_node_ids: Vec<ExecutionNodeId> = Vec::new();
 
-    let mut node_index: Vec<&orch8_types::execution::ExecutionNode> = tree.iter().collect();
-    node_index.sort_unstable_by_key(|n| n.id);
+    let (node_index, children_of) = build_tree_indexes(&tree);
 
     // Collect IDs of CancellationScope nodes so we can check ancestry.
     let mut scope_node_ids: Vec<_> = tree
@@ -311,23 +310,6 @@ async fn cancel_scoped(
         .map(|n| n.id)
         .collect();
     scope_node_ids.sort_unstable();
-
-    // Children grouped by parent, so `is_inside_finally_branch` doesn't
-    // rescan the whole tree once per TryCatch node (O(n²) on TryCatch-heavy
-    // trees).
-    // ⚡ Bolt: A sorted `Vec` is used instead of a `HashMap` to eliminate massive
-    // hashing and allocation overhead on the cancellation hot path. Lookups are
-    // performed in O(log N) time using `partition_point`.
-    let mut children_of: Vec<(
-        orch8_types::ids::ExecutionNodeId,
-        &orch8_types::execution::ExecutionNode,
-    )> = Vec::with_capacity(tree.len());
-    for n in &tree {
-        if let Some(parent_id) = n.parent_id {
-            children_of.push((parent_id, n));
-        }
-    }
-    children_of.sort_unstable_by_key(|&(p, _)| p);
 
     let block_map = crate::evaluator::flatten_blocks(&sequence_def.blocks);
 
@@ -445,6 +427,36 @@ async fn purge_live_worker_tasks(storage: &dyn StorageBackend, instance_id: Inst
     {
         warn!(instance_id = %instance_id, error = %e, "cancel: failed to purge worker tasks");
     }
+}
+
+/// Nodes sorted by id (for `binary_search`) plus `(parent_id, child)` pairs
+/// sorted by parent id.
+type TreeIndexes<'a> = (
+    Vec<&'a orch8_types::execution::ExecutionNode>,
+    Vec<(
+        orch8_types::ids::ExecutionNodeId,
+        &'a orch8_types::execution::ExecutionNode,
+    )>,
+);
+
+/// Build the lookup indexes `cancel_scoped` uses.
+///
+/// Children are grouped by parent so `is_inside_finally_branch` doesn't
+/// rescan the whole tree once per `TryCatch` node (O(n²) on `TryCatch`-heavy
+/// trees). A sorted `Vec` is used instead of a `HashMap` to avoid hashing and
+/// allocation overhead on the cancellation hot path; lookups use
+/// `partition_point` / `binary_search` in O(log N).
+fn build_tree_indexes(tree: &[orch8_types::execution::ExecutionNode]) -> TreeIndexes<'_> {
+    let mut node_index: Vec<&orch8_types::execution::ExecutionNode> = tree.iter().collect();
+    node_index.sort_unstable_by_key(|n| n.id);
+    let mut children_of = Vec::with_capacity(tree.len());
+    for n in tree {
+        if let Some(parent_id) = n.parent_id {
+            children_of.push((parent_id, n));
+        }
+    }
+    children_of.sort_unstable_by_key(|&(p, _)| p);
+    (node_index, children_of)
 }
 
 /// Check if `node` is inside the `finally` branch (`branch_index` == 2) of a
@@ -1679,8 +1691,196 @@ mod tests {
             .unwrap();
         assert_eq!(non_cancellable.state, NodeState::Running);
     }
-}
 
-#[cfg(test)]
-#[path = "signals_coverage_tests.rs"]
-mod signals_coverage_tests;
+    mod finally_protection {
+        //! Scoped cancel must never cancel a node in a try/catch `finally`
+        //! branch (`branch_index == 2`), nor a try/catch whose finally branch
+        //! is still active — the finally block always runs to completion.
+
+        use super::*;
+        use orch8_types::execution::{BlockType, ExecutionNode};
+        use orch8_types::ids::{BlockId, ExecutionNodeId};
+
+        fn node_id(n: u128) -> ExecutionNodeId {
+            ExecutionNodeId::from_uuid(uuid::Uuid::from_u128(n))
+        }
+
+        fn mk_node(
+            id: ExecutionNodeId,
+            parent: Option<ExecutionNodeId>,
+            block_type: BlockType,
+            state: NodeState,
+            branch_index: Option<i16>,
+        ) -> ExecutionNode {
+            ExecutionNode {
+                id,
+                instance_id: InstanceId::new(),
+                parent_id: parent,
+                block_id: BlockId::new("b"),
+                block_type,
+                branch_index,
+                state,
+                started_at: None,
+                completed_at: None,
+            }
+        }
+
+        fn protected(tree: &[ExecutionNode], id: ExecutionNodeId) -> bool {
+            let (node_index, children_of) = build_tree_indexes(tree);
+            let node = tree.iter().find(|n| n.id == id).unwrap();
+            is_inside_finally_branch(&node_index, &children_of, node)
+        }
+
+        #[test]
+        fn try_catch_is_protected_only_while_its_finally_branch_is_active() {
+            let cases = [
+                (NodeState::Pending, true),
+                (NodeState::Running, true),
+                (NodeState::Waiting, true),
+                (NodeState::Completed, false),
+                (NodeState::Failed, false),
+                (NodeState::Cancelled, false),
+            ];
+            for (finally_state, expected) in cases {
+                let tc = node_id(1);
+                let tree = vec![
+                    mk_node(tc, None, BlockType::TryCatch, NodeState::Running, None),
+                    mk_node(
+                        node_id(2),
+                        Some(tc),
+                        BlockType::Step,
+                        NodeState::Running,
+                        Some(0),
+                    ),
+                    mk_node(
+                        node_id(3),
+                        Some(tc),
+                        BlockType::Step,
+                        finally_state,
+                        Some(2),
+                    ),
+                ];
+
+                assert_eq!(protected(&tree, tc), expected, "finally {finally_state:?}");
+            }
+        }
+
+        #[test]
+        fn try_catch_without_children_is_cancellable() {
+            let tc = node_id(1);
+            let tree = vec![mk_node(
+                tc,
+                None,
+                BlockType::TryCatch,
+                NodeState::Running,
+                None,
+            )];
+
+            assert!(!protected(&tree, tc));
+        }
+
+        #[test]
+        fn only_nodes_under_a_try_catch_finally_branch_are_protected() {
+            let (tc, try_child, catch_child, finally_child, grandchild) =
+                (node_id(1), node_id(2), node_id(3), node_id(4), node_id(5));
+            let (scope, scope_branch_two) = (node_id(6), node_id(7));
+            let tree = vec![
+                mk_node(tc, None, BlockType::TryCatch, NodeState::Running, None),
+                mk_node(
+                    try_child,
+                    Some(tc),
+                    BlockType::Step,
+                    NodeState::Running,
+                    Some(0),
+                ),
+                mk_node(
+                    catch_child,
+                    Some(tc),
+                    BlockType::Step,
+                    NodeState::Running,
+                    Some(1),
+                ),
+                mk_node(
+                    finally_child,
+                    Some(tc),
+                    BlockType::Step,
+                    NodeState::Completed,
+                    Some(2),
+                ),
+                mk_node(
+                    grandchild,
+                    Some(finally_child),
+                    BlockType::Step,
+                    NodeState::Running,
+                    None,
+                ),
+                mk_node(
+                    scope,
+                    None,
+                    BlockType::CancellationScope,
+                    NodeState::Running,
+                    None,
+                ),
+                mk_node(
+                    scope_branch_two,
+                    Some(scope),
+                    BlockType::Step,
+                    NodeState::Running,
+                    Some(2),
+                ),
+            ];
+            let cases = [
+                ("try branch child", try_child, false),
+                ("catch branch child", catch_child, false),
+                ("finally branch child", finally_child, true),
+                ("descendant of finally branch", grandchild, true),
+                (
+                    "branch 2 under a non-try/catch parent",
+                    scope_branch_two,
+                    false,
+                ),
+            ];
+            for (case, id, expected) in cases {
+                assert_eq!(protected(&tree, id), expected, "{case}");
+            }
+        }
+
+        #[test]
+        fn active_branch_two_children_of_neighbouring_parents_do_not_protect_a_try_catch() {
+            // Parents sort as before < tc < after in the children index. Both
+            // neighbours have an active branch-2 child; the try/catch's own
+            // finally child is complete. A lookup that ignores the partition
+            // start or does not stop at the parent boundary would see a
+            // neighbour's child and wrongly protect the try/catch.
+            let (before, tc, after) = (node_id(10), node_id(20), node_id(30));
+            let tree = vec![
+                mk_node(before, None, BlockType::Parallel, NodeState::Running, None),
+                mk_node(tc, None, BlockType::TryCatch, NodeState::Running, None),
+                mk_node(after, None, BlockType::Parallel, NodeState::Running, None),
+                mk_node(
+                    node_id(11),
+                    Some(before),
+                    BlockType::Step,
+                    NodeState::Running,
+                    Some(2),
+                ),
+                mk_node(
+                    node_id(21),
+                    Some(tc),
+                    BlockType::Step,
+                    NodeState::Completed,
+                    Some(2),
+                ),
+                mk_node(
+                    node_id(31),
+                    Some(after),
+                    BlockType::Step,
+                    NodeState::Running,
+                    Some(2),
+                ),
+            ];
+
+            assert!(!protected(&tree, tc));
+        }
+    }
+}

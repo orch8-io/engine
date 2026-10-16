@@ -433,8 +433,91 @@ mod tests {
             .unwrap();
         assert_eq!(got.id, seq.id);
     }
-}
 
-#[cfg(test)]
-#[path = "sequence_cache_coverage_tests.rs"]
-mod sequence_cache_coverage_tests;
+    fn plan_cache() -> SequenceCache {
+        SequenceCache::new(100, Duration::from_secs(60))
+    }
+
+    #[tokio::test]
+    async fn repeated_plan_lookup_serves_the_cached_plan() {
+        let cache = plan_cache();
+        let seq = mk_seq("flow", 1);
+
+        let first = cache.optimization_for(&seq).await.unwrap();
+        let second = cache.optimization_for(&seq).await.unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn invalidation_forces_the_plan_to_be_recompiled() {
+        let by_id = plan_cache();
+        let all = plan_cache();
+        let seq = mk_seq("flow", 1);
+        let first_by_id = by_id.optimization_for(&seq).await.unwrap();
+        let first_all = all.optimization_for(&seq).await.unwrap();
+
+        by_id.invalidate_by_id(seq.id).await;
+        all.invalidate_all();
+
+        let second_by_id = by_id.optimization_for(&seq).await.unwrap();
+        let second_all = all.optimization_for(&seq).await.unwrap();
+        assert!(!Arc::ptr_eq(&first_by_id, &second_by_id));
+        assert!(!Arc::ptr_eq(&first_all, &second_all));
+        assert_eq!(first_by_id.source_sha256, second_by_id.source_sha256);
+    }
+
+    #[tokio::test]
+    async fn changed_definition_under_the_same_id_is_recompiled_not_served_stale() {
+        let cache = plan_cache();
+        let seq = mk_seq("flow", 1);
+        let stale = cache.optimization_for(&seq).await.unwrap();
+        let mut changed = seq.clone();
+        changed.name = "flow-renamed".into();
+
+        let fresh = cache.optimization_for(&changed).await.unwrap();
+
+        assert!(!Arc::ptr_eq(&stale, &fresh));
+        fresh.verify_equivalent(&changed).unwrap();
+        assert!(stale.verify_equivalent(&changed).is_err());
+    }
+
+    #[tokio::test]
+    async fn recompiled_plan_replaces_the_cached_entry() {
+        let cache = plan_cache();
+        let mut seq = mk_seq("flow", 1);
+        cache.optimization_for(&seq).await.unwrap();
+        seq.name = "flow-v2".into();
+
+        let first = cache.optimization_for(&seq).await.unwrap();
+        let second = cache.optimization_for(&seq).await.unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn uncompilable_sequence_is_a_safe_miss_that_does_not_poison_the_cache() {
+        let cache = plan_cache();
+        let mut invalid = mk_seq("invalid", 1);
+        invalid.blocks.clear();
+
+        let missed = cache.optimization_for(&invalid).await;
+        let valid = cache.optimization_for(&mk_seq("valid", 1)).await;
+
+        assert!(missed.is_none());
+        assert_eq!(valid.unwrap().nodes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn definition_that_becomes_uncompilable_never_serves_its_old_plan() {
+        let cache = plan_cache();
+        let seq = mk_seq("flow", 1);
+        cache.optimization_for(&seq).await.unwrap();
+        let mut broken = seq.clone();
+        broken.blocks.clear();
+
+        let plan = cache.optimization_for(&broken).await;
+
+        assert!(plan.is_none(), "stale plan served for a changed definition");
+    }
+}
