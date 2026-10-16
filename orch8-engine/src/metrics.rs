@@ -23,6 +23,11 @@ pub const WEBHOOKS_PARKED: &str = "orch8_webhooks_parked_total";
 /// Alert transitions (firing/resolved) enqueued by the alert evaluator.
 pub const ALERTS_EMITTED: &str = "orch8_alerts_emitted_total";
 pub const CRON_TRIGGERED: &str = "orch8_cron_triggered_total";
+/// Instance reschedules after a transient-classified storage error.
+pub const INSTANCE_TRANSIENT_RETRIES: &str = "orch8_instance_transient_retries_total";
+/// Instances failed because transient-classified errors kept recurring.
+pub const INSTANCE_TRANSIENT_RETRY_EXHAUSTED: &str =
+    "orch8_instance_transient_retry_exhausted_total";
 /// Occurrences skipped by a schedule's `skip` overlap policy.
 pub const CRON_SKIPPED: &str = "orch8_cron_skipped_total";
 /// Alert-only SLA breaches (sequence `max_runtime` / `max_step_runtime`).

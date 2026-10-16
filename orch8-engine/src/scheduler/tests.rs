@@ -2500,3 +2500,31 @@ async fn waiting_sweep_wakes_instance_on_expired_nested_gate_timeout() {
     let fresh = storage.get_instance(seeded[1]).await.unwrap().unwrap();
     assert_eq!(fresh.state, InstanceState::Waiting);
 }
+
+/// L2-17: transient reschedules back off exponentially (capped) and the
+/// instance is failed only after both the attempt cap and the minimum age.
+#[test]
+fn transient_retry_policy_backs_off_and_eventually_exhausts() {
+    use transient_retries::{Decision, MAX_ATTEMPTS, MIN_AGE, decide};
+    let delay = |attempts| match decide(attempts, Duration::ZERO) {
+        Decision::Retry(d) => d,
+        Decision::Exhausted { .. } => panic!("must not exhaust before MIN_AGE"),
+    };
+    let first = delay(1);
+    assert!(first >= Duration::from_millis(160) && first <= Duration::from_millis(240));
+    assert!(delay(4) > delay(1));
+    assert!(
+        delay(MAX_ATTEMPTS + 5) <= Duration::from_secs(72),
+        "capped at 60s + jitter"
+    );
+    assert!(matches!(
+        decide(MAX_ATTEMPTS - 1, MIN_AGE * 2),
+        Decision::Retry(_)
+    ));
+    assert_eq!(
+        decide(MAX_ATTEMPTS, MIN_AGE),
+        Decision::Exhausted {
+            attempts: MAX_ATTEMPTS
+        }
+    );
+}

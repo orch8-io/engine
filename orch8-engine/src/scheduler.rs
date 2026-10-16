@@ -647,7 +647,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             let _ = heartbeat_handle.await;
 
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => transient_retries::clear(instance_id),
                 Ok(Err(e)) if e.is_transient_storage() => {
                     // A transient storage failure (connection loss, pool
                     // exhaustion, DB failover) is NOT a processing failure —
@@ -655,26 +655,50 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     // work on a momentary infrastructure blip. Reschedule it
                     // back to Scheduled so a later tick retries; the CAS guard
                     // (Running -> Scheduled) is a no-op if a concurrent writer
-                    // already moved it.
-                    warn!(
-                        instance_id = %instance_id,
-                        error = %e,
-                        "instance processing hit a transient storage error -- rescheduling instead of failing"
-                    );
-                    if let Err(te) = storage
-                        .conditional_update_instance_state(
-                            instance_id,
-                            InstanceState::Running,
-                            InstanceState::Scheduled,
-                            Some(clock_outer.now()),
-                        )
-                        .await
-                    {
-                        error!(
-                            instance_id = %instance_id,
-                            error = %te,
-                            "failed to reschedule instance after transient storage error"
-                        );
+                    // already moved it. Retries back off per instance and are
+                    // bounded (L2-17): an error that is "transient" by type
+                    // but recurs forever (a rotated artifact key, a deleted
+                    // payload blob) used to re-claim the instance ~10x/s.
+                    crate::metrics::inc(crate::metrics::INSTANCE_TRANSIENT_RETRIES);
+                    match transient_retries::record(instance_id) {
+                        transient_retries::Decision::Retry(delay) => {
+                            warn!(
+                                instance_id = %instance_id,
+                                error = %e,
+                                retry_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                                "instance processing hit a transient storage error -- rescheduling instead of failing"
+                            );
+                            let fire_at = clock_outer.now()
+                                + chrono::Duration::from_std(delay)
+                                    .unwrap_or(chrono::Duration::seconds(60));
+                            if let Err(te) = storage
+                                .conditional_update_instance_state(
+                                    instance_id,
+                                    InstanceState::Running,
+                                    InstanceState::Scheduled,
+                                    Some(fire_at),
+                                )
+                                .await
+                            {
+                                error!(
+                                    instance_id = %instance_id,
+                                    error = %te,
+                                    "failed to reschedule instance after transient storage error"
+                                );
+                            }
+                        }
+                        transient_retries::Decision::Exhausted { attempts } => {
+                            crate::metrics::inc(crate::metrics::INSTANCE_TRANSIENT_RETRY_EXHAUSTED);
+                            record_transient_exhaustion(&storage, instance_id, attempts, &e).await;
+                            mark_instance_failed(
+                                &storage,
+                                instance_id,
+                                &e,
+                                "instance kept failing with a transient-classified error; retries exhausted (transient_retry_exhausted)",
+                                "failed to transition instance to Failed after transient retries were exhausted",
+                            )
+                            .await;
+                        }
                     }
                 }
                 Ok(Err(e)) => {
@@ -723,6 +747,107 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
     }
 
     Ok(join_handles)
+}
+
+/// Per-instance backoff and cap for transient-error reschedules (L2-17).
+///
+/// In-process (per node, lost on restart): it bounds the hot loop on this
+/// node and eventually lands a persistently failing instance in the DLQ,
+/// without an extra storage write on a path that runs exactly when storage
+/// is misbehaving.
+mod transient_retries {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex, PoisonError};
+    use std::time::{Duration, Instant};
+
+    use orch8_types::ids::InstanceId;
+
+    /// Delay before the first transient retry; doubles per consecutive failure.
+    const BASE: Duration = Duration::from_millis(200);
+    /// Cap on the delay between transient retries.
+    const MAX: Duration = Duration::from_secs(60);
+    /// Fail the instance once it has failed this many times in a row...
+    pub(super) const MAX_ATTEMPTS: u32 = 30;
+    /// ...and the first of those failures is at least this old, so a short
+    /// database outage (where every instance fails transiently) never DLQs
+    /// healthy work.
+    pub(super) const MIN_AGE: Duration = Duration::from_secs(15 * 60);
+    /// Entries older than this are dropped when the map grows large (the
+    /// instance finished elsewhere or was cancelled).
+    const STALE_AFTER: Duration = Duration::from_secs(2 * 3600);
+    const PRUNE_AT: usize = 10_000;
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) enum Decision {
+        Retry(Duration),
+        Exhausted { attempts: u32 },
+    }
+
+    static STATE: LazyLock<Mutex<HashMap<InstanceId, (u32, Instant)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// Pure policy: `attempts` consecutive transient failures, the first one
+    /// `since_first` ago.
+    pub(super) fn decide(attempts: u32, since_first: Duration) -> Decision {
+        if attempts >= MAX_ATTEMPTS && since_first >= MIN_AGE {
+            return Decision::Exhausted { attempts };
+        }
+        let exp = attempts.saturating_sub(1).min(16);
+        let delay = BASE.saturating_mul(1u32 << exp).min(MAX);
+        // 80-120% jitter so a batch that failed together does not retry in
+        // lockstep.
+        Decision::Retry(delay.mul_f64(rand::RngExt::random_range(&mut rand::rng(), 0.8..1.2)))
+    }
+
+    pub(super) fn record(id: InstanceId) -> Decision {
+        let now = Instant::now();
+        let mut map = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+        if map.len() >= PRUNE_AT {
+            map.retain(|_, (_, first)| now.duration_since(*first) < STALE_AFTER);
+        }
+        let entry = map.entry(id).or_insert((0, now));
+        entry.0 = entry.0.saturating_add(1);
+        let decision = decide(entry.0, now.duration_since(entry.1));
+        if matches!(decision, Decision::Exhausted { .. }) {
+            map.remove(&id);
+        }
+        decision
+    }
+
+    pub(super) fn clear(id: InstanceId) {
+        let mut map = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+        if !map.is_empty() {
+            map.remove(&id);
+        }
+    }
+}
+
+/// Persist why the instance was failed after exhausting transient retries,
+/// so the DLQ entry carries a distinct `transient_retry_exhausted` reason.
+/// Best-effort: storage is, by definition, misbehaving here.
+async fn record_transient_exhaustion(
+    storage: &Arc<dyn StorageBackend>,
+    instance_id: InstanceId,
+    attempts: u32,
+    error: &EngineError,
+) {
+    let output = BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id,
+        block_id: BlockId::new("_engine:transient_retry_exhausted"),
+        output: serde_json::json!({
+            "_error": "transient_retry_exhausted",
+            "attempts": attempts,
+            "last_error": error.to_string(),
+        }),
+        output_ref: None,
+        output_size: 0,
+        attempt: 0,
+        created_at: Utc::now(),
+    };
+    if let Err(e) = storage.save_block_output(&output).await {
+        warn!(instance_id = %instance_id, error = %e, "failed to record transient-retry exhaustion");
+    }
 }
 
 /// Return claimed instances to `Scheduled` without resurrecting a row that a
@@ -3046,6 +3171,11 @@ async fn process_instance_tree(
         Ok(EvalOutcome::Done { reason }) => {
             handle_tree_done(ctx, instance, sequence, reason).await?;
         }
+        // L3-06: same classification as the flat path. A transient storage
+        // error (connection reset, failover, pool timeout) mid-evaluate must
+        // reach `process_tick`'s transient arm and be rescheduled with
+        // backoff, not fail the instance permanently.
+        Err(e) if e.is_transient_storage() => return Err(e),
         Err(e) => {
             handle_tree_eval_error(ctx, instance, sequence, &e).await?;
         }
