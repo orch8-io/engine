@@ -134,6 +134,130 @@ fn strip_location_suffix(message: &str) -> String {
     trimmed.to_string()
 }
 
+/// Upper bound on the size of a YAML document *after* alias expansion, in
+/// abstract bytes (each node costs [`YAML_NODE_COST`] plus its string length).
+///
+/// YAML anchors/aliases let a ~1 KB body expand into millions of values
+/// ("billion laughs"); the YAML library's repetition limit does not bound the
+/// expanded size. 16 MiB comfortably exceeds any real sequence document (the
+/// HTTP body itself is capped at a few MiB) while keeping a hostile expansion
+/// from exhausting memory.
+pub const MAX_YAML_EXPANDED_BYTES: usize = 16 * 1024 * 1024;
+const YAML_NODE_COST: usize = 16;
+
+/// Deserialize YAML into a `serde_json::Value`, charging every produced node
+/// and string byte against a budget so alias expansion aborts early.
+struct BoundedValue<'b> {
+    budget: &'b std::cell::Cell<usize>,
+}
+
+impl BoundedValue<'_> {
+    fn charge<E: serde::de::Error>(&self, bytes: usize) -> Result<(), E> {
+        let cost = YAML_NODE_COST.saturating_add(bytes);
+        match self.budget.get().checked_sub(cost) {
+            Some(left) => {
+                self.budget.set(left);
+                Ok(())
+            }
+            None => Err(E::custom(format!(
+                "document expands beyond {MAX_YAML_EXPANDED_BYTES} bytes \
+                 (too many or too deeply nested aliases)"
+            ))),
+        }
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for BoundedValue<'_> {
+    type Value = Value;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for BoundedValue<'_> {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any YAML value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Value, E> {
+        self.charge(0)?;
+        Ok(Value::Bool(v))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Value, E> {
+        self.charge(0)?;
+        Ok(Value::from(v))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Value, E> {
+        self.charge(0)?;
+        Ok(Value::from(v))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Value, E> {
+        self.charge(0)?;
+        Ok(serde_json::Number::from_f64(v).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Value, E> {
+        self.charge(v.len())?;
+        Ok(Value::String(v.to_owned()))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Value, E> {
+        self.charge(v.len())?;
+        Ok(Value::String(v))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Value, E> {
+        self.charge(0)?;
+        Ok(Value::Null)
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Value, E> {
+        self.visit_unit()
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        serde::de::DeserializeSeed::deserialize(self, deserializer)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        self.charge(0)?;
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element_seed(BoundedValue {
+            budget: self.budget,
+        })? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        self.charge(0)?;
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            self.charge(key.len())?;
+            let value = map.next_value_seed(BoundedValue {
+                budget: self.budget,
+            })?;
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
+}
+
+fn parse_bounded_yaml(text: &str) -> Result<Value, serde_norway::Error> {
+    let budget = std::cell::Cell::new(MAX_YAML_EXPANDED_BYTES);
+    serde::de::DeserializeSeed::deserialize(
+        BoundedValue { budget: &budget },
+        serde_norway::Deserializer::from_str(text),
+    )
+}
+
 /// Parse a document into a JSON value. The caller then runs the normal
 /// sequence decode/validation on the value.
 pub fn parse_document(text: &str, format: DocumentFormat) -> Result<Value, DocumentError> {
@@ -153,7 +277,7 @@ pub fn parse_document(text: &str, format: DocumentFormat) -> Result<Value, Docum
                     column: None,
                 });
             }
-            serde_norway::from_str::<Value>(text).map_err(|e| {
+            parse_bounded_yaml(text).map_err(|e| {
                 let location = e.location();
                 DocumentError {
                     format,
@@ -319,5 +443,46 @@ blocks:
     fn empty_yaml_is_an_error_not_null() {
         let err = parse_document("  \n", DocumentFormat::Yaml).unwrap_err();
         assert!(err.message.contains("empty"));
+    }
+
+    /// C1-1 / T2-GAP-API-06: ~1 KB of nested aliases expands to ~1.3 M
+    /// values. The YAML library's own repetition limit (100 alias jumps per
+    /// event) does not stop this, so the expansion itself is budgeted.
+    #[test]
+    fn yaml_alias_bomb_is_rejected_before_it_expands() {
+        let leaf = vec!["x"; 200].join(", ");
+        let nine = |name: &str| vec![format!("*{name}"); 9].join(", ");
+        let bomb = format!(
+            "a: &a [{leaf}]\nb: &b [{}]\nc: &c [{}]\nd: &d [{}]\ne: [{}]\n",
+            nine("a"),
+            nine("b"),
+            nine("c"),
+            nine("d")
+        );
+        assert!(bomb.len() < 2_048, "bomb is {} bytes", bomb.len());
+
+        let err = parse_document(&bomb, DocumentFormat::Yaml).unwrap_err();
+
+        assert!(err.message.contains("expands beyond"), "{err}");
+    }
+
+    #[test]
+    fn yaml_alias_of_a_large_scalar_repeated_is_rejected() {
+        let big = "y".repeat(100_000);
+        let refs = vec!["*s"; 300].join(", ");
+        let doc = format!("s: &s \"{big}\"\nl: [{refs}]\n");
+
+        let err = parse_document(&doc, DocumentFormat::Yaml).unwrap_err();
+
+        assert!(err.message.contains("expands beyond"), "{err}");
+    }
+
+    #[test]
+    fn yaml_with_modest_anchor_reuse_still_parses() {
+        let doc = "defaults: &d {retries: 3, timeout: 30}\nblocks:\n  - {id: a, params: *d}\n  - {id: b, params: *d}\n";
+
+        let value = parse_document(doc, DocumentFormat::Yaml).unwrap();
+
+        assert_eq!(value["blocks"][1]["params"]["retries"], 3);
     }
 }

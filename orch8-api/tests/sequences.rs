@@ -401,6 +401,40 @@ async fn deprecate_sequence_hides_from_by_name_lookup() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// C1-1 / T2-GAP-API-06: a ~1 KB billion-laughs YAML body is refused with
+/// a 400 instead of expanding into millions of values.
+#[tokio::test]
+async fn yaml_alias_bomb_is_rejected_quickly_with_bounded_memory() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let leaf = vec!["x"; 200].join(", ");
+    let nine = |name: &str| vec![format!("*{name}"); 9].join(", ");
+    let bomb = format!(
+        "tenant_id: t1\nnamespace: ns1\nname: bomb\na: &a [{leaf}]\nb: &b [{}]\nc: &c [{}]\nd: &d [{}]\ne: [{}]\n",
+        nine("a"),
+        nine("b"),
+        nine("c"),
+        nine("d")
+    );
+    let started = std::time::Instant::now();
+
+    let resp = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .header("Content-Type", "application/yaml")
+        .body(bomb)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
 #[tokio::test]
 async fn list_sequence_versions_returns_all_versions() {
     let srv = spawn_test_server().await;
