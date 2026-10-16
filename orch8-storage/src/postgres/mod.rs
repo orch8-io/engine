@@ -177,8 +177,12 @@ impl PostgresStorage {
         sqlx::query("SET idle_in_transaction_session_timeout = 0")
             .execute(&mut conn)
             .await?;
+        // `run_direct` rather than `run(&mut conn)`: the `Acquire<'a>` bound on
+        // `run` makes every future that (transitively) awaits this one fail
+        // the "`Acquire` is not general enough" Send check — e.g. the axum
+        // handlers that build an engine. Same behaviour (lock, apply, unlock).
         sqlx::migrate!("../migrations")
-            .run(&mut conn)
+            .run_direct(None, &mut conn, false)
             .await
             .map_err(|e| StorageError::Migration(e.to_string()))?;
         Ok(())
