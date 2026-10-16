@@ -1544,6 +1544,8 @@ async fn check_waiting_instance(
                             block_id = %step_def.id,
                             "wait_for_input timeout expired, waking instance"
                         );
+                        reactivate_waiting_gate_node(ctx.storage, instance.id, &step_def.id)
+                            .await?;
                         crate::lifecycle::transition_instance(
                             ctx.storage.as_ref(),
                             instance.id,
@@ -1583,41 +1585,88 @@ async fn wake_on_expired_nested_timer(
     let tree = ctx.storage.get_execution_tree(instance.id).await?;
     let blocks = crate::evaluator::flatten_blocks(&seq.blocks);
     let now = ctx.clock.now();
-    let expired = tree.iter().any(|node| {
+    let exceeds = |started: chrono::DateTime<Utc>, limit: std::time::Duration| {
+        now - started >= chrono::Duration::from_std(limit).unwrap_or(chrono::TimeDelta::MAX)
+    };
+    let mut deadline_breached = false;
+    let mut timed_out_gates = Vec::new();
+    for node in &tree {
         if !matches!(node.state, NodeState::Running | NodeState::Waiting) {
-            return false;
+            continue;
         }
         let Some(started) = node.started_at else {
-            return false;
+            continue;
         };
         let Ok(idx) = blocks.binary_search_by_key(&&node.block_id, |(id, _)| *id) else {
-            return false;
+            continue;
         };
         let BlockDefinition::Step(step) = blocks[idx].1 else {
-            return false;
+            continue;
         };
-        let limits = [
-            step.deadline,
-            step.wait_for_input.as_ref().and_then(|h| h.timeout),
-        ];
-        limits.into_iter().flatten().any(|limit| {
-            now - started >= chrono::Duration::from_std(limit).unwrap_or(chrono::TimeDelta::MAX)
-        })
-    });
-    if expired {
-        debug!(
-            instance_id = %instance.id,
-            "nested step deadline/timeout expired while Waiting, waking instance"
-        );
-        crate::lifecycle::transition_instance(
-            ctx.storage.as_ref(),
-            instance.id,
-            Some(&instance.tenant_id),
-            InstanceState::Waiting,
-            InstanceState::Scheduled,
-            Some(now),
-        )
-        .await?;
+        // `evaluate`'s SLA check fails Running *and* Waiting nodes itself.
+        if step.deadline.is_some_and(|d| exceeds(started, d)) {
+            deadline_breached = true;
+        }
+        // The gate check (strict `>`) only runs when the node is re-dispatched,
+        // and the evaluator re-dispatches Running step nodes only.
+        if node.state == NodeState::Waiting
+            && let Some(timeout) = step.wait_for_input.as_ref().and_then(|h| h.timeout)
+            && now - started > chrono::Duration::from_std(timeout).unwrap_or(chrono::TimeDelta::MAX)
+        {
+            timed_out_gates.push(node.id);
+        }
+    }
+    if !deadline_breached && timed_out_gates.is_empty() {
+        return Ok(());
+    }
+    debug!(
+        instance_id = %instance.id,
+        deadline_breached,
+        timed_out_gates = timed_out_gates.len(),
+        "nested step deadline/timeout expired while Waiting, waking instance"
+    );
+    if !timed_out_gates.is_empty() {
+        // Same hand-off as a `human_input:` answer (`signals.rs`): flip the
+        // gate node back to Running so the evaluator re-runs its gate check,
+        // which now takes the timeout / escalation path.
+        ctx.storage
+            .update_nodes_state(&timed_out_gates, NodeState::Running)
+            .await?;
+    }
+    crate::lifecycle::transition_instance(
+        ctx.storage.as_ref(),
+        instance.id,
+        Some(&instance.tenant_id),
+        InstanceState::Waiting,
+        InstanceState::Scheduled,
+        Some(now),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Tree-path counterpart of the root gate-timeout wake: flip `block_id`'s
+/// `Waiting` gate node back to Running so the woken instance re-runs the gate
+/// check. Without it the evaluator (which only re-dispatches Running step
+/// nodes) re-parked the instance and the sweep woke it again every tick. A
+/// no-op for flat-path instances, which have no execution tree.
+async fn reactivate_waiting_gate_node(
+    storage: &Arc<dyn StorageBackend>,
+    instance_id: InstanceId,
+    block_id: &BlockId,
+) -> Result<(), EngineError> {
+    use orch8_types::execution::NodeState;
+    let nodes: Vec<_> = storage
+        .get_execution_tree(instance_id)
+        .await?
+        .into_iter()
+        .filter(|n| &n.block_id == block_id && n.state == NodeState::Waiting)
+        .map(|n| n.id)
+        .collect();
+    if !nodes.is_empty() {
+        storage
+            .update_nodes_state(&nodes, NodeState::Running)
+            .await?;
     }
     Ok(())
 }
