@@ -128,16 +128,44 @@ impl From<sqlx::Error> for StorageError {
 }
 
 /// `true` for backend error codes that indicate a transient, retryable
-/// conflict rather than a logic error: Postgres serialization failures
-/// (`40001`) and deadlocks (`40P01`), and `SQLite` `SQLITE_BUSY`/`SQLITE_LOCKED`
-/// (primary codes 5/6 and their extended variants — sqlx-sqlite reports the
-/// extended result code).
+/// condition rather than a logic error:
+/// - Postgres conflicts: serialization failure (`40001`), deadlock (`40P01`),
+///   lock not available (`55P03`);
+/// - Postgres availability: connection exceptions (class `08`), server
+///   shutdown / crash recovery / not accepting connections yet (`57P01`,
+///   `57P02`, `57P03`), cancelled statement incl. `statement_timeout`
+///   (`57014`), too many connections (`53300`), and a write landing on a
+///   demoted read-only primary after failover (`25006`);
+/// - `SQLite` `SQLITE_BUSY`/`SQLITE_LOCKED` (primary codes 5/6 and their
+///   extended variants — sqlx-sqlite reports the extended result code).
+///
+/// Misclassifying any of these as permanent fails/DLQs healthy instances
+/// during routine failovers and load spikes.
 #[cfg(feature = "sqlx")]
 fn is_transient_db_code(code: Option<&str>) -> bool {
-    matches!(
-        code,
-        Some("40001" | "40P01" | "5" | "6" | "261" | "262" | "517" | "518" | "773")
-    )
+    let Some(code) = code else {
+        return false;
+    };
+    code.starts_with("08")
+        || matches!(
+            code,
+            "40001"
+                | "40P01"
+                | "55P03"
+                | "57P01"
+                | "57P02"
+                | "57P03"
+                | "57014"
+                | "53300"
+                | "25006"
+                | "5"
+                | "6"
+                | "261"
+                | "262"
+                | "517"
+                | "518"
+                | "773"
+        )
 }
 
 #[cfg(feature = "sqlx")]
@@ -261,7 +289,8 @@ mod tests {
     fn transient_db_error_codes_are_recognised() {
         // 773 is SQLITE_BUSY_TIMEOUT (SQLITE_BUSY | (3 << 8)).
         for code in [
-            "40001", "40P01", "5", "6", "261", "262", "517", "518", "773",
+            "40001", "40P01", "55P03", "08000", "08006", "57P01", "57P02", "57P03", "57014",
+            "53300", "25006", "5", "6", "261", "262", "517", "518", "773",
         ] {
             assert!(is_transient_db_code(Some(code)), "{code} must be transient");
         }

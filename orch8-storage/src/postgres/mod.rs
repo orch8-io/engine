@@ -164,8 +164,21 @@ impl PostgresStorage {
     }
 
     pub async fn run_migrations(&self) -> Result<(), StorageError> {
+        // Pool connections carry the 30s `statement_timeout` /
+        // 60s `idle_in_transaction_session_timeout` guards, which a migration
+        // on a large table (index build, backfill) or the wait on the
+        // migration advisory lock can legitimately exceed. Run on a dedicated
+        // connection with the guards lifted, and detach it afterwards so the
+        // relaxed session never returns to the pool.
+        let mut conn = self.pool.acquire().await?.detach();
+        sqlx::query("SET statement_timeout = 0")
+            .execute(&mut conn)
+            .await?;
+        sqlx::query("SET idle_in_transaction_session_timeout = 0")
+            .execute(&mut conn)
+            .await?;
         sqlx::migrate!("../migrations")
-            .run(&self.pool)
+            .run(&mut conn)
             .await
             .map_err(|e| StorageError::Migration(e.to_string()))?;
         Ok(())
