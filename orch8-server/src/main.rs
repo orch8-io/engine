@@ -1227,6 +1227,7 @@ async fn spawn_grpc_server(
     Ok(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_engine(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,

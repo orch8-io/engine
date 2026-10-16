@@ -107,7 +107,7 @@ mod tests {
         state
     }
 
-    async fn status(resp: impl IntoResponse) -> StatusCode {
+    fn status(resp: impl IntoResponse) -> StatusCode {
         resp.into_response().status()
     }
 
@@ -121,27 +121,21 @@ mod tests {
         ));
         let st = state(Some(Arc::clone(&l))).await;
         assert_eq!(
-            status(liveness(State(st.clone())).await).await,
+            status(liveness(State(st.clone())).await),
             StatusCode::OK,
             "unarmed (no engine running yet) is live"
         );
         l.arm();
-        assert_eq!(
-            status(liveness(State(st.clone())).await).await,
-            StatusCode::OK
-        );
+        assert_eq!(status(liveness(State(st.clone())).await), StatusCode::OK);
         tokio::time::sleep(Duration::from_millis(40)).await;
         assert_eq!(
-            status(liveness(State(st.clone())).await).await,
+            status(liveness(State(st.clone())).await),
             StatusCode::SERVICE_UNAVAILABLE
         );
         l.record_tick();
-        assert_eq!(status(liveness(State(st)).await).await, StatusCode::OK);
+        assert_eq!(status(liveness(State(st)).await), StatusCode::OK);
         let no_engine = state(None).await;
-        assert_eq!(
-            status(liveness(State(no_engine)).await).await,
-            StatusCode::OK
-        );
+        assert_eq!(status(liveness(State(no_engine)).await), StatusCode::OK);
     }
 
     /// Readiness is 200 for a ticking engine and 503 once the engine flag
@@ -154,14 +148,11 @@ mod tests {
         ));
         l.arm();
         let st = state(Some(l)).await;
-        assert_eq!(
-            status(readiness(State(st.clone())).await).await,
-            StatusCode::OK
-        );
+        assert_eq!(status(readiness(State(st.clone())).await), StatusCode::OK);
         st.engine_ready
             .store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
-            status(readiness(State(st)).await).await,
+            status(readiness(State(st)).await),
             StatusCode::SERVICE_UNAVAILABLE
         );
     }

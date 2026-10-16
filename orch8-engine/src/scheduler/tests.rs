@@ -2207,10 +2207,13 @@ async fn scheduler_parks_instance_superseded_by_a_handoff() {
 #[tokio::test]
 async fn panicking_hook_is_isolated_and_reported_as_failure() {
     let result = dispatch_hook_bounded(async {
-        if true {
-            panic!("tenant hook bug");
-        }
-        Ok(serde_json::json!({}))
+        let boom: Result<serde_json::Value, orch8_types::error::StepError> =
+            Err(orch8_types::error::StepError::Permanent {
+                message: String::new(),
+                details: None,
+            });
+        assert!(boom.is_ok(), "tenant hook bug");
+        boom
     })
     .await;
     match result {
