@@ -385,24 +385,6 @@ fn conformance_instance(tenant: &TenantId, sequence_id: SequenceId, run_id: Uuid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InstanceStore;
-    use crate::sqlite::SqliteStorage;
-
-    #[tokio::test]
-    async fn sqlite_passes_public_core_conformance() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
-        let report = run_core_conformance(&storage).await.unwrap();
-        assert_eq!(report.checks.len(), 9);
-        assert_eq!(
-            storage
-                .get_instance(report.instance_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            InstanceState::Cancelled
-        );
-    }
 
     #[test]
     fn conformance_instance_is_not_due_for_parallel_claimers() {

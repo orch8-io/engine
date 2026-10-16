@@ -69,13 +69,18 @@ redis-streams = ["dep:redis", "dep:rustls"]
 postgres-rows = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring-webpki"]
 file-watch = ["dep:notify"]
 wasm = ["dep:wasmtime"]
+# Test harness (`orch8_engine::testing`): scheduler-faithful driver and
+# in-process engine. Enabled only by dev-dependencies.
+test-util = ["orch8-storage/test-util"]
 
 [dev-dependencies]
+# Integration tests in `tests/` use `orch8_engine::testing`.
+orch8-engine = { path = ".", default-features = false, features = ["test-util"] }
 # Tests use `#[tokio::test(start_paused = true)]`; declare `test-util`
 # directly instead of relying on feature unification from optional deps.
 tokio = { workspace = true, features = ["full", "test-util"] }
 # Handler tests exercise the object-store artifact backend.
-orch8-storage = { path = "../orch8-storage", default-features = false, features = ["artifacts"] }
+orch8-storage = { path = "../orch8-storage", default-features = false, features = ["artifacts", "postgres", "test-util"] }
 criterion.workspace = true
 serial_test.workspace = true
 # Build tiny wasm modules from WAT text for wasm_plugin.rs execution-path tests.

@@ -2,14 +2,11 @@
 //! `DATABASE_URL` is set, on Postgres. Every test uses a unique tenant so
 //! runs can share one database.
 
-use std::sync::Arc;
-
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use orch8_storage::StorageBackend;
-use orch8_storage::postgres::PostgresStorage;
-use orch8_storage::sqlite::SqliteStorage;
+use orch8_storage::testing::backends::TestBackend;
 use orch8_types::context::ExecutionContext;
 use orch8_types::error::StorageError;
 use orch8_types::filter::{InstanceFilter, Pagination};
@@ -21,17 +18,10 @@ use orch8_types::sub_tenant::{
     EmbedTheme, SUB_TENANT_QUOTA_PREFIX, SequenceEmbed, SubTenantLimits,
 };
 
-async fn backends() -> Vec<(&'static str, Arc<dyn StorageBackend>)> {
-    let mut out: Vec<(&'static str, Arc<dyn StorageBackend>)> = vec![(
-        "sqlite",
-        Arc::new(SqliteStorage::in_memory().await.unwrap()),
-    )];
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        let pg = PostgresStorage::new(&url, 5, None).await.unwrap();
-        pg.run_migrations().await.unwrap();
-        out.push(("postgres", Arc::new(pg)));
-    }
-    out
+/// `SQLite` plus Postgres (fresh schema; skipped locally without
+/// `DATABASE_URL`, required under CI).
+async fn backends() -> Vec<TestBackend> {
+    TestBackend::sqlite_and_postgres().await
 }
 
 fn tenant() -> TenantId {
@@ -102,7 +92,8 @@ fn is_sub_quota(err: &StorageError) -> bool {
 
 #[tokio::test]
 async fn sub_tenant_round_trips_on_instances_and_sequences_and_filters() {
-    for (name, storage) in backends().await {
+    for backend in backends().await {
+        let (name, storage) = (backend.name(), std::sync::Arc::clone(&backend.storage));
         let t = tenant();
         let seq = sequence(storage.as_ref(), &t, Some("acme")).await;
         let fetched = storage.get_sequence(seq.id).await.unwrap().unwrap();
@@ -153,7 +144,8 @@ async fn sub_tenant_round_trips_on_instances_and_sequences_and_filters() {
 
 #[tokio::test]
 async fn caps_and_tenant_pool_are_enforced_atomically() {
-    for (name, storage) in backends().await {
+    for backend in backends().await {
+        let (name, storage) = (backend.name(), std::sync::Arc::clone(&backend.storage));
         let t = tenant();
         let seq = sequence(storage.as_ref(), &t, None).await;
         let now = Utc::now();
@@ -264,7 +256,8 @@ async fn caps_and_tenant_pool_are_enforced_atomically() {
 
 #[tokio::test]
 async fn usage_comes_from_the_ledger_and_live_rows() {
-    for (name, storage) in backends().await {
+    for backend in backends().await {
+        let (name, storage) = (backend.name(), std::sync::Arc::clone(&backend.storage));
         let t = tenant();
         let seq = sequence(storage.as_ref(), &t, None).await;
         let now = Utc::now();
@@ -322,7 +315,8 @@ async fn usage_comes_from_the_ledger_and_live_rows() {
 
 #[tokio::test]
 async fn embed_theme_and_release_target_persist() {
-    for (name, storage) in backends().await {
+    for backend in backends().await {
+        let (name, storage) = (backend.name(), std::sync::Arc::clone(&backend.storage));
         let t = tenant();
         assert_eq!(storage.get_embed_theme(&t).await.unwrap(), None, "{name}");
         let mut theme = EmbedTheme {

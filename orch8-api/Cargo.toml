@@ -39,6 +39,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+# `orch8_storage::testing` (backend matrix, fault injection, fixtures).
+orch8-storage = { path = "../orch8-storage", features = ["test-util"] }
 
 [lints]
 workspace = true

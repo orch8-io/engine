@@ -47,10 +47,15 @@ postgres = ["sqlx/postgres", "sqlx/tls-rustls-ring-webpki", "artifacts"]
 # Object-store backed artifact store (local FS / S3 / in-memory).
 artifacts = ["dep:object_store"]
 # Customer-owned payload vault with envelope encryption (AWS KMS / static key).
+# Test infrastructure (`orch8_storage::testing`): fault-injecting storage,
+# fixtures, backend matrix. Enabled only by dev-dependencies.
+test-util = []
 byok = ["artifacts", "dep:aes-gcm", "dep:hmac", "dep:sha2", "dep:base64", "dep:zeroize", "dep:reqwest"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+# Integration tests in `tests/` use `orch8_storage::testing`.
+orch8-storage = { path = ".", features = ["test-util"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 criterion.workspace = true
 
 [[bench]]

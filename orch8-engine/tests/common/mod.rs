@@ -1,4 +1,11 @@
 //! Shared test helpers for orch8-engine integration tests.
+//!
+//! New tests: build data with `orch8_storage::testing::fixtures`
+//! (`SequenceBuilder`, `InstanceBuilder`, `step`) — `mk_sequence` /
+//! `mk_instance*` below are thin wrappers over them — and run instances
+//! through the real scheduler with `orch8_engine::testing::TestEngine`
+//! rather than `drive` / `drive_n`, which call the evaluator directly and
+//! set the final state themselves.
 #![allow(clippy::too_many_lines, dead_code, unused_imports)]
 
 use std::sync::Arc;
@@ -10,6 +17,7 @@ use serde_json::{Value, json};
 use orch8_engine::evaluator::{self, EvalOutcome, TerminalReason};
 use orch8_engine::handlers::{HandlerRegistry, builtin::register_builtins};
 use orch8_engine::sequence_cache::SequenceCache;
+use orch8_storage::testing::fixtures::{InstanceBuilder, SequenceBuilder};
 use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
 use orch8_types::config::{ExternalizationMode, SchedulerConfig, SecretString, WebhookConfig};
 use orch8_types::context::{ExecutionContext, RuntimeContext};
@@ -584,27 +592,11 @@ pub fn mk_non_cancellable_step(id: &str, handler: &str) -> BlockDefinition {
 // ------------------------------------------------------------------
 
 pub fn mk_sequence(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
-    SequenceDefinition {
-        embed: None,
-        sub_tenant: None,
-        schema: None,
-        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
-        id: SequenceId::new(),
-        tenant_id: TenantId::unchecked("t"),
-        namespace: Namespace::new("ns"),
-        name: "test-flow".into(),
-        version: 1,
-        deprecated: false,
-        blocks,
-        interceptors: None,
-        input_schema: None,
-        sla: None,
-        on_failure: None,
-        on_cancel: None,
-        placement: None,
-        created_at: Utc::now(),
-        status: SequenceStatus::Production,
-    }
+    SequenceBuilder::new("t")
+        .namespace("ns")
+        .name("test-flow")
+        .blocks(blocks)
+        .build()
 }
 
 pub fn mk_instance(seq_id: SequenceId) -> TaskInstance {
@@ -612,33 +604,11 @@ pub fn mk_instance(seq_id: SequenceId) -> TaskInstance {
 }
 
 pub fn mk_instance_with_ctx(seq_id: SequenceId, data: Value) -> TaskInstance {
-    let now = Utc::now();
-    TaskInstance {
-        sub_tenant: None,
-        id: InstanceId::new(),
-        sequence_id: seq_id,
-        tenant_id: TenantId::unchecked("t"),
-        namespace: Namespace::new("ns"),
-        state: InstanceState::Running,
-        next_fire_at: None,
-        priority: Priority::Normal,
-        timezone: "UTC".into(),
-        metadata: json!({}),
-        context: ExecutionContext {
-            data,
-            config: json!({}),
-            audit: vec![],
-            runtime: RuntimeContext::default(),
-        },
-        concurrency_key: None,
-        max_concurrency: None,
-        idempotency_key: None,
-        session_id: None,
-        parent_instance_id: None,
-        budget: None,
-        created_at: now,
-        updated_at: now,
-    }
+    InstanceBuilder::new("t", "ns", seq_id)
+        .state(InstanceState::Running)
+        .data(data)
+        .config(json!({}))
+        .build()
 }
 
 pub fn mk_instance_with_priority(seq_id: SequenceId, priority: Priority) -> TaskInstance {

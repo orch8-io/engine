@@ -696,8 +696,7 @@ mod integer_tests {
     /// schema) and `BIGINT` (databases that applied the dropped widening).
     #[tokio::test]
     async fn pg_any_int_decodes_int4_and_int8() {
-        let Ok(url) = std::env::var("DATABASE_URL") else {
-            eprintln!("skipping: DATABASE_URL not set");
+        let Some(url) = crate::testing::backends::postgres_url() else {
             return;
         };
         let pool = sqlx::PgPool::connect(&url).await.unwrap();

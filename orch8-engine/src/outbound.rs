@@ -92,7 +92,7 @@ fn checked_redirects() -> reqwest::redirect::Policy {
         if redirect_target_allowed(attempt.url()) {
             attempt.follow()
         } else {
-            attempt.error("blocked: redirect targets a private/internal network address")
+            attempt.error(BLOCKED_REDIRECT_MESSAGE)
         }
     })
 }
@@ -130,6 +130,27 @@ pub fn redact_error(e: &reqwest::Error) -> String {
         Some(u) => msg.replace(u.as_str(), &redact_parsed(u)),
         None => msg,
     }
+}
+
+/// Message of the redirect guard's refusal (see `checked_redirects`).
+pub const BLOCKED_REDIRECT_MESSAGE: &str =
+    "blocked: redirect targets a private/internal network address";
+
+/// `true` when `e` is the redirect guard refusing a hop to an internal
+/// address. Such a refusal is permanent (the same response will redirect
+/// to the same place), unlike a network error.
+pub fn is_blocked_redirect(e: &reqwest::Error) -> bool {
+    if !e.is_redirect() {
+        return false;
+    }
+    let mut source = std::error::Error::source(e);
+    while let Some(inner) = source {
+        if inner.to_string().contains(BLOCKED_REDIRECT_MESSAGE) {
+            return true;
+        }
+        source = inner.source();
+    }
+    false
 }
 
 /// Clamp a caller-supplied timeout to `1..=300_000` ms so a workflow can't

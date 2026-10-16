@@ -38,5 +38,9 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 hyper = { version = "1", features = ["server", "client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy", "http1", "http2"] }
 
+[dev-dependencies]
+# `orch8_engine::testing::http::MockHttp` for side-effect receivers.
+orch8-engine = { path = "../orch8-engine", default-features = false, features = ["test-util"] }
+
 [lints]
 workspace = true

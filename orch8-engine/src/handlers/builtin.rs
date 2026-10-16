@@ -341,7 +341,7 @@ pub(crate) async fn is_url_safe(url: &str) -> bool {
 /// Test-only: mark a URL as safe by seeding the SSRF cache, so handler unit
 /// tests can point at a loopback mock without mutating `ORCH8_ALLOW_INTERNAL_URLS`
 /// (env mutation is a data race across the parallel test threads).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 pub(crate) async fn mark_url_safe_for_test(url: &str) {
     url_safety_cache().insert(url.to_string(), true).await;
 }
@@ -833,9 +833,20 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
             .body(body_str.to_string());
     }
 
-    let resp = req.send().await.map_err(|e| StepError::Retryable {
-        message: format!("HTTP request failed: {}", crate::outbound::redact_error(&e)),
-        details: None,
+    let resp = req.send().await.map_err(|e| {
+        // A refused redirect to an internal address is an SSRF block, as
+        // permanent as the pre-check's: retrying replays the same redirect.
+        if crate::outbound::is_blocked_redirect(&e) {
+            StepError::Permanent {
+                message: crate::outbound::BLOCKED_REDIRECT_MESSAGE.into(),
+                details: None,
+            }
+        } else {
+            StepError::Retryable {
+                message: format!("HTTP request failed: {}", crate::outbound::redact_error(&e)),
+                details: None,
+            }
+        }
     })?;
 
     let status = resp.status().as_u16();

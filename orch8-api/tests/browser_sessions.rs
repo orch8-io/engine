@@ -1,6 +1,6 @@
 //! Browser-session tokens and runtime identity binding, end to end through
 //! the real auth middleware (root API key configured). Runs on `SQLite` and,
-//! when `DATABASE_URL` is set, on Postgres.
+//! when `DATABASE_URL` is set (required under CI), on Postgres.
 #![allow(clippy::too_many_lines)]
 
 use std::sync::Arc;
@@ -28,7 +28,7 @@ async fn servers() -> Vec<(&'static str, BackendTestServer)> {
         )
         .await,
     )];
-    if let Ok(url) = std::env::var("DATABASE_URL") {
+    if let Some(url) = orch8_storage::testing::backends::postgres_url() {
         let pg = PostgresStorage::new(&url, 5, None).await.unwrap();
         pg.run_migrations().await.unwrap();
         out.push((

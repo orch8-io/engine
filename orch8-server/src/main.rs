@@ -1737,6 +1737,12 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Some(n) = env_parse("ORCH8_LIVENESS_STALE_SECS") {
         config.engine.liveness_stale_secs = n;
     }
+    // Crash-recovery window (`engine.stale_instance_threshold_secs`): a
+    // `running` instance whose lease has not been renewed for this long is
+    // reclaimed. Lets crash/restart E2E suites recover in seconds.
+    if let Some(n) = env_parse("ORCH8_STALE_INSTANCE_THRESHOLD_SECS") {
+        config.engine.stale_instance_threshold_secs = n;
+    }
     // Reaper cadence/threshold overrides. Defaults (tick 30s / stale 60s for
     // worker tasks, 60s / 120s for nodes) are sane for production but make
     // reclamation tests wait minutes; the E2E harness sets these low so the

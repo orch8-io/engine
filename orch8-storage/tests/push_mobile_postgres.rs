@@ -1,32 +1,25 @@
 //! Postgres regressions for the push wake outbox and mobile device upsert
 //! (MOB-N2, STO-N11/MOB-N8, API-N6/STO-M4, MOB-N1 retention sweep).
 //!
-//! Gated on `DATABASE_URL`; skipped with a message when it is absent.
+//! Gated on `DATABASE_URL` via `orch8_storage::testing::backends` (skips
+//! locally, fails under CI); each test gets its own schema.
 
 use chrono::{Duration, Utc};
 use orch8_push::{PushOutboxStore, PushTerminalReason, WakeAttemptOutcome};
-use orch8_storage::postgres::PostgresStorage;
+use orch8_storage::testing::backends::TestPostgres;
 use orch8_storage::{MobileDevice, MobileSyncStore};
 use orch8_types::error::StorageError;
 use uuid::Uuid;
 
-async fn store() -> Option<PostgresStorage> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let storage = PostgresStorage::new(&url, 5, None)
-        .await
-        .expect("connect to DATABASE_URL");
-    storage.run_migrations().await.expect("run migrations");
-    Some(storage)
+async fn store() -> Option<TestPostgres> {
+    TestPostgres::fresh().await
 }
 
 macro_rules! require_postgres {
     () => {
         match store().await {
             Some(s) => s,
-            None => {
-                eprintln!("skipping: DATABASE_URL not set");
-                return;
-            }
+            None => return,
         }
     };
 }
@@ -120,9 +113,7 @@ async fn prune_wakes_deletes_only_old_non_leased_rows_postgres() {
         .await
         .unwrap();
     s.prune_wakes(Utc::now() - Duration::days(7)).await.unwrap();
-    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-        .await
-        .unwrap();
+    let pool = s.pool().clone();
     let left: Vec<String> =
         sqlx::query_scalar("SELECT command_id FROM push_wake_outbox WHERE tenant_id=$1")
             .bind(&scope)

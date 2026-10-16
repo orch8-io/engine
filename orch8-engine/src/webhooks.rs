@@ -12,6 +12,7 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 
 use orch8_storage::StorageBackend;
+use orch8_types::clock::SharedClock;
 use orch8_types::config::WebhookConfig;
 use orch8_types::ids::InstanceId;
 use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
@@ -256,6 +257,18 @@ async fn deliver_claimed(
     entry: &WebhookOutboxEntry,
     cancel: &CancellationToken,
 ) {
+    deliver_claimed_at(storage, config, entry, cancel, &SharedClock::default()).await;
+}
+
+/// [`deliver_claimed`] reading "now" (retry fire time, retry-window age)
+/// from `clock`, so tests can drive the outbox on virtual time.
+async fn deliver_claimed_at(
+    storage: &dyn StorageBackend,
+    config: &WebhookConfig,
+    entry: &WebhookOutboxEntry,
+    cancel: &CancellationToken,
+    clock: &SharedClock,
+) {
     let event: WebhookEvent = match serde_json::from_value(entry.payload.clone()) {
         Ok(event) => event,
         Err(error) => {
@@ -316,14 +329,16 @@ async fn deliver_claimed(
         }
         SendOutcome::Terminal(reason) => (reason, None),
         // Shutdown is not delivery exhaustion: retry on the next process.
-        SendOutcome::Transient(reason) if cancel.is_cancelled() => (reason, Some(Utc::now())),
-        SendOutcome::Transient(reason) if retries_exhausted(config, entry, prior_attempts) => {
+        SendOutcome::Transient(reason) if cancel.is_cancelled() => (reason, Some(clock.now())),
+        SendOutcome::Transient(reason)
+            if retries_exhausted(config, entry, prior_attempts, clock.now()) =>
+        {
             (reason, None)
         }
         SendOutcome::Transient(reason) => {
             let backoff = chrono::Duration::from_std(outbox_backoff(prior_attempts))
                 .unwrap_or(chrono::Duration::hours(1));
-            (reason, Utc::now().checked_add_signed(backoff))
+            (reason, clock.now().checked_add_signed(backoff))
         }
     };
     if retry_at.is_none() {
@@ -366,13 +381,7 @@ pub async fn run_outbox_loop(
         // underflow the representable range — `DateTime - TimeDelta` panics on
         // overflow. Clamp to the epoch floor instead: nothing is stale enough
         // to recover, which is the safe direction for a pathological lease.
-        let stale_before = chrono::Duration::from_std(stale_after)
-            .ok()
-            .and_then(|lease| Utc::now().checked_sub_signed(lease))
-            .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC);
-        if let Err(error) = storage.recover_stale_webhook_claims(stale_before).await {
-            warn!(%error, "failed to recover stale webhook outbox claims");
-        }
+        recover_stale_claims(storage.as_ref(), stale_after, Utc::now()).await;
         if next_prune <= tokio::time::Instant::now() {
             next_prune = tokio::time::Instant::now() + PARKED_PRUNE_INTERVAL;
             prune_parked(storage.as_ref(), config.parked_retention_secs).await;
@@ -405,6 +414,55 @@ pub async fn run_outbox_loop(
     // timeout) so their rows are resolved rather than left for stale
     // recovery.
     while in_flight.join_next().await.is_some() {}
+}
+
+/// Return rows whose claim is older than `stale_after` (a crashed or
+/// partitioned node's in-flight deliveries) to the pending pool.
+async fn recover_stale_claims(
+    storage: &dyn StorageBackend,
+    stale_after: Duration,
+    now: chrono::DateTime<Utc>,
+) {
+    let stale_before = chrono::Duration::from_std(stale_after)
+        .ok()
+        .and_then(|lease| now.checked_sub_signed(lease))
+        .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC);
+    if let Err(error) = storage.recover_stale_webhook_claims(stale_before).await {
+        warn!(%error, "failed to recover stale webhook outbox claims");
+    }
+}
+
+/// One outbox pass on `clock`'s time, awaited to completion: recover stale
+/// claims, claim every due row (up to the delivery concurrency cap), make one
+/// delivery attempt per row and record its outcome. The loop
+/// ([`run_outbox_loop`]) does the same on the system clock but keeps
+/// deliveries in flight across ticks and prunes parked rows hourly. Returns
+/// the number of rows attempted.
+pub async fn outbox_tick(
+    storage: &Arc<dyn StorageBackend>,
+    config: &WebhookConfig,
+    clock: &SharedClock,
+    cancel: &CancellationToken,
+) -> usize {
+    recover_stale_claims(storage.as_ref(), claim_lease(config), clock.now()).await;
+    let claimed = match storage
+        .claim_due_webhook_outbox(
+            clock.now(),
+            u32::try_from(DEFAULT_WEBHOOK_CONCURRENCY).unwrap_or(u32::MAX),
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%error, "failed to claim durable webhook deliveries");
+            return 0;
+        }
+    };
+    // Sequential, unlike the loop: a deterministic order for tests.
+    for entry in &claimed {
+        deliver_claimed_at(storage.as_ref(), config, entry, cancel, clock).await;
+    }
+    claimed.len()
 }
 
 /// How often the outbox loop deletes parked rows past their retention.
@@ -869,12 +927,17 @@ const OUTBOX_MAX_BACKOFF: Duration = Duration::from_secs(3600);
 /// has been retrying for `retry_window_secs` since it was enqueued, so a
 /// receiver's deploy or a short outage does not park every event within
 /// seconds.
-fn retries_exhausted(config: &WebhookConfig, entry: &WebhookOutboxEntry, prior: u32) -> bool {
+fn retries_exhausted(
+    config: &WebhookConfig,
+    entry: &WebhookOutboxEntry,
+    prior: u32,
+    now: chrono::DateTime<Utc>,
+) -> bool {
     let window = i64::try_from(config.retry_window_secs)
         .ok()
         .and_then(chrono::Duration::try_seconds)
         .unwrap_or(chrono::TimeDelta::MAX);
-    let age = Utc::now().signed_duration_since(entry.created_at);
+    let age = now.signed_duration_since(entry.created_at);
     prior >= config.max_retries && age >= window
 }
 

@@ -1,12 +1,13 @@
 //! `AiStore` on Postgres (migrations 095–097): prompt registry, LLM response
-//! cache, tenant budgets. Gated on `DATABASE_URL`; skipped when absent.
-//! Every test uses a unique tenant so runs can share one database.
+//! cache, tenant budgets. Gated on `DATABASE_URL` via
+//! `orch8_storage::testing::backends` (skips locally, fails under CI); each
+//! test gets its own schema.
 
 use chrono::{Duration, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
-use orch8_storage::postgres::PostgresStorage;
+use orch8_storage::testing::backends::TestPostgres;
 use orch8_storage::{AiStore, TelemetryStore, UsageEvent};
 use orch8_types::ai::{
     BUDGET_THRESHOLD_EVENT, BudgetAlert, BudgetPeriod, LlmCacheEntry, PromptCanary, PromptLabel,
@@ -15,23 +16,15 @@ use orch8_types::ai::{
 use orch8_types::error::StorageError;
 use orch8_types::ids::InstanceId;
 
-async fn store() -> Option<PostgresStorage> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let storage = PostgresStorage::new(&url, 5, None)
-        .await
-        .expect("connect to DATABASE_URL");
-    storage.run_migrations().await.expect("run migrations");
-    Some(storage)
+async fn store() -> Option<TestPostgres> {
+    TestPostgres::fresh().await
 }
 
 macro_rules! require_postgres {
     () => {
         match store().await {
             Some(s) => s,
-            None => {
-                eprintln!("skipping: DATABASE_URL not set");
-                return;
-            }
+            None => return,
         }
     };
 }

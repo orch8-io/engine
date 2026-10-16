@@ -483,29 +483,20 @@ async fn gc_20_sweeps_expired_dedupe() {
         .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "key1", child)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(2_100)).await;
-    let cancel = CancellationToken::new();
-    let handle = {
-        let storage = Arc::clone(&storage);
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            run_gc_loop_with_ttl(
-                storage,
-                Duration::from_millis(10),
-                Duration::from_secs(1),
-                None,
-                None,
-                cancel,
-            )
-            .await;
-        })
+    // One GC pass "two seconds later" with a 1 s TTL, instead of sleeping
+    // and racing the background loop.
+    let options = orch8_engine::gc::GcOptions {
+        dedupe_ttl: Duration::from_secs(1),
+        ..orch8_engine::gc::GcOptions::default()
     };
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(2), handle)
-        .await
-        .unwrap()
-        .unwrap();
+
+    orch8_engine::gc::gc_tick(
+        storage.as_ref(),
+        &options,
+        chrono::Utc::now() + chrono::Duration::seconds(2),
+    )
+    .await;
+
     let outcome = storage
         .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "key1", InstanceId::new())
         .await

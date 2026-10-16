@@ -1,21 +1,20 @@
 //! Integration tests that require a live Postgres instance.
 //!
-//! Gated on `DATABASE_URL` being set (as CI's `test` job always sets it,
-//! pointing at the service container it provisions). Locally, these tests
-//! are skipped with a message if `DATABASE_URL` is absent rather than
-//! failing the run for contributors without a local Postgres.
+//! Gated on `DATABASE_URL` through `orch8_storage::testing::backends`:
+//! locally a missing `DATABASE_URL` skips with a `SKIPPED` line; under CI
+//! (`CI` set) or with `ORCH8_REQUIRE_PG=1` it fails the test instead.
 //!
-//! Each test runs against its own freshly-migrated schema in the same
-//! database (`DATABASE_URL`'s database), using a unique tenant/resource
-//! namespace per test so tests can run concurrently without interfering.
+//! Each test runs against its own freshly-migrated schema (`TestPostgres`),
+//! dropped when the test ends, so the global sweeps (claims, reapers,
+//! outbox) never see another test's rows.
 
 use std::sync::Arc;
 
 use chrono::Utc;
 use uuid::Uuid;
 
-use orch8_storage::conformance::run_core_conformance;
 use orch8_storage::postgres::PostgresStorage;
+use orch8_storage::testing::backends::TestPostgres;
 use orch8_storage::{
     AdminStore, ExecutionTreeStore, InstanceStore, MobileSyncStore, OutputStore, ResourceStore,
     SchedulingStore, SequenceStore, TelemetryStore, UsageEvent, WorkerStore,
@@ -38,35 +37,19 @@ use orch8_types::session::{Session, SessionState};
 use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
 use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskState};
 
-/// Returns `None` (test should skip) if `DATABASE_URL` isn't set.
-async fn store() -> Option<PostgresStorage> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let storage = PostgresStorage::new(&url, 5, None)
-        .await
-        .expect("connect to DATABASE_URL");
-    storage.run_migrations().await.expect("run migrations");
-    Some(storage)
+/// A fresh, migrated schema for this test; `None` skips the test (locally
+/// only -- under CI a missing `DATABASE_URL` panics).
+async fn store() -> Option<TestPostgres> {
+    TestPostgres::fresh().await
 }
 
 macro_rules! require_postgres {
     () => {
         match store().await {
             Some(s) => s,
-            None => {
-                eprintln!("skipping: DATABASE_URL not set");
-                return;
-            }
+            None => return,
         }
     };
-}
-
-#[tokio::test]
-async fn postgres_passes_public_core_conformance() {
-    let storage = require_postgres!();
-    let report = run_core_conformance(&storage)
-        .await
-        .expect("Postgres must satisfy the scheduler storage contract");
-    assert_eq!(report.checks.len(), 9);
 }
 
 #[tokio::test]
@@ -86,9 +69,7 @@ async fn postgres_unknown_dispatch_mode_is_not_treated_as_poll() {
         })
         .await
         .unwrap();
-    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-        .await
-        .unwrap();
+    let pool = storage.pool().clone();
     sqlx::query("UPDATE queue_dispatch SET mode = 'future-mode' WHERE tenant_id = $1")
         .bind(&tenant)
         .execute(&pool)
@@ -125,9 +106,7 @@ async fn postgres_unknown_session_state_is_not_treated_as_active() {
         expires_at: None,
     };
     storage.create_session(&session).await.unwrap();
-    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-        .await
-        .unwrap();
+    let pool = storage.pool().clone();
     sqlx::query("UPDATE sessions SET state = 'future-terminal' WHERE id = $1")
         .bind(session.id)
         .execute(&pool)
@@ -165,9 +144,7 @@ async fn postgres_unknown_cluster_node_status_is_not_active() {
         execution_handoff_evidence: None,
     };
     storage.register_node(&node).await.unwrap();
-    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-        .await
-        .unwrap();
+    let pool = storage.pool().clone();
     sqlx::query("UPDATE cluster_nodes SET status = 'future-stopped' WHERE id = $1")
         .bind(node.id)
         .execute(&pool)
@@ -907,11 +884,6 @@ async fn mobile_device_timestamps_are_rfc3339_with_fractional_seconds() {
     assert_eq!(parsed.timezone().local_minus_utc(), 0);
 }
 
-/// Serialises the tests that run the global instance reaper against the
-/// shared database (each one's stale fixture rows would otherwise be reaped
-/// by the other mid-test).
-static INSTANCE_REAPER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 /// C-1: `heartbeat_instance` must renew a `Running` instance's lease
 /// (`updated_at`) so `recover_stale_instances` does not reclaim a step that
 /// is still genuinely executing, and must be a no-op for a terminal
@@ -920,7 +892,6 @@ static INSTANCE_REAPER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_
 #[tokio::test]
 async fn heartbeat_instance_renews_lease_on_postgres() {
     let s = require_postgres!();
-    let _reaper = INSTANCE_REAPER_LOCK.lock().await;
     let tenant = format!("t-{}", Uuid::new_v4());
     let seq_id = SequenceId::new();
     s.create_sequence(&mk_sequence(&tenant, seq_id))
@@ -932,7 +903,7 @@ async fn heartbeat_instance_renews_lease_on_postgres() {
     running.updated_at = Utc::now() - chrono::Duration::hours(1);
     s.create_instance(&running).await.unwrap();
     let token = Utc::now() - chrono::Duration::hours(1);
-    set_claim_token(running.id, Some(token)).await;
+    set_claim_token(&s, running.id, Some(token)).await;
 
     assert_eq!(
         s.heartbeat_instance(running.id, token).await.unwrap(),
@@ -967,18 +938,18 @@ async fn heartbeat_instance_renews_lease_on_postgres() {
 }
 
 /// Set (or clear) an instance's lease claim token directly, simulating
-/// another node's `claim_due_instances` without claiming unrelated rows of
-/// the shared test database.
-async fn set_claim_token(id: InstanceId, token: Option<chrono::DateTime<Utc>>) {
-    let url = std::env::var("DATABASE_URL").unwrap();
-    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+/// another node's `claim_due_instances`.
+async fn set_claim_token(
+    s: &PostgresStorage,
+    id: InstanceId,
+    token: Option<chrono::DateTime<Utc>>,
+) {
     sqlx::query("UPDATE task_instances SET claimed_at = $1, state = 'running' WHERE id = $2")
         .bind(token)
         .bind(id.into_uuid())
-        .execute(&pool)
+        .execute(s.pool())
         .await
         .unwrap();
-    pool.close().await;
 }
 
 /// L6-01: once the reaper reset a stalled claim and another node re-claimed
@@ -987,7 +958,6 @@ async fn set_claim_token(id: InstanceId, token: Option<chrono::DateTime<Utc>>) {
 #[tokio::test]
 async fn heartbeat_reports_lost_lease_after_reclaim_on_postgres() {
     let s = require_postgres!();
-    let _reaper = INSTANCE_REAPER_LOCK.lock().await;
     let tenant = format!("t-{}", Uuid::new_v4());
     let seq_id = SequenceId::new();
     s.create_sequence(&mk_sequence(&tenant, seq_id))
@@ -998,7 +968,7 @@ async fn heartbeat_reports_lost_lease_after_reclaim_on_postgres() {
     inst.updated_at = Utc::now() - chrono::Duration::hours(1);
     s.create_instance(&inst).await.unwrap();
     let token_a = Utc::now() - chrono::Duration::hours(1);
-    set_claim_token(inst.id, Some(token_a)).await;
+    set_claim_token(&s, inst.id, Some(token_a)).await;
 
     // Stalled: the reaper resets the claim, so A's lease is gone already.
     s.recover_stale_instances(std::time::Duration::from_secs(300))
@@ -1015,7 +985,7 @@ async fn heartbeat_reports_lost_lease_after_reclaim_on_postgres() {
 
     // B re-claims. A's heartbeat still reports lost and leaves B's row alone.
     let token_b = Utc::now();
-    set_claim_token(inst.id, Some(token_b)).await;
+    set_claim_token(&s, inst.id, Some(token_b)).await;
     let before = s.get_instance(inst.id).await.unwrap().unwrap().updated_at;
     assert_eq!(
         s.heartbeat_instance(inst.id, token_a).await.unwrap(),
@@ -1066,7 +1036,7 @@ async fn batch_save_externalized_state_mixed_sizes_does_not_hit_sql_syntax_error
         ),
     ];
 
-    InstanceStore::batch_save_externalized_state(&s, inst.id, &entries)
+    InstanceStore::batch_save_externalized_state(&*s, inst.id, &entries)
         .await
         .expect("batch_save_externalized_state must not hit a SQL syntax error");
 
@@ -1283,7 +1253,6 @@ async fn outputs_with_equal_timestamps_use_id_tiebreaker_postgres() {
 #[tokio::test]
 async fn stale_recovery_skips_waiting_instances_postgres() {
     let s = require_postgres!();
-    let _reaper = INSTANCE_REAPER_LOCK.lock().await;
     let tenant = format!("t-recovery-{}", Uuid::new_v4());
     let seq_id = SequenceId::new();
     s.create_sequence(&mk_sequence(&tenant, seq_id))
@@ -1515,9 +1484,7 @@ async fn duplicate_collapsible_wake_preserves_pending_replacement_postgres() {
         storage.enqueue_collapsible_wake(&old).await.unwrap(),
         old_id
     );
-    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
-        .await
-        .unwrap();
+    let pool = storage.pool().clone();
     let status: String = sqlx::query_scalar("SELECT status FROM push_wake_outbox WHERE id=$1")
         .bind(old_id)
         .fetch_one(&pool)
@@ -1659,6 +1626,7 @@ async fn postgres_encrypting_admitted_create_is_atomic() {
         .create_sequence(&mk_sequence(&tenant, sequence_id))
         .await
         .unwrap();
+    let (storage, _schema) = storage.into_parts();
     let inner: Arc<dyn orch8_storage::StorageBackend> = Arc::new(storage);
     let encrypting = Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
         inner,
@@ -1910,7 +1878,7 @@ async fn postgres_metadata_merge_and_filter_semantics() {
         .await
         .unwrap();
     let inst = mk_instance(&tenant, seq_id, None);
-    assert_metadata_semantics(&storage, &tenant, seq_id, inst).await;
+    assert_metadata_semantics(&*storage, &tenant, seq_id, inst).await;
 }
 
 /// Same-`created_at` outputs must resolve deterministically by `id`

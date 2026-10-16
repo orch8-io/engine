@@ -4,89 +4,30 @@ use std::sync::Arc;
 
 use orch8_storage::encrypting::EncryptingStorage;
 use orch8_storage::sqlite::SqliteStorage;
+use orch8_storage::testing::fixtures::{InstanceBuilder, SequenceBuilder};
 use orch8_storage::{InstanceStore, SequenceStore, StorageBackend};
 use orch8_types::encryption::FieldEncryptor;
-use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
-use orch8_types::instance::{InstanceState, Priority, TaskInstance};
-use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus, StepDef};
+use orch8_types::ids::SequenceId;
+use orch8_types::instance::TaskInstance;
+use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
 
 const TEST_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 const TEST_KEY_2: &str = "ffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeffeeffee";
 
 fn make_sequence() -> SequenceDefinition {
-    SequenceDefinition {
-        embed: None,
-        sub_tenant: None,
-        schema: None,
-        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
-        id: SequenceId::new(),
-        tenant_id: TenantId::unchecked("test"),
-        namespace: Namespace::new("default"),
-        name: "enc_seq".into(),
-        version: 1,
-        deprecated: false,
-        status: SequenceStatus::default(),
-        blocks: vec![BlockDefinition::Step(Box::new(StepDef {
-            id: orch8_types::ids::BlockId::new("s1"),
-            handler: "noop".into(),
-            params: serde_json::json!({}),
-            delay: None,
-            retry: None,
-            timeout: None,
-            rate_limit_key: None,
-            rate_budget: None,
-            placement: None,
-            send_window: None,
-            context_access: None,
-            cancellable: true,
-            wait_for_input: None,
-            queue_name: None,
-            deadline: None,
-            on_deadline_breach: None,
-            fallback_handler: None,
-            cache_key: None,
-            output_schema: None,
-            when: None,
-            compensation: None,
-        }))],
-        interceptors: None,
-        input_schema: None,
-        sla: None,
-        on_failure: None,
-        on_cancel: None,
-        placement: None,
-        created_at: chrono::Utc::now(),
-    }
+    SequenceBuilder::new("test")
+        .name("enc_seq")
+        .status(SequenceStatus::default())
+        .step("s1", "noop")
+        .build()
 }
 
 fn make_instance(seq_id: SequenceId) -> TaskInstance {
-    let now = chrono::Utc::now();
-    TaskInstance {
-        sub_tenant: None,
-        id: InstanceId::new(),
-        sequence_id: seq_id,
-        tenant_id: TenantId::unchecked("test"),
-        namespace: Namespace::new("default"),
-        state: InstanceState::Scheduled,
-        next_fire_at: Some(now),
-        priority: Priority::Normal,
-        timezone: "UTC".into(),
-        metadata: serde_json::json!({}),
-        context: orch8_types::context::ExecutionContext {
-            data: serde_json::json!({"secret": "password123", "nested": {"key": "value"}}),
-            config: serde_json::json!({}),
-            audit: vec![],
-            runtime: orch8_types::context::RuntimeContext::default(),
-        },
-        concurrency_key: None,
-        max_concurrency: None,
-        idempotency_key: None,
-        session_id: None,
-        parent_instance_id: None,
-        budget: None,
-        created_at: now,
-        updated_at: now,
-    }
+    InstanceBuilder::new("test", "default", seq_id)
+        .due_at(chrono::Utc::now())
+        .data(serde_json::json!({"secret": "password123", "nested": {"key": "value"}}))
+        .config(serde_json::json!({}))
+        .build()
 }
 
 #[tokio::test]

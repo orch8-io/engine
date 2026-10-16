@@ -1,6 +1,6 @@
 //! Device-session minting and the operator-key signal for mobile SDKs, end
 //! to end through the real auth middleware (root API key configured). Runs
-//! on `SQLite` and, when `DATABASE_URL` is set, on Postgres. The full scope
+//! on `SQLite` and, when `DATABASE_URL` is set (required under CI), on Postgres. The full scope
 //! matrix (every refused action) lives in `orch8-e2e/tests/distributed_api.rs`.
 
 use std::sync::Arc;
@@ -34,7 +34,7 @@ async fn servers() -> Vec<(&'static str, BackendTestServer)> {
         )
         .await,
     )];
-    if let Ok(url) = std::env::var("DATABASE_URL") {
+    if let Some(url) = orch8_storage::testing::backends::postgres_url() {
         let pg = PostgresStorage::new(&url, 5, None).await.unwrap();
         pg.run_migrations().await.unwrap();
         out.push((
@@ -400,7 +400,7 @@ async fn stored_device_keys_get_resolved_credentials_only_when_opted_in() {
             )
             .await,
         )];
-        if let Ok(url) = std::env::var("DATABASE_URL") {
+        if let Some(url) = orch8_storage::testing::backends::postgres_url() {
             let pg = PostgresStorage::new(&url, 5, None).await.unwrap();
             pg.run_migrations().await.unwrap();
             servers.push((

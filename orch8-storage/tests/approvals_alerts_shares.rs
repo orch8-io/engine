@@ -4,27 +4,16 @@
 use chrono::{Duration, SubsecRound, Utc};
 use uuid::Uuid;
 
-use orch8_storage::StorageBackend;
-use orch8_storage::postgres::PostgresStorage;
-use orch8_storage::sqlite::SqliteStorage;
+use orch8_storage::testing::backends::TestBackend;
 use orch8_types::alert::{AlertCondition, AlertDestination, AlertRule, AlertRuleState};
 use orch8_types::approval_link::{ApprovalActionToken, ApprovalChannel, hash_token};
 use orch8_types::ids::{BlockId, InstanceId, TenantId};
 use orch8_types::progress_share::ProgressShare;
 
-async fn backends() -> Vec<(&'static str, Box<dyn StorageBackend>)> {
-    let mut out: Vec<(&'static str, Box<dyn StorageBackend>)> = vec![(
-        "sqlite",
-        Box::new(SqliteStorage::in_memory().await.unwrap()),
-    )];
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        let pg = PostgresStorage::new(&url, 5, None).await.expect("connect");
-        pg.run_migrations().await.expect("migrate");
-        out.push(("postgres", Box::new(pg)));
-    } else {
-        eprintln!("postgres leg skipped: DATABASE_URL not set");
-    }
-    out
+/// `SQLite` plus Postgres (fresh schema; skipped locally without
+/// `DATABASE_URL`, required under CI).
+async fn backends() -> Vec<TestBackend> {
+    TestBackend::sqlite_and_postgres().await
 }
 
 fn token(
@@ -58,7 +47,8 @@ fn token(
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn approval_tokens_are_single_use_per_gate_and_expire() {
-    for (name, s) in backends().await {
+    for backend in backends().await {
+        let (name, s) = (backend.name(), std::sync::Arc::clone(&backend.storage));
         let tenant = TenantId::unchecked(format!("appr-{}", Uuid::new_v4()));
         let instance = InstanceId::new();
         let (raw_yes, yes) = token(
@@ -172,7 +162,8 @@ async fn approval_tokens_are_single_use_per_gate_and_expire() {
 
 #[tokio::test]
 async fn progress_shares_are_tenant_scoped_and_revocable() {
-    for (name, s) in backends().await {
+    for backend in backends().await {
+        let (name, s) = (backend.name(), std::sync::Arc::clone(&backend.storage));
         let tenant = TenantId::unchecked(format!("share-{}", Uuid::new_v4()));
         let other = TenantId::unchecked(format!("other-{}", Uuid::new_v4()));
         let instance = InstanceId::new();
@@ -240,7 +231,8 @@ async fn progress_shares_are_tenant_scoped_and_revocable() {
 
 #[tokio::test]
 async fn alert_rules_crud_and_state_cas() {
-    for (name, s) in backends().await {
+    for backend in backends().await {
+        let (name, s) = (backend.name(), std::sync::Arc::clone(&backend.storage));
         let tenant = TenantId::unchecked(format!("alert-{}", Uuid::new_v4()));
         let other = TenantId::unchecked(format!("other-{}", Uuid::new_v4()));
         let now = Utc::now().trunc_subsecs(6);
