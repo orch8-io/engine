@@ -198,10 +198,13 @@ pub async fn apply_step_placement(
         Ok(Some(resolved)) => resolved,
         other => return Ok(other),
     };
-    // An unparsable `$runtime` is rejected by the regular dispatch path with
-    // its precise message; leave it alone here.
-    let Ok(mut requirements) = orch8_types::worker::peek_runtime_requirements(params) else {
-        return Ok(Ok(None));
+    // An unparsable `$runtime` under an applicable placement is a permanent
+    // rejection. Answering "no placement" here (as this used to) let a step
+    // whose handler is registered in-process run locally, bypassing
+    // residency and other hard constraints (T1-GAP-008).
+    let mut requirements = match orch8_types::worker::peek_runtime_requirements(params) {
+        Ok(requirements) => requirements,
+        Err(message) => return Ok(Err(message)),
     };
     if let Err(message) =
         orch8_types::placement::apply_hard_constraints(&resolved, &mut requirements)
