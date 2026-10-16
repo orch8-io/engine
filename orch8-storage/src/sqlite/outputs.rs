@@ -346,13 +346,25 @@ pub(super) async fn save_output_and_transition(
     .bind(ts(output.created_at))
     .execute(&mut *tx).await?;
 
-    sqlx::query("UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1")
-        .bind(instance_id.into_uuid().to_string())
-        .bind(new_state.to_string())
-        .bind(next_fire_at.map(ts))
-        .bind(ts(chrono::Utc::now()))
-        .execute(&mut *tx)
-        .await?;
+    // CAS (I-C02): never move an instance that became terminal or paused
+    // after the caller read it — a cancel racing a completion must stick.
+    let result = sqlx::query(
+        "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','paused')",
+    )
+    .bind(instance_id.into_uuid().to_string())
+    .bind(new_state.to_string())
+    .bind(next_fire_at.map(ts))
+    .bind(ts(chrono::Utc::now()))
+    .execute(&mut *tx)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Err(StorageError::TerminalTarget {
+            entity: "task_instances".into(),
+            id: instance_id.into_uuid().to_string(),
+        });
+    }
 
     tx.commit().await?;
     Ok(())
@@ -387,8 +399,9 @@ pub(super) async fn save_output_merge_context_and_transition(
     .bind(ts(output.created_at))
     .execute(&mut *tx).await?;
 
-    sqlx::query(
-        "UPDATE task_instances SET context=?2, state=?3, next_fire_at=?4, updated_at=?5 WHERE id=?1",
+    // CAS (I-C02): see `save_output_and_transition`.
+    let result = sqlx::query(
+        "UPDATE task_instances SET context=?2, state=?3, next_fire_at=?4, updated_at=?5 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','paused')",
     )
     .bind(instance_id.into_uuid().to_string())
     .bind(serde_json::to_string(context)?)
@@ -397,6 +410,14 @@ pub(super) async fn save_output_merge_context_and_transition(
     .bind(ts(chrono::Utc::now()))
     .execute(&mut *tx)
     .await?;
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Err(StorageError::TerminalTarget {
+            entity: "task_instances".into(),
+            id: instance_id.into_uuid().to_string(),
+        });
+    }
 
     tx.commit().await?;
     Ok(())

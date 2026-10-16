@@ -1232,10 +1232,18 @@ impl Orch8Service for Orch8GrpcService {
                 inst.state, new_state
             )));
         }
-        self.storage
-            .update_instance_state(id, new_state, None)
+        // CAS from the validated state (L3-14): a blind write would apply a
+        // transition validated against a stale read (e.g. over a completion).
+        if !self
+            .storage
+            .conditional_update_instance_state(id, inst.state, new_state, None)
             .await
-            .map_err(storage_err)?;
+            .map_err(storage_err)?
+        {
+            return Err(Status::aborted(
+                "instance state changed concurrently; re-read and retry",
+            ));
+        }
 
         // If this instance is a SubSequence child and the external transition
         // drove it to a terminal state, wake the parent so its SubSequence
@@ -1250,8 +1258,9 @@ impl Orch8Service for Orch8GrpcService {
             && parent.state == InstanceState::Waiting
             && let Err(e) = self
                 .storage
-                .update_instance_state(
+                .conditional_update_instance_state(
                     parent_id,
+                    InstanceState::Waiting,
                     InstanceState::Scheduled,
                     Some(chrono::Utc::now()),
                 )
@@ -2058,7 +2067,7 @@ impl Orch8Service for Orch8GrpcService {
                     "gRPC worker completion: execution node not in Running/Waiting state — falling back to non-atomic transition"
                 );
             }
-            if merged_context {
+            let result = if merged_context {
                 self.storage
                     .save_output_merge_context_and_transition(
                         &block_output,
@@ -2068,7 +2077,6 @@ impl Orch8Service for Orch8GrpcService {
                         Some(chrono::Utc::now()),
                     )
                     .await
-                    .map_err(storage_err)?;
             } else {
                 self.storage
                     .save_output_and_transition(
@@ -2078,7 +2086,19 @@ impl Orch8Service for Orch8GrpcService {
                         Some(chrono::Utc::now()),
                     )
                     .await
-                    .map_err(storage_err)?;
+            };
+            match result {
+                Ok(()) => {}
+                // Lost the race to a cancel/pause: the terminal state stands
+                // (mirrors the HTTP completion path).
+                Err(orch8_types::error::StorageError::TerminalTarget { .. }) => {
+                    tracing::info!(
+                        instance_id = %task.instance_id,
+                        block_id = %task.block_id.as_str(),
+                        "gRPC worker completion CAS failed — instance became terminal/paused after read"
+                    );
+                }
+                Err(e) => return Err(storage_err(e)),
             }
         }
 

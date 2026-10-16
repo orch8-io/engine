@@ -205,17 +205,39 @@ impl InstanceLifecycleManager {
     pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), MobileError> {
         let id = parse_instance_id(instance_id)?;
 
-        let _ = self
-            .storage
-            .get_instance(id)
-            .await?
-            .ok_or_else(|| MobileError::NotFound {
-                message: format!("instance '{instance_id}' not found"),
-            })?;
-
-        self.storage
-            .update_instance_state(id, InstanceState::Cancelled, None)
-            .await?;
+        // CAS from the observed state (L3-14): a blind write would overwrite
+        // a completion that landed after the read. Retry a few times if the
+        // engine moves the instance meanwhile; an already-terminal instance
+        // keeps its final state.
+        let mut attempts = 0;
+        loop {
+            let inst =
+                self.storage
+                    .get_instance(id)
+                    .await?
+                    .ok_or_else(|| MobileError::NotFound {
+                        message: format!("instance '{instance_id}' not found"),
+                    })?;
+            if inst.state.is_terminal() {
+                debug!(instance_id = %instance_id, state = %inst.state, "cancel ignored: instance already terminal");
+                return Ok(());
+            }
+            if self
+                .storage
+                .conditional_update_instance_state(id, inst.state, InstanceState::Cancelled, None)
+                .await?
+            {
+                break;
+            }
+            attempts += 1;
+            if attempts >= 5 {
+                return Err(MobileError::Storage {
+                    message: format!(
+                        "instance '{instance_id}' kept changing state; cancel not applied"
+                    ),
+                });
+            }
+        }
 
         let mut dedup = self.dedup_keys.lock().await;
         dedup.retain(|_, v| v != instance_id);
@@ -267,7 +289,17 @@ impl InstanceLifecycleManager {
         } else {
             context.data[step_name] = payload.clone();
         }
-        self.storage.update_instance_context(id, &context).await?;
+        // CAS on `updated_at` (L3-14): a concurrent tick's context merge or a
+        // cancel since the read must not be overwritten.
+        if !self
+            .storage
+            .update_instance_context_cas(id, &context, inst.updated_at)
+            .await?
+        {
+            return Err(MobileError::InvalidInput {
+                message: format!("instance '{instance_id}' changed concurrently; retry"),
+            });
+        }
 
         let signal = orch8_types::signal::Signal {
             id: uuid::Uuid::now_v7(),
@@ -281,8 +313,15 @@ impl InstanceLifecycleManager {
             delivered_at: None,
         };
         self.storage.enqueue_signal(&signal).await?;
+        // Only wake it if it is still parked; a cancel that won the race
+        // stands (the signal is then simply never consumed).
         self.storage
-            .update_instance_state(id, InstanceState::Scheduled, Some(chrono::Utc::now()))
+            .conditional_update_instance_state(
+                id,
+                InstanceState::Waiting,
+                InstanceState::Scheduled,
+                Some(chrono::Utc::now()),
+            )
             .await?;
 
         debug!(instance_id = %instance_id, step_name = %step_name, "enqueued human_input signal");
@@ -341,19 +380,58 @@ impl InstanceLifecycleManager {
         let mut expired = 0;
 
         for instance_id in instance_ids {
-            if let Err(e) = self
-                .storage
-                .update_instance_state(instance_id, InstanceState::Failed, None)
-                .await
-            {
-                warn!(%instance_id, error = %e, "failed to expire instance");
-            } else {
-                info!(%instance_id, "expired instance (exceeded max lifetime)");
-                expired += 1;
+            // CAS from the current state (L3-14): an instance that completed
+            // since the listing must keep its terminal state.
+            let result = match self.storage.get_instance(instance_id).await {
+                Ok(Some(inst)) if !inst.state.is_terminal() => {
+                    self.storage
+                        .conditional_update_instance_state(
+                            instance_id,
+                            inst.state,
+                            InstanceState::Failed,
+                            None,
+                        )
+                        .await
+                }
+                Ok(_) => Ok(false),
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(true) => {
+                    info!(%instance_id, "expired instance (exceeded max lifetime)");
+                    expired += 1;
+                }
+                Ok(false) => {}
+                Err(e) => warn!(%instance_id, error = %e, "failed to expire instance"),
             }
         }
 
         Ok(expired)
+    }
+
+    /// Delete terminal instances (and their history) that finished more than
+    /// `retention_secs` ago, then give the freed space back to the OS
+    /// (L1-06, L1-18). Bounded per call; a backlog drains over later ticks.
+    /// `retention_secs == 0` keeps everything.
+    pub async fn purge_terminal_instances(&self, retention_secs: u64) -> Result<u64, MobileError> {
+        if retention_secs == 0 {
+            return Ok(0);
+        }
+        let Some(cutoff) = chrono::Duration::from_std(Duration::from_secs(retention_secs))
+            .ok()
+            .and_then(|retention| chrono::Utc::now().checked_sub_signed(retention))
+        else {
+            return Ok(0);
+        };
+        let deleted = self
+            .storage
+            .delete_terminal_instances(cutoff, TERMINAL_PURGE_BATCH)
+            .await?;
+        if deleted > 0 {
+            info!(deleted, "purged terminal instances past retention");
+        }
+        self.storage.compact_storage().await?;
+        Ok(deleted)
     }
 
     /// Remove a dedup entry associated with the given instance ID.

@@ -1064,6 +1064,10 @@ pub trait OutputStore: Send + Sync + 'static {
 
     /// Atomic: save block output + update instance state in a single transaction.
     /// Eliminates one DB round-trip on the hot path.
+    ///
+    /// CAS-guarded: if the instance is terminal or paused (e.g. cancelled
+    /// while the step was completing), nothing is written and
+    /// [`StorageError::TerminalTarget`] is returned.
     async fn save_output_and_transition(
         &self,
         output: &BlockOutput,
@@ -1085,6 +1089,10 @@ pub trait OutputStore: Send + Sync + 'static {
     /// implementation fails at compile time rather than silently falling
     /// back to the non-atomic path (same convention as
     /// [`SignalStore::enqueue_signal_if_active`]).
+    ///
+    /// CAS-guarded like [`OutputStore::save_output_and_transition`]: returns
+    /// [`StorageError::TerminalTarget`] and writes nothing when the instance
+    /// is terminal or paused.
     async fn save_output_merge_context_and_transition(
         &self,
         output: &BlockOutput,
