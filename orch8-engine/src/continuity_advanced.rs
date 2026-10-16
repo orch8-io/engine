@@ -1038,7 +1038,9 @@ fn federation_clock_skew() -> chrono::Duration {
         std::env::var("ORCH8_FEDERATION_CLOCK_SKEW_SECS")
             .ok()
             .and_then(|v| v.trim().parse::<i64>().ok())
-            .map_or(DEFAULT_FEDERATION_CLOCK_SKEW_SECS, |secs| secs.clamp(0, 300))
+            .map_or(DEFAULT_FEDERATION_CLOCK_SKEW_SECS, |secs| {
+                secs.clamp(0, 300)
+            })
     });
     chrono::Duration::seconds(*SKEW)
 }
