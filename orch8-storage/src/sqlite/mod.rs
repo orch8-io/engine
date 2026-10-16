@@ -135,6 +135,17 @@ pub struct SqliteStorage {
     artifact_store: Option<std::sync::Arc<crate::artifacts::ObjectArtifactStore>>,
 }
 
+/// File-backed databases give freed space back (L1-18):
+/// `auto_vacuum = INCREMENTAL` lets the GC's `compact_storage` return free
+/// pages to the OS, and `journal_size_limit` shrinks the WAL after a burst.
+/// `auto_vacuum` only takes effect on a database created with it — an
+/// existing file keeps its mode until a one-off `VACUUM` (run offline, e.g.
+/// `sqlite3 orch8.db 'PRAGMA auto_vacuum=INCREMENTAL; VACUUM;'`).
+fn space_reclaiming(opts: SqliteConnectOptions) -> SqliteConnectOptions {
+    opts.auto_vacuum(sqlx::sqlite::SqliteAutoVacuum::Incremental)
+        .pragma("journal_size_limit", "67108864")
+}
+
 /// Pool options shared by every SQLite constructor.
 ///
 /// `begin_immediate` hands the `BEGIN IMMEDIATE` to the connection's worker
@@ -212,6 +223,7 @@ impl SqliteStorage {
             .busy_timeout(Duration::from_secs(5))
             // FK enforcement is off by default in SQLite. Mirror in_memory().
             .foreign_keys(true);
+        let opts = space_reclaiming(opts);
 
         let pool = pool_options(8)
             .connect_with(opts)
@@ -239,6 +251,7 @@ impl SqliteStorage {
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(Duration::from_secs(5))
             .foreign_keys(true);
+        let opts = space_reclaiming(opts);
 
         let pool = pool_options(5)
             .idle_timeout(Duration::from_secs(30))
@@ -2793,12 +2806,38 @@ impl crate::ResourceStore for SqliteStorage {
         instances::mark_artifacts_gced(self, instance_id).await
     }
 
-    async fn delete_terminal_instances(
+    async fn list_instance_gc_candidates(
         &self,
         cutoff: chrono::DateTime<chrono::Utc>,
         limit: u32,
+    ) -> Result<Vec<InstanceId>, StorageError> {
+        instances::list_instance_gc_candidates(self, cutoff, limit).await
+    }
+
+    async fn purge_terminal_instances(&self, ids: &[InstanceId]) -> Result<u64, StorageError> {
+        instances::purge_terminal_instances(self, ids).await
+    }
+
+    async fn delete_expired_auxiliary(
+        &self,
+        retention: &crate::AuxiliaryRetention,
+        limit: u32,
     ) -> Result<u64, StorageError> {
-        instances::delete_terminal_instances(self, cutoff, limit).await
+        misc::delete_expired_auxiliary(self, retention, limit).await
+    }
+
+    async fn compact_storage(&self) -> Result<(), StorageError> {
+        // Bounded: at most ~8 MiB (2000 default-size pages) per call, so a
+        // big backlog of free pages is returned over several GC ticks.
+        sqlx::query("PRAGMA incremental_vacuum(2000)")
+            .execute(&self.pool)
+            .await?;
+        // Fold the WAL back into the main file and shrink it; a busy reader
+        // just makes this a partial checkpoint (not an error).
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     // === Instance KV State ===

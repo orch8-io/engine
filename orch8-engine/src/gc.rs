@@ -93,6 +93,41 @@ pub const EVENT_INBOX_DEFAULT_TTL: Duration = Duration::from_secs(2_592_000);
 /// it does not delete the device row.
 pub const MOBILE_DEVICE_STALE_DEFAULT_THRESHOLD: Duration = Duration::from_secs(2_592_000);
 
+/// Default retention for `worker_task_attempt_events` (lease evidence) rows
+/// (90 days): long enough for incident forensics, bounded forever after.
+pub const WORKER_ATTEMPT_EVENTS_DEFAULT_TTL: Duration = Duration::from_secs(7_776_000);
+
+/// Default retention for consumed / expired `event_inbox` rows (30 days past
+/// receipt — the same horizon unmatched events get before they expire).
+/// Producer-id dedupe does not reach further back than this.
+pub const SETTLED_EVENTS_DEFAULT_TTL: Duration = EVENT_INBOX_DEFAULT_TTL;
+
+/// Default retention for `sub_tenant_executions` (400 days): monthly quotas
+/// and usage only read the current/previous months.
+pub const SUB_TENANT_EXECUTIONS_DEFAULT_TTL: Duration = Duration::from_secs(34_560_000);
+
+/// Default retention for terminal device-reported instance status and
+/// resolved/expired mobile approval requests (30 days).
+pub const MOBILE_SETTLED_DEFAULT_TTL: Duration = Duration::from_secs(2_592_000);
+
+/// Default retention for `cluster_nodes` rows that are `stopped` and have not
+/// heartbeated (7 days). One row is registered per process start.
+pub const STOPPED_NODES_DEFAULT_TTL: Duration = Duration::from_secs(604_800);
+
+/// Default retention for `worker_registrations` not seen for this long
+/// (7 days). Live workers re-register on their next poll.
+pub const WORKER_REGISTRATIONS_DEFAULT_TTL: Duration = Duration::from_secs(604_800);
+
+/// Instances purged per transaction by the retention sweep. Smaller than
+/// [`GC_BATCH_LIMIT`]: each instance cascades through many child tables, so a
+/// 1000-instance transaction could outlive `statement_timeout` (L4-02).
+pub const INSTANCE_GC_BATCH_LIMIT: u32 = 200;
+
+/// Wall-clock budget of one instance-retention pass. The sweep keeps going
+/// while batches come back full (no fixed ~288k/day ceiling, L1-07) but
+/// yields to the next tick after this long.
+pub const INSTANCE_GC_TIME_BUDGET: Duration = Duration::from_secs(60);
+
 /// Default retention for acked mobile commands before deletion (7 days).
 pub const MOBILE_COMMAND_ACKED_DEFAULT_TTL: Duration = Duration::from_secs(604_800);
 
@@ -161,7 +196,12 @@ pub async fn run_gc_loop_with_ttl(
                     sweep_webhook_attempts(storage.as_ref()),
                     sweep_event_inbox(storage.as_ref()),
                     sweep_llm_cache(storage.as_ref()),
+                    sweep_auxiliary(storage.as_ref()),
                 );
+                // After the deletes: return freed pages to the OS (SQLite).
+                if let Err(e) = storage.compact_storage().await {
+                    tracing::warn!(error = %e, "storage compaction after gc failed");
+                }
             }
         }
     }
@@ -459,10 +499,16 @@ async fn sweep_terminal_instances_opt(storage: &dyn StorageBackend, retention: O
 }
 
 /// Delete `task_instances` rows (and their execution history) that have been
-/// terminal for longer than `retention`. Bounded per tick by
-/// [`GC_BATCH_LIMIT`]. Closes review finding L1 -- previously there was no
-/// non-test path that ever deleted a `task_instances` row outside of
-/// `delete_sequence`'s cascade.
+/// terminal for longer than `retention`. Closes review finding L1 --
+/// previously there was no non-test path that ever deleted a `task_instances`
+/// row outside of `delete_sequence`'s cascade.
+///
+/// Drains in [`INSTANCE_GC_BATCH_LIMIT`]-instance transactions until the
+/// backlog is gone or [`INSTANCE_GC_TIME_BUDGET`] elapses (L1-07). Each
+/// batch first deletes the instances' artifact blobs (L1-08): the instance
+/// row is the blobs' only index, so deleting it first would orphan them
+/// forever. An instance whose blobs could not be deleted is kept for the
+/// next pass.
 async fn sweep_terminal_instances(storage: &dyn StorageBackend, retention: Duration) {
     let Some(cutoff) = retention_cutoff(retention) else {
         tracing::warn!(
@@ -472,10 +518,7 @@ async fn sweep_terminal_instances(storage: &dyn StorageBackend, retention: Durat
         return;
     };
 
-    match storage
-        .delete_terminal_instances(cutoff, GC_BATCH_LIMIT)
-        .await
-    {
+    match drain_terminal_instances(storage, cutoff, INSTANCE_GC_TIME_BUDGET).await {
         Ok(0) => {}
         Ok(n) => {
             tracing::info!(count = n, "instance gc: deleted terminal instances");
@@ -485,6 +528,76 @@ async fn sweep_terminal_instances(storage: &dyn StorageBackend, retention: Durat
             let kind = error_kind(&e);
             tracing::error!(error = %e, kind, "instance gc sweep failed");
             metrics::inc_with(metrics::GC_INSTANCES_ERRORS, &[("kind", kind)]);
+        }
+    }
+}
+
+/// One instance-retention pass: batches of [`INSTANCE_GC_BATCH_LIMIT`] until
+/// a short batch, no progress, or `budget` elapsed. Returns instances deleted.
+pub async fn drain_terminal_instances(
+    storage: &dyn StorageBackend,
+    cutoff: chrono::DateTime<chrono::Utc>,
+    budget: Duration,
+) -> Result<u64, StorageError> {
+    let started = std::time::Instant::now();
+    let mut total = 0;
+    loop {
+        let candidates = storage
+            .list_instance_gc_candidates(cutoff, INSTANCE_GC_BATCH_LIMIT)
+            .await?;
+        if candidates.is_empty() {
+            break;
+        }
+        let mut purge = Vec::with_capacity(candidates.len());
+        for id in &candidates {
+            match storage.delete_instance_artifacts(*id).await {
+                Ok(n) => {
+                    if n > 0 {
+                        metrics::inc_by(metrics::GC_ARTIFACTS_DELETED, n);
+                    }
+                    purge.push(*id);
+                }
+                Err(e) => {
+                    let kind = error_kind(&e);
+                    tracing::error!(instance_id = %id, error = %e, kind, "instance gc: artifact delete failed; keeping instance");
+                    metrics::inc_with(metrics::GC_ARTIFACTS_ERRORS, &[("kind", kind)]);
+                }
+            }
+        }
+        let deleted = storage.purge_terminal_instances(&purge).await?;
+        total += deleted;
+        if candidates.len() < INSTANCE_GC_BATCH_LIMIT as usize
+            || deleted == 0
+            || started.elapsed() >= budget
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok(total)
+}
+
+/// Bounded retention for append-only tables with no other cleanup path
+/// (L1-02, L1-04, L1-14, L1-15, L1-16). Fixed default horizons; see the
+/// `*_DEFAULT_TTL` constants.
+async fn sweep_auxiliary(storage: &dyn StorageBackend) {
+    let before = |ttl: Duration| retention_cutoff(ttl);
+    let retention = orch8_storage::AuxiliaryRetention {
+        worker_attempt_events_before: before(WORKER_ATTEMPT_EVENTS_DEFAULT_TTL),
+        settled_events_before: before(SETTLED_EVENTS_DEFAULT_TTL),
+        sub_tenant_executions_before: before(SUB_TENANT_EXECUTIONS_DEFAULT_TTL),
+        mobile_errors_before: before(TELEMETRY_EVENTS_DEFAULT_TTL),
+        mobile_terminal_status_before: before(MOBILE_SETTLED_DEFAULT_TTL),
+        mobile_settled_approvals_before: before(MOBILE_SETTLED_DEFAULT_TTL),
+        stopped_nodes_before: before(STOPPED_NODES_DEFAULT_TTL),
+        worker_registrations_before: before(WORKER_REGISTRATIONS_DEFAULT_TTL),
+    };
+    match drain_batches(|| storage.delete_expired_auxiliary(&retention, GC_BATCH_LIMIT)).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(count = n, "auxiliary gc: deleted expired rows"),
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "auxiliary gc sweep failed");
         }
     }
 }
@@ -932,5 +1045,76 @@ mod tests {
             .await
             .expect("gc loop did not exit on cancel")
             .unwrap();
+    }
+
+    fn terminal_instance(
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> orch8_types::instance::TaskInstance {
+        use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
+        use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+        TaskInstance {
+            id: InstanceId::new(),
+            sub_tenant: None,
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId::unchecked("t"),
+            namespace: Namespace::new("default"),
+            state: InstanceState::Completed,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: orch8_types::context::ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: updated_at,
+            updated_at,
+        }
+    }
+
+    /// L1-07 / L1-08: one pass drains the whole backlog in bounded batches
+    /// (not one 1000-row batch per 5-minute tick), and deletes the purged
+    /// instances' artifact blobs instead of orphaning them.
+    #[tokio::test]
+    async fn instance_retention_drains_backlog_and_deletes_artifacts() {
+        use orch8_storage::artifacts::ObjectArtifactStore;
+        use orch8_storage::{InstanceStore, ResourceStore};
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap()
+            .with_artifact_store(Arc::new(ObjectArtifactStore::memory()));
+        let old = chrono::Utc::now() - chrono::Duration::days(2);
+        let total = INSTANCE_GC_BATCH_LIMIT * 2 + 50;
+        let mut with_blob = None;
+        for _ in 0..total {
+            let inst = terminal_instance(old);
+            storage.create_instance(&inst).await.unwrap();
+            with_blob.get_or_insert(inst.id);
+        }
+        let with_blob = with_blob.unwrap();
+        storage
+            .put_artifact(with_blob, "text/plain", bytes::Bytes::from_static(b"blob"))
+            .await
+            .unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(1);
+
+        // A zero budget still finishes the batch it started, then yields.
+        let first = drain_terminal_instances(&storage, cutoff, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(first, u64::from(INSTANCE_GC_BATCH_LIMIT));
+
+        let rest = drain_terminal_instances(&storage, cutoff, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(first + rest, u64::from(total));
+        assert!(storage.get_instance(with_blob).await.unwrap().is_none());
+        assert!(
+            storage.list_artifacts(with_blob).await.unwrap().is_empty(),
+            "instance retention must delete the instance's blobs (L1-08)"
+        );
     }
 }

@@ -22,7 +22,7 @@ impl MobileStorage {
         Self { inner }
     }
 
-    fn pool(&self) -> &sqlx::SqlitePool {
+    pub(crate) fn pool(&self) -> &sqlx::SqlitePool {
         self.inner.pool()
     }
 

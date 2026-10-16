@@ -1276,44 +1276,165 @@ pub(super) async fn list_artifact_gc_candidates(
     Ok(ids)
 }
 
-/// See [`crate::ResourceStore::delete_terminal_instances`].
-pub(super) async fn delete_terminal_instances(
+/// See [`crate::ResourceStore::list_instance_gc_candidates`].
+pub(super) async fn list_instance_gc_candidates(
     store: &PostgresStorage,
     cutoff: DateTime<Utc>,
     limit: u32,
-) -> Result<u64, StorageError> {
-    let mut tx = store.pool.begin().await?;
-
+) -> Result<Vec<InstanceId>, StorageError> {
     // Same terminal-state set as `list_artifact_gc_candidates` -- keep in
-    // sync with `InstanceState::is_terminal()`.
+    // sync with `InstanceState::is_terminal()`. Spelled exactly like the
+    // partial `idx_task_instances_terminal_updated` predicate (migration
+    // 102) so the scan walks only old terminal rows, in order (L1-05). Runs
+    // on the pool, outside the purge transaction.
     let ids: Vec<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT id FROM task_instances \
-         WHERE state::text IN ('completed','failed','cancelled') \
-           AND updated_at < $1 \
-         ORDER BY updated_at ASC LIMIT $2",
+        "SELECT t.id FROM task_instances t \
+         WHERE t.state IN ('completed', 'failed', 'cancelled') \
+           AND t.updated_at < $1 \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM task_instances p \
+               WHERE p.id = t.parent_instance_id \
+                 AND p.state NOT IN ('completed', 'failed', 'cancelled')) \
+         ORDER BY t.updated_at ASC LIMIT $2",
     )
     .bind(cutoff)
     .bind(i64::from(limit))
-    .fetch_all(&mut *tx)
+    .fetch_all(&store.pool)
     .await?;
+    Ok(ids.into_iter().map(InstanceId::from_uuid).collect())
+}
 
+/// Continuity-scoped tables (FK to `continuity_executions`), children first.
+/// Purged with the continuity whose current instance is deleted (L1-01).
+const CONTINUITY_CHILD_TABLES: &[&str] = &[
+    "continuity_stream_frames",
+    "continuity_streams",
+    "effect_receipts",
+    "provenance_entries",
+    "placement_decisions",
+    "execution_handoffs",
+    "execution_capsules",
+    "continuation_grants",
+    "invariant_results",
+    "evaluation_scores",
+    "attention_tasks",
+    "budget_reservations",
+    "continuity_locations",
+    "what_if_runs",
+    "live_migrations",
+    "compensation_runs",
+];
+
+/// See [`crate::ResourceStore::purge_terminal_instances`].
+pub(super) async fn purge_terminal_instances(
+    store: &PostgresStorage,
+    ids: &[InstanceId],
+) -> Result<u64, StorageError> {
     if ids.is_empty() {
         return Ok(0);
     }
+    let requested: Vec<uuid::Uuid> = ids.iter().map(|id| id.into_uuid()).collect();
+    let mut tx = store.pool.begin().await?;
 
-    // `step_logs`, `usage_events` and `instance_kv_state` have no FK to
-    // `task_instances` on Postgres, so they are not covered by the
-    // `ON DELETE CASCADE` the instance row deletion below relies on for
-    // execution_tree / block_outputs / signal_inbox / worker_tasks /
-    // checkpoints / externalized_state / audit_log (all cascade -- see
-    // migrations 016 and 034).
-    for table in ["step_logs", "usage_events", "instance_kv_state"] {
-        let sql = match table {
-            "step_logs" => "DELETE FROM step_logs WHERE instance_id = ANY($1)",
-            "usage_events" => "DELETE FROM usage_events WHERE instance_id = ANY($1)",
-            "instance_kv_state" => "DELETE FROM instance_kv_state WHERE instance_id = ANY($1)",
-            _ => unreachable!(),
-        };
+    // Lock the rows that are still purgeable: terminal, and not the child of
+    // a parent that became live since the candidate scan (L3-08).
+    let locked: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT t.id, t.tenant_id FROM task_instances t \
+         WHERE t.id = ANY($1) \
+           AND t.state IN ('completed', 'failed', 'cancelled') \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM task_instances p \
+               WHERE p.id = t.parent_instance_id \
+                 AND p.state NOT IN ('completed', 'failed', 'cancelled')) \
+         FOR UPDATE OF t SKIP LOCKED",
+    )
+    .bind(&requested)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut rows: Vec<(uuid::Uuid, String)> = locked;
+
+    // `task_instances.parent_instance_id` is a plain (NO ACTION) FK: a parent
+    // with a child outside this batch cannot be deleted, and trying would
+    // fail the whole batch (and every later one) with an FK violation.
+    // Drop such parents until the set is closed under "children included".
+    loop {
+        let set: Vec<uuid::Uuid> = rows.iter().map(|(id, _)| *id).collect();
+        let blocked: Vec<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT parent_instance_id FROM task_instances \
+             WHERE parent_instance_id = ANY($1) AND NOT (id = ANY($1))",
+        )
+        .bind(&set)
+        .fetch_all(&mut *tx)
+        .await?;
+        if blocked.is_empty() {
+            break;
+        }
+        rows.retain(|(id, _)| !blocked.contains(id));
+    }
+    if rows.is_empty() {
+        tx.commit().await?;
+        return Ok(0);
+    }
+    let ids: Vec<uuid::Uuid> = rows.iter().map(|(id, _)| *id).collect();
+    let tenants: Vec<String> = rows.iter().map(|(_, t)| t.clone()).collect();
+    let id_texts: Vec<String> = ids.iter().map(ToString::to_string).collect();
+
+    // Worker-task attempt evidence has no FK (by design, migration 080), so
+    // it must go before the worker_tasks cascade removes the task ids (L1-02).
+    sqlx::query(
+        "DELETE FROM worker_task_attempt_events \
+         WHERE task_id IN (SELECT id FROM worker_tasks WHERE instance_id = ANY($1))",
+    )
+    .bind(&ids)
+    .execute(&mut *tx)
+    .await?;
+
+    // The continuity record (and everything scoped to it) of every purged
+    // instance that is still its current instance (L1-01). Matched through
+    // the (tenant_id, record->>'current_instance_id') unique index.
+    let continuities: Vec<(String, uuid::Uuid)> = sqlx::query_as(
+        "SELECT ce.tenant_id, ce.continuity_id FROM continuity_executions ce \
+         JOIN UNNEST($1::text[], $2::text[]) AS p(tenant_id, instance_id) \
+           ON ce.tenant_id = p.tenant_id \
+          AND ce.record->>'current_instance_id' = p.instance_id",
+    )
+    .bind(&tenants)
+    .bind(&id_texts)
+    .fetch_all(&mut *tx)
+    .await?;
+    if !continuities.is_empty() {
+        let c_tenants: Vec<String> = continuities.iter().map(|(t, _)| t.clone()).collect();
+        let c_ids: Vec<uuid::Uuid> = continuities.iter().map(|(_, c)| *c).collect();
+        for table in CONTINUITY_CHILD_TABLES
+            .iter()
+            .copied()
+            .chain(std::iter::once("continuity_executions"))
+        {
+            // Table names come from the constant list above, never input.
+            let sql = format!(
+                "DELETE FROM {table} WHERE (tenant_id, continuity_id) IN \
+                 (SELECT * FROM UNNEST($1::text[], $2::uuid[]))"
+            );
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .bind(&c_tenants)
+                .bind(&c_ids)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+
+    // `step_logs`, `usage_events`, `instance_kv_state` and `event_waits`
+    // have no FK to `task_instances` on Postgres, so
+    // they are not covered by the `ON DELETE CASCADE` the instance row
+    // deletion below relies on for execution_tree / block_outputs /
+    // signal_inbox / worker_tasks / checkpoints / externalized_state /
+    // audit_log (all cascade -- see migrations 016 and 034).
+    for sql in [
+        "DELETE FROM step_logs WHERE instance_id = ANY($1)",
+        "DELETE FROM usage_events WHERE instance_id = ANY($1)",
+        "DELETE FROM instance_kv_state WHERE instance_id = ANY($1)",
+        "DELETE FROM event_waits WHERE instance_id = ANY($1)",
+    ] {
         sqlx::query(sql).bind(&ids).execute(&mut *tx).await?;
     }
     // Parent-scoped dedupe rows of a purged parent can never match again.

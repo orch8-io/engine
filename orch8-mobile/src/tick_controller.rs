@@ -388,6 +388,14 @@ impl TickController {
                                 Ok(_) => {}
                                 Err(e) => warn!(error = %e, "periodic instance GC failed"),
                             }
+                            if let Err(e) = lifecycle
+                                .purge_terminal_instances(
+                                    crate::lifecycle::TERMINAL_INSTANCE_RETENTION_SECS,
+                                )
+                                .await
+                            {
+                                warn!(error = %e, "periodic terminal-instance purge failed");
+                            }
                             next_instance_gc = now + INSTANCE_GC_INTERVAL;
                         }
 

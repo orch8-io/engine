@@ -2350,12 +2350,24 @@ impl crate::ResourceStore for PostgresStorage {
         instances::mark_artifacts_gced(self, instance_id).await
     }
 
-    async fn delete_terminal_instances(
+    async fn list_instance_gc_candidates(
         &self,
         cutoff: chrono::DateTime<chrono::Utc>,
         limit: u32,
+    ) -> Result<Vec<InstanceId>, StorageError> {
+        instances::list_instance_gc_candidates(self, cutoff, limit).await
+    }
+
+    async fn purge_terminal_instances(&self, ids: &[InstanceId]) -> Result<u64, StorageError> {
+        instances::purge_terminal_instances(self, ids).await
+    }
+
+    async fn delete_expired_auxiliary(
+        &self,
+        retention: &crate::AuxiliaryRetention,
+        limit: u32,
     ) -> Result<u64, StorageError> {
-        instances::delete_terminal_instances(self, cutoff, limit).await
+        misc::delete_expired_auxiliary(self, retention, limit).await
     }
 
     async fn set_instance_kv(

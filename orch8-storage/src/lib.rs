@@ -114,6 +114,43 @@ pub struct UsageAggregate {
     pub output_tokens: i64,
 }
 
+/// Cutoffs for [`ResourceStore::delete_expired_auxiliary`]. Each field is
+/// "delete matching rows older than this"; `None` leaves that table alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuxiliaryRetention {
+    /// `worker_task_attempt_events` (append-only lease evidence, L1-02).
+    pub worker_attempt_events_before: Option<DateTime<Utc>>,
+    /// Consumed / expired `event_inbox` rows (L1-04). Pending rows are
+    /// expired by the inbox sweep first, so they get this full window again.
+    pub settled_events_before: Option<DateTime<Utc>>,
+    /// `sub_tenant_executions` (quota reads only the current month, L1-15).
+    pub sub_tenant_executions_before: Option<DateTime<Utc>>,
+    /// `telemetry_mobile_errors` (L1-15).
+    pub mobile_errors_before: Option<DateTime<Utc>>,
+    /// Terminal `mobile_instance_status` rows (L1-15).
+    pub mobile_terminal_status_before: Option<DateTime<Utc>>,
+    /// Resolved / expired `mobile_approval_requests` (L1-15).
+    pub mobile_settled_approvals_before: Option<DateTime<Utc>>,
+    /// `cluster_nodes` stopped and silent since before this (L1-16). A node
+    /// that is still heartbeating is never removed.
+    pub stopped_nodes_before: Option<DateTime<Utc>>,
+    /// `worker_registrations` not seen since before this (L1-14). Live
+    /// workers re-register on their next poll.
+    pub worker_registrations_before: Option<DateTime<Utc>>,
+}
+
+/// Result of an instance lease heartbeat
+/// ([`InstanceStore::heartbeat_instance`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum InstanceLease {
+    /// The row still carries the caller's claim token.
+    Held,
+    /// The claim was reset by the reaper, replaced by another claim, or the
+    /// instance no longer exists. The caller no longer owns the instance.
+    Lost,
+}
+
 /// Outcome of a dedupe insert attempt for `emit_event`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmitDedupeOutcome {
@@ -2852,11 +2889,63 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// (`instance_retention_secs` in `SchedulerConfig`) -- unlike artifact
     /// retention this removes queryable instance history, so it is off by
     /// default. Returns the number of instances deleted.
+    ///
+    /// Provided: [`Self::list_instance_gc_candidates`] then
+    /// [`Self::purge_terminal_instances`].
     async fn delete_terminal_instances(
         &self,
         cutoff: DateTime<Utc>,
         limit: u32,
+    ) -> Result<u64, StorageError> {
+        let ids = self.list_instance_gc_candidates(cutoff, limit).await?;
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.purge_terminal_instances(&ids).await
+    }
+
+    /// Up to `limit` ids of **terminal** instances older than `cutoff`,
+    /// oldest first, for the instance-retention sweep. Read outside any
+    /// transaction (L1-05). Never returns the child of a parent that is still
+    /// live (L3-08): the parent would find its sub-sequence child gone and
+    /// spawn it again.
+    async fn list_instance_gc_candidates(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<InstanceId>, StorageError>;
+
+    /// Delete the given instances and all of their instance-keyed history in
+    /// one transaction. Re-checks under row locks: ids that are no longer
+    /// terminal (e.g. retried from the DLQ), whose parent became live, or that
+    /// still have a child outside the set are skipped. Besides the
+    /// `ON DELETE CASCADE` children and the explicitly-deleted `step_logs` /
+    /// `usage_events` / `instance_kv_state` / parent-scoped dedupe rows, this
+    /// removes the worker-task attempt evidence (L1-02), event waits (L1-04)
+    /// and the continuity record whose
+    /// current instance is purged, with its receipts, placements, provenance
+    /// and other continuity-scoped rows (L1-01). Returns the instances deleted.
+    async fn purge_terminal_instances(&self, ids: &[InstanceId]) -> Result<u64, StorageError>;
+
+    /// One bounded batch (at most `limit` rows per table) of the auxiliary
+    /// retention sweep over append-only tables that have no other cleanup
+    /// path; see [`AuxiliaryRetention`]. Returns the largest number of rows
+    /// deleted from any single table, so a caller can keep draining while a
+    /// batch comes back full.
+    async fn delete_expired_auxiliary(
+        &self,
+        retention: &AuxiliaryRetention,
+        limit: u32,
     ) -> Result<u64, StorageError>;
+
+    /// Give space freed by the GC sweeps back to the OS where the backend
+    /// needs it (L1-18). `SQLite`: `PRAGMA incremental_vacuum` (effective only
+    /// on databases created with `auto_vacuum = INCREMENTAL`, the default for
+    /// new files since this release) and a truncating WAL checkpoint.
+    /// No-op on Postgres (autovacuum).
+    async fn compact_storage(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 
     // === Externalized State ===
 

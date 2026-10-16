@@ -10,6 +10,13 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+/// How long a finished instance (and its outputs, tree and logs) is kept on
+/// the device before the periodic GC deletes it (L1-06): 30 days.
+pub const TERMINAL_INSTANCE_RETENTION_SECS: u64 = 2_592_000;
+
+/// Terminal instances deleted per GC pass on the device.
+const TERMINAL_PURGE_BATCH: u32 = 200;
+
 use orch8_storage::StorageBackend;
 use orch8_types::error::StorageError;
 #[cfg(test)]
@@ -534,6 +541,81 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         storage.create_sequence(&seq).await.unwrap();
+    }
+
+    /// L3-14: cancelling an instance that already completed must not
+    /// overwrite its terminal state.
+    #[tokio::test]
+    async fn cancel_does_not_overwrite_completed_instance() {
+        let (lifecycle, _mobile_storage, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let id = lifecycle.start("seq", "{}", None).await.unwrap();
+        let parsed = parse_instance_id(&id).unwrap();
+        lifecycle
+            .storage
+            .update_instance_state(parsed, InstanceState::Completed, None)
+            .await
+            .unwrap();
+        lifecycle.cancel_instance(&id).await.unwrap();
+        let after = lifecycle
+            .storage
+            .get_instance(parsed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, InstanceState::Completed);
+    }
+
+    /// L1-06: finished instances older than the retention are deleted on the
+    /// device; recent and live ones stay.
+    #[tokio::test]
+    async fn purge_terminal_instances_deletes_only_old_finished_runs() {
+        let (lifecycle, mobile_storage, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let old = parse_instance_id(&lifecycle.start("seq", "{}", None).await.unwrap()).unwrap();
+        let recent = parse_instance_id(&lifecycle.start("seq", "{}", None).await.unwrap()).unwrap();
+        let live = parse_instance_id(&lifecycle.start("seq", "{}", None).await.unwrap()).unwrap();
+        for id in [old, recent] {
+            lifecycle
+                .storage
+                .update_instance_state(id, InstanceState::Completed, None)
+                .await
+                .unwrap();
+        }
+        let long_ago = (chrono::Utc::now() - chrono::Duration::days(40))
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        for id in [old, live] {
+            sqlx::query("UPDATE task_instances SET updated_at = ?1 WHERE id = ?2")
+                .bind(&long_ago)
+                .bind(id.into_uuid().to_string())
+                .execute(mobile_storage.pool())
+                .await
+                .unwrap();
+        }
+
+        let deleted = lifecycle
+            .purge_terminal_instances(TERMINAL_INSTANCE_RETENTION_SECS)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        assert!(lifecycle.storage.get_instance(old).await.unwrap().is_none());
+        assert!(
+            lifecycle
+                .storage
+                .get_instance(recent)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            lifecycle
+                .storage
+                .get_instance(live)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(lifecycle.purge_terminal_instances(0).await.unwrap(), 0);
     }
 
     #[tokio::test]

@@ -1379,9 +1379,38 @@ CREATE TABLE IF NOT EXISTS rate_budgets (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, budget_key)
 );
+-- Retention purge of a continuity (L1-01; Postgres migration 102): indexed
+-- child deletes and FK checks when the continuity row goes.
+CREATE INDEX IF NOT EXISTS idx_execution_capsules_continuity
+    ON execution_capsules(tenant_id, continuity_id);
+CREATE INDEX IF NOT EXISTS idx_continuation_grants_continuity
+    ON continuation_grants(tenant_id, continuity_id);
+CREATE INDEX IF NOT EXISTS idx_continuity_stream_frames_continuity
+    ON continuity_stream_frames(tenant_id, continuity_id);
+CREATE INDEX IF NOT EXISTS idx_attention_tasks_continuity
+    ON attention_tasks(tenant_id, continuity_id);
+CREATE INDEX IF NOT EXISTS idx_budget_reservations_continuity
+    ON budget_reservations(tenant_id, continuity_id);
+CREATE INDEX IF NOT EXISTS idx_execution_handoffs_continuity_id
+    ON execution_handoffs(continuity_id);
+CREATE INDEX IF NOT EXISTS idx_execution_capsules_continuity_id
+    ON execution_capsules(continuity_id);
+CREATE INDEX IF NOT EXISTS idx_effect_receipts_continuity_id
+    ON effect_receipts(continuity_id);
+CREATE INDEX IF NOT EXISTS idx_provenance_entries_continuity_id
+    ON provenance_entries(continuity_id);
+CREATE INDEX IF NOT EXISTS idx_continuity_locations_continuity_id
+    ON continuity_locations(continuity_id);
+-- Auxiliary retention sweep (Postgres migration 106).
+CREATE INDEX IF NOT EXISTS idx_worker_task_attempt_events_created
+    ON worker_task_attempt_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_mobile_instance_status_terminal_updated
+    ON mobile_instance_status(updated_at) WHERE state IN ('completed', 'failed', 'cancelled');
+CREATE INDEX IF NOT EXISTS idx_mobile_approval_requests_settled_created
+    ON mobile_approval_requests(created_at) WHERE state <> 'pending';
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 50;
+pub(super) const SCHEMA_VERSION: i64 = 51;

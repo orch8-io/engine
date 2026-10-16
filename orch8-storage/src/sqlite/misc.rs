@@ -587,3 +587,70 @@ pub(super) async fn ping(storage: &SqliteStorage) -> Result<(), StorageError> {
         .map_err(|e| StorageError::Connection(e.to_string()))?;
     Ok(())
 }
+
+// === Auxiliary retention ===
+
+/// See [`crate::ResourceStore::delete_expired_auxiliary`]. Each statement
+/// deletes at most `limit` rows and commits on its own, so the writer lock is
+/// never held across the whole sweep.
+pub(super) async fn delete_expired_auxiliary(
+    storage: &SqliteStorage,
+    retention: &crate::AuxiliaryRetention,
+    limit: u32,
+) -> Result<u64, StorageError> {
+    // (table, predicate on ?1 = cutoff). Constants only — never input.
+    // SQLite has no `telemetry_mobile_errors` table (server-only telemetry),
+    // so `mobile_errors_before` is a no-op here.
+    let sweeps: [(Option<DateTime<Utc>>, &str, &str); 7] = [
+        (
+            retention.worker_attempt_events_before,
+            "worker_task_attempt_events",
+            "created_at < ?1",
+        ),
+        (
+            retention.settled_events_before,
+            "event_inbox",
+            "status IN ('consumed', 'expired') AND received_at < ?1",
+        ),
+        (
+            retention.sub_tenant_executions_before,
+            "sub_tenant_executions",
+            "started_at < ?1",
+        ),
+        (
+            retention.mobile_terminal_status_before,
+            "mobile_instance_status",
+            "state IN ('completed', 'failed', 'cancelled') AND updated_at < ?1",
+        ),
+        (
+            retention.mobile_settled_approvals_before,
+            "mobile_approval_requests",
+            "state <> 'pending' AND created_at < ?1",
+        ),
+        (
+            retention.stopped_nodes_before,
+            "cluster_nodes",
+            "status = 'stopped' AND last_heartbeat_at < ?1",
+        ),
+        (
+            retention.worker_registrations_before,
+            "worker_registrations",
+            "last_seen_at < ?1",
+        ),
+    ];
+    let mut max_deleted = 0;
+    for (cutoff, table, predicate) in sweeps {
+        let Some(cutoff) = cutoff else { continue };
+        let sql = format!(
+            "DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {predicate} LIMIT ?2)"
+        );
+        let deleted = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(ts(cutoff))
+            .bind(i64::from(limit))
+            .execute(&storage.pool)
+            .await?
+            .rows_affected();
+        max_deleted = max_deleted.max(deleted);
+    }
+    Ok(max_deleted)
+}

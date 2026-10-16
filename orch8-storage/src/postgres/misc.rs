@@ -535,3 +535,73 @@ pub(super) async fn ping(store: &PostgresStorage) -> Result<(), StorageError> {
         .map_err(|e| StorageError::Connection(e.to_string()))?;
     Ok(())
 }
+
+// === Auxiliary retention ===
+
+/// See [`crate::ResourceStore::delete_expired_auxiliary`]. Each statement
+/// deletes at most `limit` rows (`ctid IN (... LIMIT n)`), so one call never
+/// turns into an unbounded DELETE after months without a sweep.
+pub(super) async fn delete_expired_auxiliary(
+    store: &PostgresStorage,
+    retention: &crate::AuxiliaryRetention,
+    limit: u32,
+) -> Result<u64, StorageError> {
+    // (table, predicate on $1 = cutoff). Constants only — never input.
+    let sweeps: [(Option<DateTime<Utc>>, &str, &str); 8] = [
+        (
+            retention.worker_attempt_events_before,
+            "worker_task_attempt_events",
+            "created_at < $1",
+        ),
+        (
+            retention.settled_events_before,
+            "event_inbox",
+            "status IN ('consumed', 'expired') AND received_at < $1",
+        ),
+        (
+            retention.sub_tenant_executions_before,
+            "sub_tenant_executions",
+            "started_at < $1",
+        ),
+        (
+            retention.mobile_errors_before,
+            "telemetry_mobile_errors",
+            "received_at < $1",
+        ),
+        (
+            retention.mobile_terminal_status_before,
+            "mobile_instance_status",
+            "state IN ('completed', 'failed', 'cancelled') AND updated_at < $1",
+        ),
+        (
+            retention.mobile_settled_approvals_before,
+            "mobile_approval_requests",
+            "state <> 'pending' AND created_at < $1",
+        ),
+        (
+            retention.stopped_nodes_before,
+            "cluster_nodes",
+            "status = 'stopped' AND last_heartbeat_at < $1",
+        ),
+        (
+            retention.worker_registrations_before,
+            "worker_registrations",
+            "last_seen_at < $1",
+        ),
+    ];
+    let mut max_deleted = 0;
+    for (cutoff, table, predicate) in sweeps {
+        let Some(cutoff) = cutoff else { continue };
+        let sql = format!(
+            "DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE {predicate} LIMIT $2)"
+        );
+        let deleted = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(cutoff)
+            .bind(i64::from(limit))
+            .execute(&store.pool)
+            .await?
+            .rows_affected();
+        max_deleted = max_deleted.max(deleted);
+    }
+    Ok(max_deleted)
+}

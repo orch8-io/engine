@@ -2557,6 +2557,10 @@ passthrough_impl! {
     // `context.data` (already handled elsewhere) once the row is deleted, so
     // this is a pure pass-through -- nothing here to encrypt or decrypt.
     async fn delete_terminal_instances(&self, cutoff: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<u64, StorageError>;
+    async fn list_instance_gc_candidates(&self, cutoff: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<InstanceId>, StorageError>;
+    async fn purge_terminal_instances(&self, ids: &[InstanceId]) -> Result<u64, StorageError>;
+    async fn delete_expired_auxiliary(&self, retention: &crate::AuxiliaryRetention, limit: u32) -> Result<u64, StorageError>;
+    async fn compact_storage(&self) -> Result<(), StorageError>;
 
     // --- Instance KV State ---
     // Holds step-handler-defined state, including the agent step's
