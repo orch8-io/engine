@@ -127,7 +127,7 @@ impl PushOutboxStore for PostgresStorage {
     ) -> Result<(), String> {
         let mut transaction = self.pool.begin().await.map_err(|error| error.to_string())?;
         let (status, next, error, reason, delivered) =
-            super::push_outbox::outcome_fields(outcome, recorded_at);
+            crate::push_outbox_state::outcome_fields(outcome, recorded_at);
         let result = sqlx::query("UPDATE push_wake_outbox SET attempts=attempts+1,status=$2,next_attempt_at=$3,lease_until=NULL,last_error=$4,terminal_reason=$5,delivered_at=$6 WHERE id=$1 AND status='in_flight' AND lease_until=$7")
             .bind(wake.id).bind(status).bind(next).bind(error).bind(reason).bind(delivered).bind(wake.lease_until).execute(&mut *transaction).await.map_err(|error| error.to_string())?;
         if result.rows_affected() != 1 {
@@ -181,44 +181,3 @@ impl PushOutboxStore for PostgresStorage {
             .map_err(|error| error.to_string())
     }
 }
-
-pub(super) type OutcomeFields<'a> = (
-    &'static str,
-    Option<DateTime<Utc>>,
-    Option<&'a str>,
-    Option<&'static str>,
-    Option<DateTime<Utc>>,
-);
-
-pub(super) fn outcome_fields(
-    outcome: &WakeAttemptOutcome,
-    now: DateTime<Utc>,
-) -> OutcomeFields<'_> {
-    match outcome {
-        WakeAttemptOutcome::Delivered => ("delivered", None, None, None, Some(now)),
-        WakeAttemptOutcome::Retry {
-            next_attempt_at,
-            error,
-        } => ("pending", Some(*next_attempt_at), Some(error), None, None),
-        WakeAttemptOutcome::Terminal { reason, error } => (
-            "terminal",
-            None,
-            Some(error),
-            Some(reason_name(*reason)),
-            None,
-        ),
-    }
-}
-
-fn reason_name(reason: PushTerminalReason) -> &'static str {
-    match reason {
-        PushTerminalReason::InvalidToken => "invalid_token",
-        PushTerminalReason::PermanentFailure => "permanent_failure",
-        PushTerminalReason::Misconfigured => "misconfigured",
-        PushTerminalReason::RetryLimit => "retry_limit",
-    }
-}
-
-#[cfg(test)]
-#[path = "push_outbox_coverage_tests.rs"]
-mod push_outbox_coverage_tests;

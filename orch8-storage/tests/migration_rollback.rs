@@ -78,6 +78,17 @@ fn strip_comments(sql: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn storage_schema_version_is_the_newest_forward_migration() {
+    // Health and backup manifests report this constant as the schema the
+    // binary understands; it must move with every new migration file.
+    let newest = read_sql_files(&migrations_dir())
+        .into_keys()
+        .max()
+        .expect("at least one forward migration");
+    assert_eq!(orch8_storage::STORAGE_SCHEMA_VERSION, newest);
+}
+
+#[test]
 fn down_dir_exists() {
     let dir = down_dir();
     assert!(

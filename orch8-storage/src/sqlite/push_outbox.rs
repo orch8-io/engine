@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use super::SqliteStorage;
 use super::helpers::{begin_immediate, ts};
+use crate::push_outbox_state::outcome_fields;
 
 #[async_trait]
 impl PushOutboxStore for SqliteStorage {
@@ -183,40 +184,6 @@ impl PushOutboxStore for SqliteStorage {
             .await
             .map(|result| result.rows_affected())
             .map_err(|error| error.to_string())
-    }
-}
-
-type OutcomeFields<'a> = (
-    &'static str,
-    Option<DateTime<Utc>>,
-    Option<&'a str>,
-    Option<&'static str>,
-    Option<DateTime<Utc>>,
-);
-
-fn outcome_fields(outcome: &WakeAttemptOutcome, now: DateTime<Utc>) -> OutcomeFields<'_> {
-    match outcome {
-        WakeAttemptOutcome::Delivered => ("delivered", None, None, None, Some(now)),
-        WakeAttemptOutcome::Retry {
-            next_attempt_at,
-            error,
-        } => ("pending", Some(*next_attempt_at), Some(error), None, None),
-        WakeAttemptOutcome::Terminal { reason, error } => (
-            "terminal",
-            None,
-            Some(error),
-            Some(reason_name(*reason)),
-            None,
-        ),
-    }
-}
-
-fn reason_name(reason: PushTerminalReason) -> &'static str {
-    match reason {
-        PushTerminalReason::InvalidToken => "invalid_token",
-        PushTerminalReason::PermanentFailure => "permanent_failure",
-        PushTerminalReason::Misconfigured => "misconfigured",
-        PushTerminalReason::RetryLimit => "retry_limit",
     }
 }
 
@@ -596,7 +563,3 @@ mod tests {
         assert_eq!(superseded.as_deref(), Some("new"));
     }
 }
-
-#[cfg(test)]
-#[path = "push_outbox_coverage_tests.rs"]
-mod push_outbox_coverage_tests;

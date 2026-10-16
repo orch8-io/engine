@@ -288,6 +288,185 @@ mod tests {
         );
     }
 
+    /// Control-plane stand-in whose reads can fail, to pin that routing
+    /// propagates control-plane errors instead of falling back.
+    struct UnreachableControlPlane;
+
+    #[async_trait]
+    impl TenantPlacementStore for UnreachableControlPlane {
+        async fn get_tenant_placement(
+            &self,
+            _tenant_id: &TenantId,
+        ) -> Result<Option<TenantStoragePlacement>, StorageError> {
+            Err(StorageError::Connection("control plane unreachable".into()))
+        }
+
+        async fn advance_tenant_placement(
+            &self,
+            _placement: &TenantStoragePlacement,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::Connection("control plane unreachable".into()))
+        }
+    }
+
+    #[test]
+    fn backend_ids_are_bounded_ascii_from_a_fixed_alphabet() {
+        let cases: [(&str, String, bool); 15] = [
+            ("empty", String::new(), false),
+            ("single letter", "a".into(), true),
+            ("single digit", "9".into(), true),
+            ("uppercase", "SHARD".into(), true),
+            ("all separators", "A9-b_c.d".into(), true),
+            // Ids are opaque routing keys, never paths, so dot-only ids are
+            // inside the documented alphabet and accepted.
+            ("dots only", "...".into(), true),
+            ("128 bytes", "a".repeat(128), true),
+            ("129 bytes", "a".repeat(129), false),
+            ("space", "shard a".into(), false),
+            ("trailing space", "shard ".into(), false),
+            ("slash", "shard/a".into(), false),
+            ("colon", "shard:a".into(), false),
+            ("newline", "shard\na".into(), false),
+            ("non-ascii letter", "shard-é".into(), false),
+            ("emoji", "shard-🚀".into(), false),
+        ];
+        for (case, backend_id, valid) in &cases {
+            let result = validate_backend_id(backend_id);
+            if *valid {
+                assert!(result.is_ok(), "{case}: expected valid, got {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(StorageError::Unsupported(_))),
+                    "{case}: expected Unsupported, got {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn placement_epoch_must_be_positive() {
+        for (epoch, valid) in [
+            (i64::MIN, false),
+            (-7, false),
+            (0, false),
+            (1, true),
+            (i64::MAX, true),
+        ] {
+            let result = validate_placement(&placement("tenant-a", "shard-a", epoch));
+            if valid {
+                assert!(result.is_ok(), "epoch {epoch}: got {result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(StorageError::Conflict(_))),
+                    "epoch {epoch}: got {result:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_schema_rejects_non_positive_epoch_written_around_validation() {
+        let control = SqliteStorage::in_memory().await.unwrap();
+        let result = sqlx::query(
+            "INSERT INTO tenant_storage_placements (tenant_id, backend_id, epoch, updated_at) VALUES ('t', 'b', 0, 'now')",
+        )
+        .execute(&control.pool)
+        .await;
+        assert!(
+            result.is_err(),
+            "the epoch CHECK is the last line of defence"
+        );
+    }
+
+    #[tokio::test]
+    async fn registering_a_backend_id_twice_conflicts() {
+        let control: Arc<dyn TenantPlacementStore> =
+            Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let backend: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mut router = TenantPartitionRouter::new(control);
+        router
+            .register_backend("shard-a", Arc::clone(&backend))
+            .unwrap();
+        assert!(matches!(
+            router.register_backend("shard-a", backend),
+            Err(StorageError::Conflict(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_backend_id_is_never_registered_or_routed_to() {
+        // The placement bypasses validation, as a corrupted control row would.
+        let control = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        sqlx::query(
+            "INSERT INTO tenant_storage_placements (tenant_id, backend_id, epoch, updated_at) VALUES ('tenant-a', 'bad id', 1, ?1)",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .execute(&control.pool)
+        .await
+        .unwrap();
+        let backend: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let placement_store: Arc<dyn TenantPlacementStore> = control;
+        let mut router = TenantPartitionRouter::new(placement_store);
+
+        assert!(matches!(
+            router.register_backend("bad id", backend),
+            Err(StorageError::Unsupported(_))
+        ));
+        assert!(matches!(
+            router.route(&TenantId::new("tenant-a").unwrap()).await,
+            Err(StorageError::Unsupported(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn route_hands_back_the_backend_registered_for_the_placement() {
+        let control = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let shard_a: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let shard_b: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let placement_store: Arc<dyn TenantPlacementStore> = control.clone();
+        let mut router = TenantPartitionRouter::new(placement_store);
+        router
+            .register_backend("shard-a", Arc::clone(&shard_a))
+            .unwrap();
+        router
+            .register_backend("shard-b", Arc::clone(&shard_b))
+            .unwrap();
+        let tenant = TenantId::new("tenant-a").unwrap();
+        control
+            .advance_tenant_placement(&placement("tenant-a", "shard-a", 1))
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &router.route(&tenant).await.unwrap().backend,
+            &shard_a
+        ));
+
+        control
+            .advance_tenant_placement(&placement("tenant-a", "shard-b", 2))
+            .await
+            .unwrap();
+
+        let rerouted = router.route(&tenant).await.unwrap();
+        assert!(Arc::ptr_eq(&rerouted.backend, &shard_b));
+        assert_eq!(rerouted.placement.epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn control_plane_errors_propagate_instead_of_falling_back() {
+        let control: Arc<dyn TenantPlacementStore> = Arc::new(UnreachableControlPlane);
+        let mut router = TenantPartitionRouter::new(control);
+        router
+            .register_backend(
+                "shard-a",
+                Arc::new(SqliteStorage::in_memory().await.unwrap()),
+            )
+            .unwrap();
+        assert!(matches!(
+            router.route(&TenantId::new("tenant-a").unwrap()).await,
+            Err(StorageError::Connection(_))
+        ));
+    }
+
     #[tokio::test]
     async fn fences_stale_updates_and_unknown_backends() {
         let control = Arc::new(SqliteStorage::in_memory().await.unwrap());
@@ -310,7 +489,3 @@ mod tests {
         ));
     }
 }
-
-#[cfg(test)]
-#[path = "tenant_partition_coverage_tests.rs"]
-mod tenant_partition_coverage_tests;

@@ -12,6 +12,7 @@ pub mod fencing;
 pub mod lifecycle;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+mod push_outbox_state;
 pub mod sqlite;
 pub mod tenancy;
 #[cfg(feature = "postgres")]
