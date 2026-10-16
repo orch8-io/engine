@@ -374,7 +374,7 @@ GET /instances?tenant_id=acme&namespace=default&state=running,scheduled&limit=50
 | `sequence_id` | UUID | — | Filter by sequence |
 | `state` | string | — | Comma-separated states to include |
 | `offset` | integer | `0` | Pagination offset |
-| `limit` | integer | `100` | Page size (max 1000) |
+| `limit` | integer | `100` | Page size, clamped to 1–1000 (`0` is treated as `1`) |
 | `metadata.<key>` | string | — | Filter to instances whose `metadata.<key>` equals the value. Repeatable — multiple `metadata.*` params AND together. |
 
 **Metadata search.** Any query parameter prefixed `metadata.` filters on the instance's `metadata` object by top-level key — e.g. `GET /instances?metadata.env=prod&metadata.team=core` returns instances whose metadata has both `env=prod` and `team=core`. Matching is string-equality on top-level keys. On Postgres this is a JSONB containment (`@>`) query served by the existing GIN index on `metadata` (no Elasticsearch required, unlike Temporal search attributes); on SQLite it falls back to `json_extract`.

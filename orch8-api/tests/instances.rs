@@ -212,6 +212,44 @@ async fn batch_create_rejects_empty_namespace() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// API-07: `limit=0` used to return `items: []` with `has_more: true`, so a
+/// client paging "until has_more is false" looped forever. Like the other
+/// list endpoints (`clamp(1, ..)`), the limit is clamped to at least one row.
+#[tokio::test]
+async fn list_instances_with_limit_zero_returns_a_non_empty_page() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    for _ in 0..2 {
+        let resp = client
+            .post(format!("{}/instances", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({
+                "sequence_id": seq_id,
+                "tenant_id": "t1",
+                "namespace": "ns1",
+                "context": { "data": {}, "config": {}, "audit": [] }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    let body: serde_json::Value = client
+        .get(format!("{}/instances?tenant_id=t1&limit=0", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["has_more"], true);
+}
+
 #[tokio::test]
 async fn list_instances_filters_by_state() {
     let srv = spawn_test_server().await;

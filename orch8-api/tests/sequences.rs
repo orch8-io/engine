@@ -435,6 +435,46 @@ async fn yaml_alias_bomb_is_rejected_quickly_with_bounded_memory() {
     );
 }
 
+/// API-07: `limit=0` used to return `items: []` with `has_more: true` (an
+/// infinite client paging loop). The limit is clamped to at least one row,
+/// matching the `clamp(1, ..)` convention of the other list endpoints.
+#[tokio::test]
+async fn list_sequences_with_limit_zero_returns_a_non_empty_page() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    for name in ["limit-a", "limit-b"] {
+        let resp = client
+            .post(format!("{}/sequences", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({
+                "id": Uuid::now_v7(),
+                "tenant_id": "t1",
+                "namespace": "ns1",
+                "name": name,
+                "version": 1,
+                "blocks": [{ "type": "step", "id": "s1", "handler": "noop", "params": {} }],
+                "created_at": chrono::Utc::now().to_rfc3339()
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    let body: serde_json::Value = client
+        .get(format!("{}/sequences?tenant_id=t1&limit=0", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+    assert_eq!(body["has_more"], true);
+}
+
 #[tokio::test]
 async fn list_sequence_versions_returns_all_versions() {
     let srv = spawn_test_server().await;

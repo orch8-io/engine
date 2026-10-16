@@ -395,7 +395,9 @@ pub(crate) async fn list_sequences(
                 .map(orch8_types::ids::TenantId::unchecked)
         });
     let effective_namespace = q.namespace.map(orch8_types::ids::Namespace::new);
-    let limit = q.limit.unwrap_or(200).min(1000);
+    // At least one row: `limit=0` would return an empty page with
+    // `has_more: true` and loop a paging client forever (API-07).
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let offset = q.offset.unwrap_or(0);
 
     let sequences = state
