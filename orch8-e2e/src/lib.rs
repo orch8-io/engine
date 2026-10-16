@@ -65,12 +65,31 @@ impl Backend {
 }
 
 /// `SQLite` always; Postgres too when `DATABASE_URL` is set.
+///
+/// A missing `DATABASE_URL` panics when Postgres is required (`CI` set, or
+/// `ORCH8_REQUIRE_PG=1`) so the Postgres legs can never go silently dark in
+/// CI. Same policy as `orch8_storage::testing::backends::postgres_url`
+/// (restated here because this harness is a regular dependency and must not
+/// enable `orch8-storage/test-util` in workspace builds).
 #[must_use]
 pub fn backends() -> Vec<Backend> {
     let mut out = vec![Backend::Sqlite];
     match std::env::var("DATABASE_URL") {
-        Ok(url) if !url.is_empty() => out.push(Backend::Postgres(url)),
-        _ => eprintln!("DATABASE_URL not set: running the sqlite leg only"),
+        Ok(url) if !url.trim().is_empty() => out.push(Backend::Postgres(url)),
+        _ => {
+            let required = ["CI", "ORCH8_REQUIRE_PG"].iter().any(|name| {
+                std::env::var(name).is_ok_and(|v| {
+                    let v = v.trim();
+                    !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+                })
+            });
+            assert!(
+                !required,
+                "DATABASE_URL is not set but Postgres tests are required here \
+                 (CI or ORCH8_REQUIRE_PG=1); refusing to skip the Postgres leg silently"
+            );
+            eprintln!("SKIPPED: DATABASE_URL not set; running the sqlite leg only");
+        }
     }
     out
 }

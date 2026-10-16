@@ -15,8 +15,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
-use orch8_storage::postgres::PostgresStorage;
-use orch8_storage::sqlite::SqliteStorage;
+use orch8_storage::testing::backends::{RawPool, TestBackend, TestPostgres};
 use orch8_storage::{AuxiliaryRetention, StorageBackend};
 use orch8_types::context::ExecutionContext;
 use orch8_types::continuity::{
@@ -28,70 +27,10 @@ use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
-enum Raw {
-    Pg(sqlx::PgPool),
-    Lite(sqlx::SqlitePool),
-}
-
-impl Raw {
-    /// `UPDATE {table} SET {col} = when WHERE {key} = id` (fixture back-dating).
-    async fn backdate(&self, table: &str, col: &str, key: &str, id: &str, when: DateTime<Utc>) {
-        match self {
-            Self::Pg(pool) => {
-                sqlx::query(sqlx::AssertSqlSafe(format!(
-                    "UPDATE {table} SET {col} = $1 WHERE {key}::text = $2"
-                )))
-                .bind(when)
-                .bind(id)
-                .execute(pool)
-                .await
-                .unwrap();
-            }
-            Self::Lite(pool) => {
-                sqlx::query(sqlx::AssertSqlSafe(format!(
-                    "UPDATE {table} SET {col} = ?1 WHERE {key} = ?2"
-                )))
-                .bind(when.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-                .bind(id)
-                .execute(pool)
-                .await
-                .unwrap();
-            }
-        }
-    }
-
-    async fn count(&self, table: &str, key: &str, id: &str) -> i64 {
-        match self {
-            Self::Pg(pool) => sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "SELECT COUNT(*) FROM {table} WHERE {key}::text = $1"
-            )))
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-            Self::Lite(pool) => sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "SELECT COUNT(*) FROM {table} WHERE {key} = ?1"
-            )))
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-        }
-    }
-}
-
-async fn backends() -> Vec<(&'static str, Arc<dyn StorageBackend>, Raw)> {
-    let sqlite = SqliteStorage::in_memory().await.unwrap();
-    let raw = Raw::Lite(sqlite.pool().clone());
-    let mut out: Vec<(&'static str, Arc<dyn StorageBackend>, Raw)> =
-        vec![("sqlite", Arc::new(sqlite), raw)];
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        let pg = PostgresStorage::new(&url, 5, None).await.unwrap();
-        pg.run_migrations().await.unwrap();
-        let raw = Raw::Pg(pg.pool().clone());
-        out.push(("postgres", Arc::new(pg), raw));
-    }
-    out
+/// `SQLite` plus Postgres (fresh schema; skipped locally without
+/// `DATABASE_URL`, required under CI).
+async fn backends() -> Vec<TestBackend> {
+    TestBackend::sqlite_and_postgres().await
 }
 
 fn y2000() -> DateTime<Utc> {
@@ -184,7 +123,7 @@ fn worker_task(instance_id: InstanceId, handler: &str) -> WorkerTask {
     }
 }
 
-async fn create(storage: &dyn StorageBackend, raw: &Raw, inst: &TaskInstance) {
+async fn create(storage: &dyn StorageBackend, raw: &RawPool, inst: &TaskInstance) {
     storage.create_instance(inst).await.unwrap();
     // Some backends stamp updated_at themselves on insert.
     raw.backdate(
@@ -204,7 +143,8 @@ async fn create(storage: &dyn StorageBackend, raw: &Raw, inst: &TaskInstance) {
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // one fixture graph, asserted per backend
 async fn purge_removes_instance_keyed_history_and_respects_family() {
-    for (name, storage, raw) in backends().await {
+    for backend in backends().await {
+        let (name, storage, raw) = (backend.name(), Arc::clone(&backend.storage), &backend.raw);
         let storage = storage.as_ref();
         let tenant = TenantId::unchecked(format!("t-ret-{}", Uuid::new_v4()));
         let seq = sequence(&tenant);
@@ -283,36 +223,36 @@ async fn purge_removes_instance_keyed_history_and_respects_family() {
 
         // L3-08: a terminal child of a live (paused) parent must survive.
         let live_parent = instance(&tenant, seq.id, InstanceState::Paused, None);
-        create(storage, &raw, &live_parent).await;
+        create(storage, raw, &live_parent).await;
         let kept_child = instance(
             &tenant,
             seq.id,
             InstanceState::Completed,
             Some(live_parent.id),
         );
-        create(storage, &raw, &kept_child).await;
+        create(storage, raw, &kept_child).await;
 
         // A terminal parent whose child is still running cannot go either.
         let done_parent = instance(&tenant, seq.id, InstanceState::Completed, None);
-        create(storage, &raw, &done_parent).await;
+        create(storage, raw, &done_parent).await;
         let running_child = instance(
             &tenant,
             seq.id,
             InstanceState::Running,
             Some(done_parent.id),
         );
-        create(storage, &raw, &running_child).await;
+        create(storage, raw, &running_child).await;
 
         // A terminal parent + terminal child go together.
         let family_parent = instance(&tenant, seq.id, InstanceState::Failed, None);
-        create(storage, &raw, &family_parent).await;
+        create(storage, raw, &family_parent).await;
         let family_child = instance(
             &tenant,
             seq.id,
             InstanceState::Cancelled,
             Some(family_parent.id),
         );
-        create(storage, &raw, &family_child).await;
+        create(storage, raw, &family_child).await;
 
         let cutoff = Utc.with_ymd_and_hms(2000, 1, 2, 0, 0, 0).unwrap();
         let candidates = storage
@@ -389,7 +329,8 @@ async fn purge_removes_instance_keyed_history_and_respects_family() {
 /// and leaves fresh ones alone.
 #[tokio::test]
 async fn auxiliary_retention_deletes_only_expired_rows() {
-    for (name, storage, raw) in backends().await {
+    for backend in backends().await {
+        let (name, storage, raw) = (backend.name(), Arc::clone(&backend.storage), &backend.raw);
         let storage = storage.as_ref();
         // Stopped node that went silent long ago vs. one still heartbeating.
         let mut node_ids = Vec::new();
@@ -498,12 +439,9 @@ async fn auxiliary_retention_deletes_only_expired_rows() {
 /// `instances.rs`.
 #[tokio::test]
 async fn purge_knows_every_continuity_child_table() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("skipping: DATABASE_URL not set");
+    let Some(pg) = TestPostgres::fresh().await else {
         return;
     };
-    let pg = PostgresStorage::new(&url, 2, None).await.unwrap();
-    pg.run_migrations().await.unwrap();
     let mut referencing: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT c.conrelid::regclass::text FROM pg_constraint c \
          WHERE c.contype = 'f' AND c.confrelid = 'continuity_executions'::regclass",

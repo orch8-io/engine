@@ -20,8 +20,7 @@ use serde_json::json;
 use orch8_engine::effect_guard::commit_external_worker_effect;
 use orch8_engine::worker_lease::reap_worker_tasks;
 use orch8_storage::StorageBackend;
-use orch8_storage::postgres::PostgresStorage;
-use orch8_storage::sqlite::SqliteStorage;
+use orch8_storage::testing::backends::TestBackend;
 use orch8_types::continuity::{
     EffectState, OwnershipState, RuntimeCapabilities, RuntimeConnectivity, RuntimeId, RuntimeKind,
     RuntimeTrustLevel,
@@ -35,21 +34,10 @@ use orch8_types::worker_filter::WorkerTaskFilter;
 
 use common::{drive, mk_instance, mk_sequence, mk_step, mk_step_with_retry, registry};
 
-async fn backends() -> Vec<(&'static str, Arc<dyn StorageBackend>)> {
-    let mut out: Vec<(&'static str, Arc<dyn StorageBackend>)> = vec![(
-        "sqlite",
-        Arc::new(SqliteStorage::in_memory().await.unwrap()),
-    )];
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        let pg = PostgresStorage::new(&url, 5, None)
-            .await
-            .expect("connect to DATABASE_URL");
-        pg.run_migrations().await.expect("run migrations");
-        out.push(("postgres", Arc::new(pg)));
-    } else {
-        eprintln!("DATABASE_URL not set: running the sqlite leg only");
-    }
-    out
+/// `SQLite` plus Postgres (fresh schema per call; skipped locally without
+/// `DATABASE_URL`, required under CI).
+async fn backends() -> Vec<TestBackend> {
+    TestBackend::sqlite_and_postgres().await
 }
 
 async fn start(
@@ -170,7 +158,8 @@ fn unique_handler(prefix: &str) -> String {
 
 #[tokio::test]
 async fn dispatch_binds_effect_id_and_ownership_epoch() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.charge");
         let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
         assert_eq!(
@@ -199,7 +188,8 @@ async fn dispatch_binds_effect_id_and_ownership_epoch() {
 #[tokio::test]
 async fn lease_expiry_with_side_effect_goes_unknown_and_fails_node() {
     let _reaper = ZERO_LEASE_REAPER.lock().await;
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.charge");
         let (seq, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
         let task = only_task(&storage, inst.id).await;
@@ -242,7 +232,8 @@ async fn lease_expiry_with_side_effect_goes_unknown_and_fails_node() {
 #[tokio::test]
 async fn lease_expiry_with_retry_policy_schedules_a_fresh_attempt() {
     let _reaper = ZERO_LEASE_REAPER.lock().await;
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.charge");
         let (seq, inst) = start(&storage, vec![mk_step_with_retry("charge", &handler, 3)]).await;
         let first = only_task(&storage, inst.id).await;
@@ -310,7 +301,8 @@ async fn lease_expiry_with_retry_policy_schedules_a_fresh_attempt() {
 #[tokio::test]
 async fn pure_task_lease_expiry_requeues() {
     let _reaper = ZERO_LEASE_REAPER.lock().await;
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let (_, inst) = start(&storage, vec![mk_step("noop", "noop")]).await;
         let handler = unique_handler("pure");
         let now = Utc::now();
@@ -359,7 +351,8 @@ async fn pure_task_lease_expiry_requeues() {
 
 #[tokio::test]
 async fn timed_out_pending_task_abandons_receipt_and_advances() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.slow");
         let (seq, inst) = start(
             &storage,
@@ -391,7 +384,8 @@ async fn timed_out_pending_task_abandons_receipt_and_advances() {
 
 #[tokio::test]
 async fn settlement_uses_the_stored_effect_id_after_an_epoch_change() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.charge");
         let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
         let task = only_task(&storage, inst.id).await;
@@ -434,7 +428,8 @@ async fn settlement_uses_the_stored_effect_id_after_an_epoch_change() {
 
 #[tokio::test]
 async fn claimant_kind_sets_the_per_task_lease() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.render");
         let (_, inst) = start(&storage, vec![mk_step("render", &handler)]).await;
         let task = only_task(&storage, inst.id).await;
@@ -469,7 +464,8 @@ async fn claimant_kind_sets_the_per_task_lease() {
 #[tokio::test]
 async fn legacy_reaper_never_requeues_an_ambiguous_side_effect() {
     let _reaper = ZERO_LEASE_REAPER.lock().await;
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.charge");
         let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
         let task = only_task(&storage, inst.id).await;
@@ -520,7 +516,8 @@ async fn move_ownership(
 
 #[tokio::test]
 async fn worker_lease_mutations_are_fenced_on_ownership_epoch() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.charge");
         let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
         let task = only_task(&storage, inst.id).await;
@@ -566,7 +563,8 @@ async fn worker_lease_mutations_are_fenced_on_ownership_epoch() {
 async fn reported_failure_is_one_fenced_resolution() {
     use orch8_engine::worker_lease::fail_worker_task;
     use orch8_types::worker::WorkerClaim;
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         // Retry policy: receipt unknown, next attempt replaces the task.
         let handler = unique_handler("ext.charge");
         let (_, inst) = start(&storage, vec![mk_step_with_retry("charge", &handler, 2)]).await;
@@ -682,7 +680,8 @@ async fn reported_failure_is_one_fenced_resolution() {
 #[tokio::test]
 async fn handed_off_source_resolves_its_execution_through_location_history() {
     use orch8_engine::ownership::{LocalOwnership, local_ownership};
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.charge");
         let (seq, source) = start(&storage, vec![mk_step("charge", &handler)]).await;
         let tenant = source.tenant_id.clone();
@@ -753,7 +752,8 @@ async fn handed_off_source_resolves_its_execution_through_location_history() {
 #[tokio::test]
 async fn export_is_refused_while_a_worker_task_is_in_flight() {
     use orch8_engine::capsule::{CapsuleExportRequest, CapsuleServiceError};
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.charge");
         let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;
         let continuity = storage
@@ -805,7 +805,8 @@ async fn seed_credential(storage: &Arc<dyn StorageBackend>, id: &str) {
 
 #[tokio::test]
 async fn browser_placed_step_with_credentials_fails_permanently_at_dispatch() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let credential = format!("cred-{}", uuid::Uuid::now_v7().simple());
         seed_credential(&storage, &credential).await;
         let handler = unique_handler("ext.form");
@@ -845,7 +846,8 @@ async fn browser_placed_step_with_credentials_fails_permanently_at_dispatch() {
 
 #[tokio::test]
 async fn browser_claimants_never_receive_credential_bearing_tasks() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let credential = format!("cred-{}", uuid::Uuid::now_v7().simple());
         seed_credential(&storage, &credential).await;
         let handler = unique_handler("ext.sync");
@@ -905,7 +907,8 @@ fn caps_of(kind: RuntimeKind, handler: &str) -> RuntimeCapabilities {
 
 #[tokio::test]
 async fn placed_step_dispatches_remotely_even_when_handler_is_local() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         // `noop` is registered in-process; placement on mobile wins.
         let (_, inst) = start(
             &storage,
@@ -967,7 +970,8 @@ async fn placed_step_dispatches_remotely_even_when_handler_is_local() {
 #[tokio::test]
 async fn targeted_task_is_a_per_node_mailbox() {
     let _reaper = ZERO_LEASE_REAPER.lock().await;
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.capture");
         let device = caps_of(RuntimeKind::Mobile, &handler);
         let (_, inst) = start(
@@ -1033,7 +1037,8 @@ async fn targeted_task_is_a_per_node_mailbox() {
 
 #[tokio::test]
 async fn locality_denial_at_dispatch_fails_permanently_with_recorded_decision() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.pii");
         let (_, inst) = start(
             &storage,
@@ -1084,7 +1089,8 @@ async fn locality_denial_at_dispatch_fails_permanently_with_recorded_decision() 
 
 #[tokio::test]
 async fn invalid_placement_is_rejected_at_dispatch() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.bad");
         let (_, inst) = start(
             &storage,
@@ -1107,7 +1113,8 @@ async fn invalid_placement_is_rejected_at_dispatch() {
 
 #[tokio::test]
 async fn release_before_start_requeues_and_after_start_goes_unknown() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.upload");
         let (_, inst) = start(&storage, vec![mk_step_with_retry("upload", &handler, 3)]).await;
         let task = only_task(&storage, inst.id).await;
@@ -1193,7 +1200,8 @@ async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
     use orch8_engine::delegation::{
         DELEGATION_HANDLER, enqueue_delegation_task, integrate_delegation_outcome,
     };
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.parent");
         let (seq, parent) = start(&storage, vec![mk_step("wait", &handler)]).await;
         let execution = storage
@@ -1311,7 +1319,8 @@ async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
         integrate_delegation_outcome, is_delegation_proxy, resume_local_parent,
     };
     use orch8_types::worker::WorkerClaim;
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         // Server side: the parent lives on a phone (never stored here).
         let (seq, _) = start(&storage, vec![mk_step("classify", &unique_handler("ext"))]).await;
         let phone_parent = mk_instance(seq.id);
@@ -1467,7 +1476,8 @@ async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
 #[tokio::test]
 async fn expired_delegation_integrates_a_failure_without_failing_the_parent() {
     use orch8_engine::delegation::enqueue_delegation_task;
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.parent");
         let (seq, parent) = start(&storage, vec![mk_step("wait", &handler)]).await;
         let execution = storage
@@ -1509,7 +1519,8 @@ async fn expired_delegation_integrates_a_failure_without_failing_the_parent() {
 #[tokio::test]
 async fn checkpointed_activity_resumes_on_lease_expiry_with_unknown_receipt() {
     let _reaper = ZERO_LEASE_REAPER.lock().await;
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.batch");
         let (_, inst) = start(&storage, vec![mk_step("batch", &handler)]).await;
         let task = only_task(&storage, inst.id).await;

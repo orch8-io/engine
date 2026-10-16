@@ -7,6 +7,10 @@
 //! - [`faulty`]: [`faulty::FaultStorage`], a fault-injecting
 //!   `StorageBackend` decorator (T1 HX-1 / T2 H5).
 //! - [`fixtures`]: sequence / instance / step builders (T2 H6).
+//! - [`backends`]: [`backends::TestBackend`], [`crate::backend_test!`] and
+//!   [`backends::postgres_url`] (one body on every backend; per-test
+//!   Postgres schemas; missing `DATABASE_URL` fails under CI) (T2 H1).
 
+pub mod backends;
 pub mod faulty;
 pub mod fixtures;

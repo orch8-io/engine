@@ -1,5 +1,6 @@
 //! `InstanceStore::list_instances_keyset` contract, run against `SQLite` and
-//! (when `DATABASE_URL` is set) `Postgres`.
+//! (when `DATABASE_URL` is set; required under CI) `Postgres`, each on a
+//! fresh database / schema.
 
 use chrono::Utc;
 use orch8_storage::StorageBackend;
@@ -127,13 +128,8 @@ async fn sqlite_keyset_pagination() {
 
 #[tokio::test]
 async fn postgres_keyset_pagination() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("skipping: DATABASE_URL not set");
+    let Some(storage) = orch8_storage::testing::backends::TestPostgres::fresh().await else {
         return;
     };
-    let storage = orch8_storage::postgres::PostgresStorage::new(&url, 5, None)
-        .await
-        .expect("connect to DATABASE_URL");
-    storage.run_migrations().await.expect("run migrations");
-    exercise(&storage).await;
+    exercise(&*storage).await;
 }

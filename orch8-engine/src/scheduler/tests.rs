@@ -2079,19 +2079,10 @@ async fn jev_step_output_drives_router_and_when_guard() {
 // too when DATABASE_URL is set.
 // ------------------------------------------------------------------
 
-async fn fencing_backends() -> Vec<(&'static str, Arc<dyn StorageBackend>)> {
-    let mut out: Vec<(&'static str, Arc<dyn StorageBackend>)> = vec![(
-        "sqlite",
-        Arc::new(SqliteStorage::in_memory().await.unwrap()),
-    )];
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        let pg = orch8_storage::postgres::PostgresStorage::new(&url, 5, None)
-            .await
-            .unwrap();
-        pg.run_migrations().await.unwrap();
-        out.push(("postgres", Arc::new(pg)));
-    }
-    out
+/// `SQLite` plus Postgres (fresh schema per call; skipped locally without
+/// `DATABASE_URL`, required under CI).
+async fn fencing_backends() -> Vec<orch8_storage::testing::backends::TestBackend> {
+    orch8_storage::testing::backends::TestBackend::sqlite_and_postgres().await
 }
 
 async fn run_process_instance(storage: &Arc<dyn StorageBackend>, instance: TaskInstance) {
@@ -2213,7 +2204,8 @@ async fn seed_fenced_instance(
 
 #[tokio::test]
 async fn scheduler_defers_instance_whose_execution_is_transferring() {
-    for (backend, storage) in fencing_backends().await {
+    for test_backend in fencing_backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let (instance_id, _) = seed_fenced_instance(
             &storage,
             orch8_types::continuity::OwnershipState::Transferring,
@@ -2238,7 +2230,8 @@ async fn scheduler_defers_instance_whose_execution_is_transferring() {
 
 #[tokio::test]
 async fn scheduler_parks_instance_superseded_by_a_handoff() {
-    for (backend, storage) in fencing_backends().await {
+    for test_backend in fencing_backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let (instance_id, _) = seed_fenced_instance(
             &storage,
             orch8_types::continuity::OwnershipState::Owned,

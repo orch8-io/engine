@@ -1,6 +1,7 @@
 //! Postgres row-change trigger against a live database.
 //!
-//! Gated on `DATABASE_URL` (skipped with a message when absent), like the
+//! Gated on `DATABASE_URL` via `orch8_storage::testing::backends::postgres_url`
+//! (skipped locally when absent, a failure under CI), like the
 //! storage crate's Postgres suite. Run with:
 //!
 //! ```text
@@ -110,8 +111,7 @@ fn start(
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // one end-to-end scenario, step by step
 async fn row_changes_start_workflows_without_loss_or_duplicates() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("skipping: DATABASE_URL not set");
+    let Some(url) = orch8_storage::testing::backends::postgres_url() else {
         return;
     };
     let pool = PgPoolOptions::new()

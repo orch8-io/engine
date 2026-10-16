@@ -16,8 +16,7 @@ use chrono::Utc;
 use serde_json::json;
 
 use orch8_storage::StorageBackend;
-use orch8_storage::postgres::PostgresStorage;
-use orch8_storage::sqlite::SqliteStorage;
+use orch8_storage::testing::backends::TestBackend;
 use orch8_types::continuity::{
     CapsuleRequirements, RuntimeCapabilities, RuntimeConnectivity, RuntimeId, RuntimeKind,
     RuntimeTrustLevel,
@@ -36,21 +35,10 @@ use orch8_types::worker_filter::WorkerTaskFilter;
 
 use common::{mk_instance, mk_sequence, mk_step, registry};
 
-async fn backends() -> Vec<(&'static str, Arc<dyn StorageBackend>)> {
-    let mut out: Vec<(&'static str, Arc<dyn StorageBackend>)> = vec![(
-        "sqlite",
-        Arc::new(SqliteStorage::in_memory().await.unwrap()),
-    )];
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        let pg = PostgresStorage::new(&url, 5, None)
-            .await
-            .expect("connect to DATABASE_URL");
-        pg.run_migrations().await.expect("run migrations");
-        out.push(("postgres", Arc::new(pg)));
-    } else {
-        eprintln!("DATABASE_URL not set: running the sqlite leg only");
-    }
-    out
+/// `SQLite` plus Postgres (fresh schema per call; skipped locally without
+/// `DATABASE_URL`, required under CI).
+async fn backends() -> Vec<TestBackend> {
+    TestBackend::sqlite_and_postgres().await
 }
 
 fn unique(prefix: &str) -> String {
@@ -135,7 +123,8 @@ async fn tasks_of(storage: &Arc<dyn StorageBackend>, inst: &TaskInstance) -> Vec
 
 #[tokio::test]
 async fn residency_waits_and_never_dispatches_to_a_non_matching_runtime() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let tenant = TenantId::unchecked(unique("tenant"));
         let handler = unique("ext.charge");
         let seq = mk_sequence(vec![placed_step(
@@ -238,7 +227,8 @@ async fn residency_waits_and_never_dispatches_to_a_non_matching_runtime() {
 
 #[tokio::test]
 async fn tenant_policies_add_labels_and_preferences() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let tenant = TenantId::unchecked(unique("tenant"));
         let handler = unique("ext.render");
         storage
@@ -338,7 +328,8 @@ fn pending_task(
 
 #[tokio::test]
 async fn sticky_affinity_prefers_the_previous_worker_then_falls_back() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique("ext.affine");
         let mut seq = mk_sequence(vec![mk_step("s", &handler)]);
         seq.name = unique("affinity");
@@ -448,7 +439,8 @@ async fn sticky_affinity_prefers_the_previous_worker_then_falls_back() {
 
 #[tokio::test]
 async fn rate_budget_defers_instead_of_failing() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let tenant = TenantId::unchecked(unique("tenant"));
         let key = unique("stripe-api");
         let stored = storage
@@ -516,7 +508,8 @@ async fn rate_budget_defers_instead_of_failing() {
 
 #[tokio::test]
 async fn placement_policies_round_trip_and_sequence_placement_persists() {
-    for (backend, storage) in backends().await {
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let tenant = TenantId::unchecked(unique("tenant"));
         assert!(
             storage
