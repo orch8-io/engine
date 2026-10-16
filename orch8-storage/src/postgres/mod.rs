@@ -177,8 +177,12 @@ impl PostgresStorage {
         sqlx::query("SET idle_in_transaction_session_timeout = 0")
             .execute(&mut conn)
             .await?;
+        // `run_direct`, not `run(&mut conn)`: `run`'s `Acquire<'a>` bound on a
+        // connection borrow made every caller's future (the embedded engine
+        // and the API handlers built on it) fail the `Send` check with
+        // "implementation of `Acquire` is not general enough".
         sqlx::migrate!("../migrations")
-            .run(&mut conn)
+            .run_direct(None, &mut conn, false)
             .await
             .map_err(|e| StorageError::Migration(e.to_string()))?;
         Ok(())
