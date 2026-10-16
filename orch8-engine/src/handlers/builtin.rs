@@ -591,10 +591,20 @@ async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepErro
     None
 }
 
+/// Longest in-process `sleep` the builtin accepts, in milliseconds (L2-07 /
+/// L3-10). The sleep is an in-memory timer: it holds one of the node's
+/// `max_concurrent_steps` permits, its instance heartbeat keeps the stale
+/// reaper away, and a restart re-sleeps the full duration. Longer waits
+/// belong in the durable step `delay` field, which parks the instance as
+/// `Scheduled` with a `next_fire_at` and survives restarts.
+pub const MAX_SLEEP_MS: u64 = 60_000;
+
 /// Sleep handler. Waits for a configured duration.
 ///
 /// Params:
-/// - `duration_ms` (u64): Milliseconds to sleep. Defaults to 100.
+/// - `duration_ms` (u64): Milliseconds to sleep. Defaults to 100. Values
+///   above [`MAX_SLEEP_MS`] fail the step permanently with a message
+///   pointing at the durable `delay` field.
 ///
 /// Long sleeps poll for a pending `cancel` signal on a short interval so
 /// that in-flight sleeps are interruptible — a plain `tokio::time::sleep`
@@ -610,6 +620,17 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         .get("duration_ms")
         .and_then(Value::as_u64)
         .unwrap_or(100);
+
+    if duration_ms > MAX_SLEEP_MS {
+        return Err(StepError::Permanent {
+            message: format!(
+                "sleep: duration_ms {duration_ms} exceeds the in-process limit of {MAX_SLEEP_MS} ms; \
+                 use the step `delay` field for long waits (durable across restarts and does not \
+                 hold an execution slot)"
+            ),
+            details: None,
+        });
+    }
 
     debug!(
         instance_id = %ctx.instance_id,
@@ -1180,6 +1201,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, json!({"slept_ms": 10}));
+    }
+
+    /// L2-07 / L3-10: long in-process sleeps are rejected (they held an
+    /// execution permit and restarted from zero after every restart);
+    /// the error points at the durable `delay` field.
+    #[tokio::test]
+    async fn sleep_over_cap_fails_permanently_pointing_to_delay() {
+        let err = handle_sleep(test_ctx(json!({"duration_ms": MAX_SLEEP_MS + 1})).await)
+            .await
+            .unwrap_err();
+        let StepError::Permanent { message, .. } = &err else {
+            panic!("expected Permanent, got {err:?}");
+        };
+        assert!(message.contains("delay"), "{message}");
+        let lint = crate::lint::lint_sequence(
+            &serde_json::from_value(json!({
+                "id": uuid::Uuid::now_v7(),
+                "tenant_id": "t",
+                "namespace": "default",
+                "name": "s",
+                "version": 1,
+                "blocks": [{"type": "step", "id": "nap", "handler": "sleep",
+                            "params": {"duration_ms": 86_400_000u64}}],
+                "created_at": chrono::Utc::now(),
+            }))
+            .unwrap(),
+        );
+        assert!(
+            lint.iter()
+                .any(|w| w.block_id == "nap" && w.message.contains("delay")),
+            "{lint:?}"
+        );
     }
 
     #[tokio::test]

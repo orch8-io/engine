@@ -1192,7 +1192,7 @@ All blocks are defined in the `blocks` array of a sequence. Blocks can nest arbi
 |---------|--------|--------|
 | `noop` | _(none)_ | `{}` |
 | `log` | `message` (string), `level` ("debug"/"info"/"warn") | `{ "message": "..." }` |
-| `sleep` | `duration_ms` (integer, default 100) | `{ "slept_ms": N }` |
+| `sleep` | `duration_ms` (integer, default 100, max 60000; longer waits fail the step, use the durable step `delay` field) | `{ "slept_ms": N }` |
 | `fail` | `message` (string) | _(step fails with the given message)_ |
 | `http_request` | `url`, `method` ("GET"/"POST"/"PUT"/"DELETE"), `body`, `timeout_ms` (default 10000) | `{ "status": 200, "body": "..." }` |
 | `llm_call` | `provider`, `model`, `messages`, `temperature`, `max_tokens` | `{ "content": "...", "usage": {...} }` |
