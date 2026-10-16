@@ -41,18 +41,30 @@ pub fn calculate_next_fire_at(
         add_duration_clamped(from, delay.duration)
     };
 
-    if delay.business_days_only {
+    let holidays = if delay.business_days_only {
         let holidays = collect_holidays(&delay.holidays, context_config);
         target = skip_non_business_days(target, timezone, &holidays);
-    }
+        Some(holidays)
+    } else {
+        None
+    };
 
     if let Some(jitter) = delay.jitter {
         let jitter_ms = i64::try_from(jitter.as_millis()).unwrap_or(i64::MAX);
         if jitter_ms > 0 {
             let offset = rand::rng().random_range(-jitter_ms..=jitter_ms);
-            target = target
+            let jittered = target
                 .checked_add_signed(Duration::milliseconds(offset))
                 .unwrap_or(DateTime::<Utc>::MAX_UTC);
+            // T1-GAP-037: jitter must not push a business-day target onto a
+            // weekend or holiday (Monday 00:00 - 1h is Sunday). Keep the
+            // un-jittered business-day target for such a draw.
+            let lands_off_business_day = holidays.as_deref().is_some_and(|holidays| {
+                skip_non_business_days(jittered, timezone, holidays) != jittered
+            });
+            if !lands_off_business_day {
+                target = jittered;
+            }
         }
     }
 
@@ -401,6 +413,62 @@ mod tests {
                 "jitter must stay within ±1s, got {diff_ms}ms"
             );
         }
+    }
+
+    /// T1-GAP-037: Monday 00:00 with ±1 h jitter used to land on Sunday in
+    /// about half the draws, because jitter was applied after the
+    /// business-day skip.
+    #[test]
+    fn business_days_jitter_never_lands_on_a_weekend() {
+        let monday_midnight = chrono::NaiveDate::from_ymd_opt(2024, 1, 8)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        let delay = DelaySpec {
+            duration: StdDuration::from_secs(0),
+            business_days_only: true,
+            jitter: Some(StdDuration::from_secs(3_600)),
+            holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
+        };
+
+        let weekdays: Vec<Weekday> = (0..200)
+            .map(|_| calculate_next_fire_at(monday_midnight, &delay, "UTC", None).weekday())
+            .collect();
+
+        assert!(
+            weekdays.iter().all(|day| *day == Weekday::Mon),
+            "{weekdays:?}"
+        );
+    }
+
+    #[test]
+    fn business_days_jitter_never_lands_on_a_holiday() {
+        // Tuesday 2024-01-09 is a holiday; Monday 23:30 + up to 1 h would cross into it.
+        let monday_late = chrono::NaiveDate::from_ymd_opt(2024, 1, 8)
+            .unwrap()
+            .and_hms_opt(23, 30, 0)
+            .unwrap()
+            .and_utc();
+        let delay = DelaySpec {
+            duration: StdDuration::from_secs(0),
+            business_days_only: true,
+            jitter: Some(StdDuration::from_secs(3_600)),
+            holidays: vec!["2024-01-09".into()],
+            fire_at_local: None,
+            timezone: None,
+        };
+
+        let weekdays: Vec<Weekday> = (0..200)
+            .map(|_| calculate_next_fire_at(monday_late, &delay, "UTC", None).weekday())
+            .collect();
+
+        assert!(
+            weekdays.iter().all(|day| *day == Weekday::Mon),
+            "{weekdays:?}"
+        );
     }
 
     #[test]
