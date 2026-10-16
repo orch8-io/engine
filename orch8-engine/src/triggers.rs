@@ -481,6 +481,52 @@ pub(crate) async fn create_trigger_instance_idempotent(
     }
 }
 
+/// Attempts at creating the instance for one push-style trigger event.
+const PUSH_EVENT_ATTEMPTS: u32 = 6;
+
+/// Create the instance for a push-style trigger event (core NATS, file
+/// watch), which has no broker-side redelivery: retry transient storage
+/// errors (failover, pool timeout) with back-off, about 8 s in total,
+/// before dropping it. A fixed instance id makes a retry after an ambiguous
+/// insert a conflict instead of a duplicate. Returns whether the instance
+/// exists.
+#[cfg_attr(not(any(feature = "nats", feature = "file-watch")), allow(dead_code))]
+async fn create_push_event_instance(
+    storage: &dyn StorageBackend,
+    trigger: &TriggerDef,
+    data: serde_json::Value,
+    meta: serde_json::Value,
+    cancel: &CancellationToken,
+) -> bool {
+    let id = InstanceId::new();
+    let mut backoff = std::time::Duration::from_millis(250);
+    for attempt in 1..=PUSH_EVENT_ATTEMPTS {
+        match create_trigger_instance(storage, trigger, data.clone(), meta.clone(), Some(id)).await
+        {
+            Ok(_) => return true,
+            Err(crate::error::EngineError::Storage(
+                orch8_types::error::StorageError::Conflict(_),
+            )) if attempt > 1 => return true,
+            Err(e) if e.is_transient_storage() && attempt < PUSH_EVENT_ATTEMPTS => {
+                warn!(slug = %trigger.slug, attempt, error = %e,
+                    "transient error creating a trigger instance; retrying");
+                tokio::select! {
+                    () = cancel.cancelled() => break,
+                    () = tokio::time::sleep(backoff) => {}
+                }
+                backoff = backoff.saturating_mul(2);
+            }
+            Err(e) => {
+                error!(slug = %trigger.slug, error = %e,
+                    "failed to create an instance from a trigger event; event dropped");
+                break;
+            }
+        }
+    }
+    crate::metrics::inc(crate::metrics::TRIGGER_EVENTS_DROPPED);
+    false
+}
+
 // ─── NATS Trigger ────────────────────────────────────────────────────────────
 
 #[cfg(feature = "nats")]
@@ -556,13 +602,9 @@ async fn run_nats_listener(
                         "subject": msg.subject.as_str(),
                         "reply": reply_str,
                     });
-                    if let Err(e) = create_trigger_instance(&*storage, &trigger, data, meta, None).await {
-                        error!(
-                            slug = %trigger.slug,
-                            error = %e,
-                            "failed to create instance from NATS message"
-                        );
-                    }
+                    // Core NATS is at-most-once: there is no redelivery, so
+                    // a storage blip is retried here before the event is lost.
+                    create_push_event_instance(&*storage, &trigger, data, meta, &cancel).await;
                 } else {
                     warn!(slug = %trigger.slug, "NATS subscription ended");
                     return Ok(());
@@ -682,13 +724,7 @@ async fn run_file_watch_listener(
                         "event_kind": format!("{:?}", event.kind),
                     });
 
-                    if let Err(e) = create_trigger_instance(&*storage, &trigger, data, meta, None).await {
-                        error!(
-                            slug = %trigger.slug,
-                            error = %e,
-                            "failed to create instance from file event"
-                        );
-                    }
+                    create_push_event_instance(&*storage, &trigger, data, meta, &cancel).await;
                 } else {
                     warn!(slug = %trigger.slug, "file watch channel closed");
                     return Ok(());
@@ -805,6 +841,62 @@ mod tests {
         assert_eq!(stored.metadata["_trigger_event"], meta);
         // _trigger_type is serialized via serde (NATS → "nats").
         assert_eq!(stored.metadata["_trigger_type"], "nats");
+    }
+
+    /// L5-16/L2-14: a push-style event survives a transient storage error
+    /// for a bounded number of retries, then is dropped (and counted)
+    /// instead of retrying forever; a permanent error drops it at once.
+    #[tokio::test]
+    async fn push_event_instance_retries_transient_errors_then_drops() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        seed_sequence(&storage, "seq").await;
+        let trigger = mk_trigger("t", "seq", TriggerType::Nats);
+        let cancel = CancellationToken::new();
+        assert!(
+            create_push_event_instance(
+                &storage,
+                &trigger,
+                serde_json::json!({}),
+                serde_json::json!({}),
+                &cancel
+            )
+            .await
+        );
+
+        let missing = mk_trigger("t", "no-such-seq", TriggerType::Nats);
+        let started = tokio::time::Instant::now();
+        assert!(
+            !create_push_event_instance(
+                &storage,
+                &missing,
+                serde_json::json!({}),
+                serde_json::json!({}),
+                &cancel
+            )
+            .await
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "permanent: no retry"
+        );
+
+        storage.pool().close().await;
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        assert!(
+            !create_push_event_instance(
+                &storage,
+                &trigger,
+                serde_json::json!({}),
+                serde_json::json!({}),
+                &cancel
+            )
+            .await
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(7),
+            "transient errors are retried with back-off"
+        );
     }
 
     #[tokio::test]

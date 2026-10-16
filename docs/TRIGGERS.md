@@ -63,6 +63,23 @@ All message sources (`kafka`, `sqs`, `pubsub`, `redis_streams`,
   lease in `trigger_poll_state`, so exactly one node consumes at a time. If
   that node dies, another node takes over within about a minute.
 
+### `nats` and `file_watch` are at-most-once
+
+`nats` uses a core NATS queue-group subscription (not JetStream) and
+`file_watch` uses filesystem notifications. Neither has broker-side
+redelivery, so they do not get the contract above:
+
+- A transient storage error while creating the instance (a database
+  failover, a pool timeout) is retried with backoff for about 8 seconds.
+  After that, or on a permanent error such as a missing sequence, the event
+  is dropped and counted in `orch8_trigger_events_dropped_total`.
+- Messages published while no engine node is subscribed (every node
+  restarting, or the client reconnecting) are not delivered at all.
+
+If you cannot lose events, publish to a source with acknowledgements (`sqs`,
+`pubsub`, `kafka`, `redis_streams`, `postgres_rows`) or call
+`POST /triggers/{slug}/fire` from a consumer you control.
+
 For `kafka` and `postgres_rows`, the cursor and the last error are stored in
 `trigger_poll_state` and returned as `poll_state` by `GET /triggers/{slug}`. The cursor is tied to the Kafka
 `topic` or the Postgres `outbox_table`. If you edit either one, the listener
