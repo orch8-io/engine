@@ -20,8 +20,15 @@
 //! [`TestEngine::spawn`] runs the full [`crate::Engine::run`] (tick loop,
 //! reapers, cron, outbox) with short intervals for loop-level tests.
 //!
+//! Also here: [`http`] (a scriptable loopback HTTP mock), [`ssrf`] (the
+//! shared table of URLs every outbound guard must block) and
+//! [`step_context`] (a `StepContext` for calling a handler directly).
+//!
 //! Compiled for this crate's tests and, elsewhere, behind the `test-util`
 //! feature (dev-dependencies only).
+
+pub mod http;
+pub mod ssrf;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -306,6 +313,40 @@ impl RunningEngine {
     }
 }
 
+/// A [`StepContext`] for calling a handler directly (T1 HX-4): a fresh
+/// in-memory `SQLite` storage, tenant `t`, block `step`, attempt 0, empty
+/// context. Mutate the returned value for anything else.
+pub async fn step_context(params: serde_json::Value) -> StepContext {
+    StepContext {
+        instance_id: InstanceId::new(),
+        tenant_id: orch8_types::ids::TenantId::unchecked("t"),
+        block_id: orch8_types::ids::BlockId::new("step"),
+        params,
+        context: Arc::new(orch8_types::context::ExecutionContext::default()),
+        attempt: 0,
+        storage: Arc::new(
+            SqliteStorage::in_memory()
+                .await
+                .expect("in-memory SQLite storage"),
+        ),
+        wait_for_input: None,
+    }
+}
+
+/// Run builtin handler `name` once with `params` (see [`step_context`]).
+/// Panics if `name` is not a builtin.
+pub async fn call_builtin(
+    name: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, StepError> {
+    let mut registry = HandlerRegistry::new();
+    register_builtins(&mut registry);
+    let handler = registry
+        .get(name)
+        .unwrap_or_else(|| panic!("`{name}` is not a builtin handler"));
+    handler(step_context(params).await).await
+}
+
 /// Poll `probe` every 10 ms until it returns `Some`, or panic after
 /// `timeout` (tokio time). For loop-level tests where a tick count cannot be
 /// controlled; prefer [`TestEngine::drive`] otherwise.
@@ -328,5 +369,5 @@ where
 }
 
 #[cfg(test)]
-#[path = "testing_tests.rs"]
+#[path = "engine_tests.rs"]
 mod tests;
