@@ -151,9 +151,116 @@ pub fn truncate_for_error(body: &[u8], max: usize) -> String {
     }
 }
 
+/// Whether a non-2xx HTTP status is worth retrying: request timeout (408),
+/// too early (425), rate limited (429) and every 5xx. Any other 4xx is a
+/// request error that retrying cannot fix.
+#[must_use]
+pub const fn is_retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500..=599)
+}
+
+/// Longest `Retry-After` honoured; a larger value is clamped so a provider
+/// cannot park a step for days.
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
+
+/// Key under which a handler's retryable-error `details` carry the
+/// provider's `Retry-After`, in milliseconds. The scheduler uses it as the
+/// minimum retry back-off.
+pub const RETRY_AFTER_MS_KEY: &str = "retry_after_ms";
+
+/// Parse a `Retry-After` header (delta-seconds or HTTP-date), clamped to
+/// [`MAX_RETRY_AFTER`].
+#[must_use]
+pub fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    let wait = if let Ok(secs) = raw.parse::<u64>() {
+        Duration::from_secs(secs)
+    } else {
+        let at = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+        (at.with_timezone(&chrono::Utc) - chrono::Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+    };
+    Some(wait.min(MAX_RETRY_AFTER))
+}
+
+/// The error for a non-2xx response: [`StepError::Retryable`] for
+/// [`is_retryable_status`] (with the `Retry-After` hint folded into the
+/// details under [`RETRY_AFTER_MS_KEY`]), otherwise permanent. `details` is
+/// extended when it is an object.
+#[must_use]
+pub fn status_error(
+    message: String,
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    details: Option<serde_json::Value>,
+) -> orch8_types::error::StepError {
+    use orch8_types::error::StepError;
+    if !is_retryable_status(status) {
+        return StepError::Permanent { message, details };
+    }
+    let details = match retry_after(headers) {
+        Some(wait) => {
+            let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            let mut details = details.unwrap_or_else(|| serde_json::json!({}));
+            if let Some(map) = details.as_object_mut() {
+                map.insert(RETRY_AFTER_MS_KEY.into(), ms.into());
+            }
+            Some(details)
+        }
+        None => details,
+    };
+    StepError::Retryable { message, details }
+}
+
+/// The `Retry-After` hint a handler put into its error details.
+#[must_use]
+pub fn retry_after_hint(details: Option<&serde_json::Value>) -> Option<Duration> {
+    details?
+        .get(RETRY_AFTER_MS_KEY)?
+        .as_u64()
+        .map(|ms| Duration::from_millis(ms).min(MAX_RETRY_AFTER))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retryable_statuses_cover_rate_limits_and_server_errors() {
+        for status in [408, 425, 429, 500, 502, 503, 504, 529] {
+            assert!(is_retryable_status(status), "{status}");
+        }
+        for status in [400, 401, 403, 404, 409, 410, 422] {
+            assert!(!is_retryable_status(status), "{status}");
+        }
+    }
+
+    #[test]
+    fn status_error_carries_a_bounded_retry_after() {
+        use orch8_types::error::StepError;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "7".parse().unwrap());
+        let err = status_error("rate limited".into(), 429, &headers, None);
+        let StepError::Retryable { details, .. } = &err else {
+            panic!("429 must be retryable: {err:?}");
+        };
+        assert_eq!(
+            retry_after_hint(details.as_ref()),
+            Some(Duration::from_secs(7))
+        );
+
+        headers.insert(reqwest::header::RETRY_AFTER, "999999".parse().unwrap());
+        assert_eq!(retry_after(&headers), Some(MAX_RETRY_AFTER));
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2015 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after(&headers), Some(Duration::ZERO), "past date");
+
+        let err = status_error("gone".into(), 410, &headers, None);
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
 
     #[test]
     fn redact_url_strips_query_userinfo_fragment() {

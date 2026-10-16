@@ -94,10 +94,10 @@ fn parse_response(status: u16, bytes: &[u8], url: &str) -> Result<Value, StepErr
     if status >= 400 {
         let body = crate::outbound::truncate_for_error(bytes, MAX_ERROR_BODY_BYTES);
         let details = Some(json!({ "status": status, "body": body }));
-        return Err(if status >= 500 {
+        return Err(if crate::outbound::is_retryable_status(status) {
             StepError::Retryable {
                 message: format!(
-                    "grpc plugin: server error {status} from {}",
+                    "grpc plugin: transient error {status} from {}",
                     crate::outbound::redact_url(url)
                 ),
                 details,

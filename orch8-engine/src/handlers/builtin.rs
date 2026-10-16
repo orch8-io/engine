@@ -818,6 +818,7 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
     })?;
 
     let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
 
     // Stream the body with a hard cap so a chunked (no Content-Length)
     // response can't OOM the worker before a post-read size check.
@@ -838,17 +839,15 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
         })?;
     let response_body = String::from_utf8_lossy(&bytes).into_owned();
 
-    if status >= 500 {
-        return Err(StepError::Retryable {
-            message: format!("HTTP {status} from {}", crate::outbound::redact_url(url)),
-            details: Some(json!({ "status": status, "body": response_body })),
-        });
-    }
+    // 408/425/429/5xx are transient (carrying any `Retry-After`); every
+    // other 4xx is a permanent request error.
     if status >= 400 {
-        return Err(StepError::Permanent {
-            message: format!("HTTP {status} from {}", crate::outbound::redact_url(url)),
-            details: Some(json!({ "status": status, "body": response_body })),
-        });
+        return Err(crate::outbound::status_error(
+            format!("HTTP {status} from {}", crate::outbound::redact_url(url)),
+            status,
+            &headers,
+            Some(json!({ "status": status, "body": response_body })),
+        ));
     }
 
     Ok(json!({

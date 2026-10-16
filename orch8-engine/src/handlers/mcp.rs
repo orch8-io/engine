@@ -376,7 +376,7 @@ fn build_tools_list_request(id: u64) -> Value {
 ///   matching `id` is extracted.
 ///
 /// Error mapping:
-/// - 5xx → Retryable, 4xx → Permanent (HTTP-level).
+/// - 408/425/429/5xx → Retryable, other 4xx → Permanent (HTTP-level).
 /// - a JSON-RPC `error` member → Permanent (protocol-level: the request was
 ///   malformed or the method is unsupported — retrying will not help).
 fn parse_jsonrpc_response(
@@ -385,7 +385,7 @@ fn parse_jsonrpc_response(
     body: &[u8],
     expected_id: u64,
 ) -> Result<Value, StepError> {
-    if status >= 500 {
+    if crate::outbound::is_retryable_status(status) {
         return Err(StepError::Retryable {
             message: format!("mcp server returned HTTP {status}"),
             details: Some(json!({ "status": status, "body": lossy(body) })),

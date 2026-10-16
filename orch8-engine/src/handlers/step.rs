@@ -561,9 +561,35 @@ pub fn calculate_backoff_with_jitter(
     crate::scheduling::delay::apply_percentage_jitter(base, max_backoff, 80, 120)
 }
 
+/// Floor a retry back-off at the `Retry-After` hint a handler put into its
+/// error details ([`crate::outbound::RETRY_AFTER_MS_KEY`], already capped at
+/// [`crate::outbound::MAX_RETRY_AFTER`]), so a rate-limited step does not
+/// retry sooner than the provider asked.
+#[must_use]
+pub fn honor_retry_after(backoff: Duration, details: Option<&serde_json::Value>) -> Duration {
+    crate::outbound::retry_after_hint(details).map_or(backoff, |hint| backoff.max(hint))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_hint_floors_the_backoff() {
+        let details = serde_json::json!({ "status": 429, "retry_after_ms": 7000 });
+        assert_eq!(
+            honor_retry_after(Duration::from_secs(1), Some(&details)),
+            Duration::from_secs(7)
+        );
+        assert_eq!(
+            honor_retry_after(Duration::from_secs(30), Some(&details)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            honor_retry_after(Duration::from_secs(1), None),
+            Duration::from_secs(1)
+        );
+    }
 
     #[test]
     fn backoff_first_attempt_respects_maximum() {

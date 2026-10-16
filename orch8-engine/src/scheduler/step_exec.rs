@@ -1712,11 +1712,14 @@ pub(super) async fn handle_retryable_failure(
 
         crate::metrics::inc(crate::metrics::STEPS_RETRIED);
 
-        let backoff = crate::handlers::step::calculate_backoff_with_jitter(
-            attempt,
-            retry.initial_backoff,
-            retry.max_backoff,
-            retry.backoff_multiplier,
+        let backoff = crate::handlers::step::honor_retry_after(
+            crate::handlers::step::calculate_backoff_with_jitter(
+                attempt,
+                retry.initial_backoff,
+                retry.max_backoff,
+                retry.backoff_multiplier,
+            ),
+            details,
         );
         let fire_at = clamped_fire_at(clock.now(), backoff);
 

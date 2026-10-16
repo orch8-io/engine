@@ -811,11 +811,14 @@ pub(crate) async fn execute_step_node_with_clock(
                     evaluator::fail_node(storage.as_ref(), node.id).await?;
                     return Ok(false);
                 }
-                let backoff = crate::handlers::step::calculate_backoff_with_jitter(
-                    attempt,
-                    retry.initial_backoff,
-                    retry.max_backoff,
-                    retry.backoff_multiplier,
+                let backoff = crate::handlers::step::honor_retry_after(
+                    crate::handlers::step::calculate_backoff_with_jitter(
+                        attempt,
+                        retry.initial_backoff,
+                        retry.max_backoff,
+                        retry.backoff_multiplier,
+                    ),
+                    details.as_ref(),
                 );
                 // Shared with the fast path: clamp a pathological backoff
                 // instead of collapsing it to zero (immediate hot retry).

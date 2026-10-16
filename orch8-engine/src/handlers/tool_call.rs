@@ -196,6 +196,7 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
     })?;
 
     let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
     // Capture the response content type before the body is consumed — needed
     // when storing the response as an artifact.
     let resp_content_type = resp
@@ -232,7 +233,7 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
         return Ok(json!({ "tool_name": tool_name, "artifact": aref, "status": status }));
     }
 
-    interpret_tool_response(tool_name, status, &body_bytes)
+    interpret_tool_response(tool_name, status, &headers, &body_bytes)
 }
 
 /// Map an artifact-backend storage error to a step error: a permanent
@@ -321,11 +322,12 @@ fn parse_body_artifact(params: &Value) -> Option<UploadBody> {
 /// - 2xx + non-JSON  → **Permanent** error. (Previously silently coerced
 ///   to `null`, masking tool-side bugs — downstream steps then ran on
 ///   fake null results.)
-/// - 4xx → Permanent, body parsed as JSON if possible, else raw text.
-/// - 5xx → Retryable, same body handling.
+/// - 408/425/429/5xx → Retryable (with any `Retry-After`), other 4xx →
+///   Permanent; body parsed as JSON if possible, else raw text.
 fn interpret_tool_response(
     tool_name: &str,
     status: u16,
+    headers: &reqwest::header::HeaderMap,
     body_bytes: &[u8],
 ) -> Result<Value, StepError> {
     fn parse_body(bytes: &[u8]) -> Result<Value, serde_json::Error> {
@@ -336,23 +338,17 @@ fn interpret_tool_response(
         }
     }
 
-    if status >= 500 {
+    if status >= 400 {
         // Error-path JSON parsing is best-effort — expose raw text on
         // failure so operators can see what the tool actually returned.
         let body_repr = parse_body(body_bytes)
             .unwrap_or_else(|_| json!(String::from_utf8_lossy(body_bytes).to_string()));
-        return Err(StepError::Retryable {
-            message: format!("tool returned HTTP {status}"),
-            details: Some(json!({"status": status, "body": body_repr})),
-        });
-    }
-    if status >= 400 {
-        let body_repr = parse_body(body_bytes)
-            .unwrap_or_else(|_| json!(String::from_utf8_lossy(body_bytes).to_string()));
-        return Err(StepError::Permanent {
-            message: format!("tool returned HTTP {status}"),
-            details: Some(json!({"status": status, "body": body_repr})),
-        });
+        return Err(crate::outbound::status_error(
+            format!("tool returned HTTP {status}"),
+            status,
+            headers,
+            Some(json!({"status": status, "body": body_repr})),
+        ));
     }
 
     // Success path: JSON parse failure is a hard error, not a silent
@@ -410,7 +406,7 @@ mod tests {
     /// mask tool-side bugs — downstream steps ran on `result=null`.
     #[test]
     fn non_json_success_returns_permanent_error() {
-        let err = interpret_tool_response("search", 200, b"<html>not json</html>").unwrap_err();
+        let err = interpret_tool_response("search", 200, &reqwest::header::HeaderMap::new(), b"<html>not json</html>").unwrap_err();
         match err {
             StepError::Permanent { message, .. } => {
                 assert!(
@@ -428,7 +424,7 @@ mod tests {
     /// return 204 No Content (or 200 with no body) continue to work.
     #[test]
     fn empty_body_success_returns_null_result() {
-        let out = interpret_tool_response("search", 200, b"").unwrap();
+        let out = interpret_tool_response("search", 200, &reqwest::header::HeaderMap::new(), b"").unwrap();
         assert_eq!(out.get("result"), Some(&json!(null)));
         assert_eq!(
             out.get("status").and_then(serde_json::Value::as_u64),
@@ -439,7 +435,7 @@ mod tests {
     /// Valid JSON body on 2xx is parsed and returned under `result`.
     #[test]
     fn valid_json_success_returns_parsed_result() {
-        let out = interpret_tool_response("search", 200, br#"{"ok":true,"n":7}"#).unwrap();
+        let out = interpret_tool_response("search", 200, &reqwest::header::HeaderMap::new(), br#"{"ok":true,"n":7}"#).unwrap();
         assert_eq!(out.get("result").unwrap(), &json!({"ok": true, "n": 7}));
         assert_eq!(
             out.get("tool_name").and_then(|n| n.as_str()),
@@ -452,7 +448,7 @@ mod tests {
     /// silently becoming `null`.
     #[test]
     fn status_5xx_text_body_surfaces_raw_text_in_retryable() {
-        let err = interpret_tool_response("search", 500, b"upstream broke").unwrap_err();
+        let err = interpret_tool_response("search", 500, &reqwest::header::HeaderMap::new(), b"upstream broke").unwrap_err();
         match err {
             StepError::Retryable {
                 details: Some(d), ..
@@ -474,7 +470,7 @@ mod tests {
     /// error info from the tool survives to the caller.
     #[test]
     fn status_4xx_json_body_parsed_in_permanent_details() {
-        let err = interpret_tool_response("search", 400, br#"{"code":"bad_arg"}"#).unwrap_err();
+        let err = interpret_tool_response("search", 400, &reqwest::header::HeaderMap::new(), br#"{"code":"bad_arg"}"#).unwrap_err();
         match err {
             StepError::Permanent {
                 details: Some(d), ..
@@ -486,6 +482,24 @@ mod tests {
                 assert_eq!(d.get("body").unwrap(), &json!({"code": "bad_arg"}));
             }
             other => panic!("expected Permanent with parsed body, got: {other:?}"),
+        }
+    }
+
+    /// L5-02: rate limits and request timeouts are transient, and carry the
+    /// provider's `Retry-After`.
+    #[test]
+    fn rate_limit_and_timeout_statuses_are_retryable() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "3".parse().unwrap());
+        for status in [408, 429] {
+            let err = interpret_tool_response("search", status, &headers, b"slow down").unwrap_err();
+            let StepError::Retryable { details, .. } = err else {
+                panic!("{status} must be retryable");
+            };
+            assert_eq!(
+                crate::outbound::retry_after_hint(details.as_ref()),
+                Some(std::time::Duration::from_secs(3))
+            );
         }
     }
 
