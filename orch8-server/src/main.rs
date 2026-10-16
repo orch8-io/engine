@@ -61,6 +61,9 @@ const EXECUTOR_GRPC_RPCS: &[&str] = &[
     "/orch8.Orch8Service/CompleteTask",
     "/orch8.Orch8Service/FailTask",
     "/orch8.Orch8Service/HeartbeatTask",
+    // The worker client always releases over unary ReleaseTask (the stream
+    // has no release frame).
+    "/orch8.Orch8Service/ReleaseTask",
     "/orch8.Orch8Service/WorkerStream",
     "/orch8.Orch8Service/ArtifactTransfer",
     "/orch8.Orch8Service/IngestTelemetryBatch",
@@ -1999,6 +2002,22 @@ fn build_cors_layer(origins: &str, embed_origins: &str) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `orch8_grpc::worker_client` releases a task over the unary
+    /// `ReleaseTask` RPC (the stream has no release frame), and falls back to
+    /// the unary mutation RPCs for tasks from an earlier stream session. An
+    /// executor node must admit every one of them.
+    #[test]
+    fn executor_grpc_surface_admits_every_unary_rpc_the_worker_client_calls() {
+        for rpc in [
+            "/orch8.Orch8Service/CompleteTask",
+            "/orch8.Orch8Service/FailTask",
+            "/orch8.Orch8Service/HeartbeatTask",
+            "/orch8.Orch8Service/ReleaseTask",
+        ] {
+            assert!(EXECUTOR_GRPC_RPCS.contains(&rpc), "executor denies {rpc}");
+        }
+    }
 
     #[tokio::test]
     async fn cors_preflight_admits_browser_session_tokens_and_is_cached() {

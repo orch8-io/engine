@@ -332,7 +332,7 @@ fn coverage_role_039_executor_and_edge_differ_only_in_grpc_surface() {
 
 #[test]
 fn coverage_role_040_executor_allow_list_is_bounded_and_unique() {
-    assert_eq!(EXECUTOR_GRPC_RPCS.len(), 8);
+    assert_eq!(EXECUTOR_GRPC_RPCS.len(), 9);
     let mut sorted = EXECUTOR_GRPC_RPCS.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
@@ -361,6 +361,7 @@ fn coverage_role_042_executor_allow_list_contains_task_lifecycle_rpcs() {
         "/orch8.Orch8Service/CompleteTask",
         "/orch8.Orch8Service/FailTask",
         "/orch8.Orch8Service/HeartbeatTask",
+        "/orch8.Orch8Service/ReleaseTask",
         "/orch8.Orch8Service/WorkerStream",
         "/orch8.Orch8Service/ArtifactTransfer",
         "/orch8.Orch8Service/IngestTelemetryBatch",
@@ -389,6 +390,7 @@ fn coverage_role_044_gateway_allow_list_excludes_task_delivery_rpcs() {
         "/orch8.Orch8Service/CompleteTask",
         "/orch8.Orch8Service/FailTask",
         "/orch8.Orch8Service/HeartbeatTask",
+        "/orch8.Orch8Service/ReleaseTask",
         "/orch8.Orch8Service/WorkerStream",
         "/orch8.Orch8Service/IngestTelemetryBatch",
     ] {
