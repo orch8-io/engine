@@ -305,22 +305,30 @@ pub(super) fn classify_reqwest_error(e: &reqwest::Error) -> StepError {
     }
 }
 
-pub(super) fn classify_api_error(status: u16, body: &Value) -> StepError {
+/// Classify an LLM provider error response with the shared outbound policy
+/// ([`crate::outbound::status_error`]): 408/425/429/5xx are transient and a
+/// `Retry-After` header becomes the scheduler's minimum back-off.
+pub(super) fn classify_api_error(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body: &Value,
+) -> StepError {
     let msg = body
         .get("error")
         .and_then(|e| e.get("message"))
         .and_then(Value::as_str)
         .unwrap_or("unknown error");
 
-    match status {
+    let message = match status {
         429 => {
             warn!(status, msg, "LLM rate limited");
-            retryable(format!("rate limited: {msg}"))
+            format!("rate limited: {msg}")
         }
-        500..=599 => retryable(format!("server error ({status}): {msg}")),
-        401 | 403 => permanent(format!("auth error ({status}): {msg}")),
-        _ => permanent(format!("API error ({status}): {msg}")),
-    }
+        500..=599 => format!("server error ({status}): {msg}"),
+        401 | 403 => format!("auth error ({status}): {msg}"),
+        _ => format!("API error ({status}): {msg}"),
+    };
+    crate::outbound::status_error(message, status, headers, None)
 }
 
 pub(super) const fn retryable(message: String) -> StepError {
@@ -469,26 +477,58 @@ mod tests {
     fn classify_errors() {
         let body_429 = json!({"error": {"message": "too many requests"}});
         assert!(matches!(
-            classify_api_error(429, &body_429),
+            classify_api_error(429, &reqwest::header::HeaderMap::new(), &body_429),
             StepError::Retryable { .. }
         ));
         let body_500 = json!({"error": {"message": "internal"}});
         assert!(matches!(
-            classify_api_error(500, &body_500),
+            classify_api_error(500, &reqwest::header::HeaderMap::new(), &body_500),
             StepError::Retryable { .. }
         ));
         let body_401 = json!({"error": {"message": "invalid key"}});
         assert!(matches!(
-            classify_api_error(401, &body_401),
+            classify_api_error(401, &reqwest::header::HeaderMap::new(), &body_401),
             StepError::Permanent { .. }
         ));
+    }
+
+    /// T1-GAP-328: the LLM path follows the shared outbound status policy.
+    #[test]
+    fn llm_408_and_425_are_retryable() {
+        let body = json!({"error": {"message": "slow down"}});
+        let none = reqwest::header::HeaderMap::new();
+
+        let verdicts = [408, 425].map(|status| {
+            matches!(
+                classify_api_error(status, &none, &body),
+                StepError::Retryable { .. }
+            )
+        });
+
+        assert_eq!(verdicts, [true, true]);
+    }
+
+    #[test]
+    fn llm_429_carries_the_retry_after_hint() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "9".parse().unwrap());
+
+        let error = classify_api_error(429, &headers, &json!({}));
+
+        let StepError::Retryable { details, .. } = error else {
+            panic!("429 must be retryable");
+        };
+        assert_eq!(
+            crate::outbound::retry_after_hint(details.as_ref()),
+            Some(std::time::Duration::from_secs(9))
+        );
     }
 
     #[test]
     fn classify_api_error_403_is_permanent() {
         let body = json!({"error": {"message": "forbidden"}});
         assert!(matches!(
-            classify_api_error(403, &body),
+            classify_api_error(403, &reqwest::header::HeaderMap::new(), &body),
             StepError::Permanent { .. }
         ));
     }
@@ -497,7 +537,7 @@ mod tests {
     fn classify_api_error_503_is_retryable() {
         let body = json!({"error": {"message": "unavailable"}});
         assert!(matches!(
-            classify_api_error(503, &body),
+            classify_api_error(503, &reqwest::header::HeaderMap::new(), &body),
             StepError::Retryable { .. }
         ));
     }
@@ -506,7 +546,7 @@ mod tests {
     fn classify_api_error_4xx_other_is_permanent() {
         let body = json!({"error": {"message": "bad request"}});
         assert!(matches!(
-            classify_api_error(400, &body),
+            classify_api_error(400, &reqwest::header::HeaderMap::new(), &body),
             StepError::Permanent { .. }
         ));
     }

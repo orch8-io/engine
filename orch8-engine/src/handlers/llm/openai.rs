@@ -156,10 +156,11 @@ pub(super) async fn call_openai_compat(
     }
 
     let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
     let resp_body: Value = super::read_json_capped(resp).await?;
 
     if status >= 400 {
-        return Err(classify_api_error(status, &resp_body));
+        return Err(classify_api_error(status, &headers, &resp_body));
     }
 
     let choice = resp_body
@@ -333,8 +334,9 @@ async fn consume_openai_stream(
     let status = resp.status().as_u16();
     if status >= 400 {
         // Error responses are plain JSON, not SSE.
+        let headers = resp.headers().clone();
         let resp_body: Value = super::read_json_capped(resp).await?;
-        return Err(classify_api_error(status, &resp_body));
+        return Err(classify_api_error(status, &headers, &resp_body));
     }
 
     let idle_timeout = stream_idle_timeout(params);

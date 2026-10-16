@@ -462,11 +462,12 @@ async fn send_resend(
         ))
     })?;
     let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
     let bytes = crate::outbound::read_body_capped(resp, 64 * 1024)
         .await
         .map_err(|e| retryable(format!("email: resend response read failed: {e:?}")))?;
     if !(200..300).contains(&status) {
-        return Err(status_error("email(resend)", status, &bytes));
+        return Err(status_error("email(resend)", status, &headers, &bytes));
     }
     let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     Ok(parsed
@@ -595,11 +596,12 @@ async fn send_ses(
         ))
     })?;
     let status = resp.status().as_u16();
+    let headers = resp.headers().clone();
     let bytes = crate::outbound::read_body_capped(resp, 64 * 1024)
         .await
         .map_err(|e| retryable(format!("email: ses response read failed: {e:?}")))?;
     if !(200..300).contains(&status) {
-        return Err(status_error("email(ses)", status, &bytes));
+        return Err(status_error("email(ses)", status, &headers, &bytes));
     }
     let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     Ok(parsed
