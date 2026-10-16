@@ -75,7 +75,7 @@ wasm = ["dep:wasmtime"]
 # directly instead of relying on feature unification from optional deps.
 tokio = { workspace = true, features = ["full", "test-util"] }
 # Handler tests exercise the object-store artifact backend.
-orch8-storage = { path = "../orch8-storage", default-features = false, features = ["artifacts"] }
+orch8-storage = { path = "../orch8-storage", default-features = false, features = ["artifacts", "test-util"] }
 criterion.workspace = true
 serial_test.workspace = true
 # Build tiny wasm modules from WAT text for wasm_plugin.rs execution-path tests.

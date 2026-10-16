@@ -3475,6 +3475,7 @@ dependencies = [
  "moka",
  "object_store",
  "orch8-push",
+ "orch8-storage",
  "orch8-types",
  "rand 0.10.3",
  "reqwest",

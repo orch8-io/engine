@@ -16,6 +16,9 @@ pub mod sqlite;
 pub mod tenancy;
 #[cfg(feature = "postgres")]
 pub mod tenant_partition;
+// Test-only infrastructure (fault injection, fixtures, backend matrix).
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing;
 #[cfg(feature = "byok")]
 pub mod vault;
 
@@ -59,7 +62,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 /// How long a `claim_due_cron_schedules` claim is held before the schedule
 /// becomes claimable again. Advancing the fire times releases it early; the
 /// lease only matters when the claimer fails or crashes mid-fire.
-pub(crate) const CRON_CLAIM_LEASE_SECS: i64 = 300;
+pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
 pub const STORAGE_SCHEMA_VERSION: u32 = 110;
