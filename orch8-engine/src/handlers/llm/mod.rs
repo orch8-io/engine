@@ -23,8 +23,8 @@
 //! | `thinking` | object | — | Anthropic thinking config (e.g. `{"type": "adaptive"}`) |
 //! | `tools` | array | — | Tool/function definitions |
 //! | `tool_choice` | string/object | — | Tool selection strategy |
-//! | `total_timeout_secs` | number | `120` | Cumulative timeout across all failover attempts (0 disables) |
-//! | `per_provider_timeout_secs` | number | `60` | Per-provider timeout in failover mode |
+//! | `total_timeout_secs` | number | `120` (none when streaming) | Cumulative timeout across all failover attempts (0 disables) |
+//! | `per_provider_timeout_secs` | number | `60` (none when streaming) | Per-provider timeout in failover mode (0 disables) |
 //! | `response_schema` | object | — | JSON Schema the response must satisfy (validated, auto-repaired) |
 //! | `max_repair_attempts` | number | `2` | Schema-repair re-calls per provider attempt (hard cap 5) |
 //! | `max_image_bytes` | number | 20 MiB | Per-image size cap, pre-encoding (can only lower the default) |
@@ -109,7 +109,7 @@
 //! | Provider | Built-in default |
 //! |----------|------------------|
 //! | `openai` (and unknown names) | `gpt-6-astra` |
-//! | `anthropic` | `claude-opus-5` |
+//! | `anthropic` | `claude-opus-5-5` |
 //! | `gemini` | `gemini-3.8-flash` |
 //! | `mistral` | `mistral-medium-latest` (Mistral Medium 3.5) |
 //! | `deepseek` | `deepseek-v4-pro` |
@@ -130,12 +130,13 @@
 //!   `parallel_tool_calls` pass through.
 //! - `anthropic`: `effort` → `output_config.effort`; `thinking` /
 //!   `output_config` pass through; sampling params are dropped for models
-//!   that reject them (Opus 4.7+, Sonnet 5, Fable); `OpenAI`-shaped
+//!   that reject them (Opus 4.7+, every 5.x+ model, Fable/Mythos; detected by
+//!   model family and version, so newer ids are covered); `OpenAI`-shaped
 //!   `tools` / `tool_choice` / tool-call conversations (as produced by the
 //!   `agent` handler) are translated to Messages API blocks, and the raw
 //!   response blocks are kept on `message.anthropic_content` so thinking
 //!   blocks round-trip unchanged in tool loops; a `refusal` stop is a
-//!   permanent error. On `claude-opus-5` / `claude-fable-5-1` at the default
+//!   permanent error. On Opus 5+, Sonnet 5.5+ and Fable 5.1+ at the default
 //!   endpoint, server-side refusal fallbacks (`fallbacks: "default"`) are on
 //!   unless the step sets `fallbacks: false`.
 
@@ -152,14 +153,14 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-/// Built-in default model per provider (current flagships as of 2026-09).
+/// Built-in default model per provider (current flagships as of 2026-10).
 /// `None` for aggregators that host many vendors' models (`together`,
 /// `openrouter`): a `model` param is required there, since no single default
 /// is meaningful. Unknown provider names speak the `OpenAI` protocol and get
 /// the `OpenAI` default.
 pub(crate) fn builtin_default_model(provider: &str) -> Option<&'static str> {
     match provider {
-        "anthropic" => Some("claude-opus-5"),
+        "anthropic" => Some("claude-opus-5-5"),
         "gemini" => Some("gemini-3.8-flash"),
         "mistral" => Some("mistral-medium-latest"),
         "deepseek" => Some("deepseek-v4-pro"),
@@ -257,6 +258,32 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
                 .timeout(Duration::from_secs(300)),
         )
     })
+}
+
+/// Client for streaming LLM calls. Same hardening as [`http_client`] but no
+/// whole-request timeout: reqwest's `timeout` covers the body too, so 300 s
+/// cut off every long generation at the same point (retried at full cost).
+/// A stream is bounded by the connect timeout, the inter-chunk
+/// `stream_idle_timeout_secs`, and the step's own `timeout`.
+pub(crate) fn streaming_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        crate::outbound::build(
+            crate::outbound::builder(crate::outbound::Profile::Untrusted)
+                .pool_max_idle_per_host(8)
+                .connect_timeout(Duration::from_secs(10)),
+        )
+    })
+}
+
+/// Pick the client for an LLM request: streaming requests must not carry a
+/// whole-request timeout.
+pub(crate) fn client_for(streaming: bool) -> &'static reqwest::Client {
+    if streaming {
+        streaming_http_client()
+    } else {
+        http_client()
+    }
 }
 
 /// Maximum non-streaming LLM response body. Provider responses are a few KB
@@ -869,10 +896,21 @@ async fn handle_llm_call_failover(
         return Err(permanent("providers array is empty".to_string()));
     }
 
+    // A stream is bounded by its idle timeout (and the step `timeout`), not
+    // a wall-clock default that would cut every long generation off at the
+    // same point and retry it at full cost.
+    let streaming = delta_sink.is_some() && response_schema.is_none();
     let total_timeout = params
         .get("total_timeout_secs")
         .and_then(Value::as_u64)
-        .map_or(DEFAULT_TOTAL_TIMEOUT, Duration::from_secs);
+        .map_or(
+            if streaming {
+                Duration::ZERO
+            } else {
+                DEFAULT_TOTAL_TIMEOUT
+            },
+            Duration::from_secs,
+        );
 
     if total_timeout.is_zero() {
         return failover_inner(params, providers, response_schema, delta_sink, budgets).await;
@@ -898,10 +936,18 @@ async fn failover_inner(
     delta_sink: Option<&DeltaSink>,
     budgets: &[orch8_types::ai::BudgetStatus],
 ) -> Result<Value, StepError> {
+    let streaming = delta_sink.is_some() && response_schema.is_none();
     let per_attempt_timeout = params
         .get("per_provider_timeout_secs")
         .and_then(Value::as_u64)
-        .map_or(DEFAULT_PER_PROVIDER_TIMEOUT, Duration::from_secs);
+        .map_or(
+            if streaming {
+                Duration::ZERO
+            } else {
+                DEFAULT_PER_PROVIDER_TIMEOUT
+            },
+            Duration::from_secs,
+        );
 
     let mut tried: Vec<String> = Vec::new();
     let mut last_error: Option<StepError> = None;
@@ -1053,7 +1099,7 @@ mod tests {
 
     #[test]
     fn every_provider_has_a_current_default_or_requires_a_model() {
-        assert_eq!(builtin_default_model("anthropic"), Some("claude-opus-5"));
+        assert_eq!(builtin_default_model("anthropic"), Some("claude-opus-5-5"));
         assert_eq!(builtin_default_model("openai"), Some("gpt-6-astra"));
         assert_eq!(
             builtin_default_model("mistral"),
