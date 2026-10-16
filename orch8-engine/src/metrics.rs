@@ -38,6 +38,19 @@ pub const LOOP_OUTPUTS_COMPACTED: &str = "orch8_loop_outputs_compacted_total";
 pub const TASKS_PUSHED: &str = "orch8_tasks_pushed_total";
 /// Push deliveries that failed after all retries (task stays pending).
 pub const TASKS_PUSH_FAILED: &str = "orch8_tasks_push_failed_total";
+/// Push wake-ups skipped because the bounded push pool was full (the task
+/// stays pending for pull).
+pub const TASKS_PUSH_SKIPPED: &str = "orch8_tasks_push_skipped_total";
+/// Failed `OAuth2` credential refreshes (the credential backs off).
+pub const CREDENTIAL_REFRESH_FAILURES: &str = "orch8_credential_refresh_failures_total";
+/// Push-style trigger events (NATS core, file watch) dropped after their
+/// instance could not be created within the retry budget.
+pub const TRIGGER_EVENTS_DROPPED: &str = "orch8_trigger_events_dropped_total";
+/// Redis stream entries moved to the dead-letter stream after exceeding
+/// their delivery cap.
+pub const TRIGGER_DEAD_LETTERED: &str = "orch8_trigger_dead_lettered_total";
+/// Parked webhook outbox rows deleted by the retention sweep.
+pub const GC_WEBHOOK_PARKED_DELETED: &str = "orch8_gc_webhook_parked_deleted_total";
 /// Items returned by `ActivePieces` sidecar polls (one instance per item).
 pub const AP_POLL_ITEMS: &str = "orch8_ap_poll_items_total";
 /// Failed `ActivePieces` sidecar polls (recorded on the trigger's state row).

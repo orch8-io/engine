@@ -2341,6 +2341,10 @@ passthrough_impl! {
 
     async fn claim_credential_refresh(&self, id: &str, now: chrono::DateTime<chrono::Utc>, lease_until: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
 
+    async fn record_credential_refresh_failure(&self, id: &str, now: chrono::DateTime<chrono::Utc>, backoff: fn(u32) -> chrono::TimeDelta) -> Result<u32, StorageError>;
+
+    async fn reset_credential_refresh_failures(&self, id: &str) -> Result<(), StorageError>;
+
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError>;
 
     async fn list_credentials_due_for_refresh(

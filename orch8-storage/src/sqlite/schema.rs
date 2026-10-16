@@ -332,8 +332,11 @@ CREATE TABLE IF NOT EXISTS credentials (
     description TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    -- OAuth2 refresh lease (one refreshing node at a time).
-    refresh_claimed_until TEXT
+    -- OAuth2 refresh lease (one refreshing node at a time); after a failed
+    -- refresh it holds the credential off until its back-off elapses.
+    refresh_claimed_until TEXT,
+    -- Consecutive failed refreshes (back-off exponent, reset on success).
+    refresh_failures INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_credentials_tenant ON credentials(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_credentials_expires ON credentials(expires_at);

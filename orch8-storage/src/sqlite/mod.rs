@@ -2368,6 +2368,19 @@ impl crate::AdminStore for SqliteStorage {
         credentials::claim_refresh(self, id, now, lease_until).await
     }
 
+    async fn record_credential_refresh_failure(
+        &self,
+        id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        backoff: fn(u32) -> chrono::TimeDelta,
+    ) -> Result<u32, StorageError> {
+        credentials::record_refresh_failure(self, id, now, backoff).await
+    }
+
+    async fn reset_credential_refresh_failures(&self, id: &str) -> Result<(), StorageError> {
+        credentials::reset_refresh_failures(self, id).await
+    }
+
     async fn delete_credential(&self, id: &str) -> Result<(), StorageError> {
         credentials::delete(self, id).await
     }
