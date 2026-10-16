@@ -545,12 +545,25 @@ mod tests {
     }
 
     #[test]
-    fn report_power_state_stores_value() {
+    fn reported_power_state_is_read_back_by_the_tick_loop_decoder() {
         let ctrl = TickController::new();
-        ctrl.report_power_state(PowerState::CriticalBattery);
-        assert_eq!(ctrl.power_state.load(Ordering::Acquire), 3);
-        ctrl.report_power_state(PowerState::Charging);
-        assert_eq!(ctrl.power_state.load(Ordering::Acquire), 0);
+        for state in [
+            PowerState::Charging,
+            PowerState::Unplugged,
+            PowerState::LowBattery,
+            PowerState::CriticalBattery,
+        ] {
+            ctrl.report_power_state(state);
+
+            let decoded = PowerState::from_atomic(ctrl.power_state.load(Ordering::Acquire));
+
+            assert_eq!(decoded, state, "round trip for {state:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_power_state_encoding_decodes_as_unplugged() {
+        assert_eq!(PowerState::from_atomic(255), PowerState::Unplugged);
     }
 
     #[test]
@@ -681,8 +694,37 @@ mod tests {
         schedule.record_attempt(now + Duration::from_secs(1), false);
         assert!(schedule.dirty, "failed scans must remain pending");
     }
-}
 
-#[cfg(test)]
-#[path = "tick_controller_coverage_tests.rs"]
-mod tick_controller_coverage_tests;
+    #[test]
+    fn effective_interval_saturates_instead_of_overflowing() {
+        let huge = Duration::from_secs(u64::MAX / 2);
+
+        assert_eq!(
+            effective_tick_interval(huge, PowerState::CriticalBattery),
+            Duration::MAX
+        );
+    }
+
+    #[test]
+    fn idle_backoff_shift_is_capped_for_unbounded_streaks() {
+        let base = Duration::from_millis(500);
+
+        assert_eq!(
+            scheduled_tick_interval(base, PowerState::Unplugged, 100),
+            MAX_IDLE_INTERVAL
+        );
+        assert_eq!(
+            scheduled_tick_interval(base, PowerState::Unplugged, u32::MAX),
+            MAX_IDLE_INTERVAL,
+            "a streak of u32::MAX must not overflow the shift"
+        );
+    }
+
+    #[test]
+    fn instance_gc_fires_exactly_at_its_deadline_and_not_before() {
+        let now = Instant::now();
+
+        assert!(instance_gc_due(now, now, false), "deadline is inclusive");
+        assert!(!instance_gc_due(now, now + Duration::from_millis(1), false));
+    }
+}

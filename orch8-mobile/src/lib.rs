@@ -1785,6 +1785,18 @@ mod tests {
     }
 
     #[test]
+    fn sequence_batch_accepts_an_empty_array() {
+        assert!(parse_sequence_batch(b"[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn sequence_batch_rejects_a_non_array_document() {
+        let result = parse_sequence_batch(br#"{"name":"not-an-array"}"#);
+
+        assert!(matches!(result, Err(MobileError::InvalidInput { .. })));
+    }
+
+    #[test]
     fn sequence_batch_rejects_invalid_definition_before_returning_any() {
         let result = parse_sequence_batch(br#"[{"name":"incomplete"}]"#);
 
@@ -2770,10 +2782,6 @@ mod tests {
         assert_eq!(inst.state, InstanceState::Failed);
     }
 }
-
-#[cfg(test)]
-#[path = "engine_coverage_tests.rs"]
-mod engine_coverage_tests;
 
 #[cfg(test)]
 mod test_support;

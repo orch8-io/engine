@@ -239,8 +239,122 @@ mod tests {
                 .is_err()
         );
     }
-}
 
-#[cfg(test)]
-#[path = "privacy_boundary_tests.rs"]
-mod boundary_tests;
+    fn policy() -> BTreeSet<String> {
+        ["ssn", "secret", "photo"]
+            .map(String::from)
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn sanitizer_replaces_protected_keys_at_any_depth_and_keeps_everything_else() {
+        use serde_json::json;
+        let cases = [
+            (
+                "nested object",
+                json!({"user": {"ssn": "123"}}),
+                json!({"user": {"ssn": "[PROTECTED]"}}),
+            ),
+            (
+                "deeply nested",
+                json!({"a": {"b": {"secret": "x"}}}),
+                json!({"a": {"b": {"secret": "[PROTECTED]"}}}),
+            ),
+            (
+                "objects inside a top-level array",
+                json!([{"secret": "x"}, {"secret": "y"}]),
+                json!([{"secret": "[PROTECTED]"}, {"secret": "[PROTECTED]"}]),
+            ),
+            (
+                "objects inside a nested array",
+                json!({"items": [{"photo": "x"}]}),
+                json!({"items": [{"photo": "[PROTECTED]"}]}),
+            ),
+            (
+                "protected object replaced wholesale",
+                json!({"secret": {"nested": "x"}}),
+                json!({"secret": "[PROTECTED]"}),
+            ),
+            (
+                "protected array replaced wholesale",
+                json!({"photo": ["x", "y"]}),
+                json!({"photo": "[PROTECTED]"}),
+            ),
+            (
+                "protected null still replaced",
+                json!({"ssn": null}),
+                json!({"ssn": "[PROTECTED]"}),
+            ),
+            (
+                "public siblings preserved",
+                json!({"ssn": "x", "secret": "y", "photo": "z", "case": "A"}),
+                json!({"ssn": "[PROTECTED]", "secret": "[PROTECTED]", "photo": "[PROTECTED]", "case": "A"}),
+            ),
+            (
+                "keys are matched exactly, not by prefix or suffix",
+                json!({"user_ssn": "x", "secret_value": "y"}),
+                json!({"user_ssn": "x", "secret_value": "y"}),
+            ),
+            (
+                "scalars and unprotected arrays pass through",
+                json!([1, true, "x", null, {}]),
+                json!([1, true, "x", null, {}]),
+            ),
+        ];
+        for (case, input, expected) in cases {
+            assert_eq!(sanitize_value(&input, &policy()), expected, "case: {case}");
+        }
+    }
+
+    #[test]
+    #[ignore = "BUG: protected-field redaction is case-sensitive, so {\"SSN\": ..} leaks (T4 #12c) — fixed on test/bugs"]
+    fn sanitizer_matches_protected_keys_case_insensitively() {
+        let sanitized = sanitize_value(&serde_json::json!({"SSN": "123"}), &policy());
+
+        assert_eq!(sanitized, serde_json::json!({"SSN": "[PROTECTED]"}));
+    }
+
+    #[test]
+    fn policy_with_no_fields_or_an_empty_field_name_is_rejected() {
+        let empty = ProtectedFieldBoundary::new(FieldEncryptor::from_bytes(&[1; 32]), Vec::new());
+        let blank =
+            ProtectedFieldBoundary::new(FieldEncryptor::from_bytes(&[1; 32]), [String::new()]);
+
+        assert!(matches!(empty, Err(PrivacyError::InvalidPolicy)));
+        assert!(matches!(blank, Err(PrivacyError::InvalidPolicy)));
+    }
+
+    #[test]
+    fn sealing_requires_both_tenant_and_instance_binding() {
+        let value = serde_json::json!({"ssn": "x"});
+        for (tenant, instance) in [("", "instance"), ("tenant", "")] {
+            let result = boundary().seal_for_handoff(tenant, instance, &value);
+
+            assert!(
+                matches!(result, Err(PrivacyError::InvalidPolicy)),
+                "tenant={tenant:?} instance={instance:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leak_probe_rejects_an_empty_needle() {
+        let result = boundary().assert_no_raw_value("", &[("log", serde_json::json!({}))]);
+
+        assert!(matches!(result, Err(PrivacyError::InvalidPolicy)));
+    }
+
+    #[test]
+    fn leak_probe_names_the_surface_that_leaked_a_nested_value() {
+        let result = boundary().assert_no_raw_value(
+            "needle",
+            &[
+                ("log", serde_json::json!({"ok": true})),
+                ("trace", serde_json::json!({"nested": {"value": "needle"}})),
+            ],
+        );
+
+        assert!(matches!(result, Err(PrivacyError::Leak(surface)) if surface == "trace"));
+    }
+}

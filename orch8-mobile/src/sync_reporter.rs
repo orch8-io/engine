@@ -124,16 +124,6 @@ struct ScanOutboxEntries {
 }
 
 impl SyncReporter {
-    #[cfg(test)]
-    pub fn new(pool: SqlitePool, sync_url: String, device_id: String, api_key: String) -> Self {
-        Self::with_credential(
-            pool,
-            sync_url,
-            device_id,
-            crate::credential::Credential::new(api_key),
-        )
-    }
-
     /// A reporter sharing the engine's node credential (refreshed through
     /// the host's token provider on `401`).
     pub fn with_credential(
@@ -2130,8 +2120,114 @@ mod tests {
         assert!(reporter.has_forced_sync());
         assert!(reporter.should_sync());
     }
-}
 
-#[cfg(test)]
-#[path = "sync_reporter_coverage_tests.rs"]
-mod sync_reporter_coverage_tests;
+    #[test]
+    fn sync_response_without_fields_means_no_commands_and_the_default_interval() {
+        let response: SyncResponse = serde_json::from_str("{}").unwrap();
+
+        assert!(response.commands.is_empty());
+        assert_eq!(response.sync_interval_secs, 30);
+    }
+
+    #[test]
+    fn approval_payload_nulls_choices_that_are_not_valid_json() {
+        let payload: serde_json::Value = serde_json::from_str(&approval_payload(
+            "i1",
+            "gate",
+            None,
+            None,
+            Some("not-json"),
+            None,
+            None,
+        ))
+        .unwrap();
+
+        assert!(payload["choices"].is_null());
+        assert!(payload["prompt"].is_null());
+        assert!(payload["timeout_seconds"].is_null());
+    }
+
+    fn step_projection(
+        instance_id: InstanceId,
+        block_id: &str,
+        state: &str,
+    ) -> SyncExecutionStepProjection {
+        SyncExecutionStepProjection {
+            instance_id,
+            block_id: BlockId::new(block_id),
+            block_type: "step".to_string(),
+            state: state.to_string(),
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn steps_payload_is_absent_without_tree_or_sequence() {
+        assert!(build_steps_payload(&[], None).is_none());
+    }
+
+    #[test]
+    fn steps_payload_without_a_sequence_reports_the_tree_state_without_handlers() {
+        let mut node = step_projection(InstanceId::new(), "review", "waiting");
+        node.started_at = Some("2026-07-25T12:00:00Z".to_string());
+
+        let payload = build_steps_payload(&[node], None).unwrap();
+
+        assert_eq!(payload[0]["block_id"], "review");
+        assert_eq!(payload[0]["state"], "waiting");
+        assert!(payload[0]["handler"].is_null());
+        assert_eq!(payload[0]["started_at"], "2026-07-25T12:00:00Z");
+        assert!(payload[0]["completed_at"].is_null());
+    }
+
+    #[test]
+    fn steps_payload_reports_blocks_missing_from_the_tree_as_pending() {
+        let sequence: SequenceDefinition = serde_json::from_value(serde_json::json!({
+            "id": SequenceId::new(),
+            "tenant_id": "mobile",
+            "namespace": "default",
+            "name": "seq",
+            "version": 1,
+            "deprecated": false,
+            "blocks": [
+                {"type": "step", "id": "done", "handler": "emit", "params": {}},
+                {"type": "step", "id": "review", "handler": "human_review", "params": {}},
+            ],
+            "created_at": chrono::Utc::now(),
+        }))
+        .unwrap();
+        let tree = [step_projection(InstanceId::new(), "done", "completed")];
+
+        let payload = build_steps_payload(&tree, Some(&sequence)).unwrap();
+
+        assert_eq!(payload[0]["state"], "completed");
+        assert_eq!(payload[0]["handler"], "emit");
+        assert_eq!(payload[1]["block_id"], "review");
+        assert_eq!(payload[1]["state"], "pending");
+        assert!(payload[1]["started_at"].is_null());
+        assert_eq!(payload[1]["handler"], "human_review");
+    }
+
+    #[tokio::test]
+    async fn stale_push_completion_never_moves_the_completed_marker_backward() {
+        let (reporter, _storage, _lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        reporter.on_push_received();
+        reporter.on_push_received();
+
+        reporter.mark_pushes_completed(1);
+        assert!(reporter.has_forced_sync(), "one push still outstanding");
+        reporter.mark_pushes_completed(2);
+        assert!(!reporter.has_forced_sync());
+        reporter.mark_pushes_completed(1);
+
+        assert!(
+            !reporter.has_forced_sync(),
+            "stale completion must not re-force a sync"
+        );
+        assert_eq!(
+            reporter.completed_push_generation.load(Ordering::Acquire),
+            2
+        );
+    }
+}

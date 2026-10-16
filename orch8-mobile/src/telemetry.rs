@@ -16,6 +16,7 @@ const MAX_BUFFER_SIZE: u32 = 1000;
 /// Keeping this separate from the offline buffer ceiling prevents a full
 /// buffer from producing an oversized request that the server must reject.
 const MAX_UPLOAD_BATCH_SIZE: u32 = 500;
+const _: () = assert!(MAX_UPLOAD_BATCH_SIZE < MAX_BUFFER_SIZE);
 /// Auto-flush when buffer reaches this percentage of capacity.
 const AUTO_FLUSH_PCT: u32 = 80;
 /// When an offline buffer crosses its hard ceiling, trim a chunk so the next
@@ -840,8 +841,82 @@ mod tests {
 
         server.abort();
     }
-}
 
-#[cfg(test)]
-#[path = "telemetry_coverage_tests.rs"]
-mod telemetry_coverage_tests;
+    async fn manager_on_manual_clock() -> (TelemetryManager, Arc<orch8_types::clock::ManualClock>) {
+        use orch8_types::clock::{Clock, ManualClock};
+        let sqlite = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let storage = Arc::new(MobileStorage::new(sqlite));
+        let manual = Arc::new(ManualClock::new(chrono::Utc::now()));
+        let clock = SharedClock::from_arc(Arc::clone(&manual) as Arc<dyn Clock>);
+        let device = DeviceContext {
+            device_id: "dev-1".to_string(),
+            os_name: "iOS".to_string(),
+            os_version: "17.0".to_string(),
+            app_version: "1.0.0".to_string(),
+            sdk_version: "0.4.0".to_string(),
+        };
+        (
+            TelemetryManager::new_with_clock(storage, true, device, clock),
+            manual,
+        )
+    }
+
+    fn last_attempt(mgr: &TelemetryManager) -> Option<chrono::DateTime<chrono::Utc>> {
+        *mgr.last_flush_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[tokio::test]
+    async fn auto_flush_claim_is_refused_until_the_cooldown_has_fully_elapsed() {
+        let (mgr, manual) = manager_on_manual_clock().await;
+        assert!(mgr.claim_auto_flush_attempt(), "first claim succeeds");
+        assert!(
+            !mgr.claim_auto_flush_attempt(),
+            "immediate re-claim is refused"
+        );
+
+        manual.advance(chrono::Duration::seconds(AUTO_FLUSH_COOLDOWN_SECS - 1));
+        assert!(
+            !mgr.claim_auto_flush_attempt(),
+            "one second early is refused"
+        );
+
+        manual.advance(chrono::Duration::seconds(1));
+        assert!(
+            mgr.claim_auto_flush_attempt(),
+            "exactly at the cooldown succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn below_threshold_count_does_not_spend_an_auto_flush_attempt() {
+        let (mgr, _manual) = manager_on_manual_clock().await;
+        let threshold = u64::from(MAX_BUFFER_SIZE) * u64::from(AUTO_FLUSH_PCT) / 100;
+
+        mgr.maybe_auto_flush(threshold - 1).await;
+
+        assert_eq!(last_attempt(&mgr), None);
+    }
+
+    #[tokio::test]
+    async fn threshold_crossing_without_an_endpoint_still_claims_the_cooldown() {
+        use orch8_types::clock::Clock;
+        let (mgr, manual) = manager_on_manual_clock().await;
+        let start = manual.now();
+        let threshold = u64::from(MAX_BUFFER_SIZE) * u64::from(AUTO_FLUSH_PCT) / 100;
+
+        mgr.maybe_auto_flush(threshold).await;
+        mgr.maybe_auto_flush(threshold + 1).await;
+
+        assert_eq!(
+            last_attempt(&mgr),
+            Some(start),
+            "the second crossing inside the cooldown must not re-claim"
+        );
+    }
+}
