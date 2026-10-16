@@ -110,5 +110,5 @@ fn invariant_error(message: &str) -> StepError {
 }
 
 #[cfg(test)]
-#[path = "effect_coverage_tests.rs"]
-mod effect_coverage_tests;
+#[path = "effect_receipt_guard_tests.rs"]
+mod receipt_guard_tests;

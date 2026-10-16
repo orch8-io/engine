@@ -297,25 +297,139 @@ mod tests {
 
     #[test]
     fn export_options_enforce_short_lived_capsules() {
-        let mut value = options();
-        value.expires_in_seconds = 0;
-        assert!(validate_export_options(&value).is_err());
-        value.expires_in_seconds = 3_601;
-        assert!(validate_export_options(&value).is_err());
-        value.expires_in_seconds = 3_600;
-        assert!(validate_export_options(&value).is_ok());
+        let cases = [
+            ("zero seconds", 0, false),
+            ("one second", 1, true),
+            ("one hour", 3_600, true),
+            ("one hour plus one second", 3_601, false),
+        ];
+        for (case, seconds, valid) in cases {
+            let mut value = options();
+            value.expires_in_seconds = seconds;
+            let result = validate_export_options(&value);
+            if valid {
+                assert!(result.is_ok(), "case: {case}: {result:?}");
+            } else {
+                assert!(
+                    matches!(&result, Err(Error::Config(m)) if m.contains("between 1 and 3600 seconds")),
+                    "case: {case}: {result:?}"
+                );
+            }
+        }
     }
 
     #[test]
     fn export_options_bound_key_identifiers() {
-        let mut value = options();
-        value.signing_key_id.clear();
-        assert!(validate_export_options(&value).is_err());
-        value.signing_key_id = "s".repeat(129);
-        assert!(validate_export_options(&value).is_err());
+        type Mutation = fn(&mut CapsuleExportOptions);
+        let cases: [(&str, Mutation, Option<&str>); 6] = [
+            (
+                "1-byte key ids",
+                |o| {
+                    o.signing_key_id = "s".into();
+                    o.encryption_key_id = "e".into();
+                },
+                None,
+            ),
+            (
+                "128-byte key ids",
+                |o| {
+                    o.signing_key_id = "s".repeat(128);
+                    o.encryption_key_id = "e".repeat(128);
+                },
+                None,
+            ),
+            (
+                "empty signing key id",
+                |o| o.signing_key_id.clear(),
+                Some("signing key id"),
+            ),
+            (
+                "129-byte signing key id",
+                |o| o.signing_key_id = "s".repeat(129),
+                Some("signing key id"),
+            ),
+            (
+                "empty encryption key id",
+                |o| o.encryption_key_id.clear(),
+                Some("encryption key id"),
+            ),
+            (
+                "129-byte encryption key id",
+                |o| o.encryption_key_id = "e".repeat(129),
+                Some("encryption key id"),
+            ),
+        ];
+        for (case, mutate, rejected_label) in cases {
+            let mut value = options();
+            mutate(&mut value);
+            let result = validate_export_options(&value);
+            match rejected_label {
+                None => assert!(result.is_ok(), "case: {case}: {result:?}"),
+                Some(label) => assert!(
+                    matches!(&result, Err(Error::Config(m)) if m.contains(label)),
+                    "case: {case}: the error must name the {label}: {result:?}"
+                ),
+            }
+        }
+    }
+
+    fn execution() -> ContinuityExecution {
+        ContinuityExecution {
+            continuity_id: ContinuityId::new(),
+            tenant_id: orch8_types::ids::TenantId::unchecked("tenant_1"),
+            current_instance_id: InstanceId::new(),
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn continuity_identity_covers_every_field_except_freshness() {
+        type Mutation = fn(&mut ContinuityExecution);
+        let cases: [(&str, Mutation, bool); 7] = [
+            (
+                "continuity id",
+                |e| e.continuity_id = ContinuityId::new(),
+                false,
+            ),
+            (
+                "tenant",
+                |e| e.tenant_id = orch8_types::ids::TenantId::unchecked("tenant_2"),
+                false,
+            ),
+            (
+                "current instance",
+                |e| e.current_instance_id = InstanceId::new(),
+                false,
+            ),
+            (
+                "owner runtime",
+                |e| e.owner_runtime_id = RuntimeId::new(),
+                false,
+            ),
+            ("epoch", |e| e.epoch = ExecutionEpoch::from_u64(9), false),
+            (
+                "ownership state",
+                |e| e.state = OwnershipState::Transferring,
+                false,
+            ),
+            (
+                "updated_at only",
+                |e| e.updated_at += Duration::hours(1),
+                true,
+            ),
+        ];
+        for (case, mutate, same) in cases {
+            let base = execution();
+            let mut other = base.clone();
+            mutate(&mut other);
+            assert_eq!(
+                same_continuity_identity(&base, &other),
+                same,
+                "case: {case}"
+            );
+        }
     }
 }
-
-#[cfg(test)]
-#[path = "portable_coverage_tests.rs"]
-mod portable_coverage_tests;
