@@ -252,4 +252,31 @@ mod tests {
         assert_eq!(decode_cursor(&encode_cursor(cursor)).unwrap(), cursor);
         assert!(decode_cursor("not+url/base64").is_err());
     }
+
+    /// A cursor handed to a client must stay decodable across server
+    /// upgrades: the token is `base64url(JSON{created_at, id})` with
+    /// nanosecond timestamps.
+    const GOLDEN_CURSOR: &str = "eyJjcmVhdGVkX2F0IjoiMjAyNi0wNy0yNVQxMjozNDo1Ni4xMjM0NTY3ODlaIiwiaWQiOiIwMTkwYTBiNC02ZjQzLTdjMWUtOWE0Yi0xZjJlM2Q0YzViNmEifQ";
+
+    #[test]
+    fn previously_issued_cursor_token_still_decodes_with_nanosecond_precision() {
+        let expected = ChangeCursor {
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-07-25T12:34:56.123456789Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            id: Uuid::parse_str("0190a0b4-6f43-7c1e-9a4b-1f2e3d4c5b6a").unwrap(),
+        };
+        assert_eq!(decode_cursor(GOLDEN_CURSOR).unwrap(), expected);
+        assert_eq!(encode_cursor(expected), GOLDEN_CURSOR);
+    }
+
+    #[test]
+    fn cursor_without_an_id_is_rejected_as_invalid_argument() {
+        // base64url of {"created_at":"2026-07-25T12:34:56Z"}
+        let err = decode_cursor("eyJjcmVhdGVkX2F0IjoiMjAyNi0wNy0yNVQxMjozNDo1NloifQ").unwrap_err();
+        assert!(
+            matches!(err, ApiError::InvalidArgument(ref m) if m == "malformed change cursor"),
+            "got {err:?}"
+        );
+    }
 }

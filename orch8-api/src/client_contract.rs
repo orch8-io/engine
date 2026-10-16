@@ -78,9 +78,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "client_contract_boundary_tests.rs"]
-mod boundary_tests;
-
-#[cfg(test)]
 #[path = "client_contract_structure_tests.rs"]
 mod structure_tests;

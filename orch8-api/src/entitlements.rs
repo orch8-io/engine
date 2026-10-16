@@ -191,11 +191,77 @@ mod tests {
         plan.max_active_instances = 0;
         assert!(plan.validate().is_err());
     }
-}
 
-#[cfg(test)]
-#[path = "entitlements_boundary_tests.rs"]
-mod boundary_tests;
+    fn valid_plan() -> PlanEntitlements {
+        PlanEntitlements {
+            plan_id: "team".into(),
+            max_active_instances: 10,
+            max_batch_instances: 100,
+            max_context_bytes: 4096,
+            allowed_namespaces: BTreeSet::new(),
+            features: BTreeSet::new(),
+            default_priority_lane: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_zero_limits_and_batches_above_the_api_bound() {
+        type Mutation = fn(&mut PlanEntitlements);
+        let cases: [(&str, Mutation, bool); 10] = [
+            ("empty plan id", |p| p.plan_id.clear(), false),
+            ("one-char plan id", |p| p.plan_id = "x".into(), true),
+            ("zero active", |p| p.max_active_instances = 0, false),
+            ("one active", |p| p.max_active_instances = 1, true),
+            ("zero batch", |p| p.max_batch_instances = 0, false),
+            ("one batch", |p| p.max_batch_instances = 1, true),
+            (
+                "batch at API bound",
+                |p| p.max_batch_instances = 10_000,
+                true,
+            ),
+            (
+                "batch above API bound",
+                |p| p.max_batch_instances = 10_001,
+                false,
+            ),
+            ("zero context bytes", |p| p.max_context_bytes = 0, false),
+            ("one context byte", |p| p.max_context_bytes = 1, true),
+        ];
+        for (case, mutate, valid) in cases {
+            let mut plan = valid_plan();
+            mutate(&mut plan);
+            let result = plan.validate();
+            if valid {
+                assert_eq!(result, Ok(()), "case: {case}");
+            } else {
+                assert_eq!(
+                    result,
+                    Err("plan limits must be non-zero and within API bounds".to_string()),
+                    "case: {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_lookup_is_exact_and_case_sensitive() {
+        let catalog = StaticEntitlementCatalog::new(
+            HashMap::from([(TenantId::new("tenant-a").unwrap(), valid_plan())]),
+            PlanEntitlements::unlimited(),
+        )
+        .unwrap();
+        let cases = [
+            ("exact match", "tenant-a", "team"),
+            ("case difference", "Tenant-a", "self_managed"),
+            ("configured id is a prefix", "tenant-a-1", "self_managed"),
+            ("lookup id is a prefix", "tenant", "self_managed"),
+        ];
+        for (case, lookup, expected_plan) in cases {
+            let plan = catalog.entitlements_for(&TenantId::new(lookup).unwrap());
+            assert_eq!(plan.plan_id, expected_plan, "case: {case}");
+        }
+    }
+}
 
 #[cfg(test)]
 #[path = "entitlements_admission_tests.rs"]

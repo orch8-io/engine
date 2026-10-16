@@ -581,5 +581,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "principals_coverage_tests.rs"]
-mod principals_coverage_tests;
+#[path = "auth_route_matrix_tests.rs"]
+mod route_matrix_tests;
