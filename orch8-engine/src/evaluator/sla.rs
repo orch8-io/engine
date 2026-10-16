@@ -29,8 +29,10 @@ pub(super) async fn check_sla_deadlines(
     instance: &TaskInstance,
     block_map: &[(&BlockId, &BlockDefinition)],
     tree: &[ExecutionNode],
+    // Scheduler clock, so a virtual-time engine judges deadlines the same way
+    // the Waiting sweep that woke the instance did.
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, EngineError> {
-    let now = chrono::Utc::now();
     let mut breached = false;
     for node in tree {
         if !matches!(node.state, NodeState::Running | NodeState::Waiting) {

@@ -2351,3 +2351,152 @@ async fn dropped_parent_wake_is_retried_after_parent_parks() {
         InstanceState::Scheduled
     );
 }
+
+fn gate_step_with_timeout(id: &str, timeout: std::time::Duration) -> StepDef {
+    let mut step = mk_step_def(id, "noop", serde_json::json!({}));
+    step.wait_for_input = Some(orch8_types::sequence::HumanInputDef {
+        prompt: "approve?".into(),
+        timeout: Some(timeout),
+        escalation_handler: None,
+        choices: None,
+        store_as: None,
+        allow_comment: false,
+        auto_decide: None,
+    });
+    step
+}
+
+async fn sweep_waiting(
+    storage: &Arc<dyn StorageBackend>,
+    cursor: &mut WaitingSweepCursor,
+    batch_size: u32,
+    max_pages: u32,
+) {
+    let handlers = HandlerRegistry::new();
+    let cache = SequenceCache::new(100, Duration::from_secs(60));
+    let webhook_config = WebhookConfig::default();
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+    process_waiting_deadlines(
+        &SweepContext {
+            storage,
+            handlers: &handlers,
+            sequence_cache: &cache,
+            webhook_config: &webhook_config,
+            cancel: &cancel,
+            batch_size,
+            clock: &clock,
+        },
+        cursor,
+        max_pages,
+    )
+    .await
+    .unwrap();
+}
+
+/// L6-04: the Waiting sweep used to restart at offset 0 every tick and stop
+/// after a fixed page count, so instances sorted past the cap never had
+/// their timeouts checked. The cursor rotates the window across ticks.
+#[tokio::test]
+async fn waiting_sweep_rotates_past_the_page_cap() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![BlockDefinition::Step(Box::new(
+        gate_step_with_timeout("gate", std::time::Duration::from_secs(3600)),
+    ))]);
+    storage.create_sequence(&seq).await.unwrap();
+    // Three waiters on the gate; only the last-sorted one has expired.
+    let mut ids = Vec::new();
+    for (age_hours, sort_hours) in [(0, 3), (0, 2), (2, 1)] {
+        let mut inst = mk_waiting_instance(
+            seq.id,
+            chrono::Duration::hours(3),
+            Utc::now() - chrono::Duration::hours(sort_hours),
+        );
+        inst.context.runtime.current_step = Some(BlockId::new("gate"));
+        inst.context.runtime.current_step_started_at =
+            Some(Utc::now() - chrono::Duration::hours(age_hours));
+        storage.create_instance(&inst).await.unwrap();
+        ids.push(inst.id);
+    }
+    let state = |id: InstanceId| {
+        let storage = Arc::clone(&storage);
+        async move { storage.get_instance(id).await.unwrap().unwrap().state }
+    };
+
+    // One page of one row per tick: the old fixed window only ever saw ids[0].
+    let mut cursor = WaitingSweepCursor::default();
+    sweep_waiting(&storage, &mut cursor, 1, 1).await;
+    sweep_waiting(&storage, &mut cursor, 1, 1).await;
+    assert_eq!(state(ids[2]).await, InstanceState::Waiting);
+    sweep_waiting(&storage, &mut cursor, 1, 1).await;
+    assert_eq!(
+        state(ids[2]).await,
+        InstanceState::Scheduled,
+        "third tick reaches the instance past the page cap"
+    );
+    assert_eq!(state(ids[0]).await, InstanceState::Waiting);
+    assert_eq!(state(ids[1]).await, InstanceState::Waiting);
+}
+
+/// L3-02: a `wait_for_input.timeout` on a step nested in a composite fires
+/// while the instance is `Waiting` (the sweep wakes it so the evaluator's
+/// gate-timeout path runs); an unexpired nested gate stays parked.
+#[tokio::test]
+async fn waiting_sweep_wakes_instance_on_expired_nested_gate_timeout() {
+    use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![BlockDefinition::Parallel(Box::new(
+        orch8_types::sequence::ParallelDef {
+            id: BlockId::new("par"),
+            branches: vec![
+                vec![BlockDefinition::Step(Box::new(gate_step_with_timeout(
+                    "gate",
+                    std::time::Duration::from_secs(1),
+                )))],
+                vec![BlockDefinition::Step(Box::new(mk_step_def(
+                    "other",
+                    "noop",
+                    serde_json::json!({}),
+                )))],
+            ],
+        },
+    ))]);
+    storage.create_sequence(&seq).await.unwrap();
+
+    let mut seeded = Vec::new();
+    for gate_started in [Utc::now() - chrono::Duration::hours(1), Utc::now()] {
+        let inst = mk_waiting_instance(seq.id, chrono::Duration::hours(1), Utc::now());
+        storage.create_instance(&inst).await.unwrap();
+        let root = ExecutionNode {
+            id: orch8_types::ids::ExecutionNodeId::new(),
+            instance_id: inst.id,
+            block_id: BlockId::new("par"),
+            parent_id: None,
+            block_type: BlockType::Parallel,
+            branch_index: None,
+            state: NodeState::Running,
+            started_at: Some(gate_started),
+            completed_at: None,
+        };
+        let gate = ExecutionNode {
+            id: orch8_types::ids::ExecutionNodeId::new(),
+            instance_id: inst.id,
+            block_id: BlockId::new("gate"),
+            parent_id: Some(root.id),
+            block_type: BlockType::Step,
+            branch_index: Some(0),
+            state: NodeState::Waiting,
+            started_at: Some(gate_started),
+            completed_at: None,
+        };
+        storage.create_execution_node(&root).await.unwrap();
+        storage.create_execution_node(&gate).await.unwrap();
+        seeded.push(inst.id);
+    }
+
+    sweep_waiting(&storage, &mut WaitingSweepCursor::default(), 10, 1).await;
+    let expired = storage.get_instance(seeded[0]).await.unwrap().unwrap();
+    assert_eq!(expired.state, InstanceState::Scheduled);
+    let fresh = storage.get_instance(seeded[1]).await.unwrap().unwrap();
+    assert_eq!(fresh.state, InstanceState::Waiting);
+}

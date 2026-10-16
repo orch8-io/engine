@@ -137,15 +137,21 @@ pub async fn tick_once(
     )
     .await?;
 
-    process_waiting_deadlines(&SweepContext {
-        storage,
-        handlers,
-        sequence_cache,
-        webhook_config: &webhook_config,
-        cancel,
-        batch_size: config.batch_size,
-        clock: &config.clock,
-    })
+    // Like the SLA sweep below, the single-shot path carries no cursor and
+    // scans the whole Waiting set.
+    process_waiting_deadlines(
+        &SweepContext {
+            storage,
+            handlers,
+            sequence_cache,
+            webhook_config: &webhook_config,
+            cancel,
+            batch_size: config.batch_size,
+            clock: &config.clock,
+        },
+        &mut WaitingSweepCursor::default(),
+        u32::MAX,
+    )
     .await?;
 
     // `tick_once` is the single-shot mobile entry point — no cursor is
@@ -248,6 +254,8 @@ pub async fn run_tick_loop_with_liveness(
     // covers the whole active set over successive ticks, a bounded number of
     // pages at a time.
     let mut sla_cursor = SlaSweepCursor::default();
+    // Rotating cursor for the Waiting deadline/timeout sweep (L6-04).
+    let mut waiting_cursor = WaitingSweepCursor::default();
 
     loop {
         tokio::select! {
@@ -323,15 +331,19 @@ pub async fn run_tick_loop_with_liveness(
                 // Check SLA deadlines for waiting instances (external worker
                 // dispatch). These instances are not claimed by the normal
                 // tick, but deadlines should still fire.
-                if let Err(e) = process_waiting_deadlines(&SweepContext {
-                    storage: &storage,
-                    handlers: &handlers,
-                    sequence_cache: &sequence_cache,
-                    webhook_config: &webhook_config,
-                    cancel: &cancel,
-                    batch_size,
-                    clock: &config.clock,
-                }).await {
+                if let Err(e) = process_waiting_deadlines(
+                    &SweepContext {
+                        storage: &storage,
+                        handlers: &handlers,
+                        sequence_cache: &sequence_cache,
+                        webhook_config: &webhook_config,
+                        cancel: &cancel,
+                        batch_size,
+                        clock: &config.clock,
+                    },
+                    &mut waiting_cursor,
+                    MAX_SWEEP_PAGES,
+                ).await {
                     error!(error = %e, "waiting deadline processing failed");
                 }
                 // Alert-only SLA sweep over active instances (max_runtime /
@@ -1024,9 +1036,66 @@ async fn process_signalled_instances(
 }
 
 /// Max pages of Waiting instances swept for deadlines/timeouts per tick. Bounds
-/// per-tick work while still covering a backlog larger than one batch (the old
-/// single-page cap permanently starved instances sorted past `batch_size`).
+/// per-tick work; the rotating [`WaitingSweepCursor`] carries the position
+/// across ticks so a backlog larger than this still gets fully covered.
 const MAX_SWEEP_PAGES: u32 = 64;
+
+/// Upper bound on the cursor's sequence -> has-nested-timers memo.
+const WAITING_SWEEP_MEMO_MAX: usize = 4096;
+
+/// Rotating-scan state for the Waiting deadline/timeout sweep, carried across
+/// ticks by the tick loop (`tick_once` uses a fresh one and scans everything).
+///
+/// - `offset`: where the next tick resumes paging the Waiting set. The sweep
+///   used to restart at offset 0 every tick and stop after
+///   [`MAX_SWEEP_PAGES`], so instances sorted past `64 × batch_size` never
+///   had their deadlines or `wait_for_input` timeouts checked (L6-04).
+/// - `nested_timers`: memo of `sequence_id` -> "has a step *nested* in a
+///   composite that declares a `deadline` or `wait_for_input.timeout`"
+///   (immutable per sequence id), so only those instances pay for an
+///   execution-tree read (L3-02).
+#[derive(Default)]
+pub(crate) struct WaitingSweepCursor {
+    offset: u64,
+    nested_timers: HashMap<orch8_types::ids::SequenceId, bool>,
+}
+
+impl WaitingSweepCursor {
+    fn has_nested_timers(&mut self, seq: &SequenceDefinition) -> bool {
+        if let Some(known) = self.nested_timers.get(&seq.id) {
+            return *known;
+        }
+        let has = sequence_has_nested_timers(seq);
+        if self.nested_timers.len() >= WAITING_SWEEP_MEMO_MAX {
+            self.nested_timers.clear();
+        }
+        self.nested_timers.insert(seq.id, has);
+        has
+    }
+}
+
+/// `true` when a step nested inside a composite block declares a `deadline`
+/// or a `wait_for_input.timeout`. Top-level steps are covered by
+/// [`check_waiting_instance`]'s root scan.
+fn sequence_has_nested_timers(seq: &SequenceDefinition) -> bool {
+    crate::evaluator::flatten_blocks(&seq.blocks)
+        .iter()
+        .any(|(id, block)| {
+            matches!(block, orch8_types::sequence::BlockDefinition::Step(step)
+                if step_has_timer(step))
+                && !seq.blocks.iter().any(|root| {
+                    matches!(root, orch8_types::sequence::BlockDefinition::Step(r) if &r.id == *id)
+                })
+        })
+}
+
+fn step_has_timer(step: &orch8_types::sequence::StepDef) -> bool {
+    step.deadline.is_some()
+        || step
+            .wait_for_input
+            .as_ref()
+            .is_some_and(|h| h.timeout.is_some())
+}
 
 /// Batch-fetch the deadline block outputs for `keys` in a single query. An
 /// empty key set short-circuits to an empty map without touching storage.
@@ -1073,7 +1142,11 @@ impl<'a> DeadlineOutputs<'a> {
 /// Check SLA deadlines for instances stuck in `Waiting` state (dispatched to
 /// external workers that never completed). Runs every tick with a bounded
 /// query to avoid overhead when no deadlines are configured.
-async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineError> {
+async fn process_waiting_deadlines(
+    ctx: &SweepContext<'_>,
+    cursor: &mut WaitingSweepCursor,
+    max_pages: u32,
+) -> Result<(), EngineError> {
     use orch8_types::filter::{InstanceFilter, Pagination};
 
     let SweepContext {
@@ -1093,10 +1166,12 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
     // `batch_size` rows (the old behaviour) permanently starved any due
     // instance sorted past position `batch_size` — its timeout never fired.
     // Woken instances leave the Waiting set mid-sweep, so an offset window can
-    // skip a few after wakes; those are picked up on the next tick
-    // (self-correcting, and this sweep runs every tick).
-    let mut offset: u64 = 0;
-    for _page in 0..MAX_SWEEP_PAGES {
+    // skip a few after wakes; those are picked up on the next rotation
+    // (self-correcting, and this sweep runs every tick). The window resumes
+    // from `cursor.offset` and wraps to 0 at the end of the set.
+    let mut offset: u64 = cursor.offset;
+    let mut wrapped = false;
+    for _page in 0..max_pages {
         let pagination = Pagination {
             offset,
             limit: batch_size,
@@ -1106,6 +1181,7 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
         let page_len = waiting.len();
         if waiting.is_empty() {
             // Idle / drained — skip the per-instance sequence-cache walk.
+            wrapped = true;
             break;
         }
 
@@ -1148,11 +1224,18 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
 
         for (instance, seq) in instance_sequences {
             let completed_ids = completed.remove(&instance.id).unwrap_or_default();
+            let nested_timers = cursor.has_nested_timers(&seq);
             // Per-instance failures (a lost CAS, a transient write error) must
             // not abort the sweep for every other Waiting instance.
-            if let Err(e) =
-                check_waiting_instance(ctx, instance, &seq, &deadline_outputs_ref, &completed_ids)
-                    .await
+            if let Err(e) = check_waiting_instance(
+                ctx,
+                instance,
+                &seq,
+                &deadline_outputs_ref,
+                &completed_ids,
+                nested_timers,
+            )
+            .await
             {
                 warn!(
                     instance_id = %instance.id,
@@ -1163,13 +1246,15 @@ async fn process_waiting_deadlines(ctx: &SweepContext<'_>) -> Result<(), EngineE
         }
 
         // A short page means we reached the end of the Waiting set; otherwise
-        // advance the window to the next page. `MAX_SWEEP_PAGES` bounds the
+        // advance the window to the next page. `max_pages` bounds the
         // per-tick work so a pathological backlog can't stall the tick loop.
         if u32::try_from(page_len).unwrap_or(u32::MAX) < batch_size {
+            wrapped = true;
             break;
         }
         offset += u64::from(batch_size);
     }
+    cursor.offset = if wrapped { 0 } else { offset };
     Ok(())
 }
 
@@ -1182,6 +1267,7 @@ async fn check_waiting_instance(
     seq: &SequenceDefinition,
     deadline_outputs_ref: &DeadlineOutputs<'_>,
     completed_block_ids: &[BlockId],
+    nested_timers: bool,
 ) -> Result<(), EngineError> {
     for block in &seq.blocks {
         if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
@@ -1199,7 +1285,7 @@ async fn check_waiting_instance(
                 )
                 .await?
                 {
-                    break; // Instance was failed — no need to check more steps.
+                    return Ok(()); // Instance was failed — no need to check more steps.
                 }
             }
 
@@ -1243,11 +1329,71 @@ async fn check_waiting_instance(
                             Some(ctx.clock.now()),
                         )
                         .await?;
-                        break;
+                        return Ok(());
                     }
                 }
             }
         }
+    }
+    if nested_timers {
+        wake_on_expired_nested_timer(ctx, instance, seq).await?;
+    }
+    Ok(())
+}
+
+/// L3-02: steps nested in a composite (`parallel`, `try_catch`, `loop`, a
+/// saga action, ...) park their *node* `Waiting`; their `deadline` and
+/// `wait_for_input.timeout` were only enforced inside `evaluate`, which never
+/// runs while the instance itself is `Waiting`. Walk the execution tree and,
+/// when a live node's timer (measured from the node's own `started_at`, the
+/// same baseline `evaluate` uses) has expired, wake the instance so the
+/// evaluator's own SLA / gate-timeout handling fires on the next claim.
+async fn wake_on_expired_nested_timer(
+    ctx: &SweepContext<'_>,
+    instance: &orch8_types::instance::TaskInstance,
+    seq: &SequenceDefinition,
+) -> Result<(), EngineError> {
+    use orch8_types::execution::NodeState;
+    use orch8_types::sequence::BlockDefinition;
+
+    let tree = ctx.storage.get_execution_tree(instance.id).await?;
+    let blocks = crate::evaluator::flatten_blocks(&seq.blocks);
+    let now = ctx.clock.now();
+    let expired = tree.iter().any(|node| {
+        if !matches!(node.state, NodeState::Running | NodeState::Waiting) {
+            return false;
+        }
+        let Some(started) = node.started_at else {
+            return false;
+        };
+        let Ok(idx) = blocks.binary_search_by_key(&&node.block_id, |(id, _)| *id) else {
+            return false;
+        };
+        let BlockDefinition::Step(step) = blocks[idx].1 else {
+            return false;
+        };
+        let limits = [
+            step.deadline,
+            step.wait_for_input.as_ref().and_then(|h| h.timeout),
+        ];
+        limits.into_iter().flatten().any(|limit| {
+            now - started >= chrono::Duration::from_std(limit).unwrap_or(chrono::TimeDelta::MAX)
+        })
+    });
+    if expired {
+        debug!(
+            instance_id = %instance.id,
+            "nested step deadline/timeout expired while Waiting, waking instance"
+        );
+        crate::lifecycle::transition_instance(
+            ctx.storage.as_ref(),
+            instance.id,
+            Some(&instance.tenant_id),
+            InstanceState::Waiting,
+            InstanceState::Scheduled,
+            Some(now),
+        )
+        .await?;
     }
     Ok(())
 }
