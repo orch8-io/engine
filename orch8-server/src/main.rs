@@ -1038,6 +1038,17 @@ fn init_prometheus() -> anyhow::Result<MetricsState> {
     let handle = prometheus_handle.handle();
     metrics::set_global_recorder(prometheus_handle)
         .context("failed to install Prometheus recorder")?;
+    // `build_recorder` spawns no upkeep: histogram samples are drained only
+    // on render, so without a scraper they piled up in memory for ever.
+    let upkeep = handle.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            upkeep.run_upkeep();
+        }
+    });
     Ok(MetricsState { handle })
 }
 
