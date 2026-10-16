@@ -1224,11 +1224,47 @@ mod tests {
         assert_eq!(decoded.handlers, ["http_request"]);
         assert_eq!(serde_json::to_value(decoded).unwrap(), value);
     }
-}
 
-#[cfg(test)]
-#[path = "continuity_coverage_tests.rs"]
-mod continuity_coverage_tests;
+    fn scored_evidence() -> PlacementEvidence {
+        PlacementEvidence {
+            runtime_id: RuntimeId::new(),
+            outcome: PolicyOutcome::Allow,
+            score: 81,
+            score_factors: PlacementScoreFactors {
+                trust: 40,
+                current_runtime: 25,
+                offline_capable: 10,
+                battery_rank: 3,
+                cost_rank: 2,
+                latency_rank: 1,
+            },
+            finding_codes: vec!["trust_ok".into()],
+        }
+    }
+
+    #[test]
+    fn evidence_stored_before_score_factors_existed_still_loads_with_zero_factors() {
+        let mut value = serde_json::to_value(scored_evidence()).unwrap();
+        value.as_object_mut().unwrap().remove("score_factors");
+        let decoded: PlacementEvidence = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.score_factors, PlacementScoreFactors::default());
+        assert_eq!(decoded.score, 81);
+    }
+
+    #[test]
+    #[ignore = "BUG: PlacementScoreFactors has no per-field #[serde(default)], so adding a factor breaks every stored decision — fixed on test/bugs"]
+    fn evidence_stored_before_a_new_score_factor_existed_still_loads() {
+        let mut value = serde_json::to_value(scored_evidence()).unwrap();
+        value["score_factors"]
+            .as_object_mut()
+            .unwrap()
+            .remove("latency_rank");
+        let decoded: PlacementEvidence = serde_json::from_value(value)
+            .expect("an old record missing one factor must still deserialize");
+        assert_eq!(decoded.score_factors.trust, 40);
+        assert_eq!(decoded.score_factors.latency_rank, 0);
+    }
+}
 
 #[cfg(test)]
 mod placement_requirement_tests {

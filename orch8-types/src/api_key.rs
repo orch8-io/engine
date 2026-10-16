@@ -206,8 +206,42 @@ mod tests {
         k.expires_at = Some(now + chrono::Duration::seconds(60));
         assert!(k.is_active(now));
     }
-}
 
-#[cfg(test)]
-#[path = "api_key_coverage_tests.rs"]
-mod api_key_coverage_tests;
+    #[test]
+    fn key_is_inactive_at_the_exact_expiry_instant() {
+        let now = Utc::now();
+        let mut record = mint("t", "k", Some(now)).record;
+        assert!(!record.is_active(now), "expiry is exclusive");
+        record.expires_at = Some(now + chrono::Duration::milliseconds(1));
+        assert!(record.is_active(now));
+    }
+
+    #[test]
+    fn persisted_hash_is_the_hex_sha256_of_the_one_time_secret() {
+        let minted = mint_scoped("acme", "k", None, vec![ApiCapability::Approver]);
+        assert_eq!(minted.record.key_hash, hash_api_key(&minted.secret));
+        assert!(
+            !minted.record.key_hash.contains(&minted.secret),
+            "the plaintext secret must not be stored"
+        );
+    }
+
+    #[test]
+    fn every_mint_yields_a_fresh_id_and_secret() {
+        let a = mint_scoped("acme", "a", None, vec![ApiCapability::Worker]);
+        let b = mint_scoped("acme", "a", None, vec![ApiCapability::Worker]);
+        assert_ne!(a.record.id, b.record.id);
+        assert_ne!(a.secret, b.secret);
+        assert_ne!(a.record.key_hash, b.record.key_hash);
+    }
+
+    #[test]
+    fn compatibility_grant_never_includes_session_only_capabilities() {
+        // BrowserWorker / DeviceNode are minted only for short-lived runtime
+        // sessions; a legacy key widened to `all()` must never hold them.
+        let all = ApiCapability::all();
+        assert!(!all.contains(&ApiCapability::BrowserWorker));
+        assert!(!all.contains(&ApiCapability::DeviceNode));
+        assert!(all.contains(&ApiCapability::Operator));
+    }
+}
