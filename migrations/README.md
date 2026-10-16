@@ -64,3 +64,18 @@ the migration record before the next `orch8 migrate`:
 ```sql
 DELETE FROM _sqlx_migrations WHERE version = 82;
 ```
+
+## Upgrading large installs to 100–106
+
+Migrations 100–106 add indexes to hot tables (`task_instances`,
+`worker_tasks`, `signal_inbox`, `usage_events`, `webhook_outbox`, the
+continuity tables). Each file builds them with a plain
+`CREATE INDEX IF NOT EXISTS`, which blocks writes to the table while it runs.
+On a large database, first run the `CREATE INDEX CONCURRENTLY IF NOT EXISTS`
+statements listed in each file's header (outside a transaction, one at a
+time), then run `orch8 migrate`; the migration's own statements are then
+no-ops. 103 also back-fills `worker_tasks.tenant_id` for pending/claimed rows
+only (the live backlog). 100 and 103 add nullable columns (metadata-only, no
+rewrite); 105 only changes storage parameters (no rewrite; `fillfactor`
+applies to newly written pages — use `pg_repack` to apply it to existing
+ones).

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Long-run storage and state safety
+
+- **Instance lease fencing (L6-01).** The scheduler's instance heartbeat is
+  now fenced on a per-claim token (`task_instances.claimed_at`, migration
+  100). A node that stalled past the stale threshold and lost its claim to
+  the reaper / another node stops starting steps instead of running the
+  instance alongside the new owner.
+- **Worker completions no longer undo a cancel (I-C02).** The flat-path
+  worker completion transitions are CAS-guarded like the tree path.
+- **Behaviour change: `POST /sequences/{name}/unpublish {"delete": true}`
+  returns `409 Conflict`** (with the active-instance count) while any version
+  still has a scheduled/running/paused/waiting instance, instead of
+  cascade-deleting them. `delete_sequence` in storage refuses the same way,
+  so no caller can delete live instances. On mobile, a manifest version bump
+  installs the new version alongside one that in-flight instances still run.
+- **Retention.** The instance-retention sweep drains its backlog in
+  200-instance transactions (60 s budget per tick), deletes the instances'
+  artifact blobs, never deletes a child a live parent still needs, and also
+  removes the continuity scope, effect receipts, worker-task attempt events
+  and event waits of purged instances. A new bounded sweep prunes
+  `worker_task_attempt_events` (90 d), consumed/expired `event_inbox` rows
+  (30 d), `sub_tenant_executions` (400 d), mobile error telemetry (90 d),
+  settled mobile status/approvals (30 d), silent stopped `cluster_nodes`
+  (7 d) and stale `worker_registrations` (7 d). The mobile embed deletes
+  terminal instances after 30 days. SQLite files are created with
+  `auto_vacuum=INCREMENTAL` and a 64 MiB `journal_size_limit`, and the GC
+  returns free pages (existing files need a one-off `VACUUM` to switch).
+- **Indexes for large tables (migrations 100–106).** Scheduler claim index
+  matching `NULLS FIRST`, FK-child indexes that keep instance deletes from
+  seq-scanning `signal_inbox` / `emit_event_dedupe` / `usage_events`, GC,
+  worker-task reaper/tenant-poll, list, outbox and retention indexes, plus
+  `task_instances` fillfactor/autovacuum settings. Large installs should
+  pre-create the indexes with the `CREATE INDEX CONCURRENTLY` statements in
+  each migration's header (or run `orch8 migrate`) before upgrading.
+
 ### Hybrid: remote executors with no database
 
 See [docs/HYBRID.md](docs/HYBRID.md).
