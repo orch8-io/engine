@@ -333,7 +333,13 @@ async fn main() -> anyhow::Result<()> {
     // Inject storage so `Open` transitions survive process restarts, then
     // rehydrate any previously persisted rows. Load failures are non-fatal —
     // the registry logs and boots with an empty in-memory state.
-    let cb_registry = Arc::new(CircuitBreakerRegistry::new(5, 60).with_storage(storage.clone()));
+    let cb_registry = Arc::new(
+        CircuitBreakerRegistry::new(
+            config.circuit_breaker.failure_threshold.max(1),
+            config.circuit_breaker.cooldown_secs.max(1),
+        )
+        .with_storage(storage.clone()),
+    );
     cb_registry.load_from_storage().await;
 
     // cb_registry is already inside app_state.circuit_breakers below.
@@ -1557,6 +1563,12 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     }
     if let Some(secs) = env_parse("ORCH8_INSTANCE_RETENTION_SECS") {
         config.engine.instance_retention_secs = secs;
+    }
+    if let Some(n) = env_parse("ORCH8_CIRCUIT_BREAKER_FAILURE_THRESHOLD") {
+        config.circuit_breaker.failure_threshold = n;
+    }
+    if let Some(secs) = env_parse("ORCH8_CIRCUIT_BREAKER_COOLDOWN_SECS") {
+        config.circuit_breaker.cooldown_secs = secs;
     }
     if let Ok(val) = std::env::var("ORCH8_STORAGE_BACKEND") {
         config.database.backend = val;

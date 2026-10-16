@@ -172,7 +172,11 @@ pub const RETRY_AFTER_MS_KEY: &str = "retry_after_ms";
 /// [`MAX_RETRY_AFTER`].
 #[must_use]
 pub fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
     let wait = if let Ok(secs) = raw.parse::<u64>() {
         Duration::from_secs(secs)
     } else {

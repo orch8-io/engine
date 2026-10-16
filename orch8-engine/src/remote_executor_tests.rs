@@ -444,7 +444,11 @@ async fn settle_retries_through_a_control_plane_outage_and_keeps_the_lease() {
     )
     .await;
     assert!(started.elapsed() >= Duration::from_secs(3));
-    assert_eq!(transport.calls("complete").len(), 7, "retried until accepted");
+    assert_eq!(
+        transport.calls("complete").len(),
+        7,
+        "retried until accepted"
+    );
     assert!(
         !transport.calls("heartbeat").is_empty(),
         "the lease was renewed while reporting"
@@ -456,7 +460,9 @@ async fn settle_retries_through_a_control_plane_outage_and_keeps_the_lease() {
 #[tokio::test]
 async fn settle_gives_up_when_the_lease_runs_out() {
     let transport = Arc::new(FakeTransport::default());
-    transport.retry_completes.store(usize::MAX, Ordering::Relaxed);
+    transport
+        .retry_completes
+        .store(usize::MAX, Ordering::Relaxed);
     *transport.heartbeat_response.lock().unwrap() = Some(LeaseResponse::Retry);
     let exec = executor(
         Arc::clone(&transport),
@@ -473,8 +479,12 @@ async fn settle_gives_up_when_the_lease_runs_out() {
         session: 0,
     };
     let started = tokio::time::Instant::now();
-    exec.settle(&claimed, Outcome::Complete(json!({})), Duration::from_secs(2))
-        .await;
+    exec.settle(
+        &claimed,
+        Outcome::Complete(json!({})),
+        Duration::from_secs(2),
+    )
+    .await;
     assert!(started.elapsed() <= Duration::from_secs(4));
     assert!(transport.calls("complete").len() > 4);
     assert_eq!(exec.stats().completed, 0);

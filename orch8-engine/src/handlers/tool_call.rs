@@ -406,7 +406,13 @@ mod tests {
     /// mask tool-side bugs — downstream steps ran on `result=null`.
     #[test]
     fn non_json_success_returns_permanent_error() {
-        let err = interpret_tool_response("search", 200, &reqwest::header::HeaderMap::new(), b"<html>not json</html>").unwrap_err();
+        let err = interpret_tool_response(
+            "search",
+            200,
+            &reqwest::header::HeaderMap::new(),
+            b"<html>not json</html>",
+        )
+        .unwrap_err();
         match err {
             StepError::Permanent { message, .. } => {
                 assert!(
@@ -424,7 +430,8 @@ mod tests {
     /// return 204 No Content (or 200 with no body) continue to work.
     #[test]
     fn empty_body_success_returns_null_result() {
-        let out = interpret_tool_response("search", 200, &reqwest::header::HeaderMap::new(), b"").unwrap();
+        let out = interpret_tool_response("search", 200, &reqwest::header::HeaderMap::new(), b"")
+            .unwrap();
         assert_eq!(out.get("result"), Some(&json!(null)));
         assert_eq!(
             out.get("status").and_then(serde_json::Value::as_u64),
@@ -435,7 +442,13 @@ mod tests {
     /// Valid JSON body on 2xx is parsed and returned under `result`.
     #[test]
     fn valid_json_success_returns_parsed_result() {
-        let out = interpret_tool_response("search", 200, &reqwest::header::HeaderMap::new(), br#"{"ok":true,"n":7}"#).unwrap();
+        let out = interpret_tool_response(
+            "search",
+            200,
+            &reqwest::header::HeaderMap::new(),
+            br#"{"ok":true,"n":7}"#,
+        )
+        .unwrap();
         assert_eq!(out.get("result").unwrap(), &json!({"ok": true, "n": 7}));
         assert_eq!(
             out.get("tool_name").and_then(|n| n.as_str()),
@@ -448,7 +461,13 @@ mod tests {
     /// silently becoming `null`.
     #[test]
     fn status_5xx_text_body_surfaces_raw_text_in_retryable() {
-        let err = interpret_tool_response("search", 500, &reqwest::header::HeaderMap::new(), b"upstream broke").unwrap_err();
+        let err = interpret_tool_response(
+            "search",
+            500,
+            &reqwest::header::HeaderMap::new(),
+            b"upstream broke",
+        )
+        .unwrap_err();
         match err {
             StepError::Retryable {
                 details: Some(d), ..
@@ -470,7 +489,13 @@ mod tests {
     /// error info from the tool survives to the caller.
     #[test]
     fn status_4xx_json_body_parsed_in_permanent_details() {
-        let err = interpret_tool_response("search", 400, &reqwest::header::HeaderMap::new(), br#"{"code":"bad_arg"}"#).unwrap_err();
+        let err = interpret_tool_response(
+            "search",
+            400,
+            &reqwest::header::HeaderMap::new(),
+            br#"{"code":"bad_arg"}"#,
+        )
+        .unwrap_err();
         match err {
             StepError::Permanent {
                 details: Some(d), ..
@@ -492,7 +517,8 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "3".parse().unwrap());
         for status in [408, 429] {
-            let err = interpret_tool_response("search", status, &headers, b"slow down").unwrap_err();
+            let err =
+                interpret_tool_response("search", status, &headers, b"slow down").unwrap_err();
             let StepError::Retryable { details, .. } = err else {
                 panic!("{status} must be retryable");
             };

@@ -148,6 +148,9 @@ pub struct EngineConfig {
     /// the `/alerts/rules` API.
     #[serde(default)]
     pub alerts: AlertsConfig,
+    /// Step circuit-breaker thresholds (`[circuit_breaker]`).
+    #[serde(default)]
+    pub circuit_breaker: CircuitBreakerConfig,
     /// Embedded (end-customer) surface: scoped embed tokens + CORS.
     #[serde(default)]
     pub embed: EmbedConfig,
@@ -362,6 +365,39 @@ const fn default_cloud_observability_interval_ms() -> u64 {
 
 const fn default_cloud_observability_buffer() -> usize {
     10_000
+}
+
+/// `[circuit_breaker]` section: thresholds of the per-(tenant, handler or
+/// destination) step circuit breaker. Only transient failures (5xx, 429,
+/// timeouts, connection errors) count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CircuitBreakerConfig {
+    /// Consecutive transient failures that open a breaker. Default 5.
+    /// Env: `ORCH8_CIRCUIT_BREAKER_FAILURE_THRESHOLD`.
+    #[serde(default = "default_breaker_failure_threshold")]
+    pub failure_threshold: u32,
+    /// How long an open breaker defers calls before a probe. Default 60 s.
+    /// Env: `ORCH8_CIRCUIT_BREAKER_COOLDOWN_SECS`.
+    #[serde(default = "default_breaker_cooldown_secs")]
+    pub cooldown_secs: u64,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: default_breaker_failure_threshold(),
+            cooldown_secs: default_breaker_cooldown_secs(),
+        }
+    }
+}
+
+const fn default_breaker_failure_threshold() -> u32 {
+    5
+}
+
+const fn default_breaker_cooldown_secs() -> u64 {
+    60
 }
 
 /// `[alerts]` section.

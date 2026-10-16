@@ -92,7 +92,8 @@ pub(crate) fn breaker_preflight_at<'a>(
     let Some(cb) = handlers.circuit_breakers().filter(|_| tracked) else {
         return BreakerDecision::Proceed(Cow::Borrowed(step_def));
     };
-    let Err(remaining_secs) = cb.check(tenant_id, &step_def.handler) else {
+    let scope = crate::circuit_breaker::breaker_scope(&step_def.handler, &step_def.params);
+    let Err(remaining_secs) = cb.check(tenant_id, &scope) else {
         return BreakerDecision::Proceed(Cow::Borrowed(step_def));
     };
 
@@ -112,7 +113,11 @@ pub(crate) fn breaker_preflight_at<'a>(
 
     // Re-check the fallback's breaker. Skip-listed fallbacks bypass the check.
     let fb_remaining_open = if crate::circuit_breaker::is_breaker_tracked(fb) {
-        cb.check(tenant_id, fb).err()
+        cb.check(
+            tenant_id,
+            &crate::circuit_breaker::breaker_scope(fb, &step_def.params),
+        )
+        .err()
     } else {
         None
     };
@@ -711,7 +716,10 @@ pub(crate) async fn execute_step_node_with_clock(
     match result {
         Ok(output) => {
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
-                cb.record_success(&instance.tenant_id, &step_def.handler);
+                cb.record_success(
+                    &instance.tenant_id,
+                    &crate::circuit_breaker::breaker_scope(&step_def.handler, &step_def.params),
+                );
             }
             // Check for self-modify output: inject blocks into the instance.
             // Shared helper keeps block-injection semantics identical to the
@@ -737,7 +745,10 @@ pub(crate) async fn execute_step_node_with_clock(
             ..
         }) => {
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
-                cb.record_failure(&instance.tenant_id, &step_def.handler);
+                cb.record_failure(
+                    &instance.tenant_id,
+                    &crate::circuit_breaker::breaker_scope(&step_def.handler, &step_def.params),
+                );
             }
             // Previously this arm left the node Running and returned Ok,
             // which caused the evaluator's `find_running_step` to re-pick
@@ -864,17 +875,12 @@ pub(crate) async fn execute_step_node_with_clock(
         Err(EngineError::StepFailed {
             retryable: false, ..
         }) => {
-            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
-                cb.record_failure(&instance.tenant_id, &step_def.handler);
-            }
-            // Permanent failure - mark node as failed
+            // Permanent failure - mark node as failed. Not a breaker
+            // failure: the dependency answered; the request was wrong.
             evaluator::fail_node(storage.as_ref(), node.id).await?;
             Ok(false)
         }
         Err(e) => {
-            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
-                cb.record_failure(&instance.tenant_id, &step_def.handler);
-            }
             evaluator::fail_node(storage.as_ref(), node.id).await?;
             Err(e)
         }

@@ -260,6 +260,38 @@ async fn circuit_breaker_fallback_handler_when_primary_open() {
     );
 }
 
+/// L5-05: a permanent failure (the dependency answered, the request was
+/// wrong) does not count toward opening the breaker.
+#[tokio::test]
+async fn circuit_breaker_ignores_permanent_failures() {
+    let step = mk_step("s1", "flaky");
+    let (storage, instance, node, step_def) = setup_single_step(step).await;
+
+    let cb = CircuitBreakerRegistry::new(1, 60);
+    let mut registry = HandlerRegistry::new().with_circuit_breakers(Arc::new(cb));
+    registry.set_mock_error("flaky", "bad request".into(), false);
+
+    let outputs = orch8_engine::handlers::param_resolve::OutputsSnapshot::new();
+    for _ in 0..3 {
+        let _ = orch8_engine::handlers::step_block::execute_step_node(
+            &storage, &registry, &instance, &node, &step_def, &outputs,
+        )
+        .await;
+    }
+    let state = registry
+        .circuit_breakers()
+        .unwrap()
+        .get(&instance.tenant_id, "flaky")
+        .map(|s| s.state);
+    assert!(
+        !matches!(
+            state,
+            Some(orch8_types::circuit_breaker::BreakerState::Open)
+        ),
+        "permanent failures must not open the breaker: {state:?}"
+    );
+}
+
 #[tokio::test]
 async fn circuit_breaker_records_success_and_resets_failures() {
     let step = mk_step("s1", "flaky");

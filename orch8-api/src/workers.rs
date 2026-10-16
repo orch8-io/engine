@@ -1656,11 +1656,12 @@ pub(crate) async fn fail_task(
         return Err(ApiError::Conflict("worker task lease changed".into()));
     }
 
-    // Roll external-worker failure into the breaker. Done unconditionally (for
-    // both retryable and non-retryable) to mirror in-process step-exec, which
-    // records a failure on every Err arm. Control-flow built-ins stay
-    // skip-listed.
-    if let Some(cb) = state.circuit_breakers.as_ref()
+    // Roll a retryable external-worker failure into the breaker, mirroring
+    // in-process step-exec: a non-retryable failure means the dependency
+    // answered and the request was wrong, so it does not trip the breaker.
+    // Control-flow built-ins stay skip-listed.
+    if req.retryable
+        && let Some(cb) = state.circuit_breakers.as_ref()
         && !orch8_engine::delegation::is_delegation_task(&pre_task)
         && orch8_engine::circuit_breaker::is_breaker_tracked(&pre_task.handler_name)
     {

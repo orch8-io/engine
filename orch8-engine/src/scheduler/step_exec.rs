@@ -1378,7 +1378,10 @@ pub(super) async fn execute_step_block(
             // successful call is the probe that closes a half-open breaker
             // and clears any accumulated failure count.
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
-                cb.record_success(&instance.tenant_id, &step_def.handler);
+                cb.record_success(
+                    &instance.tenant_id,
+                    &crate::circuit_breaker::breaker_scope(&step_def.handler, &step_def.params),
+                );
             }
 
             // Clean up the sentinel now that the real output is persisted.
@@ -1444,7 +1447,10 @@ pub(super) async fn execute_step_block(
             // dependency eventually protects the workers from burning retries
             // on a hopeless handler.
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
-                cb.record_failure(&instance.tenant_id, &step_def.handler);
+                cb.record_failure(
+                    &instance.tenant_id,
+                    &crate::circuit_breaker::breaker_scope(&step_def.handler, &step_def.params),
+                );
             }
             // Handler returned cleanly with a retryable error — the side
             // effect either didn't happen or is idempotent. Clear ONLY the
@@ -1526,14 +1532,9 @@ pub(super) async fn execute_step_block(
         }
         Err(e) => {
             crate::metrics::inc(crate::metrics::STEPS_FAILED);
-            // Permanent step failures also trip the breaker: if a handler is
-            // consistently returning `StepError::Permanent` for every input we
-            // still want to stop hammering it. (Template/credential errors
-            // fail earlier and never reach this arm, so they can't poison the
-            // breaker.)
-            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
-                cb.record_failure(&instance.tenant_id, &step_def.handler);
-            }
+            // Permanent failures do not trip the breaker: the dependency
+            // answered and the request itself was wrong (a 400/404/410 from
+            // one sequence must not black out healthy calls of the tenant).
             persist_permanent_error(storage.as_ref(), instance_id, &step_def.id, attempt, &e).await;
             // Keep the sentinel on permanent failure: the handler already ran
             // (side effects may have occurred), and the row is useful

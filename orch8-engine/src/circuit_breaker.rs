@@ -4,6 +4,8 @@
 //! failing handler for one tenant cannot trip the breaker for any other tenant
 //! that shares the same handler name — a regression that would otherwise let
 //! one noisy customer degrade service for everyone else calling the same code.
+//! Built-ins that call arbitrary endpoints are further narrowed to their
+//! destination (see [`breaker_scope`]), and only transient failures count.
 //!
 //! **Persisted Open state.** The in-memory state is authoritative during a
 //! process lifetime, but `Open` transitions are additionally mirrored to
@@ -23,7 +25,7 @@
 //! keeps the in-memory registry's semantics unchanged for callers on the
 //! request path while still giving us a durable backstop.
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -127,6 +129,39 @@ pub fn is_breaker_tracked(handler: &str) -> bool {
             | "query_instance"
             | "human_review"
     )
+}
+
+/// The breaker name for a step: the handler, narrowed to its destination
+/// for built-ins that talk to arbitrary endpoints, so one failing vendor
+/// does not black out every other `http_request` (or LLM provider) of the
+/// tenant.
+///
+/// - `http_request` / `tool_call` / `mcp_call`: `handler@host` from a
+///   literal `url` param.
+/// - `llm_call` / `agent` / `embed`: `handler@provider` from a literal
+///   `provider` param.
+///
+/// A templated or missing destination falls back to the bare handler name.
+/// The same params must be passed at check and record time.
+#[must_use]
+pub fn breaker_scope<'a>(handler: &'a str, params: &serde_json::Value) -> Cow<'a, str> {
+    let literal = |key: &str| {
+        params
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.contains("{{"))
+    };
+    let destination = match handler {
+        "http_request" | "tool_call" | "mcp_call" => literal("url")
+            .and_then(|u| url::Url::parse(u).ok())
+            .and_then(|u| u.host_str().map(str::to_ascii_lowercase)),
+        "llm_call" | "agent" | "embed" => literal("provider").map(str::to_ascii_lowercase),
+        _ => None,
+    };
+    match destination {
+        Some(dest) if !dest.is_empty() => Cow::Owned(format!("{handler}@{dest}")),
+        _ => Cow::Borrowed(handler),
+    }
 }
 
 /// While `HalfOpen`, callers other than the single probe are deferred this
@@ -559,6 +594,39 @@ mod tests {
 
     fn tid(s: &str) -> TenantId {
         TenantId::unchecked(s)
+    }
+
+    /// L5-05: one failing vendor must not open the breaker for another.
+    #[test]
+    fn scope_separates_destinations() {
+        use serde_json::json;
+        let a = breaker_scope(
+            "http_request",
+            &json!({"url": "https://A.example/v1/x?k=1"}),
+        );
+        let b = breaker_scope("http_request", &json!({"url": "https://b.example/hook"}));
+        assert_eq!(a, "http_request@a.example");
+        assert_eq!(b, "http_request@b.example");
+        assert_eq!(
+            breaker_scope("llm_call", &json!({"provider": "anthropic"})),
+            "llm_call@anthropic"
+        );
+        // Templated or missing destinations share the handler-wide breaker.
+        assert_eq!(
+            breaker_scope("http_request", &json!({"url": "{{ context.data.url }}"})),
+            "http_request"
+        );
+        assert_eq!(
+            breaker_scope("custom", &json!({"url": "https://a.example"})),
+            "custom"
+        );
+
+        let cb = CircuitBreakerRegistry::new(2, 60);
+        let t = tid("t");
+        cb.record_failure(&t, &a);
+        cb.record_failure(&t, &a);
+        assert!(cb.check(&t, &a).is_err());
+        assert!(cb.check(&t, &b).is_ok(), "host B unaffected by host A");
     }
 
     #[test]

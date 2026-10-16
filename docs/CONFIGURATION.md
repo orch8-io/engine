@@ -140,6 +140,17 @@ Built-in operational alerts evaluated on engine nodes; see [Alerts](ALERTS.md). 
 
 ---
 
+## [circuit_breaker]
+
+Step circuit breaker, kept per tenant and handler. `http_request`, `tool_call` and `mcp_call` are further split by the destination host of a literal `url`; `llm_call`, `agent` and `embed` by a literal `provider`. Only transient failures (5xx, 408/425/429, timeouts, connection errors) count; a permanent 4xx means the dependency answered and does not trip the breaker.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `failure_threshold` | integer | `5` | Consecutive transient failures that open a breaker (env `ORCH8_CIRCUIT_BREAKER_FAILURE_THRESHOLD`) |
+| `cooldown_secs` | integer | `60` | How long an open breaker defers calls before one probe (env `ORCH8_CIRCUIT_BREAKER_COOLDOWN_SECS`) |
+
+---
+
 ## [logging]
 
 | Field | Type | Default | Description |
