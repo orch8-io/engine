@@ -294,10 +294,26 @@ async fn trigger_cron_schedule(
                 "cron instance for this fire already exists (crash-recovery retry), not duplicating"
             );
         }
+        Err(e) if e.is_transient() => {
+            // L2-08: a connection blip, pool timeout or failover is not a
+            // reason to drop this occurrence. Leave the fire time alone and
+            // fail the attempt: the claim lease expires and a later tick
+            // re-claims the same `next_fire_at`; the idempotency key above
+            // dedupes if the first write actually landed.
+            crate::metrics::inc_with(crate::metrics::CRON_FIRE_ERRORS, &[("kind", "transient")]);
+            warn!(
+                cron_id = %schedule.id,
+                sequence_id = %schedule.sequence_id,
+                error = %e,
+                "cron failed to create instance (transient); will retry this occurrence"
+            );
+            return Err(e.into());
+        }
         Err(e) => {
             // The referenced sequence may have been deleted between the cron
             // schedule creation and this tick. Log and advance the fire time
             // so the schedule doesn't retry every tick.
+            crate::metrics::inc_with(crate::metrics::CRON_FIRE_ERRORS, &[("kind", "permanent")]);
             warn!(
                 cron_id = %schedule.id,
                 sequence_id = %schedule.sequence_id,
@@ -307,8 +323,8 @@ async fn trigger_cron_schedule(
         }
     }
 
-    // Calculate next fire time — always advance even on failure so we don't
-    // retry the same tick in a hot error loop.
+    // Calculate next fire time — advance even on a permanent failure so we
+    // don't retry the same tick in a hot error loop.
     let next = calculate_next_fire_after(schedule, now);
     match next {
         Some(next_at) => {

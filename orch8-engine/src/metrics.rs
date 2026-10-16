@@ -23,6 +23,9 @@ pub const WEBHOOKS_PARKED: &str = "orch8_webhooks_parked_total";
 /// Alert transitions (firing/resolved) enqueued by the alert evaluator.
 pub const ALERTS_EMITTED: &str = "orch8_alerts_emitted_total";
 pub const CRON_TRIGGERED: &str = "orch8_cron_triggered_total";
+/// `{kind}`: cron occurrences whose instance could not be created —
+/// `transient` (retried, schedule not advanced) or `permanent` (skipped).
+pub const CRON_FIRE_ERRORS: &str = "orch8_cron_fire_errors_total";
 /// Instance reschedules after a transient-classified storage error.
 pub const INSTANCE_TRANSIENT_RETRIES: &str = "orch8_instance_transient_retries_total";
 /// Instances failed because transient-classified errors kept recurring.
