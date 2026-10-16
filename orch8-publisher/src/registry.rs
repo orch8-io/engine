@@ -628,5 +628,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "registry_coverage_tests.rs"]
-mod coverage_tests;
+#[path = "registry_publication_tests.rs"]
+mod publication_tests;

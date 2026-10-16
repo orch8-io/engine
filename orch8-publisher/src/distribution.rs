@@ -915,12 +915,148 @@ mod tests {
         lock.dependencies[0].version = "9.9.9".into();
         assert_eq!(lock.verify(), Err(DistributionError::HashMismatch));
     }
+
+    /// Applies a one-file delta over `{"keep.txt": "x"}` that writes `path`.
+    fn apply_delta_writing(path: &str) -> Result<DeltaApplication, DistributionError> {
+        let base = BTreeMap::from([("keep.txt".to_string(), "x".to_string())]);
+        let mut target = base.clone();
+        target.insert(path.to_string(), "v".to_string());
+        DeltaPackage {
+            base_hash: hash_files(&base).unwrap(),
+            target_hash: hash_files(&target).unwrap(),
+            full_package_url: "/full.orch8pkg".into(),
+            changed_files: BTreeMap::from([(path.to_string(), Some("v".to_string()))]),
+        }
+        .apply(&base)
+    }
+
+    #[test]
+    fn delta_accepts_plain_relative_paths() {
+        let long = "a".repeat(1024);
+        for path in [
+            "a.txt",
+            "dir/a.txt",
+            ".manifest",
+            "..file",
+            "my file.txt",
+            "dados/ação.json",
+            long.as_str(),
+        ] {
+            assert!(
+                matches!(apply_delta_writing(path), Ok(DeltaApplication::Applied(ref files)) if files.contains_key(path)),
+                "case {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn delta_rejects_paths_that_escape_or_are_not_canonical() {
+        for path in [
+            "",
+            "/",
+            "/etc/passwd",
+            "//server",
+            "../a.txt",
+            "a/../b.txt",
+            "a/..",
+            "..",
+            "a//b",
+            "a/",
+            ".//a",
+            "a\\b",
+            "C:\\a",
+            "a\0b",
+        ] {
+            assert_eq!(
+                apply_delta_writing(path),
+                Err(DistributionError::Invalid(format!(
+                    "invalid delta path {path}"
+                ))),
+                "case {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "BUG: `.` and `./a.txt` are accepted and alias `a.txt` in the delta map (T4 #9) — fixed on test/bugs"]
+    fn delta_rejects_dot_components_that_alias_another_path() {
+        for path in [".", "./a.txt", "dir/./a.txt"] {
+            assert_eq!(
+                apply_delta_writing(path),
+                Err(DistributionError::Invalid(format!(
+                    "invalid delta path {path}"
+                ))),
+                "case {path:?}"
+            );
+        }
+    }
+
+    fn promote_with_hash(content_hash: &str) -> Result<(), DistributionError> {
+        ReleaseChannel::new("tenant-a", ReleaseChannelName::Stable).promote(ChannelRelease {
+            package_name: "acme/app".into(),
+            version: "1.0.0".into(),
+            content_hash: content_hash.into(),
+            package_url: "/full".into(),
+            requirements: CapsuleRequirements::default(),
+            selected_runtime_id: None,
+            promoted_at: Utc::now(),
+        })
+    }
+
+    fn lock_with_hash(content_hash: &str) -> Result<DependencyLockfile, DistributionError> {
+        DependencyLockfile::build(vec![LockedDependency {
+            kind: DependencyKind::Plugin,
+            name: "ocr".into(),
+            version: "1.0.0".into(),
+            content_hash: content_hash.into(),
+            source: "registry/acme".into(),
+        }])
+    }
+
+    fn invalid_digest() -> DistributionError {
+        DistributionError::Invalid("SHA-256 digest must be 64 hexadecimal characters".into())
+    }
+
+    #[test]
+    fn promotion_and_lockfiles_require_a_64_hex_sha256_digest() {
+        let cases = [
+            ("empty", String::new()),
+            ("63 chars", "a".repeat(63)),
+            ("65 chars", "a".repeat(65)),
+            ("sha1 length", "a".repeat(40)),
+            ("non-hex letter", "g".repeat(64)),
+            ("algorithm prefix", format!("sha256:{}", "a".repeat(64))),
+            (
+                "embedded space",
+                format!("{} {}", "a".repeat(31), "b".repeat(32)),
+            ),
+            ("trailing newline", format!("{}\n", "a".repeat(63))),
+            ("multi-byte chars of 64 bytes", "é".repeat(32)),
+        ];
+        for (case, digest) in cases {
+            assert_eq!(
+                promote_with_hash(&digest),
+                Err(invalid_digest()),
+                "promote: {case}"
+            );
+            assert_eq!(
+                lock_with_hash(&digest).unwrap_err(),
+                invalid_digest(),
+                "lockfile: {case}"
+            );
+        }
+        let valid = "0123456789abcdef".repeat(4);
+        assert_eq!(promote_with_hash(&valid), Ok(()));
+        assert!(lock_with_hash(&valid).is_ok());
+    }
+
+    #[test]
+    #[ignore = "BUG: uppercase digests are accepted but rollback_to/promote compare case-sensitively (T4 #9) — fixed on test/bugs"]
+    fn promotion_rejects_uppercase_digest_that_lowercase_lookups_would_never_match() {
+        assert_eq!(promote_with_hash(&"A".repeat(64)), Err(invalid_digest()));
+    }
 }
 
 #[cfg(test)]
-#[path = "distribution_boundary_tests.rs"]
-mod boundary_tests;
-
-#[cfg(test)]
-#[path = "distribution_gates_coverage_tests.rs"]
-mod gates_coverage_tests;
+#[path = "distribution_gates_tests.rs"]
+mod gates_tests;

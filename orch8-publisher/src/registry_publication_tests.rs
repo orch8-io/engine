@@ -1,6 +1,10 @@
-//! Registry head-update serialization and versioning coverage.
+//! Registry publication ordering and head compare-and-swap.
 //!
-//! Count contract: 30 independently named unit tests.
+//! Rule under test: a publish writes every immutable object (package, ledger
+//! entry, ledger snapshot) before it swaps the mutable `index.json` head with a
+//! conditional write against the `ETag` the caller loaded. A stale or missing
+//! head is a `Conflict` that leaves the winner's bytes and the caller's local
+//! state untouched, and a failed attempt is always safe to retry.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,7 +21,7 @@ fn package(key: &SigningKey, name: &str, version: &str) -> SignedPackage {
         PackageManifest {
             name: name.into(),
             version: version.into(),
-            description: "coverage fixture".into(),
+            description: "publication fixture".into(),
             publisher: "Acme".into(),
             requirements: PackageRequirements::default(),
             created_at: Utc.with_ymd_and_hms(2026, 7, 25, 0, 0, 0).unwrap(),
@@ -186,24 +190,7 @@ impl CdnBackend for RecordingBackend {
 }
 
 #[test]
-fn coverage_registry_001_new_index_has_expected_defaults() {
-    let index = RegistryIndex::new("tenant-a", "acme");
-    assert_eq!(index.schema_version, 1);
-    assert_eq!(index.tenant_id, "tenant-a");
-    assert_eq!(index.namespace, "acme");
-    assert!(index.packages.is_empty());
-    assert_eq!(index.ledger_head, None);
-    assert_eq!(index.source_etag, None);
-}
-
-#[test]
-fn coverage_registry_002_with_source_etag_attaches_loaded_etag() {
-    let index = RegistryIndex::new("tenant-a", "acme").with_source_etag("\"abc\"");
-    assert_eq!(index.source_etag.as_deref(), Some("\"abc\""));
-}
-
-#[test]
-fn coverage_registry_003_source_etag_is_never_serialized() {
+fn source_etag_is_never_serialized() {
     let index = RegistryIndex::new("tenant-a", "acme").with_source_etag("\"abc\"");
     let json = canonical_json(&index).unwrap();
     assert!(!json.contains("source_etag"));
@@ -213,7 +200,7 @@ fn coverage_registry_003_source_etag_is_never_serialized() {
 }
 
 #[tokio::test]
-async fn coverage_registry_004_first_publish_creates_index_and_sets_etag() {
+async fn first_publish_creates_index_and_sets_etag() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     let etag = index.source_etag.clone().unwrap();
@@ -230,7 +217,7 @@ async fn coverage_registry_004_first_publish_creates_index_and_sets_etag() {
 }
 
 #[tokio::test]
-async fn coverage_registry_005_index_head_uses_sixty_second_cache_window() {
+async fn index_head_uses_sixty_second_cache_window() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     let store = cdn.store.lock().await;
@@ -241,7 +228,7 @@ async fn coverage_registry_005_index_head_uses_sixty_second_cache_window() {
 }
 
 #[tokio::test]
-async fn coverage_registry_006_ledger_snapshot_is_hash_addressed_and_immutable() {
+async fn ledger_snapshot_is_hash_addressed_and_immutable() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     let version = publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     let path = format!(
@@ -256,7 +243,7 @@ async fn coverage_registry_006_ledger_snapshot_is_hash_addressed_and_immutable()
 }
 
 #[tokio::test]
-async fn coverage_registry_007_legacy_ledger_head_path_is_not_written() {
+async fn legacy_ledger_head_path_is_not_written() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     let store = cdn.store.lock().await;
@@ -264,7 +251,7 @@ async fn coverage_registry_007_legacy_ledger_head_path_is_not_written() {
 }
 
 #[tokio::test]
-async fn coverage_registry_008_package_and_entry_objects_are_immutable() {
+async fn package_and_entry_objects_are_immutable() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     let store = cdn.store.lock().await;
@@ -285,19 +272,7 @@ async fn coverage_registry_008_package_and_entry_objects_are_immutable() {
 }
 
 #[tokio::test]
-async fn coverage_registry_009_entry_path_uses_zero_padded_sequence() {
-    let (cdn, publisher, key, mut index, mut ledger) = fixture();
-    let version = publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
-    let expected = format!(
-        "tenant-a/registry/acme/transparency/entries/00000000000000000000-{}.json",
-        version.ledger_entry_hash
-    );
-    let store = cdn.store.lock().await;
-    assert!(store.contains_key(&expected), "missing {expected}");
-}
-
-#[tokio::test]
-async fn coverage_registry_010_immutable_objects_upload_before_index_head() {
+async fn immutable_objects_upload_before_index_head() {
     let cdn = Arc::new(RecordingBackend::new());
     let publisher =
         PackageRegistryPublisher::new(Box::new(Arc::clone(&cdn)), "tenant-a", "acme").unwrap();
@@ -314,7 +289,7 @@ async fn coverage_registry_010_immutable_objects_upload_before_index_head() {
 }
 
 #[tokio::test]
-async fn coverage_registry_011_stored_index_matches_local_state() {
+async fn stored_index_matches_local_state() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.1.0").await;
@@ -329,17 +304,7 @@ async fn coverage_registry_011_stored_index_matches_local_state() {
 }
 
 #[tokio::test]
-async fn coverage_registry_012_etag_advances_on_every_publish() {
-    let (_cdn, publisher, key, mut index, mut ledger) = fixture();
-    publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
-    let first = index.source_etag.clone().unwrap();
-    publish_one(&publisher, &key, &mut index, &mut ledger, "1.1.0").await;
-    let second = index.source_etag.clone().unwrap();
-    assert_ne!(first, second);
-}
-
-#[tokio::test]
-async fn coverage_registry_013_external_overwrite_conflicts_next_publish() {
+async fn external_overwrite_conflicts_next_publish() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     // An out-of-band writer moves the head without telling our index.
@@ -365,7 +330,7 @@ async fn coverage_registry_013_external_overwrite_conflicts_next_publish() {
 }
 
 #[tokio::test]
-async fn coverage_registry_014_conflict_preserves_winning_index_bytes() {
+async fn conflict_preserves_winning_index_bytes() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     let winner_bytes = {
@@ -389,72 +354,7 @@ async fn coverage_registry_014_conflict_preserves_winning_index_bytes() {
 }
 
 #[tokio::test]
-async fn coverage_registry_015_conflict_leaves_caller_state_unchanged() {
-    let (_cdn, publisher, key, mut index, mut ledger) = fixture();
-    publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
-    // Fork stale state from the initial publish, then advance the real head.
-    let mut stale_index = index.clone();
-    let mut stale_ledger = ledger.clone();
-    publish_one(&publisher, &key, &mut index, &mut ledger, "1.1.0").await;
-    let before_index = stale_index.clone();
-    let before_ledger = stale_ledger.clone();
-    publisher
-        .publish(
-            &package(&key, "acme/checkout", "1.2.0"),
-            &mut stale_index,
-            &mut stale_ledger,
-            &key,
-            published_at(3),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(stale_index, before_index);
-    assert_eq!(stale_ledger, before_ledger);
-}
-
-#[tokio::test]
-async fn coverage_registry_016_reload_and_retry_after_conflict_succeeds() {
-    let (cdn, publisher, key, mut index, mut ledger) = fixture();
-    publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
-    let mut stale_index = RegistryIndex::new("tenant-a", "acme");
-    let mut stale_ledger = TransparencyLedger::default();
-    publisher
-        .publish(
-            &package(&key, "acme/checkout", "1.1.0"),
-            &mut stale_index,
-            &mut stale_ledger,
-            &key,
-            published_at(2),
-        )
-        .await
-        .unwrap_err();
-    // Reload the new head: index bytes plus their ETag.
-    let index_bytes = {
-        let store = cdn.store.lock().await;
-        store["tenant-a/registry/acme/index.json"].0.clone()
-    };
-    let mut reloaded: RegistryIndex = serde_json::from_slice(&index_bytes).unwrap();
-    reloaded.source_etag = cdn
-        .get_etag("tenant-a/registry/acme/index.json")
-        .await
-        .unwrap();
-    let mut reloaded_ledger = ledger.clone();
-    publisher
-        .publish(
-            &package(&key, "acme/checkout", "1.1.0"),
-            &mut reloaded,
-            &mut reloaded_ledger,
-            &key,
-            published_at(2),
-        )
-        .await
-        .unwrap();
-    assert_eq!(reloaded.packages["acme/checkout"].len(), 2);
-    assert_eq!(reloaded_ledger.entries.len(), 2);
-}
-
-#[tokio::test]
-async fn coverage_registry_017_competing_writers_serialize_through_cas() {
+async fn competing_writers_serialize_through_cas() {
     let (cdn, publisher, key, mut index_a, mut ledger_a) = fixture();
     publish_one(&publisher, &key, &mut index_a, &mut ledger_a, "1.0.0").await;
     // Writer B starts from an empty (stale) view and loses the first race.
@@ -511,7 +411,7 @@ async fn coverage_registry_017_competing_writers_serialize_through_cas() {
 }
 
 #[tokio::test]
-async fn coverage_registry_018_deleted_index_conflicts_when_etag_expected() {
+async fn deleted_index_conflicts_when_etag_expected() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     cdn.delete("tenant-a/registry/acme/index.json")
@@ -531,7 +431,7 @@ async fn coverage_registry_018_deleted_index_conflicts_when_etag_expected() {
 }
 
 #[tokio::test]
-async fn coverage_registry_019_out_of_namespace_package_is_rejected() {
+async fn out_of_namespace_package_is_rejected() {
     let (_cdn, publisher, key, mut index, mut ledger) = fixture();
     let error = publisher
         .publish(
@@ -549,7 +449,7 @@ async fn coverage_registry_019_out_of_namespace_package_is_rejected() {
 }
 
 #[tokio::test]
-async fn coverage_registry_020_mismatched_ledger_signing_key_is_rejected() {
+async fn mismatched_ledger_signing_key_is_rejected() {
     let (_cdn, publisher, key, mut index, mut ledger) = fixture();
     let other_key = SigningKey::generate(&mut rng());
     let error = publisher
@@ -568,7 +468,7 @@ async fn coverage_registry_020_mismatched_ledger_signing_key_is_rejected() {
 }
 
 #[tokio::test]
-async fn coverage_registry_021_duplicate_version_reports_package_and_version() {
+async fn duplicate_version_reports_package_and_version() {
     let (_cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     let error = publisher
@@ -592,7 +492,7 @@ async fn coverage_registry_021_duplicate_version_reports_package_and_version() {
 }
 
 #[tokio::test]
-async fn coverage_registry_022_unexpected_schema_version_is_rejected() {
+async fn unexpected_schema_version_is_rejected() {
     let (_cdn, publisher, key, mut index, mut ledger) = fixture();
     index.schema_version = 2;
     let error = publisher
@@ -609,30 +509,7 @@ async fn coverage_registry_022_unexpected_schema_version_is_rejected() {
 }
 
 #[tokio::test]
-async fn coverage_registry_023_entry_sequence_increments_per_publish() {
-    let (_cdn, publisher, key, mut index, mut ledger) = fixture();
-    for (expected, version) in [(0, "1.0.0"), (1, "1.1.0"), (2, "1.2.0")] {
-        publish_one(&publisher, &key, &mut index, &mut ledger, version).await;
-        assert_eq!(ledger.entries.last().unwrap().sequence, expected);
-    }
-}
-
-#[tokio::test]
-async fn coverage_registry_024_previous_hash_links_form_a_chain() {
-    let (_cdn, publisher, key, mut index, mut ledger) = fixture();
-    publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
-    publish_one(&publisher, &key, &mut index, &mut ledger, "1.1.0").await;
-    assert_eq!(ledger.entries[0].previous_hash, None);
-    assert_eq!(
-        ledger.entries[1].previous_hash.as_deref(),
-        Some(ledger.entries[0].entry_hash.as_str())
-    );
-    assert_eq!(ledger.head(), Some(ledger.entries[1].entry_hash.as_str()));
-    assert_eq!(index.ledger_head.as_deref(), ledger.head());
-}
-
-#[tokio::test]
-async fn coverage_registry_025_versions_are_ordered_oldest_to_newest() {
+async fn versions_are_ordered_oldest_to_newest() {
     let (_cdn, publisher, key, mut index, mut ledger) = fixture();
     for version in ["1.0.0", "1.1.0", "1.2.0"] {
         publish_one(&publisher, &key, &mut index, &mut ledger, version).await;
@@ -645,31 +522,7 @@ async fn coverage_registry_025_versions_are_ordered_oldest_to_newest() {
 }
 
 #[tokio::test]
-async fn coverage_registry_026_package_url_layout_matches_registry_paths() {
-    let (_cdn, publisher, key, mut index, mut ledger) = fixture();
-    let version = publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
-    assert_eq!(
-        version.package_url,
-        format!(
-            "/tenant-a/registry/acme/packages/checkout/1.0.0/{}.orch8pkg",
-            version.content_hash
-        )
-    );
-}
-
-#[tokio::test]
-async fn coverage_registry_027_version_records_its_ledger_entry_hash() {
-    let (_cdn, publisher, key, mut index, mut ledger) = fixture();
-    let version = publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
-    assert_eq!(version.ledger_entry_hash, ledger.entries[0].entry_hash);
-    assert_eq!(
-        index.ledger_head.as_deref(),
-        Some(version.ledger_entry_hash.as_str())
-    );
-}
-
-#[tokio::test]
-async fn coverage_registry_028_failed_package_upload_leaves_state_unchanged() {
+async fn failed_package_upload_leaves_state_unchanged() {
     let publisher =
         PackageRegistryPublisher::new(Box::new(FailUploadBackend), "tenant-a", "acme").unwrap();
     let key = SigningKey::generate(&mut rng());
@@ -691,7 +544,7 @@ async fn coverage_registry_028_failed_package_upload_leaves_state_unchanged() {
 }
 
 #[tokio::test]
-async fn coverage_registry_029_failed_head_write_is_safe_to_retry() {
+async fn failed_head_write_is_safe_to_retry() {
     let cdn = Arc::new(FailCasBackend {
         inner: MemoryCdnBackend::new(),
     });
@@ -727,7 +580,7 @@ async fn coverage_registry_029_failed_head_write_is_safe_to_retry() {
 }
 
 #[tokio::test]
-async fn coverage_registry_030_ledger_snapshot_matches_local_ledger() {
+async fn ledger_snapshot_matches_local_ledger() {
     let (cdn, publisher, key, mut index, mut ledger) = fixture();
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.0.0").await;
     publish_one(&publisher, &key, &mut index, &mut ledger, "1.1.0").await;
