@@ -1123,10 +1123,14 @@ describe("Continuity Handoffs — state machine", () => {
     // destination-instance check and reaches the handoff-state check.
     const otherSeq = testSequence("sm-accept-early-seq", [step("s1", "noop")], { tenantId });
     const createdOther = await client.createSequence(otherSeq);
+    // Park it an hour out so the scheduler can't claim it between create
+    // and pause (state writes are compare-and-set, so a concurrent claim
+    // would make the pause a 409 instead of a silent overwrite).
     const pausedInstance = await client.createInstance({
       sequence_id: createdOther.id,
       tenant_id: tenantId,
       namespace: "default",
+      next_fire_at: new Date(Date.now() + 3_600_000).toISOString(),
     });
     await client.updateState(pausedInstance.id, "paused");
     await assert409(
