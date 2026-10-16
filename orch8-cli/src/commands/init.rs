@@ -161,14 +161,22 @@ fn write_scaffolds(
     template: &templates::Template,
     format: DocumentFormat,
 ) -> Result<String> {
-    let api_key = generate_secret_hex();
-    let encryption_key = generate_secret_hex();
+    let config_path = base.join("orch8.toml");
+    let config_existed = config_path.exists();
+    // Re-running init next to an existing orch8.toml must not mint fresh keys
+    // for a newly written docker-compose.yml: reuse the configured ones so
+    // the two files agree.
+    let (existing_api_key, existing_encryption_key) = if config_existed {
+        existing_keys(&config_path)
+    } else {
+        (None, None)
+    };
+    let api_key = existing_api_key.unwrap_or_else(generate_secret_hex);
+    let encryption_key = existing_encryption_key.unwrap_or_else(generate_secret_hex);
     #[allow(clippy::literal_string_with_formatting_args)]
     let orch8_toml = ORCH8_TOML_TEMPLATE
         .replace("{api_key}", &api_key)
         .replace("{encryption_key}", &encryption_key);
-    let config_path = base.join("orch8.toml");
-    let config_existed = config_path.exists();
     write_if_absent(&config_path, &orch8_toml)?;
     #[cfg(unix)]
     if !config_existed {
@@ -191,6 +199,26 @@ fn write_scaffolds(
         .replace("{encryption_key}", &encryption_key);
     write_if_absent(&base.join("docker-compose.yml"), &compose)?;
     Ok(sequence_file)
+}
+
+/// `api.api_key` and `engine.encryption_key` from an existing `orch8.toml`,
+/// each `None` when absent, empty, or the file does not parse.
+fn existing_keys(config_path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(text) = fs::read_to_string(config_path) else {
+        return (None, None);
+    };
+    let Ok(value) = text.parse::<toml::Table>() else {
+        return (None, None);
+    };
+    let key = |section: &str, name: &str| {
+        value
+            .get(section)
+            .and_then(|s| s.get(name))
+            .and_then(toml::Value::as_str)
+            .filter(|k| !k.is_empty())
+            .map(str::to_owned)
+    };
+    (key("api", "api_key"), key("engine", "encryption_key"))
 }
 
 fn write_if_absent(path: &Path, content: &str) -> Result<()> {
@@ -273,6 +301,30 @@ mod tests {
         assert_eq!(
             cfg.engine.stale_instance_threshold_secs, 600,
             "stale_instance_threshold_secs must take the scaffolded (non-default) value"
+        );
+    }
+
+    #[test]
+    fn rerun_with_existing_toml_writes_compose_with_the_same_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        run(dir.path().to_str().unwrap(), "default").unwrap();
+        fs::remove_file(dir.path().join("docker-compose.yml")).unwrap();
+
+        run(dir.path().to_str().unwrap(), "default").unwrap();
+
+        let cfg: orch8_types::config::EngineConfig =
+            toml::from_str(&fs::read_to_string(dir.path().join("orch8.toml")).unwrap()).unwrap();
+        let compose = fs::read_to_string(dir.path().join("docker-compose.yml")).unwrap();
+        assert!(
+            compose.contains(&format!("ORCH8_API_KEY: \"{}\"", cfg.api.api_key.expose())),
+            "compose api key must match orch8.toml"
+        );
+        assert!(
+            compose.contains(&format!(
+                "ORCH8_ENCRYPTION_KEY: \"{}\"",
+                cfg.engine.encryption_key.expose()
+            )),
+            "compose encryption key must match orch8.toml"
         );
     }
 
