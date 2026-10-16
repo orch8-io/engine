@@ -767,11 +767,26 @@ impl RemoteExecutor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, cancel.clone());
+        // Deregister on every exit, including a handler panic unwinding
+        // through here (T1-GAP-236): a leaked entry inflates `in_flight()`
+        // and makes drain wait out its whole window for a dead task.
+        struct Deregister<'a> {
+            running: &'a StdMutex<HashMap<uuid::Uuid, CancellationToken>>,
+            id: uuid::Uuid,
+        }
+        impl Drop for Deregister<'_> {
+            fn drop(&mut self) {
+                self.running
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&self.id);
+            }
+        }
+        let _deregister = Deregister {
+            running: &self.running,
+            id,
+        };
         self.execute_inner(&task, heartbeat, &cancel).await;
-        self.running
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&id);
     }
 
     /// Params and context as the handler must see them: local credentials
