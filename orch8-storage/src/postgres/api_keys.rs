@@ -9,6 +9,11 @@ pub(super) async fn create(
     store: &PostgresStorage,
     key: &ApiKeyRecord,
 ) -> Result<(), StorageError> {
+    if key.capabilities.is_empty() {
+        return Err(StorageError::Constraint(
+            "api key must carry at least one capability".into(),
+        ));
+    }
     sqlx::query(
         r"INSERT INTO api_keys (id, tenant_id, name, capabilities_json, key_hash, created_at, last_used_at, expires_at, revoked)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
@@ -98,11 +103,10 @@ struct ApiKeyRow {
 
 impl ApiKeyRow {
     fn into_record(self) -> Result<ApiKeyRecord, StorageError> {
-        let mut capabilities: Vec<orch8_types::api_key::ApiCapability> =
+        // An empty stored list means *no* capabilities (fail closed); it is
+        // never widened to the full set on read.
+        let capabilities: Vec<orch8_types::api_key::ApiCapability> =
             serde_json::from_str(&self.capabilities_json)?;
-        if capabilities.is_empty() {
-            capabilities = orch8_types::api_key::ApiCapability::all();
-        }
         Ok(ApiKeyRecord {
             id: self.id,
             tenant_id: self.tenant_id,

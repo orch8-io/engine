@@ -2429,3 +2429,39 @@ async fn tenant_worker_claim_uses_denormalised_tenant_on_postgres() {
         vec![tasks[0].1]
     );
 }
+
+#[tokio::test]
+async fn postgres_stored_empty_capability_list_reads_back_as_no_capabilities() {
+    let storage = require_postgres!();
+    let hash = format!("empty-caps-{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO api_keys (id, tenant_id, name, capabilities_json, key_hash, created_at)
+         VALUES ($1, 'acme', 'raw', '[]', $2, NOW())",
+    )
+    .bind(format!("ak_{}", Uuid::new_v4().simple()))
+    .bind(&hash)
+    .execute(storage.pool())
+    .await
+    .unwrap();
+
+    let record = storage
+        .lookup_api_key_by_hash(&hash)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(record.capabilities.is_empty(), "{:?}", record.capabilities);
+}
+
+#[tokio::test]
+async fn postgres_create_api_key_rejects_an_empty_capability_grant() {
+    let storage = require_postgres!();
+    let minted = orch8_types::api_key::mint_scoped("acme", "empty", None, vec![]);
+
+    let err = storage.create_api_key(&minted.record).await.unwrap_err();
+
+    assert!(
+        matches!(err, orch8_types::error::StorageError::Constraint(_)),
+        "{err:?}"
+    );
+}

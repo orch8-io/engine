@@ -1,4 +1,4 @@
-pub(super) const SCHEMA: &str = r"
+pub(super) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sequences (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -629,7 +629,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
-    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    capabilities_json TEXT NOT NULL
+        DEFAULT '["operator","worker","device","publisher","approver","auditor"]',
     key_hash TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
     last_used_at TEXT,
@@ -1411,7 +1412,7 @@ CREATE INDEX IF NOT EXISTS idx_mobile_instance_status_terminal_updated
     ON mobile_instance_status(updated_at) WHERE state IN ('completed', 'failed', 'cancelled');
 CREATE INDEX IF NOT EXISTS idx_mobile_approval_requests_settled_created
     ON mobile_approval_requests(created_at) WHERE state <> 'pending';
-";
+"#;
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default

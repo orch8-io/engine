@@ -324,7 +324,22 @@ impl SqliteStorage {
                 return Err(e.into());
             }
         }
+        self.backfill_legacy_api_key_capabilities().await?;
         self.record_schema_version().await?;
+        Ok(())
+    }
+
+    /// Keys minted before capability scoping were reconciled with an empty
+    /// `capabilities_json` (the old column default). They predate scoping and
+    /// keep full access, matching the Postgres migration 075 default. New
+    /// writes reject an empty grant, so only such legacy rows can match, and
+    /// the read path treats any empty list as *no* capabilities (fail closed).
+    async fn backfill_legacy_api_key_capabilities(&self) -> Result<(), StorageError> {
+        let all = serde_json::to_string(&orch8_types::api_key::ApiCapability::all())?;
+        sqlx::query("UPDATE api_keys SET capabilities_json = ?1 WHERE capabilities_json = '[]'")
+            .bind(all)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
