@@ -35,7 +35,9 @@ async function failOneWorkerTask(
 ): Promise<void> {
   const seq = testSequence(
     "cb-trip",
-    [step("s1", handler, {})],
+    // One attempt: a retryable failure fails the instance and counts toward
+    // the breaker (permanent failures deliberately do not, see L5-05).
+    [step("s1", handler, {}, { retry: { max_attempts: 1, initial_backoff: 5, max_backoff: 20 } })],
     { tenantId },
   );
   await client.createSequence(seq);
@@ -54,7 +56,7 @@ async function failOneWorkerTask(
     tasks[0]!.id,
     tasks[0]!.worker_id ?? "worker-x",
     "driven failure for CB trip test",
-    false,
+    true,
   );
   await client.waitForState(id, "failed", { timeoutMs: 10_000 });
 }

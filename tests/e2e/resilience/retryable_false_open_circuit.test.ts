@@ -1,29 +1,18 @@
 /**
- * Verifies that a single non-retryable external-worker failure records into
- * the circuit-breaker registry without tripping it, now that the worker fail
- * path is wired into `record_failure` (see `orch8-api/src/workers.rs::fail_task`).
+ * External-worker failures and the circuit breaker (`orch8-api/src/workers.rs::fail_task`).
  *
- * Context:
- *   - The breaker registry is wired into BOTH the in-process step-dispatch
- *     path (fast + tree) and the external-worker fail path. An unknown
- *     handler name (not registered in-process) dispatches to the worker
- *     queue; `failWorkerTask(..., retryable=false)` then transitions the
- *     instance to `failed` AND invokes `record_failure` on the registry.
- *   - Default threshold = 5 failures, cooldown = 60 s
- *     (`orch8-server/src/main.rs::CircuitBreakerRegistry::new(5, 60)`).
- *   - `is_breaker_tracked` skips pure control-flow built-ins. The dynamic
- *     handler name generated here is never in that skip list, so recording
- *     proceeds.
+ * Rule (L5-05): only a *retryable* worker failure counts toward the breaker.
+ * A non-retryable failure means the dependency answered and the request was
+ * wrong, so it fails the instance but leaves the breaker untouched.
  *
- * Activation of N-failure trip-to-open is covered in
- * `circuit_breaker_trip.test.ts`. This test exercises the single-failure
- * seam: one retryable=false failure must land in the registry as
- * Closed/failure_count=1 — proof that the worker fail path is recording at
- * all, and that retryable=false isn't somehow skipped.
+ *   - retryable=false → instance `failed`, breaker failure_count stays 0;
+ *   - retryable=true on the only attempt → instance `failed`, breaker
+ *     Closed with failure_count=1 (below the default threshold of 5).
+ *
+ * Trip-to-open after N failures is covered in `circuit_breaker_trip.test.ts`.
  *
  * SELF_MANAGED in `run-e2e.ts` because it touches globally-scoped
- * worker_tasks rows (same rationale as workers.test.ts,
- * worker_heartbeat_timeout.test.ts, worker_task_timeout.test.ts).
+ * worker_tasks rows (same rationale as workers.test.ts).
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -33,7 +22,37 @@ import type { ServerHandle } from "../harness.ts";
 
 const client = new Orch8Client();
 
-describe("Non-Retryable Worker Failure Records into CB Registry", () => {
+/** One attempt, so a single retryable failure fails the instance. */
+const ONE_ATTEMPT = { retry: { max_attempts: 1, initial_backoff: 5, max_backoff: 20 } };
+
+/** Run one instance whose only step is failed by a worker; return the breaker. */
+async function failOnce(retryable: boolean) {
+  const tenantId = `test-${uuid().slice(0, 8)}`;
+  const handler = `worker_fail_handler_${uuid().slice(0, 8)}`;
+  const seq = testSequence(
+    "worker-failure-vs-breaker",
+    [step("s1", handler, {}, ONE_ATTEMPT)],
+    { tenantId },
+  );
+  await client.createSequence(seq);
+  const { id } = await client.createInstance({
+    sequence_id: seq.id,
+    tenant_id: tenantId,
+    namespace: "default",
+  });
+  // Unknown handler name -> dispatched to the external worker queue.
+  await client.waitForState(id, "waiting", { timeoutMs: 10_000 });
+  const tasks = await client.pollWorkerTasks(handler, "worker-1");
+  assert.equal(tasks.length, 1, "expected one worker task to be dispatched");
+
+  await client.failWorkerTask(tasks[0]!.id, "worker-1", "boom", retryable);
+
+  const failed = await client.waitForState(id, "failed", { timeoutMs: 10_000 });
+  assert.equal(failed.state, "failed");
+  return { breaker: await client.getCircuitBreaker(handler, tenantId), handler, tenantId };
+}
+
+describe("External worker failures and the circuit breaker", () => {
   let server: ServerHandle | undefined;
 
   before(async () => {
@@ -44,51 +63,19 @@ describe("Non-Retryable Worker Failure Records into CB Registry", () => {
     await stopServer(server);
   });
 
-  it("retryable=false fails the instance AND increments the handler's breaker", async () => {
-    const tenantId = `test-${uuid().slice(0, 8)}`;
-    const handler = `non_retryable_handler_${uuid().slice(0, 8)}`;
+  it("a non-retryable failure fails the instance without counting toward the breaker", async () => {
+    const { breaker } = await failOnce(false);
 
-    const seq = testSequence(
-      "retryable-false-vs-breaker",
-      [step("s1", handler, {})],
-      { tenantId },
-    );
-    await client.createSequence(seq);
+    assert.equal(breaker.state, "closed");
+    assert.equal(breaker.failure_count, 0, "permanent failures must not be recorded");
+  });
 
-    const { id } = await client.createInstance({
-      sequence_id: seq.id,
-      tenant_id: tenantId,
-      namespace: "default",
-    });
+  it("a retryable failure on the last attempt records exactly one breaker failure", async () => {
+    const { breaker, handler, tenantId } = await failOnce(true);
 
-    // Unknown handler name -> dispatched to external worker queue.
-    await client.waitForState(id, "waiting", { timeoutMs: 10_000 });
-    const tasks = await client.pollWorkerTasks(handler, "worker-1");
-    assert.equal(tasks.length, 1, "expected one worker task to be dispatched");
-
-    // Fail with retryable=false -> instance lands in `failed` immediately,
-    // and `record_failure` fires exactly once against (tenantId, handler).
-    await client.failWorkerTask(
-      tasks[0]!.id,
-      "worker-1",
-      "non-retryable error",
-      false,
-    );
-    const failed = await client.waitForState(id, "failed", { timeoutMs: 10_000 });
-    assert.equal(failed.state, "failed");
-
-    // The breaker must now exist as Closed with failure_count=1 — a single
-    // failure is below the default threshold (5) so no trip. This also
-    // guards against record_failure being bypassed on the retryable=false
-    // branch (the pre-Item-A gap this test replaces).
-    const breaker = await client.getCircuitBreaker(handler, tenantId);
-    assert.equal(breaker.state, "closed", "single failure must not trip the breaker");
+    assert.equal(breaker.state, "closed", "one failure is below the threshold of 5");
     assert.equal(breaker.handler, handler);
     assert.equal(breaker.tenant_id, tenantId);
-    assert.equal(
-      breaker.failure_count,
-      1,
-      "exactly one failure should be recorded",
-    );
+    assert.equal(breaker.failure_count, 1);
   });
 });

@@ -1638,13 +1638,39 @@ describe("Continuity Attention, Residency, Disclosure, Federation", () => {
       );
     });
 
-    it("rejects an envelope issued in the future", async () => {
+    // The server allows ORCH8_FEDERATION_CLOCK_SKEW_SECS (default 60 s) of
+    // clock drift on both ends of the envelope window; these cases sit
+    // outside it while keeping the TTL within the 300 s maximum.
+    it("accepts an envelope issued slightly in the future, within the clock-skew allowance", async () => {
       const { execution } = await setupExecution(federationTenantId);
+      const payload = Buffer.from(`payload-${uuid()}`);
+      const now = Date.now();
       const unsigned = unsignedEnvelope({
         tenant_id: federationTenantId,
         continuity_id: execution.continuity_id,
         epoch: execution.epoch,
-        issued_at: new Date(Date.now() + 10_000).toISOString(),
+        payload_sha256: createHash("sha256").update(payload).digest("hex"),
+        issued_at: new Date(now + 10_000).toISOString(),
+        expires_at: new Date(now + 60_000).toISOString(),
+      });
+      const signature = signEnvelope(unsigned);
+      const verified = await client.verifyFederationEnvelope({
+        tenant_id: federationTenantId,
+        envelope: { ...unsigned, signature },
+        payload_base64: payload.toString("base64"),
+      });
+      assert.equal(verified.valid, true);
+    });
+
+    it("rejects an envelope issued beyond the clock-skew allowance", async () => {
+      const { execution } = await setupExecution(federationTenantId);
+      const now = Date.now();
+      const unsigned = unsignedEnvelope({
+        tenant_id: federationTenantId,
+        continuity_id: execution.continuity_id,
+        epoch: execution.epoch,
+        issued_at: new Date(now + 120_000).toISOString(),
+        expires_at: new Date(now + 180_000).toISOString(),
       });
       const signature = signEnvelope(unsigned);
       await rejects(
@@ -1657,13 +1683,15 @@ describe("Continuity Attention, Residency, Disclosure, Federation", () => {
       );
     });
 
-    it("rejects an already-expired envelope", async () => {
+    it("rejects an envelope that expired longer ago than the clock-skew allowance", async () => {
       const { execution } = await setupExecution(federationTenantId);
+      const now = Date.now();
       const unsigned = unsignedEnvelope({
         tenant_id: federationTenantId,
         continuity_id: execution.continuity_id,
         epoch: execution.epoch,
-        expires_at: new Date(Date.now() - 1000).toISOString(),
+        issued_at: new Date(now - 200_000).toISOString(),
+        expires_at: new Date(now - 90_000).toISOString(),
       });
       const signature = signEnvelope(unsigned);
       await rejects(
