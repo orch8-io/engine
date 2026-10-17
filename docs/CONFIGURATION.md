@@ -101,6 +101,7 @@ Controls the HTTP and gRPC servers, authentication, CORS, and rate limiting.
 | `grpc_tls_cert_path` | string | `""` | PEM server certificate chain. Set with the key and client CA paths to enable required client-certificate authentication. |
 | `grpc_tls_key_path` | string | `""` | PEM private key for the gRPC server certificate. |
 | `grpc_tls_client_ca_path` | string | `""` | PEM CA roots used to verify gRPC client certificates. |
+| `grpc_tls_reload_interval_secs` | integer | `30` | How often the three gRPC TLS files are re-read. Changed, valid material is served to new connections without a restart (existing connections drain on the old certificate); malformed rotations are ignored. `SIGHUP` forces an immediate check. `0` disables reloading. |
 | `grpc_mtls_identities` | string | `""` | JSON object mapping leaf-certificate SHA-256 fingerprints to `tenant_id` and `identity`. Requires all three TLS paths. |
 | `cors_origins` | string | `""` | CORS `Access-Control-Allow-Origin` value. Empty means no CORS headers. Use a comma-separated list of specific origins. `*` is allowed only when API-key auth is off — the server refuses to start with wildcard CORS while auth is enabled |
 | `api_key` | string | `""` | Root API key. When set, all requests must include an `x-api-key: <key>` header (per-tenant keys created via the API are also accepted). If empty, the server **refuses to start** unless `--insecure-auth` (or `--insecure`) is passed explicitly |
@@ -117,6 +118,7 @@ Embedded surface for vendors; see [Embedded Orch8](EMBEDDED.md).
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `token_secret` | string | `""` | Hex HMAC secret (≥ 32 bytes decoded) that signs `o8e1.` embed tokens. Empty = every `/api/v1/embed/*` route answers 404. An invalid value refuses startup |
+| `token_secret_previous` | string | `""` | Comma-separated retired hex secrets that still verify embed tokens (never used to mint). Set the old `token_secret` here while rotating to a new one; remove it after the longest token lifetime (1 h). |
 | `allowed_origins` | string | `""` | Comma-separated browser origins granted CORS on the embed-token routes only (`*` = any) |
 
 ---
@@ -244,14 +246,17 @@ mount a config file for those settings.
 | `ORCH8_GRPC_ADDR` | `127.0.0.1:50051` | gRPC listen address |
 | `ORCH8_GRPC_TLS_CERT_PATH` | — | PEM gRPC server certificate chain path |
 | `ORCH8_GRPC_TLS_KEY_PATH` | — | PEM gRPC server private-key path |
+| `ORCH8_GRPC_TLS_RELOAD_INTERVAL_SECS` | `30` | Seconds between gRPC TLS file re-reads (0 disables) |
 | `ORCH8_GRPC_TLS_CLIENT_CA_PATH` | — | PEM client CA path; causes the listener to require a trusted client certificate |
 | `ORCH8_GRPC_MTLS_IDENTITIES` | — | JSON fingerprint-to-workload mapping; see [gRPC worker stream](GRPC_WORKER_STREAM.md#mtls-workload-identity) |
 | `ORCH8_CORS_ORIGINS` | — | CORS allowed origins (empty = no CORS headers). `*` is rejected at startup while API-key auth is enabled. List the origins that host browser runtimes; preflights allow `x-api-key`/`Authorization` and are cached for 2 h |
 | `ORCH8_API_KEY` | — | Root API key, sent by clients as `x-api-key`. Required unless `--insecure-auth` is passed |
 | `ORCH8_BROWSER_OUTPUT_MAX_BYTES` | `1048576` | Largest serialized step output a browser runtime may report (larger completions get `413`). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
 | `ORCH8_BROWSER_SESSION_SECRET` | — | Shared key (≥ 32 bytes, identical on every replica) that signs runtime-session tokens: browser sessions (`bst_…`) and phone device sessions (`dst_…`, `POST /runtimes/device-sessions`). When unset the key is derived from the root API key; with neither (`--insecure`), a process-random key is used and tokens only verify on the replica that minted them (warned at startup). A shorter value refuses startup. Changing it (or, without it, the root key) invalidates outstanding tokens: browser sessions live ≤ 1 h, device sessions ≤ 24 h (phones refresh through their `TokenProvider` on the resulting `401`). See [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
+| `ORCH8_BROWSER_SESSION_SECRET_PREVIOUS` | — | Comma-separated retired session secrets (≥ 32 bytes each) that still verify session tokens while `ORCH8_BROWSER_SESSION_SECRET` is rotated. Never used to mint. |
 | `ORCH8_REQUIRE_TENANT_HEADER` | `true` | Enforce `X-Tenant-Id` header (secure by default) |
 | `ORCH8_EMBED_TOKEN_SECRET` | — | Sets `embed.token_secret` (hex, ≥ 32 bytes decoded); enables `/api/v1/embed/*` |
+| `ORCH8_EMBED_TOKEN_SECRET_PREVIOUS` | — | Sets `embed.token_secret_previous` |
 | `ORCH8_EMBED_ALLOWED_ORIGINS` | — | Sets `embed.allowed_origins` (CORS on embed-token routes only) |
 | `ORCH8_LICENSE_KEY` | — | Sets `license.key` |
 | `ORCH8_LICENSE_PUBLIC_KEY` | — | Overrides the compiled-in license verification key (base64 of the raw 32-byte ed25519 key). For tests and private deployments |
@@ -301,6 +306,7 @@ All of these are opt-in. See [Federation and BYOK](FEDERATION.md) and [Multi-reg
 | `ORCH8_BYOK_BUCKET` / `ORCH8_BYOK_LOCAL_PATH` | — | Send every externalized payload to this customer bucket (or to a local directory, for development). Requires the encryption key. |
 | `ORCH8_BYOK_PREFIX`, `ORCH8_BYOK_REGION`, `ORCH8_BYOK_ENDPOINT`, `ORCH8_BYOK_ACCESS_KEY_ID`, `ORCH8_BYOK_SECRET_ACCESS_KEY`, `ORCH8_BYOK_ALLOW_HTTP` | `orch8`, AWS default chain | Bucket addressing and credentials. |
 | `ORCH8_BYOK_KMS_KEY_ARN` (+ `ORCH8_BYOK_KMS_REGION`, `ORCH8_BYOK_KMS_ENDPOINT`) | — | Wrap DEKs with this AWS KMS key. Credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`. |
+| `ORCH8_BYOK_KMS_CREDENTIALS_FILE` | — | JSON (`access_key_id`, `secret_access_key`, `session_token`) or `AWS_*=` lines. Re-read whenever the file changes, so KMS credentials rotate without a restart; overrides the `AWS_*` env vars. |
 | `ORCH8_BYOK_STATIC_KEY`, `ORCH8_BYOK_STATIC_KEY_ID` | — | Wrap DEKs with a local 64-hex key instead of KMS. |
 | `ORCH8_FAILOVER_REGION` | — | This node's region. The scheduler runs only while the database region fence names this region. |
 | `ORCH8_FAILOVER_POLL_SECS` | `5` | Fence poll interval (1–60). A node fails closed after 3 intervals without a successful read. |

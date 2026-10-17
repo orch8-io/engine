@@ -56,6 +56,9 @@ const MAX_QUEUES: usize = 16;
 pub(crate) const MAX_NAME_BYTES: usize = 256;
 /// Shared browser-session signing secret (all replicas, ≥ 32 bytes).
 pub const SECRET_ENV: &str = "ORCH8_BROWSER_SESSION_SECRET";
+/// Retired secrets (comma-separated) still accepted when verifying, so
+/// [`SECRET_ENV`] can be rotated without invalidating live sessions.
+pub const PREVIOUS_SECRET_ENV: &str = "ORCH8_BROWSER_SESSION_SECRET_PREVIOUS";
 /// Minimum length of [`SECRET_ENV`].
 pub const MIN_SECRET_BYTES: usize = 32;
 
@@ -158,6 +161,8 @@ pub(crate) struct Claims {
 #[derive(Clone)]
 pub struct BrowserSessionSigner {
     key: [u8; 32],
+    /// Retired keys accepted by [`Self::verify`]; never used to mint.
+    previous: Vec<[u8; 32]>,
 }
 
 impl std::fmt::Debug for BrowserSessionSigner {
@@ -175,6 +180,7 @@ impl BrowserSessionSigner {
             static EPHEMERAL: OnceLock<[u8; 32]> = OnceLock::new();
             return Self {
                 key: *EPHEMERAL.get_or_init(rand::random),
+                previous: Vec::new(),
             };
         };
         let mut hasher = Sha256::new();
@@ -182,7 +188,23 @@ impl BrowserSessionSigner {
         hasher.update(digest);
         Self {
             key: hasher.finalize().into(),
+            previous: Vec::new(),
         }
+    }
+
+    /// Also accept sessions signed with these retired shared secrets
+    /// (comma-separated, each at least [`MIN_SECRET_BYTES`]).
+    pub fn with_previous_secrets(mut self, secrets: &str) -> Result<Self, String> {
+        for secret in secrets.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if secret.len() < MIN_SECRET_BYTES {
+                return Err(format!(
+                    "{PREVIOUS_SECRET_ENV} entries must be at least {MIN_SECRET_BYTES} bytes (got {})",
+                    secret.len()
+                ));
+            }
+            self.previous.push(Self::from_secret(secret.as_bytes())?.key);
+        }
+        Ok(self)
     }
 
     /// Signer keyed by a shared secret (at least [`MIN_SECRET_BYTES`]).
@@ -198,6 +220,7 @@ impl BrowserSessionSigner {
         hasher.update(secret);
         Ok(Self {
             key: hasher.finalize().into(),
+            previous: Vec::new(),
         })
     }
 
@@ -228,7 +251,13 @@ impl BrowserSessionSigner {
     /// environment. The server calls it at startup (refusing an invalid
     /// secret) and logs the source.
     pub fn resolve(root_key_digest: Option<[u8; 32]>) -> Result<(Self, SignerSource), String> {
-        Self::resolve_from(std::env::var(SECRET_ENV).ok().as_deref(), root_key_digest)
+        let (signer, source) =
+            Self::resolve_from(std::env::var(SECRET_ENV).ok().as_deref(), root_key_digest)?;
+        let signer = match std::env::var(PREVIOUS_SECRET_ENV) {
+            Ok(previous) => signer.with_previous_secrets(&previous)?,
+            Err(_) => signer,
+        };
+        Ok((signer, source))
     }
 
     /// The process signer used to mint and verify: the shared secret when
@@ -243,16 +272,35 @@ impl BrowserSessionSigner {
                     .ok()
                     .filter(|secret| !secret.is_empty())
                     .and_then(|secret| Self::from_secret(secret.as_bytes()).ok())
+                    .map(|signer| {
+                        // `resolve` already refused an invalid previous
+                        // secret at startup.
+                        let previous = std::env::var(PREVIOUS_SECRET_ENV).unwrap_or_default();
+                        signer.clone().with_previous_secrets(&previous).unwrap_or(signer)
+                    })
             })
             .clone()
             .unwrap_or_else(|| Self::for_root(root_key_digest))
     }
 
-    fn mac(&self, payload: &[u8]) -> Hmac<Sha256> {
-        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&self.key)
-            .expect("HMAC accepts a 32-byte key");
+    fn mac_with(key: &[u8; 32], payload: &[u8]) -> Hmac<Sha256> {
+        let mut mac =
+            <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
         mac.update(payload);
         mac
+    }
+
+    fn mac(&self, payload: &[u8]) -> Hmac<Sha256> {
+        Self::mac_with(&self.key, payload)
+    }
+
+    /// Constant-time check against the current key, then each retired one.
+    fn signature_valid(&self, payload: &[u8], signature: &[u8]) -> bool {
+        std::iter::once(&self.key)
+            .chain(self.previous.iter())
+            .fold(false, |ok, key| {
+                Self::mac_with(key, payload).verify_slice(signature).is_ok() | ok
+            })
     }
 
     /// Sign `claims` under the token prefix of their kind (`bst_` for
@@ -292,7 +340,9 @@ impl BrowserSessionSigner {
         let (payload_b64, signature_b64) = body.split_once('.')?;
         let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
         let signature = URL_SAFE_NO_PAD.decode(signature_b64).ok()?;
-        self.mac(&payload).verify_slice(&signature).ok()?;
+        if !self.signature_valid(&payload, &signature) {
+            return None;
+        }
         let claims: Claims = serde_json::from_slice(&payload).ok()?;
         if claims.v != 1 || claims.exp <= now.timestamp() {
             return None;
@@ -507,6 +557,39 @@ mod tests {
         assert!(
             signer
                 .verify(&token, now + chrono::Duration::seconds(61))
+                .is_none()
+        );
+    }
+
+    /// L5-20: during a secret rotation tokens signed under the retired
+    /// secret still verify, new ones are minted under the new secret only,
+    /// and unrelated secrets stay rejected.
+    #[test]
+    fn rotation_accepts_old_and_new_secret() {
+        let old_secret = "o".repeat(32);
+        let new_secret = "n".repeat(32);
+        let old = BrowserSessionSigner::from_secret(old_secret.as_bytes()).unwrap();
+        let now = Utc::now();
+        let old_token = old.mint(&claims(now.timestamp() + 60)).unwrap();
+
+        let rotated = BrowserSessionSigner::from_secret(new_secret.as_bytes()).unwrap();
+        assert!(
+            rotated.verify(&old_token, now).is_none(),
+            "without the previous secret the old token is dead"
+        );
+        let rotated = rotated.with_previous_secrets(&old_secret).unwrap();
+        assert!(rotated.verify(&old_token, now).is_some());
+        let new_token = rotated.mint(&claims(now.timestamp() + 60)).unwrap();
+        assert!(rotated.verify(&new_token, now).is_some());
+        assert!(
+            old.verify(&new_token, now).is_none(),
+            "minting uses the new secret only"
+        );
+        assert!(rotated.clone().with_previous_secrets("short").is_err());
+        let stranger = BrowserSessionSigner::from_secret("x".repeat(32).as_bytes()).unwrap();
+        assert!(
+            rotated
+                .verify(&stranger.mint(&claims(now.timestamp() + 60)).unwrap(), now)
                 .is_none()
         );
     }

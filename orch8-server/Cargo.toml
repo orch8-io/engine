@@ -44,6 +44,9 @@ tower-http.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 tonic.workspace = true
+# Process-level crypto provider for the gRPC mTLS listener (both `ring` and
+# `aws-lc-rs` are in the graph, so rustls cannot pick one by itself).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 http = "1"
 reqwest.workspace = true
 tikv-jemallocator.workspace = true
