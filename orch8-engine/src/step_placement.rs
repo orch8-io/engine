@@ -412,6 +412,71 @@ pub const BACKLOG_METRICS_INTERVAL: Duration = Duration::from_secs(15);
 /// cardinality).
 pub const BACKLOG_GROUP_LIMIT: u32 = 2_000;
 
+/// Most distinct `orch8_queue_depth` series published per scrape. Handler
+/// names and regions are caller-controlled, so without a ceiling a tenant
+/// could mint unbounded Prometheus series (L1-17).
+pub const MAX_DEPTH_SERIES: usize = 500;
+/// Most distinct `orch8_placement_unsatisfied` series published per scrape.
+pub const MAX_UNSATISFIED_SERIES: usize = 200;
+/// Label values longer than this are truncated.
+const MAX_LABEL_BYTES: usize = 64;
+/// Label value of the series that absorbs everything past the ceiling.
+pub const OVERFLOW_LABEL: &str = "other";
+
+/// Make a caller-controlled string safe and bounded as a label value:
+/// printable characters only, at most [`MAX_LABEL_BYTES`] bytes.
+fn normalize_label(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(MAX_LABEL_BYTES));
+    for c in raw.chars() {
+        let c = if c.is_control() { '_' } else { c };
+        if out.len() + c.len_utf8() > MAX_LABEL_BYTES {
+            break;
+        }
+        out.push(c);
+    }
+    if out.is_empty() { "unknown".to_owned() } else { out }
+}
+
+/// Keep the `limit` largest series; fold the rest into one `other` series
+/// per `fold_key` so totals are preserved.
+fn cap_series<K: Ord + Clone>(
+    series: BTreeMap<K, u64>,
+    limit: usize,
+    fold_key: impl Fn(&K) -> K,
+) -> BTreeMap<K, u64> {
+    if series.len() <= limit {
+        return series;
+    }
+    let mut ranked: Vec<(K, u64)> = series.into_iter().collect();
+    // Largest first; ties broken by key so the surviving set is stable
+    // across scrapes (a flapping series would churn the exporter).
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut out = BTreeMap::new();
+    for (index, (key, count)) in ranked.into_iter().enumerate() {
+        let key = if index < limit { key } else { fold_key(&key) };
+        *out.entry(key).or_default() += count;
+    }
+    out
+}
+
+/// Enforce the series ceilings on a snapshot.
+fn bound_snapshot(snapshot: &mut BacklogSnapshot) {
+    snapshot.depth = cap_series(
+        std::mem::take(&mut snapshot.depth),
+        MAX_DEPTH_SERIES,
+        |k| DepthLabels {
+            capability: OVERFLOW_LABEL.into(),
+            region: OVERFLOW_LABEL.into(),
+            priority_lane: k.priority_lane,
+        },
+    );
+    snapshot.unsatisfied = cap_series(
+        std::mem::take(&mut snapshot.unsatisfied),
+        MAX_UNSATISFIED_SERIES,
+        |_| (OVERFLOW_LABEL.into(), OVERFLOW_LABEL.into()),
+    );
+}
+
 /// Read the pending backlog and aggregate it into metric series.
 pub async fn backlog_snapshot(
     storage: &dyn StorageBackend,
@@ -423,9 +488,10 @@ pub async fn backlog_snapshot(
     let mut snapshot = BacklogSnapshot::default();
     let mut runtimes: HashMap<String, Vec<RuntimeCapabilities>> = HashMap::new();
     for row in rows {
-        let region = orch8_types::placement::region_label(&row.requirements);
+        let region = normalize_label(&orch8_types::placement::region_label(&row.requirements));
+        let capability = normalize_label(&row.handler_name);
         let labels = DepthLabels {
-            capability: row.handler_name.clone(),
+            capability: capability.clone(),
             region: region.clone(),
             priority_lane: PriorityLane::for_priority(row.priority).as_str(),
         };
@@ -445,10 +511,11 @@ pub async fn backlog_snapshot(
         if !satisfied {
             *snapshot
                 .unsatisfied
-                .entry((row.handler_name, region))
+                .entry((capability, region))
                 .or_default() += row.count;
         }
     }
+    bound_snapshot(&mut snapshot);
     Ok(snapshot)
 }
 
@@ -517,5 +584,75 @@ pub async fn run_backlog_metrics_loop(
             Err(error) => tracing::warn!(%error, "queue backlog metrics scrape failed"),
         }
         crate::metrics::loop_pass("backlog_metrics");
+    }
+}
+
+#[cfg(test)]
+mod cardinality_tests {
+    use super::*;
+
+    fn labels(capability: String) -> DepthLabels {
+        DepthLabels {
+            capability,
+            region: "any".into(),
+            priority_lane: "normal",
+        }
+    }
+
+    /// L1-17: a tenant minting thousands of handler names cannot mint
+    /// thousands of series, and no pending task goes uncounted.
+    #[test]
+    fn depth_series_are_capped_and_totals_preserved() {
+        let mut snapshot = BacklogSnapshot::default();
+        let mut total = 0;
+        for i in 0..(MAX_DEPTH_SERIES * 3) {
+            let count = (i as u64) + 1;
+            total += count;
+            snapshot.depth.insert(labels(format!("h{i:05}")), count);
+        }
+        bound_snapshot(&mut snapshot);
+        assert!(snapshot.depth.len() <= MAX_DEPTH_SERIES + 1);
+        assert_eq!(snapshot.depth.values().sum::<u64>(), total);
+        // The biggest queues keep their own series; the tail is folded.
+        let biggest = format!("h{:05}", MAX_DEPTH_SERIES * 3 - 1);
+        assert!(snapshot.depth.contains_key(&labels(biggest)));
+        assert!(snapshot.depth.contains_key(&DepthLabels {
+            capability: OVERFLOW_LABEL.into(),
+            region: OVERFLOW_LABEL.into(),
+            priority_lane: "normal",
+        }));
+    }
+
+    #[test]
+    fn unsatisfied_series_are_capped() {
+        let mut snapshot = BacklogSnapshot::default();
+        for i in 0..(MAX_UNSATISFIED_SERIES * 2) {
+            snapshot
+                .unsatisfied
+                .insert((format!("h{i}"), "eu".into()), 1);
+        }
+        bound_snapshot(&mut snapshot);
+        assert!(snapshot.unsatisfied.len() <= MAX_UNSATISFIED_SERIES + 1);
+        assert_eq!(snapshot.unsatisfied.values().sum::<u64>(), (MAX_UNSATISFIED_SERIES * 2) as u64);
+    }
+
+    #[test]
+    fn small_snapshots_are_untouched() {
+        let mut snapshot = BacklogSnapshot::default();
+        snapshot.depth.insert(labels("send_email".into()), 7);
+        let before = snapshot.clone();
+        bound_snapshot(&mut snapshot);
+        assert_eq!(snapshot, before);
+    }
+
+    #[test]
+    fn label_values_are_truncated_and_sanitized() {
+        assert_eq!(normalize_label("send_email"), "send_email");
+        assert_eq!(normalize_label(&"x".repeat(500)).len(), MAX_LABEL_BYTES);
+        assert_eq!(normalize_label("a\nb\"c"), "a_b\"c");
+        assert_eq!(normalize_label(""), "unknown");
+        let multibyte = "é".repeat(100);
+        let out = normalize_label(&multibyte);
+        assert!(out.len() <= MAX_LABEL_BYTES && out.chars().all(|c| c == 'é'));
     }
 }

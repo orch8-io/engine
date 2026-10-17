@@ -637,8 +637,20 @@ fn apply_response(
     next.attempts = 0;
     next.next_poll_at = now + next_poll_delay(call, now);
     match response.state {
+        RemoteCallState::Unknown if call.remote_instance_id.is_some() => {
+            // L5-13: the peer already started this run and no longer knows
+            // it (retention purge, restore from backup). Starting it again
+            // would repeat the remote side effects, so fail the call and let
+            // the parent's own failure policy decide.
+            next.state = FederationCallState::Failed;
+            next.error = Some(
+                "federate: the peer no longer has this run (purged?); not restarted to avoid repeating its side effects"
+                    .into(),
+            );
+            next.next_poll_at = now;
+        }
         RemoteCallState::Unknown => {
-            // The peer lost (or never had) the run: restart it.
+            // Nothing was ever started on the peer: (re)start it.
             next.remote_instance_id = None;
             next.state = FederationCallState::Pending;
         }
@@ -1036,6 +1048,53 @@ mod tests {
         a.unwrap();
         b.unwrap();
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// L5-13: a peer that answers `Unknown` to a status poll for a run it
+    /// already started has purged it; the call must fail, not restart.
+    #[test]
+    fn purged_remote_run_fails_instead_of_restarting() {
+        let now = Utc::now();
+        let mut call = FederationCall {
+            call_id: uuid::Uuid::now_v7(),
+            tenant_id: TenantId::new("t").unwrap(),
+            instance_id: InstanceId::new(),
+            block_id: BlockId::new("b"),
+            peer_id: identity_for(&SigningKey::from_bytes(&[9; 32])).peer_id,
+            sequence: "s".into(),
+            sequence_version: None,
+            input: json!({}),
+            withheld_sha256: vec![],
+            state: FederationCallState::Running,
+            remote_instance_id: Some(InstanceId::new()),
+            result: None,
+            error: None,
+            attempts: 0,
+            notified: false,
+            next_poll_at: now,
+            created_at: now,
+            updated_at: now,
+            version: 1,
+        };
+        let unknown = || FederationResponse {
+            v: FEDERATION_PROTOCOL_VERSION,
+            call_id: call.call_id,
+            state: RemoteCallState::Unknown,
+            remote_instance_id: None,
+            outputs: None,
+        };
+        let mut next = call.clone();
+        apply_response(&mut next, &call, unknown(), now);
+        assert_eq!(next.state, FederationCallState::Failed);
+        assert!(next.error.as_deref().unwrap().contains("purged"));
+        assert_eq!(next.next_poll_at, now, "terminal: resume the parent now");
+
+        // Never started on the peer: starting is still the right move.
+        call.remote_instance_id = None;
+        call.state = FederationCallState::Pending;
+        let mut next = call.clone();
+        apply_response(&mut next, &call, unknown(), now);
+        assert_eq!(next.state, FederationCallState::Pending);
     }
 
     /// L5-03: a 401 (stale envelope: clock skew) or a 404 (sequence not
