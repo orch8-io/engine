@@ -348,16 +348,44 @@ impl MobileStorage {
     /// List terminal instance identifiers and states without loading context.
     /// Notification delivery fetches a complete row only for a newly observed
     /// callback, while listener-free dedup cleanup needs IDs alone.
+    ///
+    /// MC-03: keyset-paged by `id` and drained completely. A fixed
+    /// `LIMIT 100 ORDER BY updated_at DESC` silently dropped every transition
+    /// beyond the newest hundred when more than 100 instances finished between
+    /// two scans, so older completions were never reported.
     pub(crate) async fn list_terminal_instance_states(
         &self,
+    ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
+        let mut all = Vec::new();
+        let mut after = String::new();
+        loop {
+            let page = self
+                .list_terminal_instance_states_page(&after, SCAN_PAGE)
+                .await?;
+            let full = page.len() == SCAN_PAGE as usize;
+            if let Some((id, _)) = page.last() {
+                after = id.to_string();
+            }
+            all.extend(page);
+            if !full {
+                return Ok(all);
+            }
+        }
+    }
+
+    async fn list_terminal_instance_states_page(
+        &self,
+        after: &str,
         limit: u32,
     ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT id, state FROM task_instances
              WHERE state IN ('completed', 'failed', 'cancelled')
-             ORDER BY updated_at DESC
-             LIMIT ?1",
+               AND id > ?1
+             ORDER BY id
+             LIMIT ?2",
         )
+        .bind(after)
         .bind(i64::from(limit))
         .fetch_all(self.pool())
         .await?;
@@ -376,8 +404,30 @@ impl MobileStorage {
     /// List only the identifiers needed to emit waiting-step callbacks.
     /// Extracting `current_step` inside `SQLite` avoids parsing and retaining up
     /// to `limit` complete execution contexts on every notification scan.
+    ///
+    /// MC-03: drained completely via keyset paging (see
+    /// [`Self::list_terminal_instance_states`]).
     pub(crate) async fn list_waiting_steps(
         &self,
+    ) -> Result<Vec<WaitingStepProjection>, StorageError> {
+        let mut all = Vec::new();
+        let mut after = String::new();
+        loop {
+            let page = self.list_waiting_steps_page(&after, SCAN_PAGE).await?;
+            let full = page.len() == SCAN_PAGE as usize;
+            if let Some(last) = page.last() {
+                after = last.id.to_string();
+            }
+            all.extend(page);
+            if !full {
+                return Ok(all);
+            }
+        }
+    }
+
+    async fn list_waiting_steps_page(
+        &self,
+        after: &str,
         limit: u32,
     ) -> Result<Vec<WaitingStepProjection>, StorageError> {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
@@ -385,9 +435,11 @@ impl MobileStorage {
              FROM task_instances
              WHERE state = 'waiting'
                AND json_type(context, '$.runtime.current_step') = 'text'
-             ORDER BY updated_at DESC
-             LIMIT ?1",
+               AND id > ?1
+             ORDER BY id
+             LIMIT ?2",
         )
+        .bind(after)
         .bind(i64::from(limit))
         .fetch_all(self.pool())
         .await?;
@@ -406,26 +458,72 @@ impl MobileStorage {
     /// Read the small instance header needed for cloud status reporting.
     /// Context JSON can approach the mobile context ceiling and is deliberately
     /// reduced to its current-step string inside `SQLite`.
-    pub(crate) async fn list_sync_instances(
+    ///
+    /// MC-03/OPT-01: every non-terminal instance, drained completely via
+    /// keyset paging on `id`.
+    pub(crate) async fn list_sync_active_instances(
         &self,
-        limit: u32,
     ) -> Result<Vec<SyncInstanceProjection>, StorageError> {
-        let rows = sqlx::query_as::<_, SyncInstanceProjectionRow>(
-            "SELECT i.id, i.sequence_id, i.state,
-                    CASE WHEN json_valid(i.context)
-                         THEN json_extract(i.context, '$.runtime.current_step')
-                    END AS current_step
-             FROM task_instances i
-             WHERE i.state IN ('scheduled', 'running', 'waiting',
-                               'completed', 'failed', 'cancelled')
-             ORDER BY i.updated_at DESC
-             LIMIT ?1",
-        )
-        .bind(i64::from(limit))
-        .fetch_all(self.pool())
-        .await?;
+        let mut all = Vec::new();
+        let mut after = String::new();
+        loop {
+            let rows = sqlx::query_as::<_, SyncInstanceProjectionRow>(
+                "SELECT i.id, i.sequence_id, i.state,
+                        CASE WHEN json_valid(i.context)
+                             THEN json_extract(i.context, '$.runtime.current_step')
+                        END AS current_step
+                 FROM task_instances i
+                 WHERE i.state IN ('scheduled', 'running', 'waiting')
+                   AND i.id > ?1
+                 ORDER BY i.id
+                 LIMIT ?2",
+            )
+            .bind(&after)
+            .bind(i64::from(SCAN_PAGE))
+            .fetch_all(self.pool())
+            .await?;
+            let full = rows.len() == SCAN_PAGE as usize;
+            if let Some(last) = rows.last() {
+                after.clone_from(&last.id);
+            }
+            for row in rows {
+                all.push(row.try_into()?);
+            }
+            if !full {
+                return Ok(all);
+            }
+        }
+    }
 
-        rows.into_iter().map(TryInto::try_into).collect()
+    /// The same status header as [`Self::list_sync_active_instances`] for an
+    /// explicit set of (typically newly-terminal) instances.
+    pub(crate) async fn list_sync_instances_by_ids(
+        &self,
+        instance_ids: &[InstanceId],
+    ) -> Result<Vec<SyncInstanceProjection>, StorageError> {
+        let mut all = Vec::with_capacity(instance_ids.len());
+        for chunk in instance_ids.chunks(SCAN_PAGE as usize) {
+            let mut query = sqlx::QueryBuilder::new(
+                "SELECT i.id, i.sequence_id, i.state,
+                        CASE WHEN json_valid(i.context)
+                             THEN json_extract(i.context, '$.runtime.current_step')
+                        END AS current_step
+                 FROM task_instances i WHERE i.id IN (",
+            );
+            let mut ids = query.separated(",");
+            for id in chunk {
+                ids.push_bind(id.to_string());
+            }
+            ids.push_unseparated(") ORDER BY i.id");
+            let rows = query
+                .build_query_as::<SyncInstanceProjectionRow>()
+                .fetch_all(self.pool())
+                .await?;
+            for row in rows {
+                all.push(row.try_into()?);
+            }
+        }
+        Ok(all)
     }
 
     /// Fetch execution-tree fields for a status batch in one query instead of
@@ -434,27 +532,32 @@ impl MobileStorage {
         &self,
         instance_ids: &[InstanceId],
     ) -> Result<Vec<SyncExecutionStepProjection>, StorageError> {
-        if instance_ids.is_empty() {
-            return Ok(Vec::new());
-        }
+        let mut all = Vec::new();
+        for chunk in instance_ids.chunks(SCAN_PAGE as usize) {
+            let mut query = sqlx::QueryBuilder::new(
+                "SELECT instance_id, block_id, block_type, state, started_at, completed_at
+                 FROM execution_tree WHERE instance_id IN (",
+            );
+            let mut ids = query.separated(",");
+            for instance_id in chunk {
+                ids.push_bind(instance_id.to_string());
+            }
+            ids.push_unseparated(") ORDER BY instance_id, id");
 
-        let mut query = sqlx::QueryBuilder::new(
-            "SELECT instance_id, block_id, block_type, state, started_at, completed_at
-             FROM execution_tree WHERE instance_id IN (",
-        );
-        let mut ids = query.separated(",");
-        for instance_id in instance_ids {
-            ids.push_bind(instance_id.to_string());
+            let rows = query
+                .build_query_as::<SyncExecutionStepProjectionRow>()
+                .fetch_all(self.pool())
+                .await?;
+            for row in rows {
+                all.push(row.try_into()?);
+            }
         }
-        ids.push_unseparated(") ORDER BY instance_id, id");
-
-        let rows = query
-            .build_query_as::<SyncExecutionStepProjectionRow>()
-            .fetch_all(self.pool())
-            .await?;
-        rows.into_iter().map(TryInto::try_into).collect()
+        Ok(all)
     }
 }
+
+/// Page size for the drain-to-completion scans (MC-03).
+const SCAN_PAGE: u32 = 500;
 
 /// Fields needed by `MobileEngine::active_instances`; intentionally excludes
 /// the potentially large execution context.
@@ -749,7 +852,7 @@ mod tests {
         .await
         .unwrap();
 
-        let projected = storage.list_terminal_instance_states(100).await.unwrap();
+        let projected = storage.list_terminal_instance_states().await.unwrap();
         assert_eq!(projected, vec![(id, InstanceState::Completed)]);
     }
 
@@ -773,7 +876,7 @@ mod tests {
         .await
         .unwrap();
 
-        let projected = storage.list_waiting_steps(100).await.unwrap();
+        let projected = storage.list_waiting_steps().await.unwrap();
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].id, id);
         assert_eq!(projected[0].sequence_id, sequence_id);
@@ -816,7 +919,7 @@ mod tests {
         .await
         .unwrap();
 
-        let projected = storage.list_sync_instances(100).await.unwrap();
+        let projected = storage.list_sync_active_instances().await.unwrap();
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].id, id);
         assert_eq!(projected[0].sequence_id, sequence_id);
@@ -1048,7 +1151,7 @@ mod tests {
         insert_instance(&storage, "not-a-uuid", "completed").await;
 
         let error = storage
-            .list_terminal_instance_states(100)
+            .list_terminal_instance_states()
             .await
             .unwrap_err()
             .to_string();

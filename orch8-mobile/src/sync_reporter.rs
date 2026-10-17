@@ -53,6 +53,8 @@ pub(crate) struct SyncReporter {
     completed_push_generation: AtomicU64,
     /// Per-command redelivery count for [`CommandOutcome::RetryNotFound`].
     not_found_redeliveries: StdMutex<HashMap<String, u32>>,
+    /// What the last successful scans already queued (MC-03/OPT-01).
+    scan_cache: StdMutex<ScanCache>,
 }
 
 #[derive(serde::Serialize)]
@@ -119,9 +121,45 @@ fn borrow_valid_payloads(rows: &[(i64, String)]) -> Vec<&serde_json::value::RawV
     payloads
 }
 
+/// An unchanged non-terminal status/approval is re-queued at most this often
+/// (liveness refresh for the server's `timestamp`); changes go out immediately.
+const SCAN_HEARTBEAT: chrono::Duration = chrono::Duration::minutes(10);
+
+/// Per-instance memory of what was last queued, so a scan rewrites outbox rows
+/// only for instances whose reported status actually changed and reports each
+/// terminal instance exactly once (MC-03/OPT-01). In-memory: after a restart
+/// everything is re-reported once, which is idempotent for the server.
+#[derive(Default)]
+struct ScanCache {
+    statuses: HashMap<InstanceId, (u64, chrono::DateTime<chrono::Utc>)>,
+    approvals: HashMap<String, (u64, chrono::DateTime<chrono::Utc>)>,
+    terminal_reported: std::collections::HashSet<InstanceId>,
+}
+
+struct StatusScanEntry {
+    id: InstanceId,
+    entry: OutboxEntry,
+    fingerprint: u64,
+    terminal: bool,
+}
+
+struct ApprovalScanEntry {
+    entry: OutboxEntry,
+    fingerprint: u64,
+}
+
 struct ScanOutboxEntries {
-    statuses: Vec<OutboxEntry>,
-    approvals: Vec<OutboxEntry>,
+    statuses: Vec<StatusScanEntry>,
+    approvals: Vec<ApprovalScanEntry>,
+}
+
+fn fingerprint_of(parts: &[&str]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for part in parts {
+        part.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 impl SyncReporter {
@@ -164,6 +202,7 @@ impl SyncReporter {
             push_generation: AtomicU64::new(0),
             completed_push_generation: AtomicU64::new(0),
             not_found_redeliveries: StdMutex::new(HashMap::new()),
+            scan_cache: StdMutex::new(ScanCache::default()),
         }
     }
 
@@ -320,13 +359,45 @@ impl SyncReporter {
         mobile_storage: &MobileStorage,
         sequence_cache: &Arc<SequenceCache>,
     ) -> bool {
-        let instances = match mobile_storage.list_sync_instances(100).await {
+        // MC-03: every active instance and every not-yet-reported terminal one,
+        // not just the newest 100.
+        let mut instances = match mobile_storage.list_sync_active_instances().await {
             Ok(list) => list,
             Err(e) => {
                 debug!(error = %e, "scan_and_queue: failed to list instances");
                 return false;
             }
         };
+        let terminal_all = match mobile_storage.list_terminal_instance_states().await {
+            Ok(list) => list,
+            Err(e) => {
+                debug!(error = %e, "scan_and_queue: failed to list terminal instances");
+                return false;
+            }
+        };
+        let new_terminal: Vec<InstanceId> = {
+            let mut cache = self
+                .scan_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let present: std::collections::HashSet<InstanceId> =
+                terminal_all.iter().map(|(id, _)| *id).collect();
+            cache.terminal_reported.retain(|id| present.contains(id));
+            terminal_all
+                .iter()
+                .map(|(id, _)| *id)
+                .filter(|id| !cache.terminal_reported.contains(id))
+                .collect()
+        };
+        if !new_terminal.is_empty() {
+            match mobile_storage.list_sync_instances_by_ids(&new_terminal).await {
+                Ok(list) => instances.extend(list),
+                Err(e) => {
+                    debug!(error = %e, "scan_and_queue: failed to load terminal instances");
+                    return false;
+                }
+            }
+        }
 
         let instance_ids: Vec<_> = instances.iter().map(|instance| instance.id).collect();
         let execution_steps = match mobile_storage
@@ -350,8 +421,82 @@ impl SyncReporter {
         )
         .await;
 
-        self.queue_scan_entries(&entries.statuses, &entries.approvals)
-            .await
+        // Keep only what changed since the last successful queue.
+        let now = self.clock.now();
+        let (statuses, approvals) = {
+            let cache = self
+                .scan_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let statuses: Vec<&StatusScanEntry> = entries
+                .statuses
+                .iter()
+                .filter(|entry| {
+                    entry.terminal
+                        || cache.statuses.get(&entry.id).is_none_or(|(fp, at)| {
+                            *fp != entry.fingerprint || now - *at >= SCAN_HEARTBEAT
+                        })
+                })
+                .collect();
+            let approvals: Vec<&ApprovalScanEntry> = entries
+                .approvals
+                .iter()
+                .filter(|entry| {
+                    cache
+                        .approvals
+                        .get(&entry.entry.0)
+                        .is_none_or(|(fp, at)| {
+                            *fp != entry.fingerprint || now - *at >= SCAN_HEARTBEAT
+                        })
+                })
+                .collect();
+            (statuses, approvals)
+        };
+
+        if !statuses.is_empty() || !approvals.is_empty() {
+            let status_rows: Vec<OutboxEntry> =
+                statuses.iter().map(|entry| entry.entry.clone()).collect();
+            let approval_rows: Vec<OutboxEntry> =
+                approvals.iter().map(|entry| entry.entry.clone()).collect();
+            if !self.queue_scan_entries(&status_rows, &approval_rows).await {
+                return false;
+            }
+        }
+
+        let mut cache = self
+            .scan_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for entry in &statuses {
+            if entry.terminal {
+                cache.statuses.remove(&entry.id);
+                cache.terminal_reported.insert(entry.id);
+            } else {
+                cache.statuses.insert(entry.id, (entry.fingerprint, now));
+            }
+        }
+        for entry in &approvals {
+            cache
+                .approvals
+                .insert(entry.entry.0.clone(), (entry.fingerprint, now));
+        }
+        // Forget instances/approvals that are no longer active.
+        let active_ids: std::collections::HashSet<InstanceId> = entries
+            .statuses
+            .iter()
+            .filter(|entry| !entry.terminal)
+            .map(|entry| entry.id)
+            .collect();
+        cache.statuses.retain(|id, _| active_ids.contains(id));
+        let live_approvals: std::collections::HashSet<&str> = entries
+            .approvals
+            .iter()
+            .map(|entry| entry.entry.0.as_str())
+            .collect();
+        cache
+            .approvals
+            .retain(|key, _| live_approvals.contains(key.as_str()));
+        true
     }
 
     async fn queue_scan_entries(
@@ -1186,11 +1331,19 @@ async fn collect_scan_entries(
             )
         });
 
-        entries
-            .statuses
-            .push(build_status_entry(&instance, sequence, steps, timestamp));
+        let (entry, fingerprint) = build_status_entry(&instance, sequence, steps, timestamp);
+        entries.statuses.push(StatusScanEntry {
+            id: instance.id,
+            entry,
+            fingerprint,
+            terminal: instance.state.is_terminal(),
+        });
         if let Some(approval) = build_approval_entry(&instance, sequence) {
-            entries.approvals.push(approval);
+            let fingerprint = fingerprint_of(&[&approval.1]);
+            entries.approvals.push(ApprovalScanEntry {
+                entry: approval,
+                fingerprint,
+            });
         }
     }
     entries
@@ -1201,21 +1354,32 @@ fn build_status_entry(
     sequence: Option<&SequenceDefinition>,
     steps: Option<serde_json::Value>,
     timestamp: &str,
-) -> OutboxEntry {
+) -> (OutboxEntry, u64) {
     let instance_id = instance.id.to_string();
     let handler = instance.current_step.as_ref().and_then(|step_id| {
         sequence.and_then(|definition| find_handler(&definition.blocks, step_id))
     });
+    let state = format!("{:?}", instance.state);
+    // Everything except the scan timestamp decides whether the server's view
+    // of this instance is stale.
+    let steps_text = steps.as_ref().map(ToString::to_string).unwrap_or_default();
+    let fingerprint = fingerprint_of(&[
+        &state,
+        instance.current_step.as_ref().map_or("", BlockId::as_str),
+        handler.as_deref().unwrap_or(""),
+        sequence.map_or("", |definition| definition.name.as_str()),
+        &steps_text,
+    ]);
     let payload = status_payload(
         &instance_id,
         sequence.map(|definition| definition.name.as_str()),
-        &format!("{:?}", instance.state),
+        &state,
         instance.current_step.as_ref().map(BlockId::as_str),
         handler.as_deref(),
         steps,
         timestamp,
     );
-    (instance_id, payload)
+    ((instance_id, payload), fingerprint)
 }
 
 fn build_approval_entry(
@@ -1717,7 +1881,7 @@ mod tests {
             state: InstanceState::Waiting,
             current_step: Some(BlockId::new("setup_notifications")),
         };
-        let (_, status) = build_status_entry(&instance, Some(&sequence), None, "now");
+        let ((_, status), _) = build_status_entry(&instance, Some(&sequence), None, "now");
         let status: serde_json::Value = serde_json::from_str(&status).unwrap();
         assert_eq!(status["handler"], "setup_notifications");
         let (_, approval) = build_approval_entry(&instance, Some(&sequence)).unwrap();
@@ -2305,6 +2469,93 @@ mod tests {
             reporter.completed_push_generation.load(Ordering::Acquire),
             2
         );
+    }
+
+    // ---- MC-03 / OPT-01: status scan drains and only rewrites changes ----
+
+    async fn insert_raw_instance(
+        mobile: &crate::storage::MobileStorage,
+        state: &str,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        let id = InstanceId::new().to_string();
+        sqlx::query(
+            "INSERT INTO task_instances
+             (id, sequence_id, tenant_id, namespace, state, context, created_at, updated_at)
+             VALUES (?1, ?2, 'mobile', 'default', ?3, '{}', ?4, ?4)",
+        )
+        .bind(&id)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(state)
+        .bind(updated_at.to_rfc3339())
+        .execute(mobile.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn outbox_count(reporter: &SyncReporter) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_outbox WHERE entry_type = 'status'")
+            .fetch_one(&reporter.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn mc03_scan_reports_a_burst_larger_than_one_page_and_terminal_instances_once() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        let mobile = lifecycle.mobile_storage();
+        let base = chrono::Utc::now();
+        // 130 terminal transitions + 30 active, all between two scans.
+        for i in 0..130 {
+            insert_raw_instance(mobile, "completed", base + chrono::Duration::milliseconds(i))
+                .await;
+        }
+        for i in 0..30 {
+            insert_raw_instance(mobile, "running", base + chrono::Duration::milliseconds(i)).await;
+        }
+        let cache = Arc::new(SequenceCache::new(50, Duration::from_secs(3600)));
+
+        assert!(reporter.scan_and_queue(&storage, mobile, &cache).await);
+        assert_eq!(
+            outbox_count(&reporter).await,
+            160,
+            "old transitions beyond the newest 100 must still be reported"
+        );
+
+        // Server drained the outbox. Nothing changed: terminal instances are
+        // not re-reported and unchanged active ones are not rewritten.
+        sqlx::query("DELETE FROM sync_outbox")
+            .execute(&reporter.pool)
+            .await
+            .unwrap();
+        assert!(reporter.scan_and_queue(&storage, mobile, &cache).await);
+        assert_eq!(outbox_count(&reporter).await, 0, "no churn on a quiet scan");
+
+        // One active instance changes state: only it is re-queued.
+        let changed = insert_raw_instance(mobile, "running", base).await;
+        assert!(reporter.scan_and_queue(&storage, mobile, &cache).await);
+        let ids: Vec<String> =
+            sqlx::query_scalar("SELECT instance_id FROM sync_outbox WHERE entry_type = 'status'")
+                .fetch_all(&reporter.pool)
+                .await
+                .unwrap();
+        assert_eq!(ids, vec![changed]);
+    }
+
+    #[tokio::test]
+    async fn mc03_terminal_and_waiting_notifications_drain_past_one_hundred() {
+        let (_reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        let mobile = lifecycle.mobile_storage();
+        let base = chrono::Utc::now();
+        for i in 0..120 {
+            insert_raw_instance(mobile, "failed", base + chrono::Duration::milliseconds(i)).await;
+        }
+        let notifier = crate::notifier::MobileNotifier::new();
+        let ids = notifier.fire_terminal_events(&storage, mobile).await;
+        assert_eq!(ids.len(), 120, "all terminal ids are reported for cleanup");
+        let again = notifier.fire_terminal_events(&storage, mobile).await;
+        assert!(again.is_empty(), "and only once");
     }
 
     // ---- MC-02 / MC-10 / MC-16: command idempotency ----
