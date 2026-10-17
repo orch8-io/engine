@@ -123,6 +123,192 @@ pub async fn execute_saga(
     Ok(true)
 }
 
+/// Run the compensations of sagas an instance was torn away from (L3-11).
+///
+/// [`execute_saga`] only rolls back when one of its own actions fails. If the
+/// instance is instead cancelled, killed by the step budget, or aborted by an
+/// evaluation error while a saga is mid-flight, the saga node never gets
+/// another pass and the effects of its completed steps are left standing.
+/// This is called once the instance has reached its terminal state, and for
+/// every saga that is not already `Completed`/`Failed` (those finished or
+/// rolled back themselves) it runs the compensation of each step whose
+/// action completed and whose compensation has not run yet, in reverse
+/// order, best effort: like `on_failure` / `on_cancel` hooks only `Step`
+/// compensations run, errors are logged and swallowed, and each result is
+/// recorded under the compensation block's id.
+///
+/// Idempotent: a compensation node that is `Completed`/`Failed` (it ran in a
+/// rollback that was interrupted, or in an earlier call) is not run again,
+/// and every compensation run here is marked on its node.
+pub(crate) async fn compensate_aborted_sagas(
+    storage: &std::sync::Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    instance: &TaskInstance,
+    sequence: &orch8_types::sequence::SequenceDefinition,
+    reason: &'static str,
+) {
+    use orch8_types::sequence::BlockDefinition;
+
+    let tree = match storage.get_execution_tree(instance.id).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(instance_id = %instance.id, error = %e, "saga abort: failed to load execution tree");
+            return;
+        }
+    };
+    let saga_nodes: Vec<&ExecutionNode> = tree
+        .iter()
+        .filter(|n| {
+            n.block_type == orch8_types::execution::BlockType::Saga
+                && !matches!(n.state, NodeState::Completed | NodeState::Failed)
+        })
+        .collect();
+    if saga_nodes.is_empty() {
+        return;
+    }
+    // Final context + outputs: compensations template against what the
+    // instance actually did.
+    let instance = match storage.get_instance(instance.id).await {
+        Ok(Some(fresh)) => fresh,
+        _ => instance.clone(),
+    };
+    let block_map = evaluator::flatten_blocks(&sequence.blocks);
+    let outputs = crate::handlers::param_resolve::OutputsSnapshot::new();
+
+    for node in saga_nodes {
+        let Some(BlockDefinition::Saga(saga_def)) = block_map
+            .binary_search_by_key(&&node.block_id, |(id, _)| *id)
+            .ok()
+            .map(|idx| block_map[idx].1)
+        else {
+            continue;
+        };
+        for i in (0..saga_def.steps.len()).rev() {
+            let Some(BlockDefinition::Step(comp_step)) = saga_def.steps[i].compensation.as_deref()
+            else {
+                if saga_def.steps[i].compensation.is_some() {
+                    warn!(
+                        instance_id = %instance.id,
+                        block_id = %saga_def.id,
+                        "saga abort: skipped a non-step compensation block (v1 runs step compensations only)"
+                    );
+                }
+                continue;
+            };
+            let actions = evaluator::children_of(&tree, node.id, action_branch(i));
+            if actions.is_empty() || actions.iter().any(|a| a.state != NodeState::Completed) {
+                continue; // the action never (fully) ran: nothing to undo
+            }
+            let comp_nodes = evaluator::children_of(&tree, node.id, compensation_branch(i));
+            if comp_nodes
+                .iter()
+                .any(|c| matches!(c.state, NodeState::Completed | NodeState::Failed))
+            {
+                continue; // already ran
+            }
+            run_abort_compensation(
+                storage,
+                handlers,
+                &instance,
+                saga_def,
+                comp_step,
+                &comp_nodes,
+                &outputs,
+                reason,
+            )
+            .await;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_abort_compensation(
+    storage: &std::sync::Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    instance: &TaskInstance,
+    saga_def: &SagaDef,
+    comp_step: &orch8_types::sequence::StepDef,
+    comp_nodes: &[&ExecutionNode],
+    outputs: &crate::handlers::param_resolve::OutputsSnapshot,
+    reason: &'static str,
+) {
+    let mut context = instance.context.clone();
+    if !context.data.is_object() {
+        context.data = serde_json::json!({});
+    }
+    if let Some(data) = context.data.as_object_mut() {
+        data.insert(
+            "_error".into(),
+            serde_json::json!({
+                "source": "saga",
+                "block_id": saga_def.id.as_str(),
+                "reason": reason,
+            }),
+        );
+    }
+    let params = match crate::handlers::param_resolve::resolve_templates_in_params(
+        storage.as_ref(),
+        instance,
+        &context,
+        &comp_step.params,
+        outputs,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                instance_id = %instance.id,
+                block_id = %comp_step.id,
+                error = %e,
+                "saga abort: failed to resolve compensation params (skipped)"
+            );
+            return;
+        }
+    };
+    let step_ctx = crate::handlers::StepContext {
+        instance_id: instance.id,
+        tenant_id: instance.tenant_id.clone(),
+        block_id: comp_step.id.clone(),
+        params,
+        context: std::sync::Arc::new(context),
+        attempt: 0,
+        storage: std::sync::Arc::clone(storage),
+        wait_for_input: None,
+    };
+    let Some(result) = crate::scheduler::dispatch_cleanup_step(
+        storage,
+        handlers,
+        instance,
+        comp_step,
+        "saga_abort",
+        step_ctx,
+    )
+    .await
+    else {
+        return;
+    };
+    let state = if result.is_ok() {
+        NodeState::Completed
+    } else {
+        NodeState::Failed
+    };
+    crate::scheduler::record_cleanup_output(storage, instance, comp_step, "saga_abort", result)
+        .await;
+    for node in comp_nodes {
+        if let Err(e) = storage.update_node_state(node.id, state).await {
+            warn!(instance_id = %instance.id, error = %e, "saga abort: failed to mark compensation node");
+        }
+    }
+    debug!(
+        instance_id = %instance.id,
+        block_id = %saga_def.id,
+        step = %comp_step.id,
+        reason,
+        "saga abort: compensation ran"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

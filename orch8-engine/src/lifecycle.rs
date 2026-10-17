@@ -148,9 +148,11 @@ const ORPHAN_SWEEP_ROUNDS: usize = 17;
 /// transition sites means every path (signal, API state change, bulk cancel,
 /// step failure, budget kill, reaper) is covered, and a crash between the
 /// parent's transition and the cascade only delays it. Grandchildren are
-/// handled by further rounds. Returns the number of instances cancelled.
-pub async fn cancel_orphaned_children(storage: &dyn StorageBackend) -> Result<usize, EngineError> {
-    let mut cancelled = 0usize;
+/// handled by further rounds. Returns the instances cancelled (as read just before the cancel).
+pub async fn cancel_orphaned_children(
+    storage: &dyn StorageBackend,
+) -> Result<Vec<orch8_types::instance::TaskInstance>, EngineError> {
+    let mut cancelled = Vec::new();
     for _ in 0..ORPHAN_SWEEP_ROUNDS {
         let ids = storage.list_orphaned_children(ORPHAN_SWEEP_BATCH).await?;
         if ids.is_empty() {
@@ -176,7 +178,7 @@ pub async fn cancel_orphaned_children(storage: &dyn StorageBackend) -> Result<us
             {
                 Ok(()) => {
                     progressed = true;
-                    cancelled += 1;
+                    cancelled.push(inst.clone());
                     info!(
                         instance_id = %id,
                         parent_id = ?inst.parent_instance_id,

@@ -67,7 +67,11 @@ async fn start_chain(engine: &TestEngine) -> (InstanceId, InstanceId, InstanceId
     let parent_seq = SequenceBuilder::new("t")
         .block(sub_sequence("to_child", &child_seq))
         .build();
-    engine.storage.create_sequence(&grandchild_seq).await.unwrap();
+    engine
+        .storage
+        .create_sequence(&grandchild_seq)
+        .await
+        .unwrap();
     engine.storage.create_sequence(&child_seq).await.unwrap();
     let parent = engine.start(&parent_seq).await;
 
@@ -123,8 +127,18 @@ async fn l3_07_cancelling_a_parent_cancels_the_whole_child_chain() {
         send_cancel(&engine, parent).await;
         engine.tick().await;
 
-        assert_eq!(state_of(&engine, parent).await, InstanceState::Cancelled, "{}", b.name());
-        assert_eq!(state_of(&engine, child).await, InstanceState::Cancelled, "{}", b.name());
+        assert_eq!(
+            state_of(&engine, parent).await,
+            InstanceState::Cancelled,
+            "{}",
+            b.name()
+        );
+        assert_eq!(
+            state_of(&engine, child).await,
+            InstanceState::Cancelled,
+            "{}",
+            b.name()
+        );
         assert_eq!(
             state_of(&engine, grandchild).await,
             InstanceState::Cancelled,
@@ -177,9 +191,24 @@ async fn l3_07_live_parent_keeps_its_children() {
         for _ in 0..3 {
             engine.tick().await;
         }
-        assert_eq!(state_of(&engine, parent).await, InstanceState::Waiting, "{}", b.name());
-        assert_eq!(state_of(&engine, child).await, InstanceState::Waiting, "{}", b.name());
-        assert_eq!(state_of(&engine, grandchild).await, InstanceState::Waiting, "{}", b.name());
+        assert_eq!(
+            state_of(&engine, parent).await,
+            InstanceState::Waiting,
+            "{}",
+            b.name()
+        );
+        assert_eq!(
+            state_of(&engine, child).await,
+            InstanceState::Waiting,
+            "{}",
+            b.name()
+        );
+        assert_eq!(
+            state_of(&engine, grandchild).await,
+            InstanceState::Waiting,
+            "{}",
+            b.name()
+        );
     }
 }
 
@@ -340,7 +369,11 @@ async fn l3_05_dlq_retry_resumes_the_failed_child_instead_of_respawning() {
         );
         assert_eq!(kids[0].id, first_child.id);
         assert_eq!(kids[0].state, InstanceState::Completed);
-        assert_eq!(counted.load(Ordering::SeqCst), 1, "child's finished step re-ran");
+        assert_eq!(
+            counted.load(Ordering::SeqCst),
+            1,
+            "child's finished step re-ran"
+        );
         assert_eq!(flaky_calls.load(Ordering::SeqCst), 2);
     }
 }
@@ -372,5 +405,244 @@ async fn l3_05_a_superseded_child_is_not_adopted() {
         let kids = engine.storage.get_child_instances(parent).await.unwrap();
         assert_eq!(kids.len(), 2, "{}", backend.name());
         assert_eq!(engine.instance(old.id).await.state, InstanceState::Failed);
+    }
+}
+
+// === L3-11 ===
+
+use std::sync::Mutex;
+
+use orch8_types::sequence::{SagaDef, SagaStep};
+
+/// Engine whose `undo` handler records the block id of each compensation it
+/// runs, in call order.
+fn saga_engine_builder(backend: &TestBackend) -> (orch8_engine::testing::TestEngineBuilder, Arc<Mutex<Vec<String>>>) {
+    let undone = Arc::new(Mutex::new(Vec::<String>::new()));
+    let u = Arc::clone(&undone);
+    let builder = TestEngine::builder()
+        .storage(backend.storage.clone())
+        .register("undo", move |ctx| {
+            let u = Arc::clone(&u);
+            async move {
+                u.lock().unwrap().push(ctx.block_id.as_str().to_owned());
+                Ok(json!({"undone": ctx.block_id.as_str()}))
+            }
+        });
+    (builder, undone)
+}
+
+fn saga_step(id: &str, action: BlockDefinition, comp: Option<&str>) -> SagaStep {
+    SagaStep {
+        id: orch8_types::ids::BlockId::new(id),
+        action: Box::new(action),
+        compensation: comp.map(|c| Box::new(BlockDefinition::Step(Box::new(step(c, "undo"))))),
+    }
+}
+
+fn noop_block(id: &str) -> BlockDefinition {
+    BlockDefinition::Step(Box::new(step(id, "noop")))
+}
+
+/// A noop step that parks the instance for 1 s first, so each saga action
+/// takes its own scheduler tick.
+fn delayed_block(id: &str) -> BlockDefinition {
+    let mut s = step(id, "noop");
+    s.delay = Some(orch8_types::sequence::DelaySpec {
+        duration: std::time::Duration::from_secs(1),
+        business_days_only: false,
+        jitter: None,
+        holidays: vec![],
+        fire_at_local: None,
+        timezone: None,
+    });
+    BlockDefinition::Step(Box::new(s))
+}
+
+fn saga_block(steps: Vec<SagaStep>) -> BlockDefinition {
+    BlockDefinition::Saga(Box::new(SagaDef {
+        id: orch8_types::ids::BlockId::new("saga"),
+        steps,
+    }))
+}
+
+fn undone(log: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    log.lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn l3_11_cancelling_mid_saga_compensates_completed_steps_in_reverse() {
+    for kind in KINDS {
+        let Some(backend) = TestBackend::open(kind).await else {
+            continue;
+        };
+        let (builder, log) = saga_engine_builder(&backend);
+        let engine = builder.build().await;
+        // s0, s1 complete; s2 parks on a human-input gate.
+        let seq = SequenceBuilder::new("t")
+            .block(saga_block(vec![
+                saga_step("s0", noop_block("a0"), Some("c0")),
+                saga_step("s1", noop_block("a1"), Some("c1")),
+                saga_step("s2", gate("a2"), Some("c2")),
+            ]))
+            .build();
+        let id = engine.start(&seq).await;
+        let parked = engine.drive(id).await;
+        assert_eq!(parked.state, InstanceState::Waiting, "{}", backend.name());
+        assert!(undone(&log).is_empty());
+
+        send_cancel(&engine, id).await;
+        engine.tick().await;
+
+        assert_eq!(engine.instance(id).await.state, InstanceState::Cancelled);
+        assert_eq!(
+            undone(&log),
+            vec!["c1".to_owned(), "c0".to_owned()],
+            "{}: completed saga steps must be compensated LIFO; the step that never completed must not be",
+            backend.name()
+        );
+        // Recorded like any compensation, and not repeated by later ticks.
+        assert!(
+            engine
+                .storage
+                .get_block_output(id, &orch8_types::ids::BlockId::new("c0"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        engine.tick().await;
+        assert_eq!(undone(&log).len(), 2, "compensation ran twice");
+    }
+}
+
+#[tokio::test]
+async fn l3_11_step_budget_kill_compensates_the_saga() {
+    for kind in KINDS {
+        let Some(backend) = TestBackend::open(kind).await else {
+            continue;
+        };
+        let (builder, log) = saga_engine_builder(&backend);
+        let engine = builder
+            .config(|c| c.max_steps_per_instance = 2)
+            .build()
+            .await;
+        let seq = SequenceBuilder::new("t")
+            .block(saga_block(
+                (0..6)
+                    .map(|i| {
+                        saga_step(
+                            &format!("s{i}"),
+                            delayed_block(&format!("a{i}")),
+                            Some(&format!("c{i}")),
+                        )
+                    })
+                    .collect(),
+            ))
+            .build();
+        let id = engine.start(&seq).await;
+
+        let done = run_to_terminal(&engine, id).await;
+
+        assert_eq!(done.state, InstanceState::Failed, "{}", backend.name());
+        let ran = undone(&log);
+        assert!(
+            !ran.is_empty() && ran.len() < 6,
+            "{}: expected the completed prefix to be compensated, got {ran:?}",
+            backend.name()
+        );
+        // LIFO over a prefix: c(k-1), ..., c0.
+        let expected: Vec<String> = (0..ran.len()).rev().map(|i| format!("c{i}")).collect();
+        assert_eq!(ran, expected, "{}", backend.name());
+    }
+}
+
+#[tokio::test]
+async fn l3_11_evaluation_error_compensates_the_saga() {
+    for kind in KINDS {
+        let Some(backend) = TestBackend::open(kind).await else {
+            continue;
+        };
+        let (builder, log) = saga_engine_builder(&backend);
+        let engine = builder.build().await;
+        // s1's action invokes a sequence that does not exist: dispatch
+        // returns a (non-retryable) evaluation error instead of failing the
+        // saga node, so the saga never rolls itself back.
+        let missing = SequenceBuilder::new("t").name("does-not-exist").build();
+        let seq = SequenceBuilder::new("t")
+            .block(saga_block(vec![
+                saga_step("s0", noop_block("a0"), Some("c0")),
+                saga_step("s1", sub_sequence("a1", &missing), Some("c1")),
+            ]))
+            .build();
+        let id = engine.start(&seq).await;
+
+        let done = run_to_terminal(&engine, id).await;
+
+        assert_eq!(done.state, InstanceState::Failed, "{}", backend.name());
+        assert_eq!(undone(&log), vec!["c0".to_owned()], "{}", backend.name());
+    }
+}
+
+#[tokio::test]
+async fn l3_11_a_saga_that_rolled_itself_back_is_not_compensated_twice() {
+    for kind in KINDS {
+        let Some(backend) = TestBackend::open(kind).await else {
+            continue;
+        };
+        let (builder, log) = saga_engine_builder(&backend);
+        let engine = builder
+            .register("boom", |_ctx| async {
+                Err(StepError::Permanent {
+                    message: "boom".into(),
+                    details: None,
+                })
+            })
+            .build()
+            .await;
+        let seq = SequenceBuilder::new("t")
+            .block(saga_block(vec![
+                saga_step("s0", noop_block("a0"), Some("c0")),
+                saga_step("s1", BlockDefinition::Step(Box::new(step("a1", "boom"))), Some("c1")),
+            ]))
+            .build();
+        let id = engine.start(&seq).await;
+
+        let done = run_to_terminal(&engine, id).await;
+
+        assert_eq!(done.state, InstanceState::Failed, "{}", backend.name());
+        assert_eq!(
+            undone(&log),
+            vec!["c0".to_owned()],
+            "{}: the saga's own rollback already compensated s0",
+            backend.name()
+        );
+    }
+}
+
+#[tokio::test]
+async fn l3_07_cancelling_a_parent_compensates_the_sagas_of_its_children() {
+    for kind in KINDS {
+        let Some(backend) = TestBackend::open(kind).await else {
+            continue;
+        };
+        let (builder, log) = saga_engine_builder(&backend);
+        let engine = builder.build().await;
+        let child_seq = SequenceBuilder::new("t")
+            .block(saga_block(vec![
+                saga_step("s0", noop_block("a0"), Some("c0")),
+                saga_step("s1", gate("a1"), Some("c1")),
+            ]))
+            .build();
+        let parent_seq = SequenceBuilder::new("t")
+            .block(sub_sequence("to_child", &child_seq))
+            .build();
+        engine.storage.create_sequence(&child_seq).await.unwrap();
+        let parent = engine.start(&parent_seq).await;
+        let child = tick_until_child_parked(&engine, parent).await;
+
+        send_cancel(&engine, parent).await;
+        engine.tick().await;
+
+        assert_eq!(state_of(&engine, child.id).await, InstanceState::Cancelled, "{}", backend.name());
+        assert_eq!(undone(&log), vec!["c0".to_owned()], "{}", backend.name());
     }
 }

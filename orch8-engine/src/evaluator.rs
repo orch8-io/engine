@@ -14,8 +14,8 @@ mod sla;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use dispatch::awaited_sub_sequence_child_terminal;
 pub use dispatch::SUPERSEDED_CHILD_KEY;
+pub(crate) use dispatch::awaited_sub_sequence_child_terminal;
 use dispatch::dispatch_block;
 use sla::check_sla_deadlines;
 
@@ -224,8 +224,7 @@ pub async fn ensure_execution_tree(
     let completed = storage.get_completed_block_ids(instance.id).await?;
     if !completed.is_empty() {
         let now = chrono::Utc::now();
-        let iterating: std::collections::HashSet<ExecutionNodeId> =
-            nodes_under_iteration(&nodes);
+        let iterating: std::collections::HashSet<ExecutionNodeId> = nodes_under_iteration(&nodes);
         for node in &mut nodes {
             if matches!(node.block_type, BlockType::Step | BlockType::SubSequence)
                 && !iterating.contains(&node.id)
