@@ -4,6 +4,7 @@ import {
   Orch8Client,
   PermanentHandlerError,
   parseTaskContext,
+  orch8ErrorKind,
   type EventSource,
   type NativeOrch8,
 } from "../core";
@@ -333,5 +334,20 @@ describe("token provider", () => {
     );
     await expect(client.setTokenProvider("dst_x" as never)).rejects.toThrow(TypeError);
     expect(native.setTokenProvider).not.toHaveBeenCalled();
+  });
+});
+
+describe("orch8ErrorKind", () => {
+  it("prefers userInfo.kind", () => {
+    expect(orch8ErrorKind({ code: "ORCH8_ERROR", userInfo: { kind: "not_found" } })).toBe("not_found");
+  });
+  it("falls back to the ORCH8_<KIND> code", () => {
+    expect(orch8ErrorKind({ code: "ORCH8_RESOURCE_LIMIT" })).toBe("resource_limit");
+    expect(orch8ErrorKind({ code: "ORCH8_SIGNATURE_INVALID" })).toBe("signature_invalid");
+  });
+  it("treats legacy and foreign errors as unknown", () => {
+    expect(orch8ErrorKind({ code: "ORCH8_ERROR" })).toBe("unknown");
+    expect(orch8ErrorKind(new Error("x"))).toBe("unknown");
+    expect(orch8ErrorKind(null)).toBe("unknown");
   });
 });

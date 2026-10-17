@@ -11,6 +11,8 @@ import Orch8Mobile
 @objc(Orch8Module)
 class Orch8Module: RCTEventEmitter {
     private let lock = NSLock()
+    private let initLock = NSLock()
+    private var hasListeners = false
     private var _engine: MobileEngine?
     private var handlerTimeoutMs: UInt64 = 30_000
     private let workQueue = DispatchQueue(label: "io.orch8.reactnative.work", qos: .utility, attributes: .concurrent)
@@ -33,6 +35,39 @@ class Orch8Module: RCTEventEmitter {
 
     @objc static override func requiresMainQueueSetup() -> Bool { false }
 
+    override func startObserving() {
+        lock.lock(); hasListeners = true; lock.unlock()
+    }
+
+    override func stopObserving() {
+        lock.lock(); hasListeners = false; lock.unlock()
+    }
+
+    /// Releases the engine when the React bridge is torn down (reload, app
+    /// teardown) so the SQLite file and worker threads are not leaked.
+    override func invalidate() {
+        lock.lock()
+        let engine = _engine
+        _engine = nil
+        hasListeners = false
+        lock.unlock()
+        pending.failAll("React Native bridge invalidated")
+        if let engine {
+            workQueue.async { engine.shutdown() }
+        }
+        super.invalidate()
+    }
+
+    /// Emits a JS event; returns false when no JS listener is attached so
+    /// callers can fail fast instead of waiting for the handler timeout.
+    @discardableResult
+    func emit(_ name: String, _ body: [String: Any]) -> Bool {
+        lock.lock(); let listening = hasListeners; lock.unlock()
+        guard listening else { return false }
+        sendEvent(withName: name, body: body)
+        return true
+    }
+
     // MARK: - Helpers
 
     private func withEngine(
@@ -46,7 +81,7 @@ class Orch8Module: RCTEventEmitter {
         do {
             try body(engine)
         } catch {
-            reject("ORCH8_ERROR", "\(error)", error)
+            Orch8Errors.reject(reject, error)
         }
     }
 
@@ -63,7 +98,7 @@ class Orch8Module: RCTEventEmitter {
             do {
                 try body(engine)
             } catch {
-                reject("ORCH8_ERROR", "\(error)", error)
+                Orch8Errors.reject(reject, error)
             }
         }
     }
@@ -108,9 +143,7 @@ class Orch8Module: RCTEventEmitter {
         resolver resolve: @escaping RCTPromiseResolveBlock,
         rejecter reject: @escaping RCTPromiseRejectBlock
     ) {
-        let dbPath = config["dbPath"] as? String
-            ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("orch8.db").path
+        let dbPath = config["dbPath"] as? String ?? Orch8Errors.defaultDatabasePath()
 
         let cfg = MobileEngineConfig(
             tickIntervalMs: Self.u64(config, "tickIntervalMs", 500),
@@ -137,17 +170,27 @@ class Orch8Module: RCTEventEmitter {
 
         workQueue.async {
             do {
+                // Serialize re-initialization and release the SQLite file held
+                // by a previous engine before opening a new one on the same path.
+                self.initLock.lock()
+                defer { self.initLock.unlock() }
+                self.lock.lock()
+                let previous = self._engine
+                self._engine = nil
+                self.lock.unlock()
+                if let previous {
+                    self.pending.failAll("engine re-initialized")
+                    previous.shutdown()
+                }
                 let engine = try MobileEngine(dbPath: dbPath, config: cfg)
                 engine.setListener(listener: RNEngineListener(module: self))
                 self.lock.lock()
-                let previous = self._engine
                 self._engine = engine
                 self.handlerTimeoutMs = cfg.handlerTimeoutMs
                 self.lock.unlock()
-                previous?.shutdown()
                 resolve(nil)
             } catch {
-                reject("INIT_ERROR", "\(error)", error)
+                Orch8Errors.reject(reject, error, legacyCode: "INIT_ERROR")
             }
         }
     }
@@ -656,6 +699,10 @@ final class PendingHandlerCalls: @unchecked Sendable {
         lock.lock(); slots[id] = Slot(); lock.unlock()
     }
 
+    func cancel(_ id: String) {
+        lock.lock(); slots.removeValue(forKey: id); lock.unlock()
+    }
+
     func wait(_ id: String, timeoutMs: UInt64) -> Outcome? {
         lock.lock(); let slot = slots[id]; lock.unlock()
         guard let slot else { return nil }
@@ -699,11 +746,14 @@ final class RNStepHandler: StepHandler, @unchecked Sendable {
         guard let module else { throw HandlerError.Retryable(message: "React Native module released") }
         let requestId = UUID().uuidString
         module.pending.open(requestId)
-        module.sendEvent(withName: "orch8:executeStep", body: [
+        guard module.emit("orch8:executeStep", [
             "requestId": requestId,
             "stepName": stepName,
             "input": input,
-        ])
+        ]) else {
+            module.pending.cancel(requestId)
+            throw HandlerError.Retryable(message: "No JS runtime available for handler '\(stepName)'")
+        }
         guard let outcome = module.pending.wait(requestId, timeoutMs: timeoutMs) else {
             throw HandlerError.Retryable(message: "JS handler '\(stepName)' timed out after \(timeoutMs) ms")
         }
@@ -740,7 +790,10 @@ final class RNTokenProvider: TokenProvider, @unchecked Sendable {
         guard let module else { throw MobileError.Engine(message: "React Native module released") }
         let requestId = UUID().uuidString
         module.pending.open(requestId)
-        module.sendEvent(withName: "orch8:refreshToken", body: ["requestId": requestId])
+        guard module.emit("orch8:refreshToken", ["requestId": requestId]) else {
+            module.pending.cancel(requestId)
+            throw MobileError.Engine(message: "No JS runtime available for token refresh")
+        }
         guard let outcome = module.pending.wait(requestId, timeoutMs: timeoutMs) else {
             throw MobileError.Engine(message: "JS token provider timed out after \(timeoutMs) ms")
         }
@@ -768,21 +821,21 @@ final class RNEngineListener: EngineListener, @unchecked Sendable {
     }
 
     func onInstanceCompleted(instanceId: String, output: String) {
-        module?.sendEvent(withName: "orch8:instanceCompleted", body: [
+        module?.emit("orch8:instanceCompleted", [
             "instanceId": instanceId,
             "output": output,
         ])
     }
 
     func onInstanceFailed(instanceId: String, error: String) {
-        module?.sendEvent(withName: "orch8:instanceFailed", body: [
+        module?.emit("orch8:instanceFailed", [
             "instanceId": instanceId,
             "error": error,
         ])
     }
 
     func onStepPending(instanceId: String, stepName: String, handler: String) {
-        module?.sendEvent(withName: "orch8:stepPending", body: [
+        module?.emit("orch8:stepPending", [
             "instanceId": instanceId,
             "stepName": stepName,
             "handler": handler,

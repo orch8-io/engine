@@ -13,6 +13,7 @@ import type {
   NodeConnectivity,
   NodeRegistration,
   Orch8Config,
+  Orch8ErrorKind,
   Orch8TaskContext,
   PowerState,
   PushWakeEnvelope,
@@ -40,6 +41,38 @@ export const EVENTS = {
  * `POST /runtimes/device-sessions`. Never return an operator key.
  */
 export type TokenFetcher = () => Promise<string>;
+
+const ERROR_KINDS: readonly Orch8ErrorKind[] = [
+  "engine",
+  "storage",
+  "invalid_input",
+  "not_found",
+  "resource_limit",
+  "already_exists",
+  "shutdown",
+  "network",
+  "signature_invalid",
+  "invalid_manifest",
+];
+
+/**
+ * Classifies a rejection from the native module. Reads `userInfo.kind`, then
+ * falls back to the `ORCH8_<KIND>` code; anything else (including the legacy
+ * `ORCH8_ERROR` code and non-native errors) is `"unknown"`.
+ */
+export function orch8ErrorKind(error: unknown): Orch8ErrorKind {
+  if (!error || typeof error !== "object") return "unknown";
+  const e = error as { code?: unknown; userInfo?: { kind?: unknown } };
+  const fromInfo = e.userInfo?.kind;
+  if (typeof fromInfo === "string" && (ERROR_KINDS as readonly string[]).includes(fromInfo)) {
+    return fromInfo as Orch8ErrorKind;
+  }
+  if (typeof e.code === "string" && e.code.startsWith("ORCH8_")) {
+    const kind = e.code.slice("ORCH8_".length).toLowerCase();
+    if ((ERROR_KINDS as readonly string[]).includes(kind)) return kind as Orch8ErrorKind;
+  }
+  return "unknown";
+}
 
 /** Throw from a handler to fail the step permanently (no retry). */
 export class PermanentHandlerError extends Error {

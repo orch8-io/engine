@@ -48,6 +48,8 @@ class Orch8Module(reactContext: ReactApplicationContext) :
 
     @Volatile private var engine: MobileEngine? = null
     @Volatile private var handlerTimeoutMs: Long = 30_000
+    @Volatile private var invalidated = false
+    private val initLock = Any()
     private val work: ExecutorService = Executors.newCachedThreadPool { r ->
         Thread(r, "orch8-rn-work").apply { isDaemon = true }
     }
@@ -66,7 +68,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
         try {
             body(eng)
         } catch (e: Exception) {
-            promise.reject("ORCH8_ERROR", e.message ?: e.toString(), e)
+            Orch8Errors.reject(promise, e)
         }
     }
 
@@ -80,7 +82,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
             try {
                 body(eng)
             } catch (e: Exception) {
-                promise.reject("ORCH8_ERROR", e.message ?: e.toString(), e)
+                Orch8Errors.reject(promise, e)
             }
         }
     }
@@ -124,10 +126,35 @@ class Orch8Module(reactContext: ReactApplicationContext) :
         InstanceStateKind.CANCELLED -> "cancelled"
     }
 
-    internal fun sendEvent(name: String, params: WritableMap) {
-        reactApplicationContext
-            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-            .emit(name, params)
+    /**
+     * Emits a JS event. Returns false (never throws) when no JS runtime is
+     * alive: a throw here would cross the UniFFI callback boundary and become
+     * a Rust panic.
+     */
+    internal fun sendEvent(name: String, params: WritableMap): Boolean {
+        if (invalidated) return false
+        return try {
+            val ctx = reactApplicationContext
+            if (!ctx.hasActiveReactInstance()) return false
+            ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit(name, params)
+            true
+        } catch (ignored: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Default database location. New installs use `noBackupFilesDir` so the
+     * SQLite file is excluded from Auto Backup / device transfer. An existing
+     * database in the previous `getDatabasePath` location keeps being used so
+     * upgrades do not lose data.
+     */
+    private fun defaultDbPath(): String {
+        val ctx = reactApplicationContext
+        val existing = ctx.getDatabasePath("orch8.db")
+        if (existing.exists()) return existing.absolutePath
+        return java.io.File(ctx.noBackupFilesDir, "orch8.db").absolutePath
     }
 
     // Required by NativeEventEmitter on Android.
@@ -141,8 +168,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun initialize(config: ReadableMap, promise: Promise) {
-        val dbPath = config.str("dbPath")
-            ?: reactApplicationContext.getDatabasePath("orch8.db").absolutePath
+        val dbPath = config.str("dbPath") ?: defaultDbPath()
         val cfg = MobileEngineConfig(
             tickIntervalMs = config.ulong("tickIntervalMs", 500uL),
             maxConcurrentSteps = config.uint("maxConcurrentSteps", 4u),
@@ -167,15 +193,23 @@ class Orch8Module(reactContext: ReactApplicationContext) :
         )
         work.execute {
             try {
-                val eng = MobileEngine(dbPath, cfg)
-                eng.setListener(RNEngineListener(this))
-                val previous = engine
-                handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
-                engine = eng
-                previous?.shutdown()
+                synchronized(initLock) {
+                    // Release the SQLite file held by a previous engine before
+                    // opening a new one on the same path.
+                    val previous = engine
+                    engine = null
+                    if (previous != null) {
+                        pending.failAll("engine re-initialized")
+                        previous.shutdown()
+                    }
+                    val eng = MobileEngine(dbPath, cfg)
+                    eng.setListener(RNEngineListener(this))
+                    handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
+                    engine = eng
+                }
                 promise.resolve(null)
             } catch (e: Exception) {
-                promise.reject("INIT_ERROR", e.message ?: e.toString(), e)
+                Orch8Errors.reject(promise, e, "INIT_ERROR")
             }
         }
     }
@@ -518,7 +552,18 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     }
 
     override fun invalidate() {
+        invalidated = true
         pending.failAll("React Native context invalidated")
+        val eng = engine
+        engine = null
+        // Shut the engine down (releases the SQLite file and worker threads)
+        // on the work pool, then let the pool drain.
+        work.execute {
+            try {
+                eng?.shutdown()
+            } catch (ignored: Throwable) {
+            }
+        }
         work.shutdown()
         super.invalidate()
     }
@@ -547,6 +592,10 @@ internal class PendingHandlerCalls {
         return if (done) slot.outcome else null
     }
 
+    fun cancel(id: String) {
+        slots.remove(id)
+    }
+
     fun resolve(id: String, output: String?, error: String?, permanent: Boolean) {
         val slot = slots[id] ?: return // timed out or unknown
         synchronized(slot) {
@@ -572,11 +621,15 @@ private class RNStepHandler(
     override fun execute(stepName: String, input: String): String {
         val requestId = UUID.randomUUID().toString()
         module.pending.open(requestId)
-        module.sendEvent("orch8:executeStep", Arguments.createMap().apply {
+        val sent = module.sendEvent("orch8:executeStep", Arguments.createMap().apply {
             putString("requestId", requestId)
             putString("stepName", stepName)
             putString("input", input)
         })
+        if (!sent) {
+            module.pending.cancel(requestId)
+            throw HandlerException.Retryable("No JS runtime available for handler '$stepName'")
+        }
         val outcome = module.pending.await(requestId, timeoutMs)
             ?: throw HandlerException.Retryable("JS handler '$stepName' timed out after $timeoutMs ms")
         outcome.error?.let { message ->
@@ -603,9 +656,13 @@ private class RNTokenProvider(
     override fun refreshToken(): String {
         val requestId = UUID.randomUUID().toString()
         module.pending.open(requestId)
-        module.sendEvent("orch8:refreshToken", Arguments.createMap().apply {
+        val sent = module.sendEvent("orch8:refreshToken", Arguments.createMap().apply {
             putString("requestId", requestId)
         })
+        if (!sent) {
+            module.pending.cancel(requestId)
+            throw MobileException.Engine("No JS runtime available for token refresh")
+        }
         val outcome = module.pending.await(requestId, timeoutMs)
             ?: throw MobileException.Engine("JS token provider timed out after $timeoutMs ms")
         outcome.error?.let { throw MobileException.Engine(it) }
