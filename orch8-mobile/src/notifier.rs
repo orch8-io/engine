@@ -2,7 +2,8 @@
 //!
 //! `MobileNotifier` deduplicates `on_instance_completed`, `on_instance_failed`,
 //! and `on_step_pending` callbacks so the host app receives each event at most once
-//! (modulo eviction after `MAX_TRACKED` entries).
+//! (the tracked sets are pruned to the instances still present in storage, so
+//! nothing is re-notified while its row exists).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,9 +19,9 @@ use orch8_types::instance::InstanceState;
 use crate::handlers::EngineListener;
 use crate::storage::MobileStorage;
 
-/// Maximum number of tracked instance/step IDs before the set is cleared.
-/// After clearing, a small number of duplicate notifications may be emitted,
-/// which is acceptable for mobile use-cases.
+/// Tracked-set size above which a debug line is logged. The sets are pruned to
+/// the rows still present in storage (MC-03: scans now drain every page, so
+/// clearing a full set would re-notify every retained instance).
 const MAX_TRACKED: usize = 1000;
 
 /// Manages listener registration and bounded deduplication of lifecycle events.
@@ -74,18 +75,19 @@ impl MobileNotifier {
         mobile_storage: &MobileStorage,
     ) -> Vec<String> {
         let listener = self.listener().await;
-        let Ok(instances) = mobile_storage.list_terminal_instance_states(100).await else {
+        let Ok(instances) = mobile_storage.list_terminal_instance_states().await else {
             return Vec::new();
         };
+        let present: HashSet<InstanceId> = instances.iter().map(|(id, _)| *id).collect();
 
         let mut cleanup_seen = self.cleanup_seen.lock().await;
+        cleanup_seen.retain(|id| present.contains(id));
         if cleanup_seen.len() > MAX_TRACKED {
             debug!(
                 count = cleanup_seen.len(),
                 limit = MAX_TRACKED,
-                "terminal cleanup set exceeded limit — clearing"
+                "terminal cleanup set is unusually large"
             );
-            cleanup_seen.clear();
         }
 
         let mut terminal_ids = Vec::new();
@@ -103,14 +105,7 @@ impl MobileNotifier {
         };
         {
             let mut seen = self.terminal_seen.lock().await;
-            if seen.len() > MAX_TRACKED {
-                debug!(
-                    count = seen.len(),
-                    limit = MAX_TRACKED,
-                    "terminal notification set exceeded limit — clearing"
-                );
-                seen.clear();
-            }
+            seen.retain(|id| present.contains(id));
         }
 
         for (id, projected_state) in instances {
@@ -163,18 +158,24 @@ impl MobileNotifier {
             return;
         };
 
-        let Ok(instances) = mobile_storage.list_waiting_steps(100).await else {
+        let Ok(instances) = mobile_storage.list_waiting_steps().await else {
             return;
         };
 
         let mut seen = self.waiting_seen.lock().await;
+        // Forget steps that are no longer waiting so a later wait on the same
+        // step (loop iteration) notifies again, and the set stays bounded.
+        let present: HashSet<(InstanceId, BlockId)> = instances
+            .iter()
+            .map(|inst| (inst.id, inst.step_id.clone()))
+            .collect();
+        seen.retain(|key| present.contains(key));
         if seen.len() > MAX_TRACKED {
             debug!(
                 count = seen.len(),
                 limit = MAX_TRACKED,
-                "waiting notification set exceeded limit — clearing"
+                "waiting notification set is unusually large"
             );
-            seen.clear();
         }
 
         let mut unseen = Vec::with_capacity(instances.len());

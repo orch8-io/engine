@@ -228,6 +228,10 @@ pub enum SyncAuth {
     UrlToken,
 }
 
+/// Metadata key holding the SDK-version + handler-set fingerprint the cached
+/// manifest cursor was computed under (MC-01).
+const ENV_FINGERPRINT_KEY: &str = "sync_env_fingerprint";
+
 /// Orchestrates manifest fetch, verification, diff, and sequence download.
 pub struct SyncOrchestrator {
     mobile_storage: Arc<MobileStorage>,
@@ -370,6 +374,20 @@ impl SyncOrchestrator {
         .into())
     }
 
+    /// Fingerprint of everything that decides whether a manifest entry is
+    /// installable on this device: SDK version + registered handler names.
+    fn env_fingerprint(&self, registered_handlers: &HashSet<String>) -> String {
+        let mut names: Vec<&str> = registered_handlers.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        let mut hasher = Sha256::new();
+        hasher.update(self.sdk_version.as_bytes());
+        for n in names {
+            hasher.update([0u8]);
+            hasher.update(n.as_bytes());
+        }
+        to_hex(&hasher.finalize())
+    }
+
     /// Perform a full sync against the given manifest URL.
     pub async fn sync(
         &self,
@@ -379,8 +397,25 @@ impl SyncOrchestrator {
     ) -> Result<SyncResult, MobileError> {
         let mut result = SyncResult::default();
 
+        // MC-01: the cached ETag / last_manifest_version are only valid for the
+        // environment (SDK version + registered handler set) that evaluated
+        // the manifest. After an app upgrade the same manifest can install
+        // sequences that were previously skipped, so a changed fingerprint
+        // bypasses both the 304 shortcut and the replay guard's equality case.
+        let fingerprint = self.env_fingerprint(registered_handlers);
+        let stored_fingerprint = self
+            .mobile_storage
+            .get_sync_metadata(ENV_FINGERPRINT_KEY)
+            .await
+            .map_err(|e| MobileError::Storage {
+                message: e.to_string(),
+            })?;
+        let env_changed = stored_fingerprint.as_deref() != Some(fingerprint.as_str());
+
         // 1. Fetch manifest with ETag support.
-        let (manifest_bytes, maybe_etag) = self.fetch_manifest(manifest_url, auth).await?;
+        let (manifest_bytes, maybe_etag) = self
+            .fetch_manifest(manifest_url, auth, !env_changed)
+            .await?;
 
         if manifest_bytes.is_empty() {
             return Ok(result);
@@ -396,7 +431,8 @@ impl SyncOrchestrator {
         // removed (e.g. a withdrawn buggy/exploitable workflow). Enforce a
         // strictly-increasing manifest_version.
         if let Some(last_version) = self.get_last_manifest_version().await?
-            && manifest.manifest_version <= last_version
+            && (manifest.manifest_version < last_version
+                || (manifest.manifest_version == last_version && !env_changed))
         {
             warn!(
                 seen = manifest.manifest_version,
@@ -414,7 +450,7 @@ impl SyncOrchestrator {
         result.removed = self.reconcile_removed(&manifest, &local_sequences).await?;
 
         // 5. Download and verify each sequence.
-        let (added, updated, skipped, sig_failures) = self
+        let (added, updated, skipped, sig_failures, retryable_skips) = self
             .download_and_verify_sequences(
                 manifest_url,
                 &manifest,
@@ -433,9 +469,31 @@ impl SyncOrchestrator {
         self.evict_excess_sequences().await?;
 
         // 7. Persist sync metadata (including the applied manifest version so a
-        // later replay of an older manifest is rejected in step 2a).
-        self.persist_sync_metadata(maybe_etag, Some(manifest.manifest_version))
-            .await?;
+        // later replay of an older manifest is rejected in step 2a). MC-01:
+        // when any entry was skipped for a transient reason (download
+        // failure) the cursor is NOT advanced, so the next sync re-fetches the
+        // manifest instead of getting a 304 and never installing the entry.
+        if retryable_skips == 0 {
+            self.persist_sync_metadata(maybe_etag, Some(manifest.manifest_version))
+                .await?;
+            self.mobile_storage
+                .set_sync_metadata(ENV_FINGERPRINT_KEY, &fingerprint)
+                .await
+                .map_err(|e| MobileError::Storage {
+                    message: e.to_string(),
+                })?;
+        } else {
+            warn!(
+                retryable_skips,
+                "sync had transient skips; manifest cursor not advanced"
+            );
+            self.mobile_storage
+                .set_sync_metadata("last_sync_ts", &Utc::now().to_rfc3339())
+                .await
+                .map_err(|e| MobileError::Storage {
+                    message: e.to_string(),
+                })?;
+        }
 
         info!(
             added = result.added,
@@ -559,7 +617,9 @@ impl SyncOrchestrator {
 
     /// Download, hash-verify, and signature-verify each sequence in the manifest,
     /// then upsert new or updated sequences into local storage.
-    /// Returns `(added, updated, skipped, signature_failures)`.
+    /// Returns `(added, updated, skipped, signature_failures, retryable_skips)`
+    /// where `retryable_skips` counts entries skipped for a transient reason
+    /// (download failure) that must not advance the manifest cursor.
     #[allow(clippy::too_many_lines)]
     async fn download_and_verify_sequences(
         &self,
@@ -569,7 +629,8 @@ impl SyncOrchestrator {
         registered_handlers: &HashSet<String>,
         local_sequences: &HashMap<String, i32>,
         trusted_keys: &mut HashMap<String, VerifyingKey>,
-    ) -> Result<(u32, u32, u32, u32), MobileError> {
+    ) -> Result<(u32, u32, u32, u32, u32), MobileError> {
+        let mut retryable = 0u32;
         let mut added = 0u32;
         let mut updated = 0u32;
         let mut skipped = 0u32;
@@ -629,6 +690,7 @@ impl SyncOrchestrator {
                 Err(e) => {
                     warn!(name = %entry.name, error = %e, "failed to download sequence");
                     skipped += 1;
+                    retryable += 1;
                     continue;
                 }
             };
@@ -688,6 +750,9 @@ impl SyncOrchestrator {
             };
             if let Err(message) = verified {
                 warn!(name = %entry.name, %message, "sequence signature invalid — skipping");
+                if message.starts_with("download failed") {
+                    retryable += 1;
+                }
                 sig_failures += 1;
                 continue;
             }
@@ -719,7 +784,7 @@ impl SyncOrchestrator {
             }
         }
 
-        Ok((added, updated, skipped, sig_failures))
+        Ok((added, updated, skipped, sig_failures, retryable))
     }
 
     /// Persist sync timestamp, optional `ETag`, and optional applied manifest
@@ -779,14 +844,18 @@ impl SyncOrchestrator {
         &self,
         url: &str,
         auth: &SyncAuth,
+        use_cached_etag: bool,
     ) -> Result<(Vec<u8>, Option<String>), MobileError> {
-        let cached_etag = self
-            .mobile_storage
-            .get_sync_metadata("manifest_etag")
-            .await
-            .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
-            })?;
+        let cached_etag = if use_cached_etag {
+            self.mobile_storage
+                .get_sync_metadata("manifest_etag")
+                .await
+                .map_err(|e| MobileError::Storage {
+                    message: e.to_string(),
+                })?
+        } else {
+            None
+        };
 
         let extra = cached_etag.as_deref().map(|etag| ("if-none-match", etag));
         let response = self.http_get_with_retry(url, auth, extra).await?;
@@ -1741,7 +1810,7 @@ mod tests {
         };
 
         let mut trusted_keys = HashMap::new();
-        let (added, updated, skipped, sig_failures) = orch
+        let (added, updated, skipped, sig_failures, _retryable) = orch
             .download_and_verify_sequences(
                 "http://127.0.0.1/manifest",
                 &manifest,
@@ -1827,7 +1896,7 @@ mod tests {
         };
 
         let mut trusted_keys = HashMap::new();
-        let (_added, _updated, skipped, _sig_failures) = orch
+        let (_added, _updated, skipped, _sig_failures, _retryable) = orch
             .download_and_verify_sequences(
                 "http://127.0.0.1/manifest",
                 &manifest,
@@ -1982,7 +2051,7 @@ mod tests {
         let mut trusted_keys = HashMap::new();
         trusted_keys.insert("k1".to_string(), signing_key.verifying_key());
 
-        let (added, _, skipped, sig_failures) = orch
+        let (added, _, skipped, sig_failures, _retryable) = orch
             .download_and_verify_sequences(
                 &format!("http://127.0.0.1:{port}/m/manifest.json"),
                 &manifest,
@@ -2110,7 +2179,7 @@ mod tests {
         trusted_keys.insert("k1".to_string(), verifying_key);
         let local_sequences = HashMap::new();
 
-        let (added, updated, skipped, sig_failures) = orch
+        let (added, updated, skipped, sig_failures, _retryable) = orch
             .download_and_verify_sequences(
                 "http://127.0.0.1/manifest",
                 &manifest,
@@ -2457,5 +2526,192 @@ mod tests {
             .to_string();
 
         assert!(error.contains("base64 decode failed"), "{error}");
+    }
+
+    // ---- MC-01: manifest cursor must not advance past skipped entries ----
+
+    type Routes = Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>;
+
+    /// Tiny multi-request HTTP mock: serves `routes` (404 otherwise).
+    async fn spawn_route_server(routes: Routes) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let routes = Arc::clone(&routes);
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_string();
+                    let body = routes.lock().unwrap().get(&path).cloned();
+                    let (status, body) =
+                        body.map_or(("404 Not Found", Vec::new()), |b| ("200 OK", b));
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(&body).await;
+                });
+            }
+        });
+        port
+    }
+
+    struct SyncFixture {
+        orch: SyncOrchestrator,
+        mobile_storage: Arc<MobileStorage>,
+        routes: Routes,
+        manifest_url: String,
+        seq_json: Vec<u8>,
+        seq_sig: Vec<u8>,
+    }
+
+    async fn sync_fixture(required_handlers: Vec<String>) -> SyncFixture {
+        use ed25519_dalek::Signer;
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        let orch = SyncOrchestrator::new(
+            Arc::clone(&mobile_storage),
+            sqlite,
+            RootKey {
+                pubkey: key.verifying_key(),
+            },
+            "0.4.0".to_string(),
+            50,
+        )
+        .with_insecure_urls_for_tests();
+
+        let seq = make_test_sequence("seq-mc01", Utc::now());
+        let seq_json = serde_json::to_vec(&seq).unwrap();
+        let seq_sig = BASE64.encode(key.sign(&seq_json).to_bytes()).into_bytes();
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "signing_keys": [{
+                "key_id": "k1",
+                "public_key": BASE64.encode(key.verifying_key().to_bytes()),
+            }],
+            "sequences": [{
+                "name": "seq-mc01",
+                "version": 1,
+                "url": "seq.json",
+                "signing_key_id": "k1",
+                "sha256": to_hex(&Sha256::digest(&seq_json)),
+                "required_handlers": required_handlers,
+                "min_sdk_version": "0.0.0",
+            }],
+            "removed": [],
+            "manifest_version": 5,
+            "generated_at": Utc::now(),
+        }))
+        .unwrap();
+        let routes: Routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        routes.lock().unwrap().insert(
+            "/manifest".to_string(),
+            signed_manifest_bytes(&key, &manifest),
+        );
+        let port = spawn_route_server(Arc::clone(&routes)).await;
+        SyncFixture {
+            orch,
+            mobile_storage,
+            routes,
+            manifest_url: format!("http://127.0.0.1:{port}/manifest"),
+            seq_json,
+            seq_sig,
+        }
+    }
+
+    #[tokio::test]
+    async fn mc01_download_failure_does_not_advance_manifest_cursor() {
+        let f = sync_fixture(vec![]).await;
+        let handlers = HashSet::new();
+
+        // Sequence + signature are not served yet: transient download failure.
+        let r = f
+            .orch
+            .sync(&f.manifest_url, &SyncAuth::UrlToken, &handlers)
+            .await
+            .unwrap();
+        assert_eq!((r.added, r.skipped), (0, 1));
+        assert_eq!(
+            f.mobile_storage
+                .get_sync_metadata("last_manifest_version")
+                .await
+                .unwrap(),
+            None,
+            "a transiently-skipped entry must leave the cursor unadvanced"
+        );
+
+        // Network recovers: the very same manifest version now installs.
+        {
+            let mut routes = f.routes.lock().unwrap();
+            routes.insert("/seq.json".to_string(), f.seq_json.clone());
+            routes.insert("/seq.sig".to_string(), f.seq_sig.clone());
+        }
+        let r = f
+            .orch
+            .sync(&f.manifest_url, &SyncAuth::UrlToken, &handlers)
+            .await
+            .unwrap();
+        assert_eq!(r.added, 1, "retry must install the previously failed entry");
+        assert_eq!(
+            f.mobile_storage
+                .get_sync_metadata("last_manifest_version")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("5")
+        );
+    }
+
+    #[tokio::test]
+    async fn mc01_registering_a_missing_handler_reopens_the_same_manifest_version() {
+        let f = sync_fixture(vec!["h1".to_string()]).await;
+        {
+            let mut routes = f.routes.lock().unwrap();
+            routes.insert("/seq.json".to_string(), f.seq_json.clone());
+            routes.insert("/seq.sig".to_string(), f.seq_sig.clone());
+        }
+
+        // Old app build: handler missing -> skipped, cursor persisted.
+        let r = f
+            .orch
+            .sync(&f.manifest_url, &SyncAuth::UrlToken, &HashSet::new())
+            .await
+            .unwrap();
+        assert_eq!((r.added, r.skipped), (0, 1));
+
+        // Unchanged environment: replay guard still applies.
+        let r = f
+            .orch
+            .sync(&f.manifest_url, &SyncAuth::UrlToken, &HashSet::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            (r.added, r.skipped),
+            (0, 0),
+            "same env + same version is a no-op"
+        );
+
+        // App upgrade registers the handler: same manifest now installs.
+        let handlers: HashSet<String> = ["h1".to_string()].into_iter().collect();
+        let r = f
+            .orch
+            .sync(&f.manifest_url, &SyncAuth::UrlToken, &handlers)
+            .await
+            .unwrap();
+        assert_eq!(r.added, 1);
     }
 }

@@ -43,6 +43,8 @@ pub struct MobileEngineConfig {
     pub memory_budget_bytes: u64,
     /// URL to fetch sequence definitions from. The endpoint must return a JSON
     /// array of sequence objects. If empty, no remote loading is performed.
+    /// The array is unsigned: `load_sequences_from_url` is refused while
+    /// `root_public_key` is set (use signed `sync` instead).
     /// Example: `https://api.orch8.io/api/mobile/apps/{id}/sequences`
     pub sequences_url: String,
     /// Server sync endpoint URL. If non-empty, the engine will periodically

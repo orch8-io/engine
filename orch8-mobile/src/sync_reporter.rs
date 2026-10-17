@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sqlx::SqlitePool;
 use tracing::{debug, warn};
@@ -46,13 +46,15 @@ pub(crate) struct SyncReporter {
     device_id: String,
     credential: Arc<crate::credential::Credential>,
     sync_interval_secs: AtomicU64,
-    last_sync_attempt: StdMutex<chrono::DateTime<chrono::Utc>>,
+    last_sync_attempt: StdMutex<SyncAttempt>,
     last_command_prune: StdMutex<Option<chrono::DateTime<chrono::Utc>>>,
     clock: SharedClock,
     push_generation: AtomicU64,
     completed_push_generation: AtomicU64,
     /// Per-command redelivery count for [`CommandOutcome::RetryNotFound`].
     not_found_redeliveries: StdMutex<HashMap<String, u32>>,
+    /// What the last successful scans already queued (MC-03/OPT-01).
+    scan_cache: StdMutex<ScanCache>,
 }
 
 #[derive(serde::Serialize)]
@@ -85,6 +87,7 @@ struct CommandEntry {
 
 /// Outcome of executing a server command. Drives whether the command is
 /// acked (server stops redelivering) or left un-acked for redelivery.
+#[derive(Debug, PartialEq, Eq)]
 enum CommandOutcome {
     /// Side effects applied, or the command is permanently invalid (bad
     /// payload, unknown type) — ack it so the server stops redelivering.
@@ -118,9 +121,81 @@ fn borrow_valid_payloads(rows: &[(i64, String)]) -> Vec<&serde_json::value::RawV
     payloads
 }
 
+/// When the last sync attempt was claimed: wall clock (keeps counting while
+/// the device sleeps, so server intervals stay stable) plus a monotonic
+/// instant used only when the wall clock steps backwards (MC-11), where the
+/// wall delta would be negative and sync would otherwise stall for as long as
+/// the clock was set back.
+#[derive(Clone, Copy)]
+struct SyncAttempt {
+    wall: chrono::DateTime<chrono::Utc>,
+    mono: Instant,
+}
+
+impl SyncAttempt {
+    fn at(wall: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            wall,
+            mono: Instant::now(),
+        }
+    }
+
+    /// Time since the attempt. A negative wall delta (clock set back) falls
+    /// back to the monotonic elapsed time.
+    fn elapsed(&self, now: chrono::DateTime<chrono::Utc>) -> Duration {
+        (now - self.wall)
+            .to_std()
+            .unwrap_or_else(|_| self.mono.elapsed())
+    }
+
+    fn reanchor(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        if now < self.wall {
+            let mono_elapsed = chrono::Duration::from_std(self.mono.elapsed())
+                .unwrap_or_else(|_| chrono::Duration::zero());
+            self.wall = now - mono_elapsed;
+        }
+    }
+}
+
+/// An unchanged non-terminal status/approval is re-queued at most this often
+/// (liveness refresh for the server's `timestamp`); changes go out immediately.
+const SCAN_HEARTBEAT: chrono::Duration = chrono::Duration::minutes(10);
+
+/// Per-instance memory of what was last queued, so a scan rewrites outbox rows
+/// only for instances whose reported status actually changed and reports each
+/// terminal instance exactly once (MC-03/OPT-01). In-memory: after a restart
+/// everything is re-reported once, which is idempotent for the server.
+#[derive(Default)]
+struct ScanCache {
+    statuses: HashMap<InstanceId, (u64, chrono::DateTime<chrono::Utc>)>,
+    approvals: HashMap<String, (u64, chrono::DateTime<chrono::Utc>)>,
+    terminal_reported: std::collections::HashSet<InstanceId>,
+}
+
+struct StatusScanEntry {
+    id: InstanceId,
+    entry: OutboxEntry,
+    fingerprint: u64,
+    terminal: bool,
+}
+
+struct ApprovalScanEntry {
+    entry: OutboxEntry,
+    fingerprint: u64,
+}
+
 struct ScanOutboxEntries {
-    statuses: Vec<OutboxEntry>,
-    approvals: Vec<OutboxEntry>,
+    statuses: Vec<StatusScanEntry>,
+    approvals: Vec<ApprovalScanEntry>,
+}
+
+fn fingerprint_of(parts: &[&str]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for part in parts {
+        part.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 impl SyncReporter {
@@ -157,12 +232,13 @@ impl SyncReporter {
             device_id,
             credential,
             sync_interval_secs: AtomicU64::new(u64::from(default_interval())),
-            last_sync_attempt: StdMutex::new(now),
+            last_sync_attempt: StdMutex::new(SyncAttempt::at(now)),
             last_command_prune: StdMutex::new(None),
             clock,
             push_generation: AtomicU64::new(0),
             completed_push_generation: AtomicU64::new(0),
             not_found_redeliveries: StdMutex::new(HashMap::new()),
+            scan_cache: StdMutex::new(ScanCache::default()),
         }
     }
 
@@ -177,11 +253,14 @@ impl SyncReporter {
     }
 
     fn request_immediate_sync(&self) {
+        let back = Duration::from_secs(u64::from(MIN_SYNC_INTERVAL_SECS));
         *self
             .last_sync_attempt
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            self.clock.now() - chrono::Duration::seconds(i64::from(MIN_SYNC_INTERVAL_SECS));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = SyncAttempt {
+            wall: self.clock.now() - chrono::Duration::seconds(i64::from(MIN_SYNC_INTERVAL_SECS)),
+            mono: Instant::now().checked_sub(back).unwrap_or_else(Instant::now),
+        };
         self.push_generation.fetch_add(1, Ordering::Release);
     }
 
@@ -194,10 +273,13 @@ impl SyncReporter {
             .last_sync_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let due =
-            now - *last >= chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::MAX);
+        let due = last.elapsed(now) >= interval;
         if due {
-            *last = now;
+            *last = SyncAttempt::at(now);
+        } else {
+            // Re-anchor after a backwards clock step so later checks are
+            // wall-clock-consistent again.
+            last.reanchor(now);
         }
         due
     }
@@ -208,11 +290,11 @@ impl SyncReporter {
     pub fn next_sync_delay(&self) -> Duration {
         let interval = self.current_sync_interval();
         let now = self.clock.now();
-        let last = *self
+        let elapsed = self
             .last_sync_attempt
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let elapsed = (now - last).to_std().unwrap_or(Duration::ZERO);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed(now);
         interval.saturating_sub(elapsed)
     }
 
@@ -313,19 +395,52 @@ impl SyncReporter {
 
     /// Scan storage for active instances and queue status updates + approval
     /// requests. Coalescing in the outbox table ensures duplicates are harmless.
+    #[allow(clippy::too_many_lines)]
     pub async fn scan_and_queue(
         &self,
         storage: &Arc<dyn StorageBackend>,
         mobile_storage: &MobileStorage,
         sequence_cache: &Arc<SequenceCache>,
     ) -> bool {
-        let instances = match mobile_storage.list_sync_instances(100).await {
+        // MC-03: every active instance and every not-yet-reported terminal one,
+        // not just the newest 100.
+        let mut instances = match mobile_storage.list_sync_active_instances().await {
             Ok(list) => list,
             Err(e) => {
                 debug!(error = %e, "scan_and_queue: failed to list instances");
                 return false;
             }
         };
+        let terminal_all = match mobile_storage.list_terminal_instance_states().await {
+            Ok(list) => list,
+            Err(e) => {
+                debug!(error = %e, "scan_and_queue: failed to list terminal instances");
+                return false;
+            }
+        };
+        let new_terminal: Vec<InstanceId> = {
+            let mut cache = self
+                .scan_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let present: std::collections::HashSet<InstanceId> =
+                terminal_all.iter().map(|(id, _)| *id).collect();
+            cache.terminal_reported.retain(|id| present.contains(id));
+            terminal_all
+                .iter()
+                .map(|(id, _)| *id)
+                .filter(|id| !cache.terminal_reported.contains(id))
+                .collect()
+        };
+        if !new_terminal.is_empty() {
+            match mobile_storage.list_sync_instances_by_ids(&new_terminal).await {
+                Ok(list) => instances.extend(list),
+                Err(e) => {
+                    debug!(error = %e, "scan_and_queue: failed to load terminal instances");
+                    return false;
+                }
+            }
+        }
 
         let instance_ids: Vec<_> = instances.iter().map(|instance| instance.id).collect();
         let execution_steps = match mobile_storage
@@ -349,8 +464,82 @@ impl SyncReporter {
         )
         .await;
 
-        self.queue_scan_entries(&entries.statuses, &entries.approvals)
-            .await
+        // Keep only what changed since the last successful queue.
+        let now = self.clock.now();
+        let (statuses, approvals) = {
+            let cache = self
+                .scan_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let statuses: Vec<&StatusScanEntry> = entries
+                .statuses
+                .iter()
+                .filter(|entry| {
+                    entry.terminal
+                        || cache.statuses.get(&entry.id).is_none_or(|(fp, at)| {
+                            *fp != entry.fingerprint || now - *at >= SCAN_HEARTBEAT
+                        })
+                })
+                .collect();
+            let approvals: Vec<&ApprovalScanEntry> = entries
+                .approvals
+                .iter()
+                .filter(|entry| {
+                    cache
+                        .approvals
+                        .get(&entry.entry.0)
+                        .is_none_or(|(fp, at)| {
+                            *fp != entry.fingerprint || now - *at >= SCAN_HEARTBEAT
+                        })
+                })
+                .collect();
+            (statuses, approvals)
+        };
+
+        if !statuses.is_empty() || !approvals.is_empty() {
+            let status_rows: Vec<OutboxEntry> =
+                statuses.iter().map(|entry| entry.entry.clone()).collect();
+            let approval_rows: Vec<OutboxEntry> =
+                approvals.iter().map(|entry| entry.entry.clone()).collect();
+            if !self.queue_scan_entries(&status_rows, &approval_rows).await {
+                return false;
+            }
+        }
+
+        let mut cache = self
+            .scan_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for entry in &statuses {
+            if entry.terminal {
+                cache.statuses.remove(&entry.id);
+                cache.terminal_reported.insert(entry.id);
+            } else {
+                cache.statuses.insert(entry.id, (entry.fingerprint, now));
+            }
+        }
+        for entry in &approvals {
+            cache
+                .approvals
+                .insert(entry.entry.0.clone(), (entry.fingerprint, now));
+        }
+        // Forget instances/approvals that are no longer active.
+        let active_ids: std::collections::HashSet<InstanceId> = entries
+            .statuses
+            .iter()
+            .filter(|entry| !entry.terminal)
+            .map(|entry| entry.id)
+            .collect();
+        cache.statuses.retain(|id, _| active_ids.contains(id));
+        let live_approvals: std::collections::HashSet<&str> = entries
+            .approvals
+            .iter()
+            .map(|entry| entry.entry.0.as_str())
+            .collect();
+        cache
+            .approvals
+            .retain(|key, _| live_approvals.contains(key.as_str()));
+        true
     }
 
     async fn queue_scan_entries(
@@ -673,6 +862,76 @@ impl SyncReporter {
         })
     }
 
+    /// Replace `old` with a fresh instance of `payload.sequence_name`.
+    ///
+    /// MC-02: the replacement is started FIRST under a dedup key derived from
+    /// the command id, and only then is the old instance cancelled. A crash or
+    /// failed start can therefore never leave the old instance cancelled with
+    /// no replacement: redelivery finds either the old instance still live
+    /// (start dedups to the same replacement, cancel is retried) or a terminal
+    /// old instance whose replacement already exists.
+    async fn replace_instance(
+        cmd: &CommandEntry,
+        storage: &Arc<dyn StorageBackend>,
+        lifecycle: &Arc<InstanceLifecycleManager>,
+        old: InstanceId,
+        label: &str,
+    ) -> CommandOutcome {
+        let cancel_old = || async {
+            transition_unless_terminal(storage.as_ref(), old, InstanceState::Cancelled)
+                .await
+                .map_err(|e| warn!(error = %e, label, "update_sequence: cancel failed"))
+        };
+        let Some(seq_name) = cmd.payload.get("sequence_name").and_then(|v| v.as_str()) else {
+            // No replacement requested: plain cancel.
+            return if cancel_old().await.is_ok() {
+                CommandOutcome::Done
+            } else {
+                CommandOutcome::Retryable
+            };
+        };
+        let input = cmd
+            .payload
+            .get("input")
+            .map_or_else(|| "{}".to_string(), std::string::ToString::to_string);
+        let key = command_uuid("update_sequence", &cmd.id).to_string();
+
+        match lifecycle.start(seq_name, &input, Some(&key)).await {
+            Ok(new_id) => {
+                debug!(old = %old, new = %new_id, label, "update_sequence: replacement started");
+            }
+            // At the concurrent-instance cap the old instance still occupies a
+            // slot; free it first (narrow crash window, but not a stuck command).
+            Err(crate::error::MobileError::ResourceLimit { .. }) => {
+                if cancel_old().await.is_err() {
+                    return CommandOutcome::Retryable;
+                }
+                if let Err(e) = lifecycle.start(seq_name, &input, Some(&key)).await {
+                    warn!(error = %e, label, "update_sequence: start failed after cancel");
+                    return CommandOutcome::Retryable;
+                }
+                return CommandOutcome::Done;
+            }
+            Err(e @ crate::error::MobileError::InvalidInput { .. }) => {
+                warn!(error = %e, label, "update_sequence: invalid input — old instance kept");
+                return CommandOutcome::Done;
+            }
+            Err(e @ crate::error::MobileError::NotFound { .. }) => {
+                warn!(error = %e, label, "update_sequence: target sequence not found");
+                return CommandOutcome::RetryNotFound;
+            }
+            Err(e) => {
+                warn!(error = %e, label, "update_sequence: start failed");
+                return CommandOutcome::Retryable;
+            }
+        }
+        if cancel_old().await.is_ok() {
+            CommandOutcome::Done
+        } else {
+            CommandOutcome::Retryable
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn execute_command(
         &self,
@@ -700,8 +959,11 @@ impl SyncReporter {
                         return CommandOutcome::Done;
                     };
 
+                    // MC-10: deterministic signal id so a redelivery after a crash
+                    // between enqueue and ack cannot enqueue a duplicate that a
+                    // later loop iteration of the same step would consume.
                     let signal = orch8_types::signal::Signal {
-                        id: uuid::Uuid::now_v7(),
+                        id: command_uuid("complete_step", &cmd.id),
                         instance_id: inst_id,
                         signal_type: orch8_types::signal::SignalType::Custom(format!(
                             "human_input:{step}"
@@ -711,9 +973,19 @@ impl SyncReporter {
                         created_at: chrono::Utc::now(),
                         delivered_at: None,
                     };
-                    if let Err(e) = storage.enqueue_signal(&signal).await {
-                        warn!(error = %e, "failed to enqueue complete_step signal");
-                        return CommandOutcome::Retryable;
+                    // MC-16: refuse to enqueue into a terminal/missing instance.
+                    match storage.enqueue_signal_if_active(&signal).await {
+                        Ok(()) | Err(orch8_types::error::StorageError::Conflict(_)) => {}
+                        Err(
+                            orch8_types::error::StorageError::TerminalTarget { .. }
+                            | orch8_types::error::StorageError::NotFound { .. },
+                        ) => {
+                            debug!(instance_id = %iid, "complete_step: target terminal or missing — dropping");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to enqueue complete_step signal");
+                            return CommandOutcome::Retryable;
+                        }
                     }
                 } else {
                     warn!("complete_step command missing instance_id or step_name");
@@ -748,7 +1020,17 @@ impl SyncReporter {
                     .payload
                     .get("input")
                     .map_or_else(|| "{}".to_string(), std::string::ToString::to_string);
-                let dedup_key = cmd.payload.get("dedup_key").and_then(|v| v.as_str());
+                // MC-10: without a server-supplied key, derive one from the
+                // command id so a crash between start and ack cannot start the
+                // workflow twice on redelivery.
+                let derived_key = command_uuid("start_workflow", &cmd.id).to_string();
+                let dedup_key = Some(
+                    cmd.payload
+                        .get("dedup_key")
+                        .and_then(|v| v.as_str())
+                        .filter(|k| !k.is_empty())
+                        .unwrap_or(derived_key.as_str()),
+                );
 
                 if let Some(name) = sequence_name {
                     debug!(
@@ -817,32 +1099,12 @@ impl SyncReporter {
 
                     match policy {
                         "restart" => {
-                            // Cancel existing, start fresh with same sequence
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
-                                inst_id,
-                                InstanceState::Cancelled,
-                            )
-                            .await
-                            {
-                                warn!(error = %e, "update_sequence(restart): cancel failed");
-                                return CommandOutcome::Retryable;
-                            } else if let Some(seq_name) =
-                                cmd.payload.get("sequence_name").and_then(|v| v.as_str())
-                            {
-                                let input = cmd.payload.get("input").map_or_else(
-                                    || "{}".to_string(),
-                                    std::string::ToString::to_string,
-                                );
-                                match lifecycle.start(seq_name, &input, None).await {
-                                    Ok(new_id) => {
-                                        debug!(old = %iid, new = %new_id, "update_sequence(restart): restarted");
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "update_sequence(restart): start failed");
-                                        return CommandOutcome::Retryable;
-                                    }
-                                }
+                            // Start the replacement first, then cancel (MC-02).
+                            let outcome =
+                                Self::replace_instance(cmd, storage, lifecycle, inst_id, "restart")
+                                    .await;
+                            if outcome != CommandOutcome::Done {
+                                return outcome;
                             }
                         }
                         "fail" => {
@@ -877,34 +1139,19 @@ impl SyncReporter {
                             // The next tick will use the latest sequence version.
                         }
                         "skip_executed" => {
-                            // Cancel old, start new with same sequence; executed steps
-                            // will be skipped by the engine if the execution tree
-                            // carries forward completed node states.
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
+                            // Start new with same sequence, then cancel old (MC-02);
+                            // executed steps will be skipped by the engine if the
+                            // execution tree carries forward completed node states.
+                            let outcome = Self::replace_instance(
+                                cmd,
+                                storage,
+                                lifecycle,
                                 inst_id,
-                                InstanceState::Cancelled,
+                                "skip_executed",
                             )
-                            .await
-                            {
-                                warn!(error = %e, "update_sequence(skip_executed): cancel failed");
-                                return CommandOutcome::Retryable;
-                            } else if let Some(seq_name) =
-                                cmd.payload.get("sequence_name").and_then(|v| v.as_str())
-                            {
-                                let input = cmd.payload.get("input").map_or_else(
-                                    || "{}".to_string(),
-                                    std::string::ToString::to_string,
-                                );
-                                match lifecycle.start(seq_name, &input, None).await {
-                                    Ok(new_id) => {
-                                        debug!(old = %iid, new = %new_id, "update_sequence(skip_executed): restarted with skip");
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "update_sequence(skip_executed): start failed");
-                                        return CommandOutcome::Retryable;
-                                    }
-                                }
+                            .await;
+                            if outcome != CommandOutcome::Done {
+                                return outcome;
                             }
                         }
                         unknown => {
@@ -946,7 +1193,7 @@ impl SyncReporter {
                             return CommandOutcome::Done;
                         };
                         let signal = orch8_types::signal::Signal {
-                            id: uuid::Uuid::now_v7(),
+                            id: command_uuid("step_result", &cmd.id),
                             instance_id: inst_id,
                             signal_type: orch8_types::signal::SignalType::Custom(format!(
                                 "delegation_result:{bid}"
@@ -959,9 +1206,13 @@ impl SyncReporter {
                             created_at: chrono::Utc::now(),
                             delivered_at: None,
                         };
-                        if let Err(e) = storage.enqueue_signal(&signal).await {
-                            warn!(error = %e, "failed to enqueue step_result signal");
-                            return CommandOutcome::Retryable;
+                        match storage.enqueue_signal(&signal).await {
+                            // Conflict: this command's signal was already enqueued.
+                            Ok(()) | Err(orch8_types::error::StorageError::Conflict(_)) => {}
+                            Err(e) => {
+                                warn!(error = %e, "failed to enqueue step_result signal");
+                                return CommandOutcome::Retryable;
+                            }
                         }
                     } else {
                         let error = cmd
@@ -987,6 +1238,19 @@ impl SyncReporter {
             }
         }
     }
+}
+
+/// Namespace for `UUIDv5` ids derived from server command ids (MC-10).
+const COMMAND_UUID_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x6f72_6368_385f_6d6f_6269_6c65_636d_6473);
+
+/// Deterministic id for a side effect of server command `command_id`, so a
+/// redelivered command maps to the same signal id / dedup key.
+fn command_uuid(kind: &str, command_id: &str) -> uuid::Uuid {
+    uuid::Uuid::new_v5(
+        &COMMAND_UUID_NAMESPACE,
+        format!("{kind}:{command_id}").as_bytes(),
+    )
 }
 
 /// Compare-and-set `id` to `target` unless it is already terminal. Returns
@@ -1110,11 +1374,19 @@ async fn collect_scan_entries(
             )
         });
 
-        entries
-            .statuses
-            .push(build_status_entry(&instance, sequence, steps, timestamp));
+        let (entry, fingerprint) = build_status_entry(&instance, sequence, steps, timestamp);
+        entries.statuses.push(StatusScanEntry {
+            id: instance.id,
+            entry,
+            fingerprint,
+            terminal: instance.state.is_terminal(),
+        });
         if let Some(approval) = build_approval_entry(&instance, sequence) {
-            entries.approvals.push(approval);
+            let fingerprint = fingerprint_of(&[&approval.1]);
+            entries.approvals.push(ApprovalScanEntry {
+                entry: approval,
+                fingerprint,
+            });
         }
     }
     entries
@@ -1125,21 +1397,32 @@ fn build_status_entry(
     sequence: Option<&SequenceDefinition>,
     steps: Option<serde_json::Value>,
     timestamp: &str,
-) -> OutboxEntry {
+) -> (OutboxEntry, u64) {
     let instance_id = instance.id.to_string();
     let handler = instance.current_step.as_ref().and_then(|step_id| {
         sequence.and_then(|definition| find_handler(&definition.blocks, step_id))
     });
+    let state = format!("{:?}", instance.state);
+    // Everything except the scan timestamp decides whether the server's view
+    // of this instance is stale.
+    let steps_text = steps.as_ref().map(ToString::to_string).unwrap_or_default();
+    let fingerprint = fingerprint_of(&[
+        &state,
+        instance.current_step.as_ref().map_or("", BlockId::as_str),
+        handler.as_deref().unwrap_or(""),
+        sequence.map_or("", |definition| definition.name.as_str()),
+        &steps_text,
+    ]);
     let payload = status_payload(
         &instance_id,
         sequence.map(|definition| definition.name.as_str()),
-        &format!("{:?}", instance.state),
+        &state,
         instance.current_step.as_ref().map(BlockId::as_str),
         handler.as_deref(),
         steps,
         timestamp,
     );
-    (instance_id, payload)
+    ((instance_id, payload), fingerprint)
 }
 
 fn build_approval_entry(
@@ -1641,7 +1924,7 @@ mod tests {
             state: InstanceState::Waiting,
             current_step: Some(BlockId::new("setup_notifications")),
         };
-        let (_, status) = build_status_entry(&instance, Some(&sequence), None, "now");
+        let ((_, status), _) = build_status_entry(&instance, Some(&sequence), None, "now");
         let status: serde_json::Value = serde_json::from_str(&status).unwrap();
         assert_eq!(status["handler"], "setup_notifications");
         let (_, approval) = build_approval_entry(&instance, Some(&sequence)).unwrap();
@@ -2108,6 +2391,38 @@ mod tests {
         assert_eq!(reporter.next_sync_delay(), Duration::ZERO);
     }
 
+    /// MC-11: a device clock set back by an hour must not stall sync for that
+    /// hour; scheduling re-anchors on the new clock.
+    #[tokio::test]
+    async fn mc11_backwards_clock_step_does_not_stall_sync() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let start = chrono::Utc::now();
+        let manual = Arc::new(ManualClock::new(start));
+        let clock = SharedClock::from_arc(Arc::clone(&manual) as Arc<dyn Clock>);
+        let reporter = SyncReporter::new_with_clock(
+            pool,
+            "http://127.0.0.1:1/sync".into(),
+            "device-1".into(),
+            crate::credential::Credential::new("key".into()),
+            clock,
+        );
+
+        manual.advance(chrono::Duration::seconds(30));
+        assert!(reporter.should_sync(), "baseline: due after the interval");
+
+        // The user sets the clock back one hour.
+        manual.set(start - chrono::Duration::hours(1));
+        assert!(!reporter.should_sync(), "just synced: not due yet");
+        assert!(
+            reporter.next_sync_delay() <= Duration::from_secs(30),
+            "deadline must be at most one interval away, not an hour"
+        );
+
+        // One interval of the (new) wall clock later it is due again.
+        manual.advance(chrono::Duration::seconds(30));
+        assert!(reporter.should_sync());
+    }
+
     #[tokio::test]
     async fn push_arriving_during_sync_remains_pending() {
         let (reporter, _storage, _lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
@@ -2229,5 +2544,253 @@ mod tests {
             reporter.completed_push_generation.load(Ordering::Acquire),
             2
         );
+    }
+
+    // ---- MC-03 / OPT-01: status scan drains and only rewrites changes ----
+
+    async fn insert_raw_instance(
+        mobile: &crate::storage::MobileStorage,
+        state: &str,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        let id = InstanceId::new().to_string();
+        sqlx::query(
+            "INSERT INTO task_instances
+             (id, sequence_id, tenant_id, namespace, state, context, created_at, updated_at)
+             VALUES (?1, ?2, 'mobile', 'default', ?3, '{}', ?4, ?4)",
+        )
+        .bind(&id)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(state)
+        .bind(updated_at.to_rfc3339())
+        .execute(mobile.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn outbox_count(reporter: &SyncReporter) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_outbox WHERE entry_type = 'status'")
+            .fetch_one(&reporter.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn mc03_scan_reports_a_burst_larger_than_one_page_and_terminal_instances_once() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        let mobile = lifecycle.mobile_storage();
+        let base = chrono::Utc::now();
+        // 130 terminal transitions + 30 active, all between two scans.
+        for i in 0..130 {
+            insert_raw_instance(mobile, "completed", base + chrono::Duration::milliseconds(i))
+                .await;
+        }
+        for i in 0..30 {
+            insert_raw_instance(mobile, "running", base + chrono::Duration::milliseconds(i)).await;
+        }
+        let cache = Arc::new(SequenceCache::new(50, Duration::from_secs(3600)));
+
+        assert!(reporter.scan_and_queue(&storage, mobile, &cache).await);
+        assert_eq!(
+            outbox_count(&reporter).await,
+            160,
+            "old transitions beyond the newest 100 must still be reported"
+        );
+
+        // Server drained the outbox. Nothing changed: terminal instances are
+        // not re-reported and unchanged active ones are not rewritten.
+        sqlx::query("DELETE FROM sync_outbox")
+            .execute(&reporter.pool)
+            .await
+            .unwrap();
+        assert!(reporter.scan_and_queue(&storage, mobile, &cache).await);
+        assert_eq!(outbox_count(&reporter).await, 0, "no churn on a quiet scan");
+
+        // One active instance changes state: only it is re-queued.
+        let changed = insert_raw_instance(mobile, "running", base).await;
+        assert!(reporter.scan_and_queue(&storage, mobile, &cache).await);
+        let ids: Vec<String> =
+            sqlx::query_scalar("SELECT instance_id FROM sync_outbox WHERE entry_type = 'status'")
+                .fetch_all(&reporter.pool)
+                .await
+                .unwrap();
+        assert_eq!(ids, vec![changed]);
+    }
+
+    #[tokio::test]
+    async fn mc03_terminal_and_waiting_notifications_drain_past_one_hundred() {
+        let (_reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        let mobile = lifecycle.mobile_storage();
+        let base = chrono::Utc::now();
+        for i in 0..120 {
+            insert_raw_instance(mobile, "failed", base + chrono::Duration::milliseconds(i)).await;
+        }
+        let notifier = crate::notifier::MobileNotifier::new();
+        let ids = notifier.fire_terminal_events(&storage, mobile).await;
+        assert_eq!(ids.len(), 120, "all terminal ids are reported for cleanup");
+        let again = notifier.fire_terminal_events(&storage, mobile).await;
+        assert!(again.is_empty(), "and only once");
+    }
+
+    // ---- MC-02 / MC-10 / MC-16: command idempotency ----
+
+    fn cmd(id: &str, kind: &str, payload: serde_json::Value) -> CommandEntry {
+        CommandEntry {
+            id: id.to_string(),
+            command_type: kind.to_string(),
+            payload,
+        }
+    }
+
+    async fn state_of(storage: &Arc<dyn StorageBackend>, id: &str) -> InstanceState {
+        let id = InstanceId::from_uuid(uuid::Uuid::parse_str(id).unwrap());
+        storage.get_instance(id).await.unwrap().unwrap().state
+    }
+
+    #[tokio::test]
+    async fn mc02_failed_replacement_start_leaves_old_instance_running() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let old = lifecycle.start("wf-a", "{}", None).await.unwrap();
+
+        let c = cmd(
+            "cmd-u1",
+            "update_sequence",
+            serde_json::json!({
+                "instance_id": old, "policy": "restart", "sequence_name": "not-synced"
+            }),
+        );
+        let outcome = reporter.execute_command(&c, &storage, &lifecycle).await;
+
+        assert_eq!(outcome, CommandOutcome::RetryNotFound);
+        assert_eq!(
+            state_of(&storage, &old).await,
+            InstanceState::Scheduled,
+            "a replacement that cannot start must not cancel the old instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn mc02_restart_converges_after_crash_between_start_and_cancel() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let old = lifecycle.start("wf-a", "{}", None).await.unwrap();
+        let payload = serde_json::json!({
+            "instance_id": old, "policy": "restart", "sequence_name": "wf-a"
+        });
+        let c = cmd("cmd-u2", "update_sequence", payload);
+
+        // Crash point: replacement started (under the command-derived key),
+        // old instance not yet cancelled.
+        let key = command_uuid("update_sequence", "cmd-u2").to_string();
+        let replacement = lifecycle.start("wf-a", "{}", Some(&key)).await.unwrap();
+        assert_eq!(count_instances(&storage).await, 2);
+
+        // Redelivery.
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(state_of(&storage, &old).await, InstanceState::Cancelled);
+        assert_eq!(
+            count_instances(&storage).await,
+            2,
+            "redelivery must reuse the replacement, not start a third instance"
+        );
+        assert_ne!(state_of(&storage, &replacement).await, InstanceState::Cancelled);
+
+        // Crash point two: old already cancelled -> terminal skip, still no
+        // extra instance and the replacement survives.
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(count_instances(&storage).await, 2);
+    }
+
+    #[tokio::test]
+    async fn mc02_skip_executed_starts_replacement_then_cancels_old() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let old = lifecycle.start("wf-a", "{}", None).await.unwrap();
+        let c = cmd(
+            "cmd-u3",
+            "update_sequence",
+            serde_json::json!({
+                "instance_id": old, "policy": "skip_executed", "sequence_name": "wf-a"
+            }),
+        );
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(state_of(&storage, &old).await, InstanceState::Cancelled);
+        assert_eq!(count_instances(&storage).await, 2);
+    }
+
+    #[tokio::test]
+    async fn mc10_start_workflow_without_dedup_key_is_idempotent_per_command() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let c = cmd(
+            "cmd-s1",
+            "start_workflow",
+            serde_json::json!({ "sequence_name": "wf-a" }),
+        );
+        // Executed twice, as after a crash between execution and the marker.
+        reporter.execute_command(&c, &storage, &lifecycle).await;
+        reporter.execute_command(&c, &storage, &lifecycle).await;
+        assert_eq!(count_instances(&storage).await, 1);
+
+        let other = cmd(
+            "cmd-s2",
+            "start_workflow",
+            serde_json::json!({ "sequence_name": "wf-a" }),
+        );
+        reporter.execute_command(&other, &storage, &lifecycle).await;
+        assert_eq!(count_instances(&storage).await, 2, "distinct commands stay distinct");
+    }
+
+    #[tokio::test]
+    async fn mc10_mc16_complete_step_enqueues_once_and_never_into_terminal_instances() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let iid = lifecycle.start("wf-a", "{}", None).await.unwrap();
+        let inst = InstanceId::from_uuid(uuid::Uuid::parse_str(&iid).unwrap());
+        let c = cmd(
+            "cmd-c1",
+            "complete_step",
+            serde_json::json!({ "instance_id": iid, "step_name": "s1", "output": {"ok": true} }),
+        );
+
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(
+            storage.get_pending_signals(inst).await.unwrap().len(),
+            1,
+            "a redelivered complete_step must not enqueue a duplicate signal"
+        );
+
+        // MC-16: terminal target -> acked as Done, no signal row.
+        transition_unless_terminal(storage.as_ref(), inst, InstanceState::Cancelled)
+            .await
+            .unwrap();
+        let late = cmd(
+            "cmd-c2",
+            "complete_step",
+            serde_json::json!({ "instance_id": iid, "step_name": "s1", "output": {} }),
+        );
+        assert_eq!(
+            reporter.execute_command(&late, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(storage.get_pending_signals(inst).await.unwrap().len(), 1);
     }
 }
