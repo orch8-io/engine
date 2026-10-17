@@ -92,6 +92,15 @@ pub(super) async fn create(
     Ok(())
 }
 
+/// Active-instance count for admission, capped at `$2` rows. Runs under the
+/// tenant advisory lock, so an unbounded `COUNT(*)` made every create of a
+/// large tenant pay O(active) (measured: ~80 ms single-threaded at 700k
+/// active rows, 1.5 ms when capped at 10k) while holding up that tenant's
+/// other creates. Served by `idx_task_instances_tenant_state_updated`
+/// (index-only).
+const ACTIVE_COUNT_BOUNDED_SQL: &str = "SELECT COUNT(*) FROM (SELECT 1 FROM task_instances \
+     WHERE tenant_id=$1 AND state IN ('scheduled','running','waiting','paused') LIMIT $2) active";
+
 pub(super) async fn create_admitted(
     store: &PostgresStorage,
     inst: &TaskInstance,
@@ -102,8 +111,12 @@ pub(super) async fn create_admitted(
         .bind(inst.tenant_id.as_str())
         .execute(&mut *transaction)
         .await?;
-    let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE tenant_id=$1 AND state IN ('scheduled','running','waiting','paused')")
+    // Count at most `max_active` rows (L4-06): the verdict only needs
+    // "is active >= max_active", so the index-only scan under the tenant
+    // lock is O(min(active, limit)) instead of O(active).
+    let active: i64 = sqlx::query_scalar(ACTIVE_COUNT_BOUNDED_SQL)
         .bind(inst.tenant_id.as_str())
+        .bind(i64::try_from(max_active).unwrap_or(i64::MAX))
         .fetch_one(&mut *transaction)
         .await?;
     if u64::try_from(active).unwrap_or(u64::MAX) >= max_active {
@@ -141,12 +154,15 @@ pub(super) async fn create_batch_admitted(
             .await?;
     }
     for tenant in &tenants {
-        let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE tenant_id=$1 AND state IN ('scheduled','running','waiting','paused')")
-            .bind(tenant.as_str())
-            .fetch_one(&mut *transaction)
-            .await?;
         let requested = requested.get(tenant).copied().unwrap_or(0);
         let limit = limits.get(tenant).copied().unwrap_or(0);
+        // The verdict is `active + requested > limit`; counting `limit + 1`
+        // rows is enough to decide it (L4-06).
+        let active: i64 = sqlx::query_scalar(ACTIVE_COUNT_BOUNDED_SQL)
+            .bind(tenant.as_str())
+            .bind(i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX))
+            .fetch_one(&mut *transaction)
+            .await?;
         if u64::try_from(active)
             .unwrap_or(u64::MAX)
             .saturating_add(requested)

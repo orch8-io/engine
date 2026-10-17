@@ -11,6 +11,7 @@ use uuid::Uuid;
 use orch8_types::error::StorageError;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
+use orch8_types::signal::{Signal, SignalType};
 
 use crate::StorageBackend;
 
@@ -95,6 +96,103 @@ where
     } else {
         RetryOutcome::Superseded
     })
+}
+
+/// Outcome of [`request_cancel`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelRequest {
+    /// A durable `Cancel` signal was enqueued; the scheduler applies it.
+    Enqueued,
+    /// An undelivered `Cancel` signal was already queued: nothing to add
+    /// (retried request, double click, overlapping bulk calls).
+    AlreadyPending,
+    /// The instance is already terminal (or gone): nothing to cancel.
+    Terminal,
+}
+
+/// The one way an operator surface (REST, gRPC, bulk, jobs) cancels an
+/// instance.
+///
+/// It must NOT flip `state` to `Cancelled` directly: that skips the
+/// scheduler's cancel handling, so the instance's interrupted sagas are never
+/// compensated, its `on_cancel` hooks never fire, its live worker tasks stay
+/// claimable and a waiting sub-sequence parent is not woken. Instead a
+/// durable `Cancel` signal is enqueued -- atomically with the target-state
+/// check -- and the scheduler's existing cancel path (signal sweep for
+/// paused/waiting/scheduled instances, per-instance signal pass for claimed
+/// ones) performs the transition and runs compensation and hooks exactly once
+/// off the request path. The signal survives restarts; repeating the request
+/// is a no-op while one is pending, and a stale extra signal on an
+/// already-cancelled instance is discarded by the signal processor.
+///
+/// Scheduled instances are re-armed so a far-future `next_fire_at` or retry
+/// backoff does not delay the cancel; paused/waiting ones are picked up by
+/// the scheduler's signal sweep.
+pub async fn request_cancel(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+) -> Result<CancelRequest, StorageError> {
+    let pending = storage.get_pending_signals(instance_id).await?;
+    if pending
+        .iter()
+        .any(|s| s.signal_type == SignalType::Cancel && !s.delivered)
+    {
+        return Ok(CancelRequest::AlreadyPending);
+    }
+    let signal = Signal {
+        id: Uuid::now_v7(),
+        instance_id,
+        signal_type: SignalType::Cancel,
+        payload: serde_json::Value::Null,
+        delivered: false,
+        created_at: Utc::now(),
+        delivered_at: None,
+    };
+    match storage.enqueue_signal_if_active(&signal).await {
+        Ok(()) => {}
+        Err(StorageError::TerminalTarget { .. } | StorageError::NotFound { .. }) => {
+            return Ok(CancelRequest::Terminal);
+        }
+        Err(e) => return Err(e),
+    }
+    // CAS on Scheduled: never resurrects an instance that moved on.
+    let _ = storage
+        .conditional_update_instance_state(
+            instance_id,
+            InstanceState::Scheduled,
+            InstanceState::Scheduled,
+            Some(Utc::now()),
+        )
+        .await;
+    Ok(CancelRequest::Enqueued)
+}
+
+/// Cancel every active instance matching `filter` via [`request_cancel`].
+/// Returns how many instances now have a cancel pending (newly enqueued or
+/// already queued). Walks the matches with a keyset cursor, so instances the
+/// scheduler cancels while this runs neither shift nor skip the page window.
+pub async fn request_cancel_matching(
+    storage: &dyn StorageBackend,
+    filter: &orch8_types::filter::InstanceFilter,
+) -> Result<u64, StorageError> {
+    const PAGE: u32 = 500;
+    let mut before: Option<InstanceId> = None;
+    let mut count = 0u64;
+    loop {
+        let page = storage.list_instances_keyset(filter, before, PAGE).await?;
+        let Some(last) = page.last() else { break };
+        before = Some(last.id);
+        let full = page.len() == PAGE as usize;
+        for inst in &page {
+            if request_cancel(storage, inst.id).await? != CancelRequest::Terminal {
+                count += 1;
+            }
+        }
+        if !full {
+            break;
+        }
+    }
+    Ok(count)
 }
 
 const ALL_STATES: [InstanceState; 7] = [

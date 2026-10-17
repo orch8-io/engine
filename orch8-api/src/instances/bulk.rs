@@ -70,11 +70,20 @@ pub async fn bulk_update_state(
         priority: None,
     };
 
-    let count = state
-        .storage
-        .bulk_update_state(&filter, req.state)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instances"))?;
+    // Cancel goes through the scheduler's cancel path (a durable signal per
+    // instance) so sagas are compensated and `on_cancel` hooks fire; the
+    // count is the number of instances with a cancel now pending.
+    let count = if req.state == InstanceState::Cancelled {
+        orch8_storage::lifecycle::request_cancel_matching(state.storage.as_ref(), &filter)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instances"))?
+    } else {
+        state
+            .storage
+            .bulk_update_state(&filter, req.state)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instances"))?
+    };
 
     Ok(Json(CountResponse { count }))
 }

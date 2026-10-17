@@ -109,10 +109,12 @@ narrowed with `tenant_id=`.
 
 ### `DELETE /jobs/{id}`
 
-- A job that has not started yet is cancelled immediately: **200** with
-  `status: "cancelled"`.
-- A running job is sent a cancel signal, which the engine applies at the next
-  step boundary: **202**.
+- Cancelling is a request: the job is sent a cancel signal and the call
+  returns **202**. The engine applies it promptly (a job that has not started
+  is cancelled on the next scheduling pass; a running one at the next step
+  boundary), compensating completed saga steps and running the sequence's
+  `on_cancel` hook. Poll the job (`GET /jobs/{id}`) for `status: "cancelled"`.
+- Repeating the request while one is pending is harmless.
 - A job that already finished returns **409**.
 
 ## Worker example (Node, plain `fetch`)

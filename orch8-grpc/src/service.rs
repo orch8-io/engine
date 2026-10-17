@@ -1232,6 +1232,19 @@ impl Orch8Service for Orch8GrpcService {
                 inst.state, new_state
             )));
         }
+        // Cancel is a request to the scheduler's cancel path (saga
+        // compensation + `on_cancel` hooks), never a direct column flip.
+        if new_state == InstanceState::Cancelled {
+            return match orch8_storage::lifecycle::request_cancel(self.storage.as_ref(), id)
+                .await
+                .map_err(storage_err)?
+            {
+                orch8_storage::lifecycle::CancelRequest::Terminal => Err(Status::aborted(
+                    "instance state changed concurrently; re-read and retry",
+                )),
+                _ => Ok(Response::new(proto::Empty {})),
+            };
+        }
         // CAS from the validated state (L3-14): a blind write would apply a
         // transition validated against a stale read (e.g. over a completion).
         if !self
@@ -1459,11 +1472,16 @@ impl Orch8Service for Orch8GrpcService {
             orch8_storage::lifecycle::bulk_transition_sources(new_state, filter.states.as_deref())
                 .map_err(Status::invalid_argument)?,
         );
-        let updated = self
-            .storage
-            .bulk_update_state(&filter, new_state)
-            .await
-            .map_err(storage_err)?;
+        let updated = if new_state == InstanceState::Cancelled {
+            orch8_storage::lifecycle::request_cancel_matching(self.storage.as_ref(), &filter)
+                .await
+                .map_err(storage_err)?
+        } else {
+            self.storage
+                .bulk_update_state(&filter, new_state)
+                .await
+                .map_err(storage_err)?
+        };
         Ok(Response::new(proto::BulkUpdateStateResponse { updated }))
     }
 

@@ -5211,18 +5211,8 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "Job cancelled",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Job"
-                }
-              }
-            }
-          },
           "202": {
-            "description": "Cancellation requested for a running job",
+            "description": "Cancellation requested",
             "content": {
               "application/json": {
                 "schema": {

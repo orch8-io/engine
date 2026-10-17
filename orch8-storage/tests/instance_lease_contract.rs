@@ -449,6 +449,48 @@ async fn batch_admission_denies_a_tenant_missing_from_limits(s: &dyn StorageBack
     }
 }
 
+/// L4-06: the admission count is capped at the ceiling, so the verdict must
+/// stay exact when the tenant has far more active rows than the limit, at the
+/// boundary, and for a zero ceiling.
+async fn admission_verdict_is_exact_around_the_ceiling(s: &dyn StorageBackend) {
+    let seq = sequence(s).await;
+    for _ in 0..7 {
+        s.create_instance(&instance(seq, "tenant-big", InstanceState::Waiting))
+            .await
+            .unwrap();
+    }
+    let over = |limit: u64| async move {
+        s.create_instance_admitted(&instance(seq, "tenant-big", InstanceState::Scheduled), limit)
+            .await
+    };
+    assert!(matches!(over(3).await, Err(StorageError::QuotaExceeded(_))));
+    assert!(matches!(over(7).await, Err(StorageError::QuotaExceeded(_))));
+    assert!(matches!(over(0).await, Err(StorageError::QuotaExceeded(_))));
+    over(8).await.unwrap();
+
+    let batch = |n: usize| {
+        (0..n)
+            .map(|_| instance(seq, "tenant-big", InstanceState::Scheduled))
+            .collect::<Vec<_>>()
+    };
+    let limits = |l: u64| HashMap::from([(TenantId::unchecked("tenant-big"), l)]);
+    // 8 active now.
+    assert!(matches!(
+        s.create_instances_batch_admitted(&batch(1), &limits(8)).await,
+        Err(StorageError::QuotaExceeded(_))
+    ));
+    assert!(matches!(
+        s.create_instances_batch_admitted(&batch(3), &limits(10)).await,
+        Err(StorageError::QuotaExceeded(_))
+    ));
+    assert_eq!(
+        s.create_instances_batch_admitted(&batch(2), &limits(10))
+            .await
+            .unwrap(),
+        2
+    );
+}
+
 backend_contract!(
     stale_running_instance_is_rescheduled_due_now_and_claimable,
     only_running_instances_past_the_threshold_are_reclaimed,
@@ -462,4 +504,5 @@ backend_contract!(
     batch_admission_applies_each_tenants_own_limit,
     breached_batch_admission_inserts_nothing,
     batch_admission_denies_a_tenant_missing_from_limits,
+    admission_verdict_is_exact_around_the_ceiling,
 );
