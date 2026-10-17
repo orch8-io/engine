@@ -325,6 +325,39 @@ async fn purge_removes_instance_keyed_history_and_respects_family() {
     }
 }
 
+/// D-01: a terminal parent that still has any child row is not a candidate
+/// (the purge could never delete it unless the whole family is in the batch),
+/// so blocked parents cannot fill the oldest-first window; once the child is
+/// gone the parent becomes a candidate.
+#[tokio::test]
+async fn gc_candidates_exclude_parents_with_children() {
+    for backend in backends().await {
+        let (name, storage, raw) = (backend.name(), Arc::clone(&backend.storage), &backend.raw);
+        let storage = storage.as_ref();
+        let tenant = TenantId::unchecked(format!("t-ret-{}", Uuid::new_v4()));
+        let seq = sequence(&tenant);
+        storage.create_sequence(&seq).await.unwrap();
+
+        let blocked = instance(&tenant, seq.id, InstanceState::Completed, None);
+        create(storage, raw, &blocked).await;
+        let live_child = instance(&tenant, seq.id, InstanceState::Running, Some(blocked.id));
+        create(storage, raw, &live_child).await;
+        let free = instance(&tenant, seq.id, InstanceState::Completed, None);
+        create(storage, raw, &free).await;
+
+        let cutoff = Utc.with_ymd_and_hms(2000, 1, 2, 0, 0, 0).unwrap();
+        let candidates = storage
+            .list_instance_gc_candidates(cutoff, 10_000)
+            .await
+            .unwrap();
+        assert!(candidates.contains(&free.id), "{name}");
+        assert!(
+            !candidates.contains(&blocked.id),
+            "{name}: parent with a child must not be a candidate"
+        );
+    }
+}
+
 /// The auxiliary sweep deletes old rows of the append-only tables it covers
 /// and leaves fresh ones alone.
 #[tokio::test]

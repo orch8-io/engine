@@ -603,13 +603,25 @@ pub async fn drain_terminal_instances(
 ) -> Result<u64, StorageError> {
     let started = std::time::Instant::now();
     let mut total = 0;
+    // Instances whose artifact delete failed in this pass. They stay at the
+    // head of the oldest-first scan, so the scan window is widened by their
+    // count and they are filtered out: a few poisoned rows must not starve
+    // everything behind them (D-01).
+    let mut skip: std::collections::HashSet<orch8_types::ids::InstanceId> =
+        std::collections::HashSet::new();
     loop {
-        let candidates = storage
-            .list_instance_gc_candidates(cutoff, INSTANCE_GC_BATCH_LIMIT)
-            .await?;
+        let window = INSTANCE_GC_BATCH_LIMIT
+            .saturating_add(u32::try_from(skip.len()).unwrap_or(u32::MAX));
+        let fetched = storage.list_instance_gc_candidates(cutoff, window).await?;
+        let candidates: Vec<_> = fetched
+            .into_iter()
+            .filter(|id| !skip.contains(id))
+            .take(INSTANCE_GC_BATCH_LIMIT as usize)
+            .collect();
         if candidates.is_empty() {
             break;
         }
+        let skipped_before = skip.len();
         let mut purge = Vec::with_capacity(candidates.len());
         for id in &candidates {
             match storage.delete_instance_artifacts(*id).await {
@@ -623,15 +635,18 @@ pub async fn drain_terminal_instances(
                     let kind = error_kind(&e);
                     tracing::error!(instance_id = %id, error = %e, kind, "instance gc: artifact delete failed; keeping instance");
                     metrics::inc_with(metrics::GC_ARTIFACTS_ERRORS, &[("kind", kind)]);
+                    skip.insert(*id);
                 }
             }
         }
         let deleted = storage.purge_terminal_instances(&purge).await?;
         total += deleted;
-        if candidates.len() < INSTANCE_GC_BATCH_LIMIT as usize
-            || deleted == 0
-            || started.elapsed() >= budget
-        {
+        // Keep going while this iteration made progress: it deleted rows (a
+        // purged child may have exposed its parent as a candidate) or it
+        // learned about new poisoned rows to scan past. A full scan window
+        // is not itself progress.
+        let progressed = deleted > 0 || skip.len() > skipped_before;
+        if !progressed || started.elapsed() >= budget {
             break;
         }
         tokio::task::yield_now().await;
@@ -1145,6 +1160,69 @@ mod tests {
             created_at: updated_at,
             updated_at,
         }
+    }
+
+    /// D-01: terminal parents that still have a live child sit at the head of
+    /// the oldest-first scan; they must not fill the candidate window and
+    /// stall retention for the rows behind them.
+    #[tokio::test]
+    async fn instance_retention_not_starved_by_blocked_parents() {
+        use orch8_storage::InstanceStore;
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let oldest = chrono::Utc::now() - chrono::Duration::days(5);
+        let old = chrono::Utc::now() - chrono::Duration::days(2);
+        for _ in 0..(INSTANCE_GC_BATCH_LIMIT + 10) {
+            let parent = terminal_instance(oldest);
+            storage.create_instance(&parent).await.unwrap();
+            let mut child = terminal_instance(old);
+            child.state = orch8_types::instance::InstanceState::Running;
+            child.parent_instance_id = Some(parent.id);
+            storage.create_instance(&child).await.unwrap();
+        }
+        let mut free = Vec::new();
+        for _ in 0..5 {
+            let inst = terminal_instance(old);
+            storage.create_instance(&inst).await.unwrap();
+            free.push(inst.id);
+        }
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(1);
+        let deleted = drain_terminal_instances(&storage, cutoff, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 5, "blocked parents must not stall the sweep");
+        for id in free {
+            assert!(storage.get_instance(id).await.unwrap().is_none());
+        }
+    }
+
+    /// D-01: instances whose artifact delete keeps failing stay at the head
+    /// of the scan; the pass must scan past them.
+    #[tokio::test]
+    async fn instance_retention_not_starved_by_failing_artifact_deletes() {
+        use orch8_storage::testing::faulty::FaultStorage;
+        let inner = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let (storage, faults) = FaultStorage::wrap(inner);
+        let base = chrono::Utc::now() - chrono::Duration::days(5);
+        let total = INSTANCE_GC_BATCH_LIMIT + 5;
+        for i in 0..total {
+            let inst = terminal_instance(base + chrono::Duration::seconds(i64::from(i)));
+            storage.create_instance(&inst).await.unwrap();
+        }
+        faults
+            .on("delete_instance_artifacts")
+            .times(u64::from(INSTANCE_GC_BATCH_LIMIT))
+            .fail_permanent();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(1);
+        let deleted = drain_terminal_instances(storage.as_ref(), cutoff, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 5, "poisoned head rows must not stall the sweep");
     }
 
     /// L1-07 / L1-08: one pass drains the whole backlog in bounded batches
