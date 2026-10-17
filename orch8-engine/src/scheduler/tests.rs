@@ -2843,7 +2843,7 @@ async fn cancel_hooks_run_off_the_signal_sweep() {
         InstanceState::Cancelled
     );
     assert_eq!(
-        hooks.0.lock().unwrap().len(),
+        hooks.pending(),
         1,
         "the on_cancel hook was spawned off the tick"
     );
@@ -2904,4 +2904,86 @@ async fn pause_and_resume_a_waiting_instance() {
             expected
         );
     }
+}
+
+/// D-05: one tenant whose hook target hangs is capped at
+/// `HOOK_PER_TENANT_CONCURRENCY` running hooks, so other tenants' hooks
+/// still get a global permit.
+#[tokio::test]
+async fn hook_pool_caps_per_tenant_concurrency_and_does_not_starve_others() {
+    use std::sync::atomic::AtomicUsize;
+
+    let hooks = HookTasks::default();
+    let running = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    for _ in 0..(HOOK_CONCURRENCY * 2) {
+        let (running, peak, release) = (
+            Arc::clone(&running),
+            Arc::clone(&peak),
+            Arc::clone(&release),
+        );
+        hooks.spawn("noisy", async move {
+            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            release.notified().await;
+            running.fetch_sub(1, Ordering::SeqCst);
+        });
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    hooks.spawn("quiet", async move {
+        let _ = tx.send(());
+    });
+    tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("a quiet tenant's hook must not wait behind the noisy tenant")
+        .unwrap();
+    assert_eq!(
+        running.load(Ordering::SeqCst),
+        HOOK_PER_TENANT_CONCURRENCY,
+        "noisy tenant capped"
+    );
+    release.notify_waiters();
+    // Waiters not yet registered miss notify_waiters; keep releasing until done.
+    let drained = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            release.notify_waiters();
+            if hooks.pending() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(drained.is_ok(), "all hooks finished");
+    assert!(peak.load(Ordering::SeqCst) <= HOOK_PER_TENANT_CONCURRENCY);
+}
+
+/// D-05: the hook queue is bounded; overflow is dropped (and counted)
+/// instead of queueing without limit.
+#[tokio::test]
+async fn hook_pool_drops_beyond_queue_capacity() {
+    let hooks = HookTasks::default();
+    for _ in 0..(HOOK_QUEUE_CAPACITY + 25) {
+        hooks.spawn("t", std::future::pending::<()>());
+    }
+    assert_eq!(hooks.pending(), HOOK_QUEUE_CAPACITY);
+    assert!(!hooks.drain(Duration::from_millis(50)).await, "hung hooks");
+    // Aborted hooks release their queue slots.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(hooks.pending(), 0);
+}
+
+/// D-05: shutdown waits (bounded) for in-flight hooks.
+#[tokio::test]
+async fn hook_pool_drain_waits_for_running_hooks() {
+    let hooks = HookTasks::default();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    hooks.spawn("t", async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        flag.store(true, Ordering::SeqCst);
+    });
+    assert!(hooks.drain(Duration::from_secs(5)).await);
+    assert!(done.load(Ordering::SeqCst), "drain waited for the hook");
 }
