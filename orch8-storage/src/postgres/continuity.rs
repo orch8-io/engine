@@ -772,6 +772,75 @@ impl crate::ContinuityStore for PostgresStorage {
             .collect()
     }
 
+    async fn get_runtime_capability(
+        &self,
+        tenant_id: &TenantId,
+        runtime_id: RuntimeId,
+        observed_after: DateTime<Utc>,
+    ) -> Result<Option<RuntimeCapabilities>, StorageError> {
+        let row = sqlx::query(
+            "SELECT record FROM runtime_capabilities
+             WHERE tenant_id = $1 AND runtime_id = $2 AND expires_at > $3",
+        )
+        .bind(tenant_id.as_str())
+        .bind(runtime_id.into_uuid())
+        .bind(observed_after)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(row.get("record"))).transpose()
+    }
+
+    async fn list_runtime_capabilities_by_kind(
+        &self,
+        tenant_id: &TenantId,
+        observed_after: DateTime<Utc>,
+        kinds: &[orch8_types::continuity::RuntimeKind],
+        per_kind_limit: u32,
+    ) -> Result<Vec<RuntimeCapabilities>, StorageError> {
+        let kind_names = kinds
+            .iter()
+            .map(|kind| state_name(*kind))
+            .collect::<Result<Vec<_>, _>>()?;
+        let rows = sqlx::query(
+            "SELECT record FROM (
+               SELECT record, row_number() OVER (
+                        PARTITION BY record->>'kind' ORDER BY observed_at DESC) AS rn
+               FROM runtime_capabilities
+               WHERE tenant_id = $1 AND expires_at > $2
+                 AND (cardinality($3::text[]) = 0 OR record->>'kind' = ANY($3))
+             ) ranked WHERE rn <= $4",
+        )
+        .bind(tenant_id.as_str())
+        .bind(observed_after)
+        .bind(&kind_names)
+        .bind(i64::from(per_kind_limit.min(1_000)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| decode(row.get("record")))
+            .collect()
+    }
+
+    async fn prune_expired_runtime_capabilities(
+        &self,
+        expired_before: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM runtime_capabilities WHERE (tenant_id, runtime_id) IN (
+               SELECT tenant_id, runtime_id FROM runtime_capabilities
+               WHERE expires_at < $1 LIMIT $2)",
+        )
+        .bind(expired_before)
+        .bind(i64::from(limit))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
     async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO effect_receipts

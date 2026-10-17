@@ -30,9 +30,15 @@ enum ApnsOutcome {
     Success,
     /// 410: the device token itself is gone -- never retry.
     InvalidToken,
-    /// 403: APNs rejected the JWT (expired/wrong key/revoked), not the
+    /// 403: APNs rejected the provider token (expired/invalid JWT), not the
     /// device token -- invalidate the cached token and retry with a fresh one.
+    /// Only for `ExpiredProviderToken` / `InvalidProviderToken`; other 403
+    /// reasons (`Forbidden`, `BadCertificate*`, `MissingProviderToken`) are a
+    /// key/entitlement problem a fresh JWT cannot fix ([`ApnsOutcome::Misconfigured`]).
     AuthRejected,
+    /// 403 whose reason a fresh JWT cannot resolve: surface as a terminal
+    /// configuration error instead of re-signing on every wake.
+    Misconfigured,
     /// 429 or 5xx: transient server-side/rate-limit failure -- retry with
     /// backoff.
     Retryable,
@@ -41,12 +47,23 @@ enum ApnsOutcome {
 }
 
 fn classify_apns_status(status: reqwest::StatusCode) -> ApnsOutcome {
+    classify_apns_response(status, "")
+}
+
+/// Classify with the response body, so a 403 can be told apart by its
+/// `reason` (an empty body keeps the legacy "JWT rejected" reading).
+fn classify_apns_response(status: reqwest::StatusCode, body: &str) -> ApnsOutcome {
     if status.is_success() {
         ApnsOutcome::Success
     } else if status.as_u16() == 410 {
         ApnsOutcome::InvalidToken
     } else if status.as_u16() == 403 {
-        ApnsOutcome::AuthRejected
+        match apns_reason(body).as_deref() {
+            None | Some("ExpiredProviderToken" | "InvalidProviderToken") => {
+                ApnsOutcome::AuthRejected
+            }
+            Some(_) => ApnsOutcome::Misconfigured,
+        }
     } else if status.as_u16() == 429 || status.is_server_error() {
         // 429 (TooManyRequests) is APNs' most common transient failure at
         // fan-out volume; like 5xx it resolves by backing off and retrying.
@@ -54,6 +71,16 @@ fn classify_apns_status(status: reqwest::StatusCode) -> ApnsOutcome {
     } else {
         ApnsOutcome::Permanent
     }
+}
+
+fn apns_reason(body: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct ApnsErrorBody {
+        reason: Option<String>,
+    }
+    serde_json::from_str::<ApnsErrorBody>(body)
+        .ok()
+        .and_then(|b| b.reason)
 }
 
 /// Whether an APNs error body names a token-level rejection
@@ -205,6 +232,13 @@ impl ApnsProvider {
                 .header("authorization", format!("bearer {jwt}"))
                 .header("apns-push-type", "background")
                 .header("apns-priority", "5")
+                // Drop a wake the device could not take within the TTL and
+                // collapse a burst into one queued notification.
+                .header(
+                    "apns-expiration",
+                    (chrono::Utc::now().timestamp() + crate::WAKE_TTL_SECS).to_string(),
+                )
+                .header("apns-collapse-id", crate::WAKE_COLLAPSE_ID)
                 .header("apns-topic", &self.topic)
                 .json(&payload)
                 .send()
@@ -222,7 +256,15 @@ impl ApnsProvider {
             };
 
             let status = resp.status();
-            match classify_apns_status(status) {
+            // Only a 403 needs its body to pick the outcome; reading it for
+            // other statuses is left to the arms that report it.
+            let (outcome, forbidden_body, resp) = if status.as_u16() == 403 {
+                let body = read_error_body(resp).await;
+                (classify_apns_response(status, &body), Some(body), None)
+            } else {
+                (classify_apns_status(status), None, Some(resp))
+            };
+            match outcome {
                 ApnsOutcome::Success => {
                     debug!(
                         token = crate::safe_prefix(token, 8),
@@ -236,6 +278,18 @@ impl ApnsProvider {
                         "APNs token invalid (410)"
                     );
                     return Err(PushError::InvalidToken);
+                }
+                ApnsOutcome::Misconfigured => {
+                    // A fresh JWT cannot fix this: do not discard the cached
+                    // token or retry; the operator must fix the key/topic.
+                    let reason = forbidden_body
+                        .as_deref()
+                        .and_then(apns_reason)
+                        .unwrap_or_default();
+                    warn!(%reason, "APNs rejected the provider credentials (403)");
+                    return Err(PushError::Config(format!(
+                        "APNs returned 403 ({reason}): provider key, team or topic is not authorized"
+                    )));
                 }
                 ApnsOutcome::AuthRejected => {
                     // M-21: retrying with the SAME cached JWT would just
@@ -260,7 +314,10 @@ impl ApnsProvider {
                     tokio::time::sleep(retry_backoff(attempt)).await;
                 }
                 outcome @ (ApnsOutcome::Retryable | ApnsOutcome::Permanent) => {
-                    let body = read_error_body(resp).await;
+                    let body = match resp {
+                        Some(resp) => read_error_body(resp).await,
+                        None => String::new(),
+                    };
                     // MOB-N12: APNs reports dead/mismatched tokens as 400
                     // with a `reason`, not only as 410 — quarantine those.
                     if status.as_u16() == 400 && reason_is_invalid_token(&body) {
@@ -380,6 +437,36 @@ kHmPRiazukxPLb6ilpRAewjW8nihRANCAATDskChT+Altkm9X7MI69T3IUmrQU0L
         assert_eq!(
             classify_apns_status(StatusCode::TOO_MANY_REQUESTS),
             ApnsOutcome::Retryable
+        );
+    }
+
+    #[test]
+    fn apns_403_only_refreshes_the_jwt_for_provider_token_reasons() {
+        let forbidden = StatusCode::FORBIDDEN;
+        for reason in ["ExpiredProviderToken", "InvalidProviderToken"] {
+            assert_eq!(
+                classify_apns_response(forbidden, &format!(r#"{{"reason":"{reason}"}}"#)),
+                ApnsOutcome::AuthRejected,
+                "{reason}"
+            );
+        }
+        // A fresh JWT cannot fix an unauthorized key / topic / certificate.
+        for reason in [
+            "Forbidden",
+            "BadCertificate",
+            "BadCertificateEnvironment",
+            "MissingProviderToken",
+        ] {
+            assert_eq!(
+                classify_apns_response(forbidden, &format!(r#"{{"reason":"{reason}"}}"#)),
+                ApnsOutcome::Misconfigured,
+                "{reason}"
+            );
+        }
+        // No readable reason keeps the legacy "JWT rejected" reading.
+        assert_eq!(
+            classify_apns_response(forbidden, ""),
+            ApnsOutcome::AuthRejected
         );
     }
 

@@ -614,6 +614,21 @@ fn bind_poll_identity(
     Ok(Some(capabilities))
 }
 
+/// Most tasks one poll by a device/tab session may claim. A phone runs a
+/// handful of steps; letting an end-user credential lease up to 1000 tasks per
+/// poll would let one device hoard (and starve) the queue.
+pub(crate) const DEVICE_POLL_MAX_LIMIT: u32 = 10;
+
+/// Effective claim limit: server workers up to 1000, device sessions
+/// `1..=DEVICE_POLL_MAX_LIMIT`.
+pub(crate) fn poll_limit(binding: &crate::browser_sessions::OptionalBinding, requested: u32) -> u32 {
+    if crate::browser_sessions::device_binding(binding).is_some() {
+        requested.clamp(1, DEVICE_POLL_MAX_LIMIT)
+    } else {
+        requested.min(1000)
+    }
+}
+
 #[utoipa::path(post, path = "/workers/tasks/poll", tag = "workers",
     request_body = PollRequest,
     responses((status = 200, description = "Claimed worker tasks and lease hints", body = PollTasksResponse))
@@ -631,7 +646,7 @@ pub(crate) async fn poll_tasks(
         None,
         req.capabilities.take(),
     )?;
-    let limit = req.limit.min(1000);
+    let limit = poll_limit(&binding, req.limit);
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
     validate_and_record_capabilities(
         &state,
@@ -743,7 +758,7 @@ pub(crate) async fn poll_tasks_from_queue(
         Some(&req.queue_name),
         req.capabilities.take(),
     )?;
-    let limit = req.limit.min(1000);
+    let limit = poll_limit(&binding, req.limit);
     // Tenant-scoped claim path — see `poll_tasks` comment for the rationale.
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
     validate_and_record_capabilities(
@@ -1881,6 +1896,38 @@ fn parse_states(raw: &str) -> Result<Vec<WorkerTaskState>, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn binding_of(kind: orch8_types::continuity::RuntimeKind) -> crate::browser_sessions::OptionalBinding {
+        Some(axum::Extension(crate::browser_sessions::RuntimeBinding {
+            tenant_id: orch8_types::ids::TenantId::unchecked("t"),
+            kind,
+            runtime_id: orch8_types::continuity::RuntimeId::new(),
+            device_id: Some("phone".into()),
+            handlers: vec!["h".into()],
+            queues: Vec::new(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+        }))
+    }
+
+    #[test]
+    fn device_session_polls_are_clamped_to_one_through_ten() {
+        use orch8_types::continuity::RuntimeKind;
+        let device = binding_of(RuntimeKind::Mobile);
+        assert_eq!(poll_limit(&device, 1_000), DEVICE_POLL_MAX_LIMIT);
+        assert_eq!(poll_limit(&device, 10), 10);
+        assert_eq!(poll_limit(&device, 3), 3);
+        assert_eq!(poll_limit(&device, 0), 1, "a device poll always asks for something");
+    }
+
+    #[test]
+    fn non_device_polls_keep_the_server_ceiling() {
+        use orch8_types::continuity::RuntimeKind;
+        let none: crate::browser_sessions::OptionalBinding = None;
+        assert_eq!(poll_limit(&none, 5_000), 1_000);
+        assert_eq!(poll_limit(&none, 0), 0);
+        let browser = binding_of(RuntimeKind::Browser);
+        assert_eq!(poll_limit(&browser, 5_000), 1_000, "only mobile device sessions are clamped");
+    }
 
     #[test]
     fn parse_single_worker_state() {

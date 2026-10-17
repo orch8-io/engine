@@ -82,6 +82,17 @@ the migration record before the next `orch8 migrate`:
 DELETE FROM _sqlx_migrations WHERE version = 82;
 ```
 
+## Upgrading large installs to 118–121
+
+Migrations 118–121 (mobile-server hardening) add only indexes plus one
+metadata-only column (`rollback_policies.min_samples`, constant default) and
+drop two single-column telemetry tenant indexes made redundant by the new
+composites. They touch `telemetry_mobile_events`, `telemetry_mobile_errors`,
+`runtime_capabilities`, `push_wake_outbox`, `mobile_devices`,
+`mobile_approval_requests` and `mobile_commands`; on large installs run the
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS` statements from each file's header
+online first, then `orch8 migrate` is a no-op for them.
+
 ## Upgrading large installs to 100–106 and 111
 
 Migrations 100–106 and 111 add indexes to hot tables (`task_instances`,

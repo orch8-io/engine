@@ -69,8 +69,20 @@ pub use governance::{
     PushGovernanceError, SignedWakeMetadata, TokenLifecycleState, WakeNonceCache, collapse_wakes,
 };
 pub use outbox::{
-    ClaimedWake, PushOutboxStore, PushOutboxWorker, PushTerminalReason, WakeAttemptOutcome,
+    ClaimedWake, DEFAULT_DELIVERY_CONCURRENCY, PushOutboxStore, PushOutboxWorker,
+    PushTerminalReason, WakeAttemptOutcome,
 };
+
+/// How long a provider may hold an undelivered wake (5 minutes). A wake is
+/// only a "go sync" nudge and the command stays queued server-side, so a
+/// stale one is worthless: APNs `apns-expiration` / FCM `android.ttl`.
+pub const WAKE_TTL_SECS: i64 = 300;
+
+/// Collapse identifier shared by every wake for a device (APNs
+/// `apns-collapse-id`, FCM `collapse_key`): a burst of commands leaves at most
+/// one wake queued at the provider, because one sync drains every pending
+/// command.
+pub const WAKE_COLLAPSE_ID: &str = "orch8-wake";
 
 /// Secret material that is redacted from debug output and wiped on drop.
 #[derive(Clone)]

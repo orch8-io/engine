@@ -358,9 +358,14 @@ async fn placement_rejection(
             crate::effect_guard::ensure_effect_scope(storage, &instance.tenant_id, instance.id)
                 .await?;
         let now = chrono::Utc::now();
-        let candidates = storage
-            .list_runtime_capabilities(&instance.tenant_id, now, 1_000)
-            .await?;
+        let candidates = crate::placement::candidate_runtimes(
+            storage,
+            &instance.tenant_id,
+            requirements,
+            &[],
+            now,
+        )
+        .await?;
         let placement = crate::placement::evaluate_dispatch_placement(
             instance.tenant_id.clone(),
             execution.continuity_id,
@@ -459,13 +464,9 @@ async fn placed_on_browser(
         return Ok(false);
     };
     Ok(storage
-        .list_runtime_capabilities(&instance.tenant_id, chrono::Utc::now(), 1_000)
+        .get_runtime_capability(&instance.tenant_id, target, chrono::Utc::now())
         .await?
-        .iter()
-        .any(|runtime| {
-            runtime.runtime_id == target
-                && runtime.kind == orch8_types::continuity::RuntimeKind::Browser
-        }))
+        .is_some_and(|runtime| runtime.kind == orch8_types::continuity::RuntimeKind::Browser))
 }
 
 /// Dispatch a step within the execution tree to the external worker queue.

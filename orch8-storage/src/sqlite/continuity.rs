@@ -784,6 +784,86 @@ impl crate::ContinuityStore for SqliteStorage {
             .collect()
     }
 
+    async fn get_runtime_capability(
+        &self,
+        tenant_id: &TenantId,
+        runtime_id: RuntimeId,
+        observed_after: DateTime<Utc>,
+    ) -> Result<Option<RuntimeCapabilities>, StorageError> {
+        let row = sqlx::query(
+            "SELECT record FROM runtime_capabilities
+             WHERE tenant_id = ? AND runtime_id = ? AND expires_at > ?",
+        )
+        .bind(tenant_id.as_str())
+        .bind(runtime_id.to_string())
+        .bind(observed_after.to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(&row.get::<String, _>("record")))
+            .transpose()
+    }
+
+    async fn list_runtime_capabilities_by_kind(
+        &self,
+        tenant_id: &TenantId,
+        observed_after: DateTime<Utc>,
+        kinds: &[orch8_types::continuity::RuntimeKind],
+        per_kind_limit: u32,
+    ) -> Result<Vec<RuntimeCapabilities>, StorageError> {
+        let kind_names = kinds
+            .iter()
+            .map(|kind| state_name(*kind))
+            .collect::<Result<Vec<_>, _>>()?;
+        let kind_filter = if kind_names.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " AND json_extract(record, '$.kind') IN ({})",
+                vec!["?"; kind_names.len()].join(",")
+            )
+        };
+        let sql = format!(
+            "SELECT record FROM (
+               SELECT record, row_number() OVER (
+                        PARTITION BY json_extract(record, '$.kind') ORDER BY observed_at DESC) AS rn
+               FROM runtime_capabilities
+               WHERE tenant_id = ? AND expires_at > ?{kind_filter}
+             ) WHERE rn <= ?"
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(tenant_id.as_str())
+            .bind(observed_after.to_rfc3339());
+        for name in &kind_names {
+            query = query.bind(name.as_str());
+        }
+        let rows = query
+            .bind(i64::from(per_kind_limit.min(1_000)))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| decode(&row.get::<String, _>("record")))
+            .collect()
+    }
+
+    async fn prune_expired_runtime_capabilities(
+        &self,
+        expired_before: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM runtime_capabilities WHERE rowid IN (
+               SELECT rowid FROM runtime_capabilities WHERE expires_at < ? LIMIT ?)",
+        )
+        .bind(expired_before.to_rfc3339())
+        .bind(i64::from(limit))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
     async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO effect_receipts

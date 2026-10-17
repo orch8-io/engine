@@ -1482,7 +1482,13 @@ fn spawn_push_outbox_worker(
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let store: Arc<dyn orch8_push::PushOutboxStore> = storage;
-    let worker = orch8_push::PushOutboxWorker::new(store, provider);
+    // `ORCH8_PUSH_CONCURRENCY`: simultaneous provider calls per drain
+    // (default 32, clamped 1..=256).
+    let concurrency = std::env::var("ORCH8_PUSH_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(orch8_push::DEFAULT_DELIVERY_CONCURRENCY);
+    let worker = orch8_push::PushOutboxWorker::new(store, provider).with_concurrency(concurrency);
     let worker = match crypto {
         Some(crypto) => worker.with_wake_signer(
             format!("push-{}", crypto.signing_key_id),
@@ -1500,8 +1506,16 @@ fn spawn_push_outbox_worker(
                 () = shutdown.cancelled() => break,
                 _ = interval.tick() => {
                     let now = chrono::Utc::now();
-                    if let Err(error) = worker.drain_once(now).await {
-                        tracing::warn!(%error, "push outbox drain failed");
+                    // Shutdown must not wait out a slow provider call: dropping
+                    // the drain aborts in-flight sends, whose leases expire and
+                    // are re-driven by the next node/run.
+                    tokio::select! {
+                        () = shutdown.cancelled() => break,
+                        result = worker.drain_once(now) => {
+                            if let Err(error) = result {
+                                tracing::warn!(%error, "push outbox drain failed");
+                            }
+                        }
                     }
                     if ticks.is_multiple_of(PUSH_PRUNE_EVERY_TICKS) {
                         match worker.prune_once(now, retention).await {

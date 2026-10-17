@@ -5,6 +5,9 @@
 //! rest of the batch is still ingested under the caller's tenant.
 
 use super::*;
+use orch8_storage::telemetry_validation::{
+    MAX_TELEMETRY_BATCH_PAYLOAD_BYTES, MAX_TELEMETRY_EVENT_PAYLOAD_BYTES,
+};
 
 const TENANT: &str = "acme";
 

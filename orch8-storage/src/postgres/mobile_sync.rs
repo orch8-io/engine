@@ -7,6 +7,22 @@ use std::fmt::Write;
 use super::PostgresStorage;
 use crate::StorageError;
 
+/// Topic of the per-device wake created for server-to-device commands.
+const MOBILE_COMMAND_WAKE_TOPIC: &str = "mobile_command";
+
+/// Collapse scope of command wakes: one per `(tenant, device)`.
+fn mobile_command_collapse_key(tenant_id: &str, device_id: &str) -> String {
+    orch8_push::CollapsibleWake {
+        tenant_id: tenant_id.to_owned(),
+        device_id: device_id.to_owned(),
+        execution_id: String::new(),
+        topic: MOBILE_COMMAND_WAKE_TOPIC.to_owned(),
+        command_id: String::new(),
+        created_at: chrono::Utc::now(),
+    }
+    .collapse_key()
+}
+
 #[async_trait]
 impl crate::MobileSyncStore for PostgresStorage {
     // --- Devices ---
@@ -191,9 +207,13 @@ impl crate::MobileSyncStore for PostgresStorage {
         &self,
         status: &crate::MobileInstanceStatus,
     ) -> Result<(), StorageError> {
+        // Parsed here (not by a SQL `::timestamptz` cast) so a malformed
+        // timestamp is a typed constraint error, not an opaque query failure
+        // the device would retry forever.
+        let updated_at = crate::normalize_status_timestamp(&status.updated_at, chrono::Utc::now())?;
         sqlx::query(
             "INSERT INTO mobile_instance_status (device_id, instance_id, sequence_name, state, current_step, handler, context_summary, steps, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::timestamptz)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT(device_id, instance_id) DO UPDATE SET
                sequence_name = EXCLUDED.sequence_name,
                state = EXCLUDED.state,
@@ -201,7 +221,8 @@ impl crate::MobileSyncStore for PostgresStorage {
                handler = EXCLUDED.handler,
                context_summary = EXCLUDED.context_summary,
                steps = EXCLUDED.steps,
-               updated_at = EXCLUDED.updated_at",
+               updated_at = EXCLUDED.updated_at
+             WHERE mobile_instance_status.updated_at <= EXCLUDED.updated_at",
         )
         .bind(&status.device_id)
         .bind(&status.instance_id)
@@ -211,7 +232,79 @@ impl crate::MobileSyncStore for PostgresStorage {
         .bind(&status.handler)
         .bind(&status.context_summary)
         .bind(&status.steps)
-        .bind(&status.updated_at)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn upsert_mobile_instance_status_batch(
+        &self,
+        statuses: &[crate::MobileInstanceStatus],
+    ) -> Result<(), StorageError> {
+        if statuses.is_empty() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now();
+        // Collapse duplicate keys to the newest update first: one `ON CONFLICT
+        // DO UPDATE` statement may not touch the same row twice.
+        let mut newest: std::collections::HashMap<
+            (&str, &str),
+            (chrono::DateTime<chrono::Utc>, &crate::MobileInstanceStatus),
+        > = std::collections::HashMap::with_capacity(statuses.len());
+        for status in statuses {
+            let at = crate::normalize_status_timestamp(&status.updated_at, now)?;
+            let key = (status.device_id.as_str(), status.instance_id.as_str());
+            match newest.get(&key) {
+                Some((existing, _)) if *existing > at => {}
+                _ => {
+                    newest.insert(key, (at, status));
+                }
+            }
+        }
+        let mut device_ids = Vec::with_capacity(newest.len());
+        let mut instance_ids = Vec::with_capacity(newest.len());
+        let mut sequence_names = Vec::with_capacity(newest.len());
+        let mut states = Vec::with_capacity(newest.len());
+        let mut current_steps = Vec::with_capacity(newest.len());
+        let mut handlers = Vec::with_capacity(newest.len());
+        let mut summaries = Vec::with_capacity(newest.len());
+        let mut steps = Vec::with_capacity(newest.len());
+        let mut updated = Vec::with_capacity(newest.len());
+        for (at, status) in newest.into_values() {
+            device_ids.push(status.device_id.clone());
+            instance_ids.push(status.instance_id.clone());
+            sequence_names.push(status.sequence_name.clone());
+            states.push(status.state.clone());
+            current_steps.push(status.current_step.clone());
+            handlers.push(status.handler.clone());
+            summaries.push(status.context_summary.clone());
+            steps.push(status.steps.clone());
+            updated.push(at);
+        }
+        sqlx::query(
+            "INSERT INTO mobile_instance_status (device_id, instance_id, sequence_name, state, current_step, handler, context_summary, steps, updated_at)
+             SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::timestamptz[])
+             ON CONFLICT(device_id, instance_id) DO UPDATE SET
+               sequence_name = EXCLUDED.sequence_name,
+               state = EXCLUDED.state,
+               current_step = EXCLUDED.current_step,
+               handler = EXCLUDED.handler,
+               context_summary = EXCLUDED.context_summary,
+               steps = EXCLUDED.steps,
+               updated_at = EXCLUDED.updated_at
+             WHERE mobile_instance_status.updated_at <= EXCLUDED.updated_at",
+        )
+        .bind(&device_ids)
+        .bind(&instance_ids)
+        .bind(&sequence_names)
+        .bind(&states)
+        .bind(&current_steps)
+        .bind(&handlers)
+        .bind(&summaries)
+        .bind(&steps)
+        .bind(&updated)
         .execute(&self.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
@@ -329,6 +422,57 @@ impl crate::MobileSyncStore for PostgresStorage {
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn insert_mobile_approvals_batch(
+        &self,
+        approvals: &[crate::MobileApprovalRequest],
+    ) -> Result<u64, StorageError> {
+        if approvals.is_empty() {
+            return Ok(0);
+        }
+        // One statement; duplicate (device, instance, block) keys inside the
+        // batch collapse to the first, matching sequential DO NOTHING.
+        let mut seen = std::collections::HashSet::with_capacity(approvals.len());
+        let unique: Vec<&crate::MobileApprovalRequest> = approvals
+            .iter()
+            .filter(|a| seen.insert((a.device_id.as_str(), a.instance_id.as_str(), a.block_id.as_str())))
+            .collect();
+        let ids: Vec<&str> = unique.iter().map(|a| a.id.as_str()).collect();
+        let device_ids: Vec<&str> = unique.iter().map(|a| a.device_id.as_str()).collect();
+        let tenant_ids: Vec<&str> = unique.iter().map(|a| a.tenant_id.as_str()).collect();
+        let instance_ids: Vec<&str> = unique.iter().map(|a| a.instance_id.as_str()).collect();
+        let block_ids: Vec<&str> = unique.iter().map(|a| a.block_id.as_str()).collect();
+        let sequence_names: Vec<Option<&str>> =
+            unique.iter().map(|a| a.sequence_name.as_deref()).collect();
+        let prompts: Vec<Option<&str>> = unique.iter().map(|a| a.prompt.as_deref()).collect();
+        let choices: Vec<Option<&str>> = unique.iter().map(|a| a.choices.as_deref()).collect();
+        let store_as: Vec<Option<&str>> = unique.iter().map(|a| a.store_as.as_deref()).collect();
+        let timeouts: Vec<Option<i32>> = unique
+            .iter()
+            .map(|a| a.timeout_secs.and_then(|t| i32::try_from(t).ok()))
+            .collect();
+        let metadata: Vec<Option<&str>> = unique.iter().map(|a| a.metadata.as_deref()).collect();
+        let result = sqlx::query(
+            "INSERT INTO mobile_approval_requests (id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, created_at)
+             SELECT u.*, 'pending', now() FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::int[], $11::text[]) AS u
+             ON CONFLICT(device_id, instance_id, block_id) DO NOTHING",
+        )
+        .bind(&ids)
+        .bind(&device_ids)
+        .bind(&tenant_ids)
+        .bind(&instance_ids)
+        .bind(&block_ids)
+        .bind(&sequence_names)
+        .bind(&prompts)
+        .bind(&choices)
+        .bind(&store_as)
+        .bind(&timeouts)
+        .bind(&metadata)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+        Ok(result.rows_affected())
     }
 
     async fn get_mobile_approval(
@@ -545,6 +689,25 @@ impl crate::MobileSyncStore for PostgresStorage {
         Ok(())
     }
 
+    async fn create_mobile_command_if_absent(
+        &self,
+        command: &crate::MobileCommand,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "INSERT INTO mobile_commands (id, device_id, command_type, payload, created_at)
+             VALUES ($1, $2, $3, $4, now())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&command.id)
+        .bind(&command.device_id)
+        .bind(&command.command_type)
+        .bind(&command.payload)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn create_mobile_command_with_wake(
         &self,
         command: &crate::MobileCommand,
@@ -562,16 +725,35 @@ impl crate::MobileSyncStore for PostgresStorage {
         .bind(&command.payload)
         .execute(&mut *transaction)
         .await?;
+        // One pending wake per device: a burst of commands collapses onto the
+        // newest wake (the sync it triggers drains every pending command), the
+        // same scope `enqueue_collapsible_wake` uses. The advisory lock
+        // serializes competing writers for the device across the fleet.
+        let collapse_key = mobile_command_collapse_key(tenant_id, &command.device_id);
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(&collapse_key)
+            .execute(&mut *transaction)
+            .await?;
         sqlx::query(
-            "INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,created_at) VALUES ($1,$2,$3,$4,$5)",
+            "INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,topic,collapse_key,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
         )
         .bind(wake_id)
         .bind(tenant_id)
         .bind(&command.device_id)
         .bind(&command.id)
+        .bind(MOBILE_COMMAND_WAKE_TOPIC)
+        .bind(&collapse_key)
         .bind(created_at)
         .execute(&mut *transaction)
         .await?;
+        sqlx::query("UPDATE push_wake_outbox SET status='terminal',terminal_reason='superseded',superseded_by=$1 WHERE tenant_id=$2 AND device_id=$3 AND collapse_key=$4 AND status='pending' AND id<>$5")
+            .bind(&command.id)
+            .bind(tenant_id)
+            .bind(&command.device_id)
+            .bind(&collapse_key)
+            .bind(wake_id)
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok(wake_id)
     }

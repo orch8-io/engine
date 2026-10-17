@@ -24,6 +24,12 @@ const MAX_ERROR_BODY_LEN: usize = 4 * 1024;
 /// An unregistered device token never retries.
 const MAX_DELIVERY_ATTEMPTS: u32 = 3;
 
+/// Minimum spacing between forced access-token refreshes triggered by a
+/// 401/403, process-wide. A rejection that persists across fresh tokens is a
+/// permission/configuration problem; re-minting per wake would only hammer
+/// the OAuth endpoint.
+const MIN_FORCED_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
 const fn retry_backoff(attempt: u32) -> Duration {
     Duration::from_millis(200_u64.saturating_mul(1 << attempt))
 }
@@ -80,6 +86,14 @@ fn classify_fcm_response(status: reqwest::StatusCode, body: &str) -> FcmOutcome 
     if unregistered {
         return FcmOutcome::InvalidToken;
     }
+    // Other token-level rejections that FCM reports under 400/403 and that no
+    // amount of OAuth refreshing can fix: a token minted for a different
+    // sender (403 SENDER_ID_MISMATCH) or malformed (INVALID_ARGUMENT naming
+    // the registration token). Quarantine the token instead of discarding the
+    // process-wide access token and retrying.
+    if fcm_token_level_rejection(body) {
+        return FcmOutcome::InvalidToken;
+    }
     if status.as_u16() == 401 || status.as_u16() == 403 {
         return FcmOutcome::AuthRejected;
     }
@@ -95,6 +109,35 @@ fn classify_fcm_response(status: reqwest::StatusCode, body: &str) -> FcmOutcome 
         return FcmOutcome::Retryable;
     }
     FcmOutcome::Permanent
+}
+
+fn fcm_token_level_rejection(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(error) = value.get("error") else {
+        return false;
+    };
+    let detail_code = error
+        .get("details")
+        .and_then(|d| d.as_array())
+        .is_some_and(|details| {
+            details.iter().any(|d| {
+                matches!(
+                    d.get("errorCode").and_then(|c| c.as_str()),
+                    Some("SENDER_ID_MISMATCH")
+                )
+            })
+        });
+    if detail_code {
+        return true;
+    }
+    let status = error.get("status").and_then(|s| s.as_str());
+    let message = error
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default();
+    status == Some("INVALID_ARGUMENT") && message.to_ascii_lowercase().contains("registration token")
 }
 
 #[derive(serde::Deserialize)]
@@ -148,6 +191,8 @@ pub struct FcmProvider {
     message_base_url: String,
     service_account: ServiceAccount,
     cached_token: Mutex<Option<CachedToken>>,
+    /// When a 401/403 last forced the cached token to be discarded.
+    last_forced_refresh: std::sync::Mutex<Option<Instant>>,
 }
 
 impl FcmProvider {
@@ -173,7 +218,22 @@ impl FcmProvider {
             message_base_url: "https://fcm.googleapis.com".into(),
             service_account,
             cached_token: Mutex::new(None),
+            last_forced_refresh: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Whether a rejected access token may be discarded now (and, if so,
+    /// record the refresh).
+    fn begin_forced_refresh(&self) -> bool {
+        let mut last = self
+            .last_forced_refresh
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if last.is_some_and(|at| at.elapsed() < MIN_FORCED_REFRESH_INTERVAL) {
+            return false;
+        }
+        *last = Some(Instant::now());
+        true
     }
 
     async fn get_or_refresh_token(&self) -> Result<String, PushError> {
@@ -270,7 +330,11 @@ impl FcmProvider {
                 "token": token,
                 "data": data,
                 "android": {
-                    "priority": "normal"
+                    "priority": "normal",
+                    // Same wake semantics as APNs: one queued wake per device,
+                    // dropped if the device cannot take it within the TTL.
+                    "collapse_key": crate::WAKE_COLLAPSE_ID,
+                    "ttl": format!("{}s", crate::WAKE_TTL_SECS)
                 }
             }
         }))
@@ -348,6 +412,19 @@ impl FcmProvider {
                     // up to TOKEN_REFRESH_INTERVAL later; invalidate it so
                     // the next attempt (in this loop, or a subsequent call)
                     // forces a fresh token exchange.
+                    // Forced refreshes are rate-limited across the whole
+                    // process: the first rejection in a window may re-mint the
+                    // token (and the rest of this call keeps refreshing), but
+                    // a later wake hitting the same rejection inside the
+                    // window backs off through the outbox's retry schedule
+                    // instead of hammering the OAuth endpoint per wake.
+                    if attempt == 0 && !self.begin_forced_refresh() {
+                        warn!(status = %status, "FCM rejected the access token; forced refresh rate-limited");
+                        return Err(PushError::Retryable(format!(
+                            "FCM returned {status} (access token rejected; refresh rate-limited): {}",
+                            error_preview(&body)
+                        )));
+                    }
                     warn!(
                         attempt,
                         status = %status,

@@ -14,6 +14,7 @@ pub mod lifecycle;
 pub mod postgres;
 mod push_outbox_state;
 pub mod sqlite;
+pub mod telemetry_validation;
 pub mod tenancy;
 #[cfg(feature = "postgres")]
 pub mod tenant_partition;
@@ -66,11 +67,31 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 111;
+pub const STORAGE_SCHEMA_VERSION: u32 = 121;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
 pub const CREDENTIAL_REFRESH_BATCH: u32 = 100;
+
+/// Payload the encrypting decorator substitutes for a mobile command whose
+/// stored payload cannot be decrypted, so one corrupt row is skipped by the
+/// caller instead of failing the whole pending-command listing.
+pub const UNREADABLE_COMMAND_PAYLOAD: &str = "{\"__orch8_unreadable_payload\":true}";
+
+/// Parse a device-supplied status timestamp (RFC 3339) and clamp anything in
+/// the future to `now`: a skewed device clock would otherwise sort its rows
+/// first forever and defeat the monotonic update guard.
+pub(crate) fn normalize_status_timestamp(
+    raw: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, StorageError> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw)
+        .map_err(|_| {
+            StorageError::Constraint(format!("updated_at is not an RFC 3339 timestamp: {raw:?}"))
+        })?
+        .with_timezone(&chrono::Utc);
+    Ok(parsed.min(now))
+}
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -2605,6 +2626,24 @@ pub trait AdminStore: Send + Sync + 'static {
         window_secs: i64,
     ) -> Result<Option<f64>, StorageError>;
 
+    /// `(failed, total)` run counts for a sequence over the trailing window,
+    /// measured against server receive time. The caller applies the policy's
+    /// `min_samples` before trusting `failed / total`.
+    async fn query_error_stats(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        window_secs: i64,
+    ) -> Result<(i64, i64), StorageError>;
+
+    /// Set the minimum sample size on an existing rollback policy.
+    async fn set_rollback_min_samples(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        min_samples: i32,
+    ) -> Result<(), StorageError>;
+
     async fn list_rollback_history(
         &self,
         tenant_id: Option<&str>,
@@ -3255,6 +3294,15 @@ pub trait MobileSyncStore: Send + Sync + 'static {
         status: &MobileInstanceStatus,
     ) -> Result<(), StorageError>;
 
+    /// Upsert many statuses in ONE statement/transaction. Rows for the same
+    /// `(device_id, instance_id)` collapse to the newest; a stored row is only
+    /// overwritten by an update that is not older than it (a delayed retry can
+    /// neither roll state back nor revive a terminal instance), and client
+    /// timestamps in the future are clamped to the server clock.
+    ///
+    /// # Errors
+    /// `StorageError::Constraint` when an `updated_at` is not RFC 3339 (the
+    /// whole batch is rejected, nothing is written).
     async fn upsert_mobile_instance_status_batch(
         &self,
         statuses: &[MobileInstanceStatus],
@@ -3308,11 +3356,35 @@ pub trait MobileSyncStore: Send + Sync + 'static {
         offset: u64,
     ) -> Result<Vec<MobileApprovalRequest>, StorageError>;
 
+    /// Insert many approval requests in one statement/transaction
+    /// (`ON CONFLICT DO NOTHING` on `(device_id, instance_id, block_id)`).
+    /// Returns the number of rows actually inserted.
+    async fn insert_mobile_approvals_batch(
+        &self,
+        approvals: &[MobileApprovalRequest],
+    ) -> Result<u64, StorageError> {
+        let mut inserted = 0;
+        for approval in approvals {
+            if self.insert_mobile_approval(approval).await? {
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
+    }
+
     async fn expire_mobile_approvals(&self) -> Result<u64, StorageError>;
 
     // --- Commands ---
 
     async fn create_mobile_command(&self, command: &MobileCommand) -> Result<(), StorageError>;
+
+    /// Insert a command whose id is deterministic (e.g. derived from a
+    /// device-supplied request id). Returns `false`, writing nothing, when a
+    /// command with that id already exists, so a retried request is idempotent.
+    async fn create_mobile_command_if_absent(
+        &self,
+        command: &MobileCommand,
+    ) -> Result<bool, StorageError>;
 
     /// Atomically persist a mobile command and its provider wake outbox row.
     async fn create_mobile_command_with_wake(
@@ -3528,6 +3600,39 @@ pub trait ContinuityStore: Send + Sync + 'static {
         observed_after: DateTime<Utc>,
         limit: u32,
     ) -> Result<Vec<RuntimeCapabilities>, StorageError>;
+
+    /// Primary-key lookup of one *live* runtime registration (`expires_at >
+    /// observed_after`). Prefer this over scanning [`list_runtime_capabilities`]
+    /// whenever the runtime id is known: the list is capped, so in a tenant
+    /// with thousands of phones a specific cloud/desktop runtime can fall
+    /// outside the window.
+    ///
+    /// [`list_runtime_capabilities`]: ContinuityStore::list_runtime_capabilities
+    async fn get_runtime_capability(
+        &self,
+        tenant_id: &TenantId,
+        runtime_id: RuntimeId,
+        observed_after: DateTime<Utc>,
+    ) -> Result<Option<RuntimeCapabilities>, StorageError>;
+
+    /// Live registrations restricted to `kinds` (empty = every kind), at most
+    /// `per_kind_limit` per kind (most recently observed first), so a large
+    /// fleet of one kind (phones) cannot crowd out the others.
+    async fn list_runtime_capabilities_by_kind(
+        &self,
+        tenant_id: &TenantId,
+        observed_after: DateTime<Utc>,
+        kinds: &[orch8_types::continuity::RuntimeKind],
+        per_kind_limit: u32,
+    ) -> Result<Vec<RuntimeCapabilities>, StorageError>;
+
+    /// Delete registrations that expired before `expired_before` (all tenants),
+    /// at most `limit` rows. Returns the number deleted.
+    async fn prune_expired_runtime_capabilities(
+        &self,
+        expired_before: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError>;
 
     async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError>;
 

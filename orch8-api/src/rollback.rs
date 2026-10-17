@@ -30,6 +30,9 @@ pub struct CreatePolicyRequest {
     pub cooldown_secs: Option<i32>,
     pub confirmation_window_secs: Option<i32>,
     pub webhook_url: Option<String>,
+    /// Minimum observed runs in the window before the rate can trigger a
+    /// rollback (default 20).
+    pub min_samples: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +46,7 @@ pub struct PolicyResponse {
     pub cooldown_secs: i32,
     pub confirmation_window_secs: i32,
     pub webhook_url: Option<String>,
+    pub min_samples: i32,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -59,6 +63,7 @@ impl From<orch8_types::rollback::RollbackPolicy> for PolicyResponse {
             cooldown_secs: p.cooldown_secs,
             confirmation_window_secs: p.confirmation_window_secs,
             webhook_url: p.webhook_url,
+            min_samples: p.min_samples,
             created_at: p.created_at.to_rfc3339(),
             updated_at: p.updated_at.to_rfc3339(),
         }
@@ -102,6 +107,15 @@ pub(crate) async fn create_policy(
         ));
     }
 
+    if req
+        .min_samples
+        .is_some_and(|v| !(1..=1_000_000).contains(&v))
+    {
+        return Err(ApiError::InvalidArgument(
+            "min_samples must be between 1 and 1000000".into(),
+        ));
+    }
+
     if let Some(ref url) = req.webhook_url {
         validate_public_url(url).map_err(|e| ApiError::InvalidArgument(e.to_string()))?;
     }
@@ -125,6 +139,14 @@ pub(crate) async fn create_policy(
         )
         .await
         .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
+
+    if let Some(min_samples) = req.min_samples {
+        state
+            .storage
+            .set_rollback_min_samples(&tenant, &req.sequence_name, min_samples)
+            .await
+            .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
+    }
 
     let policy = state
         .storage

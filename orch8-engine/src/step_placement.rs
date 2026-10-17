@@ -275,9 +275,14 @@ pub async fn record_placement_status(
         return;
     }
     let now = Utc::now();
-    let candidates = match storage
-        .list_runtime_capabilities(&instance.tenant_id, now, 1_000)
-        .await
+    let candidates = match crate::placement::candidate_runtimes(
+        storage,
+        &instance.tenant_id,
+        &task.requirements,
+        &[],
+        now,
+    )
+    .await
     {
         Ok(candidates) => candidates,
         Err(error) => {
@@ -500,8 +505,15 @@ pub async fn backlog_snapshot(
             continue;
         }
         if !runtimes.contains_key(&row.tenant_id) {
+            // Per-kind cap: a large phone fleet must not hide the cloud /
+            // desktop runtimes that actually satisfy server-side placements.
             let live = storage
-                .list_runtime_capabilities(&TenantId::unchecked(row.tenant_id.clone()), now, 1_000)
+                .list_runtime_capabilities_by_kind(
+                    &TenantId::unchecked(row.tenant_id.clone()),
+                    now,
+                    &[],
+                    1_000,
+                )
                 .await?;
             runtimes.insert(row.tenant_id.clone(), live);
         }

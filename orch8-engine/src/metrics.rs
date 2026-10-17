@@ -102,6 +102,11 @@ pub const GC_MOBILE_APPROVALS_EXPIRED: &str = "orch8_gc_mobile_approvals_expired
 /// Acked or abandoned (never-acked, past TTL) mobile commands deleted.
 pub const GC_MOBILE_COMMANDS_DELETED: &str = "orch8_gc_mobile_commands_deleted_total";
 pub const GC_MOBILE_ERRORS: &str = "orch8_gc_mobile_errors_total";
+/// Pending mobile commands left out of a sync response because their payload
+/// could not be decrypted or parsed (label `reason`).
+pub const MOBILE_COMMANDS_SKIPPED: &str = "orch8_mobile_commands_skipped_total";
+/// Expired `runtime_capabilities` registrations pruned by the GC.
+pub const GC_RUNTIME_CAPABILITIES_DELETED: &str = "orch8_gc_runtime_capabilities_deleted_total";
 /// Terminal `task_instances` rows (and their cascaded/explicitly-cleaned
 /// execution history) deleted by the opt-in instance-retention sweep.
 pub const GC_INSTANCES_DELETED: &str = "orch8_gc_instances_deleted_total";

@@ -34,11 +34,12 @@ pub(super) async fn ingest_telemetry_event(
         Err(_) => payload.to_string(),
     };
     sqlx::query(
-        "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
+        "INSERT INTO telemetry_events (event_type, payload, created_at, received_at) VALUES (?1, ?2, ?3, ?4)",
     )
     .bind(event_type)
     .bind(&enriched)
     .bind(created_at.to_rfc3339())
+    .bind(Utc::now().to_rfc3339())
     .execute(storage.pool())
     .await?;
     Ok(())
@@ -123,11 +124,12 @@ pub(super) async fn ingest_telemetry_events_batch(
         return Ok(0);
     }
     let mut total = 0u64;
-    // SQLite has a variable limit of 999 by default; 3 params per row -> batch <= 333.
-    for chunk in events.chunks(333) {
+    // SQLite has a variable limit of 999 by default; 4 params per row -> batch <= 249.
+    for chunk in events.chunks(249) {
         let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "INSERT INTO telemetry_events (event_type, payload, created_at) ",
+            "INSERT INTO telemetry_events (event_type, payload, created_at, received_at) ",
         );
+        let received_at = Utc::now().to_rfc3339();
         qb.push_values(chunk, |mut b, event| {
             let enriched = match serde_json::from_str::<serde_json::Value>(&event.payload) {
                 Ok(mut v) => {
@@ -142,6 +144,7 @@ pub(super) async fn ingest_telemetry_events_batch(
             b.push_bind(&event.event_type);
             b.push_bind(enriched);
             b.push_bind(event.created_at.to_rfc3339());
+            b.push_bind(received_at.clone());
         });
         let result = qb.build().execute(storage.pool()).await?;
         total += result.rows_affected();
@@ -171,7 +174,7 @@ pub(super) async fn ingest_telemetry_error(
         "tenant_id": tenant_id,
     });
     sqlx::query(
-        "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
+        "INSERT INTO telemetry_events (event_type, payload, created_at, received_at) VALUES (?1, ?2, ?3, ?3)",
     )
     .bind("InstanceFailed")
     .bind(payload.to_string())

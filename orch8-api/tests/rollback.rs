@@ -1,5 +1,36 @@
-use orch8_api::test_harness::spawn_test_server;
-use orch8_storage::AdminStore;
+use orch8_api::test_harness::{TestServer, spawn_test_server};
+use orch8_storage::{AdminStore, SequenceStore};
+use orch8_storage::testing::fixtures::SequenceBuilder;
+
+/// Register a production sequence the rollback check may act on. The check
+/// refuses unknown or unpublished (client-supplied) sequence names.
+async fn publish_sequence(server: &TestServer, name: &str) {
+    let seq = SequenceBuilder::new("default").name(name).build();
+    server.storage.create_sequence(&seq).await.unwrap();
+}
+
+/// The rollback check runs off the request path (debounced), so observe its
+/// effect by polling.
+async fn wait_for_history(server: &TestServer, expected: usize) -> usize {
+    for _ in 0..100 {
+        let n = server
+            .storage
+            .list_rollback_history(None, None, 100)
+            .await
+            .unwrap()
+            .len();
+        if n >= expected {
+            return n;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    0
+}
+
+/// Let any scheduled (debounced) check run before asserting a negative.
+async fn settle() {
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+}
 
 #[tokio::test]
 async fn rollback_policy_crud() {
@@ -149,13 +180,15 @@ async fn auto_rollback_triggered_on_error_threshold() {
     let client = reqwest::Client::new();
     let seq = "error-prone-seq";
 
+    publish_sequence(&server, seq).await;
     // Create a very sensitive rollback policy (0% threshold, 1-hour window)
     let resp = client
         .post(format!("{}/rollback-policies", server.base_url))
         .json(&serde_json::json!({
             "sequence_name": seq,
             "error_rate_threshold": 0.0,
-            "time_window_secs": 3600
+            "time_window_secs": 3600,
+            "min_samples": 1
         }))
         .send()
         .await
@@ -208,6 +241,7 @@ async fn auto_rollback_triggered_on_error_threshold() {
     assert_eq!(resp.status(), 202);
 
     // Verify rollback history was recorded
+    wait_for_history(&server, 1).await;
     let history = server
         .storage
         .list_rollback_history(None, None, 100)
@@ -232,13 +266,15 @@ async fn auto_rollback_not_triggered_when_under_threshold() {
     let client = reqwest::Client::new();
     let seq = "healthy-seq";
 
+    publish_sequence(&server, seq).await;
     // Create a policy with 50% threshold
     let resp = client
         .post(format!("{}/rollback-policies", server.base_url))
         .json(&serde_json::json!({
             "sequence_name": seq,
             "error_rate_threshold": 0.5,
-            "time_window_secs": 3600
+            "time_window_secs": 3600,
+            "min_samples": 1
         }))
         .send()
         .await
@@ -291,6 +327,7 @@ async fn auto_rollback_not_triggered_when_under_threshold() {
     assert_eq!(resp.status(), 202);
 
     // Verify no rollback history was recorded
+    settle().await;
     let history = server
         .storage
         .list_rollback_history(None, None, 100)
@@ -324,6 +361,7 @@ async fn auto_rollback_not_triggered_without_policy() {
         .unwrap();
     assert_eq!(resp.status(), 202);
 
+    settle().await;
     let history = server
         .storage
         .list_rollback_history(None, None, 100)

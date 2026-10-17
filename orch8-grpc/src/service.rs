@@ -219,9 +219,7 @@ const WORKER_STREAM_MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
 const WORKER_STREAM_HEARTBEAT_SECS: u32 = 15;
 const MIN_TRANSFER_CHUNK_BYTES: u32 = 4 * 1024;
 const MAX_TRANSFER_CHUNK_BYTES: u32 = 1024 * 1024;
-const MAX_TELEMETRY_EVENTS: usize = 1_000;
-const MAX_TELEMETRY_BATCH_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
-const MAX_TELEMETRY_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
+use orch8_storage::telemetry_validation::MAX_TELEMETRY_EVENTS;
 const RUNTIME_CAPABILITY_LEASE_SECS: i64 = 45;
 const WORKER_STREAM_FEATURES: [&str; 8] = [
     "task_delivery",
@@ -250,62 +248,26 @@ fn telemetry_rejection(index: usize, code: &str, message: &str) -> proto::Teleme
     }
 }
 
-fn bounded_telemetry_field(value: &str, max_bytes: usize) -> bool {
-    value.len() <= max_bytes
-}
-
 fn validate_telemetry_event(
     index: usize,
     input: &proto::TelemetryEventInput,
     tenant_id: &TenantId,
     accepted_payload_bytes: usize,
 ) -> Result<TelemetryEvent, proto::TelemetryEventRejection> {
-    let event_type = input.event_type.trim();
-    if event_type.is_empty() || !bounded_telemetry_field(event_type, 128) {
-        return Err(telemetry_rejection(
-            index,
-            "invalid_event_type",
-            "event_type must contain 1..=128 bytes",
-        ));
-    }
-    if input.payload_json.len() > MAX_TELEMETRY_EVENT_PAYLOAD_BYTES {
-        return Err(telemetry_rejection(
-            index,
-            "payload_too_large",
-            "payload_json exceeds 256 KiB",
-        ));
-    }
-    if accepted_payload_bytes.saturating_add(input.payload_json.len())
-        > MAX_TELEMETRY_BATCH_PAYLOAD_BYTES
-    {
-        return Err(telemetry_rejection(
-            index,
-            "batch_payload_limit_exceeded",
-            "accepted payloads would exceed the 4 MiB batch limit",
-        ));
-    }
-    if serde_json::from_str::<serde_json::Value>(&input.payload_json).is_err() {
-        return Err(telemetry_rejection(
-            index,
-            "invalid_payload_json",
-            "payload_json must be valid JSON",
-        ));
-    }
-    for (name, value, max_bytes) in [
-        ("device_id", input.device_id.as_str(), 256),
-        ("os_name", input.os_name.as_str(), 64),
-        ("os_version", input.os_version.as_str(), 64),
-        ("app_version", input.app_version.as_str(), 64),
-        ("sdk_version", input.sdk_version.as_str(), 64),
-    ] {
-        if !bounded_telemetry_field(value, max_bytes) {
-            return Err(telemetry_rejection(
-                index,
-                "metadata_too_large",
-                &format!("{name} exceeds {max_bytes} bytes"),
-            ));
-        }
-    }
+    // Bounds are shared with the HTTP ingest path.
+    let event_type = orch8_storage::telemetry_validation::validate_event_fields(
+        &input.event_type,
+        &input.payload_json,
+        orch8_storage::telemetry_validation::device_field_limits(
+            &input.device_id,
+            &input.os_name,
+            &input.os_version,
+            &input.app_version,
+            &input.sdk_version,
+        ),
+        accepted_payload_bytes,
+    )
+    .map_err(|r| telemetry_rejection(index, r.code, &r.message))?;
     let created_at = chrono::DateTime::parse_from_rfc3339(&input.created_at)
         .map_err(|_| {
             telemetry_rejection(
@@ -558,6 +520,94 @@ impl Orch8GrpcService {
         })
     }
 
+    /// A completion/failure the fence refused (the lease moved on, the task is
+    /// gone, a duplicate settled it) is a per-task outcome: tell the worker to
+    /// drop that task and keep the stream and its other in-flight tasks alive.
+    /// Any other error (storage down, tenant violation) still ends the stream.
+    async fn reject_task_frame(
+        &self,
+        status: Status,
+        task_id: Uuid,
+        what: &str,
+        outstanding: &mut std::collections::HashSet<Uuid>,
+        sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
+    ) -> Result<(), Status> {
+        if !matches!(
+            status.code(),
+            tonic::Code::AlreadyExists
+                | tonic::Code::FailedPrecondition
+                | tonic::Code::NotFound
+                | tonic::Code::Aborted
+        ) {
+            return Err(status);
+        }
+        outstanding.remove(&task_id);
+        sender
+            .send(Ok(worker_server_frame(
+                proto::worker_stream_server::Payload::Cancellation(
+                    proto::WorkerStreamCancellation {
+                        task_id: task_id.to_string(),
+                        reason: format!("{what} rejected: {}", status.message()),
+                    },
+                ),
+            )))
+            .await
+            .map_err(|_| Status::cancelled("worker stream closed"))
+    }
+
+    /// Re-attach tasks this `worker_id` already holds (claimed on a previous
+    /// stream that dropped without releasing them) to a freshly opened stream.
+    /// They are re-sent with their existing `claim_epoch`, so the fence is
+    /// unchanged: the new stream may complete/fail/heartbeat them, and the
+    /// previous (dead) stream can no longer act.
+    async fn adopt_held_tasks(
+        &self,
+        open: &proto::WorkerStreamOpen,
+        tenant: Option<&TenantId>,
+        max_in_flight: u32,
+        outstanding: &mut std::collections::HashSet<Uuid>,
+        sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
+    ) -> Result<(), Status> {
+        let filter = orch8_types::worker_filter::WorkerTaskFilter {
+            tenant_id: tenant.cloned(),
+            states: Some(vec![WorkerTaskState::Claimed]),
+            worker_id: Some(open.worker_id.clone()),
+            ..Default::default()
+        };
+        let pagination = orch8_types::filter::Pagination {
+            offset: 0,
+            limit: max_in_flight,
+            sort_ascending: true,
+        };
+        let held = self
+            .storage
+            .list_worker_tasks(&filter, &pagination)
+            .await
+            .map_err(storage_err)?;
+        for task in held {
+            if task.worker_id.as_deref() != Some(open.worker_id.as_str())
+                || !open.handler_names.contains(&task.handler_name)
+            {
+                continue;
+            }
+            let task_json = to_json_string(&task)?;
+            if task_json.len() > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
+            {
+                continue;
+            }
+            outstanding.insert(task.id);
+            sender
+                .send(Ok(worker_server_frame(
+                    proto::worker_stream_server::Payload::Task(proto::WorkerStreamTask {
+                        task_json,
+                    }),
+                )))
+                .await
+                .map_err(|_| Status::cancelled("worker stream closed"))?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn handle_worker_stream_frame(
         &self,
@@ -603,11 +653,9 @@ impl Orch8GrpcService {
                 let advertised = match (tenant, *runtime_id) {
                     (Some(tenant), Some(id)) => self
                         .storage
-                        .list_runtime_capabilities(tenant, chrono::Utc::now(), 1_000)
+                        .get_runtime_capability(tenant, id, chrono::Utc::now())
                         .await
-                        .map_err(storage_err)?
-                        .into_iter()
-                        .find(|capabilities| capabilities.runtime_id == id),
+                        .map_err(storage_err)?,
                     _ => None,
                 };
                 for handler in &open.handler_names {
@@ -728,7 +776,11 @@ impl Orch8GrpcService {
                         "completion does not belong to this worker session",
                     ));
                 }
-                self.complete_task(stream_request(complete, tenant)).await?;
+                if let Err(status) = self.complete_task(stream_request(complete, tenant)).await {
+                    return self
+                        .reject_task_frame(status, task_id, "completion", outstanding, sender)
+                        .await;
+                }
                 outstanding.remove(&task_id);
                 sender
                     .send(Ok(worker_server_frame(
@@ -750,7 +802,11 @@ impl Orch8GrpcService {
                         "failure does not belong to this worker session",
                     ));
                 }
-                self.fail_task(stream_request(failure, tenant)).await?;
+                if let Err(status) = self.fail_task(stream_request(failure, tenant)).await {
+                    return self
+                        .reject_task_frame(status, task_id, "failure", outstanding, sender)
+                        .await;
+                }
                 outstanding.remove(&task_id);
                 sender
                     .send(Ok(worker_server_frame(
@@ -1851,6 +1907,14 @@ impl Orch8Service for Orch8GrpcService {
                 }
             }
             let mut outstanding = std::collections::HashSet::new();
+            if !draining
+                && let Err(status) = service
+                    .adopt_held_tasks(&open, tenant.as_ref(), max_in_flight, &mut outstanding, &sender)
+                    .await
+            {
+                let _ = sender.send(Err(status)).await;
+                return;
+            }
             let mut runtime_id = initial_capabilities.map(|capabilities| capabilities.runtime_id);
             loop {
                 // Stop accepting frames (Demand included) on shutdown and end
@@ -2522,3 +2586,5 @@ mod sanitize_tests;
 mod telemetry_ingest_tests;
 #[cfg(test)]
 mod worker_stream_protocol_tests;
+#[cfg(test)]
+mod worker_stream_reconnect_tests;

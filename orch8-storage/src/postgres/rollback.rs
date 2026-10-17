@@ -50,8 +50,8 @@ pub(super) async fn get_rollback_policy(
     tenant_id: &str,
     sequence_name: &str,
 ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
-    let row: Option<(i64, String, String, f64, i32, bool, i32, i32, Option<String>, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 AND sequence_name = $2"
+    let row: Option<(i64, String, String, f64, i32, bool, i32, i32, Option<String>, i32, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, min_samples, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 AND sequence_name = $2"
     )
     .bind(tenant_id)
     .bind(sequence_name)
@@ -68,6 +68,7 @@ pub(super) async fn get_rollback_policy(
             cooldown_secs,
             confirmation_window_secs,
             webhook_url,
+            min_samples,
             created_at,
             updated_at,
         )| {
@@ -81,6 +82,7 @@ pub(super) async fn get_rollback_policy(
                 cooldown_secs,
                 confirmation_window_secs,
                 webhook_url,
+                min_samples,
                 created_at,
                 updated_at,
             }
@@ -103,11 +105,12 @@ pub(super) async fn list_rollback_policies(
         i32,
         i32,
         Option<String>,
+        i32,
         DateTime<Utc>,
         DateTime<Utc>,
     )> = if let Some(t) = tenant_id {
         sqlx::query_as(
-            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 ORDER BY tenant_id, sequence_name LIMIT $2"
+            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, min_samples, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 ORDER BY tenant_id, sequence_name LIMIT $2"
         )
         .bind(t)
         .bind(i64::from(limit))
@@ -115,7 +118,7 @@ pub(super) async fn list_rollback_policies(
         .await?
     } else {
         sqlx::query_as(
-            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies ORDER BY tenant_id, sequence_name LIMIT $1"
+            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, min_samples, created_at, updated_at FROM rollback_policies ORDER BY tenant_id, sequence_name LIMIT $1"
         )
         .bind(i64::from(limit))
         .fetch_all(&storage.pool)
@@ -134,6 +137,7 @@ pub(super) async fn list_rollback_policies(
                 cooldown_secs,
                 confirmation_window_secs,
                 webhook_url,
+                min_samples,
                 created_at,
                 updated_at,
             )| {
@@ -147,6 +151,7 @@ pub(super) async fn list_rollback_policies(
                     cooldown_secs,
                     confirmation_window_secs,
                     webhook_url,
+                    min_samples,
                     created_at,
                     updated_at,
                 }
@@ -189,19 +194,41 @@ pub(super) async fn record_rollback(
     Ok(())
 }
 
-pub(super) async fn query_error_rate(
+pub(super) async fn set_rollback_min_samples(
+    storage: &PostgresStorage,
+    tenant_id: &str,
+    sequence_name: &str,
+    min_samples: i32,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE rollback_policies SET min_samples = $3, updated_at = NOW() WHERE tenant_id = $1 AND sequence_name = $2",
+    )
+    .bind(tenant_id)
+    .bind(sequence_name)
+    .bind(min_samples)
+    .execute(&storage.pool)
+    .await?;
+    Ok(())
+}
+
+/// `(failed, total)` run counts for a sequence inside the window.
+///
+/// The window is evaluated against the **server** receive time
+/// (`received_at`), never the client-supplied `created_at`, so a device cannot
+/// back-date or future-date reports into (or out of) the window. Error
+/// reports (`ingest_telemetry_error`) land in `telemetry_mobile_errors`; each
+/// counts once as a failed run, matching `SQLite`, which stores them as
+/// `InstanceFailed` telemetry events. Served by the composite indexes from
+/// migration 118 (`tenant_id, (payload->>'sequence_name'), received_at` and
+/// `tenant_id, sequence_name, received_at`).
+pub(super) async fn query_error_stats(
     storage: &PostgresStorage,
     tenant_id: &str,
     sequence_name: &str,
     window_secs: i64,
-) -> Result<Option<f64>, StorageError> {
+) -> Result<(i64, i64), StorageError> {
     let start = Utc::now() - chrono::Duration::seconds(window_secs);
-    // Error reports (`ingest_telemetry_error`) land in `telemetry_mobile_errors`,
-    // not `telemetry_mobile_events`. Count each one as a failed run, matching
-    // SQLite (which stores them as `InstanceFailed` telemetry events) --
-    // otherwise the error-report endpoint that triggers this check could
-    // never move the rate.
-    let row: Option<(i64, i64)> = sqlx::query_as(
+    let row: (i64, i64) = sqlx::query_as(
         r"WITH ev AS (
            SELECT
              COUNT(*) FILTER (WHERE event_type = 'InstanceFailed') AS failed,
@@ -209,7 +236,7 @@ pub(super) async fn query_error_rate(
            FROM telemetry_mobile_events
            WHERE tenant_id = $1
              AND payload->>'sequence_name' = $2
-             AND created_at >= $3
+             AND received_at >= $3
          ), er AS (
            SELECT COUNT(*) AS n
            FROM telemetry_mobile_errors
@@ -222,16 +249,28 @@ pub(super) async fn query_error_rate(
     .bind(tenant_id)
     .bind(sequence_name)
     .bind(start)
-    .fetch_optional(&storage.pool)
+    .fetch_one(&storage.pool)
     .await?;
-    Ok(row.and_then(|(failed, total)| {
-        if total > 0 {
-            #[allow(clippy::cast_precision_loss)]
-            Some(failed as f64 / total as f64)
-        } else {
-            None
-        }
-    }))
+    Ok(row)
+}
+
+pub(super) async fn query_error_rate(
+    storage: &PostgresStorage,
+    tenant_id: &str,
+    sequence_name: &str,
+    window_secs: i64,
+) -> Result<Option<f64>, StorageError> {
+    let (failed, total) = query_error_stats(storage, tenant_id, sequence_name, window_secs).await?;
+    Ok(rate_from(failed, total))
+}
+
+fn rate_from(failed: i64, total: i64) -> Option<f64> {
+    if total > 0 {
+        #[allow(clippy::cast_precision_loss)]
+        Some(failed as f64 / total as f64)
+    } else {
+        None
+    }
 }
 
 pub(super) async fn list_rollback_history(

@@ -295,7 +295,7 @@ impl PushProvider for SilentRecordingProvider {
 }
 
 #[tokio::test]
-async fn drain_claims_one_row_at_a_time_at_a_fixed_due_time() {
+async fn drain_claims_a_batch_for_the_free_slots_at_a_fixed_due_time() {
     let store = Arc::new(DrainRecorder {
         wakes: Mutex::new(vec![claimed(0)]),
         ..Default::default()
@@ -305,9 +305,11 @@ async fn drain_claims_one_row_at_a_time_at_a_fixed_due_time() {
 
     assert_eq!(worker.drain_once(now()).await.unwrap(), 1);
     let claims = store.claims.lock().unwrap();
-    assert_eq!(claims.len(), 2); // one row, then an empty claim
-    assert!(claims.iter().all(|claim| claim.0 == now()));
-    assert!(claims.iter().all(|claim| claim.2 == 1));
+    // One claim asks for as many wakes as the batch allows (7 < 32 slots); it
+    // returns fewer, so the queue is treated as drained.
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].0, now());
+    assert_eq!(claims[0].2, 7);
     // The lease must outlast the whole provider budget, or another node
     // could reclaim the wake while this one is still sending it.
     let provider_budget = Duration::from_std(worker.provider_timeout).unwrap();
@@ -454,24 +456,112 @@ impl PushProvider for SlowRecordingProvider {
     }
 }
 
-// Real 30 ms sleeps: `drain_once` measures elapsed time with
-// `std::time::Instant`, which a paused tokio clock cannot advance.
+/// Tracks how many provider calls overlap.
+#[derive(Default)]
+struct OverlapProvider {
+    now: std::sync::atomic::AtomicUsize,
+    max: std::sync::atomic::AtomicUsize,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl PushProvider for OverlapProvider {
+    async fn send_silent_push(&self, _token: &str, _platform: &str) -> Result<(), PushError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = self.now.fetch_add(1, SeqCst) + 1;
+        self.max.fetch_max(now, SeqCst);
+        self.calls.fetch_add(1, SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        self.now.fetch_sub(1, SeqCst);
+        Ok(())
+    }
+}
+
 #[tokio::test]
-async fn drain_leases_each_wake_after_the_previous_provider_call() {
+async fn drain_sends_a_claimed_batch_concurrently_up_to_the_configured_bound() {
+    use std::sync::atomic::Ordering::SeqCst;
     let store = Arc::new(DrainRecorder {
-        wakes: Mutex::new(vec![claimed(0), claimed(0)]),
+        wakes: Mutex::new(vec![claimed(0); 9]),
         ..Default::default()
     });
-    let worker =
-        PushOutboxWorker::new(store.clone(), Arc::new(SlowRecordingProvider)).with_limits(2, 8);
+    let provider = Arc::new(OverlapProvider::default());
+    let worker = PushOutboxWorker::new(store.clone(), provider.clone())
+        .with_limits(100, 8)
+        .with_concurrency(3);
 
-    assert_eq!(worker.drain_once(now()).await.unwrap(), 2);
+    assert_eq!(worker.drain_once(now()).await.unwrap(), 9);
+    assert_eq!(provider.calls.load(SeqCst), 9);
+    assert_eq!(provider.max.load(SeqCst), 3, "bounded concurrency, not sequential");
+    assert_eq!(store.outcomes.lock().unwrap().len(), 9);
+    // Slots are refilled as calls finish: the first claim fills the 3 slots,
+    // later claims top up what freed.
     let claims = store.claims.lock().unwrap();
-    assert_eq!(claims.len(), 2);
-    assert_eq!(claims[0].2, 1);
-    assert_eq!(claims[1].2, 1);
-    assert_eq!(claims[0].0, claims[1].0);
-    assert!(claims[1].1 - claims[0].1 >= Duration::milliseconds(25));
+    assert_eq!(claims[0].2, 3);
+    assert!(claims.iter().all(|claim| claim.0 == now()));
+}
+
+struct HangingForTokenProvider;
+
+#[async_trait]
+impl PushProvider for HangingForTokenProvider {
+    async fn send_silent_push(&self, token: &str, _platform: &str) -> Result<(), PushError> {
+        if token == "hang" {
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn one_hung_provider_call_does_not_block_the_wakes_behind_it() {
+    let mut hung = claimed(0);
+    hung.push_token = "hang".into();
+    let mut wakes = vec![hung];
+    wakes.extend(vec![claimed(0); 5]);
+    let store = Arc::new(DrainRecorder {
+        wakes: Mutex::new(wakes),
+        ..Default::default()
+    });
+    let mut worker = PushOutboxWorker::new(store.clone(), Arc::new(HangingForTokenProvider))
+        .with_limits(100, 8)
+        .with_concurrency(2);
+    worker.provider_timeout = std::time::Duration::from_millis(300);
+
+    assert_eq!(worker.drain_once(now()).await.unwrap(), 6);
+    let outcomes = store.outcomes.lock().unwrap();
+    assert_eq!(outcomes.len(), 6);
+    // The five healthy wakes were delivered while the hung one was still
+    // pending; the timed-out call is recorded last.
+    assert!(outcomes[..5].iter().all(|o| matches!(o, WakeAttemptOutcome::Delivered)));
+    assert!(matches!(outcomes[5], WakeAttemptOutcome::Retry { .. }));
+}
+
+#[tokio::test]
+async fn dropping_the_drain_aborts_in_flight_calls_so_shutdown_is_prompt() {
+    let store = Arc::new(DrainRecorder {
+        wakes: Mutex::new(vec![claimed(0); 4]),
+        ..Default::default()
+    });
+    let mut hung = claimed(0);
+    hung.push_token = "hang".into();
+    store.wakes.lock().unwrap().insert(0, hung);
+    // Default provider timeout is 75 s; cancellation must not wait for it.
+    let worker = PushOutboxWorker::new(store.clone(), Arc::new(HangingForTokenProvider));
+    let started = std::time::Instant::now();
+    let result =
+        tokio::time::timeout(std::time::Duration::from_millis(100), worker.drain_once(now())).await;
+    assert!(result.is_err(), "drain is still waiting on the hung call");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn concurrency_is_clamped_to_between_one_and_two_fifty_six() {
+    let store = Arc::new(DrainRecorder::default());
+    let provider = Arc::new(SilentRecordingProvider::default());
+    let low = PushOutboxWorker::new(store.clone(), provider.clone()).with_concurrency(0);
+    let high = PushOutboxWorker::new(store, provider).with_concurrency(10_000);
+    assert_eq!(low.concurrency, 1);
+    assert_eq!(high.concurrency, 256);
 }
 
 #[tokio::test]

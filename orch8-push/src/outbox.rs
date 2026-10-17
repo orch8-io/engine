@@ -128,7 +128,11 @@ pub struct PushOutboxWorker {
     provider_timeout: std::time::Duration,
     max_attempts: u32,
     wake_signer: Option<(String, SigningKey)>,
+    concurrency: u32,
 }
+
+/// Default number of provider calls one drain keeps in flight.
+pub const DEFAULT_DELIVERY_CONCURRENCY: u32 = 32;
 
 impl PushOutboxWorker {
     #[must_use]
@@ -143,7 +147,18 @@ impl PushOutboxWorker {
             provider_timeout: std::time::Duration::from_secs(75),
             max_attempts: 8,
             wake_signer: None,
+            concurrency: DEFAULT_DELIVERY_CONCURRENCY,
         }
+    }
+
+    /// Bound on simultaneous provider calls within one drain (1..=256,
+    /// default [`DEFAULT_DELIVERY_CONCURRENCY`]). Sequential delivery capped a
+    /// node at roughly one wake per provider round-trip and let a single hung
+    /// call stall everything behind it.
+    #[must_use]
+    pub fn with_concurrency(mut self, concurrency: u32) -> Self {
+        self.concurrency = concurrency.clamp(1, 256);
+        self
     }
 
     #[must_use]
@@ -167,105 +182,193 @@ impl PushOutboxWorker {
     }
 
     /// Claim and deliver one bounded batch, returning the number attempted.
+    ///
+    /// Up to `concurrency` provider calls run at once; a slot freed by a
+    /// finished call is refilled with a fresh claim, so one hung call occupies
+    /// one slot instead of blocking the whole queue. Dropping the returned
+    /// future (shutdown) aborts in-flight calls; their leases simply expire
+    /// and the wakes are re-driven.
+    ///
+    /// # Errors
+    /// The first claim or outcome-persistence error; calls already in flight
+    /// are still allowed to finish and persist before it is returned.
     pub async fn drain_once(&self, now: DateTime<Utc>) -> Result<usize, String> {
         if !self.provider.is_configured() {
             return Ok(0);
         }
-        // Lease one row at a time: a batch-wide deadline can expire before a
-        // slow provider lets us reach the later rows in a sequential batch.
         let started = std::time::Instant::now();
-        let mut attempted = 0;
-        while attempted < self.batch_size {
-            let elapsed = Duration::from_std(started.elapsed())
-                .map_err(|error| format!("push outbox clock overflow: {error}"))?;
-            let attempt_at = now + elapsed;
-            // Count claim latency against the provider budget as well, leaving
-            // time to persist the result before this lease can be reclaimed.
-            let send_deadline = tokio::time::Instant::now() + self.provider_timeout;
-            // Keep due eligibility fixed for this drain. A retry recorded
-            // earlier in the batch must wait for a later drain, even if other
-            // provider calls make its backoff elapse in the meantime.
-            let mut wakes = self
-                .store
-                .claim_due_wakes(now, attempt_at + self.lease_duration, 1)
-                .await?;
-            let Some(wake) = wakes.pop() else {
-                break;
-            };
-            let send = async {
-                if let Some((key_id, key)) = &self.wake_signer {
-                    match crate::SignedWakeMetadata::sign(
-                        &wake.tenant_id,
-                        &wake.device_id,
-                        &wake.command_id,
-                        key_id,
-                        key,
-                        attempt_at,
-                        attempt_at + Duration::minutes(5),
-                    ) {
-                        Ok(metadata) => {
-                            self.provider
-                                .send_signed_wake(&wake.push_token, &wake.platform, &metadata)
-                                .await
-                        }
-                        Err(error) => Err(PushError::Permanent(error.to_string())),
-                    }
-                } else {
-                    self.provider
-                        .send_silent_push(&wake.push_token, &wake.platform)
-                        .await
+        let mut claimed_total: u32 = 0;
+        let mut exhausted = false;
+        let mut first_error: Option<String> = None;
+        let mut in_flight: tokio::task::JoinSet<Result<(), String>> = tokio::task::JoinSet::new();
+        loop {
+            while !exhausted && first_error.is_none() {
+                let free = self
+                    .concurrency
+                    .saturating_sub(u32::try_from(in_flight.len()).unwrap_or(u32::MAX));
+                let want = free.min(self.batch_size.saturating_sub(claimed_total));
+                if want == 0 {
+                    break;
                 }
-            };
-            let provider_result = tokio::time::timeout_at(send_deadline, send)
-                .await
-                .unwrap_or_else(|_| Err(PushError::Retryable("push provider timed out".into())));
-            let completed_at = now
-                + Duration::from_std(started.elapsed())
-                    .map_err(|error| format!("push outbox clock overflow: {error}"))?;
-            let outcome = self.classify(&wake, provider_result, completed_at);
-            self.store
-                .record_wake_outcome(&wake, &outcome, completed_at)
-                .await?;
-            attempted += 1;
+                let elapsed = match Duration::from_std(started.elapsed()) {
+                    Ok(elapsed) => elapsed,
+                    Err(error) => {
+                        first_error = Some(format!("push outbox clock overflow: {error}"));
+                        break;
+                    }
+                };
+                let attempt_at = now + elapsed;
+                // Count claim latency against the provider budget as well,
+                // leaving time to persist the result before the lease can be
+                // reclaimed.
+                let send_deadline = tokio::time::Instant::now() + self.provider_timeout;
+                // Keep due eligibility fixed for this drain. A retry recorded
+                // earlier in the batch must wait for a later drain.
+                let wakes = match self
+                    .store
+                    .claim_due_wakes(now, attempt_at + self.lease_duration, want)
+                    .await
+                {
+                    Ok(wakes) => wakes,
+                    Err(error) => {
+                        first_error = Some(error);
+                        break;
+                    }
+                };
+                // A short claim means the queue is empty or contended; stop
+                // refilling and let the next tick continue.
+                if u32::try_from(wakes.len()).unwrap_or(u32::MAX) < want {
+                    exhausted = true;
+                }
+                claimed_total =
+                    claimed_total.saturating_add(u32::try_from(wakes.len()).unwrap_or(u32::MAX));
+                for wake in wakes {
+                    let job = DeliveryJob {
+                        store: Arc::clone(&self.store),
+                        provider: Arc::clone(&self.provider),
+                        wake_signer: self.wake_signer.clone(),
+                        max_attempts: self.max_attempts,
+                        now,
+                        started,
+                        attempt_at,
+                        send_deadline,
+                    };
+                    in_flight.spawn(job.run(wake));
+                }
+            }
+            match in_flight.join_next().await {
+                None => break,
+                Some(Ok(Ok(()))) => {}
+                Some(Ok(Err(error))) => {
+                    first_error.get_or_insert(error);
+                }
+                Some(Err(join_error)) => {
+                    first_error.get_or_insert(format!("push delivery task failed: {join_error}"));
+                }
+            }
         }
-        Ok(attempted as usize)
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(claimed_total as usize),
+        }
     }
 
+    #[cfg(test)]
     fn classify(
         &self,
         wake: &ClaimedWake,
         result: Result<(), PushError>,
         now: DateTime<Utc>,
     ) -> WakeAttemptOutcome {
-        match result {
-            Ok(()) => WakeAttemptOutcome::Delivered,
-            Err(PushError::InvalidToken) => WakeAttemptOutcome::Terminal {
-                reason: PushTerminalReason::InvalidToken,
-                error: "device token rejected by provider".into(),
-            },
-            Err(PushError::Retryable(error) | PushError::Delivery(error)) => {
-                let completed_attempts = wake.attempts.saturating_add(1);
-                if completed_attempts >= self.max_attempts {
-                    WakeAttemptOutcome::Terminal {
-                        reason: PushTerminalReason::RetryLimit,
-                        error,
-                    }
-                } else {
-                    WakeAttemptOutcome::Retry {
-                        next_attempt_at: now + retry_delay(completed_attempts),
-                        error,
-                    }
+        classify_outcome(self.max_attempts, wake, result, now)
+    }
+}
+
+fn classify_outcome(
+    max_attempts: u32,
+    wake: &ClaimedWake,
+    result: Result<(), PushError>,
+    now: DateTime<Utc>,
+) -> WakeAttemptOutcome {
+    match result {
+        Ok(()) => WakeAttemptOutcome::Delivered,
+        Err(PushError::InvalidToken) => WakeAttemptOutcome::Terminal {
+            reason: PushTerminalReason::InvalidToken,
+            error: "device token rejected by provider".into(),
+        },
+        Err(PushError::Retryable(error) | PushError::Delivery(error)) => {
+            let completed_attempts = wake.attempts.saturating_add(1);
+            if completed_attempts >= max_attempts {
+                WakeAttemptOutcome::Terminal {
+                    reason: PushTerminalReason::RetryLimit,
+                    error,
+                }
+            } else {
+                WakeAttemptOutcome::Retry {
+                    next_attempt_at: now + retry_delay(completed_attempts),
+                    error,
                 }
             }
-            Err(PushError::Permanent(error)) => WakeAttemptOutcome::Terminal {
-                reason: PushTerminalReason::PermanentFailure,
-                error,
-            },
-            Err(PushError::Config(error)) => WakeAttemptOutcome::Terminal {
-                reason: PushTerminalReason::Misconfigured,
-                error,
-            },
         }
+        Err(PushError::Permanent(error)) => WakeAttemptOutcome::Terminal {
+            reason: PushTerminalReason::PermanentFailure,
+            error,
+        },
+        Err(PushError::Config(error)) => WakeAttemptOutcome::Terminal {
+            reason: PushTerminalReason::Misconfigured,
+            error,
+        },
+    }
+}
+
+/// Everything one spawned delivery needs (owned, so it can run on its own task).
+struct DeliveryJob {
+    store: Arc<dyn PushOutboxStore>,
+    provider: Arc<dyn PushProvider>,
+    wake_signer: Option<(String, SigningKey)>,
+    max_attempts: u32,
+    now: DateTime<Utc>,
+    started: std::time::Instant,
+    attempt_at: DateTime<Utc>,
+    send_deadline: tokio::time::Instant,
+}
+
+impl DeliveryJob {
+    async fn run(self, wake: ClaimedWake) -> Result<(), String> {
+        let send = async {
+            if let Some((key_id, key)) = &self.wake_signer {
+                match crate::SignedWakeMetadata::sign(
+                    &wake.tenant_id,
+                    &wake.device_id,
+                    &wake.command_id,
+                    key_id,
+                    key,
+                    self.attempt_at,
+                    self.attempt_at + Duration::minutes(5),
+                ) {
+                    Ok(metadata) => {
+                        self.provider
+                            .send_signed_wake(&wake.push_token, &wake.platform, &metadata)
+                            .await
+                    }
+                    Err(error) => Err(PushError::Permanent(error.to_string())),
+                }
+            } else {
+                self.provider
+                    .send_silent_push(&wake.push_token, &wake.platform)
+                    .await
+            }
+        };
+        let provider_result = tokio::time::timeout_at(self.send_deadline, send)
+            .await
+            .unwrap_or_else(|_| Err(PushError::Retryable("push provider timed out".into())));
+        let completed_at = self.now
+            + Duration::from_std(self.started.elapsed())
+                .map_err(|error| format!("push outbox clock overflow: {error}"))?;
+        let outcome = classify_outcome(self.max_attempts, &wake, provider_result, completed_at);
+        self.store
+            .record_wake_outcome(&wake, &outcome, completed_at)
+            .await
     }
 }
 
