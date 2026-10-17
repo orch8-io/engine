@@ -301,6 +301,12 @@ pub struct EmbedConfig {
     /// embed tokens. Env: `ORCH8_EMBED_TOKEN_SECRET`.
     #[serde(default)]
     pub token_secret: SecretString,
+    /// Retired token secrets (comma-separated hex) still accepted when
+    /// verifying, so `token_secret` can be rotated without invalidating
+    /// tokens already issued (they live at most one hour). Never used to
+    /// mint. Env: `ORCH8_EMBED_TOKEN_SECRET_PREVIOUS`.
+    #[serde(default)]
+    pub token_secret_previous: SecretString,
     /// Comma-separated browser origins allowed to call `/api/v1/embed/*`.
     /// Env: `ORCH8_EMBED_ALLOWED_ORIGINS`.
     #[serde(default)]
@@ -933,6 +939,10 @@ const fn default_grace_period() -> u64 {
     30
 }
 
+const fn default_grpc_tls_reload_interval_secs() -> u64 {
+    30
+}
+
 const fn default_stale_threshold() -> u64 {
     300
 }
@@ -952,6 +962,12 @@ pub struct ApiConfig {
     /// PEM CA roots used to verify required gRPC client certificates.
     #[serde(default)]
     pub grpc_tls_client_ca_path: String,
+    /// How often (seconds) the gRPC TLS files are re-read; changed, valid
+    /// material is served to new connections without a restart (SIGHUP
+    /// forces an immediate check). 0 disables reloading.
+    /// Env: `ORCH8_GRPC_TLS_RELOAD_INTERVAL_SECS`.
+    #[serde(default = "default_grpc_tls_reload_interval_secs")]
+    pub grpc_tls_reload_interval_secs: u64,
     /// JSON object mapping client-certificate SHA-256 fingerprints to
     /// `{ "tenant_id": "...", "identity": "..." }` workload identities.
     #[serde(default)]
@@ -996,6 +1012,7 @@ impl Default for ApiConfig {
             grpc_tls_cert_path: String::new(),
             grpc_tls_key_path: String::new(),
             grpc_tls_client_ca_path: String::new(),
+            grpc_tls_reload_interval_secs: default_grpc_tls_reload_interval_secs(),
             grpc_mtls_identities: String::new(),
             http_addr: default_http_addr(),
             cors_origins: default_cors_origins(),

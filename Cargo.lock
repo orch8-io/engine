@@ -3443,6 +3443,7 @@ dependencies = [
  "orch8-storage",
  "orch8-types",
  "reqwest",
+ "rustls",
  "serde_json",
  "serial_test",
  "tempfile",

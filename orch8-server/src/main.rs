@@ -35,6 +35,7 @@ mod federation_wiring;
 mod managed_control;
 mod remote_executor;
 mod telemetry;
+mod tls_reload;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GrpcSurface {
@@ -1168,24 +1169,19 @@ async fn spawn_grpc_server(
         orch8_grpc::auth::WorkloadIdentityRegistry::from_json(&config.api.grpc_mtls_identities)
             .map_err(anyhow::Error::msg)
             .context("Invalid grpc_mtls_identities")?;
-    let tls_config = if configured_tls_paths == tls_paths.len() {
-        let (certificate, private_key, client_ca) = tokio::try_join!(
-            tokio::fs::read(&config.api.grpc_tls_cert_path),
-            tokio::fs::read(&config.api.grpc_tls_key_path),
-            tokio::fs::read(&config.api.grpc_tls_client_ca_path),
+    let (mut tls_reloader, tls_config) = if configured_tls_paths == tls_paths.len() {
+        let (reloader, tls_config) = tls_reload::TlsReloader::load(
+            &config.api.grpc_tls_cert_path,
+            &config.api.grpc_tls_key_path,
+            &config.api.grpc_tls_client_ca_path,
         )
-        .context("Failed to read gRPC mTLS certificate material")?;
-        Some(
-            tonic::transport::ServerTlsConfig::new()
-                .identity(tonic::transport::Identity::from_pem(
-                    certificate,
-                    private_key,
-                ))
-                .client_ca_root(tonic::transport::Certificate::from_pem(client_ca)),
-        )
+        .await?;
+        (Some(reloader), Some(tls_config))
     } else {
-        None
+        (None, None)
     };
+    let tls_reload_interval =
+        std::time::Duration::from_secs(config.api.grpc_tls_reload_interval_secs);
 
     let mut grpc_service =
         Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes)
@@ -1210,40 +1206,117 @@ async fn spawn_grpc_server(
     // detect dead peers, and recycle connections so a single long-lived
     // client can't pin resources forever (streams get a grace window to
     // finish, then the worker reconnects).
-    let mut server = tonic::transport::Server::builder()
-        .timeout(GRPC_REQUEST_TIMEOUT)
-        .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
-        .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
-        .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
-        .max_connection_age(GRPC_MAX_CONNECTION_AGE)
-        .max_connection_age_grace(GRPC_MAX_CONNECTION_AGE_GRACE);
-    if let Some(tls_config) = tls_config {
-        server = server
-            .tls_config(tls_config)
-            .context("Invalid gRPC mTLS certificate material")?;
-    }
+    let build_server = |tls: Option<tonic::transport::ServerTlsConfig>| {
+        let mut server = tonic::transport::Server::builder()
+            .timeout(GRPC_REQUEST_TIMEOUT)
+            .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
+            .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+            .max_connection_age(GRPC_MAX_CONNECTION_AGE)
+            .max_connection_age_grace(GRPC_MAX_CONNECTION_AGE_GRACE);
+        if let Some(tls) = tls {
+            server = server
+                .tls_config(tls)
+                .context("Invalid gRPC mTLS certificate material")?;
+        }
+        anyhow::Ok(server)
+    };
+    let service = Orch8ServiceServer::new(grpc_service)
+        .max_decoding_message_size(GRPC_MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(GRPC_MAX_MESSAGE_BYTES);
+    // One serve generation: shares the listening socket (a dup of the fd) so
+    // a TLS reload starts the next generation before the previous one drains,
+    // with no gap in accepting connections.
+    let std_listener = listener.into_std().context("gRPC listener")?;
+    let serve = move |tls: Option<tonic::transport::ServerTlsConfig>,
+                      stop: CancellationToken|
+          -> anyhow::Result<
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    > {
+        let server = build_server(tls)?;
+        let listener = tokio::net::TcpListener::from_std(std_listener.try_clone()?)?;
+        let auth_layer = auth_layer.clone();
+        let service = service.clone();
+        Ok(tokio::spawn(async move {
+            server
+                .layer(auth_layer)
+                .add_service(service)
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async move { stop.cancelled().await },
+                )
+                .await
+        }))
+    };
+    let mut generation_stop = shutdown.child_token();
+    let mut current = serve(tls_config, generation_stop.clone())?;
     let handle = tokio::spawn(async move {
         tracing::info!("gRPC server listening on {}", grpc_addr);
-        if let Err(e) = server
-            .layer(auth_layer)
-            .add_service(
-                Orch8ServiceServer::new(grpc_service)
-                    .max_decoding_message_size(GRPC_MAX_MESSAGE_BYTES)
-                    .max_encoding_message_size(GRPC_MAX_MESSAGE_BYTES),
-            )
-            .serve_with_incoming_shutdown(
-                tokio_stream::wrappers::TcpListenerStream::new(listener),
-                async move {
-                    shutdown.cancelled().await;
-                },
-            )
-            .await
-        {
-            tracing::error!(error = %e, "gRPC server error");
-            // The gRPC surface is dead but the process keeps running — clear
-            // the readiness flag so `/health/ready` returns 503 and the load
-            // balancer drains this node instead of routing gRPC traffic to it.
-            engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(unix)]
+        let mut sighup = tokio::signal::unix::signal(SignalKind::hangup()).ok();
+        loop {
+            let reload_enabled = tls_reloader.is_some();
+            let tick = async {
+                if reload_enabled && !tls_reload_interval.is_zero() {
+                    tokio::time::sleep(tls_reload_interval).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            };
+            #[cfg(unix)]
+            let hup = async {
+                match sighup.as_mut() {
+                    Some(s) if reload_enabled => {
+                        s.recv().await;
+                    }
+                    _ => std::future::pending::<()>().await,
+                }
+            };
+            #[cfg(not(unix))]
+            let hup = std::future::pending::<()>();
+            tokio::select! {
+                result = &mut current => {
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::error!(error = %e, "gRPC server error");
+                            // The gRPC surface is dead but the process keeps running — clear
+                            // the readiness flag so `/health/ready` returns 503 and the load
+                            // balancer drains this node instead of routing gRPC traffic to it.
+                            engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "gRPC server task failed");
+                            engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    return;
+                }
+                () = tick => {}
+                () = hup => tracing::info!("SIGHUP: checking gRPC TLS material"),
+            }
+            let Some(reloader) = tls_reloader.as_mut() else {
+                continue;
+            };
+            let Some(new_tls) = reloader.poll().await else {
+                continue;
+            };
+            let next_stop = shutdown.child_token();
+            match serve(Some(new_tls), next_stop.clone()) {
+                Ok(next) => {
+                    tracing::info!("gRPC TLS material changed; serving with the new certificate");
+                    // The old generation stops accepting and drains in place.
+                    generation_stop.cancel();
+                    let old = std::mem::replace(&mut current, next);
+                    generation_stop = next_stop;
+                    tokio::spawn(async move {
+                        if let Ok(Err(e)) = old.await {
+                            tracing::warn!(error = %e, "previous gRPC generation ended with error");
+                        }
+                    });
+                }
+                Err(e) => tracing::warn!(error = %e, "gRPC TLS reload failed; keeping current"),
+            }
         }
     });
     Ok(handle)
@@ -1718,6 +1791,9 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_CLIENT_CA_PATH") {
         config.api.grpc_tls_client_ca_path = val;
     }
+    if let Some(n) = env_parse("ORCH8_GRPC_TLS_RELOAD_INTERVAL_SECS") {
+        config.api.grpc_tls_reload_interval_secs = n;
+    }
     if let Ok(val) = std::env::var("ORCH8_GRPC_MTLS_IDENTITIES") {
         config.api.grpc_mtls_identities = val;
     }
@@ -1726,6 +1802,9 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     }
     if let Ok(val) = std::env::var(orch8_api::embed::token::SECRET_ENV) {
         config.embed.token_secret = val.into();
+    }
+    if let Ok(val) = std::env::var("ORCH8_EMBED_TOKEN_SECRET_PREVIOUS") {
+        config.embed.token_secret_previous = val.into();
     }
     if let Ok(val) = std::env::var(orch8_api::embed::token::ALLOWED_ORIGINS_ENV) {
         config.embed.allowed_origins = val;
