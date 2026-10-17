@@ -89,7 +89,7 @@ const TASK_VM_INFO_PHYS_FOOTPRINT_WORD: usize = 18;
 const TASK_VM_INFO_REV1_COUNT: u32 = 38;
 
 /// Extract `phys_footprint` from a `task_info(TASK_VM_INFO)` reply of
-/// `returned_count` natural_t words. `None` when the kernel's reply is too
+/// `returned_count` `natural_t` words. `None` when the kernel's reply is too
 /// short to contain it or reports zero.
 #[cfg(any(target_vendor = "apple", test))]
 fn phys_footprint_from_task_vm_info(buf: &[u64], returned_count: u32) -> Option<u64> {

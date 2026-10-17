@@ -395,6 +395,7 @@ impl SyncReporter {
 
     /// Scan storage for active instances and queue status updates + approval
     /// requests. Coalescing in the outbox table ensures duplicates are harmless.
+    #[allow(clippy::too_many_lines)]
     pub async fn scan_and_queue(
         &self,
         storage: &Arc<dyn StorageBackend>,
@@ -1239,7 +1240,7 @@ impl SyncReporter {
     }
 }
 
-/// Namespace for UUIDv5 ids derived from server command ids (MC-10).
+/// Namespace for `UUIDv5` ids derived from server command ids (MC-10).
 const COMMAND_UUID_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x6f72_6368_385f_6d6f_6269_6c65_636d_6473);
 

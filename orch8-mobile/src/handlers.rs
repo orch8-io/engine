@@ -177,48 +177,71 @@ mod tests {
         registry.get("foreign").unwrap()(context(serde_json::json!({ "n": 7 })).await).await
     }
 
-    struct CountingSlowHandler(Arc<std::sync::atomic::AtomicU32>);
+    /// Blocks until `release` is set, so the test controls exactly how long
+    /// the "native call" outlives its timeout (no wall-clock races).
+    struct GatedHandler {
+        calls: Arc<std::sync::atomic::AtomicU32>,
+        release: Arc<std::sync::atomic::AtomicBool>,
+    }
 
-    impl StepHandler for CountingSlowHandler {
+    impl StepHandler for GatedHandler {
         fn execute(&self, _step_name: String, _input: String) -> Result<String, HandlerError> {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(300));
+            use std::sync::atomic::Ordering::SeqCst;
+            self.calls.fetch_add(1, SeqCst);
+            for _ in 0..1000 {
+                if self.release.load(SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
             Ok("{}".into())
         }
     }
 
     #[tokio::test]
     async fn retry_is_refused_while_a_timed_out_call_is_still_running_mc06() {
+        use std::sync::atomic::Ordering::SeqCst;
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut registry = HandlerRegistry::new();
         register_foreign_handler(
             &mut registry,
             "foreign",
-            Arc::new(CountingSlowHandler(Arc::clone(&calls))),
-            Duration::from_millis(20),
+            Arc::new(GatedHandler {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+            }),
+            Duration::from_millis(50),
             Arc::new(Stragglers::default()),
         );
         let run = registry.get("foreign").unwrap();
+        let (c1, c2, c3) = (
+            context(serde_json::json!({})).await,
+            context(serde_json::json!({})).await,
+            context(serde_json::json!({})).await,
+        );
 
-        let first = run(context(serde_json::json!({})).await).await.unwrap_err();
+        let first = run(c1).await.unwrap_err();
         assert!(crate::stragglers::is_device_timeout(&first));
 
         // The scheduler retries immediately: the native call is still busy.
-        let retry = run(context(serde_json::json!({})).await).await.unwrap_err();
+        let retry = run(c2).await.unwrap_err();
         assert!(
-            matches!(retry, StepError::Retryable { .. }) && !crate::stragglers::is_device_timeout(&retry),
+            matches!(retry, StepError::Retryable { .. })
+                && !crate::stragglers::is_device_timeout(&retry),
             "{retry:?}"
         );
         assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
+            calls.load(SeqCst),
             1,
             "the straggler must not be invoked a second time concurrently"
         );
 
         // Once the straggler returns, the handler is runnable again.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let _ = run(context(serde_json::json!({})).await).await;
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        release.store(true, SeqCst);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let _ = run(c3).await;
+        assert_eq!(calls.load(SeqCst), 2);
     }
 
     #[tokio::test]

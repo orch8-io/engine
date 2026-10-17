@@ -2515,8 +2515,10 @@ mod tests {
     fn mc13_unsigned_url_loading_is_refused_when_a_root_key_is_configured() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("engine.db").to_string_lossy().to_string();
-        let mut config = MobileEngineConfig::default();
-        config.root_public_key = "AAAA".to_string();
+        let config = MobileEngineConfig {
+            root_public_key: "AAAA".to_string(),
+            ..MobileEngineConfig::default()
+        };
         let engine = MobileEngine::new(path, config).unwrap();
 
         let err = engine
@@ -2540,8 +2542,10 @@ mod tests {
     fn mc13_url_batches_respect_max_stored_sequences() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("engine.db").to_string_lossy().to_string();
-        let mut config = MobileEngineConfig::default();
-        config.max_stored_sequences = 2;
+        let config = MobileEngineConfig {
+            max_stored_sequences: 2,
+            ..MobileEngineConfig::default()
+        };
         let engine = MobileEngine::new(path, config).unwrap();
         engine
             .load_sequence_from_json(
