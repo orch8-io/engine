@@ -759,7 +759,15 @@ impl RemoteExecutor {
         }
     }
 
+    #[allow(clippy::items_after_statements)]
     async fn execute(&self, task: ClaimedTask, permit: OwnedSemaphorePermit, heartbeat: Duration) {
+        let _permit = permit;
+        let id = task.task.id;
+        let cancel = CancellationToken::new();
+        self.running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, cancel.clone());
         // Deregister on every exit, including a handler panic unwinding
         // through here (T1-GAP-236): a leaked entry inflates `in_flight()`
         // and makes drain wait out its whole window for a dead task.
@@ -775,15 +783,6 @@ impl RemoteExecutor {
                     .remove(&self.id);
             }
         }
-
-        let _permit = permit;
-        let id = task.task.id;
-        let cancel = CancellationToken::new();
-        self.running
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, cancel.clone());
-
         let _deregister = Deregister {
             running: &self.running,
             id,
