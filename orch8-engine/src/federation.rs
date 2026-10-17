@@ -1066,7 +1066,7 @@ mod tests {
             input: json!({}),
             withheld_sha256: vec![],
             state: FederationCallState::Running,
-            remote_instance_id: Some(InstanceId::new()),
+            remote_instance_id: Some(uuid::Uuid::now_v7()),
             result: None,
             error: None,
             attempts: 0,
