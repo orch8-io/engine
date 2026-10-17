@@ -573,12 +573,9 @@ async fn refresh_credential(
             credential.id, credential.kind
         )));
     }
-    let refresh_url = credential
-        .refresh_url
-        .clone()
-        .ok_or_else(|| {
-            RefreshError::permanent(format!("credential '{}' has no refresh_url", credential.id))
-        })?;
+    let refresh_url = credential.refresh_url.clone().ok_or_else(|| {
+        RefreshError::permanent(format!("credential '{}' has no refresh_url", credential.id))
+    })?;
     let refresh_token = credential
         .refresh_token
         .as_ref()
@@ -1102,7 +1099,10 @@ mod tests {
             .unwrap();
         let value = credential("api-key", CredentialKind::ApiKey);
 
-        let error = refresh_credential(&storage, value).await.unwrap_err().message;
+        let error = refresh_credential(&storage, value)
+            .await
+            .unwrap_err()
+            .message;
 
         assert!(error.contains("is not oauth2"));
     }
@@ -1115,7 +1115,10 @@ mod tests {
         let mut value = credential("oauth", CredentialKind::Oauth2);
         value.refresh_token = Some(SecretString::new("refresh-token".into()));
 
-        let error = refresh_credential(&storage, value).await.unwrap_err().message;
+        let error = refresh_credential(&storage, value)
+            .await
+            .unwrap_err()
+            .message;
 
         assert_eq!(error, "credential 'oauth' has no refresh_url");
     }
@@ -1128,7 +1131,10 @@ mod tests {
         let mut value = credential("oauth", CredentialKind::Oauth2);
         value.refresh_url = Some("https://example.com/token".into());
 
-        let error = refresh_credential(&storage, value).await.unwrap_err().message;
+        let error = refresh_credential(&storage, value)
+            .await
+            .unwrap_err()
+            .message;
 
         assert_eq!(error, "credential 'oauth' has no refresh_token");
     }
@@ -1142,7 +1148,10 @@ mod tests {
         value.refresh_url = Some("http://127.0.0.1/token".into());
         value.refresh_token = Some(SecretString::new("refresh-token".into()));
 
-        let error = refresh_credential(&storage, value).await.unwrap_err().message;
+        let error = refresh_credential(&storage, value)
+            .await
+            .unwrap_err()
+            .message;
 
         assert!(error.contains("targets an internal or non-public address"));
     }
@@ -1317,7 +1326,10 @@ mod tests {
     #[test]
     fn transient_refresh_failures_do_not_escalate() {
         assert_eq!(transient_refresh_backoff(1), chrono::TimeDelta::minutes(2));
-        assert_eq!(transient_refresh_backoff(50), chrono::TimeDelta::minutes(15));
+        assert_eq!(
+            transient_refresh_backoff(50),
+            chrono::TimeDelta::minutes(15)
+        );
         for code in [500_u16, 502, 503, 408, 425, 429] {
             let status = reqwest::StatusCode::from_u16(code).unwrap();
             assert!(!refresh_status_is_permanent(status), "{code} is transient");

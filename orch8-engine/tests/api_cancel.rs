@@ -123,7 +123,10 @@ fn assert_cancelled_once(
     assert_eq!(state, InstanceState::Cancelled, "{name}");
     assert_eq!(
         log(undone),
-        expect_undone.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+        expect_undone
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect::<Vec<_>>(),
         "{name}: completed saga steps must be compensated LIFO, exactly once"
     );
     assert_eq!(
@@ -237,10 +240,7 @@ async fn api_cancel_of_a_paused_instance_compensates_and_fires_on_cancel() {
         let engine = builder.build().await;
         let seq = with_on_cancel(
             SequenceBuilder::new("t")
-                .block(saga(vec![
-                    ("s0", noop_block("a0")),
-                    ("s1", gate("a1")),
-                ]))
+                .block(saga(vec![("s0", noop_block("a0")), ("s1", gate("a1"))]))
                 .build(),
         );
         let id = engine.start(&seq).await;
@@ -338,7 +338,9 @@ async fn api_bulk_cancel_runs_every_matching_instances_hooks_once() {
         engine.storage.create_sequence(&seq).await.unwrap();
         let mut ids = Vec::new();
         for _ in 0..3 {
-            let inst = InstanceBuilder::for_sequence(&seq).due_at(engine.now()).build();
+            let inst = InstanceBuilder::for_sequence(&seq)
+                .due_at(engine.now())
+                .build();
             ids.push(engine.create(&inst).await);
         }
         for id in &ids {
@@ -372,8 +374,18 @@ async fn api_bulk_cancel_runs_every_matching_instances_hooks_once() {
                 backend.name()
             );
         }
-        assert_eq!(log(&undone).len(), 3, "{}: one compensation per instance", backend.name());
-        assert_eq!(log(&hooked).len(), 3, "{}: one hook per instance", backend.name());
+        assert_eq!(
+            log(&undone).len(),
+            3,
+            "{}: one compensation per instance",
+            backend.name()
+        );
+        assert_eq!(
+            log(&hooked).len(),
+            3,
+            "{}: one hook per instance",
+            backend.name()
+        );
     }
 }
 
@@ -410,7 +422,9 @@ async fn api_cancel_of_a_child_wakes_its_waiting_parent() {
         let child = child.expect("child never parked");
         assert_eq!(engine.instance(parent).await.state, InstanceState::Waiting);
 
-        request_cancel(engine.storage.as_ref(), child).await.unwrap();
+        request_cancel(engine.storage.as_ref(), child)
+            .await
+            .unwrap();
         settle(&engine, child).await;
 
         assert_eq!(engine.instance(child).await.state, InstanceState::Cancelled);

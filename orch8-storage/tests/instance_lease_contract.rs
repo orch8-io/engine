@@ -460,8 +460,11 @@ async fn admission_verdict_is_exact_around_the_ceiling(s: &dyn StorageBackend) {
             .unwrap();
     }
     let over = |limit: u64| async move {
-        s.create_instance_admitted(&instance(seq, "tenant-big", InstanceState::Scheduled), limit)
-            .await
+        s.create_instance_admitted(
+            &instance(seq, "tenant-big", InstanceState::Scheduled),
+            limit,
+        )
+        .await
     };
     assert!(matches!(over(3).await, Err(StorageError::QuotaExceeded(_))));
     assert!(matches!(over(7).await, Err(StorageError::QuotaExceeded(_))));
@@ -476,11 +479,13 @@ async fn admission_verdict_is_exact_around_the_ceiling(s: &dyn StorageBackend) {
     let limits = |l: u64| HashMap::from([(TenantId::unchecked("tenant-big"), l)]);
     // 8 active now.
     assert!(matches!(
-        s.create_instances_batch_admitted(&batch(1), &limits(8)).await,
+        s.create_instances_batch_admitted(&batch(1), &limits(8))
+            .await,
         Err(StorageError::QuotaExceeded(_))
     ));
     assert!(matches!(
-        s.create_instances_batch_admitted(&batch(3), &limits(10)).await,
+        s.create_instances_batch_admitted(&batch(3), &limits(10))
+            .await,
         Err(StorageError::QuotaExceeded(_))
     ));
     assert_eq!(

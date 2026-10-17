@@ -2004,12 +2004,12 @@ pub(crate) async fn task_stats(
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<TaskStatsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(w) = query.window_secs {
-        if w == 0 || w > MAX_STATS_WINDOW_SECS {
-            return Err(ApiError::InvalidArgument(format!(
-                "window_secs must be between 1 and {MAX_STATS_WINDOW_SECS}"
-            )));
-        }
+    if let Some(w) = query.window_secs
+        && (w == 0 || w > MAX_STATS_WINDOW_SECS)
+    {
+        return Err(ApiError::InvalidArgument(format!(
+            "window_secs must be between 1 and {MAX_STATS_WINDOW_SECS}"
+        )));
     }
     let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, None);
     let result = state

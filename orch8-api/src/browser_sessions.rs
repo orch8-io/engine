@@ -202,7 +202,8 @@ impl BrowserSessionSigner {
                     secret.len()
                 ));
             }
-            self.previous.push(Self::from_secret(secret.as_bytes())?.key);
+            self.previous
+                .push(Self::from_secret(secret.as_bytes())?.key);
         }
         Ok(self)
     }
@@ -276,7 +277,10 @@ impl BrowserSessionSigner {
                         // `resolve` already refused an invalid previous
                         // secret at startup.
                         let previous = std::env::var(PREVIOUS_SECRET_ENV).unwrap_or_default();
-                        signer.clone().with_previous_secrets(&previous).unwrap_or(signer)
+                        signer
+                            .clone()
+                            .with_previous_secrets(&previous)
+                            .unwrap_or(signer)
                     })
             })
             .clone()
