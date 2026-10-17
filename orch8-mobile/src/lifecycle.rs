@@ -34,7 +34,13 @@ pub struct InstanceLifecycleManager {
     mobile_storage: Arc<MobileStorage>,
     dedup_keys: Arc<Mutex<HashMap<String, String>>>,
     max_concurrent_instances: u32,
+    /// When `compact_storage` last ran (MC-07).
+    last_compaction: std::sync::Mutex<Option<std::time::Instant>>,
 }
+
+/// Compaction (incremental vacuum + WAL truncate) runs when a purge freed rows,
+/// otherwise at most this often.
+const IDLE_COMPACTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 impl InstanceLifecycleManager {
     pub fn new(
@@ -47,7 +53,25 @@ impl InstanceLifecycleManager {
             mobile_storage,
             dedup_keys: Arc::new(Mutex::new(HashMap::new())),
             max_concurrent_instances,
+            last_compaction: std::sync::Mutex::new(None),
         }
+    }
+
+    /// MC-07: whether the GC pass should compact storage now. Always after a
+    /// purge that deleted rows; otherwise only once per
+    /// [`IDLE_COMPACTION_INTERVAL`] (a 60 s no-op `wal_checkpoint(TRUNCATE)` +
+    /// `incremental_vacuum` wakes the disk for nothing).
+    fn compaction_due(&self, deleted: u64, now: std::time::Instant) -> bool {
+        let mut last = self
+            .last_compaction
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let due = deleted > 0
+            || last.is_none_or(|at| now.duration_since(at) >= IDLE_COMPACTION_INTERVAL);
+        if due {
+            *last = Some(now);
+        }
+        due
     }
 
     pub(crate) fn mobile_storage(&self) -> &MobileStorage {
@@ -437,7 +461,9 @@ impl InstanceLifecycleManager {
         if deleted > 0 {
             info!(deleted, "purged terminal instances past retention");
         }
-        self.storage.compact_storage().await?;
+        if self.compaction_due(deleted, std::time::Instant::now()) {
+            self.storage.compact_storage().await?;
+        }
         Ok(deleted)
     }
 
@@ -492,6 +518,36 @@ mod tests {
         let mobile_storage = Arc::new(MobileStorage::new(sqlite));
         let lifecycle = InstanceLifecycleManager::new(storage.clone(), mobile_storage.clone(), 10);
         (lifecycle, mobile_storage, dir)
+    }
+
+    #[tokio::test]
+    async fn mc07_idle_gc_passes_do_not_compact_more_than_hourly() {
+        let (lifecycle, _ms, _dir) = setup().await;
+        let t0 = std::time::Instant::now();
+        assert!(lifecycle.compaction_due(0, t0), "first pass establishes a baseline");
+        assert!(!lifecycle.compaction_due(0, t0 + Duration::from_secs(60)));
+        assert!(!lifecycle.compaction_due(0, t0 + Duration::from_secs(59 * 60)));
+        assert!(
+            lifecycle.compaction_due(3, t0 + Duration::from_secs(120)),
+            "a purge that freed rows compacts immediately"
+        );
+        assert!(!lifecycle.compaction_due(0, t0 + Duration::from_secs(150)));
+        assert!(lifecycle.compaction_due(0, t0 + Duration::from_secs(120 + 3600)));
+    }
+
+    #[tokio::test]
+    async fn opt03_mobile_file_db_uses_wal_with_normal_synchronous() {
+        let (_lifecycle, ms, _dir) = setup().await;
+        let sync: i64 = sqlx::query_scalar("PRAGMA synchronous")
+            .fetch_one(ms.pool())
+            .await
+            .unwrap();
+        assert_eq!(sync, 1, "NORMAL");
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(ms.pool())
+            .await
+            .unwrap();
+        assert_eq!(mode, "wal");
     }
 
     async fn seed_sequence(storage: &Arc<dyn StorageBackend>, name: &str) {

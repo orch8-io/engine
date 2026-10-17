@@ -244,11 +244,21 @@ impl SqliteStorage {
     /// (1 writer + 4 reader capacity under WAL), a short idle timeout so burst
     /// readers do not remain resident for SQLx's default 10 minutes, a
     /// 5-second busy timeout, and foreign keys for cascade deletes.
+    ///
+    /// `synchronous = NORMAL` (OPT-03): in WAL mode this skips the per-commit
+    /// WAL fsync (the default FULL fsyncs every transaction), which cuts flash
+    /// writes/wakeups on a phone. Durability trade-off: the database can never
+    /// be corrupted, but after an OS crash or power loss the last few committed
+    /// transactions may be rolled back (an app crash alone loses nothing,
+    /// because the WAL is in the OS page cache). The mobile engine already
+    /// tolerates this: server commands are redelivered, claims are journaled
+    /// idempotently, and sync cursors only move forward after success.
     pub async fn file_mobile(path: &str) -> Result<Self, StorageError> {
         let opts = SqliteConnectOptions::from_str(&format!("sqlite:{path}"))
             .map_err(|e| StorageError::Connection(e.to_string()))?
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
             .busy_timeout(Duration::from_secs(5))
             .foreign_keys(true);
         let opts = space_reclaiming(opts);
