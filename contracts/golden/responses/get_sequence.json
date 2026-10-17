@@ -1,0 +1,20 @@
+{
+  "blocks": [
+    {
+      "cancellable": true,
+      "handler": "noop",
+      "id": "s1",
+      "params": {},
+      "type": "step"
+    }
+  ],
+  "created_at": "2026-01-01T00:00:00Z",
+  "deprecated": false,
+  "id": "00000000-0000-0000-0000-000000000000",
+  "name": "golden-seq",
+  "namespace": "ns",
+  "schema_version": 1,
+  "status": "production",
+  "tenant_id": "golden",
+  "version": 1
+}

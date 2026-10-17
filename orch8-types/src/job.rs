@@ -137,15 +137,7 @@ fn deserialize_priority_opt<'de, D>(deserializer: D) -> Result<Option<Priority>,
 where
     D: Deserializer<'de>,
 {
-    let raw = Option::<String>::deserialize(deserializer)?;
-    raw.map(|s| {
-        parse_priority(&s).ok_or_else(|| {
-            serde::de::Error::custom(format!(
-                "unknown priority '{s}' (expected low, normal, high or critical)"
-            ))
-        })
-    })
-    .transpose()
+    Option::<Priority>::deserialize(deserializer)
 }
 
 impl EnqueueJobRequest {
