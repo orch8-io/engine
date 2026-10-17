@@ -53,9 +53,17 @@ where
                 ApiError::validation("DOCUMENT_SYNTAX", "request body is not valid UTF-8")
                     .into_response()
             })?;
-            let value = parse_document(text, format).map_err(|e| {
-                ApiError::validation("DOCUMENT_SYNTAX", e.to_string()).into_response()
-            })?;
+            // Parsing is CPU-bound (up to the alias-expansion budget for
+            // YAML), so keep it off the async worker threads.
+            let text = text.to_owned();
+            let value = tokio::task::spawn_blocking(move || parse_document(&text, format))
+                .await
+                .map_err(|_| {
+                    ApiError::Internal("document parser task failed".into()).into_response()
+                })?
+                .map_err(|e| {
+                    ApiError::validation("DOCUMENT_SYNTAX", e.to_string()).into_response()
+                })?;
             return Ok(Self(value));
         }
         let Json(value) = Json::<serde_json::Value>::from_request(req, state)

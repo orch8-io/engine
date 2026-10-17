@@ -4,7 +4,9 @@
 //! `modifyAckDeadline`) over the engine's existing `reqwest` client. Auth is
 //! an `OAuth2` access token from, in order: an inline/`credentials://`
 //! service-account JSON (`credentials_json`), the file named by
-//! `GOOGLE_APPLICATION_CREDENTIALS`, or the GCE/GKE metadata server. Setting
+//! `GOOGLE_APPLICATION_CREDENTIALS`, or the GCE/GKE metadata server. The last
+//! two are the engine's own identity and are used only when the operator sets
+//! `ORCH8_ALLOW_AMBIENT_TRIGGER_CREDENTIALS=true` (default off). Setting
 //! `endpoint` to an emulator URL (or `PUBSUB_EMULATOR_HOST`) disables auth.
 //!
 //! Each message creates one instance (idempotency key = Pub/Sub
@@ -16,7 +18,7 @@
 //! ```json
 //! {
 //!   "subscription": "projects/my-proj/subscriptions/orders-orch8",
-//!   "credentials_json": "credentials://gcp-sa",   // optional
+//!   "credentials_json": "credentials://gcp-sa",   // required unless ambient opt-in
 //!   "max_messages": 50,
 //!   "endpoint": "http://localhost:8085"           // optional (emulator)
 //! }
@@ -302,12 +304,24 @@ mod listener {
         })
     }
 
-    async fn auth_for(cfg: &PubSubConfig, emulator: bool) -> Result<Auth, EngineError> {
+    async fn auth_for(
+        cfg: &PubSubConfig,
+        emulator: bool,
+        allow_ambient: bool,
+    ) -> Result<Auth, EngineError> {
         if emulator {
             return Ok(Auth::None);
         }
         let json = match &cfg.credentials_json {
             Some(j) => Some(j.clone()),
+            None if !allow_ambient => {
+                return Err(EngineError::InvalidConfig(
+                    "pubsub: no credentials (set credentials_json, e.g. a credentials:// \
+                     reference; the engine's own Google identity is not used unless the \
+                     operator sets ORCH8_ALLOW_AMBIENT_TRIGGER_CREDENTIALS=true)"
+                        .into(),
+                ));
+            }
             None => match std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
                 Ok(path) => Some(read_credentials_file(&path).await?),
                 Err(_) => None,
@@ -400,7 +414,12 @@ mod listener {
                 crate::outbound::builder(crate::outbound::Profile::LocalSidecar)
                     .timeout(Duration::from_secs(10)),
             ),
-            auth: auth_for(&cfg, emulator && cfg.credentials_json.is_none()).await?,
+            auth: auth_for(
+                &cfg,
+                emulator && cfg.credentials_json.is_none(),
+                crate::trigger_sources::ambient_credentials_allowed(),
+            )
+            .await?,
             cached: None,
         };
         let pull_url = format!("{base}/v1/{}:pull", cfg.subscription);
@@ -475,6 +494,26 @@ mod listener {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        // C1-2: no credentials in the tenant config means no engine identity
+        // (env key file or metadata server) unless the operator opted in.
+        #[tokio::test]
+        #[serial_test::serial(trigger_env)]
+        async fn auth_without_credentials_is_refused_unless_ambient_allowed() {
+            let cfg = PubSubConfig::parse(&json!({"subscription": "projects/p/subscriptions/s"}))
+                .unwrap();
+            let Err(err) = auth_for(&cfg, false, false).await else {
+                panic!("ambient credentials must be refused");
+            };
+            assert!(
+                matches!(&err, EngineError::InvalidConfig(m) if m.contains("no credentials")),
+                "{err:?}"
+            );
+            assert!(matches!(
+                auth_for(&cfg, false, true).await,
+                Ok(Auth::Metadata | Auth::ServiceAccount(_))
+            ));
+        }
 
         #[tokio::test]
         async fn credentials_file_read_is_capped() {

@@ -239,7 +239,7 @@ async fn sqs_delivers_and_deletes_messages() {
     let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into());
     let config = json!({"queue_url": queue_url, "region": region, "wait_time_seconds": 1});
     let cfg = SqsConfig::parse(&config).unwrap();
-    let creds = cfg.effective_credentials().expect("AWS_* credentials");
+    let creds = cfg.effective_credentials(true).expect("AWS_* credentials");
 
     // SendMessage with the same signer the listener uses.
     let body =

@@ -13,9 +13,9 @@
 //! {
 //!   "queue_url": "https://sqs.us-east-1.amazonaws.com/123456789012/orders",
 //!   "region": "us-east-1",                        // optional, parsed from the URL
-//!   "access_key_id": "credentials://aws/access_key_id",     // optional,
-//!   "secret_access_key": "credentials://aws/secret_access_key", // falls back to
-//!   "session_token": null,                        // AWS_* environment variables
+//!   "access_key_id": "credentials://aws/access_key_id",     // required unless the
+//!   "secret_access_key": "credentials://aws/secret_access_key", // operator opts in to
+//!   "session_token": null,                        // ambient AWS_* (default off)
 //!   "wait_time_seconds": 20,
 //!   "max_messages": 10,
 //!   "visibility_timeout": 60                      // optional
@@ -117,11 +117,16 @@ impl SqsConfig {
         })
     }
 
-    /// Credentials from the config, else from the standard AWS environment
-    /// variables.
+    /// Credentials from the config. The engine's own `AWS_*` environment
+    /// variables are used only when `allow_ambient` is true (operator opt-in,
+    /// see [`super::ambient_credentials_allowed`]); otherwise a trigger
+    /// without credentials gets none.
     #[must_use]
-    pub fn effective_credentials(&self) -> Option<AwsCredentials> {
+    pub fn effective_credentials(&self, allow_ambient: bool) -> Option<AwsCredentials> {
         self.credentials.clone().or_else(|| {
+            if !allow_ambient {
+                return None;
+            }
             let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok()?;
             let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok()?;
             Some(AwsCredentials {
@@ -332,6 +337,7 @@ mod listener {
     }
 
     /// Run the SQS listener until cancelled.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(
         storage: Arc<dyn StorageBackend>,
         trigger: TriggerDef,
@@ -340,12 +346,16 @@ mod listener {
         let config = resolved_config(storage.as_ref(), &trigger).await?;
         let cfg = SqsConfig::parse(&config)
             .map_err(|e| EngineError::InvalidConfig(format!("sqs: {e}")))?;
-        let creds = cfg.effective_credentials().ok_or_else(|| {
-            EngineError::InvalidConfig(
-                "sqs: no credentials (set access_key_id/secret_access_key or AWS_* env vars)"
-                    .into(),
-            )
-        })?;
+        let creds = cfg
+            .effective_credentials(crate::trigger_sources::ambient_credentials_allowed())
+            .ok_or_else(|| {
+                EngineError::InvalidConfig(
+                    "sqs: no credentials (set access_key_id/secret_access_key, e.g. as \
+                 credentials:// references; the engine's own AWS_* identity is not used \
+                 unless the operator sets ORCH8_ALLOW_AMBIENT_TRIGGER_CREDENTIALS=true)"
+                        .into(),
+                )
+            })?;
         if crate::outbound::trigger_endpoint_profile() != crate::outbound::Profile::LocalSidecar
             && !crate::handlers::builtin::is_url_safe(&cfg.endpoint).await
         {
@@ -548,5 +558,86 @@ mod tests {
         assert_eq!(map_message("q", &text).unwrap().0, json!("hello"));
         assert!(map_message("q", &json!({"Body": "x"})).is_none());
         assert!(map_message("q", &json!({"MessageId": "m"})).is_none());
+    }
+
+    // C1-2: tenant-defined triggers must not borrow the engine's AWS identity.
+    // Env mutation is serialized across these tests.
+    #[allow(unsafe_code)]
+    fn set_ambient_aws_env() {
+        // SAFETY: every test touching the environment is #[serial(trigger_env)].
+        unsafe {
+            std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAAMBIENT");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "ambient-secret");
+        }
+    }
+
+    #[allow(unsafe_code)]
+    fn clear_ambient_aws_env() {
+        // SAFETY: serialized via #[serial(trigger_env)].
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(trigger_env)]
+    fn ambient_aws_env_is_ignored_unless_operator_opted_in() {
+        set_ambient_aws_env();
+        let c = SqsConfig::parse(&json!({
+            "queue_url": "https://sqs.eu-west-1.amazonaws.com/123456789012/orders"
+        }))
+        .unwrap();
+        let denied = c.effective_credentials(false);
+        let allowed = c.effective_credentials(true);
+        clear_ambient_aws_env();
+        assert!(denied.is_none(), "ambient creds leaked to a tenant trigger");
+        assert_eq!(allowed.unwrap().access_key_id, "AKIAAMBIENT");
+    }
+
+    #[test]
+    #[serial_test::serial(trigger_env)]
+    fn explicit_credentials_win_over_ambient() {
+        set_ambient_aws_env();
+        let c = SqsConfig::parse(&json!({
+            "queue_url": "https://sqs.eu-west-1.amazonaws.com/123456789012/orders",
+            "access_key_id": "AKIATENANT", "secret_access_key": "tenant-secret"
+        }))
+        .unwrap();
+        let got = c.effective_credentials(false).unwrap();
+        clear_ambient_aws_env();
+        assert_eq!(got.access_key_id, "AKIATENANT");
+    }
+
+    #[cfg(feature = "sqs")]
+    #[tokio::test]
+    #[serial_test::serial(trigger_env)]
+    async fn run_without_credentials_is_invalid_config_even_with_ambient_env() {
+        use orch8_storage::sqlite::SqliteStorage;
+        use orch8_types::ids::TenantId;
+        use orch8_types::trigger::{TriggerDef, TriggerType};
+        set_ambient_aws_env();
+        let storage = std::sync::Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let now = chrono::Utc::now();
+        let trigger = TriggerDef {
+            slug: "t".into(),
+            sequence_name: "s".into(),
+            version: None,
+            tenant_id: TenantId::unchecked("tenant-a"),
+            namespace: "default".into(),
+            enabled: true,
+            secret: None,
+            trigger_type: TriggerType::Sqs,
+            config: json!({"queue_url": "https://sqs.eu-west-1.amazonaws.com/123456789012/internal"}),
+            created_at: now,
+            updated_at: now,
+        };
+        let result = run(storage, trigger, tokio_util::sync::CancellationToken::new()).await;
+        clear_ambient_aws_env();
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, crate::error::EngineError::InvalidConfig(m) if m.contains("no credentials")),
+            "{err:?}"
+        );
     }
 }
