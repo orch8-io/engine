@@ -1,7 +1,7 @@
 //! E2E tests for the Instances API.
 
 use orch8_api::test_harness::spawn_test_server;
-use orch8_storage::InstanceStore;
+use orch8_storage::{InstanceStore, SignalStore};
 use reqwest::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
@@ -911,4 +911,117 @@ async fn bulk_update_state_skips_illegal_source_states() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// === Cancel is a request to the scheduler, never a direct state flip ===
+// (a direct flip skips saga compensation and `on_cancel` hooks; the engine
+// side is covered by orch8-engine/tests/api_cancel.rs).
+
+async fn create_instance_id(
+    client: &reqwest::Client,
+    srv: &orch8_api::test_harness::TestServer,
+    seq_id: Uuid,
+) -> orch8_types::ids::InstanceId {
+    let resp = client
+        .post(format!("{}/instances", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "sequence_id": seq_id, "tenant_id": "t1", "namespace": "ns1" }))
+        .send()
+        .await
+        .unwrap();
+    let created: serde_json::Value = resp.json().await.unwrap();
+    orch8_types::ids::InstanceId::from_uuid(created["id"].as_str().unwrap().parse().unwrap())
+}
+
+async fn pending_cancels(
+    srv: &orch8_api::test_harness::TestServer,
+    id: orch8_types::ids::InstanceId,
+) -> usize {
+    srv.storage
+        .get_pending_signals(id)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|s| s.signal_type == orch8_types::signal::SignalType::Cancel)
+        .count()
+}
+
+#[tokio::test]
+async fn patch_state_cancelled_enqueues_one_durable_cancel_signal() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let id = create_instance_id(&client, &srv, seq_id).await;
+
+    for _ in 0..2 {
+        let resp = client
+            .patch(format!("{}/instances/{id}/state", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({ "state": "cancelled" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let inst = srv.storage.get_instance(id).await.unwrap().unwrap();
+    assert_ne!(
+        inst.state,
+        orch8_types::instance::InstanceState::Cancelled,
+        "the API must not flip the state itself"
+    );
+    assert_eq!(
+        pending_cancels(&srv, id).await,
+        1,
+        "retries must not stack signals"
+    );
+
+    // Once the instance is terminal a late cancel is rejected, not queued.
+    srv.storage
+        .update_instance_state(id, orch8_types::instance::InstanceState::Cancelled, None)
+        .await
+        .unwrap();
+    let resp = client
+        .patch(format!("{}/instances/{id}/state", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "state": "cancelled" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn bulk_state_cancelled_enqueues_cancel_signals_for_active_instances_only() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(create_instance_id(&client, &srv, seq_id).await);
+    }
+    srv.storage
+        .update_instance_state(
+            ids[0],
+            orch8_types::instance::InstanceState::Completed,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let resp = client
+        .patch(format!("{}/instances/bulk/state", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "filter": { "tenant_id": "t1" }, "state": "cancelled" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let out: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(out["count"], 2);
+    assert_eq!(pending_cancels(&srv, ids[0]).await, 0);
+    for id in &ids[1..] {
+        assert_eq!(pending_cancels(&srv, *id).await, 1);
+        let inst = srv.storage.get_instance(*id).await.unwrap().unwrap();
+        assert_ne!(inst.state, orch8_types::instance::InstanceState::Cancelled);
+    }
 }

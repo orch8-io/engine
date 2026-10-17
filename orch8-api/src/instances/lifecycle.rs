@@ -794,6 +794,23 @@ pub async fn update_state(
         )));
     }
 
+    // Cancel is a request, not a column flip: a direct write to `Cancelled`
+    // would skip the instance's saga compensation and `on_cancel` hooks. Hand
+    // it to the scheduler's cancel path via a durable signal (idempotent;
+    // the transition lands within a tick). Parent wake-up, worker-task purge
+    // and hooks all happen there.
+    if req.state == InstanceState::Cancelled {
+        return match orch8_storage::lifecycle::request_cancel(state.storage.as_ref(), instance_id)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instance"))?
+        {
+            orch8_storage::lifecycle::CancelRequest::Terminal => Err(ApiError::Conflict(format!(
+                "instance {id} changed state concurrently; re-read and retry"
+            ))),
+            _ => Ok(StatusCode::OK),
+        };
+    }
+
     // CAS on the state we validated against: an unconditional write here
     // would let a transition validated against a stale read land on top of
     // a concurrent engine transition (e.g. resurrect a just-Completed run).

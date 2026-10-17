@@ -23,9 +23,8 @@ use orch8_types::context::ExecutionContext;
 use orch8_types::error::StorageError;
 use orch8_types::filter::InstanceFilter;
 use orch8_types::ids::{InstanceId, Namespace, TenantId};
-use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+use orch8_types::instance::{Priority, TaskInstance};
 use orch8_types::job::{EnqueueJobRequest, JOB_IDEMPOTENCY_PREFIX, Job, JobPage, JobStatus};
-use orch8_types::signal::{Signal, SignalType};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -308,15 +307,14 @@ pub async fn list_jobs(
     }))
 }
 
-/// Cancel a job. A job that has not started yet is cancelled immediately
-/// (200, status `cancelled`); a running job receives a cancel signal that
-/// the engine applies at its next step boundary (202). Cancelling a job that
+/// Cancel a job. The cancel is a durable signal the engine applies promptly
+/// (202) -- saga compensations and `on_cancel` hooks run as part of it, so the
+/// returned job may still show its pre-cancel status. Cancelling a job that
 /// already finished is a 409.
 #[utoipa::path(delete, path = "/jobs/{id}", tag = "jobs",
     params(("id" = Uuid, Path, description = "Job id (= instance id)")),
     responses(
-        (status = 200, description = "Job cancelled", body = Job),
-        (status = 202, description = "Cancellation requested for a running job", body = Job),
+        (status = 202, description = "Cancellation requested", body = Job),
         (status = 404, description = "Job not found"),
         (status = 409, description = "Job already finished"),
     )
@@ -334,50 +332,16 @@ pub async fn cancel_job(
         )));
     }
 
-    // Not yet started (or waiting out a retry backoff): cancel directly so a
-    // far-future job does not linger until its fire time. CAS on the state
-    // we read — losing the race to a claim falls through to the signal path.
-    if matches!(
-        instance.state,
-        InstanceState::Scheduled | InstanceState::Paused
-    ) && state
-        .storage
-        .conditional_update_instance_state(
-            instance.id,
-            instance.state,
-            InstanceState::Cancelled,
-            None,
-        )
+    // One path for every state: a durable cancel signal the scheduler
+    // applies (saga compensation + `on_cancel` hooks included). A job that
+    // has not started yet is re-armed so a far-future fire time does not
+    // delay it. Losing the race to a finish is a 409.
+    if orch8_storage::lifecycle::request_cancel(state.storage.as_ref(), instance.id)
         .await
         .map_err(|e| ApiError::from_storage(e, "job"))?
+        == orch8_storage::lifecycle::CancelRequest::Terminal
     {
-        let refreshed = state
-            .storage
-            .get_instance(instance.id)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "job"))?
-            .unwrap_or(instance);
-        return Ok((
-            StatusCode::OK,
-            Json(load_job_view(&state, &refreshed).await?),
-        ));
-    }
-
-    let signal = Signal {
-        id: Uuid::now_v7(),
-        instance_id: instance.id,
-        signal_type: SignalType::Cancel,
-        payload: serde_json::Value::Null,
-        delivered: false,
-        created_at: Utc::now(),
-        delivered_at: None,
-    };
-    match state.storage.enqueue_signal_if_active(&signal).await {
-        Ok(()) => {}
-        Err(StorageError::TerminalTarget { .. }) => {
-            return Err(ApiError::Conflict(format!("job {id} already finished")));
-        }
-        Err(e) => return Err(ApiError::from_storage(e, "job")),
+        return Err(ApiError::Conflict(format!("job {id} already finished")));
     }
     let refreshed = state
         .storage

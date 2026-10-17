@@ -339,9 +339,20 @@ async fn list_filters_and_keyset_pagination() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let cancelled: Value = resp.json().await.unwrap();
-    assert_eq!(cancelled["status"], "cancelled");
+    // Cancel is a durable request the scheduler applies (so sagas and
+    // `on_cancel` hooks run); the job is not `cancelled` until it does.
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let cancel_iid = InstanceId::from_uuid(ids[0].parse().unwrap());
+    let pending = srv.storage.get_pending_signals(cancel_iid).await.unwrap();
+    assert!(
+        pending
+            .iter()
+            .any(|s| s.signal_type == orch8_types::signal::SignalType::Cancel)
+    );
+    srv.storage
+        .update_instance_state(cancel_iid, InstanceState::Cancelled, None)
+        .await
+        .unwrap();
 
     let page: Value = client
         .get(format!("{base}/jobs?status=cancelled"))

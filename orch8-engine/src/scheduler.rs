@@ -1242,6 +1242,9 @@ async fn process_one_signalled_instance(
                 .get_by_id(storage.as_ref(), inst.sequence_id)
                 .await
         {
+            // A sub-sequence parent parked on this child must observe the
+            // cancel (the API no longer flips the state itself).
+            wake_parent_if_child(storage.as_ref(), &inst).await;
             let storage = Arc::clone(storage);
             let handlers = Arc::clone(handlers);
             let tenant = inst.tenant_id.clone();
@@ -2687,7 +2690,7 @@ async fn process_instance(
 
     let instance = ensure_run_started(ctx, instance).await?;
 
-    if process_pending_signals(ctx, instance_id, prefetched.signals, &sequence).await? {
+    if process_pending_signals(ctx, &instance, prefetched.signals, &sequence).await? {
         return Ok(());
     }
 
@@ -2819,12 +2822,20 @@ async fn ensure_run_started(
 
 /// Process any pending signals (using pre-fetched data). Returns `true` when
 /// a signal aborted the instance and the caller must stop processing it.
+///
+/// A cancel signal that drove the instance to `Cancelled` here (an unscoped
+/// cancel of a claimed instance -- including every API-requested cancel of a
+/// scheduled one) owes the same terminal effects as the tree path: the
+/// compensations of its interrupted sagas, its `on_cancel` hook, and a wake
+/// for a waiting sub-sequence parent. This runs on the per-instance task,
+/// like [`run_tree_terminal_effects`], never on the tick.
 async fn process_pending_signals(
     ctx: &InstanceRunCtx<'_>,
-    instance_id: InstanceId,
+    instance: &orch8_types::instance::TaskInstance,
     signals: Vec<Signal>,
     sequence: &SequenceDefinition,
 ) -> Result<bool, EngineError> {
+    let instance_id = instance.id;
     if !signals.is_empty() {
         let abort = crate::signals::process_signals_prefetched(
             ctx.storage.as_ref(),
@@ -2835,6 +2846,12 @@ async fn process_pending_signals(
         )
         .await?;
         if abort {
+            if let Ok(Some(fresh)) = ctx.storage.get_instance(instance_id).await
+                && fresh.state == InstanceState::Cancelled
+            {
+                run_tree_terminal_effects(ctx, &fresh, sequence, InstanceState::Cancelled).await;
+                wake_parent_if_child(ctx.storage.as_ref(), &fresh).await;
+            }
             return Ok(true);
         }
     }

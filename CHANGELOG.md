@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Review round 2: API-driven cancel
+
+- **Operator cancels now run saga compensation and `on_cancel` hooks.**
+  `PATCH /instances/{id}/state` (and gRPC `UpdateState`) to `cancelled`,
+  `PATCH /instances/bulk/state` (and gRPC `BulkUpdateState`) to `cancelled`,
+  and `DELETE /jobs/{id}` used to flip the state column directly, skipping the
+  instance's own saga compensations and `on_cancel` hooks and leaving its
+  worker tasks claimable. They now enqueue a durable `cancel` signal through
+  one helper (`orch8_storage::lifecycle::request_cancel`) that the scheduler's
+  existing cancel path applies off the request: compensations run LIFO, the
+  hook runs on the bounded hook pool, worker tasks are purged and a waiting
+  sub-sequence parent is woken. Repeated requests are no-ops while one is
+  pending; a request for an already-terminal instance is rejected as before
+  (400 from the transition pre-check, 409 if it finishes in the race window).
+  **Behaviour change:** the call returns before the transition, so the
+  instance reads its old state until the next scheduling pass (milliseconds to
+  one tick); `DELETE /jobs/{id}` is always **202** now (was **200** for jobs
+  that had not started); the bulk `count` is the number of instances with a
+  cancel now pending.
+- **Unscoped cancel of a claimed instance now compensates and fires
+  `on_cancel`.** A cancel signal consumed while the instance was claimed
+  (`process_pending_signals`) used to skip both; the signal sweep also now wakes
+  a waiting sub-sequence parent.
+- **Bounded admission count (L4-06).** `create_instance_admitted` /
+  `create_instances_batch_admitted` count at most `limit` (+1) active rows
+  under the tenant advisory lock instead of every active row. No counter
+  table: measured 78 ms single-threaded at 700k active rows for one tenant,
+  1.5 ms capped at 10k, ~3 ms for a typical 20k-row tenant. The backlog gauge
+  (L4-04) was measured at 0.7 s (parallel) / 1.2 s (single worker) per
+  15 s per node at 2M instances / 350k pending tasks, and a counter table
+  would put a contended row on every enqueue and claim, so it is left as is.
+
 ### Delta review fixes
 
 - **Instance retention no longer stalls behind blocked rows (D-01).** The
