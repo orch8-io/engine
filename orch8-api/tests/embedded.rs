@@ -1127,21 +1127,6 @@ async fn put_embed(case: &Case, token: &str, name: &str, body: Value) -> reqwest
         .put(case.url(&format!("/embed/sequences/{name}")))
         .bearer_auth(token)
         .json(&body)
-// ---------------------------------------------------------------------------
-// Embed hardening regressions (EM-02 .. EM-11)
-// ---------------------------------------------------------------------------
-
-fn tuned_runtime(tune: impl FnOnce(&mut EmbeddedRuntime)) -> EmbeddedRuntime {
-    let mut rt = runtime(License::unlicensed());
-    tune(&mut rt);
-    rt
-}
-
-async fn put_seq(case: &Case, token: &str, name: &str) -> reqwest::Response {
-    case.client
-        .put(case.url(&format!("/embed/sequences/{name}")))
-        .bearer_auth(token)
-        .json(&json!({"blocks": [{"type": "step", "id": "a", "handler": "noop", "params": {}}]}))
         .send()
         .await
         .unwrap()
@@ -1296,6 +1281,53 @@ async fn embed_put_sequence_is_sandboxed() {
         assert!(
             offered.contains(&"transform") && !offered.contains(&"http_request"),
             "{}: {offered:?}",
+            case.name
+        );
+    }
+}
+
+#[tokio::test]
+async fn embed_sandbox_handlers_are_configurable() {
+    let mut embedded = runtime(License::unlicensed());
+    embedded.sandbox =
+        orch8_engine::embed_sandbox::SandboxPolicy::from_config_list("noop, crm_lookup");
+    for case in cases_with(Some(embedded)).await {
+        let t = tenant();
+        let builder = mint(&case, &t, "acme", &["builder:edit"], Value::Null).await;
+        let body = |handler: &str| json!({"blocks": [{"type": "step", "id": "a", "handler": handler, "params": {}}]});
+        let allowed = put_embed(&case, &builder, "x", body("crm_lookup")).await;
+        assert_eq!(allowed.status(), StatusCode::CREATED, "{}", case.name);
+        // A configured list replaces the default.
+        let replaced = put_embed(&case, &builder, "y", body("set_state")).await;
+        assert_eq!(
+            replaced.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            case.name
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embed hardening regressions (EM-02 .. EM-11)
+// ---------------------------------------------------------------------------
+
+fn tuned_runtime(tune: impl FnOnce(&mut EmbeddedRuntime)) -> EmbeddedRuntime {
+    let mut rt = runtime(License::unlicensed());
+    tune(&mut rt);
+    rt
+}
+
+async fn put_seq(case: &Case, token: &str, name: &str) -> reqwest::Response {
+    case.client
+        .put(case.url(&format!("/embed/sequences/{name}")))
+        .bearer_auth(token)
+        .json(&json!({"blocks": [{"type": "step", "id": "a", "handler": "noop", "params": {}}]}))
+        .send()
+        .await
+        .unwrap()
+}
+
 async fn embed_json(case: &Case, path: &str, token: &str) -> Value {
     case.embed_get(path, token)
         .send()
@@ -1640,25 +1672,6 @@ async fn embed_lists_skip_hidden_runs_instead_of_returning_short_pages() {
     }
 }
 
-#[tokio::test]
-async fn embed_sandbox_handlers_are_configurable() {
-    let mut embedded = runtime(License::unlicensed());
-    embedded.sandbox =
-        orch8_engine::embed_sandbox::SandboxPolicy::from_config_list("noop, crm_lookup");
-    for case in cases_with(Some(embedded)).await {
-        let t = tenant();
-        let builder = mint(&case, &t, "acme", &["builder:edit"], Value::Null).await;
-        let body = |handler: &str| json!({"blocks": [{"type": "step", "id": "a", "handler": handler, "params": {}}]});
-        let allowed = put_embed(&case, &builder, "x", body("crm_lookup")).await;
-        assert_eq!(allowed.status(), StatusCode::CREATED, "{}", case.name);
-        // A configured list replaces the default.
-        let replaced = put_embed(&case, &builder, "y", body("set_state")).await;
-        assert_eq!(
-            replaced.status(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "{}",
-            case.name
-        );
 /// EM-04: suspending a sub-tenant or revoking a token makes embed tokens
 /// fail; resuming restores them.
 #[tokio::test]

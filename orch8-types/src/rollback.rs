@@ -78,6 +78,7 @@ mod tests {
             enabled: true,
             cooldown_secs: 3600,
             confirmation_window_secs: 60,
+            min_samples: default_min_samples(),
             webhook_url: None,
             created_at: now,
             updated_at: now,

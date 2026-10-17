@@ -310,6 +310,8 @@ async fn enforce_sandbox(
         "sequence rejected by the embed sandbox: {}",
         violations.join("; ")
     )))
+}
+
 /// Per-sub-tenant storage caps for the embedded builder (EM-02): versions
 /// kept per name and distinct names owned. `existing_versions` is the number
 /// of stored versions of the name being written (0 = a new name).

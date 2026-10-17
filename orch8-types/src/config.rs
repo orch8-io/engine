@@ -370,6 +370,7 @@ impl Default for EmbedConfig {
             token_secret: SecretString::default(),
             token_secret_previous: SecretString::default(),
             allowed_origins: String::new(),
+            sandbox_handlers: String::new(),
             max_sequences_per_sub_tenant: default_embed_max_sequences(),
             max_versions_per_sequence: default_embed_max_versions(),
             default_max_concurrent_per_sub_tenant: default_embed_max_concurrent(),
