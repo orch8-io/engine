@@ -947,7 +947,12 @@ impl MobileEngine {
     /// Fetch and load sequences from a remote URL. The endpoint must return a
     /// JSON array of sequence definition objects. Uses the URL from
     /// `config.sequences_url` if `url` is empty.
+    ///
+    /// The array is **unsigned**, so this is a development path: it is refused
+    /// whenever `config.root_public_key` is set (production apps get signed
+    /// content through [`MobileEngine::sync`]). `max_stored_sequences` applies.
     pub fn load_sequences_from_url(&self, url: String) -> Result<u32, MobileError> {
+        self.require_unsigned_loading_allowed()?;
         let target = if url.is_empty() {
             &self.config.sequences_url
         } else {
@@ -1016,27 +1021,7 @@ impl MobileEngine {
             // no longer needs to overlap SQLite persistence.
             drop(body_bytes);
 
-            let mut loaded = 0u32;
-            for (json_size, seq) in sequences {
-                if json_size as u64 > self.config.max_sequence_size_bytes {
-                    warn!(
-                        name = %seq.name,
-                        size = json_size,
-                        limit = self.config.max_sequence_size_bytes,
-                        "skipping oversized sequence"
-                    );
-                    continue;
-                }
-                match self.storage.create_sequence(&seq).await {
-                    Ok(()) => {
-                        info!(name = %seq.name, version = seq.version, "loaded sequence from URL");
-                        loaded += 1;
-                    }
-                    Err(e) => {
-                        warn!(name = %seq.name, error = %e, "failed to store sequence");
-                    }
-                }
-            }
+            let loaded = self.install_fetched_sequences(sequences).await?;
 
             info!(url = %target, count = loaded, "loaded sequences from remote");
             Ok(loaded)
@@ -1487,6 +1472,76 @@ impl MobileEngine {
 }
 
 impl MobileEngine {
+    /// Unsigned sequence loading from a URL must not coexist with a configured
+    /// verification key: the operator asked for signed content only.
+    fn require_unsigned_loading_allowed(&self) -> Result<(), MobileError> {
+        if self.config.root_public_key.trim().is_empty() {
+            Ok(())
+        } else {
+            Err(MobileError::InvalidInput {
+                message: "load_sequences_from_url installs unsigned sequences and is disabled \
+                          while root_public_key is configured; use sync() with a signed manifest"
+                    .to_string(),
+            })
+        }
+    }
+
+    /// Store a fetched batch, honouring the per-sequence size limit and
+    /// `max_stored_sequences` (new names past the cap are skipped; updates to
+    /// stored names are always allowed).
+    async fn install_fetched_sequences(
+        &self,
+        sequences: Vec<(usize, SequenceDefinition)>,
+    ) -> Result<u32, MobileError> {
+        let tenant = mobile_tenant_id();
+        let ns = Namespace::new("default");
+        let mut names: std::collections::HashSet<String> = self
+            .storage
+            .list_sequences(
+                Some(&tenant),
+                Some(&ns),
+                self.config.max_stored_sequences.saturating_add(1),
+                0,
+            )
+            .await?
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        let cap = self.config.max_stored_sequences as usize;
+
+        let mut loaded = 0u32;
+        for (json_size, seq) in sequences {
+            if json_size as u64 > self.config.max_sequence_size_bytes {
+                warn!(
+                    name = %seq.name,
+                    size = json_size,
+                    limit = self.config.max_sequence_size_bytes,
+                    "skipping oversized sequence"
+                );
+                continue;
+            }
+            if !names.contains(&seq.name) && names.len() >= cap {
+                warn!(
+                    name = %seq.name,
+                    limit = cap,
+                    "skipping sequence: stored sequence limit reached"
+                );
+                continue;
+            }
+            match self.storage.create_sequence(&seq).await {
+                Ok(()) => {
+                    info!(name = %seq.name, version = seq.version, "loaded sequence from URL");
+                    names.insert(seq.name.clone());
+                    loaded += 1;
+                }
+                Err(e) => {
+                    warn!(name = %seq.name, error = %e, "failed to store sequence");
+                }
+            }
+        }
+        Ok(loaded)
+    }
+
     /// Rebuild the handler registry from the enabled builtins plus every
     /// host handler (host handlers win on a name clash). Fails once the
     /// registry is shared with a running tick loop or worker.
@@ -2440,6 +2495,79 @@ mod tests {
             let err = engine.sync(url.to_string(), None).unwrap_err().to_string();
             assert!(err.contains("URL must"), "{url}: {err}");
         }
+    }
+
+    fn named_sequence(name: &str, version: i32) -> SequenceDefinition {
+        serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "tenant_id": "mobile",
+            "namespace": "default",
+            "name": name,
+            "version": version,
+            "deprecated": false,
+            "blocks": [{ "type": "step", "id": "s1", "handler": "noop", "params": {}, "cancellable": true }],
+            "created_at": chrono::Utc::now().to_rfc3339()
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn mc13_unsigned_url_loading_is_refused_when_a_root_key_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine.db").to_string_lossy().to_string();
+        let mut config = MobileEngineConfig::default();
+        config.root_public_key = "AAAA".to_string();
+        let engine = MobileEngine::new(path, config).unwrap();
+
+        let err = engine
+            .load_sequences_from_url("https://example.com/seqs".to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unsigned"), "{err}");
+
+        // The documented dev path (no root key) still gets as far as the fetch.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine.db").to_string_lossy().to_string();
+        let engine = MobileEngine::new(path, MobileEngineConfig::default()).unwrap();
+        let err = engine
+            .load_sequences_from_url("http://example.com/seqs".to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("URL must"), "reached URL validation: {err}");
+    }
+
+    #[test]
+    fn mc13_url_batches_respect_max_stored_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine.db").to_string_lossy().to_string();
+        let mut config = MobileEngineConfig::default();
+        config.max_stored_sequences = 2;
+        let engine = MobileEngine::new(path, config).unwrap();
+        engine
+            .load_sequence_from_json(
+                serde_json::to_string(&named_sequence("already-there", 1)).unwrap(),
+            )
+            .unwrap();
+
+        let batch = ["already-there", "new-a", "new-b", "new-c"]
+            .into_iter()
+            .map(|name| (100usize, named_sequence(name, 2)))
+            .collect();
+        let loaded = engine
+            .run_with_timeout(engine.install_fetched_sequences(batch))
+            .unwrap();
+
+        // One free slot: the update to the stored name and one new name fit.
+        assert_eq!(loaded, 2);
+        let mut names: Vec<String> = engine
+            .loaded_sequences()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names, vec!["already-there", "new-a"]);
     }
 
     #[test]
