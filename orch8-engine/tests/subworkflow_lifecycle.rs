@@ -416,7 +416,12 @@ use orch8_types::sequence::{SagaDef, SagaStep};
 
 /// Engine whose `undo` handler records the block id of each compensation it
 /// runs, in call order.
-fn saga_engine_builder(backend: &TestBackend) -> (orch8_engine::testing::TestEngineBuilder, Arc<Mutex<Vec<String>>>) {
+fn saga_engine_builder(
+    backend: &TestBackend,
+) -> (
+    orch8_engine::testing::TestEngineBuilder,
+    Arc<Mutex<Vec<String>>>,
+) {
     let undone = Arc::new(Mutex::new(Vec::<String>::new()));
     let u = Arc::clone(&undone);
     let builder = TestEngine::builder()
@@ -601,7 +606,11 @@ async fn l3_11_a_saga_that_rolled_itself_back_is_not_compensated_twice() {
         let seq = SequenceBuilder::new("t")
             .block(saga_block(vec![
                 saga_step("s0", noop_block("a0"), Some("c0")),
-                saga_step("s1", BlockDefinition::Step(Box::new(step("a1", "boom"))), Some("c1")),
+                saga_step(
+                    "s1",
+                    BlockDefinition::Step(Box::new(step("a1", "boom"))),
+                    Some("c1"),
+                ),
             ]))
             .build();
         let id = engine.start(&seq).await;
@@ -642,7 +651,12 @@ async fn l3_07_cancelling_a_parent_compensates_the_sagas_of_its_children() {
         send_cancel(&engine, parent).await;
         engine.tick().await;
 
-        assert_eq!(state_of(&engine, child.id).await, InstanceState::Cancelled, "{}", backend.name());
+        assert_eq!(
+            state_of(&engine, child.id).await,
+            InstanceState::Cancelled,
+            "{}",
+            backend.name()
+        );
         assert_eq!(undone(&log), vec!["c0".to_owned()], "{}", backend.name());
     }
 }

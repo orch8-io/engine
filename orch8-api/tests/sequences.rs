@@ -908,3 +908,147 @@ async fn create_sequence_with_malformed_input_schema_returns_400() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+/// L3-09: `migrate-instance` used to rebind blindly. An instance mid-way
+/// through a composite owns an execution tree; a target version that drops,
+/// retypes or re-parents a live block must be rejected with 409, a
+/// structurally identical (or purely additive) one must still be accepted.
+#[tokio::test]
+async fn migrate_instance_rejects_structurally_incompatible_target() {
+    use orch8_storage::{ExecutionTreeStore, InstanceStore};
+    use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
+    use orch8_types::ids::{BlockId, ExecutionNodeId, InstanceId};
+
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let step = |id: &str| json!({ "type": "step", "id": id, "handler": "noop", "params": {}, "cancellable": true });
+    let publish = |name: &str, version: i32, blocks: serde_json::Value| {
+        let id = Uuid::now_v7();
+        let body = json!({
+            "id": id, "tenant_id": "t1", "namespace": "ns1", "name": name,
+            "version": version, "deprecated": false, "blocks": blocks,
+            "created_at": chrono::Utc::now().to_rfc3339()
+        });
+        (id, body)
+    };
+    let par = |branches: serde_json::Value| json!({ "type": "parallel", "id": "par", "branches": branches });
+    let versions = [
+        // v1: the version the instance runs.
+        publish("mig", 1, json!([par(json!([[step("a")], [step("b")]]))])),
+        // additive: a new trailing block.
+        publish(
+            "mig",
+            2,
+            json!([par(json!([[step("a")], [step("b")]])), step("tail")]),
+        ),
+        // `b` removed.
+        publish("mig", 3, json!([par(json!([[step("a")]]))])),
+        // `par` retyped to a race.
+        publish(
+            "mig",
+            4,
+            json!([{ "type": "race", "id": "par", "branches": [[step("a")], [step("b")]] }]),
+        ),
+        // `b` moved out from under `par`.
+        publish("mig", 5, json!([par(json!([[step("a")]])), step("b")])),
+    ];
+    for (_, body) in &versions {
+        let resp = client
+            .post(format!("{}/sequences", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "{body}");
+    }
+
+    let resp = client
+        .post(format!("{}/instances", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "sequence_id": versions[0].0, "tenant_id": "t1", "namespace": "ns1",
+            "context": { "data": {}, "config": {}, "audit": [] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let inst_id = created["id"].as_str().unwrap().to_string();
+    let instance_id = InstanceId::from_uuid(inst_id.parse().unwrap());
+
+    // The tree the scheduler would have built: `par` running, `a` done,
+    // `b` still pending.
+    let node =
+        |block: &str, block_type, parent: Option<ExecutionNodeId>, branch, state| ExecutionNode {
+            id: ExecutionNodeId::new(),
+            instance_id,
+            block_id: BlockId::new(block),
+            parent_id: parent,
+            block_type,
+            branch_index: branch,
+            state,
+            started_at: None,
+            completed_at: None,
+        };
+    let par_node = node("par", BlockType::Parallel, None, None, NodeState::Running);
+    let nodes = vec![
+        node(
+            "a",
+            BlockType::Step,
+            Some(par_node.id),
+            Some(0),
+            NodeState::Completed,
+        ),
+        node(
+            "b",
+            BlockType::Step,
+            Some(par_node.id),
+            Some(1),
+            NodeState::Pending,
+        ),
+        par_node,
+    ];
+    srv.storage
+        .create_execution_nodes_batch(&nodes)
+        .await
+        .unwrap();
+
+    let migrate = |target: Uuid| {
+        client
+            .post(format!("{}/sequences/migrate-instance", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({ "instance_id": inst_id, "target_sequence_id": target }))
+            .send()
+    };
+    for (idx, needle) in [(2, "'b'"), (3, "'par'"), (4, "'b'")] {
+        let resp = migrate(versions[idx].0).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "version {}", idx + 1);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("structurally incompatible") && message.contains(needle),
+            "{message}"
+        );
+        // Rejected migrations leave the binding untouched.
+        let stored = srv
+            .storage
+            .get_instance(instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.sequence_id.into_uuid(), versions[0].0);
+    }
+
+    let resp = migrate(versions[1].0).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = srv
+        .storage
+        .get_instance(instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.sequence_id.into_uuid(), versions[1].0);
+}
