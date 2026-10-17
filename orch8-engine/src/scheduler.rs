@@ -1950,6 +1950,30 @@ pub(crate) async fn dispatch_cleanup_step(
     hook: &'static str,
     ctx: crate::handlers::StepContext,
 ) -> Option<Result<serde_json::Value, orch8_types::error::StepError>> {
+    // Sub-tenant sandbox: cleanup hooks of an embedded end customer's
+    // sequence run only allowlisted handlers.
+    match crate::embed_sandbox::deny_handler(
+        storage.as_ref(),
+        instance,
+        handlers.embed_sandbox(),
+        step.id.as_str(),
+        &step.handler,
+    )
+    .await
+    {
+        Ok(None) => {}
+        Ok(Some(reason)) => {
+            warn!(instance_id = %instance.id, hook, reason = %reason, "embed sandbox denied cleanup hook step");
+            return Some(Err(orch8_types::error::StepError::Permanent {
+                message: reason,
+                details: None,
+            }));
+        }
+        Err(e) => {
+            warn!(instance_id = %instance.id, hook, error = %e, "embed sandbox lookup failed; skipping cleanup hook step");
+            return None;
+        }
+    }
     let plugin_kind = crate::handlers::PluginKind::detect(&step.handler);
     let result = if let Some(handler) = handlers.get(&step.handler) {
         dispatch_hook_bounded(handler(ctx)).await
@@ -2507,8 +2531,22 @@ pub(crate) async fn handle_deadline_breach(
         Err(e) => return Err(e),
     }
 
-    // Invoke escalation handler if configured.
+    // Invoke escalation handler if configured (never for a sandboxed
+    // sub-tenant sequence unless the handler is allowlisted).
+    let escalation_denied = match &step_def.on_deadline_breach {
+        Some(escalation) => crate::embed_sandbox::deny_handler(
+            storage.as_ref(),
+            instance,
+            handlers.embed_sandbox(),
+            step_def.id.as_str(),
+            &escalation.handler,
+        )
+        .await?
+        .is_some(),
+        None => false,
+    };
     if let Some(ref escalation) = step_def.on_deadline_breach
+        && !escalation_denied
         && let Some(handler) = handlers.get(&escalation.handler)
     {
         let mut params = escalation.params.clone();

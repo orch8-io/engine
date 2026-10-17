@@ -465,6 +465,28 @@ pub(super) async fn dispatch_block(
                         details: None,
                     })?;
 
+                // Sub-tenant sandbox: resolution is by name across the whole
+                // tenant, so a sandboxed run may only start sequences owned by
+                // its own sub-tenant. Anything else reads as "not found" (no
+                // existence probing of vendor or other sub-tenants' sequences).
+                if !crate::embed_sandbox::sub_sequence_allowed(instance, &child_seq)
+                    && crate::embed_sandbox::is_sandboxed(storage.as_ref(), instance).await?
+                {
+                    tracing::warn!(
+                        instance_id = %instance.id,
+                        block_id = %ss_def.id,
+                        target = %ss_def.sequence_name,
+                        "embed sandbox denied sub-sequence outside the sub-tenant"
+                    );
+                    return Err(EngineError::StepFailed {
+                        instance_id: instance.id,
+                        block_id: ss_def.id.clone(),
+                        message: format!("sub-sequence '{}' not found", ss_def.sequence_name),
+                        retryable: false,
+                        details: None,
+                    });
+                }
+
                 // Resolve `{{…}}` templates in `input` exactly like step params
                 // (context + prior outputs), so each activation passes its own
                 // values — e.g. the current for_each item.

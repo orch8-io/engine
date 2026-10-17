@@ -133,6 +133,9 @@ pub struct HandlerRegistry {
     /// reliability behaviour so the breaker doesn't interfere with other
     /// assertions.
     circuit_breakers: Option<Arc<CircuitBreakerRegistry>>,
+    /// Handler allowlist for sub-tenant-owned sequences (see
+    /// [`crate::embed_sandbox`]). Defaults to the conservative built-in set.
+    embed_sandbox: Arc<crate::embed_sandbox::SandboxPolicy>,
 }
 
 impl HandlerRegistry {
@@ -141,7 +144,21 @@ impl HandlerRegistry {
             handlers: HashMap::new(),
             mocks: HashMap::new(),
             circuit_breakers: None,
+            embed_sandbox: Arc::new(crate::embed_sandbox::SandboxPolicy::default()),
         }
+    }
+
+    /// Install the sub-tenant sandbox policy (`[embed] sandbox_handlers`).
+    #[must_use]
+    pub fn with_embed_sandbox(mut self, policy: crate::embed_sandbox::SandboxPolicy) -> Self {
+        self.embed_sandbox = Arc::new(policy);
+        self
+    }
+
+    /// The sandbox policy for sub-tenant-owned sequences.
+    #[must_use]
+    pub fn embed_sandbox(&self) -> &crate::embed_sandbox::SandboxPolicy {
+        &self.embed_sandbox
     }
 
     /// Builder-style setter that installs a circuit breaker registry. The

@@ -477,6 +477,23 @@ async fn auto_decide_endpoint(
     instance: &orch8_types::instance::TaskInstance,
     auto: &orch8_types::sequence::AutoDecideDef,
 ) -> Result<crate::handlers::jev::JevEndpoint, orch8_types::error::StepError> {
+    // Sub-tenant sandbox: `auto_decide` spends the operator's model key or
+    // dereferences a stored credential — never for an embedded end customer's
+    // sequence. The gate then fails safe to a human.
+    if crate::embed_sandbox::is_sandboxed(storage, instance)
+        .await
+        .map_err(|e| orch8_types::error::StepError::Retryable {
+            message: format!("embed sandbox lookup failed: {e}"),
+            details: None,
+        })?
+    {
+        return Err(orch8_types::error::StepError::Permanent {
+            message: "embed sandbox: wait_for_input.auto_decide is not allowed in a sequence \
+                      authored by an embedded sub-tenant"
+                .into(),
+            details: None,
+        });
+    }
     let mut api_key = auto.api_key.clone().map(serde_json::Value::String);
     if let Some(key) = api_key.as_mut() {
         crate::credentials::resolve_in_value(storage, instance.tenant_id.as_str(), key).await?;
@@ -1184,6 +1201,7 @@ pub(super) async fn execute_step_block(
         step_def,
         &outputs_snap,
         defer_credentials,
+        handlers.embed_sandbox(),
     )
     .await
     {

@@ -72,7 +72,7 @@ pub(crate) async fn handle_query_instance(ctx: StepContext) -> Result<Value, Ste
     // SECURITY: not-found and cross-tenant MUST return the identical response
     // so an attacker cannot probe foreign instance existence.
     let target = match target {
-        Some(t) if t.tenant_id == ctx.tenant_id => t,
+        Some(t) if super::util::caller_may_access(&ctx, &t).await? => t,
         _ => return Ok(json!({ "found": false })),
     };
 
@@ -501,5 +501,55 @@ mod tests {
         let result = handle_query_instance(ctx).await.unwrap();
 
         assert_eq!(result["current_node"], json!("live"));
+    }
+
+    #[tokio::test]
+    async fn sub_tenant_run_cannot_query_another_sub_tenants_instance() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let mut caller = mk_instance("T1");
+        caller.sub_tenant = Some("acme".into());
+        let mut own = mk_instance("T1");
+        own.sub_tenant = Some("acme".into());
+        let mut other = mk_instance("T1");
+        other.sub_tenant = Some("globex".into());
+        let tenant_level = mk_instance("T1");
+        for i in [&caller, &own, &other, &tenant_level] {
+            storage.create_instance(i).await.unwrap();
+        }
+        for (target, found) in [(&own, true), (&other, false), (&tenant_level, false)] {
+            let ctx = mk_ctx(
+                &caller,
+                Arc::clone(&storage_dyn),
+                json!({ "instance_id": target.id.to_string() }),
+            );
+            let result = handle_query_instance(ctx).await.unwrap();
+            assert_eq!(
+                result["found"],
+                json!(found),
+                "target {:?}",
+                target.sub_tenant
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tenant_level_run_may_still_query_sub_tenant_instances() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1");
+        let mut target = mk_instance("T1");
+        target.sub_tenant = Some("acme".into());
+        storage.create_instance(&caller).await.unwrap();
+        storage.create_instance(&target).await.unwrap();
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({ "instance_id": target.id.to_string() }),
+        );
+        assert_eq!(
+            handle_query_instance(ctx).await.unwrap()["found"],
+            json!(true)
+        );
     }
 }

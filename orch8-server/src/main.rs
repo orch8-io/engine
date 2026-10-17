@@ -1417,7 +1417,9 @@ fn spawn_engine_now(
     // hit the same in-memory state the scheduler consults — and so the
     // engine's check/record_* calls roll up into the rows persisted by the
     // inspection endpoints.
-    let handlers = handlers.with_circuit_breakers(cb_registry);
+    let handlers = handlers.with_circuit_breakers(cb_registry).with_embed_sandbox(
+        orch8_engine::embed_sandbox::SandboxPolicy::from_config_list(&config.embed.sandbox_handlers),
+    );
     if config.alerts.enabled {
         let alert_storage = Arc::clone(&storage);
         let alert_config = config.alerts.clone();
@@ -1808,6 +1810,9 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     }
     if let Ok(val) = std::env::var(orch8_api::embed::token::ALLOWED_ORIGINS_ENV) {
         config.embed.allowed_origins = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_EMBED_SANDBOX_HANDLERS") {
+        config.embed.sandbox_handlers = val;
     }
     if let Ok(val) = std::env::var(orch8_api::license::LICENSE_KEY_ENV) {
         config.license.key = val.into();

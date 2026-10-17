@@ -311,6 +311,16 @@ pub struct EmbedConfig {
     /// Env: `ORCH8_EMBED_ALLOWED_ORIGINS`.
     #[serde(default)]
     pub allowed_origins: String,
+    /// Comma-separated handler names a sub-tenant-owned sequence (authored
+    /// through the embedded builder) may use. Empty (default) selects the
+    /// conservative built-in set (`noop`, `log`, `sleep`, `fail`, `assert`,
+    /// `human_review`, `set_state`, `get_state`, `delete_state`, `merge_state`,
+    /// `transform`); a non-empty value **replaces** it. Enforced when the
+    /// sequence is written and again on every step at execution time.
+    /// Tenant-level (vendor-authored) sequences are never restricted.
+    /// Env: `ORCH8_EMBED_SANDBOX_HANDLERS`.
+    #[serde(default)]
+    pub sandbox_handlers: String,
 }
 
 /// `[license]` section.

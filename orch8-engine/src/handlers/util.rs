@@ -44,6 +44,29 @@ pub(crate) fn dry_run_stub(handler: &str, would: Value, shape: Value) -> Value {
     Value::Object(obj)
 }
 
+/// Whether the instance running `ctx` may read or signal `target` by id.
+///
+/// Same tenant is always required. A run that belongs to a sub-tenant (an
+/// embedded end customer's) is further confined to instances of that same
+/// sub-tenant, so a by-id guess cannot reach another end customer's data.
+/// Callers must answer a denial exactly like "not found".
+pub(crate) async fn caller_may_access(
+    ctx: &super::StepContext,
+    target: &orch8_types::instance::TaskInstance,
+) -> Result<bool, StepError> {
+    if target.tenant_id != ctx.tenant_id {
+        return Ok(false);
+    }
+    let caller = ctx
+        .storage
+        .get_instance(ctx.instance_id)
+        .await
+        .map_err(|e| map_storage_err(&e))?;
+    // A caller row that no longer exists (instance deleted mid-step) has no
+    // sub-tenant to confine it; the tenant check above still applies.
+    Ok(caller.is_none_or(|c| c.sub_tenant.is_none() || c.sub_tenant == target.sub_tenant))
+}
+
 /// Parse an `InstanceId` from a params object field.
 ///
 /// Returns `StepError::Permanent` if the field is missing, not a string, or

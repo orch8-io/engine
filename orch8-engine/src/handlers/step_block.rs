@@ -197,6 +197,9 @@ pub(crate) enum PrepareError {
     Template(EngineError),
     /// A `credentials://` ref failed to resolve — fail the step.
     Credential(StepError),
+    /// The step breaks the sub-tenant sandbox ([`crate::embed_sandbox`]) —
+    /// fail the step without dispatching it.
+    Sandbox(String),
 }
 
 impl PrepareError {
@@ -205,6 +208,7 @@ impl PrepareError {
         match self {
             Self::Infra(e) | Self::Template(e) => e.to_string(),
             Self::Credential(e) => e.to_string(),
+            Self::Sandbox(message) => message.clone(),
         }
     }
 }
@@ -227,6 +231,7 @@ pub(crate) async fn prepare_step(
     step_def: &StepDef,
     outputs: &OutputsSnapshot,
     defer_credentials: bool,
+    sandbox: &crate::embed_sandbox::SandboxPolicy,
 ) -> Result<PreparedStep, PrepareError> {
     // Context snapshot — reads only `instance.context` + `context_access`, so
     // it is built before template resolution. An error here is infrastructural.
@@ -258,6 +263,24 @@ pub(crate) async fn prepare_step(
     };
 
     let carries_credentials = orch8_types::worker::contains_credential_reference(&resolved_params);
+
+    // Sub-tenant sandbox: a sequence authored by an embedded end customer may
+    // only run allowlisted handlers and never resolves credentials. Checked on
+    // the *resolved* params (a template can mint a `credentials://` ref) and
+    // before any credential is expanded, whatever the stored sequence says.
+    if crate::embed_sandbox::is_sandboxed(storage, instance)
+        .await
+        .map_err(PrepareError::Infra)?
+        && let Err(reason) = crate::embed_sandbox::check_step(step_def, &resolved_params, sandbox)
+    {
+        tracing::warn!(
+            instance_id = %instance.id,
+            block_id = %step_def.id,
+            reason = %reason,
+            "embed sandbox denied step"
+        );
+        return Err(PrepareError::Sandbox(reason));
+    }
 
     // Credentials next: every dispatch target sees expanded params without
     // needing the credential registry. Missing/disabled/cross-tenant refs fail.
@@ -499,6 +522,7 @@ pub(crate) async fn execute_step_node_with_clock(
         step_def,
         outputs,
         defer_credentials,
+        handlers.embed_sandbox(),
     )
     .await
     {
