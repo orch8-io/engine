@@ -1,6 +1,6 @@
 //! Sub-workflow lifecycle regressions from the long-run review (L3-05,
 //! L3-07, L3-11), driven through the real scheduler on virtual time
-//! ([`TestEngine`]) on SQLite and, when `DATABASE_URL` is set, Postgres.
+//! ([`TestEngine`]) on `SQLite` and, when `DATABASE_URL` is set, Postgres.
 
 use serde_json::json;
 
@@ -327,7 +327,7 @@ async fn l3_05_dlq_retry_of_a_composite_reruns_only_the_failed_leaf() {
     }
 }
 
-/// parent = [sub_sequence -> child], child = [count "c1", flaky "c2"].
+/// parent = `[sub_sequence -> child]`, child = `[noop "c1", flaky "c2"]`.
 async fn failed_parent_with_failed_child(engine: &TestEngine) -> InstanceId {
     let child_seq = SequenceBuilder::new("t")
         .step("c1", "noop")

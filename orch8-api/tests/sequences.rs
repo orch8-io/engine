@@ -914,6 +914,7 @@ async fn create_sequence_with_malformed_input_schema_returns_400() {
 /// retypes or re-parents a live block must be rejected with 409, a
 /// structurally identical (or purely additive) one must still be accepted.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn migrate_instance_rejects_structurally_incompatible_target() {
     use orch8_storage::{ExecutionTreeStore, InstanceStore};
     use orch8_types::execution::{BlockType, ExecutionNode, NodeState};

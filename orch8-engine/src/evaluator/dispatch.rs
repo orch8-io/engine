@@ -89,7 +89,7 @@ fn find_activation_child<'c>(
         })
 }
 
-/// The loop / for_each part of an activation key (everything after the node
+/// The loop / `for_each` part of an activation key (everything after the node
 /// id), which is stable across a tree rebuild.
 fn activation_suffix(activation: &str) -> &str {
     activation.split_once('/').map_or("", |(_, rest)| rest)
