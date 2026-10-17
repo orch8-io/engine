@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Delta review fixes
+
+- **Instance retention no longer stalls behind blocked rows (D-01).** The
+  candidate scan skips parents that still have any child row (children are
+  purged first, the parent on a later pass), and a pass scans past instances
+  whose artifact delete keeps failing instead of retrying the same head rows.
+- **Bounded parked-webhook and delivery-attempt pruning (D-02).** Both
+  deletes run in capped batches (40 x 5000 rows, 20 s budget per call) and
+  continue on the next tick instead of one unbounded `DELETE` that outlived
+  `statement_timeout`. New migration `111_webhook_outbox_parked_index`
+  (partial index on parked rows; pre-create `CONCURRENTLY` on large installs,
+  see its header).
+- **OAuth2 refresh back-off (D-03).** Updating a credential through the API
+  (`update` / `update_cas`) clears its failure count and refresh hold, so a
+  re-authorised credential refreshes at once. Transport errors, 5xx, 408/425/429
+  and storage errors hold a credential for at most 15 minutes; only 4xx
+  rejections (`invalid_grant`, ...) and bad configuration escalate towards 6 h.
+- **Readiness no longer flaps under a slow database (D-04).** The readiness
+  floor is now `max(10 x tick_interval, 90 s)` (was 30 s) and the tick
+  heartbeat is also stamped between the claim and each sweep phase.
+- **Bounded cancel/escalation hooks (D-05).** One hook pool per tick loop:
+  16 concurrent overall, 4 per tenant, 1024 queued or running; overflow is
+  dropped and counted in `orch8_hooks_dropped_total`. Shutdown waits up to
+  the grace period for in-flight hooks, then aborts them.
+- **Over-cap `sleep` steps keep working (D-06).** A persisted `sleep` step with
+  `duration_ms` above 60 s is parked durably for that duration (like `delay`)
+  instead of failing permanently. The lint warning stays.
+
 ### Operations: reload and rotation
 
 - **KMS credentials rotate without a restart (L5-04).**
