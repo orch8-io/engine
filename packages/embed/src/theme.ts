@@ -58,12 +58,12 @@ export function cssVarsRule(vars: Record<string, string>): string {
   return decls ? `:host { ${decls} }` : "";
 }
 
-/** Only absolute http(s) URLs are allowed for the vendor logo. */
+/** Only absolute https URLs are allowed for the vendor logo (no mixed content, no data:/javascript:). */
 export function safeLogoUrl(url: string | null | undefined): string | null {
   if (!url) return null;
   try {
     const parsed = new URL(url);
-    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null;
+    return parsed.protocol === "https:" ? parsed.href : null;
   } catch {
     return null;
   }

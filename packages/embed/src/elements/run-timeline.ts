@@ -1,4 +1,4 @@
-import { BASE_ATTRIBUTES, Orch8Element, type LoadMode } from "../base.js";
+import { BASE_ATTRIBUTES, Orch8Element, type LoadMode, type LoadResult } from "../base.js";
 import { formatDateTime, formatDuration, h, jsonPreview } from "../dom.js";
 import type { RunDetail } from "../types.js";
 
@@ -16,16 +16,17 @@ export class Orch8RunTimelineElement extends Orch8Element {
   private run: RunDetail | null = null;
   private prevStates = new Map<string, string>();
   private prevRunState: string | null = null;
+  private signature = "";
 
   protected override extraCss(): string {
     return `
       ol.timeline { list-style: none; margin: 0; padding: 0; position: relative; }
-      ol.timeline > li { position: relative; padding: 0 0 calc(var(--_space) * 2) 28px; }
+      ol.timeline > li { position: relative; padding: 0 0 calc(var(--_space) * 2); padding-inline-start: 28px; }
       ol.timeline > li::before {
-        content: ""; position: absolute; left: 7px; top: 18px; bottom: 0; width: 2px; background: var(--_border);
+        content: ""; position: absolute; inset-inline-start: 7px; top: 18px; bottom: 0; width: 2px; background: var(--_border);
       }
       ol.timeline > li:last-child::before { display: none; }
-      .dot { position: absolute; left: 0; top: 3px; width: 16px; height: 16px; border-radius: 50%;
+      .dot { position: absolute; inset-inline-start: 0; top: 3px; width: 16px; height: 16px; border-radius: 50%;
         border: 2px solid currentColor; background: var(--_bg); display: grid; place-items: center; font-size: 10px; line-height: 1; }
       .step-name { font-weight: 600; }
       .step-meta { font-size: 0.875em; color: var(--_muted); }
@@ -47,6 +48,7 @@ export class Orch8RunTimelineElement extends Orch8Element {
   protected override onAttributeChanged(name: string): void {
     if (name === "run-id") {
       this.run = null;
+      this.signature = "";
       this.prevStates.clear();
       this.prevRunState = null;
     }
@@ -67,10 +69,13 @@ export class Orch8RunTimelineElement extends Orch8Element {
     return this.pollInterval() > 0 && Boolean(this.runId) && !(this.run && TERMINAL.has(String(this.run.state)));
   }
 
-  protected async load(signal: AbortSignal, mode: LoadMode): Promise<void> {
+  protected async load(signal: AbortSignal, mode: LoadMode): Promise<LoadResult> {
     const id = this.runId;
     if (!id) return;
     const run = await this.client.getRun(id, signal);
+    const signature = JSON.stringify(run);
+    if (mode === "refresh" && signature === this.signature) return "unchanged"; // keep focus, scroll, selection
+    this.signature = signature;
     if (mode === "refresh") this.announceChanges(run);
     this.run = run;
     this.prevRunState = String(run.state);
@@ -130,7 +135,7 @@ export class Orch8RunTimelineElement extends Orch8Element {
               "details",
               { "data-out": step.id },
               h("summary", { "data-key": `out-${step.id}` }, this.t("timelineOutput")),
-              h("pre", { tabindex: "0" }, jsonPreview(step.output)),
+              h("pre", { tabindex: "0", "data-key": `pre-${step.id}` }, jsonPreview(step.output)),
             )
           : null,
       );
@@ -144,6 +149,18 @@ export class Orch8RunTimelineElement extends Orch8Element {
     for (const d of Array.from(list.querySelectorAll<HTMLDetailsElement>("details"))) {
       if (open.has(d.getAttribute("data-out"))) d.open = true;
     }
+    // Scroll offsets of output panes survive the rebuild (focus is restored by data-key).
+    const scrolls = new Map<string, [number, number]>();
+    for (const pre of Array.from(this.body.querySelectorAll<HTMLElement>("pre[data-key]"))) {
+      scrolls.set(pre.getAttribute("data-key")!, [pre.scrollTop, pre.scrollLeft]);
+    }
     this.withFocusPreserved(() => this.body.replaceChildren(header, list));
+    for (const pre of Array.from(list.querySelectorAll<HTMLElement>("pre[data-key]"))) {
+      const pos = scrolls.get(pre.getAttribute("data-key")!);
+      if (pos) {
+        pre.scrollTop = pos[0];
+        pre.scrollLeft = pos[1];
+      }
+    }
   }
 }

@@ -1,4 +1,4 @@
-import { BASE_ATTRIBUTES, Orch8Element, type LoadMode } from "../base.js";
+import { BASE_ATTRIBUTES, Orch8Element, type LoadMode, type LoadResult } from "../base.js";
 import { formatDateTime, formatRelative, h } from "../dom.js";
 import type { RunSummary } from "../types.js";
 
@@ -24,6 +24,8 @@ export class Orch8RunsElement extends Orch8Element {
   private starting = false;
   private startError: string | null = null;
   private firstPageLen = 0;
+  private signature = "";
+  private moreCtl: AbortController | null = null;
 
   protected override extraCss(): string {
     return `
@@ -45,12 +47,39 @@ export class Orch8RunsElement extends Orch8Element {
     return Number.isFinite(n) && n >= 0 ? (n === 0 ? 0 : Math.max(n, 1000)) : 10_000;
   }
 
-  protected async load(signal: AbortSignal, mode: LoadMode): Promise<void> {
+  protected override renderStaleMs(): number {
+    return 60_000; // relative "updated" times must not go stale
+  }
+
+  /** Credentials/endpoint/paging changed: rows and the cursor belong to the old view. */
+  protected override onAttributeChanged(): void {
+    this.moreCtl?.abort();
+    this.moreCtl = null;
+    this.loadingMore = false;
+    this.items = [];
+    this.nextCursor = null;
+    this.firstPageLen = 0;
+    this.signature = "";
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.moreCtl?.abort();
+    this.moreCtl = null;
+    this.loadingMore = false;
+  }
+
+  private sign(): string {
+    return JSON.stringify([this.items, this.nextCursor]);
+  }
+
+  protected async load(signal: AbortSignal, mode: LoadMode): Promise<LoadResult> {
     const page = await this.client.listRuns({ limit: this.pageSize }, signal);
     if (mode === "initial" || this.items.length === 0) {
       this.items = page.items;
       this.firstPageLen = page.items.length;
       this.nextCursor = page.next_cursor ?? null;
+      this.signature = this.sign();
       return;
     }
     // Refresh: replace the first page, keep rows fetched via "Load more".
@@ -58,22 +87,35 @@ export class Orch8RunsElement extends Orch8Element {
     const older = this.items.slice(this.firstPageLen).filter((r) => !fresh.has(r.id));
     this.items = [...page.items, ...older];
     this.firstPageLen = page.items.length;
+    const signature = this.sign();
+    const same = signature === this.signature;
+    this.signature = signature;
+    if (same && !this.loadingMore) return "unchanged";
   }
 
   private async loadMore(): Promise<void> {
     if (!this.nextCursor || this.loadingMore) return;
     this.loadingMore = true;
     this.render();
+    // Aborted by onAttributeChanged() on a token/base-url switch, so a late page never lands in a new view.
+    const ctl = new AbortController();
+    this.moreCtl = ctl;
     try {
-      const page = await this.client.listRuns({ limit: this.pageSize, cursor: this.nextCursor });
+      const page = await this.client.listRuns({ limit: this.pageSize, cursor: this.nextCursor }, ctl.signal);
+      if (ctl.signal.aborted) return;
       const seen = new Set(this.items.map((r) => r.id));
       this.items = [...this.items, ...page.items.filter((r) => !seen.has(r.id))];
       this.nextCursor = page.next_cursor ?? null;
+      this.signature = this.sign();
     } catch (err) {
+      if (ctl.signal.aborted) return;
       this.announce(this.errorMessage(err).message);
     } finally {
-      this.loadingMore = false;
-      this.render();
+      if (this.moreCtl === ctl) {
+        this.moreCtl = null;
+        this.loadingMore = false;
+        this.render();
+      }
     }
   }
 
@@ -134,8 +176,8 @@ export class Orch8RunsElement extends Orch8Element {
           h(
             "div",
             { class: "status", part: "empty" },
-            h("p", { style: "margin:0;font-weight:500" }, this.t("runsEmpty")),
-            h("p", { class: "small", style: "margin:4px 0 0" }, this.t("runsEmptyHint")),
+            h("p", { class: "empty-title" }, this.t("runsEmpty")),
+            h("p", { class: "small empty-hint" }, this.t("runsEmptyHint")),
           ),
         ),
       );

@@ -21,6 +21,7 @@ export type Orch8ErrorKind =
   | "invalid"
   | "rate_limited"
   | "server"
+  | "invalid_response"
   | "network"
   | "aborted";
 
@@ -63,11 +64,32 @@ export interface EmbedClientOptions {
 interface RequestOptions {
   method?: "GET" | "POST" | "PUT";
   body?: unknown;
+  /** The caller ignores the response body, so an empty 2xx is a success. */
+  allowEmpty?: boolean;
   signal?: AbortSignal;
   query?: Record<string, string | number | null | undefined>;
 }
 
 const EMBED_PREFIX = "/api/v1/embed";
+
+/** Minimum gap between two provider calls for a non-forced ("expiring") refresh. */
+const MIN_REFRESH_GAP_MS = 5000;
+
+/**
+ * Token state shared by every client built on the same provider function, so N
+ * widgets on a page ask the provider once at expiry instead of N times.
+ */
+interface TokenStore {
+  token: string | null;
+  inflight: Promise<string> | null;
+  fetchedAt: number;
+}
+const stores = new WeakMap<object, TokenStore>();
+function storeFor(provider: TokenProvider): TokenStore {
+  let s = stores.get(provider);
+  if (!s) stores.set(provider, (s = { token: null, inflight: null, fetchedAt: 0 }));
+  return s;
+}
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -130,7 +152,6 @@ export class EmbedClient {
   readonly baseUrl: string;
   private token: string | null;
   private readonly provider: TokenProvider | null;
-  private inflightToken: Promise<string> | null = null;
   private readonly retries: number;
   private readonly retryBaseMs: number;
   private readonly skew: number;
@@ -167,26 +188,44 @@ export class EmbedClient {
   /** Resolves the bearer token, calling the provider when needed. */
   async getToken(force: "unauthorized" | null = null): Promise<string> {
     if (!force && this.token && (this.tokenIsFresh(this.token) || !this.provider)) return this.token;
-    if (!this.provider) {
+    const provider = this.provider;
+    if (!provider) {
       throw new Orch8EmbedError("config", "No embed token: set the `token` attribute or a `tokenProvider`.");
     }
-    if (!this.inflightToken) {
-      const reason = force ?? (this.token ? "expiring" : "initial");
-      const provider = this.provider;
-      this.inflightToken = (async () => {
-        try {
-          const next = await provider({ reason });
-          if (typeof next !== "string" || !next) {
-            throw new Orch8EmbedError("config", "tokenProvider returned an empty token");
-          }
-          this.token = next;
-          return next;
-        } finally {
-          this.inflightToken = null;
-        }
-      })();
+    const store = storeFor(provider);
+    // Another widget already refreshed: adopt its token instead of asking again.
+    if (store.token && store.token !== this.token && this.tokenIsFresh(store.token)) {
+      this.token = store.token;
+      return store.token;
     }
-    return this.inflightToken;
+    if (store.inflight) {
+      const next = await store.inflight;
+      this.token = next;
+      return next;
+    }
+    // A provider whose tokens look expired to this clock (skew) must not be hit on every request.
+    if (!force && store.token && this.now() - store.fetchedAt < MIN_REFRESH_GAP_MS) {
+      this.token = store.token;
+      return store.token;
+    }
+    const reason = force ?? (this.token ? "expiring" : "initial");
+    const run = (async () => {
+      try {
+        const next = await provider({ reason });
+        if (typeof next !== "string" || !next) {
+          throw new Orch8EmbedError("config", "tokenProvider returned an empty token");
+        }
+        store.token = next;
+        store.fetchedAt = this.now();
+        return next;
+      } finally {
+        store.inflight = null;
+      }
+    })();
+    store.inflight = run;
+    const next = await run;
+    this.token = next;
+    return next;
   }
 
   private url(path: string, query?: RequestOptions["query"]): string {
@@ -220,11 +259,13 @@ export class EmbedClient {
       if (opts.signal?.aborted) throw new Orch8EmbedError("aborted", "aborted");
       throw new Orch8EmbedError("network", err instanceof Error ? err.message : "network error");
     }
-    const text = await res.text().catch(() => "");
+    const text = await res.text().catch(() => null);
     let json: unknown = undefined;
+    let parsed = false;
     if (text) {
       try {
         json = JSON.parse(text);
+        parsed = true;
       } catch {
         json = undefined;
       }
@@ -244,6 +285,16 @@ export class EmbedClient {
         (err as { retryAfterMs?: number }).retryAfterMs = Math.min(retryAfter * 1000, 30_000);
       }
       throw err;
+    }
+    // A 2xx that is not JSON (captive portal / proxy HTML, truncated body) is not a success.
+    const empty = text === "" || (parsed && json === null);
+    if (res.status === 204 || (empty && opts.allowEmpty)) return undefined as T;
+    if (text === null || !parsed || json === null) {
+      throw new Orch8EmbedError(
+        "invalid_response",
+        empty || text === null ? "Empty response from the engine" : "Response from the engine was not valid JSON",
+        res.status,
+      );
     }
     return json as T;
   }
@@ -298,7 +349,7 @@ export class EmbedClient {
   }
 
   resolveApproval(id: string, body: ResolveApprovalBody, signal?: AbortSignal): Promise<unknown> {
-    return this.request(`/approvals/${encodeURIComponent(id)}`, { method: "POST", body, signal });
+    return this.request(`/approvals/${encodeURIComponent(id)}`, { method: "POST", body, signal, allowEmpty: true });
   }
 
   async listSequences(signal?: AbortSignal): Promise<SequenceList> {
@@ -317,6 +368,7 @@ export class EmbedClient {
     return this.request<unknown>(`/sequences/${encodeURIComponent(name)}`, {
       method: "PUT",
       body: definition,
+      allowEmpty: true,
       signal,
     });
   }

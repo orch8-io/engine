@@ -13,6 +13,7 @@ export const baseCss = `
   --_fg: var(--orch8-fg, #1a1d23);
   --_muted: var(--orch8-muted, #555c69);
   --_border: var(--orch8-border, #d5d9e0);
+  --_control-border: var(--orch8-control-border, #767d8c);
   --_accent: var(--orch8-accent, #3346c4);
   --_accent-fg: var(--orch8-accent-fg, #ffffff);
   --_success: var(--orch8-success, #1b6e36);
@@ -39,6 +40,7 @@ export const baseCss = `
   --_fg: var(--orch8-dark-fg, #e8eaee);
   --_muted: var(--orch8-dark-muted, #a6adb9);
   --_border: var(--orch8-dark-border, #333a45);
+  --_control-border: var(--orch8-dark-control-border, #7b8494);
   --_accent: var(--orch8-dark-accent, #9db0ff);
   --_accent-fg: var(--orch8-dark-accent-fg, #0b1020);
   --_success: var(--orch8-dark-success, #6fd08f);
@@ -55,6 +57,7 @@ export const baseCss = `
     --_fg: var(--orch8-dark-fg, #e8eaee);
     --_muted: var(--orch8-dark-muted, #a6adb9);
     --_border: var(--orch8-dark-border, #333a45);
+    --_control-border: var(--orch8-dark-control-border, #7b8494);
     --_accent: var(--orch8-dark-accent, #9db0ff);
     --_accent-fg: var(--orch8-dark-accent-fg, #0b1020);
     --_success: var(--orch8-dark-success, #6fd08f);
@@ -78,7 +81,7 @@ export const baseCss = `
 .small { font-size: 0.875em; }
 button, .btn {
   font: inherit; cursor: pointer; border-radius: calc(var(--_radius) - 2px);
-  border: 1px solid var(--_border); background: var(--_surface); color: var(--_fg);
+  border: 1px solid var(--_control-border); background: var(--_surface); color: var(--_fg);
   padding: calc(var(--_space) * 0.5) calc(var(--_space) * 1.5); min-height: 32px;
   text-decoration: none; display: inline-flex; align-items: center; gap: 4px;
 }
@@ -89,7 +92,7 @@ button.link { background: none; border: none; color: var(--_accent); padding: 0;
 a { color: var(--_accent); }
 input, select, textarea {
   font: inherit; color: var(--_fg); background: var(--_bg);
-  border: 1px solid var(--_border); border-radius: calc(var(--_radius) - 2px);
+  border: 1px solid var(--_control-border); border-radius: calc(var(--_radius) - 2px);
   padding: calc(var(--_space) * 0.5) var(--_space); width: 100%;
 }
 textarea { font-family: var(--orch8-mono-font, ui-monospace, SFMono-Regular, Menlo, monospace); min-height: 72px; resize: vertical; }
@@ -120,4 +123,74 @@ ol.plain, ul.plain { list-style: none; margin: 0; padding: 0; }
 .badge-link { font-size: 0.75em; color: var(--_muted); text-decoration: none; display: inline-flex; align-items: center; gap: 4px; }
 .badge-link:hover { color: var(--_fg); text-decoration: underline; }
 .badge-mark { width: 12px; height: 12px; border-radius: 3px; background: var(--_accent); display: inline-block; }
+.empty-title { margin: 0; font-weight: 500; }
+.empty-hint { margin: 4px 0 0; }
+@media (forced-colors: active) {
+  button, .btn, input, select, textarea, .choice { border-color: ButtonText; }
+  button:disabled { border-color: GrayText; color: GrayText; }
+  button.primary { background: ButtonFace; color: ButtonText; border-color: ButtonText; }
+  :focus-visible { outline-color: Highlight; }
+  .badge-mark { background: CanvasText; forced-color-adjust: none; }
+}
 `;
+
+/**
+ * CSP-safe stylesheet installation. Constructable stylesheets
+ * (`adoptedStyleSheets`) are not subject to `style-src` inline checks, so they
+ * work under a strict CSP. Browsers without them fall back to `<style>`
+ * elements, which carry the host's optional `nonce` attribute.
+ */
+const sheetCache = new Map<string, CSSStyleSheet>();
+
+function canAdopt(root: ShadowRoot): boolean {
+  try {
+    return (
+      typeof CSSStyleSheet === "function" &&
+      "adoptedStyleSheets" in root &&
+      typeof CSSStyleSheet.prototype.replaceSync === "function"
+    );
+  } catch {
+    return false;
+  }
+}
+
+export interface StyleSlot {
+  set(css: string): void;
+  setNonce(nonce: string | null): void;
+}
+
+/** Creates a style slot in `root`. `shared` slots reuse one sheet per css text. */
+export function createStyleSlot(root: ShadowRoot, css: string, nonce: string | null, shared: boolean): StyleSlot {
+  if (canAdopt(root)) {
+    let sheet = shared ? sheetCache.get(css) : undefined;
+    if (!sheet) {
+      sheet = new CSSStyleSheet();
+      sheet.replaceSync(css);
+      if (shared) sheetCache.set(css, sheet);
+    }
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, sheet];
+    const own = sheet;
+    return {
+      // A shared sheet is immutable by contract; only unshared (theme) slots call set().
+      set: (next) => own.replaceSync(next),
+      setNonce: () => {},
+    };
+  }
+  const el = document.createElement("style");
+  if (nonce) el.setAttribute("nonce", nonce);
+  let current = css;
+  el.textContent = current;
+  root.prepend(el);
+  return {
+    set: (next) => {
+      current = next;
+      el.textContent = next;
+    },
+    setNonce: (n) => {
+      if (n) el.setAttribute("nonce", n);
+      else el.removeAttribute("nonce");
+      el.textContent = current; // re-parse so the new nonce is checked
+    },
+  };
+}
+
