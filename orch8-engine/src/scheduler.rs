@@ -138,6 +138,9 @@ pub async fn tick_once(
         &hooks,
     )
     .await?;
+    // After the signal sweep so a parent cancelled by a signal this pass
+    // takes its children down in the same pass.
+    cancel_orphans(storage.as_ref()).await;
 
     // Like the SLA sweep below, the single-shot path carries no cursor and
     // scans the whole Waiting set.
@@ -338,6 +341,9 @@ pub async fn run_tick_loop_with_liveness(
                 {
                     error!(error = %e, "signalled instance processing failed");
                 }
+                // After the signal sweep: a parent cancelled by a signal this
+                // iteration takes its children down in the same iteration.
+                cancel_orphans(storage.as_ref()).await;
                 // Check SLA deadlines for waiting instances (external worker
                 // dispatch). These instances are not claimed by the normal
                 // tick, but deadlines should still fire.
@@ -3012,6 +3018,14 @@ async fn cooperatively_preempt(
         );
     }
     Ok(yielded)
+}
+
+/// Cancel live sub-workflows of failed/cancelled parents (L3-07). A storage
+/// error is logged and retried on the next tick.
+async fn cancel_orphans(storage: &dyn StorageBackend) {
+    if let Err(e) = crate::lifecycle::cancel_orphaned_children(storage).await {
+        warn!(error = %e, "orphaned sub-workflow sweep failed");
+    }
 }
 
 /// If this instance has a `parent_instance_id`, transition the parent from

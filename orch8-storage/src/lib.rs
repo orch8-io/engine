@@ -888,6 +888,12 @@ pub trait InstanceStore: Send + Sync + 'static {
         parent_instance_id: InstanceId,
     ) -> Result<Vec<TaskInstance>, StorageError>;
 
+    /// Ids of live (`scheduled`/`running`/`waiting`/`paused`) instances whose
+    /// parent is already `failed` or `cancelled` (L3-07). Such a child can
+    /// never be observed by its parent again; the engine cancels it. Capped
+    /// at `limit` per call; the set shrinks as the engine drains it.
+    async fn list_orphaned_children(&self, limit: u32) -> Result<Vec<InstanceId>, StorageError>;
+
     // === Dynamic Step Injection ===
 
     /// Append blocks to a running instance's sequence (stored as instance-level overrides).

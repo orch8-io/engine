@@ -1516,6 +1516,7 @@ passthrough_impl! {
     async fn update_instance_sequence(&self, id: InstanceId, new_sequence_id: orch8_types::ids::SequenceId) -> Result<(), StorageError>;
     async fn count_instances(&self, filter: &orch8_types::filter::InstanceFilter) -> Result<u64, StorageError>;
     async fn any_instance_in_state(&self, state: orch8_types::instance::InstanceState) -> Result<bool, StorageError>;
+    async fn list_orphaned_children(&self, limit: u32) -> Result<Vec<orch8_types::ids::InstanceId>, StorageError>;
     async fn bulk_update_state(&self, filter: &orch8_types::filter::InstanceFilter, new_state: orch8_types::instance::InstanceState) -> Result<u64, StorageError>;
     async fn bulk_reschedule(&self, filter: &orch8_types::filter::InstanceFilter, offset_secs: i64) -> Result<u64, StorageError>;
     async fn ensure_instance_run_started(&self, id: InstanceId, run_id: &str, started_at: DateTime<Utc>) -> Result<(), StorageError>;

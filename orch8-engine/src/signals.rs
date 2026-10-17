@@ -391,7 +391,7 @@ async fn cancel_scoped(
 /// those of its still-active step nodes (tree path), or of the step it is
 /// parked on (flat path, no tree). Completed task rows of finished steps
 /// are kept for history. Best-effort — the cancel itself already committed.
-async fn purge_live_worker_tasks(storage: &dyn StorageBackend, instance_id: InstanceId) {
+pub(crate) async fn purge_live_worker_tasks(storage: &dyn StorageBackend, instance_id: InstanceId) {
     let block_ids: Vec<String> = match storage.get_execution_tree(instance_id).await {
         Ok(tree) if !tree.is_empty() => tree
             .iter()
