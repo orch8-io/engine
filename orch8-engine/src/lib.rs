@@ -18,6 +18,7 @@ pub mod clock {
 }
 pub mod doctor;
 pub mod effect_guard;
+pub mod embed_sandbox;
 pub mod error;
 pub mod evaluator;
 pub mod event_correlation;

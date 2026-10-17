@@ -44,6 +44,8 @@ pub struct EmbeddedRuntime {
     pub allowed_origins: Vec<String>,
     pub license: License,
     pub enforcer: SoftEnforcer,
+    /// Handlers a sub-tenant-authored sequence may use (`[embed] sandbox_handlers`).
+    pub sandbox: orch8_engine::embed_sandbox::SandboxPolicy,
 }
 
 impl EmbeddedRuntime {
@@ -68,6 +70,9 @@ impl EmbeddedRuntime {
             allowed_origins: parse_origins(&embed.allowed_origins),
             license: License::load(license.key.expose()),
             enforcer: SoftEnforcer::default(),
+            sandbox: orch8_engine::embed_sandbox::SandboxPolicy::from_config_list(
+                &embed.sandbox_handlers,
+            ),
         })
     }
 
@@ -79,6 +84,7 @@ impl EmbeddedRuntime {
             allowed_origins: Vec::new(),
             license,
             enforcer: SoftEnforcer::default(),
+            sandbox: orch8_engine::embed_sandbox::SandboxPolicy::default(),
         }
     }
 }

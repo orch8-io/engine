@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security: embed sequence sandbox (EM-01)
+
+- **Sequences authored through the embedded builder are now sandboxed.** An
+  end customer holding `builder:edit` + `runs:start` could previously write a
+  sequence with `http_request` + `credentials://<any tenant credential>`,
+  `llm_call` on the tenant's key, or `query_instance` / `send_signal` /
+  `sub_sequence` against other sub-tenants, and run it with the tenant's
+  authority. Sequences *owned by a sub-tenant* (`sequence.sub_tenant` set, as
+  stamped by `PUT /embed/sequences/{name}` or `X-Sub-Tenant` creates) are now
+  confined, at write time (`PUT` answers **422** naming the offending block)
+  and again at execution time (so sequences already stored are safe too, and so
+  is a `credentials://` value a template mints at run time; the step fails
+  without dispatching):
+  - **Handler allowlist.** Default: `noop`, `log`, `sleep`, `fail`, `assert`,
+    `human_review` (without `notify_url` / `notify_headers`), `set_state`,
+    `get_state`, `delete_state`, `merge_state`, `transform`. Covers every
+    handler a step can dispatch: `handler`, `fallback_handler`,
+    `on_deadline_breach`, `wait_for_input.escalation_handler`, `compensation`,
+    `on_failure` / `on_cancel` hooks and interceptors. Custom worker handlers
+    are outside the default; add them with `[embed] sandbox_handlers`
+    (comma-separated; env `ORCH8_EMBED_SANDBOX_HANDLERS`; a non-empty value
+    **replaces** the default). The embedded builder only offers allowed
+    handlers.
+  - **No credentials.** `credentials://` references are rejected in
+    sub-tenant-owned sequences and never resolved for their runs. There is no
+    per-sub-tenant credential model, so sub-tenant sequences get none; keep
+    credentialed work in vendor-authored (tenant-level or gallery) sequences.
+    `wait_for_input.auto_decide` is also refused.
+  - **`sub_sequence`** from a sub-tenant-owned run may only start sequences
+    owned by the same sub-tenant (a denied target reads "not found"); `PUT`
+    additionally rejects targets that already exist under the vendor or
+    another sub-tenant.
+  - **By-id instance access.** `query_instance` and `send_signal` from any run
+    that belongs to a sub-tenant are limited to instances of that same
+    sub-tenant (previously: same tenant). Denials look like "not found".
+  - Vendor-authored (tenant-level) sequences, including gallery templates, are
+    not restricted.
+  - Upgrade note: sub-tenant sequences that already use handlers outside the
+    allowlist, or `credentials://`, will now fail their step at run time
+    ("embed sandbox: ..."); widen `sandbox_handlers` for handlers you trust, or
+    move that logic into a vendor-authored sequence the sub-tenant starts.
+
 ### Review round 2: API-driven cancel
 
 - **Operator cancels now run saga compensation and `on_cancel` hooks.**

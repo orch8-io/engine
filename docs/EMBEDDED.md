@@ -205,9 +205,21 @@ What an embedded viewer sees:
   `version`, `sub_tenant`, …) are ignored and assigned by the server. The same
   validation as `POST /sequences` applies.
 
-`builder:edit` lets an end customer author workflows that run with the
-tenant's handlers and credentials. Grant it only to customers you trust with
-that, the same way you would grant them a sequence editor in your own product.
+**Builder sandbox.** A sequence owned by a sub-tenant is confined to an
+allowlist of inert handlers: `noop`, `log`, `sleep`, `fail`, `assert`,
+`human_review` (no `notify_url` / `notify_headers`), `set_state`, `get_state`,
+`delete_state`, `merge_state`, `transform`. Anything else (`http_request`,
+`llm_call`, `query_instance`, `send_signal`, `email`, worker handlers, ...)
+is rejected by `PUT` with 422 naming the block, and refused again when a
+stored sequence runs. `credentials://` references are rejected and never
+resolved for sub-tenant-owned runs (there is no per-sub-tenant credential
+model); `sub_sequence` may only target the sub-tenant's own sequences;
+`query_instance` / `send_signal` from a sub-tenant run reach only that
+sub-tenant's instances. Vendor-authored (tenant-level and gallery) sequences
+are not restricted, so put anything needing the network, an LLM or credentials
+in a gallery or tenant-level sequence your customers start. To permit more
+handlers set `[embed] sandbox_handlers` (comma-separated, replaces the
+default; env `ORCH8_EMBED_SANDBOX_HANDLERS`).
 
 ### CORS
 

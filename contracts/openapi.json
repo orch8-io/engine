@@ -2523,6 +2523,9 @@
           },
           "409": {
             "description": "The name belongs to the tenant or another sub-tenant"
+          },
+          "422": {
+            "description": "Rejected by the embed sandbox: a handler outside the allowlist (`[embed] sandbox_handlers`), a `credentials://` reference, or a `sub_sequence` target the sub-tenant does not own"
           }
         },
         "security": [

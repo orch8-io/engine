@@ -169,6 +169,7 @@ pub(crate) async fn list_sequences(
             .builtin_handlers
             .iter()
             .filter(|name| !name.starts_with('_'))
+            .filter(|name| state.embedded.sandbox.allows(name))
             .map(|name| EmbedHandler {
                 name: name.clone(),
                 label: None,
@@ -217,6 +218,44 @@ pub(crate) async fn get_sequence(
     Ok(Json(body))
 }
 
+/// Reject a sequence an embedded end customer may not own: handlers outside
+/// the sandbox allowlist, `credentials://` references, and `sub_sequence`
+/// targets that exist but belong to the vendor or another sub-tenant. Execution
+/// re-enforces all of it, so a target created later is still confined.
+async fn enforce_sandbox(
+    state: &AppState,
+    principal: &EmbedPrincipal,
+    seq: &SequenceDefinition,
+) -> Result<(), ApiError> {
+    let mut violations = orch8_engine::embed_sandbox::check_sequence(seq, &state.embedded.sandbox)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    for (block_id, target) in orch8_engine::embed_sandbox::sub_sequence_targets(seq) {
+        let versions = state
+            .storage
+            .list_sequence_versions(&principal.tenant_id, &seq.namespace, &target)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "sequence"))?;
+        if versions
+            .iter()
+            .any(|v| v.sub_tenant.as_deref() != Some(principal.sub_tenant.as_str()))
+        {
+            violations.push(format!(
+                "block \"{block_id}\": sub_sequence target \"{target}\" is not a sequence \
+                 owned by your sub-tenant"
+            ));
+        }
+    }
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::UnprocessableEntity(format!(
+        "sequence rejected by the embed sandbox: {}",
+        violations.join("; ")
+    )))
+}
+
 #[utoipa::path(put, path = "/embed/sequences/{name}", tag = "embed", operation_id = "embed_put_sequence",
     params(("name" = String, Path, description = "Sequence name"), NamespaceQuery),
     request_body(content = serde_json::Value,
@@ -225,6 +264,7 @@ pub(crate) async fn get_sequence(
         (status = 201, description = "New version created, owned by the token's sub-tenant", body = serde_json::Value),
         (status = 403, description = "Token lacks builder:edit or the sequence"),
         (status = 409, description = "The name belongs to the tenant or another sub-tenant"),
+        (status = 422, description = "Rejected by the embed sandbox: a handler outside the allowlist (`[embed] sandbox_handlers`), a `credentials://` reference, or a `sub_sequence` target the sub-tenant does not own"),
     ),
     security(("embed_token" = []))
 )]
@@ -302,6 +342,7 @@ pub(crate) async fn put_sequence(
     let (mut seq, warnings) = crate::sequences::decode_draft_sequence(&value, false)?;
     seq.tenant_id = principal.tenant_id.clone();
     seq.sub_tenant = Some(principal.sub_tenant.clone());
+    enforce_sandbox(&state, &principal, &seq).await?;
     let mut body = crate::sequences::validate_and_persist_sequence(&state, &seq, warnings).await?;
     body["version"] = serde_json::json!(seq.version);
     Ok((StatusCode::CREATED, Json(body)))

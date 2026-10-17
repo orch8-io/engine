@@ -1114,3 +1114,189 @@ async fn release_target_routes_by_sub_tenant() {
         assert_eq!(sequence_of(plain).await, candidate, "{}", case.name);
     }
 }
+
+async fn put_embed(case: &Case, token: &str, name: &str, body: Value) -> reqwest::Response {
+    case.client
+        .put(case.url(&format!("/embed/sequences/{name}")))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn embed_put_sequence_is_sandboxed() {
+    for case in cases().await {
+        let t = tenant();
+        let (_, vendor_seq) = sequence(&case, &t, None, "default", json!({})).await;
+        let builder = mint(&case, &t, "acme", &["builder:edit"], Value::Null).await;
+        let step = |handler: &str, params: Value| json!({"type": "step", "id": "bad_block", "handler": handler, "params": params});
+
+        // Handlers outside the allowlist, each naming the offending block.
+        for handler in [
+            "http_request",
+            "llm_call",
+            "query_instance",
+            "send_signal",
+            "email",
+            "notify",
+            "agent",
+            "self_modify",
+            "unregistered_worker_handler",
+        ] {
+            let response = put_embed(
+                &case,
+                &builder,
+                "sandboxed",
+                json!({"blocks": [step(handler, json!({}))]}),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{}: {handler}",
+                case.name
+            );
+            let text = response.text().await.unwrap();
+            assert!(
+                text.contains("bad_block") && text.contains(handler),
+                "{}: {text}",
+                case.name
+            );
+        }
+
+        // Credential references, in params, sub_sequence input, interceptors
+        // and hooks; plus the one param that makes `human_review` reach out.
+        for (label, body) in [
+            (
+                "params",
+                json!({"blocks": [step("noop", json!({"k": ["credentials://prod"]}))]}),
+            ),
+            (
+                "sub_sequence input",
+                json!({"blocks": [{"type": "sub_sequence", "id": "bad_block", "sequence_name": "mine",
+                    "input": {"t": "credentials://prod/key"}}]}),
+            ),
+            (
+                "interceptor",
+                json!({"blocks": [step("noop", json!({}))],
+                    "interceptors": {"before_step": {"handler": "noop", "params": {"t": "credentials://x"}}}}),
+            ),
+            (
+                "on_failure hook",
+                json!({"blocks": [step("noop", json!({}))],
+                    "on_failure": [step("noop", json!({"t": "credentials://x"}))]}),
+            ),
+            (
+                "human_review notify_url",
+                json!({"blocks": [step("human_review", json!({"notify_url": "https://evil.example"}))]}),
+            ),
+        ] {
+            let response = put_embed(&case, &builder, "sandboxed", body).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{}: {label}",
+                case.name
+            );
+        }
+
+        // A sub_sequence into a vendor-owned sequence is refused.
+        let into_vendor = put_embed(
+            &case,
+            &builder,
+            "sandboxed",
+            json!({"blocks": [{"type": "sub_sequence", "id": "ss", "sequence_name": vendor_seq}]}),
+        )
+        .await;
+        assert_eq!(
+            into_vendor.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            case.name
+        );
+        let text = into_vendor.text().await.unwrap();
+        assert!(
+            text.contains("block \\\"ss\\\"") && text.contains(&vendor_seq),
+            "{}: {text}",
+            case.name
+        );
+
+        // Nothing was stored by any rejected write.
+        let missing = case
+            .embed_get("/embed/sequences/sandboxed", &builder)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND, "{}", case.name);
+
+        // Allowlisted handlers, control flow and a self-referencing
+        // sub_sequence (own sub-tenant) pass.
+        let ok = put_embed(
+            &case,
+            &builder,
+            "inert",
+            json!({"blocks": [
+                {"type": "step", "id": "a", "handler": "set_state", "params": {"key": "k", "value": 1}},
+                {"type": "step", "id": "b", "handler": "transform", "params": {"x": "{{ context.data.y }}"}},
+                {"type": "step", "id": "c", "handler": "human_review", "params": {"instructions": "ok?"}},
+                {"type": "parallel", "id": "p", "branches": [[
+                    {"type": "step", "id": "d", "handler": "sleep", "params": {"duration_ms": 1}}]]},
+                {"type": "sub_sequence", "id": "self_ref", "sequence_name": "inert"}
+            ]}),
+        )
+        .await;
+        let status = ok.status();
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{}: {}",
+            case.name,
+            ok.text().await.unwrap()
+        );
+
+        // The builder palette only offers allowlisted handlers.
+        let list: Value = case
+            .embed_get("/embed/sequences", &builder)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let offered: Vec<&str> = list["handlers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|h| h["name"].as_str())
+            .collect();
+        assert!(
+            offered.contains(&"transform") && !offered.contains(&"http_request"),
+            "{}: {offered:?}",
+            case.name
+        );
+    }
+}
+
+#[tokio::test]
+async fn embed_sandbox_handlers_are_configurable() {
+    let mut embedded = runtime(License::unlicensed());
+    embedded.sandbox =
+        orch8_engine::embed_sandbox::SandboxPolicy::from_config_list("noop, crm_lookup");
+    for case in cases_with(Some(embedded)).await {
+        let t = tenant();
+        let builder = mint(&case, &t, "acme", &["builder:edit"], Value::Null).await;
+        let body = |handler: &str| json!({"blocks": [{"type": "step", "id": "a", "handler": handler, "params": {}}]});
+        let allowed = put_embed(&case, &builder, "x", body("crm_lookup")).await;
+        assert_eq!(allowed.status(), StatusCode::CREATED, "{}", case.name);
+        // A configured list replaces the default.
+        let replaced = put_embed(&case, &builder, "y", body("set_state")).await;
+        assert_eq!(
+            replaced.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            case.name
+        );
+    }
+}

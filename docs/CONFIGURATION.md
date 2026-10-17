@@ -120,6 +120,7 @@ Embedded surface for vendors; see [Embedded Orch8](EMBEDDED.md).
 | `token_secret` | string | `""` | Hex HMAC secret (≥ 32 bytes decoded) that signs `o8e1.` embed tokens. Empty = every `/api/v1/embed/*` route answers 404. An invalid value refuses startup |
 | `token_secret_previous` | string | `""` | Comma-separated retired hex secrets that still verify embed tokens (never used to mint). Set the old `token_secret` here while rotating to a new one; remove it after the longest token lifetime (1 h). |
 | `allowed_origins` | string | `""` | Comma-separated browser origins granted CORS on the embed-token routes only (`*` = any) |
+| `sandbox_handlers` | string | `""` | Comma-separated handler names a **sub-tenant-owned** sequence (written through the embedded builder) may use. Empty = conservative default (`noop`, `log`, `sleep`, `fail`, `assert`, `human_review`, `set_state`, `get_state`, `delete_state`, `merge_state`, `transform`); non-empty **replaces** the default. Also forbids `credentials://` references. Enforced at write time (422) and at execution time. Vendor-authored (tenant-level) sequences are never restricted. See [EMBEDDED.md](EMBEDDED.md) |
 
 ---
 
@@ -258,6 +259,7 @@ mount a config file for those settings.
 | `ORCH8_EMBED_TOKEN_SECRET` | — | Sets `embed.token_secret` (hex, ≥ 32 bytes decoded); enables `/api/v1/embed/*` |
 | `ORCH8_EMBED_TOKEN_SECRET_PREVIOUS` | — | Sets `embed.token_secret_previous` |
 | `ORCH8_EMBED_ALLOWED_ORIGINS` | — | Sets `embed.allowed_origins` (CORS on embed-token routes only) |
+| `ORCH8_EMBED_SANDBOX_HANDLERS` | — | Sets `embed.sandbox_handlers` (handlers sub-tenant-authored sequences may use) |
 | `ORCH8_LICENSE_KEY` | — | Sets `license.key` |
 | `ORCH8_LICENSE_PUBLIC_KEY` | — | Overrides the compiled-in license verification key (base64 of the raw 32-byte ed25519 key). For tests and private deployments |
 | `ORCH8_ALLOW_NO_TENANT_ISOLATION` | — | Set to `1` to allow `require_tenant_header=false` while API-key auth is on (explicit opt-out of tenant isolation; the server warns loudly) |

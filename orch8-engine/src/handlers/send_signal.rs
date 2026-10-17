@@ -54,7 +54,7 @@ pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepEr
         .map_err(|e| map_storage_err(&e))?;
 
     match target {
-        Some(ref t) if t.tenant_id == ctx.tenant_id => {}
+        Some(ref t) if super::util::caller_may_access(&ctx, t).await? => {}
         _ => return Err(permanent("target instance not found")),
     }
 
@@ -679,5 +679,39 @@ mod tests {
             matches!(err, StepError::Permanent { .. }),
             "expected Permanent, got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn sub_tenant_run_cannot_signal_another_sub_tenants_instance() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let mut caller = mk_instance("T1", InstanceState::Running);
+        caller.sub_tenant = Some("acme".into());
+        let mut own = mk_instance("T1", InstanceState::Running);
+        own.sub_tenant = Some("acme".into());
+        let mut other = mk_instance("T1", InstanceState::Running);
+        other.sub_tenant = Some("globex".into());
+        for i in [&caller, &own, &other] {
+            storage.create_instance(i).await.unwrap();
+        }
+        let params =
+            |t: &TaskInstance| json!({ "instance_id": t.id.to_string(), "signal_type": "cancel" });
+        let denied = handle_send_signal(mk_ctx(&caller, Arc::clone(&storage_dyn), params(&other)))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(denied, StepError::Permanent { ref message, .. } if message == "target instance not found")
+        );
+        assert!(
+            storage
+                .get_pending_signals(other.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no signal may reach the other sub-tenant"
+        );
+        handle_send_signal(mk_ctx(&caller, storage_dyn, params(&own)))
+            .await
+            .expect("same sub-tenant stays allowed");
     }
 }

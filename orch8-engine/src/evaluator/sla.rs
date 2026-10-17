@@ -23,6 +23,7 @@ use crate::handlers::HandlerRegistry;
 /// evaluation rather than re-flattening the whole block tree on every
 /// iteration of the evaluate loop (the loop runs up to 200 times, and a
 /// fresh `flatten_blocks` allocates + hashes the entire tree each pass).
+#[allow(clippy::too_many_lines)]
 pub(super) async fn check_sla_deadlines(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -67,7 +68,22 @@ pub(super) async fn check_sla_deadlines(
 
         // Invoke escalation handler if configured.
         if let Some(ref escalation) = step_def.on_deadline_breach {
-            if let Some(handler) = handlers.get(&escalation.handler) {
+            let escalation_denied = crate::embed_sandbox::deny_handler(
+                storage.as_ref(),
+                instance,
+                handlers.embed_sandbox(),
+                step_def.id.as_str(),
+                &escalation.handler,
+            )
+            .await?
+            .is_some();
+            if escalation_denied {
+                warn!(
+                    instance_id = %instance.id,
+                    block_id = %node.block_id,
+                    "embed sandbox denied deadline escalation handler"
+                );
+            } else if let Some(handler) = handlers.get(&escalation.handler) {
                 let mut params = escalation.params.clone();
                 // Inject breach metadata into escalation params.
                 if let serde_json::Value::Object(ref mut map) = params {
