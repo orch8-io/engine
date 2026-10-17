@@ -61,9 +61,10 @@
 //! mid-resume completes the step exactly once and commits its local receipt
 //! once.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sqlx::{Row, SqlitePool};
@@ -86,6 +87,77 @@ const PUMP_BATCH: i64 = 50;
 /// A delegation whose outcome cannot be read this long after it expired is
 /// given up (the proxy was purged or the server lost it).
 const RESULT_GRACE: chrono::Duration = chrono::Duration::minutes(10);
+/// Resolved/abandoned delegations (input, result, grant) are kept this long
+/// for `delegation_status`, then deleted (MC-09).
+pub(crate) const FINISHED_RETENTION: chrono::Duration = chrono::Duration::days(30);
+/// How long the live-runtime list is reused while placing delegations (MC-08).
+const RUNTIMES_CACHE_TTL: Duration = Duration::from_secs(15);
+/// Retry delay ceiling for a delegation that cannot be placed (MC-08).
+const PLACEMENT_RETRY_CAP: Duration = Duration::from_secs(5 * 60);
+/// Outcome polls stay at the base cadence for this many misses, then back off.
+const POLL_FREE_MISSES: u32 = 5;
+/// Outcome-poll ceiling once backed off.
+const POLL_RETRY_CAP: Duration = Duration::from_secs(30);
+
+/// Exponential delay `base * 2^attempts` capped at `cap`, scaled by `jitter`
+/// (expected in `0.75..=1.25`; a parameter so the schedule is testable).
+pub(crate) fn retry_delay(attempts: u32, base: Duration, cap: Duration, jitter: f64) -> Duration {
+    let factor = 2f64.powi(i32::try_from(attempts.min(20)).unwrap_or(20));
+    base.mul_f64(factor)
+        .min(cap)
+        .mul_f64(jitter.clamp(0.0, 2.0))
+}
+
+/// Per-delegation retry schedule (MC-08): a record whose last attempt failed
+/// or found nothing is skipped by passes until its `next_at`.
+#[derive(Default)]
+struct RetryGate {
+    entries: StdMutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl RetryGate {
+    fn due(&self, id: &str, now: Instant) -> bool {
+        self.lock().get(id).is_none_or(|(_, next_at)| now >= *next_at)
+    }
+
+    fn attempts(&self, id: &str) -> u32 {
+        self.lock().get(id).map_or(0, |(attempts, _)| *attempts)
+    }
+
+    /// Record a miss and schedule the next try `delay` from `now`.
+    fn miss(&self, id: &str, now: Instant, delay: Duration) {
+        let mut entries = self.lock();
+        let attempts = entries.get(id).map_or(0, |(attempts, _)| *attempts);
+        entries.insert(id.to_owned(), (attempts.saturating_add(1), now + delay));
+    }
+
+    /// Forget every record not in `open` (resolved, abandoned or re-keyed).
+    fn retain_open(&self, open: &std::collections::HashSet<&str>) {
+        self.lock().retain(|id, _| open.contains(id.as_str()));
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, (u32, Instant)>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Delete delegations that finished (or were abandoned) before `cutoff`.
+/// Returns the number removed.
+pub(crate) async fn purge_finished(
+    pool: &SqlitePool,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "DELETE FROM mobile_delegations \
+         WHERE state IN ('resolved', 'abandoned') AND updated_at < ?",
+    )
+    .bind(cutoff.to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
 
 /// Options for `start_delegation`.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -329,6 +401,12 @@ pub(crate) struct DelegationPump {
     wake: Notify,
     stop: CancellationToken,
     scheduler_work: Arc<Notify>,
+    /// Per-delegation retry schedule (MC-08).
+    gate: RetryGate,
+    /// Set by `wake()` (push, new work): the next pass ignores the schedule.
+    force_pass: AtomicBool,
+    /// Briefly cached `GET runtimes` answer (MC-08).
+    runtimes_cache: StdMutex<Option<(Instant, Vec<RuntimeCapabilities>)>>,
     delegated: AtomicU64,
     completed: AtomicU64,
     failed: AtomicU64,
@@ -362,6 +440,9 @@ impl DelegationPump {
             wake: Notify::new(),
             stop: CancellationToken::new(),
             scheduler_work,
+            gate: RetryGate::default(),
+            force_pass: AtomicBool::new(false),
+            runtimes_cache: StdMutex::new(None),
             delegated: AtomicU64::new(0),
             completed: AtomicU64::new(0),
             failed: AtomicU64::new(0),
@@ -387,6 +468,7 @@ impl DelegationPump {
     }
 
     pub(crate) fn wake(&self) {
+        self.force_pass.store(true, Ordering::Release);
         self.wake.notify_one();
     }
 
@@ -426,19 +508,51 @@ impl DelegationPump {
                 return;
             }
         };
-        for record in records {
+        let force = self.force_pass.swap(false, Ordering::AcqRel);
+        let open: std::collections::HashSet<&str> = records
+            .iter()
+            .map(|record| record.delegation_id.as_str())
+            .collect();
+        self.gate.retain_open(&open);
+        for record in &records {
             if self.stop.is_cancelled() {
                 break;
             }
+            let id = record.delegation_id.clone();
+            let claimed = record.state == "claimed";
+            if !force && !self.gate.due(&id, Instant::now()) {
+                continue;
+            }
             let outcome = match record.state.as_str() {
-                "prepared" => self.advance(record).await,
-                "claimed" => self.poll_outcome(record).await,
+                "prepared" => self.advance(record.clone()).await,
+                "claimed" => self.poll_outcome(record.clone()).await,
                 _ => Ok(()),
             };
             if let Err(error) = outcome {
                 debug!(%error, "delegation step deferred");
+                self.schedule_retry(&id, claimed);
+            } else if claimed {
+                // Still waiting on the destination (a resolved record leaves
+                // the open set and its entry is dropped next pass).
+                self.schedule_retry(&id, true);
             }
         }
+    }
+
+    /// Back off a delegation that did not make progress: placement retries
+    /// grow to [`PLACEMENT_RETRY_CAP`]; outcome polls keep the base cadence
+    /// for [`POLL_FREE_MISSES`] misses, then grow to [`POLL_RETRY_CAP`].
+    fn schedule_retry(&self, id: &str, polling: bool) {
+        let base = Duration::from_millis(self.options.poll_interval_ms.max(50));
+        let attempts = self.gate.attempts(id);
+        let jitter = 0.75 + rand::random::<f64>() * 0.5;
+        let delay = if polling {
+            let exponent = (attempts + 1).saturating_sub(POLL_FREE_MISSES);
+            retry_delay(exponent, base, POLL_RETRY_CAP, jitter)
+        } else {
+            retry_delay(attempts + 1, base, PLACEMENT_RETRY_CAP, jitter)
+        };
+        self.gate.miss(id, Instant::now(), delay);
     }
 
     // ------------------------------------------------------------------
@@ -698,6 +812,7 @@ impl DelegationPump {
 
     async fn note_error(&self, record: &Record, error: &str) -> Result<(), MobileError> {
         debug!(delegation_id = %record.delegation_id, error, "delegation not placed yet");
+        self.schedule_retry(&record.delegation_id, false);
         self.update(
             &record.delegation_id,
             "last_error = ?",
@@ -938,7 +1053,16 @@ impl DelegationPump {
         }
     }
 
-    async fn choose_destination(&self, record: &Record) -> Result<Option<String>, MobileError> {
+    async fn live_runtimes(&self) -> Result<Option<Vec<RuntimeCapabilities>>, MobileError> {
+        if let Some((fetched_at, runtimes)) = self
+            .runtimes_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            && fetched_at.elapsed() < RUNTIMES_CACHE_TTL
+        {
+            return Ok(Some(runtimes.clone()));
+        }
         let (status, body) = self
             .client
             .get_json(&format!("runtimes?tenant_id={}", encode(self.tenant())))
@@ -947,6 +1071,18 @@ impl DelegationPump {
             return Ok(None);
         }
         let runtimes: Vec<RuntimeCapabilities> = serde_json::from_value(body).unwrap_or_default();
+        *self
+            .runtimes_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((Instant::now(), runtimes.clone()));
+        Ok(Some(runtimes))
+    }
+
+    async fn choose_destination(&self, record: &Record) -> Result<Option<String>, MobileError> {
+        let Some(runtimes) = self.live_runtimes().await? else {
+            return Ok(None);
+        };
         let needed: Vec<String> = match (&record.sub_sequence_id, &record.handler) {
             (None, Some(handler)) => vec![handler.clone()],
             _ => Vec::new(),
@@ -1215,6 +1351,77 @@ mod tests {
             step_sequence_id("t", "a", "bc"),
             "parts are delimited"
         );
+    }
+
+    #[test]
+    fn mc08_retry_delay_grows_exponentially_with_jitter_and_a_cap() {
+        let base = Duration::from_secs(2);
+        let cap = Duration::from_secs(300);
+        assert_eq!(retry_delay(1, base, cap, 1.0), Duration::from_secs(4));
+        assert_eq!(retry_delay(3, base, cap, 1.0), Duration::from_secs(16));
+        assert_eq!(retry_delay(30, base, cap, 1.0), cap, "capped");
+        assert_eq!(retry_delay(1, base, cap, 0.75), Duration::from_secs(3));
+        assert_eq!(retry_delay(1, base, cap, 1.25), Duration::from_secs(5));
+        assert_eq!(
+            retry_delay(u32::MAX, base, cap, 1.0),
+            cap,
+            "huge attempt counts must not overflow"
+        );
+    }
+
+    #[test]
+    fn mc08_a_failed_delegation_is_skipped_until_its_backoff_elapses() {
+        let gate = RetryGate::default();
+        let t0 = Instant::now();
+        assert!(gate.due("d1", t0), "unknown records are always due");
+
+        gate.miss("d1", t0, Duration::from_secs(4));
+        assert_eq!(gate.attempts("d1"), 1);
+        assert!(!gate.due("d1", t0 + Duration::from_secs(2)));
+        assert!(gate.due("d1", t0 + Duration::from_secs(4)));
+        assert!(gate.due("d2", t0), "other records are unaffected");
+
+        gate.miss("d1", t0, Duration::from_secs(8));
+        assert_eq!(gate.attempts("d1"), 2);
+
+        let open: std::collections::HashSet<&str> = ["d2"].into_iter().collect();
+        gate.retain_open(&open);
+        assert_eq!(gate.attempts("d1"), 0, "closed records are forgotten");
+    }
+
+    #[tokio::test]
+    async fn mc09_finished_delegations_are_purged_after_retention_only() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_tables(&pool).await.unwrap();
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::days(31)).to_rfc3339();
+        let recent = (now - chrono::Duration::days(2)).to_rfc3339();
+        for (id, state, updated) in [
+            ("old-resolved", "resolved", &old),
+            ("old-abandoned", "abandoned", &old),
+            ("old-open", "claimed", &old),
+            ("recent-resolved", "resolved", &recent),
+        ] {
+            sqlx::query(
+                "INSERT INTO mobile_delegations (delegation_id, local_instance_id, kind, input, \
+                 state, deadline_at, created_at, updated_at) VALUES (?1, 'i', 'explicit', '{}', ?2, ?3, ?3, ?3)",
+            )
+            .bind(id)
+            .bind(state)
+            .bind(updated)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let removed = purge_finished(&pool, now - FINISHED_RETENTION).await.unwrap();
+        assert_eq!(removed, 2);
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT delegation_id FROM mobile_delegations ORDER BY delegation_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, vec!["old-open", "recent-resolved"]);
     }
 
     #[test]

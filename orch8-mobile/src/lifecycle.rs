@@ -36,7 +36,12 @@ pub struct InstanceLifecycleManager {
     max_concurrent_instances: u32,
     /// When `compact_storage` last ran (MC-07).
     last_compaction: std::sync::Mutex<Option<std::time::Instant>>,
+    /// When finished delegations were last swept (MC-09).
+    last_delegation_sweep: std::sync::Mutex<Option<std::time::Instant>>,
 }
+
+/// Finished-delegation retention sweeps run at most this often.
+const DELEGATION_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Compaction (incremental vacuum + WAL truncate) runs when a purge freed rows,
 /// otherwise at most this often.
@@ -54,6 +59,29 @@ impl InstanceLifecycleManager {
             dedup_keys: Arc::new(Mutex::new(HashMap::new())),
             max_concurrent_instances,
             last_compaction: std::sync::Mutex::new(None),
+            last_delegation_sweep: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// MC-09: delete delegations resolved/abandoned more than
+    /// [`crate::delegation::FINISHED_RETENTION`] ago, at most hourly. A
+    /// missing table (delegation never initialized) is not an error.
+    async fn sweep_finished_delegations(&self, now: std::time::Instant) {
+        {
+            let mut last = self
+                .last_delegation_sweep
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.is_some_and(|at| now.duration_since(at) < DELEGATION_SWEEP_INTERVAL) {
+                return;
+            }
+            *last = Some(now);
+        }
+        let cutoff = chrono::Utc::now() - crate::delegation::FINISHED_RETENTION;
+        match crate::delegation::purge_finished(self.mobile_storage.pool(), cutoff).await {
+            Ok(0) => {}
+            Ok(removed) => info!(removed, "purged finished delegations past retention"),
+            Err(error) => debug!(%error, "finished-delegation sweep skipped"),
         }
     }
 
@@ -461,7 +489,9 @@ impl InstanceLifecycleManager {
         if deleted > 0 {
             info!(deleted, "purged terminal instances past retention");
         }
-        if self.compaction_due(deleted, std::time::Instant::now()) {
+        let now = std::time::Instant::now();
+        self.sweep_finished_delegations(now).await;
+        if self.compaction_due(deleted, now) {
             self.storage.compact_storage().await?;
         }
         Ok(deleted)
