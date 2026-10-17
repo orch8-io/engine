@@ -29,6 +29,8 @@ use crate::error::ApiError;
 pub const TOKEN_PREFIX: &str = "o8e1";
 /// Env equivalent of `[embed] token_secret`.
 pub const SECRET_ENV: &str = "ORCH8_EMBED_TOKEN_SECRET";
+/// Env equivalent of `[embed] token_secret_previous`.
+pub const PREVIOUS_SECRET_ENV: &str = "ORCH8_EMBED_TOKEN_SECRET_PREVIOUS";
 /// Env equivalent of `[embed] allowed_origins`.
 pub const ALLOWED_ORIGINS_ENV: &str = "ORCH8_EMBED_ALLOWED_ORIGINS";
 pub const MIN_SECRET_BYTES: usize = 32;
@@ -175,6 +177,9 @@ pub enum SequenceVisibility {
 #[derive(Clone)]
 pub struct EmbedSigner {
     key: zeroize::Zeroizing<Vec<u8>>,
+    /// Retired secrets still accepted by [`Self::verify`] (never used to
+    /// mint) so a rotation does not invalidate tokens already in flight.
+    previous: Vec<zeroize::Zeroizing<Vec<u8>>>,
 }
 
 impl std::fmt::Debug for EmbedSigner {
@@ -215,14 +220,46 @@ impl EmbedSigner {
         }
         Ok(Self {
             key: zeroize::Zeroizing::new(key),
+            previous: Vec::new(),
         })
     }
 
-    fn mac(&self, signed: &[u8]) -> Hmac<Sha256> {
-        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&self.key)
+    /// Also accept tokens signed with these retired hex secrets
+    /// (comma-separated; blanks ignored). Tokens are still minted with the
+    /// current secret only.
+    pub fn with_previous_hex(mut self, secrets: &str) -> Result<Self, String> {
+        for secret in secrets.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let key = decode_hex(secret)?;
+            if key.len() < MIN_SECRET_BYTES {
+                return Err(format!(
+                    "previous embed token secret must decode to at least {MIN_SECRET_BYTES} bytes (got {})",
+                    key.len()
+                ));
+            }
+            self.previous.push(zeroize::Zeroizing::new(key));
+        }
+        Ok(self)
+    }
+
+    fn mac_with(key: &[u8], signed: &[u8]) -> Hmac<Sha256> {
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(key)
             .expect("HMAC-SHA256 accepts keys of any length");
         mac.update(signed);
         mac
+    }
+
+    fn mac(&self, signed: &[u8]) -> Hmac<Sha256> {
+        Self::mac_with(&self.key, signed)
+    }
+
+    /// Constant-time check against the current secret, then each retired one.
+    fn signature_valid(&self, signed: &[u8], signature: &[u8]) -> bool {
+        std::iter::once(&self.key)
+            .chain(self.previous.iter())
+            .fold(false, |ok, key| {
+                // No short-circuit: every key is always checked.
+                Self::mac_with(key, signed).verify_slice(signature).is_ok() | ok
+            })
     }
 
     pub fn mint(&self, claims: &EmbedClaims) -> Result<String, ApiError> {
@@ -253,7 +290,9 @@ impl EmbedSigner {
         let signature = URL_SAFE_NO_PAD.decode(signature_b64).ok()?;
         let signed = &token[..prefix.len() + 1 + payload_b64.len()];
         // `verify_slice` compares in constant time.
-        self.mac(signed.as_bytes()).verify_slice(&signature).ok()?;
+        if !self.signature_valid(signed.as_bytes(), &signature) {
+            return None;
+        }
         let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
         let claims: EmbedClaims = serde_json::from_slice(&payload).ok()?;
         let now = now.timestamp();
@@ -421,6 +460,27 @@ mod tests {
             exp: now + 600,
             jti: Uuid::new_v4(),
         }
+    }
+
+    /// L5-20: a rotated embed secret keeps accepting tokens minted under the
+    /// retired one, while minting only with the new one.
+    #[test]
+    fn rotation_accepts_old_and_new_secret() {
+        let old_hex = "11".repeat(32);
+        let new_hex = "22".repeat(32);
+        let old = EmbedSigner::from_hex(&old_hex).unwrap();
+        let now = Utc::now();
+        let claims = claims(now.timestamp());
+        let old_token = old.mint(&claims).unwrap();
+
+        let rotated = EmbedSigner::from_hex(&new_hex).unwrap();
+        assert!(rotated.verify(&old_token, now).is_none());
+        let rotated = rotated.with_previous_hex(&old_hex).unwrap();
+        assert!(rotated.verify(&old_token, now).is_some());
+        let new_token = rotated.mint(&claims).unwrap();
+        assert!(rotated.verify(&new_token, now).is_some());
+        assert!(old.verify(&new_token, now).is_none());
+        assert!(rotated.clone().with_previous_hex("abcd").is_err());
     }
 
     #[test]

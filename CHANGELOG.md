@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Operations: reload and rotation
+
+- **KMS credentials rotate without a restart (L5-04).**
+  `ORCH8_BYOK_KMS_CREDENTIALS_FILE` points at a JSON
+  (`access_key_id`, `secret_access_key`, `session_token`) or `AWS_*=` file
+  that is re-read whenever it changes; a half-written file keeps the last
+  good credentials. The `AWS_*` env vars remain a boot-time snapshot.
+- **gRPC TLS material reloads (L5-14).** New `api.grpc_tls_reload_interval_secs`
+  (`ORCH8_GRPC_TLS_RELOAD_INTERVAL_SECS`, default 30, 0 disables). Changed,
+  valid cert/key/client-CA files are served to new connections without a
+  restart (existing connections drain on the old certificate); malformed
+  rotations are ignored. `SIGHUP` forces an immediate check.
+- **Dual-secret rotation for signed tokens (L5-20).** New
+  `[embed] token_secret_previous` (`ORCH8_EMBED_TOKEN_SECRET_PREVIOUS`) and
+  `ORCH8_BROWSER_SESSION_SECRET_PREVIOUS` (comma-separated) keep verifying
+  tokens signed with a retired secret; tokens are always minted with the
+  current one.
+- **A reaped node re-registers (L2-16).** A node the stale-node reaper marked
+  `stopped` becomes `active` again on its next heartbeat (a gracefully
+  deregistered node stays stopped).
+- **Lease expiry uses the database clock on Postgres (L2-09).** Trigger poll
+  leases, cron claims and OAuth refresh claims no longer
+  compare against the node's wall clock, so a skewed node cannot steal or
+  outlive a lease.
+- **Behaviour change: a purged remote federation run fails the call (L5-13).**
+  When a peer answers `unknown` to a status poll for a run it already
+  started, the call fails instead of starting the remote run again (which
+  repeated its side effects).
+- **Bounded backlog metric cardinality (L1-17).** `orch8_queue_depth` and
+  `orch8_placement_unsatisfied` publish at most 500 / 200 series; label
+  values are truncated to 64 bytes and the tail folds into
+  `capability="other"`.
+
 ### Long-run storage and state safety
 
 - **Instance lease fencing (L6-01).** The scheduler's instance heartbeat is

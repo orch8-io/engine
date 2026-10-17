@@ -57,7 +57,11 @@ impl EmbeddedRuntime {
         let signer = if secret.trim().is_empty() {
             None
         } else {
-            Some(EmbedSigner::from_hex(secret).map_err(|e| format!("[embed] token_secret: {e}"))?)
+            Some(
+                EmbedSigner::from_hex(secret)
+                    .and_then(|s| s.with_previous_hex(embed.token_secret_previous.expose()))
+                    .map_err(|e| format!("[embed] token_secret: {e}"))?,
+            )
         };
         Ok(Self {
             signer,
