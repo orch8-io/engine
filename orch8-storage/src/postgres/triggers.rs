@@ -257,14 +257,18 @@ pub(super) async fn try_acquire_poll_lease(
     now: chrono::DateTime<chrono::Utc>,
     lease_until: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, StorageError> {
+    // L2-09: the lease is decided on the database clock. The caller's
+    // `now`/`lease_until` only contribute the lease *duration*, so a node
+    // whose clock runs ahead can neither steal a live lease nor hold one
+    // past its real expiry.
     let result = sqlx::query(
         r"INSERT INTO trigger_poll_state (slug, lease_owner, lease_until, updated_at)
-          VALUES ($1, $2, $3, NOW())
+          VALUES ($1, $2, NOW() + ($3::timestamptz - $4::timestamptz), NOW())
           ON CONFLICT (slug) DO UPDATE SET
             lease_owner = EXCLUDED.lease_owner,
             lease_until = EXCLUDED.lease_until
           WHERE trigger_poll_state.lease_until IS NULL
-             OR trigger_poll_state.lease_until < $4
+             OR trigger_poll_state.lease_until < NOW()
              OR trigger_poll_state.lease_owner = EXCLUDED.lease_owner",
     )
     .bind(slug)

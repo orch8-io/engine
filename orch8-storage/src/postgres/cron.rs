@@ -125,15 +125,20 @@ pub(super) async fn claim_due(
     // `last_triggered_at < next_fire_at` disabled the schedule forever on
     // any failure in between. Re-fires are deduped by the instance
     // idempotency key `cron:<id>:<next_fire_at>`.
-    let lease_until = now + chrono::Duration::seconds(super::super::CRON_CLAIM_LEASE_SECS);
+    //
+    // L2-09: whether a schedule is *due* is judged against the caller's
+    // `now` (it is a wall-clock fire time), but the claim lease itself runs
+    // on the database clock so skewed nodes cannot steal or outlive a lease.
+    #[allow(clippy::cast_precision_loss)]
+    let lease_secs = super::super::CRON_CLAIM_LEASE_SECS as f64;
     let rows = sqlx::query_as::<_, CronRow>(
         r"UPDATE cron_schedules
-          SET claimed_until = $2, updated_at = NOW()
+          SET claimed_until = NOW() + make_interval(secs => $2), updated_at = NOW()
           WHERE id IN (
               SELECT id FROM cron_schedules
               WHERE enabled = TRUE
                 AND next_fire_at <= $1
-                AND (claimed_until IS NULL OR claimed_until < $1)
+                AND (claimed_until IS NULL OR claimed_until < NOW())
               ORDER BY next_fire_at
               LIMIT 100
               FOR UPDATE SKIP LOCKED
@@ -143,7 +148,7 @@ pub(super) async fn claim_due(
                  last_triggered_at, next_fire_at, created_at, updated_at",
     )
     .bind(now)
-    .bind(lease_until)
+    .bind(lease_secs)
     .fetch_all(&store.pool)
     .await?;
     Ok(rows.into_iter().map(CronRow::into_schedule).collect())

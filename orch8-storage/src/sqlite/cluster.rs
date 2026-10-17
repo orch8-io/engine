@@ -29,7 +29,16 @@ pub(super) async fn register(
 }
 
 pub(super) async fn heartbeat(storage: &SqliteStorage, node_id: Uuid) -> Result<(), StorageError> {
-    sqlx::query("UPDATE cluster_nodes SET last_heartbeat_at=?2 WHERE id=?1")
+    // L2-16: see the Postgres backend — revive a reaped (not deregistered)
+    // node when it heartbeats again.
+    sqlx::query(
+        "UPDATE cluster_nodes SET last_heartbeat_at=?2,
+             status = CASE WHEN status='stopped' AND execution_handoff_evidence IS NULL
+                           THEN 'active' ELSE status END,
+             stopped_at = CASE WHEN status='stopped' AND execution_handoff_evidence IS NULL
+                               THEN NULL ELSE stopped_at END
+         WHERE id=?1",
+    )
         .bind(node_id.to_string())
         .bind(ts(Utc::now()))
         .execute(&storage.pool)

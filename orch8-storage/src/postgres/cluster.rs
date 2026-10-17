@@ -30,8 +30,19 @@ pub(super) async fn register(
 }
 
 pub(super) async fn heartbeat(store: &PostgresStorage, node_id: Uuid) -> Result<(), StorageError> {
-    sqlx::query("UPDATE cluster_nodes SET last_heartbeat_at = NOW() WHERE id = $1")
-        .bind(node_id)
+    // L2-16: a node the reaper flipped to `stopped` (a stall or partition
+    // longer than the stale threshold) is alive again once it heartbeats, so
+    // re-register it. A graceful `deregister` stamps the handoff evidence, so
+    // a late heartbeat tick never resurrects a node that shut down on purpose.
+    sqlx::query(
+        "UPDATE cluster_nodes SET last_heartbeat_at = NOW(),
+             status = CASE WHEN status = 'stopped' AND execution_handoff_evidence IS NULL
+                           THEN 'active' ELSE status END,
+             stopped_at = CASE WHEN status = 'stopped' AND execution_handoff_evidence IS NULL
+                               THEN NULL ELSE stopped_at END
+         WHERE id = $1",
+    )
+    .bind(node_id)
         .execute(&store.pool)
         .await?;
     Ok(())

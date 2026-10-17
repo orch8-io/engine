@@ -162,9 +162,11 @@ pub(super) async fn claim_refresh(
     now: chrono::DateTime<chrono::Utc>,
     lease_until: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, StorageError> {
+    // L2-09: expiry is judged on the database clock; the caller's times
+    // only supply the lease duration (see `try_acquire_poll_lease`).
     let result = sqlx::query(
-        r"UPDATE credentials SET refresh_claimed_until = $2
-          WHERE id = $1 AND (refresh_claimed_until IS NULL OR refresh_claimed_until < $3)",
+        r"UPDATE credentials SET refresh_claimed_until = NOW() + ($2::timestamptz - $3::timestamptz)
+          WHERE id = $1 AND (refresh_claimed_until IS NULL OR refresh_claimed_until < NOW())",
     )
     .bind(id)
     .bind(lease_until)

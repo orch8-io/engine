@@ -1985,9 +1985,15 @@ async fn cron_failed_fire_is_reclaimable_after_lease_postgres() {
 
     assert!(mine(storage.claim_due_cron_schedules(now).await.unwrap()));
     assert!(!mine(storage.claim_due_cron_schedules(now).await.unwrap()));
-    let later = now + chrono::Duration::minutes(10);
+    // L2-09: lease expiry is judged on the database clock, so expire the
+    // claim there instead of passing a future `now`.
+    sqlx::query("UPDATE cron_schedules SET claimed_until = NOW() - INTERVAL '1 second' WHERE id = $1")
+        .bind(schedule.id)
+        .execute(storage.pool())
+        .await
+        .unwrap();
     assert!(
-        mine(storage.claim_due_cron_schedules(later).await.unwrap()),
+        mine(storage.claim_due_cron_schedules(now).await.unwrap()),
         "failed fire must be re-claimable after the lease"
     );
     storage.delete_cron_schedule(schedule.id).await.unwrap();
@@ -2033,7 +2039,13 @@ async fn trigger_poll_lease_excludes_other_owner_postgres() {
             .await
             .unwrap()
     );
-    let after = until + chrono::Duration::seconds(1);
+    // L2-09: expire the lease on the database clock.
+    sqlx::query("UPDATE trigger_poll_state SET lease_until = NOW() - INTERVAL '1 second' WHERE slug = $1")
+        .bind(&slug)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    let after = now;
     assert!(
         storage
             .try_acquire_trigger_poll_lease(&slug, "b", after, after + chrono::Duration::minutes(1))
@@ -2077,6 +2089,14 @@ async fn credential_refresh_claim_and_cas_update_postgres() {
     assert!(
         !storage
             .claim_credential_refresh(&id, now, lease)
+            .await
+            .unwrap()
+    );
+    // L2-09: a skewed caller clock cannot expire the claim; only the
+    // database clock can.
+    assert!(
+        !storage
+            .claim_credential_refresh(&id, now + chrono::Duration::hours(1), lease)
             .await
             .unwrap()
     );
