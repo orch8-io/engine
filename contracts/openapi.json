@@ -2455,7 +2455,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Summary + `definition`. Owned sequences and gallery templates carry the full definition; other tenant-level sequences a redacted one (step `params` emptied, `redacted: true`)",
+            "description": "Summary + `definition`. Owned sequences and gallery templates carry the full definition; other tenant-level sequences an allow-list projection (block types, ids, handler names, nesting; `redacted: true`)",
             "content": {
               "application/json": {
                 "schema": {}
@@ -2524,8 +2524,14 @@
           "409": {
             "description": "The name belongs to the tenant or another sub-tenant"
           },
+          "413": {
+            "description": "Body exceeds 1 MiB"
+          },
           "422": {
             "description": "Rejected by the embed sandbox: a handler outside the allowlist (`[embed] sandbox_handlers`), a `credentials://` reference, or a `sub_sequence` target the sub-tenant does not own"
+          },
+          "429": {
+            "description": "Per-sequence version cap or per-sub-tenant sequence cap reached (`sub_tenant_quota_exceeded`)"
           }
         },
         "security": [
@@ -2632,6 +2638,37 @@
           },
           "404": {
             "description": "Embedding is disabled (no token secret)"
+          }
+        }
+      }
+    },
+    "/embed/tokens/{jti}/revoke": {
+      "post": {
+        "tags": [
+          "embed"
+        ],
+        "operationId": "embed_revoke_token",
+        "parameters": [
+          {
+            "name": "jti",
+            "in": "path",
+            "description": "Token id (`token_id` from the mint response)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Token revoked; it is refused within a few seconds"
+          },
+          "403": {
+            "description": "Operator capability required"
+          },
+          "404": {
+            "description": "Embedding is disabled"
           }
         }
       }
@@ -7874,6 +7911,60 @@
           },
           "400": {
             "description": "Invalid sub-tenant id, body or no tenant"
+          }
+        }
+      }
+    },
+    "/sub-tenants/{sub}/resume": {
+      "post": {
+        "tags": [
+          "sub-tenants"
+        ],
+        "operationId": "resume_sub_tenant",
+        "parameters": [
+          {
+            "name": "sub",
+            "in": "path",
+            "description": "Sub-tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Embed tokens of the sub-tenant are accepted again"
+          },
+          "403": {
+            "description": "Operator capability required"
+          }
+        }
+      }
+    },
+    "/sub-tenants/{sub}/suspend": {
+      "post": {
+        "tags": [
+          "sub-tenants"
+        ],
+        "operationId": "suspend_sub_tenant",
+        "parameters": [
+          {
+            "name": "sub",
+            "in": "path",
+            "description": "Sub-tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Every embed token of the sub-tenant is refused (401) within a few seconds"
+          },
+          "403": {
+            "description": "Operator capability required"
           }
         }
       }
@@ -14947,7 +15038,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Sequence-name allowlist; null = every sequence visible to the\nsub-tenant."
+            "description": "Tenant-level sequences the token may see and run, beyond the\nsub-tenant's own sequences and the read-only gallery: `\"name\"`\n(namespace `default`), `\"namespace/name\"`, or `\"*\"` for every\ntenant-level sequence. null/empty = no tenant-level access."
           },
           "sub_tenant": {
             "type": "string"
@@ -14967,6 +15058,7 @@
         "type": "object",
         "required": [
           "token",
+          "token_id",
           "expires_at"
         ],
         "properties": {
@@ -14976,6 +15068,11 @@
           },
           "token": {
             "type": "string"
+          },
+          "token_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The token's `jti`; pass it to `POST /embed/tokens/{jti}/revoke`."
           }
         }
       },

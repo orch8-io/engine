@@ -2,8 +2,10 @@
 //!
 //! `o8e1.<b64url(json payload)>.<b64url(HMAC-SHA256(secret, "o8e1." + b64payload))>`
 //! where `secret` is the hex-decoded `[embed] token_secret`. Tokens are
-//! stateless, bound to one tenant and one sub-tenant, carry an explicit scope
-//! list and optional sequence allowlist, and live at most one hour.
+//! signed, bound to one tenant and one sub-tenant, carry an explicit scope
+//! list and an optional tenant-level sequence allowlist, and live at most one
+//! hour. They are revocable: a suspended sub-tenant or a revoked `jti` is
+//! refused (see [`crate::embed::EmbeddedRuntime::admit`]).
 
 use axum::extract::{FromRequestParts, State};
 use axum::http::StatusCode;
@@ -78,6 +80,7 @@ pub struct EmbedClaims {
     pub tid: String,
     pub sub: String,
     pub scp: Vec<EmbedScope>,
+    /// Tenant-level sequence allowlist (see [`EmbedPrincipal::sequences`]).
     pub seq: Option<Vec<String>>,
     pub iat: i64,
     pub exp: i64,
@@ -90,8 +93,10 @@ pub struct EmbedPrincipal {
     pub tenant_id: TenantId,
     pub sub_tenant: String,
     pub scopes: Vec<EmbedScope>,
-    /// Sequence-name allowlist; `None` = every sequence visible to the
-    /// sub-tenant.
+    /// Tenant-level sequences the token may see and run, beyond the
+    /// sub-tenant's own and the read-only gallery. Entries are `"name"`
+    /// (namespace `default`), `"namespace/name"`, or `"*"` for every
+    /// tenant-level sequence. `None`/empty = no tenant-level access.
     pub sequences: Option<Vec<String>>,
     pub token_id: Uuid,
     pub expires_at: DateTime<Utc>,
@@ -120,19 +125,54 @@ impl EmbedPrincipal {
         )))
     }
 
-    /// Whether the token's sequence allowlist admits `name`.
+    /// Whether the allowlist admits the tenant-level sequence
+    /// `(namespace, name)`. Matches on namespace and name together, never the
+    /// name alone.
     #[must_use]
-    pub fn allows_sequence(&self, name: &str) -> bool {
-        self.sequences
-            .as_ref()
-            .is_none_or(|list| list.iter().any(|allowed| allowed == name))
+    pub fn admits_tenant_level(&self, namespace: &str, name: &str) -> bool {
+        self.sequences.as_ref().is_some_and(|list| {
+            list.iter().any(|entry| {
+                entry == "*"
+                    || (namespace == "default" && entry == name)
+                    || entry
+                        .split_once('/')
+                        .is_some_and(|(ns, n)| ns == namespace && n == name)
+            })
+        })
+    }
+
+    /// The tenant-level admission as a storage filter.
+    #[must_use]
+    pub fn tenant_level_filter(&self) -> orch8_storage::EmbedTenantLevel {
+        let Some(list) = self.sequences.as_ref() else {
+            return orch8_storage::EmbedTenantLevel::None;
+        };
+        if list.iter().any(|entry| entry == "*") {
+            return orch8_storage::EmbedTenantLevel::All;
+        }
+        let mut pairs = Vec::new();
+        for entry in list {
+            // A bare name is a `default`-namespace entry; `ns/name` is both
+            // that pair and (for names containing '/') the literal name.
+            pairs.push(("default".to_string(), entry.clone()));
+            if let Some((ns, name)) = entry.split_once('/') {
+                pairs.push((ns.to_string(), name.to_string()));
+            }
+        }
+        if pairs.is_empty() {
+            orch8_storage::EmbedTenantLevel::None
+        } else {
+            orch8_storage::EmbedTenantLevel::Names(pairs)
+        }
     }
 
     /// How (if at all) this principal sees `seq`:
-    /// * the sub-tenant's own sequences — always;
-    /// * gallery templates (tenant-level, `embed-gallery`) — always, read-only;
-    /// * other tenant-level sequences — when the token's allowlist admits them;
-    /// * anything of another tenant or sub-tenant — never.
+    /// * the sub-tenant's own sequences: always;
+    /// * gallery templates (tenant-level, `embed-gallery`): always, read-only
+    ///   and never runnable, even if the allowlist names them;
+    /// * other tenant-level sequences: only when the allowlist admits
+    ///   `(namespace, name)`;
+    /// * anything of another tenant or sub-tenant: never.
     #[must_use]
     pub fn visibility(
         &self,
@@ -144,17 +184,16 @@ impl EmbedPrincipal {
         if let Some(owner) = seq.sub_tenant.as_deref() {
             return (owner == self.sub_tenant).then_some(SequenceVisibility::Owned);
         }
-        if self.allows_sequence(&seq.name) {
-            Some(SequenceVisibility::Tenant)
-        } else if orch8_types::sub_tenant::SequenceEmbed::is_gallery_template(seq) {
-            Some(SequenceVisibility::Gallery)
-        } else {
-            None
+        if orch8_types::sub_tenant::SequenceEmbed::is_gallery_template(seq) {
+            return Some(SequenceVisibility::Gallery);
         }
+        self.admits_tenant_level(seq.namespace.as_str(), &seq.name)
+            .then_some(SequenceVisibility::Tenant)
     }
 
     /// Whether runs of `seq` may be started/viewed with this token: owned
-    /// sequences, or tenant-level ones admitted by the allowlist.
+    /// sequences, or tenant-level ones admitted by the allowlist. Gallery
+    /// templates are read-only and never runnable.
     #[must_use]
     pub fn can_run(&self, seq: &orch8_types::sequence::SequenceDefinition) -> bool {
         matches!(
@@ -349,9 +388,11 @@ impl FromRequestParts<AppState> for EmbedPrincipal {
             return Err(ApiError::NotFound("embed routes are disabled".into()));
         };
         let token = bearer_token(&parts.headers).ok_or(ApiError::Unauthorized)?;
-        signer
+        let principal = signer
             .verify(token, Utc::now())
-            .ok_or(ApiError::Unauthorized)
+            .ok_or(ApiError::Unauthorized)?;
+        state.embedded.admit(state, &principal).await?;
+        Ok(principal)
     }
 }
 
@@ -360,8 +401,10 @@ impl FromRequestParts<AppState> for EmbedPrincipal {
 pub(crate) struct IssueTokenRequest {
     pub sub_tenant: String,
     pub scopes: Vec<EmbedScope>,
-    /// Sequence-name allowlist; null = every sequence visible to the
-    /// sub-tenant.
+    /// Tenant-level sequences the token may see and run, beyond the
+    /// sub-tenant's own sequences and the read-only gallery: `"name"`
+    /// (namespace `default`), `"namespace/name"`, or `"*"` for every
+    /// tenant-level sequence. null/empty = no tenant-level access.
     #[serde(default)]
     pub sequences: Option<Vec<String>>,
     /// Lifetime (default 900, max 3600).
@@ -372,6 +415,8 @@ pub(crate) struct IssueTokenRequest {
 #[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct IssueTokenResponse {
     pub token: String,
+    /// The token's `jti`; pass it to `POST /embed/tokens/{jti}/revoke`.
+    pub token_id: Uuid,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -439,8 +484,50 @@ pub(crate) async fn issue_token(
         .ok_or_else(|| ApiError::Internal("token expiry out of range".into()))?;
     Ok((
         StatusCode::CREATED,
-        Json(IssueTokenResponse { token, expires_at }),
+        Json(IssueTokenResponse {
+            token,
+            token_id: claims.jti,
+            expires_at,
+        }),
     ))
+}
+
+#[utoipa::path(post, path = "/embed/tokens/{jti}/revoke", tag = "embed", operation_id = "embed_revoke_token",
+    params(("jti" = Uuid, Path, description = "Token id (`token_id` from the mint response)")),
+    responses(
+        (status = 204, description = "Token revoked; it is refused within a few seconds"),
+        (status = 403, description = "Operator capability required"),
+        (status = 404, description = "Embedding is disabled"),
+    )
+)]
+pub(crate) async fn revoke_token(
+    State(state): State<AppState>,
+    tenant_ctx: OptionalTenant,
+    principal: Option<Extension<crate::auth::PrincipalContext>>,
+    axum::extract::Path(jti): axum::extract::Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    if state.embedded.signer.is_none() {
+        return Err(ApiError::NotFound("embed routes are disabled".into()));
+    }
+    if !crate::auth::principal_is_operator(principal.as_ref().map(|Extension(p)| p)) {
+        return Err(ApiError::Forbidden(
+            "revoking embed tokens requires the operator capability".into(),
+        ));
+    }
+    let tenant = crate::sub_tenants::require_tenant(&tenant_ctx)?;
+    // A token lives at most MAX_TTL_SECS from issue, so the row can be purged
+    // that long after revocation.
+    state
+        .storage
+        .revoke_embed_token(
+            &tenant,
+            jti,
+            Utc::now() + chrono::Duration::seconds(MAX_TTL_SECS),
+        )
+        .await
+        .map_err(|e| ApiError::from_storage(e, "embed_token"))?;
+    state.embedded.revocations.clear();
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -608,7 +695,79 @@ mod tests {
         };
         assert!(principal.require(EmbedScope::RunsRead).is_ok());
         assert!(principal.require(EmbedScope::RunsStart).is_err());
-        assert!(principal.allows_sequence("onboarding"));
-        assert!(!principal.allows_sequence("billing"));
+        assert!(principal.admits_tenant_level("default", "onboarding"));
+        assert!(!principal.admits_tenant_level("default", "billing"));
+    }
+
+    fn principal_with(sequences: Option<Vec<&str>>) -> EmbedPrincipal {
+        EmbedPrincipal {
+            tenant_id: TenantId::unchecked("t"),
+            sub_tenant: "s".into(),
+            scopes: vec![EmbedScope::RunsStart],
+            sequences: sequences.map(|v| v.into_iter().map(String::from).collect()),
+            token_id: Uuid::new_v4(),
+            expires_at: Utc::now(),
+        }
+    }
+
+    fn tenant_seq(
+        namespace: &str,
+        name: &str,
+        gallery: bool,
+    ) -> orch8_types::sequence::SequenceDefinition {
+        let mut value = serde_json::json!({
+            "id": orch8_types::ids::SequenceId::new(), "tenant_id": "t", "namespace": namespace,
+            "name": name, "version": 1, "created_at": Utc::now(), "blocks": [],
+        });
+        if gallery {
+            value["embed"] = serde_json::json!({"gallery": true});
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// EM-05: a missing allowlist grants no tenant-level access.
+    #[test]
+    fn missing_allowlist_admits_no_tenant_level_sequence() {
+        let seq = tenant_seq("default", "internal-admin", false);
+        for allowlist in [None, Some(vec![])] {
+            let p = principal_with(allowlist);
+            assert_eq!(p.visibility(&seq), None);
+            assert!(!p.can_run(&seq));
+            assert_eq!(
+                p.tenant_level_filter(),
+                orch8_storage::EmbedTenantLevel::None
+            );
+        }
+    }
+
+    /// EM-05: the allowlist matches on (namespace, name), not name alone;
+    /// `"*"` is the documented opt-in for every tenant-level sequence.
+    #[test]
+    fn allowlist_matches_namespace_and_name() {
+        let default_seq = tenant_seq("default", "onboarding", false);
+        let other_ns = tenant_seq("internal", "onboarding", false);
+        let bare = principal_with(Some(vec!["onboarding"]));
+        assert!(bare.can_run(&default_seq));
+        assert!(!bare.can_run(&other_ns), "same name in another namespace");
+        let qualified = principal_with(Some(vec!["internal/onboarding"]));
+        assert!(qualified.can_run(&other_ns));
+        assert!(!qualified.can_run(&default_seq));
+        let star = principal_with(Some(vec!["*"]));
+        assert!(star.can_run(&default_seq) && star.can_run(&other_ns));
+        assert_eq!(
+            star.tenant_level_filter(),
+            orch8_storage::EmbedTenantLevel::All
+        );
+    }
+
+    /// EM-05: gallery templates are read-only even when named or wildcarded.
+    #[test]
+    fn gallery_templates_are_never_runnable() {
+        let gallery = tenant_seq("embed-gallery", "starter", true);
+        for allowlist in [None, Some(vec!["*"]), Some(vec!["embed-gallery/starter"])] {
+            let p = principal_with(allowlist);
+            assert_eq!(p.visibility(&gallery), Some(SequenceVisibility::Gallery));
+            assert!(!p.can_run(&gallery));
+        }
     }
 }

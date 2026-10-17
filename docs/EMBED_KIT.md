@@ -71,7 +71,7 @@ export async function POST() {
       scopes: user.isAdmin
         ? ["runs:read", "runs:start", "approvals:resolve", "sequences:read", "builder:edit"]
         : ["runs:read", "runs:start", "approvals:resolve", "sequences:read"],
-      sequences: null,                                      // or ["customer-onboarding"] to restrict
+      sequences: null,                                      // tenant-level sequences to expose: ["customer-onboarding"], ["ns/name"], or ["*"]; null = only the customer's own + gallery
       ttl_seconds: 900,
     }),
   });

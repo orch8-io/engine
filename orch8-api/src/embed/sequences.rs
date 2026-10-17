@@ -4,13 +4,13 @@
 //! sequences, gallery templates (tenant-level, namespace `embed-gallery`,
 //! `embed.gallery = true`), and tenant-level sequences admitted by the
 //! token's allowlist. Only owned sequences and gallery templates expose their
-//! full definition; other tenant-level sequences are served with every step's
-//! `params` emptied, so a vendor's configuration (URLs, prompts, credential
-//! references) is never disclosed to its end customers. Builders write only sequences their
-//! sub-tenant owns and never into the gallery namespace; copying a gallery
-//! template means reading it and writing it under a new owned name.
-
-use std::collections::BTreeMap;
+//! full definition; other tenant-level sequences are served as an allow-list
+//! projection (block types, ids, step handler names and nesting only), so a
+//! vendor's configuration (URLs, prompts, conditions, cache and queue keys,
+//! credential references) is never disclosed to its end customers. Builders
+//! write only sequences their sub-tenant owns and never into the gallery
+//! namespace; copying a gallery template means reading it and writing it
+//! under a new owned name.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -21,16 +21,19 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use orch8_types::ids::{Namespace, SequenceId};
-use orch8_types::sequence::SequenceDefinition;
+use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 
 use super::runs::resolve_visible_sequence;
 use super::token::{EmbedPrincipal, EmbedScope, SequenceVisibility};
 use crate::AppState;
 use crate::error::ApiError;
 
-/// Upper bound on sequences scanned for one listing.
-const LIST_SCAN_LIMIT: u32 = 1_000;
+/// Upper bound on distinct sequence names returned by one listing.
+const LIST_LIMIT: u32 = 1_000;
 const MAX_NAME_BYTES: usize = 256;
+/// Hard cap on a `PUT /embed/sequences/{name}` body (the server-wide limit
+/// is far larger). Definitions beyond this are refused with 413.
+pub(crate) const PUT_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize, IntoParams)]
 pub(crate) struct NamespaceQuery {
@@ -98,23 +101,71 @@ pub(crate) struct EmbedSequenceList {
     pub handlers: Vec<EmbedHandler>,
 }
 
-/// Replace every step `params` object with `{}` so a summary-only
-/// definition shows structure but no configuration (URLs, prompts,
-/// credential references).
-fn redact_params(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, child) in map.iter_mut() {
-                if key == "params" {
-                    *child = serde_json::json!({});
-                } else {
-                    redact_params(child);
-                }
-            }
+/// Allow-list projection of a block for viewers who may see a sequence's
+/// shape but not its configuration (EM-09): block type, id, step handler and
+/// nesting only. Everything else (params, conditions, inputs, cache/queue/
+/// rate-limit keys, placement, prompts, sub-sequence targets) is dropped
+/// because it is simply never copied.
+fn project_block(block: &BlockDefinition) -> serde_json::Value {
+    use serde_json::json;
+    let list = |blocks: &[BlockDefinition]| -> Vec<serde_json::Value> {
+        blocks.iter().map(project_block).collect()
+    };
+    let branches = |branches: &[Vec<BlockDefinition>]| -> Vec<Vec<serde_json::Value>> {
+        branches.iter().map(|b| list(b)).collect()
+    };
+    match block {
+        BlockDefinition::Step(d) => json!({"type": "step", "id": d.id, "handler": d.handler}),
+        BlockDefinition::Parallel(d) => {
+            json!({"type": "parallel", "id": d.id, "branches": branches(&d.branches)})
         }
-        serde_json::Value::Array(items) => items.iter_mut().for_each(redact_params),
-        _ => {}
+        BlockDefinition::Race(d) => {
+            json!({"type": "race", "id": d.id, "branches": branches(&d.branches)})
+        }
+        BlockDefinition::Loop(d) => json!({"type": "loop", "id": d.id, "body": list(&d.body)}),
+        BlockDefinition::ForEach(d) => {
+            json!({"type": "for_each", "id": d.id, "body": list(&d.body)})
+        }
+        BlockDefinition::Router(d) => json!({
+            "type": "router", "id": d.id,
+            "routes": d.routes.iter().map(|r| json!({"blocks": list(&r.blocks)})).collect::<Vec<_>>(),
+            "default": d.default.as_deref().map(list),
+        }),
+        BlockDefinition::TryCatch(d) => json!({
+            "type": "try_catch", "id": d.id,
+            "try_block": list(&d.try_block), "catch_block": list(&d.catch_block),
+            "finally_block": d.finally_block.as_deref().map(list),
+        }),
+        BlockDefinition::SubSequence(d) => json!({"type": "sub_sequence", "id": d.id}),
+        BlockDefinition::ABSplit(d) => json!({
+            "type": "ab_split", "id": d.id,
+            "variants": d.variants.iter().map(|v| json!({"blocks": list(&v.blocks)})).collect::<Vec<_>>(),
+        }),
+        BlockDefinition::CancellationScope(d) => {
+            json!({"type": "cancellation_scope", "id": d.id, "blocks": list(&d.blocks)})
+        }
+        BlockDefinition::Saga(d) => json!({
+            "type": "saga", "id": d.id,
+            "steps": d.steps.iter().map(|st| json!({
+                "id": st.id,
+                "action": project_block(&st.action),
+                "compensation": st.compensation.as_deref().map(project_block),
+            })).collect::<Vec<_>>(),
+        }),
     }
+}
+
+/// Definition served for tenant-level sequences that are not owned by the
+/// sub-tenant and are not gallery templates.
+fn project_definition(seq: &SequenceDefinition) -> serde_json::Value {
+    serde_json::json!({
+        "id": seq.id,
+        "namespace": seq.namespace,
+        "name": seq.name,
+        "version": seq.version,
+        "input_schema": seq.input_schema,
+        "blocks": seq.blocks.iter().map(project_block).collect::<Vec<_>>(),
+    })
 }
 
 fn require_read(principal: &EmbedPrincipal) -> Result<(), ApiError> {
@@ -138,17 +189,24 @@ pub(crate) async fn list_sequences(
     principal: EmbedPrincipal,
 ) -> Result<impl IntoResponse, ApiError> {
     require_read(&principal)?;
-    let all = state
+    // Visibility is decided in SQL: latest version per name, only what this
+    // principal may see (EM-02).
+    let visible = state
         .storage
-        .list_sequences(Some(&principal.tenant_id), None, LIST_SCAN_LIMIT, 0)
+        .list_embed_visible_sequences(
+            &principal.tenant_id,
+            &principal.sub_tenant,
+            &principal.tenant_level_filter(),
+            LIST_LIMIT,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?;
-    let mut latest: BTreeMap<(String, String), (SequenceVisibility, SequenceDefinition)> =
-        BTreeMap::new();
-    for seq in all {
-        if seq.deprecated {
-            continue;
-        }
+    // Defence in depth (and de-duplication of a name held at both levels).
+    let mut latest: std::collections::BTreeMap<
+        (String, String),
+        (SequenceVisibility, SequenceDefinition),
+    > = std::collections::BTreeMap::new();
+    for seq in visible {
         let Some(visibility) = principal.visibility(&seq) else {
             continue;
         };
@@ -186,7 +244,7 @@ pub(crate) async fn list_sequences(
 #[utoipa::path(get, path = "/embed/sequences/{name}", tag = "embed", operation_id = "embed_get_sequence",
     params(("name" = String, Path, description = "Sequence name"), NamespaceQuery),
     responses(
-        (status = 200, description = "Summary + `definition`. Owned sequences and gallery templates carry the full definition; other tenant-level sequences a redacted one (step `params` emptied, `redacted: true`)",
+        (status = 200, description = "Summary + `definition`. Owned sequences and gallery templates carry the full definition; other tenant-level sequences an allow-list projection (block types, ids, handler names, nesting; `redacted: true`)",
             body = serde_json::Value),
         (status = 404, description = "Unknown or not visible"),
     ),
@@ -204,15 +262,13 @@ pub(crate) async fn get_sequence(
     let summary = summary(visibility, &seq);
     let mut body = serde_json::to_value(&summary)
         .map_err(|e| ApiError::Internal(format!("encode sequence summary: {e}")))?;
-    let mut definition = serde_json::to_value(&seq)
-        .map_err(|e| ApiError::Internal(format!("encode sequence: {e}")))?;
     let redacted = !(summary.owned || summary.gallery);
-    if redacted {
-        redact_params(&mut definition);
-        if let Some(object) = definition.as_object_mut() {
-            object.remove("interceptors");
-        }
-    }
+    let definition = if redacted {
+        project_definition(&seq)
+    } else {
+        serde_json::to_value(&seq)
+            .map_err(|e| ApiError::Internal(format!("encode sequence: {e}")))?
+    };
     body["definition"] = definition;
     body["redacted"] = serde_json::json!(redacted);
     Ok(Json(body))
@@ -254,6 +310,35 @@ async fn enforce_sandbox(
         "sequence rejected by the embed sandbox: {}",
         violations.join("; ")
     )))
+/// Per-sub-tenant storage caps for the embedded builder (EM-02): versions
+/// kept per name and distinct names owned. `existing_versions` is the number
+/// of stored versions of the name being written (0 = a new name).
+async fn enforce_write_caps(
+    state: &AppState,
+    principal: &EmbedPrincipal,
+    existing_versions: usize,
+) -> Result<(), ApiError> {
+    let limits = &state.embedded.limits;
+    let max_versions = limits.max_versions_per_sequence as usize;
+    if max_versions > 0 && existing_versions >= max_versions {
+        return Err(ApiError::SubTenantQuotaExceeded(format!(
+            "sequence already has {max_versions} versions (the per-sequence cap)"
+        )));
+    }
+    let max_sequences = u64::from(limits.max_sequences_per_sub_tenant);
+    if max_sequences > 0 && existing_versions == 0 {
+        let owned = state
+            .storage
+            .count_sub_tenant_sequence_names(&principal.tenant_id, &principal.sub_tenant)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "sequence"))?;
+        if owned >= max_sequences {
+            return Err(ApiError::SubTenantQuotaExceeded(format!(
+                "sub-tenant already owns {max_sequences} sequences (the per-sub-tenant cap)"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[utoipa::path(put, path = "/embed/sequences/{name}", tag = "embed", operation_id = "embed_put_sequence",
@@ -265,6 +350,8 @@ async fn enforce_sandbox(
         (status = 403, description = "Token lacks builder:edit or the sequence"),
         (status = 409, description = "The name belongs to the tenant or another sub-tenant"),
         (status = 422, description = "Rejected by the embed sandbox: a handler outside the allowlist (`[embed] sandbox_handlers`), a `credentials://` reference, or a `sub_sequence` target the sub-tenant does not own"),
+        (status = 413, description = "Body exceeds 1 MiB"),
+        (status = 429, description = "Per-sequence version cap or per-sub-tenant sequence cap reached (`sub_tenant_quota_exceeded`)"),
     ),
     security(("embed_token" = []))
 )]
@@ -300,6 +387,7 @@ pub(crate) async fn put_sequence(
     {
         return Err(ApiError::Conflict("sequence name is not available".into()));
     }
+    enforce_write_caps(&state, &principal, versions.len()).await?;
     let next_version = versions.iter().map(|v| v.version).max().unwrap_or(0) + 1;
 
     // Identity is server-assigned: strip client-supplied identity fields
@@ -353,25 +441,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redaction_empties_every_params_object() {
-        let mut value = serde_json::json!({
+    fn projection_keeps_shape_and_drops_all_configuration() {
+        let seq: SequenceDefinition = serde_json::from_value(serde_json::json!({
+            "id": SequenceId::new(), "tenant_id": "t", "namespace": "default", "name": "n",
+            "version": 3, "created_at": Utc::now(),
+            "interceptors": {"before_step": {"handler": "secret_hook", "params": {"k": "v"}}},
+            "placement": {"queue_name": "internal-queue"},
             "blocks": [
-                {"type": "step", "id": "a", "handler": "http_request",
+                {"type": "step", "id": "a", "handler": "http_request", "cache_key": "SECRETCACHE",
+                 "queue_name": "SECRETQ", "rate_limit_key": "SECRETRL",
                  "params": {"url": "https://internal", "token": "{{credentials.x}}"}},
+                {"type": "router", "id": "r", "routes": [{"condition": "ctx.data.vip == SECRETCOND",
+                    "blocks": [{"type": "step", "id": "b", "handler": "llm_call", "params": {"prompt": "x"}}]}]},
+                {"type": "sub_sequence", "id": "s", "sequence_name": "internal-admin", "input": {"k": "SECRETIN"}},
                 {"type": "parallel", "id": "p", "branches": [[
-                    {"type": "step", "id": "b", "handler": "llm_call", "params": {"prompt": "x"}}
+                    {"type": "step", "id": "c", "handler": "noop", "params": {}}
                 ]]}
             ]
-        });
-        redact_params(&mut value);
+        }))
+        .unwrap();
+        let value = project_definition(&seq);
         let text = value.to_string();
-        assert!(
-            !text.contains("internal") && !text.contains("credentials") && !text.contains("prompt")
-        );
+        for secret in [
+            "internal",
+            "credentials",
+            "prompt",
+            "SECRET",
+            "secret_hook",
+            "ctx.data",
+        ] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
+        }
         assert_eq!(value["blocks"][0]["handler"], "http_request");
         assert_eq!(
-            value["blocks"][1]["branches"][0][0]["params"],
-            serde_json::json!({})
+            value["blocks"][1]["routes"][0]["blocks"][0]["handler"],
+            "llm_call"
         );
+        assert_eq!(value["blocks"][3]["branches"][0][0]["id"], "c");
+        assert_eq!(value["version"], 3);
     }
 }

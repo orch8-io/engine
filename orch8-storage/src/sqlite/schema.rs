@@ -1415,6 +1415,22 @@ CREATE INDEX IF NOT EXISTS idx_mobile_approval_requests_settled_created
 -- Parked-row prune (Postgres migration 111).
 CREATE INDEX IF NOT EXISTS idx_webhook_outbox_parked_created
     ON webhook_outbox(created_at) WHERE status = 'parked';
+-- Embed-token revocation + sub-tenant suspension (Postgres migration 115).
+CREATE TABLE IF NOT EXISTS sub_tenant_status (
+    tenant_id TEXT NOT NULL,
+    sub_tenant TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, sub_tenant)
+);
+CREATE TABLE IF NOT EXISTS embed_revoked_tokens (
+    jti TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_embed_revoked_tokens_expires
+    ON embed_revoked_tokens(expires_at);
 "#;
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is

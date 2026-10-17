@@ -515,6 +515,24 @@ impl crate::SequenceStore for SqliteStorage {
         sequences::list_all(self, tenant_id, namespace, limit, offset).await
     }
 
+    async fn list_embed_visible_sequences(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        tenant_level: &crate::EmbedTenantLevel,
+        limit: u32,
+    ) -> Result<Vec<SequenceDefinition>, StorageError> {
+        sequences::list_embed_visible(self, tenant_id, sub_tenant, tenant_level, limit).await
+    }
+
+    async fn count_sub_tenant_sequence_names(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+    ) -> Result<u64, StorageError> {
+        sequences::count_sub_tenant_names(self, tenant_id, sub_tenant).await
+    }
+
     async fn deprecate_sequence(&self, id: SequenceId) -> Result<(), StorageError> {
         sequences::deprecate(self, id).await
     }

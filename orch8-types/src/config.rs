@@ -294,7 +294,7 @@ impl Default for ExecutorConfig {
 }
 
 /// `[embed]` section. Embed routes are disabled (404) without a secret.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbedConfig {
     /// Hex-encoded HMAC secret (at least 32 bytes decoded) signing `o8e1.`
@@ -321,6 +321,63 @@ pub struct EmbedConfig {
     /// Env: `ORCH8_EMBED_SANDBOX_HANDLERS`.
     #[serde(default)]
     pub sandbox_handlers: String,
+    /// Most distinct sequence names one sub-tenant may own via the embedded
+    /// builder (`PUT /embed/sequences/{name}`). `0` = unlimited.
+    #[serde(default = "default_embed_max_sequences")]
+    pub max_sequences_per_sub_tenant: u32,
+    /// Most versions kept per sub-tenant-owned sequence name. `0` = unlimited.
+    #[serde(default = "default_embed_max_versions")]
+    pub max_versions_per_sequence: u32,
+    /// Concurrent-run cap applied to a sub-tenant that has no explicit
+    /// `PUT /sub-tenants/{sub}/limits` row, when it starts its first run
+    /// through an embed token. `0` = unlimited.
+    #[serde(default = "default_embed_max_concurrent")]
+    pub default_max_concurrent_per_sub_tenant: u32,
+    /// Monthly-execution cap applied likewise. `0` = unlimited.
+    #[serde(default = "default_embed_max_monthly")]
+    pub default_max_executions_per_month_per_sub_tenant: u64,
+    /// Sustained requests per second allowed per `(tenant, sub-tenant)` on
+    /// `/embed/*`. `0` disables the limiter.
+    #[serde(default = "default_embed_rate_per_sec")]
+    pub rate_limit_per_sec: u32,
+    /// Token-bucket burst for the embed limiter.
+    #[serde(default = "default_embed_rate_burst")]
+    pub rate_limit_burst: u32,
+}
+
+const fn default_embed_max_sequences() -> u32 {
+    200
+}
+const fn default_embed_max_versions() -> u32 {
+    100
+}
+const fn default_embed_max_concurrent() -> u32 {
+    100
+}
+const fn default_embed_max_monthly() -> u64 {
+    100_000
+}
+const fn default_embed_rate_per_sec() -> u32 {
+    20
+}
+const fn default_embed_rate_burst() -> u32 {
+    60
+}
+
+impl Default for EmbedConfig {
+    fn default() -> Self {
+        Self {
+            token_secret: SecretString::default(),
+            token_secret_previous: SecretString::default(),
+            allowed_origins: String::new(),
+            max_sequences_per_sub_tenant: default_embed_max_sequences(),
+            max_versions_per_sequence: default_embed_max_versions(),
+            default_max_concurrent_per_sub_tenant: default_embed_max_concurrent(),
+            default_max_executions_per_month_per_sub_tenant: default_embed_max_monthly(),
+            rate_limit_per_sec: default_embed_rate_per_sec(),
+            rate_limit_burst: default_embed_rate_burst(),
+        }
+    }
 }
 
 /// `[license]` section.

@@ -286,11 +286,22 @@ pub(crate) async fn get_license(
 }
 
 /// Cached engine-wide active-sub-tenant count + warn throttle.
+///
+/// The count is refreshed by a background task and served stale: a request
+/// never awaits the database for it (EM-07). Until the first refresh lands
+/// there is no count and no verdict (soft enforcement fails open). A zero TTL
+/// (tests) refreshes inline instead, so changes are observable immediately.
 #[derive(Debug)]
 pub struct SoftEnforcer {
     ttl: Duration,
-    cache: tokio::sync::Mutex<Option<(Instant, u64)>>,
+    cache: std::sync::Mutex<EnforcerCache>,
     last_warn: std::sync::Mutex<Option<Instant>>,
+}
+
+#[derive(Debug, Default)]
+struct EnforcerCache {
+    value: Option<(Instant, u64)>,
+    refreshing: bool,
 }
 
 impl Default for SoftEnforcer {
@@ -306,31 +317,65 @@ impl SoftEnforcer {
     pub fn with_ttl(ttl: Duration) -> Self {
         Self {
             ttl,
-            cache: tokio::sync::Mutex::new(None),
+            cache: std::sync::Mutex::new(EnforcerCache::default()),
             last_warn: std::sync::Mutex::new(None),
         }
     }
 
-    async fn active_sub_tenants(&self, state: &AppState) -> Option<u64> {
-        let mut cache = self.cache.lock().await;
-        if let Some((at, count)) = *cache
-            && at.elapsed() < self.ttl
-        {
-            return Some(count);
-        }
+    async fn query_count(state: &AppState) -> Option<u64> {
         let since = Utc::now() - chrono::Duration::days(ACTIVE_WINDOW_DAYS);
         match state.storage.count_active_sub_tenants(since).await {
-            Ok(count) => {
-                *cache = Some((Instant::now(), count));
-                Some(count)
-            }
+            Ok(count) => Some(count),
             Err(error) => {
                 // Soft enforcement fails open: never error a request over it.
                 tracing::debug!(%error, "license soft-enforcement count unavailable");
-                *cache = Some((Instant::now(), 0));
                 None
             }
         }
+    }
+
+    fn store(&self, count: Option<u64>) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.refreshing = false;
+            // On failure keep the previous value but restart its clock so a
+            // down database is retried once per TTL, not once per request.
+            let previous = cache.value.map_or(0, |(_, c)| c);
+            cache.value = Some((Instant::now(), count.unwrap_or(previous)));
+        }
+    }
+
+    /// Synchronous half of a read: the cached count (possibly stale) and
+    /// whether the caller should start a background refresh. At most one
+    /// refresh is in flight at a time.
+    fn begin_read(&self) -> (Option<u64>, bool) {
+        let Ok(mut cache) = self.cache.lock() else {
+            return (None, false);
+        };
+        let fresh = cache.value.is_some_and(|(at, _)| at.elapsed() < self.ttl);
+        let spawn = !fresh && !cache.refreshing;
+        if spawn {
+            cache.refreshing = true;
+        }
+        (cache.value.map(|(_, count)| count), spawn)
+    }
+
+    /// The cached count, possibly stale; `None` before the first refresh.
+    /// Never awaits storage on the request path (except with a zero TTL).
+    async fn active_sub_tenants(&self, state: &AppState) -> Option<u64> {
+        if self.ttl.is_zero() {
+            let count = Self::query_count(state).await;
+            self.store(count);
+            return count;
+        }
+        let (value, spawn_refresh) = self.begin_read();
+        if spawn_refresh {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let count = Self::query_count(&state).await;
+                state.embedded.enforcer.store(count);
+            });
+        }
+        value
     }
 
     fn warn(&self, verdict: &str, active: u64) {
@@ -374,6 +419,32 @@ pub async fn soft_enforcement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// EM-07: reads never wait for a refresh. The first read has no value
+    /// and asks for one refresh; concurrent reads do not pile up refreshes;
+    /// a stale value keeps being served while the refresh runs.
+    #[test]
+    fn soft_enforcer_serves_stale_and_refreshes_in_the_background() {
+        let enforcer = SoftEnforcer::with_ttl(Duration::from_millis(40));
+        assert_eq!(enforcer.begin_read(), (None, true));
+        assert_eq!(
+            enforcer.begin_read(),
+            (None, false),
+            "one refresh at a time"
+        );
+        enforcer.store(Some(7));
+        assert_eq!(enforcer.begin_read(), (Some(7), false), "fresh");
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            enforcer.begin_read(),
+            (Some(7), true),
+            "stale is still served"
+        );
+        assert_eq!(enforcer.begin_read(), (Some(7), false));
+        // A failed refresh keeps the previous value and restarts its clock.
+        enforcer.store(None);
+        assert_eq!(enforcer.begin_read(), (Some(7), false));
+    }
     use ed25519_dalek::{Signer, SigningKey};
 
     fn keypair() -> (SigningKey, VerifyingKey) {

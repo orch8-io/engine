@@ -175,6 +175,62 @@ pub(super) async fn list_all(
     rows.iter().map(row_to_sequence).collect()
 }
 
+/// Latest non-deprecated version per `(namespace, name)` visible to an embed
+/// sub-tenant (EM-02), filtered in SQL.
+pub(super) async fn list_embed_visible(
+    storage: &SqliteStorage,
+    tenant_id: &TenantId,
+    sub_tenant: &str,
+    tenant_level: &crate::EmbedTenantLevel,
+    limit: u32,
+) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError> {
+    let mut qb = sqlx::QueryBuilder::new("SELECT s.* FROM sequences s WHERE s.tenant_id = ");
+    qb.push_bind(tenant_id.as_str().to_owned());
+    qb.push(" AND s.deprecated = 0 AND (s.sub_tenant = ");
+    qb.push_bind(sub_tenant.to_owned());
+    qb.push(" OR (s.sub_tenant IS NULL AND ((s.namespace = ");
+    qb.push_bind(orch8_types::sub_tenant::GALLERY_NAMESPACE);
+    qb.push(" AND json_extract(s.embed, '$.gallery') = 1)");
+    match tenant_level {
+        crate::EmbedTenantLevel::None => {}
+        crate::EmbedTenantLevel::All => {
+            qb.push(" OR 1=1");
+        }
+        crate::EmbedTenantLevel::Names(pairs) => {
+            for (ns, name) in pairs {
+                qb.push(" OR (s.namespace = ");
+                qb.push_bind(ns.clone());
+                qb.push(" AND s.name = ");
+                qb.push_bind(name.clone());
+                qb.push(")");
+            }
+        }
+    }
+    qb.push("))) AND s.version = (SELECT MAX(v.version) FROM sequences v WHERE v.tenant_id = s.tenant_id \
+             AND v.namespace = s.namespace AND v.name = s.name AND v.deprecated = 0 \
+             AND (v.sub_tenant IS s.sub_tenant)) \
+             ORDER BY s.namespace, s.name LIMIT ");
+    qb.push_bind(i64::from(limit));
+    let rows = qb.build().fetch_all(&storage.pool).await?;
+    rows.iter().map(row_to_sequence).collect()
+}
+
+pub(super) async fn count_sub_tenant_names(
+    storage: &SqliteStorage,
+    tenant_id: &TenantId,
+    sub_tenant: &str,
+) -> Result<u64, StorageError> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (SELECT DISTINCT namespace, name FROM sequences \
+         WHERE tenant_id = ?1 AND sub_tenant = ?2)",
+    )
+    .bind(tenant_id.as_str())
+    .bind(sub_tenant)
+    .fetch_one(&storage.pool)
+    .await?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
 pub(super) async fn deprecate(storage: &SqliteStorage, id: SequenceId) -> Result<(), StorageError> {
     sqlx::query("UPDATE sequences SET deprecated=1 WHERE id=?1")
         .bind(id.to_string())
