@@ -72,6 +72,41 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 /// keep row locks short, large enough to drain a backlog quickly.
 pub(crate) const BULK_STATEMENT_BATCH: i64 = 5_000;
 
+/// Upper bound on batches one bounded-retention call issues (D-02). A long
+/// outage can leave millions of expired rows; a single call deletes at most
+/// `BULK_MAX_BATCHES * BULK_STATEMENT_BATCH` of them (or stops at
+/// [`BULK_TIME_BUDGET`]) and the next periodic tick continues.
+pub(crate) const BULK_MAX_BATCHES: u32 = 40;
+
+/// Wall-clock budget for one bounded-retention call (D-02).
+pub(crate) const BULK_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Delete rows older than `cutoff` in `BULK_STATEMENT_BATCH`-row statements
+/// until a short batch, [`BULK_MAX_BATCHES`] batches, or [`BULK_TIME_BUDGET`].
+/// `sql` takes the cutoff as `$1` and the batch size as `$2`. Returns the
+/// rows deleted by this call.
+pub(crate) async fn bulk_delete_before(
+    pool: &sqlx::PgPool,
+    sql: &'static str,
+    cutoff: DateTime<Utc>,
+) -> Result<u64, StorageError> {
+    let started = std::time::Instant::now();
+    let mut total = 0;
+    for _ in 0..BULK_MAX_BATCHES {
+        let deleted = sqlx::query(sql)
+            .bind(cutoff)
+            .bind(BULK_STATEMENT_BATCH)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        total += deleted;
+        if deleted < BULK_STATEMENT_BATCH.unsigned_abs() || started.elapsed() >= BULK_TIME_BUDGET {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 pub struct PostgresStorage {
     pub(crate) pool: PgPool,
     /// Optional durable artifact backend (local FS / S3). `None` → artifact

@@ -220,10 +220,18 @@ pub(super) async fn delete_parked_before(
     store: &PostgresStorage,
     cutoff: chrono::DateTime<chrono::Utc>,
 ) -> Result<u64, StorageError> {
-    let result =
-        sqlx::query("DELETE FROM webhook_outbox WHERE status = 'parked' AND created_at < $1")
-            .bind(cutoff)
-            .execute(&store.pool)
-            .await?;
-    Ok(result.rows_affected())
+    // Bounded (D-02): after a long receiver outage the parked backlog can be
+    // millions of rows; one unbounded DELETE outlives `statement_timeout`,
+    // rolls back, and fails the same way every hourly tick. Batches are
+    // served by the partial `idx_webhook_outbox_parked_created` (migration
+    // 111) and capped per call; the next tick continues.
+    super::bulk_delete_before(
+        &store.pool,
+        "DELETE FROM webhook_outbox WHERE ctid IN \
+         (SELECT ctid FROM webhook_outbox \
+          WHERE status = 'parked' AND created_at < $1 \
+          ORDER BY created_at LIMIT $2)",
+        cutoff,
+    )
+    .await
 }

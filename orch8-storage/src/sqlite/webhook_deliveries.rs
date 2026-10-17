@@ -151,9 +151,12 @@ pub(super) async fn delete_before(
     storage: &SqliteStorage,
     cutoff: DateTime<Utc>,
 ) -> Result<u64, StorageError> {
-    let result = sqlx::query("DELETE FROM webhook_delivery_attempts WHERE attempted_at < ?1")
-        .bind(ts(cutoff))
-        .execute(&storage.pool)
-        .await?;
-    Ok(result.rows_affected())
+    // Bounded (D-02): see `postgres::webhook_deliveries::delete_before`.
+    super::helpers::bulk_delete_before(
+        &storage.pool,
+        "DELETE FROM webhook_delivery_attempts WHERE id IN \
+         (SELECT id FROM webhook_delivery_attempts WHERE attempted_at < ?1 LIMIT ?2)",
+        &ts(cutoff),
+    )
+    .await
 }
