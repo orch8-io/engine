@@ -70,6 +70,27 @@ struct ApiState {
     gate: tokio::sync::Mutex<()>,
     gate_open: std::sync::atomic::AtomicBool,
     opened: tokio::sync::Notify,
+    /// `/slow` requests currently parked in their handler. A request whose
+    /// client vanished (drain / SIGKILL) leaves only once hyper drops the
+    /// handler future, which races with the gate opening.
+    slow_inflight: std::sync::atomic::AtomicUsize,
+}
+
+/// Counts a `/slow` request as in flight until its handler future ends or
+/// is dropped (client disconnect).
+struct SlowInflight<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> SlowInflight<'a> {
+    fn enter(counter: &'a std::sync::atomic::AtomicUsize) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for SlowInflight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 struct InternalApi {
@@ -102,6 +123,7 @@ async fn deliver(state: &ApiState, path: &str, headers: &HeaderMap) -> (StatusCo
         );
     }
     if path == "/slow" {
+        let _inflight = SlowInflight::enter(&state.slow_inflight);
         loop {
             let notified = state.opened.notified();
             if state.gate_open.load(std::sync::atomic::Ordering::Acquire) {
@@ -172,6 +194,21 @@ impl InternalApi {
         if open {
             self.state.opened.notify_waiters();
         }
+    }
+
+    /// Wait until every parked `/slow` handler is gone (its connection was
+    /// dropped). Opening the gate before that lets the abandoned request
+    /// complete and be applied a second time, which is a mock-server race,
+    /// not engine behaviour.
+    fn wait_abandoned_requests_dropped(&self, what: &str) {
+        wait_until(what, Duration::from_secs(10), || {
+            (self
+                .state
+                .slow_inflight
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0)
+                .then_some(())
+        });
     }
 
     fn applied(&self, key: &str) -> u32 {
@@ -538,7 +575,10 @@ fn run(backend: &Backend) {
         },
     );
 
-    // The retry runs on an executor over plain HTTP polling.
+    // The retry runs on an executor over plain HTTP polling. The drained
+    // attempt's connection must be gone before the gate opens, or the mock
+    // would still apply the abandoned request.
+    api.wait_abandoned_requests_dropped("the drained request's handler to be dropped");
     api.set_gate(true);
     let h1 = ExecutorProcess::spawn(
         "h1",
@@ -642,6 +682,7 @@ fn run(backend: &Backend) {
     let survivor_id = replica(&token, "s1");
     let killed_at = Instant::now();
     victim.kill();
+    api.wait_abandoned_requests_dropped("the killed executor's request handler to be dropped");
     api.set_gate(true);
     let reclaimed = wait_until("the reaper to reclaim", Duration::from_secs(30), || {
         cloud

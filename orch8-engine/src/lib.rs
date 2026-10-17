@@ -596,6 +596,12 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// +-20% jitter so several loops that crashed together (shared dependency
+/// down) do not restart in lockstep.
+fn jittered_restart_delay(delay: Duration) -> Duration {
+    delay.mul_f64(rand::RngExt::random_range(&mut rand::rng(), 0.8..1.2))
+}
+
 /// Run a background loop built by `make` until `cancel` fires, restarting it
 /// with capped exponential backoff whenever it panics or returns early
 /// (L2-05). Each restart increments
@@ -633,7 +639,7 @@ where
         }
         tokio::select! {
             () = cancel.cancelled() => return,
-            () = tokio::time::sleep(delay) => {}
+            () = tokio::time::sleep(jittered_restart_delay(delay)) => {}
         }
         delay = (delay * 2).min(LOOP_RESTART_MAX);
     }
@@ -782,6 +788,19 @@ mod shutdown_tests {
             .expect("supervisor exits on cancel")
             .unwrap();
         assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn supervise_restart_delay_is_jittered_within_bounds() {
+        let delays: std::collections::BTreeSet<_> = (0..50)
+            .map(|_| jittered_restart_delay(Duration::from_secs(10)))
+            .collect();
+        assert!(
+            delays
+                .iter()
+                .all(|d| *d >= Duration::from_secs(8) && *d <= Duration::from_secs(12))
+        );
+        assert!(delays.len() > 5, "delays spread out");
     }
 
     /// L2-04: transient storage errors during startup are retried with

@@ -49,6 +49,15 @@ pub const TASKS_PUSH_FAILED: &str = "orch8_tasks_push_failed_total";
 /// Push wake-ups skipped because the bounded push pool was full (the task
 /// stays pending for pull).
 pub const TASKS_PUSH_SKIPPED: &str = "orch8_tasks_push_skipped_total";
+/// Deferred sub-sequence parent wakes evicted (map at capacity) or expired
+/// without delivery. The park-then-recheck path is the recovery for these.
+pub const DEFERRED_PARENT_WAKES_DROPPED: &str = "orch8_deferred_parent_wakes_dropped_total";
+/// Per-instance transient-retry trackers evicted because the map hit its
+/// hard size bound (the evicted instance restarts its backoff count).
+pub const TRANSIENT_RETRY_ENTRIES_EVICTED: &str = "orch8_transient_retry_entries_evicted_total";
+/// Trigger listeners that exited on their own and were deregistered for
+/// respawn (label `listener`). A rising rate is a crash loop.
+pub const TRIGGER_LISTENER_RESTARTS: &str = "orch8_trigger_listener_restarts_total";
 /// Failed `OAuth2` credential refreshes (the credential backs off).
 pub const CREDENTIAL_REFRESH_FAILURES: &str = "orch8_credential_refresh_failures_total";
 /// Push-style trigger events (NATS core, file watch) dropped after their

@@ -185,7 +185,7 @@ async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken
                 if let Some(ServerPayload::Command(frame)) = message.payload {
                     match decode_command(&frame.command_json) {
                         Ok(command) => handle_command(&command, &sender, shutdown).await?,
-                        Err(unsupported) => ack_unsupported(unsupported, &sender).await?,
+                        Err(undecodable) => handle_undecodable(undecodable, &sender).await?,
                     }
                 }
             }
@@ -217,17 +217,51 @@ pub(crate) fn spawn(
     })
 }
 
-/// Decode a control command. An undecodable one (e.g. a command kind added
-/// by a newer control plane) yields its id when it has one, so it can be
-/// acked and dropped instead of failing (and replaying on) every session.
-fn decode_command(json: &str) -> Result<WorkerCommand, Option<String>> {
+/// A command frame that could not be decoded into a [`WorkerCommand`].
+#[derive(Debug, PartialEq, Eq)]
+enum Undecodable {
+    /// The command kind is not known to this build (e.g. added by a newer
+    /// control plane). Acked and dropped so it does not replay on every
+    /// session.
+    UnknownKind(Option<String>),
+    /// The kind is known but the frame no longer matches its schema. Not
+    /// acked: acking would silently swallow a command (e.g. `drain`) we did
+    /// not execute. It stays pending on the control plane and is reported
+    /// here at error level.
+    KnownKindMalformed { id: Option<String>, kind: String },
+}
+
+/// Decode a control command, classifying a failure (see [`Undecodable`]).
+fn decode_command(json: &str) -> Result<WorkerCommand, Undecodable> {
     serde_json::from_str::<WorkerCommand>(json).map_err(|error| {
-        let id = serde_json::from_str::<serde_json::Value>(json)
-            .ok()
-            .and_then(|v| v.get("id").and_then(serde_json::Value::as_str).map(str::to_string));
-        tracing::warn!(%error, command_id = ?id, "unsupported managed control command; acknowledging and ignoring");
-        id
+        let value = serde_json::from_str::<serde_json::Value>(json).ok();
+        let id = value
+            .as_ref()
+            .and_then(|v| v.get("id").and_then(serde_json::Value::as_str))
+            .map(str::to_string);
+        let known = value
+            .as_ref()
+            .and_then(|v| v.get("command").and_then(serde_json::Value::as_str))
+            .filter(|k| k.parse::<WorkerCommandKind>().is_ok())
+            .map(str::to_string);
+        if let Some(kind) = known {
+            tracing::error!(%error, command_id = ?id, %kind, "known managed control command could not be decoded; NOT acknowledging (stays pending)");
+            Undecodable::KnownKindMalformed { id, kind }
+        } else {
+            tracing::warn!(%error, command_id = ?id, "unsupported managed control command; acknowledging and ignoring");
+            Undecodable::UnknownKind(id)
+        }
     })
+}
+
+async fn handle_undecodable(
+    undecodable: Undecodable,
+    sender: &tokio::sync::mpsc::Sender<WorkerStreamClient>,
+) -> Result<()> {
+    match undecodable {
+        Undecodable::UnknownKind(id) => ack_unsupported(id, sender).await,
+        Undecodable::KnownKindMalformed { .. } => Ok(()),
+    }
 }
 
 async fn ack_unsupported(
@@ -281,10 +315,37 @@ mod tests {
         })
         .to_string();
         let unsupported = decode_command(&json).unwrap_err();
+        assert_eq!(unsupported, Undecodable::UnknownKind(Some(id.to_string())));
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-        ack_unsupported(unsupported, &sender).await.unwrap();
+        handle_undecodable(unsupported, &sender).await.unwrap();
         assert_eq!(received_ack(&mut receiver).await.command_id, id.to_string());
-        assert!(decode_command("not json").unwrap_err().is_none());
+        assert_eq!(
+            decode_command("not json").unwrap_err(),
+            Undecodable::UnknownKind(None)
+        );
+    }
+
+    /// D-09: a known kind whose schema drifted is not acked (it would be
+    /// silently lost), while it is still classified, not fatal.
+    #[tokio::test]
+    async fn known_kind_with_drifted_schema_is_not_acked() {
+        let id = uuid::Uuid::new_v4();
+        let json = serde_json::json!({
+            "id": id, "worker_id": 42, "command": "drain",
+            "created_at": "not-a-date",
+        })
+        .to_string();
+        let undecodable = decode_command(&json).unwrap_err();
+        assert_eq!(
+            undecodable,
+            Undecodable::KnownKindMalformed {
+                id: Some(id.to_string()),
+                kind: "drain".into()
+            }
+        );
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        handle_undecodable(undecodable, &sender).await.unwrap();
+        assert!(receiver.try_recv().is_err(), "no ack for a known kind");
     }
 
     #[test]
@@ -439,14 +500,23 @@ mod tests {
         })
         .to_string();
 
-        assert_eq!(decode_command(&json).unwrap_err(), Some(id.to_string()));
+        assert_eq!(
+            decode_command(&json).unwrap_err(),
+            Undecodable::UnknownKind(Some(id.to_string()))
+        );
     }
 
     #[test]
     fn undecodable_command_without_an_id_yields_nothing_to_acknowledge() {
         let json = serde_json::json!({"worker_id": "edge-1", "command": "drain"}).to_string();
 
-        assert_eq!(decode_command(&json).unwrap_err(), None);
+        assert_eq!(
+            decode_command(&json).unwrap_err(),
+            Undecodable::KnownKindMalformed {
+                id: None,
+                kind: "drain".into()
+            }
+        );
     }
 
     #[tokio::test]

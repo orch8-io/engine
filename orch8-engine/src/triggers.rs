@@ -31,12 +31,45 @@ struct ActiveListener {
     cancel: CancellationToken,
     trigger_type: TriggerType,
     config: serde_json::Value,
+    /// When this listener task was spawned (to tell a crash loop from a
+    /// listener that ran healthily for a while before exiting).
+    started: std::time::Instant,
+}
+
+/// Crash-loop bookkeeping for a slug whose listener keeps exiting on its own.
+struct RestartState {
+    /// Consecutive self-exits; reset after a healthy run.
+    count: u32,
+    /// `sync_triggers` will not respawn the listener before this instant.
+    next_allowed: std::time::Instant,
+}
+
+/// A listener that stayed up this long before exiting counts as healthy.
+const LISTENER_HEALTHY_RUN: std::time::Duration = std::time::Duration::from_secs(300);
+const LISTENER_RESTART_BASE: std::time::Duration = std::time::Duration::from_secs(30);
+const LISTENER_RESTART_MAX: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Delay before respawning a listener that has self-exited `count`
+/// consecutive times: none for the first exit (sync cadence applies), then
+/// 30 s doubling to a 10 min cap, +-20% jitter.
+fn listener_restart_delay(count: u32) -> std::time::Duration {
+    if count <= 1 {
+        return std::time::Duration::ZERO;
+    }
+    let exp = (count - 2).min(10);
+    LISTENER_RESTART_BASE
+        .saturating_mul(1u32 << exp)
+        .min(LISTENER_RESTART_MAX)
+        .mul_f64(rand::RngExt::random_range(&mut rand::rng(), 0.8..1.2))
 }
 
 /// Tracks active trigger listeners so we can start/stop them as definitions change.
+#[derive(Default)]
 struct ActiveTriggers {
     /// Map of slug -> the listener currently running for it.
     listeners: HashMap<String, ActiveListener>,
+    /// Crash-loop backoff per slug (listeners that exit on their own).
+    restarts: HashMap<String, RestartState>,
 }
 
 /// Run the trigger processor loop. Periodically syncs trigger definitions from DB
@@ -46,9 +79,7 @@ pub async fn run_trigger_loop(
     poll_interval: std::time::Duration,
     cancel: CancellationToken,
 ) {
-    let active = Arc::new(RwLock::new(ActiveTriggers {
-        listeners: HashMap::new(),
-    }));
+    let active = Arc::new(RwLock::new(ActiveTriggers::default()));
 
     let mut ticker = interval(poll_interval);
     let mut listener_tasks = JoinSet::new();
@@ -127,7 +158,31 @@ fn spawn_deregistering_listener<F>(
                 listener = kind,
                 "trigger listener exited, deregistering"
             );
-            active.listeners.remove(&slug);
+            let ran = active.listeners.remove(&slug).map(|l| l.started.elapsed());
+            let now = std::time::Instant::now();
+            let state = active.restarts.entry(slug.clone()).or_insert(RestartState {
+                count: 0,
+                next_allowed: now,
+            });
+            if ran.is_some_and(|r| r >= LISTENER_HEALTHY_RUN) {
+                state.count = 0;
+            }
+            state.count = state.count.saturating_add(1);
+            let delay = listener_restart_delay(state.count);
+            state.next_allowed = now + delay;
+            crate::metrics::inc_with(
+                crate::metrics::TRIGGER_LISTENER_RESTARTS,
+                &[("listener", kind)],
+            );
+            if !delay.is_zero() {
+                warn!(
+                    slug,
+                    listener = kind,
+                    consecutive_exits = state.count,
+                    retry_in_secs = delay.as_secs(),
+                    "trigger listener keeps exiting; backing off before respawn"
+                );
+            }
         }
     });
 }
@@ -207,11 +262,22 @@ async fn sync_triggers(
                 info!(slug, "stopping trigger listener");
                 listener.cancel.cancel();
             }
+            // A deliberate stop/config edit is a fresh start.
+            active.restarts.remove(&slug);
         }
+        active.restarts.retain(|slug, _| desired.contains_key(slug));
 
         // Start listeners for new or just-restarted triggers.
         for (slug, trigger) in &desired {
             if active.listeners.contains_key(slug) {
+                continue;
+            }
+            if active
+                .restarts
+                .get(slug)
+                .is_some_and(|r| r.next_allowed > std::time::Instant::now())
+            {
+                debug!(slug, "trigger listener restart backing off");
                 continue;
             }
 
@@ -224,6 +290,7 @@ async fn sync_triggers(
                     cancel: child_cancel.clone(),
                     trigger_type: trigger.trigger_type.clone(),
                     config: trigger.config.clone(),
+                    started: std::time::Instant::now(),
                 },
             );
 
@@ -791,8 +858,10 @@ mod tests {
                     cancel: CancellationToken::new(),
                     trigger_type: TriggerType::ActivepiecesPoll,
                     config: serde_json::Value::Null,
+                    started: std::time::Instant::now(),
                 },
             )]),
+            ..ActiveTriggers::default()
         }));
         let mut tasks = JoinSet::new();
 
@@ -807,6 +876,67 @@ mod tests {
         while tasks.join_next().await.is_some() {}
 
         assert!(active.read().await.listeners.is_empty());
+        // D-10: the crash is counted and the respawn backoff recorded.
+        let guard = active.read().await;
+        assert_eq!(guard.restarts["slug-a"].count, 1);
+    }
+
+    /// D-10: the respawn delay grows with consecutive exits and is capped.
+    #[test]
+    fn listener_restart_delay_grows_and_is_capped() {
+        assert!(listener_restart_delay(1).is_zero());
+        let d2 = listener_restart_delay(2);
+        assert!(
+            d2 >= std::time::Duration::from_secs(24) && d2 <= std::time::Duration::from_secs(36)
+        );
+        assert!(listener_restart_delay(4) > d2);
+        assert!(
+            listener_restart_delay(100)
+                <= LISTENER_RESTART_MAX.mul_f64(1.2) + std::time::Duration::from_millis(1)
+        );
+    }
+
+    /// D-10: a slug inside its restart backoff window is not respawned by
+    /// the periodic sync.
+    #[tokio::test]
+    async fn sync_does_not_respawn_a_listener_inside_its_backoff_window() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mut trigger = mk_trigger("t-backoff", "seq", TriggerType::ActivepiecesPoll);
+        trigger.config = serde_json::json!({"poll_url": "https://a.example.com"});
+        storage.create_trigger(&trigger).await.unwrap();
+        let active = Arc::new(RwLock::new(ActiveTriggers::default()));
+        active.write().await.restarts.insert(
+            "t-backoff".into(),
+            RestartState {
+                count: 5,
+                next_allowed: std::time::Instant::now() + std::time::Duration::from_secs(300),
+            },
+        );
+        let cancel = CancellationToken::new();
+        let mut listener_tasks = JoinSet::new();
+
+        sync_triggers(&storage, &active, &cancel, &mut listener_tasks)
+            .await
+            .unwrap();
+
+        assert!(
+            active.read().await.listeners.is_empty(),
+            "still backing off"
+        );
+        assert!(listener_tasks.is_empty());
+        active
+            .write()
+            .await
+            .restarts
+            .get_mut("t-backoff")
+            .unwrap()
+            .next_allowed = std::time::Instant::now();
+        sync_triggers(&storage, &active, &cancel, &mut listener_tasks)
+            .await
+            .unwrap();
+        assert!(active.read().await.listeners.contains_key("t-backoff"));
+        cancel.cancel();
+        listener_tasks.abort_all();
     }
 
     fn mk_trigger(slug: &str, seq_name: &str, tt: TriggerType) -> TriggerDef {
@@ -1213,9 +1343,7 @@ mod tests {
         trigger.config = serde_json::json!({"poll_url": "https://a.example.com"});
         storage.create_trigger(&trigger).await.unwrap();
 
-        let active = Arc::new(RwLock::new(ActiveTriggers {
-            listeners: HashMap::new(),
-        }));
+        let active = Arc::new(RwLock::new(ActiveTriggers::default()));
         let cancel = CancellationToken::new();
         let mut listener_tasks = JoinSet::new();
 
@@ -1263,9 +1391,7 @@ mod tests {
         trigger.config = serde_json::json!({"poll_url": "https://a.example.com"});
         storage.create_trigger(&trigger).await.unwrap();
 
-        let active = Arc::new(RwLock::new(ActiveTriggers {
-            listeners: HashMap::new(),
-        }));
+        let active = Arc::new(RwLock::new(ActiveTriggers::default()));
         let cancel = CancellationToken::new();
         let mut listener_tasks = JoinSet::new();
 
