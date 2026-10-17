@@ -158,8 +158,10 @@ mod tests {
     }
 
     #[test]
-    fn limits_reject_unknown_fields() {
+    fn limits_tolerate_unknown_fields_on_read() {
+        // Persisted type: a row written by a newer binary must still decode
+        // after a rollback. Strictness is enforced at the API boundary.
         assert!(serde_json::from_str::<SubTenantLimits>(r#"{"max_concurrent":1}"#).is_ok());
-        assert!(serde_json::from_str::<SubTenantLimits>(r#"{"max":1}"#).is_err());
+        assert!(serde_json::from_str::<SubTenantLimits>(r#"{"max":1}"#).is_ok());
     }
 }
