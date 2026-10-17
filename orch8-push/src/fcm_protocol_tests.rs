@@ -136,6 +136,7 @@ fn provider(endpoint: &str) -> FcmProvider {
             token_uri: format!("{endpoint}/token"),
         },
         cached_token: Mutex::new(None),
+        last_forced_refresh: std::sync::Mutex::new(None),
     }
 }
 
@@ -343,6 +344,85 @@ async fn repeated_auth_rejection_exhausts_delivery_attempts() {
     ));
     assert_eq!(mock.state.token_bodies.lock().await.len(), 3);
     assert_eq!(mock.state.deliveries.lock().await.len(), 3);
+}
+
+#[tokio::test]
+async fn auth_rejection_refresh_is_rate_limited_across_wakes() {
+    // First wake: the rejection may re-mint the token (and keeps retrying
+    // within the call). Second wake inside the window: the same rejection must
+    // NOT discard the process-wide token or hit the OAuth endpoint again.
+    let mock = spawn_mock_fcm(vec![
+        (StatusCode::UNAUTHORIZED, "e1"),
+        (StatusCode::UNAUTHORIZED, "e2"),
+        (StatusCode::UNAUTHORIZED, "e3"),
+        (StatusCode::UNAUTHORIZED, "e4"),
+    ])
+    .await;
+    let provider = provider(&mock.endpoint);
+
+    let first = provider.send_silent_push("device-a", "android").await;
+    assert!(matches!(first, Err(PushError::Retryable(_))));
+    let exchanges = mock.state.token_bodies.lock().await.len();
+    assert_eq!(exchanges, 3);
+
+    let second = provider.send_silent_push("device-b", "android").await;
+    assert!(matches!(
+        second,
+        Err(PushError::Retryable(message)) if message.contains("rate-limited")
+    ));
+    // One lazy mint (the first call left the cache empty), but no *forced*
+    // re-mint and no retry loop: 3 exchanges per wake would be 6 here.
+    assert_eq!(
+        mock.state.token_bodies.lock().await.len(),
+        exchanges + 1,
+        "the rejected second wake costs at most one lazy token mint"
+    );
+    assert_eq!(mock.state.deliveries.lock().await.len(), 4, "one delivery try, no churn");
+}
+
+#[tokio::test]
+async fn wake_is_sent_with_ttl_and_collapse_key() {
+    let mock = spawn_mock_fcm(vec![(StatusCode::OK, r#"{"name":"ok"}"#)]).await;
+    provider(&mock.endpoint)
+        .send_silent_push("device-token", "android")
+        .await
+        .unwrap();
+    let deliveries = mock.state.deliveries.lock().await;
+    let android = &deliveries[0].body["message"]["android"];
+    assert_eq!(android["collapse_key"], crate::WAKE_COLLAPSE_ID);
+    assert_eq!(android["ttl"], "300s");
+}
+
+#[tokio::test]
+async fn sender_id_mismatch_quarantines_the_token_without_touching_oauth() {
+    let body = r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"SenderId mismatch","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"SENDER_ID_MISMATCH"}]}}"#;
+    let mock = spawn_mock_fcm(vec![(StatusCode::FORBIDDEN, body)]).await;
+    let result = provider(&mock.endpoint)
+        .send_silent_push("device-token", "android")
+        .await;
+    assert!(matches!(result, Err(PushError::InvalidToken)));
+    assert_eq!(mock.state.token_bodies.lock().await.len(), 1, "no re-mint, no retries");
+    assert_eq!(mock.state.deliveries.lock().await.len(), 1);
+}
+
+#[test]
+fn invalid_argument_about_the_registration_token_is_a_token_rejection() {
+    let body = r#"{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"The registration token is not a valid FCM registration token"}}"#;
+    assert_eq!(
+        classify_fcm_response(StatusCode::BAD_REQUEST, body),
+        FcmOutcome::InvalidToken
+    );
+    // A payload-shaped INVALID_ARGUMENT stays a permanent (non-token) error.
+    let payload = r#"{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"Invalid JSON payload"}}"#;
+    assert_eq!(
+        classify_fcm_response(StatusCode::BAD_REQUEST, payload),
+        FcmOutcome::Permanent
+    );
+    // An INVALID_ARGUMENT delivered with a 403 is still not an auth rejection.
+    assert_eq!(
+        classify_fcm_response(StatusCode::FORBIDDEN, body),
+        FcmOutcome::InvalidToken
+    );
 }
 
 #[tokio::test]

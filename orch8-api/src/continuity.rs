@@ -356,11 +356,10 @@ async fn issue_continuation_grant(
     let now = Utc::now();
     let destination_is_known = state
         .storage
-        .list_runtime_capabilities(&tenant_id, now, 10_000)
+        .get_runtime_capability(&tenant_id, body.destination_runtime_id, now)
         .await
         .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?
-        .iter()
-        .any(|runtime| runtime.runtime_id == body.destination_runtime_id);
+        .is_some();
     if !destination_is_known {
         return Err(ApiError::Conflict(
             "grant destination must have a live capability registration".into(),
@@ -502,11 +501,10 @@ async fn create_execution(
         }
         let registered = state
             .storage
-            .list_runtime_capabilities(&tenant_id, Utc::now(), 10_000)
+            .get_runtime_capability(&tenant_id, body.runtime_id, Utc::now())
             .await
             .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?
-            .iter()
-            .any(|runtime| runtime.runtime_id == body.runtime_id);
+            .is_some();
         if !registered {
             return Err(ApiError::Conflict(
                 "the hosting runtime must have a live capability registration".into(),
@@ -808,16 +806,23 @@ async fn build_handoff_preview(
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound(format!("continuity execution {continuity_id}")))?;
-    let runtimes = state
+    let destination = state
         .storage
-        .list_runtime_capabilities(tenant_id, Utc::now(), 1_000)
+        .get_runtime_capability(tenant_id, destination_runtime_id, Utc::now())
         .await
-        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
-    let destination = runtimes
-        .iter()
-        .find(|runtime| runtime.runtime_id == destination_runtime_id)
+        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?
         .ok_or_else(|| ApiError::NotFound("destination runtime".into()))?;
+    let destination = &destination;
     let findings = assess_compatibility(requirements, destination, Utc::now());
+    let runtimes = orch8_engine::placement::candidate_runtimes(
+        state.storage.as_ref(),
+        tenant_id,
+        requirements,
+        &[execution.owner_runtime_id, destination_runtime_id],
+        Utc::now(),
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
     let mut placement_decision = orch8_engine::placement::choose_runtime(
         tenant_id.clone(),
         continuity_id,
@@ -1177,11 +1182,15 @@ async fn export_handoff(
         ));
     }
     let placement_now = Utc::now();
-    let candidates = state
-        .storage
-        .list_runtime_capabilities(&tenant_id, placement_now, 1_000)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    let candidates = orch8_engine::placement::candidate_runtimes(
+        state.storage.as_ref(),
+        &tenant_id,
+        &authorized.requirements,
+        &[execution.owner_runtime_id, handoff.destination_runtime_id],
+        placement_now,
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
     let current = orch8_engine::placement::choose_runtime(
         tenant_id.clone(),
         handoff.continuity_id,
@@ -1505,11 +1514,9 @@ async fn attach_device_capsule(
     let now = Utc::now();
     let source_key = state
         .storage
-        .list_runtime_capabilities(&tenant_id, now, 10_000)
+        .get_runtime_capability(&tenant_id, handoff.source_runtime_id, now)
         .await
         .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?
-        .into_iter()
-        .find(|runtime| runtime.runtime_id == handoff.source_runtime_id)
         .and_then(|runtime| runtime.capsule_signing_public_key)
         .ok_or_else(|| {
             ApiError::Conflict("source runtime has no live registered capsule signing key".into())
@@ -2363,11 +2370,15 @@ async fn choose_placement(
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound(format!("continuity execution {id}")))?;
     let now = Utc::now();
-    let candidates = state
-        .storage
-        .list_runtime_capabilities(&tenant_id, now, 1_000)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    let candidates = orch8_engine::placement::candidate_runtimes(
+        state.storage.as_ref(),
+        &tenant_id,
+        &body.requirements,
+        &[execution.owner_runtime_id],
+        now,
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
     let decision = orch8_engine::placement::choose_runtime(
         tenant_id,
         id,
@@ -6477,17 +6488,19 @@ async fn evaluate_residency(
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
-    let capabilities = state
+    let residency_now = Utc::now();
+    let source_capability = state
         .storage
-        .list_runtime_capabilities(&tenant_id, Utc::now(), 10_000)
+        .get_runtime_capability(&tenant_id, execution.owner_runtime_id, residency_now)
         .await
         .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
-    let source = capabilities
-        .iter()
-        .find(|capability| capability.runtime_id == execution.owner_runtime_id);
-    let destination = capabilities
-        .iter()
-        .find(|capability| capability.runtime_id == body.destination_runtime_id);
+    let destination_capability = state
+        .storage
+        .get_runtime_capability(&tenant_id, body.destination_runtime_id, residency_now)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    let source = source_capability.as_ref();
+    let destination = destination_capability.as_ref();
     let single_region = |capability: Option<&RuntimeCapabilities>| {
         capability.and_then(|capability| {
             (capability.regions.len() == 1).then(|| capability.regions[0].clone())
@@ -6605,11 +6618,10 @@ async fn sign_federation(
         .ok_or_else(|| ApiError::NotFound("federation execution".into()))?;
     let destination_exists = state
         .storage
-        .list_runtime_capabilities(&tenant_id, Utc::now(), 1_000)
+        .get_runtime_capability(&tenant_id, body.destination_runtime_id, Utc::now())
         .await
         .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?
-        .into_iter()
-        .any(|runtime| runtime.runtime_id == body.destination_runtime_id && !runtime.draining);
+        .is_some_and(|runtime| !runtime.draining);
     if !destination_exists {
         return Err(ApiError::Conflict(
             "destination runtime is unavailable or draining".into(),
@@ -7035,21 +7047,22 @@ async fn validate_delegation_control_plane(
             "delegation source is not the current execution owner".into(),
         ));
     }
-    let capabilities = state
+    let delegation_now = Utc::now();
+    let source = state
         .storage
-        .list_runtime_capabilities(tenant_id, Utc::now(), 10_000)
+        .get_runtime_capability(tenant_id, delegation.source_runtime_id, delegation_now)
         .await
-        .map_err(|error| ApiError::from_storage(error, "delegation runtimes"))?;
-    let source = capabilities
-        .iter()
-        .find(|capability| capability.runtime_id == delegation.source_runtime_id)
+        .map_err(|error| ApiError::from_storage(error, "delegation runtimes"))?
         .ok_or_else(|| ApiError::Conflict("delegation source runtime is not reachable".into()))?;
-    let destination = capabilities
-        .iter()
-        .find(|capability| capability.runtime_id == delegation.destination_runtime_id)
+    let destination = state
+        .storage
+        .get_runtime_capability(tenant_id, delegation.destination_runtime_id, delegation_now)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegation runtimes"))?
         .ok_or_else(|| {
             ApiError::Conflict("delegation destination runtime is not reachable".into())
         })?;
+    let (source, destination) = (&source, &destination);
     if source.trust < RuntimeTrustLevel::Registered
         || destination.trust < RuntimeTrustLevel::Registered
     {

@@ -128,6 +128,13 @@ pub const INSTANCE_GC_BATCH_LIMIT: u32 = 200;
 /// yields to the next tick after this long.
 pub const INSTANCE_GC_TIME_BUDGET: Duration = Duration::from_secs(60);
 
+/// How long an expired `runtime_capabilities` registration is kept before the
+/// GC deletes it (1 day past `expires_at`). Live runtimes re-register on every
+/// heartbeat; a device that missed this long is gone and re-registers on its
+/// next connect. Reads already ignore expired rows, so this only bounds table
+/// growth (one row per phone ever seen).
+pub const RUNTIME_CAPABILITY_RETENTION: Duration = Duration::from_secs(86_400);
+
 /// Default retention for acked mobile commands before deletion (7 days).
 pub const MOBILE_COMMAND_ACKED_DEFAULT_TTL: Duration = Duration::from_secs(604_800);
 
@@ -235,6 +242,7 @@ pub async fn gc_tick(
         sweep_mobile_devices(storage),
         sweep_mobile_approvals(storage),
         sweep_mobile_commands(storage),
+        sweep_runtime_capabilities(storage, now),
         sweep_terminal_instances_opt(storage, options.instance_retention, now),
         sweep_webhook_attempts(storage, now),
         sweep_event_inbox(storage, now),
@@ -434,6 +442,30 @@ async fn sweep_mobile_approvals(storage: &dyn StorageBackend) {
             let kind = error_kind(&e);
             tracing::error!(error = %e, kind, "mobile approval gc sweep failed");
             metrics::inc_with(metrics::GC_MOBILE_ERRORS, &[("sweep", "approvals")]);
+        }
+    }
+}
+
+/// Delete `runtime_capabilities` registrations that expired more than
+/// [`RUNTIME_CAPABILITY_RETENTION`] ago.
+async fn sweep_runtime_capabilities(
+    storage: &dyn StorageBackend,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let Some(cutoff) = retention_cutoff(now, RUNTIME_CAPABILITY_RETENTION) else {
+        return;
+    };
+    match drain_batches(|| storage.prune_expired_runtime_capabilities(cutoff, GC_BATCH_LIMIT)).await
+    {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(count = n, "runtime capability gc: deleted expired registrations");
+            metrics::inc_by(metrics::GC_RUNTIME_CAPABILITIES_DELETED, n);
+        }
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "runtime capability gc sweep failed");
+            metrics::inc_with(metrics::GC_MOBILE_ERRORS, &[("sweep", "runtime_capabilities")]);
         }
     }
 }

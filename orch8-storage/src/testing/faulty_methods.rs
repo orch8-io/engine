@@ -302,6 +302,8 @@ fault_impl! {
         async fn delete_rollback_policy(&self, tenant_id: &str, sequence_name: &str) -> Result<(), StorageError>;
         async fn record_rollback(&self, tenant_id: &str, sequence_name: &str, error_rate: f64, threshold: f64, reason: &str) -> Result<(), StorageError>;
         async fn query_error_rate(&self, tenant_id: &str, sequence_name: &str, window_secs: i64) -> Result<Option<f64>, StorageError>;
+        async fn query_error_stats(&self, tenant_id: &str, sequence_name: &str, window_secs: i64) -> Result<(i64, i64), StorageError>;
+        async fn set_rollback_min_samples(&self, tenant_id: &str, sequence_name: &str, min_samples: i32) -> Result<(), StorageError>;
         async fn list_rollback_history(&self, tenant_id: Option<&str>, sequence_name: Option<&str>, limit: u32) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError>;
         async fn ping(&self) -> Result<(), StorageError>;
     }
@@ -386,6 +388,8 @@ fault_impl! {
         async fn list_mobile_approvals_page(&self, tenant_id: Option<&str>, state: Option<&str>, limit: u32, offset: u64) -> Result<Vec<MobileApprovalRequest>, StorageError>;
         async fn expire_mobile_approvals(&self) -> Result<u64, StorageError>;
         async fn create_mobile_command(&self, command: &MobileCommand) -> Result<(), StorageError>;
+        async fn create_mobile_command_if_absent(&self, command: &MobileCommand) -> Result<bool, StorageError>;
+        async fn insert_mobile_approvals_batch(&self, approvals: &[MobileApprovalRequest]) -> Result<u64, StorageError>;
         async fn create_mobile_command_with_wake(&self, command: &MobileCommand, tenant_id: &str, created_at: chrono::DateTime<chrono::Utc>) -> Result<uuid::Uuid, StorageError>;
         async fn fetch_pending_commands(&self, device_id: &str, limit: u32) -> Result<Vec<MobileCommand>, StorageError>;
         async fn ack_mobile_commands(&self, device_id: &str, command_ids: &[String]) -> Result<u64, StorageError>;
@@ -416,6 +420,9 @@ fault_impl! {
         async fn is_capsule_import_instance(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &TenantId, capabilities: &RuntimeCapabilities) -> Result<(), StorageError>;
         async fn list_runtime_capabilities(&self, tenant_id: &TenantId, observed_after: DateTime<Utc>, limit: u32) -> Result<Vec<RuntimeCapabilities>, StorageError>;
+        async fn get_runtime_capability(&self, tenant_id: &TenantId, runtime_id: orch8_types::continuity::RuntimeId, observed_after: DateTime<Utc>) -> Result<Option<RuntimeCapabilities>, StorageError>;
+        async fn list_runtime_capabilities_by_kind(&self, tenant_id: &TenantId, observed_after: DateTime<Utc>, kinds: &[orch8_types::continuity::RuntimeKind], per_kind_limit: u32) -> Result<Vec<RuntimeCapabilities>, StorageError>;
+        async fn prune_expired_runtime_capabilities(&self, expired_before: DateTime<Utc>, limit: u32) -> Result<u64, StorageError>;
         async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError>;
         async fn ensure_effect_receipt(&self, receipt: &EffectReceipt) -> Result<EffectReceipt, StorageError>;
         async fn find_unresolved_effect_receipt(&self, tenant_id: &TenantId, continuity_id: ContinuityId, instance_id: InstanceId, block_id: &orch8_types::ids::BlockId, attempt: u32) -> Result<Option<EffectReceipt>, StorageError>;

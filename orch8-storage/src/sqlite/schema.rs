@@ -464,7 +464,10 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
     payload TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Server receive time (Postgres migration 118); `created_at` is the
+    -- client-supplied event time and must not drive rollback windows.
+    received_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry_created_at ON telemetry_events(created_at);
 
@@ -581,6 +584,11 @@ CREATE TABLE IF NOT EXISTS push_wake_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_push_wake_due
     ON push_wake_outbox(next_attempt_at) WHERE status = 'pending';
+-- Split due-claim branches (Postgres migration 120).
+CREATE INDEX IF NOT EXISTS idx_push_wake_inflight_lease
+    ON push_wake_outbox(lease_until) WHERE status = 'in_flight';
+CREATE INDEX IF NOT EXISTS idx_push_wake_pending_created
+    ON push_wake_outbox(created_at) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_push_wake_collapse_pending
     ON push_wake_outbox(tenant_id,device_id,collapse_key,created_at)
     WHERE status='pending' AND collapse_key IS NOT NULL;
@@ -599,6 +607,7 @@ CREATE TABLE IF NOT EXISTS rollback_policies (
     cooldown_secs INTEGER NOT NULL DEFAULT 3600,
     confirmation_window_secs INTEGER NOT NULL DEFAULT 60,
     webhook_url TEXT,
+    min_samples INTEGER NOT NULL DEFAULT 20,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(tenant_id, sequence_name)
@@ -895,6 +904,9 @@ CREATE TABLE IF NOT EXISTS runtime_capabilities (
 );
 CREATE INDEX IF NOT EXISTS idx_runtime_capabilities_live
     ON runtime_capabilities(tenant_id, expires_at DESC);
+-- Expiry sweep (Postgres migration 119).
+CREATE INDEX IF NOT EXISTS idx_runtime_capabilities_expiry
+    ON runtime_capabilities(expires_at);
 
 CREATE TABLE IF NOT EXISTS effect_receipts (
     id TEXT PRIMARY KEY,
@@ -1431,9 +1443,18 @@ CREATE TABLE IF NOT EXISTS embed_revoked_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_embed_revoked_tokens_expires
     ON embed_revoked_tokens(expires_at);
+-- Mobile-sync query indexes (Postgres migration 121).
+CREATE INDEX IF NOT EXISTS idx_mobile_devices_tenant_registered
+    ON mobile_devices(tenant_id, registered_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mobile_approvals_tenant_created_id
+    ON mobile_approval_requests(tenant_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_mobile_commands_acked_at
+    ON mobile_commands(acked_at) WHERE acked_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mobile_commands_unacked_created
+    ON mobile_commands(created_at) WHERE acked_at IS NULL;
 "#;
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 51;
+pub(super) const SCHEMA_VERSION: i64 = 52;

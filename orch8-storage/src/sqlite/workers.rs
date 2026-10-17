@@ -335,6 +335,33 @@ pub(super) async fn claim_matching(
         query.push(" AND wt.state='pending' AND wt.awaiting_dispatch=0");
         // See the Postgres twin: no work for terminal/cancelled instances.
         query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))");
+        // Same SQL pushdown as the Postgres twin (strict supersets of
+        // `claim_allowed`; the Rust check stays authoritative) so rows this
+        // claimant can never take do not fill the scan window.
+        query
+            .push(" AND (json_extract(wt.requirements,'$.runtime_kinds') IS NULL OR EXISTS (SELECT 1 FROM json_each(wt.requirements,'$.runtime_kinds') k WHERE k.value=")
+            .push_bind(capabilities.kind.as_str())
+            .push("))");
+        query
+            .push(" AND (json_extract(wt.requirements,'$.runtime_id') IS NULL OR json_extract(wt.requirements,'$.runtime_id')=")
+            .push_bind(capabilities.runtime_id.to_string())
+            .push(")");
+        // Every required label must be advertised with exactly that value.
+        query
+            .push(" AND NOT EXISTS (SELECT 1 FROM json_each(wt.requirements,'$.labels') r WHERE NOT EXISTS (SELECT 1 FROM json_each(")
+            .push_bind(
+                serde_json::to_string(&capabilities.labels).map_err(StorageError::Serialization)?,
+            )
+            .push(") a WHERE a.key=r.key AND a.value=r.value))");
+        query
+            .push(" AND (json_extract(wt.requirements,'$.residency') IS NULL OR json_extract(wt.requirements,'$.residency')=")
+            .push_bind(
+                capabilities
+                    .labels
+                    .get(orch8_types::placement::RESIDENCY_LABEL)
+                    .cloned(),
+            )
+            .push(")");
         if let Some(queue) = queue_name {
             query.push(" AND wt.queue_name=").push_bind(queue);
         }

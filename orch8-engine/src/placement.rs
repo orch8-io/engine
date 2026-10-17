@@ -343,6 +343,61 @@ fn trust_score(trust: RuntimeTrustLevel) -> i64 {
     }
 }
 
+/// Load the live runtimes a placement decision for `requirements` should
+/// consider, without ever truncating the answer to "the most recently
+/// observed N runtimes of the tenant":
+///
+/// * a targeted `runtime_id` (and any `extra` ids, e.g. the current owner) is
+///   fetched by primary key;
+/// * otherwise registrations are listed per runtime kind (restricted to
+///   `requirements.runtime_kinds` when set), each kind capped on its own, so
+///   thousands of phones cannot push a cloud or desktop runtime out of view;
+/// * the result is ordered most-capable kinds first (mobile last) so the
+///   [`MAX_CANDIDATES`] bound inside [`choose_runtime`] drops phones before
+///   servers.
+///
+/// # Errors
+/// Any storage error from the underlying lookups.
+pub async fn candidate_runtimes(
+    storage: &dyn orch8_storage::StorageBackend,
+    tenant_id: &TenantId,
+    requirements: &CapsuleRequirements,
+    extra: &[RuntimeId],
+    now: DateTime<Utc>,
+) -> Result<Vec<RuntimeCapabilities>, orch8_types::error::StorageError> {
+    let mut out: Vec<RuntimeCapabilities> = Vec::new();
+    let mut seen: BTreeSet<RuntimeId> = BTreeSet::new();
+    for id in requirements.runtime_id.iter().chain(extra.iter()) {
+        if seen.insert(*id)
+            && let Some(found) = storage.get_runtime_capability(tenant_id, *id, now).await?
+        {
+            out.push(found);
+        }
+    }
+    if requirements.runtime_id.is_none() {
+        let listed = storage
+            .list_runtime_capabilities_by_kind(
+                tenant_id,
+                now,
+                &requirements.runtime_kinds,
+                u32::try_from(MAX_CANDIDATES).unwrap_or(u32::MAX),
+            )
+            .await?;
+        let mut listed: Vec<_> = listed
+            .into_iter()
+            .filter(|runtime| seen.insert(runtime.runtime_id))
+            .collect();
+        listed.sort_by_key(|runtime| {
+            (
+                matches!(runtime.kind, orch8_types::continuity::RuntimeKind::Mobile),
+                std::cmp::Reverse(runtime.observed_at),
+            )
+        });
+        out.extend(listed);
+    }
+    Ok(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn choose_runtime(
     tenant_id: TenantId,

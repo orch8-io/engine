@@ -129,6 +129,17 @@ async fn handle_sync(
         )));
     }
 
+    // A malformed timestamp used to be stored verbatim on SQLite but fail the
+    // whole sync with a 500 on Postgres, so the device retried the same
+    // poisoned batch forever. Reject it up front, naming the offending item.
+    for (index, update) in req.status_updates.iter().enumerate() {
+        if chrono::DateTime::parse_from_rfc3339(&update.timestamp).is_err() {
+            return Err(ApiError::InvalidArgument(format!(
+                "status_updates[{index}].timestamp must be an RFC 3339 timestamp"
+            )));
+        }
+    }
+
     let storage = &state.storage;
 
     // Verify the caller owns the target device BEFORE touching any
@@ -151,8 +162,10 @@ async fn handle_sync(
         }
     }
 
-    for update in &req.status_updates {
-        let status = MobileInstanceStatus {
+    let statuses: Vec<MobileInstanceStatus> = req
+        .status_updates
+        .iter()
+        .map(|update| MobileInstanceStatus {
             device_id: req.device_id.clone(),
             instance_id: update.instance_id.clone(),
             sequence_name: update.sequence_name.clone(),
@@ -165,15 +178,19 @@ async fn handle_sync(
                 .map(std::string::ToString::to_string),
             steps: update.steps.as_ref().map(std::string::ToString::to_string),
             updated_at: update.timestamp.clone(),
-        };
-        storage
-            .upsert_mobile_instance_status(&status)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "mobile_instance_status"))?;
-    }
+        })
+        .collect();
+    // One transaction: a delayed retry cannot overwrite newer state, and the
+    // 500-row worst case is a single round trip instead of 500 autocommits.
+    storage
+        .upsert_mobile_instance_status_batch(&statuses)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "mobile_instance_status"))?;
 
-    for approval in &req.approval_requests {
-        let approval_req = MobileApprovalRequest {
+    let approvals: Vec<MobileApprovalRequest> = req
+        .approval_requests
+        .iter()
+        .map(|approval| MobileApprovalRequest {
             id: uuid::Uuid::new_v4().to_string(),
             device_id: req.device_id.clone(),
             tenant_id: tenant_id.clone(),
@@ -195,12 +212,12 @@ async fn handle_sync(
             resolution: None,
             created_at: String::new(),
             resolved_at: None,
-        };
-        storage
-            .insert_mobile_approval(&approval_req)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "mobile_approval_requests"))?;
-    }
+        })
+        .collect();
+    storage
+        .insert_mobile_approvals_batch(&approvals)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "mobile_approval_requests"))?;
 
     // Process step delegations — device asks server to resolve credentials
     // and execute steps that require secrets. Results come back as commands.
@@ -225,7 +242,7 @@ async fn handle_sync(
                 "credential resolution failed for delegated step"
             );
             let error_cmd = MobileCommand {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: step_result_command_id(&req.device_id, &delegation.request_id),
                 device_id: req.device_id.clone(),
                 command_type: "step_result".into(),
                 payload: serde_json::json!({
@@ -240,7 +257,7 @@ async fn handle_sync(
                 acked_at: None,
             };
             storage
-                .create_mobile_command(&error_cmd)
+                .create_mobile_command_if_absent(&error_cmd)
                 .await
                 .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
             continue;
@@ -250,7 +267,7 @@ async fn handle_sync(
         // The mobile device will execute the step handler with these
         // resolved params (secrets are only in transit, never stored on device).
         let result_cmd = MobileCommand {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: step_result_command_id(&req.device_id, &delegation.request_id),
             device_id: req.device_id.clone(),
             command_type: "step_result".into(),
             payload: serde_json::json!({
@@ -266,7 +283,7 @@ async fn handle_sync(
             acked_at: None,
         };
         storage
-            .create_mobile_command(&result_cmd)
+            .create_mobile_command_if_absent(&result_cmd)
             .await
             .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
     }
@@ -315,23 +332,10 @@ async fn handle_sync(
 
     let sync_interval_secs = if pending.is_empty() { 30 } else { 5 };
 
-    let commands: Result<Vec<CommandPayload>, ApiError> = pending
-        .into_iter()
-        .map(|cmd| {
-            let payload = serde_json::from_str(&cmd.payload).map_err(|e| {
-                ApiError::Internal(format!(
-                    "corrupt mobile command payload (id={}): {e}",
-                    cmd.id
-                ))
-            })?;
-            Ok(CommandPayload {
-                id: cmd.id,
-                command_type: cmd.command_type,
-                payload,
-            })
-        })
-        .collect();
-    let commands = commands?;
+    // A command whose payload cannot be read (undecryptable, corrupt JSON) is
+    // skipped, logged and counted; failing the whole response would wedge
+    // every sync of the device until the row aged out (7 days).
+    let commands = readable_commands(pending);
 
     debug!(
         device_id = %req.device_id,
@@ -345,6 +349,57 @@ async fn handle_sync(
         commands,
         sync_interval_secs,
     }))
+}
+
+/// Deterministic id of the `step_result` command answering a delegation: a
+/// retried sync (same `request_id`) maps to the same row instead of minting a
+/// fresh command, which would carry the resolved params a second time.
+fn step_result_command_id(device_id: &str, request_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"orch8/mobile-step-result/v1\0");
+    hasher.update(device_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(request_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
+/// Parse pending commands, dropping (with a log line and a metric) any whose
+/// payload is unreadable.
+fn readable_commands(pending: Vec<MobileCommand>) -> Vec<CommandPayload> {
+    pending
+        .into_iter()
+        .filter_map(|cmd| {
+            if cmd.payload == orch8_storage::UNREADABLE_COMMAND_PAYLOAD {
+                warn!(command_id = %cmd.id, device_id = %cmd.device_id, "skipping mobile command: payload could not be decrypted");
+                orch8_engine::metrics::inc_with(
+                    orch8_engine::metrics::MOBILE_COMMANDS_SKIPPED,
+                    &[("reason", "decrypt")],
+                );
+                return None;
+            }
+            match serde_json::from_str(&cmd.payload) {
+                Ok(payload) => Some(CommandPayload {
+                    id: cmd.id,
+                    command_type: cmd.command_type,
+                    payload,
+                }),
+                Err(error) => {
+                    warn!(command_id = %cmd.id, device_id = %cmd.device_id, %error, "skipping mobile command: corrupt payload");
+                    orch8_engine::metrics::inc_with(
+                        orch8_engine::metrics::MOBILE_COMMANDS_SKIPPED,
+                        &[("reason", "parse")],
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Persist a server→device command together with its push wake. Wakes are

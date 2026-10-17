@@ -78,11 +78,42 @@ impl PushOutboxStore for PostgresStorage {
         // One statement: lease the due rows and return the device target
         // from the same join (no per-row follow-up query, which also looked
         // the device up without its tenant and panicked on a NULL token).
-        // `FOR UPDATE OF o` locks only outbox rows, not the device rows.
+        //
+        // The two due conditions are separate UNION ALL branches (migration
+        // 120) instead of one OR: `status='pending' AND next_attempt_at<=now`
+        // and `status='in_flight' AND lease_until<=now` each get their own
+        // partial index (`idx_push_wake_pending_created`,
+        // `idx_push_wake_inflight_lease`); a single OR over both left the
+        // planner a sequential scan once the table held millions of terminal
+        // rows. Each branch applies the device join/filter *before* its LIMIT
+        // so wakes for inactive or token-less devices never occupy the head
+        // of the batch.
+        //
+        // Tenant fairness: each branch pulls a pool of the `$4` oldest due
+        // rows, the pool is ranked per tenant (`row_number() OVER (PARTITION
+        // BY tenant_id ORDER BY created_at)`), and the batch takes rank-1 rows
+        // of every tenant before any rank-2 row, so a tenant with a deep
+        // backlog cannot starve the tenants queued behind it within the pool.
+        //
+        // UNION cannot carry FOR UPDATE, so the chosen ids are locked
+        // afterwards (SKIP LOCKED, re-checking the due predicate in case
+        // another node claimed a candidate in between); a contended batch may
+        // return fewer than `limit` rows, never a row twice.
         let rows = sqlx::query(
-            "WITH due AS (SELECT o.id FROM push_wake_outbox o JOIN mobile_devices d ON d.device_id=o.device_id AND d.tenant_id=o.tenant_id \
-             WHERE d.active=TRUE AND d.push_token IS NOT NULL AND ((o.status='pending' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=$1)) OR (o.status='in_flight' AND o.lease_until<=$1)) \
-             ORDER BY o.created_at LIMIT $3 FOR UPDATE OF o SKIP LOCKED) \
+            "WITH cand AS ( \
+               (SELECT o.id, o.tenant_id, o.created_at FROM push_wake_outbox o JOIN mobile_devices d ON d.device_id=o.device_id AND d.tenant_id=o.tenant_id \
+                 WHERE o.status='pending' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=$1) \
+                   AND d.active=TRUE AND d.push_token IS NOT NULL \
+                 ORDER BY o.created_at LIMIT $4) \
+               UNION ALL \
+               (SELECT o.id, o.tenant_id, o.created_at FROM push_wake_outbox o JOIN mobile_devices d ON d.device_id=o.device_id AND d.tenant_id=o.tenant_id \
+                 WHERE o.status='in_flight' AND o.lease_until<=$1 \
+                   AND d.active=TRUE AND d.push_token IS NOT NULL \
+                 ORDER BY o.lease_until LIMIT $4)), \
+             ranked AS (SELECT id, created_at, row_number() OVER (PARTITION BY tenant_id ORDER BY created_at) AS rn FROM cand), \
+             due AS (SELECT o.id FROM push_wake_outbox o JOIN ranked r ON r.id=o.id \
+               WHERE ((o.status='pending' AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=$1)) OR (o.status='in_flight' AND o.lease_until<=$1)) \
+               ORDER BY r.rn, r.created_at LIMIT $3 FOR UPDATE OF o SKIP LOCKED) \
              UPDATE push_wake_outbox o SET status='in_flight',lease_until=$2 FROM due, mobile_devices d \
              WHERE o.id=due.id AND d.device_id=o.device_id AND d.tenant_id=o.tenant_id \
              RETURNING o.id,o.tenant_id,o.device_id,o.command_id,o.attempts,d.push_token,d.platform",
@@ -90,6 +121,7 @@ impl PushOutboxStore for PostgresStorage {
         .bind(now)
         .bind(lease_until)
         .bind(i64::from(limit))
+        .bind(i64::from(limit.saturating_mul(4).max(64)))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| error.to_string())?;

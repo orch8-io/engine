@@ -315,6 +315,40 @@ pub(super) async fn claim_matching(
         // cancelled (its tasks are purged on cancel, but a racing dispatch
         // or an older row may remain).
         query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))");
+        // Push the cheap hard requirements into SQL so unclaimable rows never
+        // consume the bounded scan window and hide eligible ones behind them
+        // (a phone advertises few labels, and every older task needing a
+        // label / another runtime kind / a named runtime would otherwise sit
+        // in front of the work it can actually take). Each predicate is a
+        // strict superset of what `claim_allowed` accepts -- the Rust check
+        // below stays authoritative.
+        query
+            .push(" AND (NOT (wt.requirements ? 'runtime_kinds') OR wt.requirements->'runtime_kinds' @> to_jsonb(")
+            .push_bind(capabilities.kind.as_str())
+            .push("::text))");
+        query
+            .push(" AND (NOT (wt.requirements ? 'runtime_id') OR wt.requirements->>'runtime_id' = ")
+            .push_bind(capabilities.runtime_id.to_string())
+            .push(")");
+        query
+            .push(" AND (NOT (wt.requirements ? 'labels') OR wt.requirements->'labels' <@ ")
+            .push_bind(
+                serde_json::to_value(&capabilities.labels).map_err(StorageError::Serialization)?,
+            )
+            .push("::jsonb)");
+        query
+            .push(" AND (NOT (wt.requirements ? 'residency') OR wt.requirements->>'residency' = ")
+            .push_bind(
+                capabilities
+                    .labels
+                    .get(orch8_types::placement::RESIDENCY_LABEL)
+                    .cloned(),
+            )
+            .push("::text)");
+        if capabilities.kind == orch8_types::continuity::RuntimeKind::Browser {
+            // A browser never receives credential-bearing work.
+            query.push(" AND NOT wt.carries_credentials");
+        }
         if let Some(queue) = queue_name {
             query.push(" AND wt.queue_name = ").push_bind(queue);
         }

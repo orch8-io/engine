@@ -172,12 +172,7 @@ pub(super) async fn mark_stale_devices_inactive(
     Ok(result.rows_affected())
 }
 
-pub(super) async fn upsert_mobile_instance_status(
-    storage: &SqliteStorage,
-    status: &crate::MobileInstanceStatus,
-) -> Result<(), StorageError> {
-    sqlx::query(
-        "INSERT INTO mobile_instance_status (device_id, instance_id, sequence_name, state, current_step, handler, context_summary, steps, updated_at)
+const UPSERT_STATUS_SQL: &str = "INSERT INTO mobile_instance_status (device_id, instance_id, sequence_name, state, current_step, handler, context_summary, steps, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(device_id, instance_id) DO UPDATE SET
            sequence_name = excluded.sequence_name,
@@ -186,21 +181,158 @@ pub(super) async fn upsert_mobile_instance_status(
            handler = excluded.handler,
            context_summary = excluded.context_summary,
            steps = excluded.steps,
-           updated_at = excluded.updated_at",
+           updated_at = excluded.updated_at
+         WHERE COALESCE(julianday(mobile_instance_status.updated_at), 0) <= COALESCE(julianday(excluded.updated_at), 0)";
+
+/// The `updated_at` string to store: the device's own text when its time is
+/// not in the future (kept verbatim), otherwise the server clock.
+fn status_updated_at(
+    status: &crate::MobileInstanceStatus,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(chrono::DateTime<chrono::Utc>, String), StorageError> {
+    let at = crate::normalize_status_timestamp(&status.updated_at, now)?;
+    let text = if at == now {
+        now.to_rfc3339()
+    } else {
+        status.updated_at.clone()
+    };
+    Ok((at, text))
+}
+
+pub(super) async fn upsert_mobile_instance_status(
+    storage: &SqliteStorage,
+    status: &crate::MobileInstanceStatus,
+) -> Result<(), StorageError> {
+    let (_, updated_at) = status_updated_at(status, chrono::Utc::now())?;
+    sqlx::query(UPSERT_STATUS_SQL)
+        .bind(&status.device_id)
+        .bind(&status.instance_id)
+        .bind(&status.sequence_name)
+        .bind(&status.state)
+        .bind(&status.current_step)
+        .bind(&status.handler)
+        .bind(&status.context_summary)
+        .bind(&status.steps)
+        .bind(updated_at)
+        .execute(&storage.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
+}
+
+pub(super) async fn upsert_mobile_instance_status_batch(
+    storage: &SqliteStorage,
+    statuses: &[crate::MobileInstanceStatus],
+) -> Result<(), StorageError> {
+    if statuses.is_empty() {
+        return Ok(());
+    }
+    let now = chrono::Utc::now();
+    // Newest wins per (device, instance); order of first appearance is kept.
+    let mut order: Vec<(&str, &str)> = Vec::new();
+    let mut newest: std::collections::HashMap<
+        (&str, &str),
+        (chrono::DateTime<chrono::Utc>, String, &crate::MobileInstanceStatus),
+    > = std::collections::HashMap::with_capacity(statuses.len());
+    for status in statuses {
+        let (at, text) = status_updated_at(status, now)?;
+        let key = (status.device_id.as_str(), status.instance_id.as_str());
+        match newest.get(&key) {
+            Some((existing, _, _)) if *existing > at => {}
+            Some(_) => {
+                newest.insert(key, (at, text, status));
+            }
+            None => {
+                order.push(key);
+                newest.insert(key, (at, text, status));
+            }
+        }
+    }
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    for key in order {
+        let (_, text, status) = &newest[&key];
+        sqlx::query(UPSERT_STATUS_SQL)
+            .bind(&status.device_id)
+            .bind(&status.instance_id)
+            .bind(&status.sequence_name)
+            .bind(&status.state)
+            .bind(&status.current_step)
+            .bind(&status.handler)
+            .bind(&status.context_summary)
+            .bind(&status.steps)
+            .bind(text)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
+}
+
+pub(super) async fn insert_mobile_approvals_batch(
+    storage: &SqliteStorage,
+    approvals: &[crate::MobileApprovalRequest],
+) -> Result<u64, StorageError> {
+    if approvals.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    let mut inserted = 0;
+    for approval in approvals {
+        let result = sqlx::query(
+            "INSERT INTO mobile_approval_requests (id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))
+             ON CONFLICT(device_id, instance_id, block_id) DO NOTHING",
+        )
+        .bind(&approval.id)
+        .bind(&approval.device_id)
+        .bind(&approval.tenant_id)
+        .bind(&approval.instance_id)
+        .bind(&approval.block_id)
+        .bind(&approval.sequence_name)
+        .bind(&approval.prompt)
+        .bind(&approval.choices)
+        .bind(&approval.store_as)
+        .bind(approval.timeout_secs)
+        .bind(&approval.metadata)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+        inserted += result.rows_affected();
+    }
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(inserted)
+}
+
+pub(super) async fn create_mobile_command_if_absent(
+    storage: &SqliteStorage,
+    command: &crate::MobileCommand,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "INSERT INTO mobile_commands (id, device_id, command_type, payload, created_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(id) DO NOTHING",
     )
-    .bind(&status.device_id)
-    .bind(&status.instance_id)
-    .bind(&status.sequence_name)
-    .bind(&status.state)
-    .bind(&status.current_step)
-    .bind(&status.handler)
-    .bind(&status.context_summary)
-    .bind(&status.steps)
-    .bind(&status.updated_at)
+    .bind(&command.id)
+    .bind(&command.device_id)
+    .bind(&command.command_type)
+    .bind(&command.payload)
     .execute(&storage.pool)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(())
+    Ok(result.rows_affected() == 1)
 }
 
 pub(super) async fn list_mobile_instance_status(
@@ -510,6 +642,9 @@ pub(super) async fn create_mobile_command(
     Ok(())
 }
 
+/// Topic of the per-device wake created for server-to-device commands.
+const MOBILE_COMMAND_WAKE_TOPIC: &str = "mobile_command";
+
 pub(super) async fn create_mobile_command_with_wake(
     storage: &SqliteStorage,
     command: &crate::MobileCommand,
@@ -527,16 +662,38 @@ pub(super) async fn create_mobile_command_with_wake(
     .bind(&command.payload)
     .execute(&mut *transaction)
     .await?;
+    // One pending wake per device: collapse onto the newest (the sync it
+    // triggers drains every pending command), the same scope
+    // `enqueue_collapsible_wake` uses.
+    let collapse_key = orch8_push::CollapsibleWake {
+        tenant_id: tenant_id.to_owned(),
+        device_id: command.device_id.clone(),
+        execution_id: String::new(),
+        topic: MOBILE_COMMAND_WAKE_TOPIC.to_owned(),
+        command_id: String::new(),
+        created_at,
+    }
+    .collapse_key();
     sqlx::query(
-        "INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,created_at) VALUES (?,?,?,?,?)",
+        "INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,topic,collapse_key,created_at) VALUES (?,?,?,?,?,?,?)",
     )
     .bind(wake_id.to_string())
     .bind(tenant_id)
     .bind(&command.device_id)
     .bind(&command.id)
+    .bind(MOBILE_COMMAND_WAKE_TOPIC)
+    .bind(&collapse_key)
     .bind(super::helpers::ts(created_at))
     .execute(&mut *transaction)
     .await?;
+    sqlx::query("UPDATE push_wake_outbox SET status='terminal',terminal_reason='superseded',superseded_by=? WHERE tenant_id=? AND device_id=? AND collapse_key=? AND status='pending' AND id<>?")
+        .bind(&command.id)
+        .bind(tenant_id)
+        .bind(&command.device_id)
+        .bind(&collapse_key)
+        .bind(wake_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
     Ok(wake_id)
 }

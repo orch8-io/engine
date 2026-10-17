@@ -3,10 +3,40 @@
 //! Verifies that rollback checks respect thresholds, cooldown hysteresis, and
 //! handle concurrent error ingestion correctly.
 
-use orch8_api::test_harness::spawn_test_server;
-use orch8_storage::AdminStore;
+use orch8_api::test_harness::{TestServer, spawn_test_server};
+use orch8_storage::testing::fixtures::SequenceBuilder;
+use orch8_storage::{AdminStore, SequenceStore};
 
 const TENANT: &str = "default";
+
+/// Register a production sequence: the rollback check refuses unpublished,
+/// client-supplied sequence names.
+async fn publish(server: &TestServer, name: &str) {
+    let seq = SequenceBuilder::new(TENANT).name(name).build();
+    server.storage.create_sequence(&seq).await.unwrap();
+}
+
+/// The check runs off the request path (debounced): poll for its effect.
+async fn wait_for_history(server: &TestServer, expected: usize) {
+    for _ in 0..100 {
+        let n = server
+            .storage
+            .list_rollback_history(None, None, 100)
+            .await
+            .unwrap()
+            .len();
+        if n >= expected {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Let any scheduled (debounced) check finish before asserting a negative or
+/// a final count.
+async fn settle() {
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+}
 
 /// Helper: create a rollback policy for a given sequence under the default tenant.
 async fn create_policy(
@@ -21,7 +51,8 @@ async fn create_policy(
         .json(&serde_json::json!({
             "sequence_name": seq,
             "error_rate_threshold": error_rate_threshold,
-            "time_window_secs": time_window_secs
+            "time_window_secs": time_window_secs,
+            "min_samples": 1
         }))
         .send()
         .await
@@ -85,6 +116,7 @@ async fn error_rate_below_threshold_does_not_trigger_rollback() {
     let server = spawn_test_server().await;
     let client = reqwest::Client::new();
     let seq = "below-threshold-seq";
+    publish(&server, seq).await;
 
     create_policy(&client, &server.base_url, seq, 0.1, 300).await;
 
@@ -110,6 +142,7 @@ async fn error_rate_below_threshold_does_not_trigger_rollback() {
         "error rate {rate} should be below 0.1 threshold"
     );
 
+    settle().await;
     let history = server
         .storage
         .list_rollback_history(None, None, 100)
@@ -126,12 +159,14 @@ async fn cooldown_prevents_duplicate_rollback_triggers() {
     let server = spawn_test_server().await;
     let client = reqwest::Client::new();
     let seq = "cooldown-seq";
+    publish(&server, seq).await;
 
     // 0% threshold = any error triggers; default cooldown prevents re-trigger.
     create_policy(&client, &server.base_url, seq, 0.0, 3600).await;
 
     // First error triggers rollback.
     ingest_error(&client, &server.base_url, seq, "first error").await;
+    wait_for_history(&server, 1).await;
 
     let history = server
         .storage
@@ -142,6 +177,7 @@ async fn cooldown_prevents_duplicate_rollback_triggers() {
 
     // Second error immediately after — cooldown should prevent re-trigger.
     ingest_error(&client, &server.base_url, seq, "second error").await;
+    settle().await;
 
     let history = server
         .storage
@@ -160,6 +196,7 @@ async fn sequential_errors_above_threshold_trigger_single_rollback() {
     let server = spawn_test_server().await;
     let client = reqwest::Client::new();
     let seq = "threshold-breach-seq";
+    publish(&server, seq).await;
 
     // 50% threshold.
     create_policy(&client, &server.base_url, seq, 0.5, 3600).await;
@@ -186,6 +223,8 @@ async fn sequential_errors_above_threshold_trigger_single_rollback() {
 
     // Exactly one rollback: first error that breaches threshold triggers it,
     // cooldown prevents all subsequent errors from triggering again.
+    wait_for_history(&server, 1).await;
+    settle().await;
     let history = server
         .storage
         .list_rollback_history(None, None, 100)

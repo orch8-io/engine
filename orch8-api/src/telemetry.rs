@@ -8,11 +8,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use orch8_storage::telemetry_validation::{
+    MAX_ERROR_MESSAGE_BYTES, MAX_ERROR_STACK_BYTES, device_field_limits, validate_event_fields,
+};
+
 use crate::AppState;
 use crate::auth::{OptionalTenant, scoped_tenant_id};
 use crate::error::ApiError;
 
 const MAX_BATCH_SIZE: usize = 500;
+/// Widest time range one dashboard query may scan.
+const MAX_DASHBOARD_WINDOW_DAYS: i64 = 31;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -94,11 +100,38 @@ pub(crate) async fn ingest_telemetry(
         .map_or_else(|| "default".to_string(), |t| t.as_str().to_string());
 
     let total = req.events.len();
-    let events: Vec<orch8_storage::TelemetryEvent> = req
-        .events
-        .into_iter()
-        .map(|e| orch8_storage::TelemetryEvent {
-            event_type: e.event_type,
+    // Same field/payload/event-type bounds as the gRPC transport. A bad event
+    // rejects the batch with the offending index so the device can drop it
+    // instead of retrying the whole batch forever.
+    let mut accepted_payload_bytes = 0usize;
+    let mut events: Vec<orch8_storage::TelemetryEvent> = Vec::with_capacity(total);
+    let now = Utc::now();
+    for (index, e) in req.events.into_iter().enumerate() {
+        let event_type = validate_event_fields(
+            &e.event_type,
+            &e.payload,
+            device_field_limits(
+                &e.device.device_id,
+                &e.device.os_name,
+                &e.device.os_version,
+                &e.device.app_version,
+                &e.device.sdk_version,
+            ),
+            accepted_payload_bytes,
+        )
+        .map_err(|r| {
+            ApiError::InvalidArgument(format!("events[{index}]: {}: {}", r.code, r.message))
+        })?
+        .to_owned();
+        accepted_payload_bytes = accepted_payload_bytes.saturating_add(e.payload.len());
+        // Client time is advisory only (rollback windows use server receive
+        // time); a skewed or malicious future timestamp is clamped to now.
+        let created_at = e
+            .timestamp
+            .parse::<DateTime<Utc>>()
+            .map_or(now, |t| t.min(now));
+        events.push(orch8_storage::TelemetryEvent {
+            event_type,
             payload: e.payload,
             device_id: e.device.device_id,
             os_name: e.device.os_name,
@@ -106,9 +139,9 @@ pub(crate) async fn ingest_telemetry(
             app_version: e.device.app_version,
             sdk_version: e.device.sdk_version,
             tenant_id: tenant.clone(),
-            created_at: e.timestamp.parse().unwrap_or_else(|_| Utc::now()),
-        })
-        .collect();
+            created_at,
+        });
+    }
 
     let accepted = state
         .storage
@@ -165,6 +198,46 @@ pub(crate) async fn ingest_errors(
     let tenant = scoped_tenant_id(&tenant_ctx, req.tenant_id.as_deref())
         .map_or_else(|| "default".to_string(), |t| t.as_str().to_string());
 
+    if req.error_type.is_empty() || req.error_type.len() > 128 {
+        return Err(ApiError::InvalidArgument(
+            "error_type must contain 1..=128 bytes".into(),
+        ));
+    }
+    if req.message.len() > MAX_ERROR_MESSAGE_BYTES {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "message exceeds {MAX_ERROR_MESSAGE_BYTES} bytes"
+        )));
+    }
+    if req
+        .stack_trace
+        .as_ref()
+        .is_some_and(|t| t.len() > MAX_ERROR_STACK_BYTES)
+    {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "stack_trace exceeds {MAX_ERROR_STACK_BYTES} bytes"
+        )));
+    }
+    if req.sequence_name.as_ref().is_some_and(|n| n.len() > 256)
+        || req.instance_id.as_ref().is_some_and(|n| n.len() > 256)
+    {
+        return Err(ApiError::InvalidArgument(
+            "sequence_name and instance_id must be at most 256 bytes".into(),
+        ));
+    }
+    for (name, value, max) in device_field_limits(
+        &req.device.device_id,
+        &req.device.os_name,
+        &req.device.os_version,
+        &req.device.app_version,
+        &req.device.sdk_version,
+    ) {
+        if value.len() > max {
+            return Err(ApiError::InvalidArgument(format!(
+                "{name} exceeds {max} bytes"
+            )));
+        }
+    }
+
     let result = state
         .storage
         .ingest_telemetry_error(
@@ -184,11 +257,11 @@ pub(crate) async fn ingest_errors(
 
     match result {
         Ok(()) => {
-            // Trigger auto-rollback check if sequence_name is present.
-            if let Some(ref seq_name) = req.sequence_name
-                && let Err(e) = check_rollback(&state, &tenant, seq_name).await
-            {
-                warn!(error = %e, "rollback check failed");
+            // Auto-rollback check runs off the request path and is debounced
+            // per (tenant, sequence): an error burst costs one evaluation per
+            // interval instead of several queries per report.
+            if let Some(seq_name) = req.sequence_name {
+                schedule_rollback_check(&state, &tenant, &seq_name);
             }
             Ok(StatusCode::ACCEPTED)
         }
@@ -197,6 +270,100 @@ pub(crate) async fn ingest_errors(
             Err(ApiError::Internal(format!("DB error: {e}")))
         }
     }
+}
+
+/// Minimum spacing between rollback evaluations for one (tenant, sequence).
+pub(crate) const ROLLBACK_CHECK_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
+/// Hard cap on tracked keys; stale ones are pruned past this.
+const ROLLBACK_DEBOUNCE_MAX_KEYS: usize = 10_000;
+
+struct DebounceEntry {
+    last_run: std::time::Instant,
+    trailing_scheduled: bool,
+}
+
+type DebounceMap = std::collections::HashMap<(String, String), DebounceEntry>;
+
+fn debounce_map() -> &'static std::sync::Mutex<DebounceMap> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<DebounceMap>> = std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+}
+
+/// What the debouncer decided for one report.
+#[derive(Debug, PartialEq, Eq)]
+enum Debounce {
+    /// Run now.
+    Now,
+    /// Run once after the given delay (a trailing run, so the last report of a
+    /// burst is always evaluated).
+    After(std::time::Duration),
+    /// A run is already pending; nothing to do.
+    Skip,
+}
+
+fn debounce_decision(tenant_id: &str, sequence_name: &str, now: std::time::Instant) -> Debounce {
+    let mut map = debounce_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if map.len() >= ROLLBACK_DEBOUNCE_MAX_KEYS {
+        map.retain(|_, e| {
+            e.trailing_scheduled || now.duration_since(e.last_run) < ROLLBACK_CHECK_DEBOUNCE * 60
+        });
+    }
+    let key = (tenant_id.to_owned(), sequence_name.to_owned());
+    match map.get_mut(&key) {
+        None => {
+            map.insert(
+                key,
+                DebounceEntry {
+                    last_run: now,
+                    trailing_scheduled: false,
+                },
+            );
+            Debounce::Now
+        }
+        Some(e) if e.trailing_scheduled => Debounce::Skip,
+        Some(e) => {
+            let since = now.duration_since(e.last_run);
+            if since >= ROLLBACK_CHECK_DEBOUNCE {
+                e.last_run = now;
+                Debounce::Now
+            } else {
+                e.trailing_scheduled = true;
+                Debounce::After(ROLLBACK_CHECK_DEBOUNCE.saturating_sub(since))
+            }
+        }
+    }
+}
+
+fn mark_trailing_ran(tenant_id: &str, sequence_name: &str) {
+    let mut map = debounce_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(e) = map.get_mut(&(tenant_id.to_owned(), sequence_name.to_owned())) {
+        e.trailing_scheduled = false;
+        e.last_run = std::time::Instant::now();
+    }
+}
+
+fn schedule_rollback_check(state: &AppState, tenant_id: &str, sequence_name: &str) {
+    let delay = match debounce_decision(tenant_id, sequence_name, std::time::Instant::now()) {
+        Debounce::Skip => return,
+        Debounce::Now => None,
+        Debounce::After(d) => Some(d),
+    };
+    let state = state.clone();
+    let tenant = tenant_id.to_owned();
+    let seq = sequence_name.to_owned();
+    tokio::spawn(async move {
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
+            mark_trailing_ran(&tenant, &seq);
+        }
+        if let Err(e) = check_rollback(&state, &tenant, &seq).await {
+            warn!(error = %e, "rollback check failed");
+        }
+    });
 }
 
 fn webhook_client() -> &'static reqwest::Client {
@@ -232,6 +399,23 @@ async fn check_rollback(
         _ => return Ok(()),
     };
 
+    // Guard 0: the name is client-supplied. Only a published (production,
+    // non-deprecated) sequence of this tenant can be rolled back.
+    let tenant = orch8_types::ids::TenantId::unchecked(tenant_id.to_string());
+    let ns = orch8_types::ids::Namespace::new("default");
+    let published = state
+        .storage
+        .get_sequence_by_name(&tenant, &ns, sequence_name, None)
+        .await
+        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?
+        .is_some_and(|s| {
+            !s.deprecated && s.status == orch8_types::sequence::SequenceStatus::Production
+        });
+    if !published {
+        debug!(sequence = %sequence_name, "rollback check skipped: not a published sequence of this tenant");
+        return Ok(());
+    }
+
     // Guard 1: cooldown — skip if a rollback happened recently.
     if policy.cooldown_secs > 0 {
         let recent = state
@@ -254,15 +438,24 @@ async fn check_rollback(
         }
     }
 
-    // Primary check: error rate over the full time window.
-    let Some(error_rate) = state
+    // Primary check: error rate over the full time window, once the window
+    // holds at least `min_samples` observed runs.
+    let (failed, total) = state
         .storage
-        .query_error_rate(tenant_id, sequence_name, i64::from(policy.time_window_secs))
+        .query_error_stats(tenant_id, sequence_name, i64::from(policy.time_window_secs))
         .await
-        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?
-    else {
+        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
+    if total < i64::from(policy.min_samples.max(1)) {
+        debug!(
+            sequence = %sequence_name,
+            total,
+            min_samples = policy.min_samples,
+            "rollback check skipped: below minimum sample size"
+        );
         return Ok(());
-    };
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let error_rate = failed as f64 / total as f64;
 
     if error_rate < policy.error_rate_threshold {
         return Ok(());
@@ -272,25 +465,25 @@ async fn check_rollback(
     if policy.confirmation_window_secs > 0
         && policy.confirmation_window_secs < policy.time_window_secs
     {
-        let confirm_rate = state
+        let (c_failed, c_total) = state
             .storage
-            .query_error_rate(
+            .query_error_stats(
                 tenant_id,
                 sequence_name,
                 i64::from(policy.confirmation_window_secs),
             )
             .await
             .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
-        match confirm_rate {
-            Some(r) if r >= policy.error_rate_threshold => {}
-            _ => {
-                debug!(
-                    sequence = %sequence_name,
-                    full_window_rate = %error_rate,
-                    "rollback check skipped — confirmation window rate below threshold"
-                );
-                return Ok(());
-            }
+        #[allow(clippy::cast_precision_loss)]
+        let confirmed =
+            c_total > 0 && (c_failed as f64 / c_total as f64) >= policy.error_rate_threshold;
+        if !confirmed {
+            debug!(
+                sequence = %sequence_name,
+                full_window_rate = %error_rate,
+                "rollback check skipped — confirmation window rate below threshold"
+            );
+            return Ok(());
         }
     }
 
@@ -308,8 +501,6 @@ async fn check_rollback(
         .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
 
     // Deprecate + unpublish the sequence so mobile clients stop using it on next sync.
-    let tenant = orch8_types::ids::TenantId::unchecked(tenant_id.to_string());
-    let ns = orch8_types::ids::Namespace::new("default");
     if let Ok(Some(seq)) = state
         .storage
         .get_sequence_by_name(&tenant, &ns, sequence_name, None)
@@ -430,6 +621,8 @@ pub(crate) async fn dashboard_queries(
         .start_time
         .unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));
     let end = req.end_time.unwrap_or_else(Utc::now);
+    // Cap the scanned window so one request cannot aggregate the whole table.
+    let start = start.max(end - chrono::Duration::days(MAX_DASHBOARD_WINDOW_DAYS));
 
     let query_type = match req.query_type {
         DashboardQueryType::SyncCompletedVersions => "sync_completed_versions",

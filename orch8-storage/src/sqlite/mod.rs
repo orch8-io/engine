@@ -2670,6 +2670,24 @@ impl crate::AdminStore for SqliteStorage {
         .await
     }
 
+    async fn query_error_stats(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        window_secs: i64,
+    ) -> Result<(i64, i64), StorageError> {
+        rollback::query_error_stats(self, tenant_id, sequence_name, window_secs).await
+    }
+
+    async fn set_rollback_min_samples(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        min_samples: i32,
+    ) -> Result<(), StorageError> {
+        rollback::set_rollback_min_samples(self, tenant_id, sequence_name, min_samples).await
+    }
+
     async fn query_error_rate(
         &self,
         tenant_id: &str,
@@ -3190,6 +3208,27 @@ impl crate::MobileSyncStore for SqliteStorage {
         status: &crate::MobileInstanceStatus,
     ) -> Result<(), StorageError> {
         mobile_sync::upsert_mobile_instance_status(self, status).await
+    }
+
+    async fn upsert_mobile_instance_status_batch(
+        &self,
+        statuses: &[crate::MobileInstanceStatus],
+    ) -> Result<(), StorageError> {
+        mobile_sync::upsert_mobile_instance_status_batch(self, statuses).await
+    }
+
+    async fn insert_mobile_approvals_batch(
+        &self,
+        approvals: &[crate::MobileApprovalRequest],
+    ) -> Result<u64, StorageError> {
+        mobile_sync::insert_mobile_approvals_batch(self, approvals).await
+    }
+
+    async fn create_mobile_command_if_absent(
+        &self,
+        command: &crate::MobileCommand,
+    ) -> Result<bool, StorageError> {
+        mobile_sync::create_mobile_command_if_absent(self, command).await
     }
 
     async fn list_mobile_instance_status(

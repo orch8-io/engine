@@ -2395,6 +2395,24 @@ impl crate::AdminStore for PostgresStorage {
         .await
     }
 
+    async fn query_error_stats(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        window_secs: i64,
+    ) -> Result<(i64, i64), StorageError> {
+        rollback::query_error_stats(self, tenant_id, sequence_name, window_secs).await
+    }
+
+    async fn set_rollback_min_samples(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        min_samples: i32,
+    ) -> Result<(), StorageError> {
+        rollback::set_rollback_min_samples(self, tenant_id, sequence_name, min_samples).await
+    }
+
     async fn query_error_rate(
         &self,
         tenant_id: &str,

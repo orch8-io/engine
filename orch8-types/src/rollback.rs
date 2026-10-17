@@ -23,8 +23,21 @@ pub struct RollbackPolicy {
     /// Optional webhook URL to POST alert payloads when rollback triggers.
     #[serde(default)]
     pub webhook_url: Option<String>,
+    /// Minimum number of observed runs (successes + failures) inside the
+    /// window before the error rate is allowed to trigger a rollback. Stops a
+    /// single (possibly forged) error report from unpublishing a sequence.
+    /// Default: 20.
+    #[serde(default = "default_min_samples")]
+    pub min_samples: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Default for [`RollbackPolicy::min_samples`].
+pub const DEFAULT_MIN_SAMPLES: i32 = 20;
+
+fn default_min_samples() -> i32 {
+    DEFAULT_MIN_SAMPLES
 }
 
 fn default_cooldown() -> i32 {

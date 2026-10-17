@@ -52,8 +52,8 @@ pub(super) async fn get_rollback_policy(
     tenant_id: &str,
     sequence_name: &str,
 ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
-    let row: Option<(i64, String, String, f64, i32, i32, i32, i32, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, created_at, updated_at
+    let row: Option<(i64, String, String, f64, i32, i32, i32, i32, Option<String>, i32, String, String)> = sqlx::query_as(
+        "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, min_samples, created_at, updated_at
          FROM rollback_policies WHERE tenant_id = ? AND sequence_name = ?"
     )
     .bind(tenant_id)
@@ -71,6 +71,7 @@ pub(super) async fn get_rollback_policy(
             cooldown_secs,
             confirmation_window_secs,
             webhook_url,
+            min_samples,
             created_at,
             updated_at,
         )|
@@ -85,6 +86,7 @@ pub(super) async fn get_rollback_policy(
                 cooldown_secs,
                 confirmation_window_secs,
                 webhook_url,
+                min_samples,
                 created_at: parse_ts(&created_at)?,
                 updated_at: parse_ts(&updated_at)?,
             })
@@ -108,11 +110,12 @@ pub(super) async fn list_rollback_policies(
         i32,
         i32,
         Option<String>,
+        i32,
         String,
         String,
     )> = if let Some(t) = tenant_id {
         sqlx::query_as(
-            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, created_at, updated_at
+            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, min_samples, created_at, updated_at
              FROM rollback_policies WHERE tenant_id = ? ORDER BY tenant_id, sequence_name LIMIT ?"
         )
         .bind(t)
@@ -121,7 +124,7 @@ pub(super) async fn list_rollback_policies(
         .await?
     } else {
         sqlx::query_as(
-            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, created_at, updated_at
+            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, min_samples, created_at, updated_at
              FROM rollback_policies ORDER BY tenant_id, sequence_name LIMIT ?"
         )
         .bind(limit)
@@ -140,6 +143,7 @@ pub(super) async fn list_rollback_policies(
                 cooldown_secs,
                 confirmation_window_secs,
                 webhook_url,
+                min_samples,
                 created_at,
                 updated_at,
             )|
@@ -154,6 +158,7 @@ pub(super) async fn list_rollback_policies(
                     cooldown_secs,
                     confirmation_window_secs,
                     webhook_url,
+                    min_samples,
                     created_at: parse_ts(&created_at)?,
                     updated_at: parse_ts(&updated_at)?,
                 })
@@ -197,36 +202,64 @@ pub(super) async fn record_rollback(
     Ok(())
 }
 
-pub(super) async fn query_error_rate(
+pub(super) async fn set_rollback_min_samples(
+    storage: &SqliteStorage,
+    tenant_id: &str,
+    sequence_name: &str,
+    min_samples: i32,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE rollback_policies SET min_samples = ?3, updated_at = datetime('now') WHERE tenant_id = ?1 AND sequence_name = ?2",
+    )
+    .bind(tenant_id)
+    .bind(sequence_name)
+    .bind(min_samples)
+    .execute(&storage.pool)
+    .await?;
+    Ok(())
+}
+
+/// `(failed, total)` run counts inside the window. Uses the server receive
+/// time (`received_at`, falling back to `created_at` for rows written before
+/// the column existed), never the client-supplied event time.
+pub(super) async fn query_error_stats(
     storage: &SqliteStorage,
     tenant_id: &str,
     sequence_name: &str,
     window_secs: i64,
-) -> Result<Option<f64>, StorageError> {
+) -> Result<(i64, i64), StorageError> {
     let start = chrono::Utc::now() - chrono::Duration::seconds(window_secs);
     let start_str = start.to_rfc3339();
-    let row: Option<(i64, i64)> = sqlx::query_as(
+    let row: (i64, i64) = sqlx::query_as(
         r"SELECT
            COUNT(*) FILTER (WHERE event_type = 'InstanceFailed') as failed,
            COUNT(*) as total
          FROM telemetry_events
-         WHERE created_at >= ?1
+         WHERE COALESCE(received_at, created_at) >= ?1
            AND json_extract(payload, '$.sequence_name') = ?2
            AND json_extract(payload, '$.tenant_id') = ?3",
     )
     .bind(start_str)
     .bind(sequence_name)
     .bind(tenant_id)
-    .fetch_optional(&storage.pool)
+    .fetch_one(&storage.pool)
     .await?;
-    Ok(row.and_then(|(failed, total)| {
-        if total > 0 {
-            #[allow(clippy::cast_precision_loss)]
-            Some(failed as f64 / total as f64)
-        } else {
-            None
-        }
-    }))
+    Ok(row)
+}
+
+pub(super) async fn query_error_rate(
+    storage: &SqliteStorage,
+    tenant_id: &str,
+    sequence_name: &str,
+    window_secs: i64,
+) -> Result<Option<f64>, StorageError> {
+    let (failed, total) = query_error_stats(storage, tenant_id, sequence_name, window_secs).await?;
+    Ok(if total > 0 {
+        #[allow(clippy::cast_precision_loss)]
+        Some(failed as f64 / total as f64)
+    } else {
+        None
+    })
 }
 
 pub(super) async fn list_rollback_history(
