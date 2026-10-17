@@ -154,9 +154,17 @@ async fn step_delay_until(
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
-    let Some(delay) = &step_def.delay else {
-        return Ok(None);
+    // D-06: a legacy `sleep` step over the in-process cap is served as a
+    // durable delay (same marker, same early-wake semantics) instead of
+    // failing, so sequences persisted before the cap keep working.
+    let sleep_ms = if step_def.delay.is_none() {
+        crate::handlers::builtin::over_cap_sleep_ms(&step_def.handler, &step_def.params)
+    } else {
+        None
     };
+    if step_def.delay.is_none() && sleep_ms.is_none() {
+        return Ok(None);
+    }
 
     let now = clock.now();
     let marker_key = delay_marker_key(&step_def.id);
@@ -178,12 +186,20 @@ async fn step_delay_until(
         return Ok((now < until).then_some(until));
     }
 
-    let fire_at = crate::scheduling::delay::calculate_next_fire_at(
-        now,
-        delay,
-        &instance.timezone,
-        Some(&instance.context.config),
-    );
+    let fire_at = match (&step_def.delay, sleep_ms) {
+        (Some(delay), _) => crate::scheduling::delay::calculate_next_fire_at(
+            now,
+            delay,
+            &instance.timezone,
+            Some(&instance.context.config),
+        ),
+        (None, Some(ms)) => i64::try_from(ms)
+            .ok()
+            .and_then(chrono::Duration::try_milliseconds)
+            .and_then(|d| now.checked_add_signed(d))
+            .unwrap_or(now),
+        (None, None) => return Ok(None),
+    };
 
     storage
         .merge_instance_metadata(

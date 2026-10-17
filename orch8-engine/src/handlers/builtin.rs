@@ -599,12 +599,29 @@ async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepErro
 /// `Scheduled` with a `next_fire_at` and survives restarts.
 pub const MAX_SLEEP_MS: u64 = 60_000;
 
+/// The requested duration of a `sleep` step when it exceeds
+/// [`MAX_SLEEP_MS`], else `None`. The scheduler's step preamble turns such a
+/// sleep into a durable `delay` (D-06) so sequences persisted before the cap
+/// existed keep working instead of failing permanently.
+pub(crate) fn over_cap_sleep_ms(handler: &str, params: &Value) -> Option<u64> {
+    if handler != "sleep" {
+        return None;
+    }
+    params
+        .get("duration_ms")
+        .and_then(Value::as_u64)
+        .filter(|ms| *ms > MAX_SLEEP_MS)
+}
+
 /// Sleep handler. Waits for a configured duration.
 ///
 /// Params:
 /// - `duration_ms` (u64): Milliseconds to sleep. Defaults to 100. Values
-///   above [`MAX_SLEEP_MS`] fail the step permanently with a message
-///   pointing at the durable `delay` field.
+///   above [`MAX_SLEEP_MS`] are not slept in-process: the scheduler parks
+///   the instance durably for that long (like the step `delay` field) and
+///   the step then completes at once. Reaching this handler over the cap
+///   without that deferral fails permanently, pointing at `delay`. The
+///   lint still warns about such steps.
 ///
 /// Long sleeps poll for a pending `cancel` signal on a short interval so
 /// that in-flight sleeps are interruptible — a plain `tokio::time::sleep`
@@ -622,6 +639,19 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         .unwrap_or(100);
 
     if duration_ms > MAX_SLEEP_MS {
+        // D-06: the scheduler's step preamble already served this sleep as a
+        // durable delay (it leaves the delay marker behind and only then
+        // dispatches the step), so there is nothing left to wait for.
+        // Without the marker the step did not come through the preamble;
+        // refuse rather than hold an execution slot.
+        let marker = crate::scheduler::delay_marker_key(&ctx.block_id);
+        let served = match ctx.storage.get_instance(ctx.instance_id).await {
+            Ok(Some(instance)) => instance.metadata.get(&marker).is_some_and(Value::is_string),
+            _ => false,
+        };
+        if served {
+            return Ok(json!({ "slept_ms": duration_ms, "durable": true }));
+        }
         return Err(StepError::Permanent {
             message: format!(
                 "sleep: duration_ms {duration_ms} exceeds the in-process limit of {MAX_SLEEP_MS} ms; \
