@@ -301,6 +301,7 @@ All of these are opt-in. See [Federation and BYOK](FEDERATION.md) and [Multi-reg
 | `ORCH8_BYOK_BUCKET` / `ORCH8_BYOK_LOCAL_PATH` | — | Send every externalized payload to this customer bucket (or to a local directory, for development). Requires the encryption key. |
 | `ORCH8_BYOK_PREFIX`, `ORCH8_BYOK_REGION`, `ORCH8_BYOK_ENDPOINT`, `ORCH8_BYOK_ACCESS_KEY_ID`, `ORCH8_BYOK_SECRET_ACCESS_KEY`, `ORCH8_BYOK_ALLOW_HTTP` | `orch8`, AWS default chain | Bucket addressing and credentials. |
 | `ORCH8_BYOK_KMS_KEY_ARN` (+ `ORCH8_BYOK_KMS_REGION`, `ORCH8_BYOK_KMS_ENDPOINT`) | — | Wrap DEKs with this AWS KMS key. Credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`. |
+| `ORCH8_BYOK_KMS_CREDENTIALS_FILE` | — | JSON (`access_key_id`, `secret_access_key`, `session_token`) or `AWS_*=` lines. Re-read whenever the file changes, so KMS credentials rotate without a restart; overrides the `AWS_*` env vars. |
 | `ORCH8_BYOK_STATIC_KEY`, `ORCH8_BYOK_STATIC_KEY_ID` | — | Wrap DEKs with a local 64-hex key instead of KMS. |
 | `ORCH8_FAILOVER_REGION` | — | This node's region. The scheduler runs only while the database region fence names this region. |
 | `ORCH8_FAILOVER_POLL_SECS` | `5` | Fence poll interval (1–60). A node fails closed after 3 intervals without a successful read. |

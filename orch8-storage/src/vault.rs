@@ -165,13 +165,138 @@ impl std::fmt::Debug for AwsCredentials {
     }
 }
 
+/// Supplies the credentials used to sign each KMS request. Consulted on
+/// every call so rotated credentials take effect without a restart.
+pub trait CredentialSource: Send + Sync {
+    /// The credentials to sign the next request with.
+    ///
+    /// # Errors
+    /// Returns an error when no usable credentials can be obtained.
+    fn current(&self) -> Result<AwsCredentials, StorageError>;
+}
+
+/// Fixed credentials (the legacy boot-time snapshot).
+pub struct StaticCredentials(pub AwsCredentials);
+
+impl CredentialSource for StaticCredentials {
+    fn current(&self) -> Result<AwsCredentials, StorageError> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Credentials read from a file that is re-read whenever it changes (mtime or
+/// size), so a sidecar / secret mount / cron can rotate them in place. The
+/// file is either JSON (`{"access_key_id","secret_access_key","session_token"}`)
+/// or `KEY=VALUE` lines using `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+/// and `AWS_SESSION_TOKEN`. If a re-read fails the last good credentials
+/// keep being used (a half-written file must not take the vault down).
+pub struct FileCredentials {
+    path: std::path::PathBuf,
+    cached: std::sync::Mutex<(Option<(std::time::SystemTime, u64)>, AwsCredentials)>,
+}
+
+impl FileCredentials {
+    /// # Errors
+    /// Fails when the file cannot be read or parsed at startup.
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Result<Self, StorageError> {
+        let path = path.into();
+        let stamp = Self::stamp(&path)?;
+        let creds = Self::load(&path)?;
+        Ok(Self {
+            path,
+            cached: std::sync::Mutex::new((Some(stamp), creds)),
+        })
+    }
+
+    fn stamp(path: &std::path::Path) -> Result<(std::time::SystemTime, u64), StorageError> {
+        let meta = std::fs::metadata(path)
+            .map_err(|e| vault_err(format!("credentials file {}: {e}", path.display())))?;
+        Ok((
+            meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+            meta.len(),
+        ))
+    }
+
+    fn load(path: &std::path::Path) -> Result<AwsCredentials, StorageError> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| vault_err(format!("credentials file {}: {e}", path.display())))?;
+        parse_credentials(&text)
+    }
+}
+
+fn parse_credentials(text: &str) -> Result<AwsCredentials, StorageError> {
+    let (mut id, mut secret, mut token) = (None, None, None);
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        let get = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+        };
+        id = get("access_key_id");
+        secret = get("secret_access_key");
+        token = get("session_token");
+    } else {
+        for line in text.lines() {
+            let Some((k, val)) = line.split_once('=') else {
+                continue;
+            };
+            let val = val.trim().trim_matches('"').to_owned();
+            if val.is_empty() {
+                continue;
+            }
+            match k.trim().trim_start_matches("export ").trim() {
+                "AWS_ACCESS_KEY_ID" => id = Some(val),
+                "AWS_SECRET_ACCESS_KEY" => secret = Some(val),
+                "AWS_SESSION_TOKEN" => token = Some(val),
+                _ => {}
+            }
+        }
+    }
+    match (id, secret) {
+        (Some(access_key_id), Some(secret_access_key)) => Ok(AwsCredentials {
+            access_key_id,
+            secret_access_key,
+            session_token: token,
+        }),
+        _ => Err(vault_err(
+            "credentials file must define an access key id and secret access key",
+        )),
+    }
+}
+
+impl CredentialSource for FileCredentials {
+    fn current(&self) -> Result<AwsCredentials, StorageError> {
+        let mut guard = self
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Ok(now) = Self::stamp(&self.path) {
+            if guard.0 != Some(now) {
+                match Self::load(&self.path) {
+                    Ok(creds) => {
+                        tracing::info!(path = %self.path.display(), "KMS credentials reloaded");
+                        *guard = (Some(now), creds);
+                    }
+                    Err(e) => {
+                        // Keep the previous stamp so the next call retries.
+                        tracing::warn!(error = %e, "KMS credentials reload failed; keeping previous");
+                    }
+                }
+            }
+        }
+        Ok(guard.1.clone())
+    }
+}
+
 /// AWS KMS (`TrentService.Encrypt` / `Decrypt`) over HTTPS, signed with
 /// `SigV4`. The customer's key never leaves KMS; only DEKs are wrapped.
 pub struct AwsKmsKeyProvider {
     key_arn: String,
     region: String,
     endpoint: String,
-    credentials: AwsCredentials,
+    credentials: Arc<dyn CredentialSource>,
     http: reqwest::Client,
 }
 
@@ -186,6 +311,25 @@ impl AwsKmsKeyProvider {
         region: Option<String>,
         endpoint: Option<String>,
         credentials: AwsCredentials,
+    ) -> Result<Self, StorageError> {
+        Self::with_credential_source(
+            key_arn,
+            region,
+            endpoint,
+            Arc::new(StaticCredentials(credentials)),
+        )
+    }
+
+    /// Like [`Self::new`] but signs with credentials fetched per request, so
+    /// rotation needs no restart (see [`FileCredentials`]).
+    ///
+    /// # Errors
+    /// Returns an error when the ARN does not name a region.
+    pub fn with_credential_source(
+        key_arn: impl Into<String>,
+        region: Option<String>,
+        endpoint: Option<String>,
+        credentials: Arc<dyn CredentialSource>,
     ) -> Result<Self, StorageError> {
         let key_arn = key_arn.into();
         let region = region
@@ -223,6 +367,7 @@ impl AwsKmsKeyProvider {
             .next()
             .unwrap_or_default()
             .to_owned();
+        let credentials = self.credentials.current()?;
         let now = chrono::Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let mut headers = vec![
@@ -234,7 +379,7 @@ impl AwsKmsKeyProvider {
             ("x-amz-date".to_owned(), amz_date.clone()),
             ("x-amz-target".to_owned(), format!("TrentService.{target}")),
         ];
-        if let Some(token) = &self.credentials.session_token {
+        if let Some(token) = &credentials.session_token {
             headers.push(("x-amz-security-token".to_owned(), token.clone()));
         }
         let authorization = sigv4_authorization(&SigV4Request {
@@ -246,8 +391,8 @@ impl AwsKmsKeyProvider {
             amz_date: &amz_date,
             region: &self.region,
             service: "kms",
-            access_key_id: &self.credentials.access_key_id,
-            secret_access_key: &self.credentials.secret_access_key,
+            access_key_id: &credentials.access_key_id,
+            secret_access_key: &credentials.secret_access_key,
         });
         let mut request = self.http.post(format!("{}/", self.endpoint)).body(payload);
         for (name, value) in &headers {
@@ -766,6 +911,95 @@ mod tests {
             crate::encrypting::is_vault_reference(&seen),
             "reference-only view: {seen}"
         );
+    }
+
+    #[test]
+    fn credentials_file_formats_parse() {
+        let json = parse_credentials(
+            r#"{"access_key_id":"AK","secret_access_key":"SK","session_token":"T"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (json.access_key_id.as_str(), json.session_token.as_deref()),
+            ("AK", Some("T"))
+        );
+        let env =
+            parse_credentials("export AWS_ACCESS_KEY_ID=AK2\nAWS_SECRET_ACCESS_KEY=\"SK2\"\n")
+                .unwrap();
+        assert_eq!(env.access_key_id, "AK2");
+        assert_eq!(env.secret_access_key, "SK2");
+        assert!(parse_credentials("nothing useful").is_err());
+    }
+
+    /// L5-04: rotated credentials are picked up per request, and a corrupt
+    /// rewrite keeps the last good credentials.
+    #[test]
+    fn file_credentials_reload_on_change_and_survive_bad_rewrite() {
+        let dir = std::env::temp_dir().join(format!("orch8-creds-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("creds.json");
+        std::fs::write(&path, r#"{"access_key_id":"OLD","secret_access_key":"s1"}"#).unwrap();
+        let src = FileCredentials::new(&path).unwrap();
+        assert_eq!(src.current().unwrap().access_key_id, "OLD");
+        // Different length guarantees a changed stamp even on coarse mtimes.
+        std::fs::write(&path, r#"{"access_key_id":"NEWER","secret_access_key":"s22"}"#).unwrap();
+        assert_eq!(src.current().unwrap().access_key_id, "NEWER");
+        std::fs::write(&path, "{ half written").unwrap();
+        assert_eq!(src.current().unwrap().access_key_id, "NEWER");
+        std::fs::write(&path, r#"{"access_key_id":"THIRD!!","secret_access_key":"s3"}"#).unwrap();
+        assert_eq!(src.current().unwrap().access_key_id, "THIRD!!");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// L5-04: the SigV4 `Credential=` scope of a live KMS request follows the
+    /// credential source at call time, not a boot snapshot.
+    #[tokio::test]
+    async fn kms_requests_sign_with_rotated_credentials() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_lowercase());
+                let body = r#"{"CiphertextBlob":"AAAA"}"#;
+                let _ = sock
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("orch8-creds-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("creds.env");
+        std::fs::write(&path, "AWS_ACCESS_KEY_ID=AKIAOLDOLD\nAWS_SECRET_ACCESS_KEY=s\n").unwrap();
+        let provider = AwsKmsKeyProvider::with_credential_source(
+            "arn:aws:kms:us-east-1:111:key/abc",
+            None,
+            Some(format!("http://{addr}")),
+            Arc::new(FileCredentials::new(&path).unwrap()),
+        )
+        .unwrap();
+        provider.wrap(&[7u8; 32]).await.unwrap();
+        assert!(rx.recv().await.unwrap().contains("credential=akiaoldold/"));
+        std::fs::write(
+            &path,
+            "AWS_ACCESS_KEY_ID=AKIANEWNEWNEW\nAWS_SECRET_ACCESS_KEY=s2\n",
+        )
+        .unwrap();
+        provider.wrap(&[7u8; 32]).await.unwrap();
+        assert!(rx.recv().await.unwrap().contains("credential=akianewnewnew/"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// AWS `SigV4` reference vector (IAM `ListUsers`, AWS General Reference).

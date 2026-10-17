@@ -11,7 +11,8 @@ use orch8_engine::federation::FederationClient;
 use orch8_storage::artifacts::S3Config;
 use orch8_storage::encrypting::ExternalPayloadVault;
 use orch8_storage::vault::{
-    AwsCredentials, AwsKmsKeyProvider, KeyProvider, PayloadVault, StaticKeyProvider,
+    AwsCredentials, AwsKmsKeyProvider, CredentialSource, FileCredentials, KeyProvider,
+    PayloadVault, StaticCredentials, StaticKeyProvider,
 };
 
 fn env(name: &str) -> Option<String> {
@@ -34,7 +35,8 @@ fn env_flag(name: &str) -> bool {
 /// `ORCH8_BYOK_ALLOW_HTTP`.
 ///
 /// Key: `ORCH8_BYOK_KMS_KEY_ARN` (+ `ORCH8_BYOK_KMS_ENDPOINT`, credentials
-/// from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`)
+/// from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`, or
+/// a hot-reloaded `ORCH8_BYOK_KMS_CREDENTIALS_FILE`)
 /// or `ORCH8_BYOK_STATIC_KEY` (64 hex) + `ORCH8_BYOK_STATIC_KEY_ID`.
 ///
 /// # Errors
@@ -52,14 +54,21 @@ pub fn payload_vault_from_env() -> anyhow::Result<Option<Arc<dyn ExternalPayload
         return Ok(None);
     }
     let provider: Arc<dyn KeyProvider> = if let Some(arn) = env("ORCH8_BYOK_KMS_KEY_ARN") {
-        let credentials = AwsCredentials {
-            access_key_id: env("AWS_ACCESS_KEY_ID")
-                .context("ORCH8_BYOK_KMS_KEY_ARN requires AWS_ACCESS_KEY_ID")?,
-            secret_access_key: env("AWS_SECRET_ACCESS_KEY")
-                .context("ORCH8_BYOK_KMS_KEY_ARN requires AWS_SECRET_ACCESS_KEY")?,
-            session_token: env("AWS_SESSION_TOKEN"),
-        };
-        Arc::new(AwsKmsKeyProvider::new(
+        // A credentials file is re-read whenever it changes, so rotation
+        // needs no restart. Plain env credentials are a boot-time snapshot.
+        let credentials: Arc<dyn CredentialSource> =
+            if let Some(path) = env("ORCH8_BYOK_KMS_CREDENTIALS_FILE") {
+                Arc::new(FileCredentials::new(path)?)
+            } else {
+                Arc::new(StaticCredentials(AwsCredentials {
+                    access_key_id: env("AWS_ACCESS_KEY_ID")
+                        .context("ORCH8_BYOK_KMS_KEY_ARN requires AWS_ACCESS_KEY_ID")?,
+                    secret_access_key: env("AWS_SECRET_ACCESS_KEY")
+                        .context("ORCH8_BYOK_KMS_KEY_ARN requires AWS_SECRET_ACCESS_KEY")?,
+                    session_token: env("AWS_SESSION_TOKEN"),
+                }))
+            };
+        Arc::new(AwsKmsKeyProvider::with_credential_source(
             arn,
             env("ORCH8_BYOK_KMS_REGION"),
             env("ORCH8_BYOK_KMS_ENDPOINT"),
