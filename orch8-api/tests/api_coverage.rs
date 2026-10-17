@@ -1776,6 +1776,27 @@ async fn t70_worker_task_stats() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn t70b_worker_task_stats_window_secs_is_bounded() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    for (q, expected) in [
+        ("window_secs=300", StatusCode::OK),
+        ("window_secs=604800", StatusCode::OK),
+        ("window_secs=0", StatusCode::BAD_REQUEST),
+        ("window_secs=604801", StatusCode::BAD_REQUEST),
+        ("window_secs=abc", StatusCode::BAD_REQUEST),
+    ] {
+        let resp = client
+            .get(format!("{}/workers/tasks/stats?{q}", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected, "{q}");
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Approvals (tests 71-80)
 // ════════════════════════════════════════════════════════════════════════════

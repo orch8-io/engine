@@ -2021,7 +2021,7 @@ passthrough_impl! {
         }
         Ok(tasks)
     }
-    async fn worker_task_stats(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
+    async fn worker_task_stats(&self, tenant_id: Option<&orch8_types::ids::TenantId>, window_secs: Option<u32>) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
     async fn pending_worker_task_depth(&self, limit: u32) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError>;
 
     async fn claim_worker_tasks_from_queue(

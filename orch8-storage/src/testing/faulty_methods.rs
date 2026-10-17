@@ -160,7 +160,7 @@ fault_impl! {
         async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
         async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
         async fn list_worker_tasks(&self, filter: &orch8_types::worker_filter::WorkerTaskFilter, pagination: &orch8_types::filter::Pagination) -> Result<Vec<WorkerTask>, StorageError>;
-        async fn worker_task_stats(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
+        async fn worker_task_stats(&self, tenant_id: Option<&orch8_types::ids::TenantId>, window_secs: Option<u32>) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
         async fn pending_worker_task_depth(&self, limit: u32) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError>;
         async fn claim_worker_tasks_from_queue(&self, queue_name: &str, handler_name: &str, worker_id: &str, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn claim_worker_tasks_from_queue_for_tenant(&self, queue_name: &str, handler_name: &str, worker_id: &str, tenant_id: &TenantId, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;

@@ -1016,12 +1016,21 @@ pub(super) async fn list(
 pub(super) async fn stats(
     storage: &SqliteStorage,
     tenant_id: Option<&orch8_types::ids::TenantId>,
+    window_secs: Option<u32>,
 ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
-    let mut cqb =
-        sqlx::QueryBuilder::new("SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks");
+    let mut cqb = sqlx::QueryBuilder::new(
+        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks WHERE 1=1",
+    );
     if let Some(tid) = tenant_id {
-        cqb.push(" WHERE instance_id IN (SELECT id FROM task_instances WHERE tenant_id=");
+        cqb.push(" AND instance_id IN (SELECT id FROM task_instances WHERE tenant_id=");
         cqb.push_bind(tid.as_str());
+        cqb.push(")");
+    }
+    if let Some(secs) = window_secs {
+        // Terminal rows only count inside the window; live gauges always count.
+        let cutoff = ts(Utc::now() - chrono::Duration::seconds(i64::from(secs)));
+        cqb.push(" AND (state NOT IN ('completed', 'failed') OR completed_at >= ");
+        cqb.push_bind(cutoff);
         cqb.push(")");
     }
     cqb.push(" GROUP BY state, handler_name");

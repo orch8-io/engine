@@ -155,8 +155,19 @@ export function listWorkerTasks(
   return request("/workers/tasks", params as Record<string, string | undefined>, signal);
 }
 
-export function getWorkerTaskStats(signal?: AbortSignal): Promise<WorkerTaskStats> {
-  return request("/workers/tasks/stats", undefined, signal);
+/**
+ * `windowSecs` (1..604800) restricts completed/failed counts to tasks finished
+ * in the last N seconds; omit for lifetime counts. pending/claimed are live.
+ */
+export function getWorkerTaskStats(
+  signal?: AbortSignal,
+  windowSecs?: number,
+): Promise<WorkerTaskStats> {
+  return request(
+    "/workers/tasks/stats",
+    windowSecs === undefined ? undefined : { window_secs: String(windowSecs) },
+    signal,
+  );
 }
 
 /** Aggregated fleet view of one worker, grouped from its per-handler registrations. */

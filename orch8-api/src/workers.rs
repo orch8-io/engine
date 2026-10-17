@@ -1985,17 +1985,36 @@ pub(crate) async fn list_tasks(
     Ok(Json(tasks))
 }
 
+/// Longest accepted `window_secs` for `/workers/tasks/stats` (7 days).
+const MAX_STATS_WINDOW_SECS: u32 = 7 * 24 * 3600;
+
+#[derive(Deserialize)]
+pub(crate) struct TaskStatsQuery {
+    window_secs: Option<u32>,
+}
+
 #[utoipa::path(get, path = "/workers/tasks/stats", tag = "workers",
+    params(
+        ("window_secs" = Option<u32>, Query, description = "When set (1..=604800), `completed`/`failed` rows are counted only if finished within the last N seconds, so `by_handler` failure rates reflect a recent window; `pending`/`claimed` are live gauges and always counted. Omit for lifetime counts (default)."),
+    ),
     responses((status = 200, description = "Aggregate worker task stats", body = orch8_types::worker_filter::WorkerTaskStats))
 )]
 pub(crate) async fn task_stats(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    Query(query): Query<TaskStatsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if let Some(w) = query.window_secs {
+        if w == 0 || w > MAX_STATS_WINDOW_SECS {
+            return Err(ApiError::InvalidArgument(format!(
+                "window_secs must be between 1 and {MAX_STATS_WINDOW_SECS}"
+            )));
+        }
+    }
     let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, None);
     let result = state
         .storage
-        .worker_task_stats(scoped_tenant.as_ref())
+        .worker_task_stats(scoped_tenant.as_ref(), query.window_secs)
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
