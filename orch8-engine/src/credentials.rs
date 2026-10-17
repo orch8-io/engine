@@ -105,6 +105,52 @@ fn refresh_failure_backoff(failures: u32) -> chrono::TimeDelta {
     chrono::TimeDelta::minutes(minutes).min(chrono::TimeDelta::hours(6))
 }
 
+/// Cap on the hold after a *transient* refresh failure (transport error, 5xx,
+/// 429, storage hiccup). A provider blip must not park a healthy credential
+/// for hours; only permanent errors (`invalid_grant`, 4xx, bad config)
+/// escalate towards the 6 h cap (D-03).
+const TRANSIENT_REFRESH_BACKOFF_CAP: chrono::TimeDelta = chrono::TimeDelta::minutes(15);
+
+/// Back-off after the `failures`-th consecutive *transient* failure.
+fn transient_refresh_backoff(failures: u32) -> chrono::TimeDelta {
+    refresh_failure_backoff(failures).min(TRANSIENT_REFRESH_BACKOFF_CAP)
+}
+
+/// A failed token refresh, classified for back-off purposes.
+#[derive(Debug)]
+struct RefreshError {
+    message: String,
+    /// The same request will keep failing until a human fixes the credential
+    /// (revoked grant, 4xx from the token endpoint, missing/blocked config).
+    permanent: bool,
+}
+
+impl RefreshError {
+    fn permanent(message: String) -> Self {
+        Self {
+            message,
+            permanent: true,
+        }
+    }
+}
+
+/// Unclassified failures (network, storage, body read) are transient.
+impl From<String> for RefreshError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            permanent: false,
+        }
+    }
+}
+
+/// Whether a non-success token-endpoint status is permanent for this grant.
+/// 4xx means the request itself was rejected (`invalid_grant`, `invalid_client`,
+/// ...); 408/425/429 and all 5xx are the provider being unavailable.
+fn refresh_status_is_permanent(status: reqwest::StatusCode) -> bool {
+    status.is_client_error() && !matches!(status.as_u16(), 408 | 425 | 429)
+}
+
 /// Recursively walk `value` and replace every `credentials://<id>[/<key>]`
 /// string with the resolved credential material.
 ///
@@ -482,17 +528,23 @@ async fn refresh_due_credential(
     if !fresh.enabled || fresh.expires_at.is_none_or(|t| t > cutoff) {
         return Ok(false);
     }
-    if let Err(error) = refresh_credential(storage, fresh).await {
-        // Back off: a dead credential (revoked app, `invalid_grant`, dead
-        // token endpoint) must not be retried, and listed ahead of healthy
-        // ones, every pass.
+    if let Err(refresh_error) = refresh_credential(storage, fresh).await {
+        // Back off: a dead credential (revoked app, `invalid_grant`) must not
+        // be retried, and listed ahead of healthy ones, every pass. Transient
+        // failures (provider outage) use a short capped hold instead (D-03).
+        let backoff: fn(u32) -> chrono::TimeDelta = if refresh_error.permanent {
+            refresh_failure_backoff
+        } else {
+            transient_refresh_backoff
+        };
+        let error = refresh_error.message;
         match storage
-            .record_credential_refresh_failure(&listed.id, now, refresh_failure_backoff)
+            .record_credential_refresh_failure(&listed.id, now, backoff)
             .await
         {
             Ok(failures) if failures >= REFRESH_FAILURES_WARN => {
                 error!(credential_id = %listed.id, failures,
-                    retry_in_secs = refresh_failure_backoff(failures).num_seconds(),
+                    retry_in_secs = backoff(failures).num_seconds(),
                     "oauth2 credential keeps failing to refresh; check or re-authorize it");
             }
             Ok(_) => {}
@@ -514,30 +566,37 @@ async fn refresh_due_credential(
 async fn refresh_credential(
     storage: &dyn StorageBackend,
     credential: CredentialDef,
-) -> Result<(), String> {
+) -> Result<(), RefreshError> {
     if !matches!(credential.kind, CredentialKind::Oauth2) {
-        return Err(format!(
+        return Err(RefreshError::permanent(format!(
             "credential '{}' is not oauth2 (got {:?})",
             credential.id, credential.kind
-        ));
+        )));
     }
     let refresh_url = credential
         .refresh_url
         .clone()
-        .ok_or_else(|| format!("credential '{}' has no refresh_url", credential.id))?;
+        .ok_or_else(|| {
+            RefreshError::permanent(format!("credential '{}' has no refresh_url", credential.id))
+        })?;
     let refresh_token = credential
         .refresh_token
         .as_ref()
-        .ok_or_else(|| format!("credential '{}' has no refresh_token", credential.id))?
+        .ok_or_else(|| {
+            RefreshError::permanent(format!(
+                "credential '{}' has no refresh_token",
+                credential.id
+            ))
+        })?
         .expose()
         .to_string();
 
     if !crate::handlers::builtin::is_url_safe(&refresh_url).await {
-        return Err(format!(
+        return Err(RefreshError::permanent(format!(
             "credential '{}': refresh_url '{}' targets an internal or non-public address",
             credential.id,
             crate::outbound::redact_url(&refresh_url)
-        ));
+        )));
     }
 
     let params = [
@@ -569,17 +628,17 @@ async fn refresh_credential(
         // Token endpoints may echo submitted form fields in error bodies.
         // Never propagate that body into the refresh loop's warning log: it
         // can contain the refresh token we just sent.
-        return Err(format!(
-            "credential '{}': refresh returned {status}",
-            credential.id
-        ));
+        return Err(RefreshError {
+            message: format!("credential '{}': refresh returned {status}", credential.id),
+            permanent: refresh_status_is_permanent(status),
+        });
     }
 
     let token: TokenResponse = serde_json::from_slice(&body).map_err(|e| {
-        format!(
+        RefreshError::permanent(format!(
             "credential '{}': malformed refresh response: {e}",
             credential.id
-        )
+        ))
     })?;
 
     persist_refreshed_tokens(storage, &credential, &token).await?;
@@ -1043,7 +1102,7 @@ mod tests {
             .unwrap();
         let value = credential("api-key", CredentialKind::ApiKey);
 
-        let error = refresh_credential(&storage, value).await.unwrap_err();
+        let error = refresh_credential(&storage, value).await.unwrap_err().message;
 
         assert!(error.contains("is not oauth2"));
     }
@@ -1056,7 +1115,7 @@ mod tests {
         let mut value = credential("oauth", CredentialKind::Oauth2);
         value.refresh_token = Some(SecretString::new("refresh-token".into()));
 
-        let error = refresh_credential(&storage, value).await.unwrap_err();
+        let error = refresh_credential(&storage, value).await.unwrap_err().message;
 
         assert_eq!(error, "credential 'oauth' has no refresh_url");
     }
@@ -1069,7 +1128,7 @@ mod tests {
         let mut value = credential("oauth", CredentialKind::Oauth2);
         value.refresh_url = Some("https://example.com/token".into());
 
-        let error = refresh_credential(&storage, value).await.unwrap_err();
+        let error = refresh_credential(&storage, value).await.unwrap_err().message;
 
         assert_eq!(error, "credential 'oauth' has no refresh_token");
     }
@@ -1083,7 +1142,7 @@ mod tests {
         value.refresh_url = Some("http://127.0.0.1/token".into());
         value.refresh_token = Some(SecretString::new("refresh-token".into()));
 
-        let error = refresh_credential(&storage, value).await.unwrap_err();
+        let error = refresh_credential(&storage, value).await.unwrap_err().message;
 
         assert!(error.contains("targets an internal or non-public address"));
     }
@@ -1251,6 +1310,23 @@ mod tests {
         assert_eq!(refresh_failure_backoff(1), chrono::TimeDelta::minutes(2));
         assert_eq!(refresh_failure_backoff(2), chrono::TimeDelta::minutes(4));
         assert_eq!(refresh_failure_backoff(50), chrono::TimeDelta::hours(6));
+    }
+
+    /// D-03: provider blips (transport, 5xx, 429) hold a credential for at
+    /// most ~15 min; only 4xx rejections escalate to the multi-hour cap.
+    #[test]
+    fn transient_refresh_failures_do_not_escalate() {
+        assert_eq!(transient_refresh_backoff(1), chrono::TimeDelta::minutes(2));
+        assert_eq!(transient_refresh_backoff(50), chrono::TimeDelta::minutes(15));
+        for code in [500_u16, 502, 503, 408, 425, 429] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert!(!refresh_status_is_permanent(status), "{code} is transient");
+        }
+        for code in [400_u16, 401, 403, 404] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert!(refresh_status_is_permanent(status), "{code} is permanent");
+        }
+        assert!(!RefreshError::from("net down".to_string()).permanent);
     }
 
     /// A token response without `expires_in` must move `expires_at` into the
