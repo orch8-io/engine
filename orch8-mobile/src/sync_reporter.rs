@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sqlx::SqlitePool;
 use tracing::{debug, warn};
@@ -46,7 +46,7 @@ pub(crate) struct SyncReporter {
     device_id: String,
     credential: Arc<crate::credential::Credential>,
     sync_interval_secs: AtomicU64,
-    last_sync_attempt: StdMutex<chrono::DateTime<chrono::Utc>>,
+    last_sync_attempt: StdMutex<SyncAttempt>,
     last_command_prune: StdMutex<Option<chrono::DateTime<chrono::Utc>>>,
     clock: SharedClock,
     push_generation: AtomicU64,
@@ -119,6 +119,42 @@ fn borrow_valid_payloads(rows: &[(i64, String)]) -> Vec<&serde_json::value::RawV
         serde_json::from_str::<&serde_json::value::RawValue>(payload).ok()
     }));
     payloads
+}
+
+/// When the last sync attempt was claimed: wall clock (keeps counting while
+/// the device sleeps, so server intervals stay stable) plus a monotonic
+/// instant used only when the wall clock steps backwards (MC-11), where the
+/// wall delta would be negative and sync would otherwise stall for as long as
+/// the clock was set back.
+#[derive(Clone, Copy)]
+struct SyncAttempt {
+    wall: chrono::DateTime<chrono::Utc>,
+    mono: Instant,
+}
+
+impl SyncAttempt {
+    fn at(wall: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            wall,
+            mono: Instant::now(),
+        }
+    }
+
+    /// Time since the attempt. A negative wall delta (clock set back) falls
+    /// back to the monotonic elapsed time.
+    fn elapsed(&self, now: chrono::DateTime<chrono::Utc>) -> Duration {
+        (now - self.wall)
+            .to_std()
+            .unwrap_or_else(|_| self.mono.elapsed())
+    }
+
+    fn reanchor(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        if now < self.wall {
+            let mono_elapsed = chrono::Duration::from_std(self.mono.elapsed())
+                .unwrap_or_else(|_| chrono::Duration::zero());
+            self.wall = now - mono_elapsed;
+        }
+    }
 }
 
 /// An unchanged non-terminal status/approval is re-queued at most this often
@@ -196,7 +232,7 @@ impl SyncReporter {
             device_id,
             credential,
             sync_interval_secs: AtomicU64::new(u64::from(default_interval())),
-            last_sync_attempt: StdMutex::new(now),
+            last_sync_attempt: StdMutex::new(SyncAttempt::at(now)),
             last_command_prune: StdMutex::new(None),
             clock,
             push_generation: AtomicU64::new(0),
@@ -217,11 +253,14 @@ impl SyncReporter {
     }
 
     fn request_immediate_sync(&self) {
+        let back = Duration::from_secs(u64::from(MIN_SYNC_INTERVAL_SECS));
         *self
             .last_sync_attempt
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            self.clock.now() - chrono::Duration::seconds(i64::from(MIN_SYNC_INTERVAL_SECS));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = SyncAttempt {
+            wall: self.clock.now() - chrono::Duration::seconds(i64::from(MIN_SYNC_INTERVAL_SECS)),
+            mono: Instant::now().checked_sub(back).unwrap_or_else(Instant::now),
+        };
         self.push_generation.fetch_add(1, Ordering::Release);
     }
 
@@ -234,10 +273,13 @@ impl SyncReporter {
             .last_sync_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let due =
-            now - *last >= chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::MAX);
+        let due = last.elapsed(now) >= interval;
         if due {
-            *last = now;
+            *last = SyncAttempt::at(now);
+        } else {
+            // Re-anchor after a backwards clock step so later checks are
+            // wall-clock-consistent again.
+            last.reanchor(now);
         }
         due
     }
@@ -248,11 +290,11 @@ impl SyncReporter {
     pub fn next_sync_delay(&self) -> Duration {
         let interval = self.current_sync_interval();
         let now = self.clock.now();
-        let last = *self
+        let elapsed = self
             .last_sync_attempt
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let elapsed = (now - last).to_std().unwrap_or(Duration::ZERO);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed(now);
         interval.saturating_sub(elapsed)
     }
 
@@ -2346,6 +2388,38 @@ mod tests {
 
         reporter.on_push_received();
         assert_eq!(reporter.next_sync_delay(), Duration::ZERO);
+    }
+
+    /// MC-11: a device clock set back by an hour must not stall sync for that
+    /// hour; scheduling re-anchors on the new clock.
+    #[tokio::test]
+    async fn mc11_backwards_clock_step_does_not_stall_sync() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let start = chrono::Utc::now();
+        let manual = Arc::new(ManualClock::new(start));
+        let clock = SharedClock::from_arc(Arc::clone(&manual) as Arc<dyn Clock>);
+        let reporter = SyncReporter::new_with_clock(
+            pool,
+            "http://127.0.0.1:1/sync".into(),
+            "device-1".into(),
+            crate::credential::Credential::new("key".into()),
+            clock,
+        );
+
+        manual.advance(chrono::Duration::seconds(30));
+        assert!(reporter.should_sync(), "baseline: due after the interval");
+
+        // The user sets the clock back one hour.
+        manual.set(start - chrono::Duration::hours(1));
+        assert!(!reporter.should_sync(), "just synced: not due yet");
+        assert!(
+            reporter.next_sync_delay() <= Duration::from_secs(30),
+            "deadline must be at most one interval away, not an hour"
+        );
+
+        // One interval of the (new) wall clock later it is due again.
+        manual.advance(chrono::Duration::seconds(30));
+        assert!(reporter.should_sync());
     }
 
     #[tokio::test]
