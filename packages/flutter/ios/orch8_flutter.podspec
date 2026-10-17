@@ -7,6 +7,7 @@ Pod::Spec.new do |s|
   s.author           = 'Orch8'
   s.source           = { :path => '.' }
   s.source_files     = 'orch8_flutter/Sources/orch8_flutter/**/*.swift'
+  s.resource_bundles = { 'orch8_flutter_privacy' => ['orch8_flutter/Sources/orch8_flutter/PrivacyInfo.xcprivacy'] }
   s.dependency         'Flutter'
   s.dependency         'Orch8Mobile', '0.7.1'
   s.platform         = :ios, '16.0'

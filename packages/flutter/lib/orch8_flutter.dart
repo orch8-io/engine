@@ -4,6 +4,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/services.dart';
 
+export 'src/errors.dart';
+
 class Orch8Config {
   final String? dbPath;
   final int tickIntervalMs;

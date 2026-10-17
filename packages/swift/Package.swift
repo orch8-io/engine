@@ -16,7 +16,8 @@ let package = Package(
         .target(
             name: "Orch8Mobile",
             dependencies: ["Orch8MobileFFI"],
-            path: "Sources/Orch8Mobile"
+            path: "Sources/Orch8Mobile",
+            resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
         .binaryTarget(
             name: "Orch8MobileFFI",

@@ -132,6 +132,36 @@ apps: a stored key in the app is extractable, and an operator-capable key makes
 the SDK log a warning. See the engine's `docs/MOBILE_SDK.md` for which routes a
 device session reaches.
 
+## Where the database lives, backups and lifecycle
+
+When `dbPath` is omitted the database is created in a location that is **not
+backed up**:
+
+| Platform | Default | Notes |
+|---|---|---|
+| iOS | `<Application Support>/Orch8/orch8.db` | hidden from Files, `isExcludedFromBackup`, protection class `completeUntilFirstUserAuthentication` (readable by background tasks after the first unlock) |
+| Android | `<noBackupFilesDir>/orch8.db` | excluded from Auto Backup and device transfer |
+
+A database that already exists at the previous default (iOS `Documents/orch8.db`,
+Android `getDatabasePath("orch8.db")`) keeps being used, so upgrades do not lose
+data; it stays subject to the OS backup rules of that location. Pass `dbPath`
+to choose a location explicitly. If you want the workflow state to be restored
+from a backup, set `dbPath` to a backed-up directory and add the matching
+Android `dataExtractionRules` / `fullBackupContent` entry yourself.
+
+The engine is shut down automatically when the native module is invalidated
+(JS reload, app teardown). Step handlers and the token provider are JavaScript
+functions: they need a live JS runtime with an attached listener. When none is
+available (headless/background launch without JS, or after teardown) the step
+fails immediately as retryable instead of waiting for `handlerTimeoutMs`.
+
+## Errors
+
+Rejections carry `code = "ORCH8_<KIND>"` (for example `ORCH8_NOT_FOUND`) and
+`userInfo.kind`; use `orch8ErrorKind(error)` to classify them as an
+`Orch8ErrorKind`. The previous code (`ORCH8_ERROR`, `INIT_ERROR`) is available
+as `userInfo.legacyCode`.
+
 ## Runtime node (engine release after 0.7.1)
 
 The phone can join the distributed-execution mesh as a runtime of kind

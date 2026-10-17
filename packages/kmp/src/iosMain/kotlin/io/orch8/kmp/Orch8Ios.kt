@@ -2,8 +2,15 @@ package io.orch8.kmp
 
 import io.orch8.kmp.bridge.Orch8JsonBridgeFactory
 import kotlin.concurrent.Volatile
+import kotlinx.cinterop.ExperimentalForeignApi
+import platform.Foundation.NSApplicationSupportDirectory
 import platform.Foundation.NSDocumentDirectory
+import platform.Foundation.NSFileManager
+import platform.Foundation.NSFileProtectionCompleteUntilFirstUserAuthentication
+import platform.Foundation.NSFileProtectionKey
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
+import platform.Foundation.NSURL
+import platform.Foundation.NSURLIsExcludedFromBackupKey
 import platform.Foundation.NSUserDomainMask
 
 /**
@@ -27,11 +34,33 @@ object Orch8Ios {
 
     internal fun installedFactory(): Orch8JsonBridgeFactory? = factory
 
-    /** `<Documents>/orch8.db`, the location used by the Swift quick start. */
+    /**
+     * Default database path. New installs use
+     * `<Application Support>/Orch8/orch8.db`: hidden from the Files app,
+     * excluded from iCloud/iTunes backup, and protected until first unlock so
+     * background tasks can open it while the device is locked. A database that
+     * already exists at the previous default (`<Documents>/orch8.db`) keeps
+     * being used so upgrades do not lose data.
+     */
+    @OptIn(ExperimentalForeignApi::class)
     fun defaultDatabasePath(fileName: String = "orch8.db"): String {
-        val dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, true)
-        val documents = dirs.firstOrNull() as? String
-            ?: throw Orch8Exception(Orch8ErrorKind.STORAGE, "no Documents directory available")
-        return "$documents/$fileName"
+        val fm = NSFileManager.defaultManager
+        val documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, true)
+            .firstOrNull() as? String
+        if (documents != null && fm.fileExistsAtPath("$documents/$fileName")) {
+            return "$documents/$fileName"
+        }
+        val support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, true)
+            .firstOrNull() as? String
+            ?: throw Orch8Exception(Orch8ErrorKind.STORAGE, "no Application Support directory available")
+        val dir = "$support/Orch8"
+        fm.createDirectoryAtPath(
+            dir,
+            withIntermediateDirectories = true,
+            attributes = mapOf<Any?, Any?>(NSFileProtectionKey to NSFileProtectionCompleteUntilFirstUserAuthentication),
+            error = null,
+        )
+        NSURL.fileURLWithPath(dir).setResourceValue(true, forKey = NSURLIsExcludedFromBackupKey, error = null)
+        return "$dir/$fileName"
     }
 }

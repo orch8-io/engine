@@ -20,6 +20,7 @@ import io.orch8.mobile.NodeCapabilities
 import io.orch8.mobile.NodeConnectivity
 import io.orch8.mobile.PowerState
 import io.orch8.mobile.StepHandler
+import io.orch8.mobile.SyncException
 import io.orch8.mobile.TokenProvider
 import io.orch8.mobile.WorkerOptions
 import java.util.concurrent.CountDownLatch
@@ -67,6 +68,51 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         channel = null
         eventChannel?.setStreamHandler(null)
         eventChannel = null
+        eventSink = null
+        // The Dart isolate is gone: shut the engine down so it stops calling
+        // handlers that can no longer answer (each would burn a retry attempt)
+        // and releases the SQLite file before a re-attach opens another engine.
+        val eng = synchronized(initLock) {
+            val e = engine
+            engine = null
+            e
+        }
+        work.execute {
+            try {
+                eng?.shutdown()
+            } catch (ignored: Throwable) {
+            }
+        }
+        work.shutdown()
+    }
+
+    private val initLock = Any()
+
+    private fun orch8Kind(e: Throwable): String = when (e) {
+        is MobileException.Engine -> "engine"
+        is MobileException.Storage -> "storage"
+        is MobileException.InvalidInput -> "invalid_input"
+        is MobileException.NotFound -> "not_found"
+        is MobileException.ResourceLimit -> "resource_limit"
+        is MobileException.AlreadyExists -> "already_exists"
+        is MobileException.Shutdown -> "shutdown"
+        is SyncException.Network -> "network"
+        is SyncException.SignatureInvalid -> "signature_invalid"
+        is SyncException.InvalidManifest -> "invalid_manifest"
+        else -> "unknown"
+    }
+
+    /**
+     * Rejects with `code = "ORCH8_<KIND>"` and `details = {kind, legacyCode}`;
+     * `legacyCode` keeps the pre-0.8 code (`ORCH8_ERROR` / `INIT_ERROR`).
+     */
+    private fun rejectOrch8(result: MethodChannel.Result, e: Throwable, legacyCode: String = "ORCH8_ERROR") {
+        val kind = orch8Kind(e)
+        result.error(
+            "ORCH8_" + kind.uppercase(),
+            e.message ?: e.toString(),
+            mapOf("kind" to kind, "legacyCode" to legacyCode),
+        )
     }
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -99,7 +145,7 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
             } catch (e: IllegalArgumentException) {
                 main.post { result.error("INVALID_ARGUMENT", e.message, null) }
             } catch (e: Exception) {
-                main.post { result.error("ORCH8_ERROR", e.message ?: e.toString(), null) }
+                main.post { rejectOrch8(result, e) }
             }
         }
     }
@@ -335,10 +381,20 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         "error" to s.error,
     )
 
+    /**
+     * Default database location: `noBackupFilesDir` (excluded from Auto Backup
+     * and device transfer). A database already in the previous
+     * `getDatabasePath` location keeps being used.
+     */
+    private fun defaultDbPath(): String {
+        val ctx = appContext ?: return "orch8.db"
+        val existing = ctx.getDatabasePath("orch8.db")
+        if (existing.exists()) return existing.absolutePath
+        return java.io.File(ctx.noBackupFilesDir, "orch8.db").absolutePath
+    }
+
     private fun handleInitialize(args: Map<*, *>, result: MethodChannel.Result) {
-        val dbPath = args.str("dbPath")
-            ?: appContext?.getDatabasePath("orch8.db")?.absolutePath
-            ?: "orch8.db"
+        val dbPath = args.str("dbPath") ?: defaultDbPath()
         fun ulong(key: String, default: ULong) = args.long(key)?.toULong() ?: default
         fun uint(key: String, default: UInt) = args.long(key)?.toUInt() ?: default
         val cfg = MobileEngineConfig(
@@ -365,15 +421,20 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         )
         work.execute {
             try {
-                val eng = MobileEngine(dbPath, cfg)
-                eng.setListener(FlutterEngineListener(::emit))
-                val previous = engine
-                handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
-                engine = eng
-                previous?.shutdown()
+                synchronized(initLock) {
+                    // Release the SQLite file held by a previous engine before
+                    // opening a new one on the same path.
+                    val previous = engine
+                    engine = null
+                    previous?.shutdown()
+                    val eng = MobileEngine(dbPath, cfg)
+                    eng.setListener(FlutterEngineListener(::emit))
+                    handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
+                    engine = eng
+                }
                 main.post { result.success(null) }
             } catch (e: Exception) {
-                main.post { result.error("INIT_ERROR", e.message ?: e.toString(), null) }
+                main.post { rejectOrch8(result, e, "INIT_ERROR") }
             }
         }
     }

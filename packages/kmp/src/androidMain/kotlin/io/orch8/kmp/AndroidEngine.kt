@@ -5,15 +5,22 @@ import android.content.Intent
 import android.os.BatteryManager
 
 /**
- * Open the engine in the app's database directory
- * (`context.getDatabasePath(dbName)`), which is excluded from Auto Backup
- * only if your backup rules say so — see docs/MOBILE_SDK.md.
+ * Open the engine in `context.noBackupFilesDir`, which Android excludes from
+ * Auto Backup and device-to-device transfer. A database that already exists in
+ * the previous default location (`context.getDatabasePath(dbName)`, backed up
+ * unless your backup rules say otherwise) keeps being used so upgrades do not
+ * lose data.
  */
 fun Orch8Engine.Companion.open(
     context: Context,
     config: EngineConfig = EngineConfig(),
     dbName: String = "orch8.db",
-): Orch8Engine = open(context.applicationContext.getDatabasePath(dbName).absolutePath, config)
+): Orch8Engine {
+    val app = context.applicationContext
+    val existing = app.getDatabasePath(dbName)
+    val path = if (existing.exists()) existing else java.io.File(app.noBackupFilesDir, dbName)
+    return open(path.absolutePath, config)
+}
 
 /**
  * Derive a [PowerState] from an `ACTION_BATTERY_CHANGED` sticky intent:

@@ -9,6 +9,7 @@ Pod::Spec.new do |s|
     :http => "https://github.com/orch8-io/orch8-mobile-swift/releases/download/#{s.version}/Orch8MobileCocoaPods-#{s.version}.zip"
   }
   s.source_files        = 'Sources/Orch8Mobile/**/*.swift'
+  s.resource_bundles    = { 'Orch8MobilePrivacy' => ['Sources/Orch8Mobile/PrivacyInfo.xcprivacy'] }
   s.vendored_frameworks = 'Orch8Mobile.xcframework'
   s.platform            = :ios, '16.0'
   s.swift_version       = '5.9'

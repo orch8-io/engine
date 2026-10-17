@@ -22,6 +22,9 @@ required_files=(
   packages/swift/Orch8Mobile.podspec
   packages/swift/README.md
   packages/swift/Sources/Orch8Mobile/Orch8MobileBindings.swift
+  packages/swift/Sources/Orch8Mobile/PrivacyInfo.xcprivacy
+  packages/flutter/ios/orch8_flutter/Sources/orch8_flutter/PrivacyInfo.xcprivacy
+  packages/react-native/ios/PrivacyInfo.xcprivacy
 )
 
 for file in "${required_files[@]}"; do
