@@ -55,6 +55,12 @@ const REAPER_BATCH: u32 = 500;
 /// clock skew between the node that wrote the row and the reaper.
 pub const STRANDED_DISPATCH_GRACE: Duration = Duration::from_secs(120);
 
+/// How many times a checkpointed worker task may be resumed after its lease
+/// expires. `claim_epoch` counts claims, so a task is resumed while the claim
+/// that just expired is at most this number (one initial claim plus this many
+/// resumptions).
+pub const MAX_CHECKPOINT_RESUMES: u64 = 10;
+
 pub const LEASE_EXPIRED_REASON: &str = "heartbeat lease expired";
 pub const LEASE_EXPIRED_RESUMABLE_REASON: &str =
     "heartbeat lease expired; checkpointed activity requeued to resume (effect receipt unknown)";
@@ -217,12 +223,16 @@ async fn resolve_expired_lease(
             None,
         )
         .await?;
-        if task.checkpoint_seq > 0 {
+        if task.checkpoint_seq > 0 && task.claim_epoch <= MAX_CHECKPOINT_RESUMES {
             // A resumable activity that durably checkpointed opted into
             // resumption: the replacement claimant continues from
             // `resume_checkpoint` under a new claim epoch (the receipt stays
             // `unknown` until that attempt reports) instead of re-running the
-            // effect from scratch as a new attempt.
+            // effect from scratch as a new attempt. Bounded (L3-15): a task
+            // that keeps checkpointing and then losing its worker would
+            // otherwise be requeued forever, bypassing the step's retry
+            // policy; past the budget it takes the ambiguous-effect policy
+            // below like a task that never checkpointed.
             fence(
                 task,
                 None,

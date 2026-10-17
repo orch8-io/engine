@@ -1516,6 +1516,64 @@ async fn expired_delegation_integrates_a_failure_without_failing_the_parent() {
     }
 }
 
+/// L3-15: a task that checkpoints, loses its worker, is requeued, checkpoints
+/// again... used to cycle forever. Resumption is bounded; past the budget the
+/// ambiguous-effect policy applies (no retry policy here, so the node fails).
+#[tokio::test]
+async fn checkpointed_activity_resumption_is_bounded() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
+    for test_backend in backends().await {
+        let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
+        let handler = unique_handler("ext.flapping");
+        let (_, inst) = start(&storage, vec![mk_step("flapping", &handler)]).await;
+        let task = only_task(&storage, inst.id).await;
+
+        let mut resumes = 0u64;
+        let final_task = loop {
+            assert!(
+                resumes <= orch8_engine::worker_lease::MAX_CHECKPOINT_RESUMES + 1,
+                "{backend}: checkpointed task was requeued {resumes} times"
+            );
+            let current = storage.get_worker_task(task.id).await.unwrap().unwrap();
+            if current.state != WorkerTaskState::Pending {
+                break current;
+            }
+            let claimed = claim(&storage, &current).await;
+            let proof = orch8_types::worker::WorkerClaim::new("worker-a", claimed.claim_epoch);
+            assert!(
+                storage
+                    .checkpoint_worker_task(
+                        task.id,
+                        &proof,
+                        claimed.checkpoint_seq,
+                        &json!({"cursor": resumes})
+                    )
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{backend}"
+            );
+            reap_worker_tasks(storage.as_ref(), Duration::ZERO)
+                .await
+                .unwrap();
+            resumes += 1;
+        };
+
+        assert_eq!(final_task.state, WorkerTaskState::Failed, "{backend}");
+        assert_eq!(
+            resumes,
+            orch8_engine::worker_lease::MAX_CHECKPOINT_RESUMES + 1,
+            "{backend}: one initial claim plus the resume budget"
+        );
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        assert!(
+            tree.iter()
+                .any(|n| n.block_id.as_str() == "flapping" && n.state == NodeState::Failed),
+            "{backend}: the node fails once the budget is exhausted"
+        );
+    }
+}
+
 #[tokio::test]
 async fn checkpointed_activity_resumes_on_lease_expiry_with_unknown_receipt() {
     let _reaper = ZERO_LEASE_REAPER.lock().await;
