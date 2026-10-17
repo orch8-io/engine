@@ -182,3 +182,195 @@ async fn l3_07_live_parent_keeps_its_children() {
         assert_eq!(state_of(&engine, grandchild).await, InstanceState::Waiting, "{}", b.name());
     }
 }
+
+// === L3-05 ===
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use orch8_types::error::StepError;
+use orch8_types::sequence::ParallelDef;
+
+/// Handlers `count` (counts calls) and `flaky` (permanent failure on its
+/// first call only). Returns (builder, count calls, flaky calls).
+fn counting_engine_builder(
+    backend: &TestBackend,
+) -> (
+    orch8_engine::testing::TestEngineBuilder,
+    Arc<AtomicU32>,
+    Arc<AtomicU32>,
+) {
+    let counted = Arc::new(AtomicU32::new(0));
+    let flaky_calls = Arc::new(AtomicU32::new(0));
+    let c = Arc::clone(&counted);
+    let f = Arc::clone(&flaky_calls);
+    let builder = TestEngine::builder()
+        .storage(backend.storage.clone())
+        .register("noop", move |_ctx| {
+            let c = Arc::clone(&c);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"ok": true}))
+            }
+        })
+        .register("log", move |_ctx| {
+            let f = Arc::clone(&f);
+            async move {
+                if f.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(StepError::Permanent {
+                        message: "first call fails".into(),
+                        details: None,
+                    })
+                } else {
+                    Ok(json!({"ok": true}))
+                }
+            }
+        });
+    (builder, counted, flaky_calls)
+}
+
+/// Tick until `id` is terminal (advancing virtual time over any wait).
+async fn run_to_terminal(engine: &TestEngine, id: InstanceId) -> TaskInstance {
+    for _ in 0..80 {
+        engine.tick().await;
+        // Wakes (parent wake, retry) stamp real `Utc::now()`; keep the
+        // virtual clock at or past it so they are due on the next tick.
+        let real_now = chrono::Utc::now();
+        if real_now > engine.now() {
+            engine.clock.set(real_now);
+        }
+        let inst = engine.instance(id).await;
+        if inst.state.is_terminal() {
+            return inst;
+        }
+        if inst.state == InstanceState::Scheduled
+            && let Some(at) = inst.next_fire_at
+            && at > engine.now()
+        {
+            engine.clock.set(at);
+        }
+    }
+    let inst = engine.instance(id).await;
+    panic!("{id} did not reach a terminal state: {:?}", inst.state);
+}
+
+async fn retry(engine: &TestEngine, id: InstanceId) {
+    let outcome = orch8_storage::lifecycle::retry_failed_instance(engine.storage.as_ref(), id)
+        .await
+        .unwrap();
+    assert_eq!(outcome, orch8_storage::lifecycle::RetryOutcome::Retried);
+}
+
+#[tokio::test]
+async fn l3_05_dlq_retry_of_a_composite_reruns_only_the_failed_leaf() {
+    for kind in KINDS {
+        let Some(backend) = TestBackend::open(kind).await else {
+            continue;
+        };
+        let (builder, counted, flaky_calls) = counting_engine_builder(&backend);
+        let engine = builder.build().await;
+        let seq = SequenceBuilder::new("t")
+            .block(BlockDefinition::Parallel(Box::new(ParallelDef {
+                id: orch8_types::ids::BlockId::new("par"),
+                branches: vec![
+                    vec![BlockDefinition::Step(Box::new(step("a", "noop")))],
+                    vec![BlockDefinition::Step(Box::new(step("b", "log")))],
+                ],
+            })))
+            .build();
+        let id = engine.start(&seq).await;
+
+        let failed = run_to_terminal(&engine, id).await;
+        assert_eq!(failed.state, InstanceState::Failed, "{}", backend.name());
+        assert_eq!(counted.load(Ordering::SeqCst), 1);
+
+        retry(&engine, id).await;
+        let done = run_to_terminal(&engine, id).await;
+
+        assert_eq!(done.state, InstanceState::Completed, "{}", backend.name());
+        assert_eq!(flaky_calls.load(Ordering::SeqCst), 2, "failed leaf re-ran");
+        assert_eq!(
+            counted.load(Ordering::SeqCst),
+            1,
+            "{}: the nested step that already succeeded re-ran on DLQ retry",
+            backend.name()
+        );
+    }
+}
+
+/// parent = [sub_sequence -> child], child = [count "c1", flaky "c2"].
+async fn failed_parent_with_failed_child(engine: &TestEngine) -> InstanceId {
+    let child_seq = SequenceBuilder::new("t")
+        .step("c1", "noop")
+        .step("c2", "log")
+        .build();
+    let parent_seq = SequenceBuilder::new("t")
+        .block(sub_sequence("to_child", &child_seq))
+        .build();
+    engine.storage.create_sequence(&child_seq).await.unwrap();
+    let parent = engine.start(&parent_seq).await;
+    let failed = run_to_terminal(engine, parent).await;
+    assert_eq!(failed.state, InstanceState::Failed);
+    parent
+}
+
+#[tokio::test]
+async fn l3_05_dlq_retry_resumes_the_failed_child_instead_of_respawning() {
+    for kind in KINDS {
+        let Some(backend) = TestBackend::open(kind).await else {
+            continue;
+        };
+        let (builder, counted, flaky_calls) = counting_engine_builder(&backend);
+        let engine = builder.build().await;
+        let parent = failed_parent_with_failed_child(&engine).await;
+        let first_child = only_child(&engine, parent).await;
+        assert_eq!(first_child.state, InstanceState::Failed);
+        assert_eq!(counted.load(Ordering::SeqCst), 1);
+
+        retry(&engine, parent).await;
+        let done = run_to_terminal(&engine, parent).await;
+
+        assert_eq!(done.state, InstanceState::Completed, "{}", backend.name());
+        let kids = engine.storage.get_child_instances(parent).await.unwrap();
+        assert_eq!(
+            kids.len(),
+            1,
+            "{}: DLQ retry spawned a second sub-workflow",
+            backend.name()
+        );
+        assert_eq!(kids[0].id, first_child.id);
+        assert_eq!(kids[0].state, InstanceState::Completed);
+        assert_eq!(counted.load(Ordering::SeqCst), 1, "child's finished step re-ran");
+        assert_eq!(flaky_calls.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn l3_05_a_superseded_child_is_not_adopted() {
+    for kind in KINDS {
+        let Some(backend) = TestBackend::open(kind).await else {
+            continue;
+        };
+        let (builder, _counted, _flaky) = counting_engine_builder(&backend);
+        let engine = builder.build().await;
+        let parent = failed_parent_with_failed_child(&engine).await;
+        let old = only_child(&engine, parent).await;
+        // What resume-from-block does to the children of the blocks it wipes.
+        engine
+            .storage
+            .merge_instance_metadata(
+                old.id,
+                &json!({ orch8_engine::evaluator::SUPERSEDED_CHILD_KEY: true }),
+            )
+            .await
+            .unwrap();
+
+        retry(&engine, parent).await;
+        let done = run_to_terminal(&engine, parent).await;
+
+        assert_eq!(done.state, InstanceState::Completed, "{}", backend.name());
+        let kids = engine.storage.get_child_instances(parent).await.unwrap();
+        assert_eq!(kids.len(), 2, "{}", backend.name());
+        assert_eq!(engine.instance(old.id).await.state, InstanceState::Failed);
+    }
+}

@@ -15,6 +15,7 @@ mod sla;
 mod tests;
 
 pub(crate) use dispatch::awaited_sub_sequence_child_terminal;
+pub use dispatch::SUPERSEDED_CHILD_KEY;
 use dispatch::dispatch_block;
 use sla::check_sla_deadlines;
 
@@ -213,12 +214,21 @@ pub async fn ensure_execution_tree(
     // flat path already completed must start Completed, or the evaluator
     // re-dispatches them — re-running their side effects, or tripping the
     // effect guard on the committed receipt.
+    //
+    // The same applies to a tree rebuilt after a DLQ retry / resume-from
+    // (the old tree is deleted, real outputs are kept): steps and
+    // sub-sequences nested in composites that already produced output stay
+    // done, so only the failed leaf re-runs (L3-05). Blocks under a
+    // loop / for_each are excluded: their outputs belong to earlier
+    // iterations and the loop re-enters its body.
     let completed = storage.get_completed_block_ids(instance.id).await?;
     if !completed.is_empty() {
         let now = chrono::Utc::now();
+        let iterating: std::collections::HashSet<ExecutionNodeId> =
+            nodes_under_iteration(&nodes);
         for node in &mut nodes {
-            if node.parent_id.is_none()
-                && node.block_type == BlockType::Step
+            if matches!(node.block_type, BlockType::Step | BlockType::SubSequence)
+                && !iterating.contains(&node.id)
                 && completed.contains(&node.block_id)
             {
                 node.state = NodeState::Completed;
@@ -237,6 +247,29 @@ pub async fn ensure_execution_tree(
     }
 
     Ok(nodes)
+}
+
+/// Ids of the nodes that have a `loop` / `for_each` ancestor.
+fn nodes_under_iteration(nodes: &[ExecutionNode]) -> std::collections::HashSet<ExecutionNodeId> {
+    let by_id: std::collections::HashMap<ExecutionNodeId, &ExecutionNode> =
+        nodes.iter().map(|n| (n.id, n)).collect();
+    nodes
+        .iter()
+        .filter(|n| {
+            let mut cur = n.parent_id;
+            while let Some(pid) = cur {
+                let Some(parent) = by_id.get(&pid) else {
+                    break;
+                };
+                if matches!(parent.block_type, BlockType::Loop | BlockType::ForEach) {
+                    return true;
+                }
+                cur = parent.parent_id;
+            }
+            false
+        })
+        .map(|n| n.id)
+        .collect()
 }
 
 /// Invoke `f` for each child block slice of a composite, in the order
