@@ -922,10 +922,10 @@ impl Drop for RoutedFront {
 // ---------------------------------------------------------------------------
 
 /// Path of the `orch8-server` binary: `ORCH8_SERVER_BIN`, else the binary
-/// in this test binary's own profile directory, built there on demand.
+/// in this test binary's own profile directory, built (or refreshed when stale) there.
 ///
 /// The test binary lives at `<target-dir>[/<triple>]/<profile>/deps/<test>`,
-/// so the server is looked up (and, if missing, built with a matching
+/// so the server is looked up (and always re-built via cargo, a no-op when fresh, with a matching
 /// `--target-dir`, `--target` and profile) right next to it. That keeps the
 /// lookup correct under `CARGO_TARGET_DIR`, a configured `build.target`, and
 /// `cargo llvm-cov` (whose `llvm-cov-target` dir the old fixed
@@ -943,14 +943,15 @@ pub fn server_binary() -> std::path::PathBuf {
             .and_then(std::path::Path::parent)
             .expect("target profile dir");
         let bin = profile_dir.join(format!("orch8-server{}", std::env::consts::EXE_SUFFIX));
-        if !bin.exists() {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-            let status = std::process::Command::new(cargo)
-                .args(server_build_args(profile_dir))
-                .status()
-                .expect("run cargo build");
-            assert!(status.success(), "building orch8-server failed");
-        }
+        // Always invoke cargo: it is a no-op when the binary is up to date,
+        // and rebuilds a stale one (an existence check silently tested old
+        // code after source edits).
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = std::process::Command::new(cargo)
+            .args(server_build_args(profile_dir))
+            .status()
+            .expect("run cargo build");
+        assert!(status.success(), "building orch8-server failed");
         assert!(bin.exists(), "{} not found", bin.display());
         bin
     })
@@ -959,8 +960,8 @@ pub fn server_binary() -> std::path::PathBuf {
 
 /// `cargo build` arguments that put `orch8-server` into `profile_dir`
 /// (`<target-dir>[/<triple>]/<profile>`). The target-dir root is the
-/// nearest ancestor holding cargo's `CACHEDIR.TAG`; a directory between it
-/// and the profile dir is the target triple.
+/// nearest ancestor holding cargo's `CACHEDIR.TAG` and `.rustc_info.json`; a
+/// directory between it and the profile dir is the target triple.
 #[must_use]
 pub fn server_build_args(profile_dir: &std::path::Path) -> Vec<String> {
     let name = |p: &std::path::Path| {
@@ -969,9 +970,12 @@ pub fn server_build_args(profile_dir: &std::path::Path) -> Vec<String> {
             .unwrap_or_default()
     };
     let parent = profile_dir.parent().unwrap_or(profile_dir);
+    // Current cargo writes a `CACHEDIR.TAG` into the target-triple directory
+    // as well as the target-dir root, so the tag alone cannot tell them
+    // apart. Only a target-dir root holds `.rustc_info.json`.
     let (target_dir, triple) = match parent.parent() {
         Some(grand)
-            if !parent.join("CACHEDIR.TAG").exists() && grand.join("CACHEDIR.TAG").exists() =>
+            if grand.join("CACHEDIR.TAG").exists() && !parent.join(".rustc_info.json").exists() =>
         {
             (grand, Some(name(parent)))
         }
@@ -1935,6 +1939,7 @@ mod server_binary_tests {
             std::fs::create_dir_all(&dir).unwrap();
             if i == tag_at {
                 std::fs::write(dir.join("CACHEDIR.TAG"), "").unwrap();
+                std::fs::write(dir.join(".rustc_info.json"), "{}").unwrap();
             }
         }
         (root, dir)
@@ -1963,6 +1968,8 @@ mod server_binary_tests {
     #[test]
     fn triple_subdir_adds_the_target_flag() {
         let (_root, profile) = layout(&["target", "aarch64-apple-darwin", "debug"], 0);
+        // Current cargo also tags the triple directory itself.
+        std::fs::write(profile.parent().unwrap().join("CACHEDIR.TAG"), "").unwrap();
 
         let args = server_build_args(&profile);
 
@@ -1989,6 +1996,23 @@ mod server_binary_tests {
     }
 
     #[test]
+    fn llvm_cov_target_dir_beside_a_tagged_target_dir_is_not_a_triple() {
+        let (_root, profile) = layout(&["target", "llvm-cov-target", "debug"], 1);
+        let target = profile.parent().unwrap().parent().unwrap();
+        std::fs::write(target.join("CACHEDIR.TAG"), "").unwrap();
+        std::fs::write(target.join(".rustc_info.json"), "{}").unwrap();
+
+        let args = server_build_args(&profile);
+
+        assert!(
+            arg_after(&args, "--target-dir")
+                .unwrap()
+                .ends_with("llvm-cov-target")
+        );
+        assert_eq!(arg_after(&args, "--target"), None);
+    }
+
+    #[test]
     fn release_and_custom_profiles_are_passed_through() {
         let (_r1, release) = layout(&["target", "release"], 0);
         let (_r2, custom) = layout(&["target", "ci"], 0);
@@ -1998,5 +2022,16 @@ mod server_binary_tests {
             arg_after(&server_build_args(&custom), "--profile"),
             Some("ci")
         );
+    }
+
+    #[test]
+    fn build_args_always_name_the_server_package_and_bin() {
+        let (_root, profile) = layout(&["target", "debug"], 0);
+
+        let args = server_build_args(&profile);
+
+        assert_eq!(args[0], "build");
+        assert_eq!(arg_after(&args, "-p"), Some("orch8-server"));
+        assert_eq!(arg_after(&args, "--bin"), Some("orch8-server"));
     }
 }

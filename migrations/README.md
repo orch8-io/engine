@@ -51,6 +51,23 @@ expand/contract sequence across releases (add a new column, dual-write,
 backfill, switch reads, drop the old column), or a documented stop-the-world
 upgrade.
 
+### Note: lock-heavy migrations 103-105 on large installs
+
+103 (backfill `worker_tasks.tenant_id` in one transaction plus plain index
+builds), 104 (three plain index builds on `task_instances`) and 105 (`DROP
+INDEX` under an exclusive lock) hold locks proportional to table size. They
+are not rewritten (checksums); instead `orch8 migrate` / `run_migrations`
+logs a startup warning when they are pending and the tables are estimated at
+1M+ rows. Operators of such installs should run the `CREATE INDEX
+CONCURRENTLY` statements from the 103/104 header comments online first
+(the migrations' `IF NOT EXISTS` then make the indexes a no-op), and apply
+the upgrade in a low-traffic window. The 103 backfill can be done in batches
+beforehand: `UPDATE worker_tasks wt SET tenant_id = ti.tenant_id FROM
+task_instances ti WHERE ti.id = wt.instance_id AND wt.tenant_id IS NULL AND
+wt.state IN ('pending','claimed') AND wt.id IN (SELECT id FROM worker_tasks
+WHERE tenant_id IS NULL AND state IN ('pending','claimed') LIMIT 10000);`
+repeated until it updates 0 rows (requires the `ADD COLUMN` from 103).
+
 ### Note: dropped migration 082
 
 `082_widen_instance_max_concurrency.sql` (`task_instances.max_concurrency`

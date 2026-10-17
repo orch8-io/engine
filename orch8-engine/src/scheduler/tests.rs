@@ -2721,6 +2721,52 @@ fn transient_retry_policy_backs_off_and_eventually_exhausts() {
     );
 }
 
+/// D-08: the transient-retry map is hard-bounded by evicting the oldest
+/// entries, even when none is older than the stale window.
+#[test]
+fn transient_retry_map_is_hard_bounded() {
+    use std::collections::HashMap;
+    let now = std::time::Instant::now();
+    let mut map = HashMap::new();
+    for i in 0..100u64 {
+        map.insert(
+            InstanceId::new(),
+            (1u32, now.checked_sub(Duration::from_secs(i)).unwrap()),
+        );
+    }
+    transient_retries::enforce_bounds(&mut map, now, 50, 100);
+    assert_eq!(map.len(), 90, "oldest 10% evicted at the hard cap");
+    assert!(
+        map.values()
+            .all(|(_, first)| now.duration_since(*first) < Duration::from_secs(90)),
+        "the oldest entries are the ones evicted"
+    );
+}
+
+/// D-08: at capacity a new deferred parent wake evicts the oldest entry
+/// instead of being silently dropped.
+#[test]
+fn deferred_parent_wake_evicts_oldest_at_cap() {
+    let now = std::time::Instant::now();
+    let mut map = HashMap::new();
+    let oldest = InstanceId::new();
+    map.insert(
+        oldest,
+        (now.checked_sub(Duration::from_secs(100)).unwrap(), now),
+    );
+    for _ in 0..2 {
+        map.insert(
+            InstanceId::new(),
+            (now.checked_sub(Duration::from_secs(1)).unwrap(), now),
+        );
+    }
+    let newcomer = InstanceId::new();
+    insert_bounded(&mut map, newcomer, now, 3);
+    assert_eq!(map.len(), 3);
+    assert!(map.contains_key(&newcomer), "new wake is kept");
+    assert!(!map.contains_key(&oldest), "oldest wake is evicted");
+}
+
 /// L2-11: an instance whose signals cannot be applied (here: a context
 /// written under a different encryption key, the H-10 class) must not block
 /// signal delivery to the instances after it.

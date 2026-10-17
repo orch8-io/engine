@@ -217,6 +217,7 @@ impl PostgresStorage {
         sqlx::query("SET idle_in_transaction_session_timeout = 0")
             .execute(&mut conn)
             .await?;
+        migration_preflight(&mut conn).await;
         // `run_direct` rather than `run(&mut conn)`: the `Acquire<'a>` bound on
         // `run` makes every future that (transitively) awaits this one fail
         // the "`Acquire` is not general enough" Send check — e.g. the axum
@@ -226,6 +227,61 @@ impl PostgresStorage {
             .await
             .map_err(|e| StorageError::Migration(e.to_string()))?;
         Ok(())
+    }
+}
+
+/// Row estimate above which the lock-heavy migrations 103-105 are flagged.
+const HEAVY_MIGRATION_ROWS: i64 = 1_000_000;
+
+/// Warnings for pending lock-heavy migrations on a large install. Migrations
+/// 103-105 build plain (non-`CONCURRENTLY`) indexes on `task_instances` /
+/// `worker_tasks`, backfill `worker_tasks.tenant_id` in one transaction, and
+/// drop an index under an exclusive lock. They cannot be edited once
+/// released (checksums), so operators are told to pre-create the indexes
+/// online instead (statements are in each migration's header comment).
+fn heavy_migration_warnings(
+    max_applied: i64,
+    task_instances_rows: i64,
+    worker_tasks_rows: i64,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if max_applied < 103 && worker_tasks_rows >= HEAVY_MIGRATION_ROWS {
+        out.push(format!(
+            "migration 103 will backfill worker_tasks.tenant_id in a single transaction and build indexes on ~{worker_tasks_rows} rows; pre-create the indexes with CREATE INDEX CONCURRENTLY (see migrations/103 header) and consider upgrading in a low-traffic window"
+        ));
+    }
+    if max_applied < 105 && task_instances_rows >= HEAVY_MIGRATION_ROWS {
+        out.push(format!(
+            "migrations 104/105 will build three indexes on task_instances (~{task_instances_rows} rows) and drop idx_instances_idempotency under a short exclusive lock; pre-create the indexes with CREATE INDEX CONCURRENTLY (see migrations/104 header)"
+        ));
+    }
+    out
+}
+
+/// Best-effort, read-only check run before migrating: warn about pending
+/// lock-heavy migrations on large tables. Never fails the migration.
+async fn migration_preflight(conn: &mut sqlx::PgConnection) {
+    let applied: Result<Option<i64>, _> =
+        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&mut *conn)
+            .await;
+    let Ok(Some(max_applied)) = applied else {
+        return; // fresh database (no tracking table / nothing applied)
+    };
+    let mut rows = [0_i64; 2];
+    for (slot, table) in ["task_instances", "worker_tasks"].into_iter().enumerate() {
+        rows[slot] = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(reltuples, 0)::bigint FROM pg_class WHERE oid = to_regclass($1)",
+        )
+        .bind(table)
+        .fetch_optional(&mut *conn)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    }
+    for warning in heavy_migration_warnings(max_applied, rows[0], rows[1]) {
+        tracing::warn!("{warning}");
     }
 }
 
@@ -2660,3 +2716,22 @@ impl crate::ResourceStore for PostgresStorage {
 }
 
 // MobileSyncStore is implemented in mobile_sync.rs
+
+#[cfg(test)]
+mod migration_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn large_tables_with_pending_heavy_migrations_warn() {
+        let w = heavy_migration_warnings(102, 5_000_000, 5_000_000);
+        assert_eq!(w.len(), 2);
+        assert!(w[0].contains("migration 103") && w[1].contains("104/105"));
+    }
+
+    #[test]
+    fn small_or_already_migrated_installs_stay_quiet() {
+        assert!(heavy_migration_warnings(102, 1000, 1000).is_empty());
+        assert!(heavy_migration_warnings(111, 9_000_000, 9_000_000).is_empty());
+        assert_eq!(heavy_migration_warnings(103, 9_000_000, 9_000_000).len(), 1);
+    }
+}

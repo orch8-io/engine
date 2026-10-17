@@ -823,6 +823,9 @@ mod transient_retries {
     /// instance finished elsewhere or was cancelled).
     const STALE_AFTER: Duration = Duration::from_secs(2 * 3600);
     const PRUNE_AT: usize = 10_000;
+    /// Hard bound: past this, the oldest entries are evicted even if younger
+    /// than `STALE_AFTER` (a long outage fails every instance transiently).
+    pub(super) const HARD_CAP: usize = 50_000;
 
     #[derive(Debug, PartialEq, Eq)]
     pub(super) enum Decision {
@@ -849,9 +852,7 @@ mod transient_retries {
     pub(super) fn record(id: InstanceId) -> Decision {
         let now = Instant::now();
         let mut map = STATE.lock().unwrap_or_else(PoisonError::into_inner);
-        if map.len() >= PRUNE_AT {
-            map.retain(|_, (_, first)| now.duration_since(*first) < STALE_AFTER);
-        }
+        enforce_bounds(&mut map, now, PRUNE_AT, HARD_CAP);
         let entry = map.entry(id).or_insert((0, now));
         entry.0 = entry.0.saturating_add(1);
         let decision = decide(entry.0, now.duration_since(entry.1));
@@ -859,6 +860,29 @@ mod transient_retries {
             map.remove(&id);
         }
         decision
+    }
+
+    /// Prune stale entries at `prune_at`; if still at `hard_cap`, evict the
+    /// oldest 10% (counted in a metric) so the map can never grow unbounded.
+    pub(super) fn enforce_bounds(
+        map: &mut HashMap<InstanceId, (u32, Instant)>,
+        now: Instant,
+        prune_at: usize,
+        hard_cap: usize,
+    ) {
+        if map.len() >= prune_at {
+            map.retain(|_, (_, first)| now.duration_since(*first) < STALE_AFTER);
+        }
+        if map.len() >= hard_cap {
+            let mut by_age: Vec<(Instant, InstanceId)> =
+                map.iter().map(|(id, (_, first))| (*first, *id)).collect();
+            by_age.sort_unstable();
+            let evict = (hard_cap / 10).max(1);
+            for (_, id) in by_age.into_iter().take(evict) {
+                map.remove(&id);
+                crate::metrics::inc(crate::metrics::TRANSIENT_RETRY_ENTRIES_EVICTED);
+            }
+        }
     }
 
     pub(super) fn clear(id: InstanceId) {
@@ -1389,11 +1413,10 @@ impl HookTasks {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        let finished = tokio::time::timeout(wait, async {
-            while set.join_next().await.is_some() {}
-        })
-        .await
-        .is_ok();
+        let finished =
+            tokio::time::timeout(wait, async { while set.join_next().await.is_some() {} })
+                .await
+                .is_ok();
         if !finished {
             set.abort_all();
         }
@@ -3402,8 +3425,30 @@ fn defer_parent_wake(parent_id: InstanceId) {
     let mut map = DEFERRED_PARENT_WAKES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if map.len() >= DEFERRED_WAKE_CAP && !map.contains_key(&parent_id) {
-        return;
+    insert_bounded(&mut map, parent_id, now, DEFERRED_WAKE_CAP);
+}
+
+/// Insert/refresh a deferred wake. At `cap`, the entry closest to its max age
+/// (oldest `first`) is evicted instead of dropping the new wake. An evicted
+/// parent is recovered by the park-then-recheck path
+/// (`recheck_parked_sub_sequence_parent`), which re-reads the awaited
+/// children after the parent's `Running -> Waiting` commit; the drop is
+/// counted in a metric.
+fn insert_bounded(
+    map: &mut HashMap<InstanceId, (std::time::Instant, std::time::Instant)>,
+    parent_id: InstanceId,
+    now: std::time::Instant,
+    cap: usize,
+) {
+    if map.len() >= cap
+        && !map.contains_key(&parent_id)
+        && let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, (first, _))| *first)
+            .map(|(id, _)| *id)
+    {
+        map.remove(&oldest);
+        crate::metrics::inc(crate::metrics::DEFERRED_PARENT_WAKES_DROPPED);
     }
     map.entry(parent_id)
         .and_modify(|(_, next)| *next = now + DEFERRED_WAKE_RETRY)
@@ -3423,7 +3468,11 @@ async fn retry_deferred_parent_wakes(storage: &Arc<dyn StorageBackend>) {
         if map.is_empty() {
             return;
         }
+        let before = map.len();
         map.retain(|_, (first, _)| now.duration_since(*first) < DEFERRED_WAKE_MAX_AGE);
+        for _ in map.len()..before {
+            crate::metrics::inc(crate::metrics::DEFERRED_PARENT_WAKES_DROPPED);
+        }
         map.iter()
             .filter(|(_, (_, next))| *next <= now)
             .map(|(id, _)| *id)

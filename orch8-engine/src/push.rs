@@ -75,6 +75,16 @@ pub async fn maybe_push_task(
     // up one detached task (and socket) per enqueued task. When the pool is
     // full the wake-up is skipped; the task still waits for the next poll.
     let pool = push_pool();
+    // Per-tenant cap first, so one tenant's black-holed URL can only ever
+    // occupy its own share of the process-wide pool.
+    let Ok(tenant_permit) = pool.tenant_semaphore(tenant_id).try_acquire_owned() else {
+        metrics::inc(metrics::TASKS_PUSH_SKIPPED);
+        debug!(
+            queue,
+            tenant_id, "tenant push cap reached; leaving task for poll"
+        );
+        return;
+    };
     let Ok(permit) = Arc::clone(&pool.permits).try_acquire_owned() else {
         metrics::inc(metrics::TASKS_PUSH_SKIPPED);
         debug!(queue, "push pool full; leaving task for poll");
@@ -89,6 +99,7 @@ pub async fn maybe_push_task(
         .clone();
     tokio::spawn(async move {
         let _permit = permit;
+        let _tenant_permit = tenant_permit;
         tokio::select! {
             () = caller.cancelled() => {}
             () = shared.cancelled() => {}
@@ -100,16 +111,45 @@ pub async fn maybe_push_task(
 /// Most push wake-ups in flight per process.
 const MAX_IN_FLIGHT_PUSHES: usize = 64;
 
+/// Most push wake-ups in flight per tenant, so a single tenant with a
+/// black-holed `push_url` cannot occupy the whole process-wide pool.
+const MAX_IN_FLIGHT_PUSHES_PER_TENANT: usize = 16;
+
+/// Tenant-semaphore map size above which idle entries are pruned.
+const TENANT_MAP_PRUNE_AT: usize = 1024;
+
 struct PushPool {
     permits: Arc<Semaphore>,
+    tenants: std::sync::Mutex<std::collections::HashMap<String, Arc<Semaphore>>>,
     /// Cancelled (and replaced) by [`shutdown`]: every in-flight push stops.
     cancel: std::sync::Mutex<CancellationToken>,
+}
+
+impl PushPool {
+    fn tenant_semaphore(&self, tenant_id: &str) -> Arc<Semaphore> {
+        let mut map = self
+            .tenants
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if map.len() >= TENANT_MAP_PRUNE_AT && !map.contains_key(tenant_id) {
+            // Drop idle entries (no outstanding permits, no other holder).
+            map.retain(|_, sem| {
+                Arc::strong_count(sem) > 1
+                    || sem.available_permits() < MAX_IN_FLIGHT_PUSHES_PER_TENANT
+            });
+        }
+        Arc::clone(
+            map.entry(tenant_id.to_owned())
+                .or_insert_with(|| Arc::new(Semaphore::new(MAX_IN_FLIGHT_PUSHES_PER_TENANT))),
+        )
+    }
 }
 
 fn push_pool() -> &'static PushPool {
     static POOL: OnceLock<PushPool> = OnceLock::new();
     POOL.get_or_init(|| PushPool {
         permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_PUSHES)),
+        tenants: std::sync::Mutex::new(std::collections::HashMap::new()),
         cancel: std::sync::Mutex::new(CancellationToken::new()),
     })
 }
@@ -418,5 +458,79 @@ mod tests {
             "no push may start while the pool is full"
         );
         drop(held);
+    }
+
+    /// D-07: a tenant at its cap is skipped while another tenant still
+    /// pushes through the shared pool.
+    #[tokio::test]
+    #[serial_test::serial(push_pool)]
+    async fn one_tenants_cap_does_not_starve_another_tenant() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/push", listener.local_addr().unwrap());
+        let now = chrono::Utc::now();
+        for tenant in ["greedy", "polite"] {
+            storage
+                .upsert_queue_dispatch(&QueueDispatchConfig {
+                    tenant_id: tenant.into(),
+                    queue_name: "q1".into(),
+                    mode: DispatchMode::Push,
+                    push_url: Some(url.clone()),
+                    secret: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .unwrap();
+        }
+        crate::handlers::builtin::mark_url_safe_for_test(&url).await;
+
+        let held = push_pool()
+            .tenant_semaphore("greedy")
+            .acquire_many_owned(u32::try_from(MAX_IN_FLIGHT_PUSHES_PER_TENANT).unwrap())
+            .await
+            .unwrap();
+        maybe_push_task(
+            storage.as_ref(),
+            "greedy",
+            &mk_task(Some("q1")),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), listener.accept())
+                .await
+                .is_err(),
+            "a tenant at its cap must not push"
+        );
+        maybe_push_task(
+            storage.as_ref(),
+            "polite",
+            &mk_task(Some("q1")),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .is_ok(),
+            "another tenant still pushes while one is saturated"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn idle_tenant_entries_are_pruned_past_the_threshold() {
+        let pool = PushPool {
+            permits: Arc::new(Semaphore::new(1)),
+            tenants: std::sync::Mutex::new(std::collections::HashMap::new()),
+            cancel: std::sync::Mutex::new(CancellationToken::new()),
+        };
+        for i in 0..TENANT_MAP_PRUNE_AT {
+            drop(pool.tenant_semaphore(&format!("t{i}")));
+        }
+        let busy = pool.tenant_semaphore("busy");
+        let _p = Arc::clone(&busy).try_acquire_owned().unwrap();
+        assert!(pool.tenants.lock().unwrap().len() <= 2);
     }
 }
