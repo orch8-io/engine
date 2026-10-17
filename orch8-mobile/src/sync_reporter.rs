@@ -85,6 +85,7 @@ struct CommandEntry {
 
 /// Outcome of executing a server command. Drives whether the command is
 /// acked (server stops redelivering) or left un-acked for redelivery.
+#[derive(Debug, PartialEq, Eq)]
 enum CommandOutcome {
     /// Side effects applied, or the command is permanently invalid (bad
     /// payload, unknown type) — ack it so the server stops redelivering.
@@ -673,6 +674,76 @@ impl SyncReporter {
         })
     }
 
+    /// Replace `old` with a fresh instance of `payload.sequence_name`.
+    ///
+    /// MC-02: the replacement is started FIRST under a dedup key derived from
+    /// the command id, and only then is the old instance cancelled. A crash or
+    /// failed start can therefore never leave the old instance cancelled with
+    /// no replacement: redelivery finds either the old instance still live
+    /// (start dedups to the same replacement, cancel is retried) or a terminal
+    /// old instance whose replacement already exists.
+    async fn replace_instance(
+        cmd: &CommandEntry,
+        storage: &Arc<dyn StorageBackend>,
+        lifecycle: &Arc<InstanceLifecycleManager>,
+        old: InstanceId,
+        label: &str,
+    ) -> CommandOutcome {
+        let cancel_old = || async {
+            transition_unless_terminal(storage.as_ref(), old, InstanceState::Cancelled)
+                .await
+                .map_err(|e| warn!(error = %e, label, "update_sequence: cancel failed"))
+        };
+        let Some(seq_name) = cmd.payload.get("sequence_name").and_then(|v| v.as_str()) else {
+            // No replacement requested: plain cancel.
+            return if cancel_old().await.is_ok() {
+                CommandOutcome::Done
+            } else {
+                CommandOutcome::Retryable
+            };
+        };
+        let input = cmd
+            .payload
+            .get("input")
+            .map_or_else(|| "{}".to_string(), std::string::ToString::to_string);
+        let key = command_uuid("update_sequence", &cmd.id).to_string();
+
+        match lifecycle.start(seq_name, &input, Some(&key)).await {
+            Ok(new_id) => {
+                debug!(old = %old, new = %new_id, label, "update_sequence: replacement started");
+            }
+            // At the concurrent-instance cap the old instance still occupies a
+            // slot; free it first (narrow crash window, but not a stuck command).
+            Err(crate::error::MobileError::ResourceLimit { .. }) => {
+                if cancel_old().await.is_err() {
+                    return CommandOutcome::Retryable;
+                }
+                if let Err(e) = lifecycle.start(seq_name, &input, Some(&key)).await {
+                    warn!(error = %e, label, "update_sequence: start failed after cancel");
+                    return CommandOutcome::Retryable;
+                }
+                return CommandOutcome::Done;
+            }
+            Err(e @ crate::error::MobileError::InvalidInput { .. }) => {
+                warn!(error = %e, label, "update_sequence: invalid input — old instance kept");
+                return CommandOutcome::Done;
+            }
+            Err(e @ crate::error::MobileError::NotFound { .. }) => {
+                warn!(error = %e, label, "update_sequence: target sequence not found");
+                return CommandOutcome::RetryNotFound;
+            }
+            Err(e) => {
+                warn!(error = %e, label, "update_sequence: start failed");
+                return CommandOutcome::Retryable;
+            }
+        }
+        if cancel_old().await.is_ok() {
+            CommandOutcome::Done
+        } else {
+            CommandOutcome::Retryable
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn execute_command(
         &self,
@@ -700,8 +771,11 @@ impl SyncReporter {
                         return CommandOutcome::Done;
                     };
 
+                    // MC-10: deterministic signal id so a redelivery after a crash
+                    // between enqueue and ack cannot enqueue a duplicate that a
+                    // later loop iteration of the same step would consume.
                     let signal = orch8_types::signal::Signal {
-                        id: uuid::Uuid::now_v7(),
+                        id: command_uuid("complete_step", &cmd.id),
                         instance_id: inst_id,
                         signal_type: orch8_types::signal::SignalType::Custom(format!(
                             "human_input:{step}"
@@ -711,9 +785,19 @@ impl SyncReporter {
                         created_at: chrono::Utc::now(),
                         delivered_at: None,
                     };
-                    if let Err(e) = storage.enqueue_signal(&signal).await {
-                        warn!(error = %e, "failed to enqueue complete_step signal");
-                        return CommandOutcome::Retryable;
+                    // MC-16: refuse to enqueue into a terminal/missing instance.
+                    match storage.enqueue_signal_if_active(&signal).await {
+                        Ok(()) | Err(orch8_types::error::StorageError::Conflict(_)) => {}
+                        Err(
+                            orch8_types::error::StorageError::TerminalTarget { .. }
+                            | orch8_types::error::StorageError::NotFound { .. },
+                        ) => {
+                            debug!(instance_id = %iid, "complete_step: target terminal or missing — dropping");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to enqueue complete_step signal");
+                            return CommandOutcome::Retryable;
+                        }
                     }
                 } else {
                     warn!("complete_step command missing instance_id or step_name");
@@ -748,7 +832,17 @@ impl SyncReporter {
                     .payload
                     .get("input")
                     .map_or_else(|| "{}".to_string(), std::string::ToString::to_string);
-                let dedup_key = cmd.payload.get("dedup_key").and_then(|v| v.as_str());
+                // MC-10: without a server-supplied key, derive one from the
+                // command id so a crash between start and ack cannot start the
+                // workflow twice on redelivery.
+                let derived_key = command_uuid("start_workflow", &cmd.id).to_string();
+                let dedup_key = Some(
+                    cmd.payload
+                        .get("dedup_key")
+                        .and_then(|v| v.as_str())
+                        .filter(|k| !k.is_empty())
+                        .unwrap_or(derived_key.as_str()),
+                );
 
                 if let Some(name) = sequence_name {
                     debug!(
@@ -817,32 +911,12 @@ impl SyncReporter {
 
                     match policy {
                         "restart" => {
-                            // Cancel existing, start fresh with same sequence
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
-                                inst_id,
-                                InstanceState::Cancelled,
-                            )
-                            .await
-                            {
-                                warn!(error = %e, "update_sequence(restart): cancel failed");
-                                return CommandOutcome::Retryable;
-                            } else if let Some(seq_name) =
-                                cmd.payload.get("sequence_name").and_then(|v| v.as_str())
-                            {
-                                let input = cmd.payload.get("input").map_or_else(
-                                    || "{}".to_string(),
-                                    std::string::ToString::to_string,
-                                );
-                                match lifecycle.start(seq_name, &input, None).await {
-                                    Ok(new_id) => {
-                                        debug!(old = %iid, new = %new_id, "update_sequence(restart): restarted");
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "update_sequence(restart): start failed");
-                                        return CommandOutcome::Retryable;
-                                    }
-                                }
+                            // Start the replacement first, then cancel (MC-02).
+                            let outcome =
+                                Self::replace_instance(cmd, storage, lifecycle, inst_id, "restart")
+                                    .await;
+                            if outcome != CommandOutcome::Done {
+                                return outcome;
                             }
                         }
                         "fail" => {
@@ -877,34 +951,19 @@ impl SyncReporter {
                             // The next tick will use the latest sequence version.
                         }
                         "skip_executed" => {
-                            // Cancel old, start new with same sequence; executed steps
-                            // will be skipped by the engine if the execution tree
-                            // carries forward completed node states.
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
+                            // Start new with same sequence, then cancel old (MC-02);
+                            // executed steps will be skipped by the engine if the
+                            // execution tree carries forward completed node states.
+                            let outcome = Self::replace_instance(
+                                cmd,
+                                storage,
+                                lifecycle,
                                 inst_id,
-                                InstanceState::Cancelled,
+                                "skip_executed",
                             )
-                            .await
-                            {
-                                warn!(error = %e, "update_sequence(skip_executed): cancel failed");
-                                return CommandOutcome::Retryable;
-                            } else if let Some(seq_name) =
-                                cmd.payload.get("sequence_name").and_then(|v| v.as_str())
-                            {
-                                let input = cmd.payload.get("input").map_or_else(
-                                    || "{}".to_string(),
-                                    std::string::ToString::to_string,
-                                );
-                                match lifecycle.start(seq_name, &input, None).await {
-                                    Ok(new_id) => {
-                                        debug!(old = %iid, new = %new_id, "update_sequence(skip_executed): restarted with skip");
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, "update_sequence(skip_executed): start failed");
-                                        return CommandOutcome::Retryable;
-                                    }
-                                }
+                            .await;
+                            if outcome != CommandOutcome::Done {
+                                return outcome;
                             }
                         }
                         unknown => {
@@ -946,7 +1005,7 @@ impl SyncReporter {
                             return CommandOutcome::Done;
                         };
                         let signal = orch8_types::signal::Signal {
-                            id: uuid::Uuid::now_v7(),
+                            id: command_uuid("step_result", &cmd.id),
                             instance_id: inst_id,
                             signal_type: orch8_types::signal::SignalType::Custom(format!(
                                 "delegation_result:{bid}"
@@ -959,9 +1018,13 @@ impl SyncReporter {
                             created_at: chrono::Utc::now(),
                             delivered_at: None,
                         };
-                        if let Err(e) = storage.enqueue_signal(&signal).await {
-                            warn!(error = %e, "failed to enqueue step_result signal");
-                            return CommandOutcome::Retryable;
+                        match storage.enqueue_signal(&signal).await {
+                            // Conflict: this command's signal was already enqueued.
+                            Ok(()) | Err(orch8_types::error::StorageError::Conflict(_)) => {}
+                            Err(e) => {
+                                warn!(error = %e, "failed to enqueue step_result signal");
+                                return CommandOutcome::Retryable;
+                            }
                         }
                     } else {
                         let error = cmd
@@ -987,6 +1050,19 @@ impl SyncReporter {
             }
         }
     }
+}
+
+/// Namespace for UUIDv5 ids derived from server command ids (MC-10).
+const COMMAND_UUID_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x6f72_6368_385f_6d6f_6269_6c65_636d_6473);
+
+/// Deterministic id for a side effect of server command `command_id`, so a
+/// redelivered command maps to the same signal id / dedup key.
+fn command_uuid(kind: &str, command_id: &str) -> uuid::Uuid {
+    uuid::Uuid::new_v5(
+        &COMMAND_UUID_NAMESPACE,
+        format!("{kind}:{command_id}").as_bytes(),
+    )
 }
 
 /// Compare-and-set `id` to `target` unless it is already terminal. Returns
@@ -2229,5 +2305,166 @@ mod tests {
             reporter.completed_push_generation.load(Ordering::Acquire),
             2
         );
+    }
+
+    // ---- MC-02 / MC-10 / MC-16: command idempotency ----
+
+    fn cmd(id: &str, kind: &str, payload: serde_json::Value) -> CommandEntry {
+        CommandEntry {
+            id: id.to_string(),
+            command_type: kind.to_string(),
+            payload,
+        }
+    }
+
+    async fn state_of(storage: &Arc<dyn StorageBackend>, id: &str) -> InstanceState {
+        let id = InstanceId::from_uuid(uuid::Uuid::parse_str(id).unwrap());
+        storage.get_instance(id).await.unwrap().unwrap().state
+    }
+
+    #[tokio::test]
+    async fn mc02_failed_replacement_start_leaves_old_instance_running() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let old = lifecycle.start("wf-a", "{}", None).await.unwrap();
+
+        let c = cmd(
+            "cmd-u1",
+            "update_sequence",
+            serde_json::json!({
+                "instance_id": old, "policy": "restart", "sequence_name": "not-synced"
+            }),
+        );
+        let outcome = reporter.execute_command(&c, &storage, &lifecycle).await;
+
+        assert_eq!(outcome, CommandOutcome::RetryNotFound);
+        assert_eq!(
+            state_of(&storage, &old).await,
+            InstanceState::Scheduled,
+            "a replacement that cannot start must not cancel the old instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn mc02_restart_converges_after_crash_between_start_and_cancel() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let old = lifecycle.start("wf-a", "{}", None).await.unwrap();
+        let payload = serde_json::json!({
+            "instance_id": old, "policy": "restart", "sequence_name": "wf-a"
+        });
+        let c = cmd("cmd-u2", "update_sequence", payload);
+
+        // Crash point: replacement started (under the command-derived key),
+        // old instance not yet cancelled.
+        let key = command_uuid("update_sequence", "cmd-u2").to_string();
+        let replacement = lifecycle.start("wf-a", "{}", Some(&key)).await.unwrap();
+        assert_eq!(count_instances(&storage).await, 2);
+
+        // Redelivery.
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(state_of(&storage, &old).await, InstanceState::Cancelled);
+        assert_eq!(
+            count_instances(&storage).await,
+            2,
+            "redelivery must reuse the replacement, not start a third instance"
+        );
+        assert_ne!(state_of(&storage, &replacement).await, InstanceState::Cancelled);
+
+        // Crash point two: old already cancelled -> terminal skip, still no
+        // extra instance and the replacement survives.
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(count_instances(&storage).await, 2);
+    }
+
+    #[tokio::test]
+    async fn mc02_skip_executed_starts_replacement_then_cancels_old() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let old = lifecycle.start("wf-a", "{}", None).await.unwrap();
+        let c = cmd(
+            "cmd-u3",
+            "update_sequence",
+            serde_json::json!({
+                "instance_id": old, "policy": "skip_executed", "sequence_name": "wf-a"
+            }),
+        );
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(state_of(&storage, &old).await, InstanceState::Cancelled);
+        assert_eq!(count_instances(&storage).await, 2);
+    }
+
+    #[tokio::test]
+    async fn mc10_start_workflow_without_dedup_key_is_idempotent_per_command() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let c = cmd(
+            "cmd-s1",
+            "start_workflow",
+            serde_json::json!({ "sequence_name": "wf-a" }),
+        );
+        // Executed twice, as after a crash between execution and the marker.
+        reporter.execute_command(&c, &storage, &lifecycle).await;
+        reporter.execute_command(&c, &storage, &lifecycle).await;
+        assert_eq!(count_instances(&storage).await, 1);
+
+        let other = cmd(
+            "cmd-s2",
+            "start_workflow",
+            serde_json::json!({ "sequence_name": "wf-a" }),
+        );
+        reporter.execute_command(&other, &storage, &lifecycle).await;
+        assert_eq!(count_instances(&storage).await, 2, "distinct commands stay distinct");
+    }
+
+    #[tokio::test]
+    async fn mc10_mc16_complete_step_enqueues_once_and_never_into_terminal_instances() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        let iid = lifecycle.start("wf-a", "{}", None).await.unwrap();
+        let inst = InstanceId::from_uuid(uuid::Uuid::parse_str(&iid).unwrap());
+        let c = cmd(
+            "cmd-c1",
+            "complete_step",
+            serde_json::json!({ "instance_id": iid, "step_name": "s1", "output": {"ok": true} }),
+        );
+
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(
+            reporter.execute_command(&c, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(
+            storage.get_pending_signals(inst).await.unwrap().len(),
+            1,
+            "a redelivered complete_step must not enqueue a duplicate signal"
+        );
+
+        // MC-16: terminal target -> acked as Done, no signal row.
+        transition_unless_terminal(storage.as_ref(), inst, InstanceState::Cancelled)
+            .await
+            .unwrap();
+        let late = cmd(
+            "cmd-c2",
+            "complete_step",
+            serde_json::json!({ "instance_id": iid, "step_name": "s1", "output": {} }),
+        );
+        assert_eq!(
+            reporter.execute_command(&late, &storage, &lifecycle).await,
+            CommandOutcome::Done
+        );
+        assert_eq!(storage.get_pending_signals(inst).await.unwrap().len(), 1);
     }
 }
