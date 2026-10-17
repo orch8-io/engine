@@ -250,16 +250,22 @@ pub async fn ensure_execution_tree(
 
 /// Ids of the nodes that have a `loop` / `for_each` ancestor.
 fn nodes_under_iteration(nodes: &[ExecutionNode]) -> std::collections::HashSet<ExecutionNodeId> {
-    let by_id: std::collections::HashMap<ExecutionNodeId, &ExecutionNode> =
-        nodes.iter().map(|n| (n.id, n)).collect();
+    // ⚡ Bolt: Use a flat sorted Vec instead of a HashMap to avoid hashing and memory allocation overhead.
+    let mut by_id: Vec<(ExecutionNodeId, &ExecutionNode)> = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        by_id.push((node.id, node));
+    }
+    by_id.sort_unstable_by_key(|(id, _)| *id);
+
     nodes
         .iter()
         .filter(|n| {
             let mut cur = n.parent_id;
             while let Some(pid) = cur {
-                let Some(parent) = by_id.get(&pid) else {
+                let Ok(idx) = by_id.binary_search_by_key(&pid, |(id, _)| *id) else {
                     break;
                 };
+                let parent = by_id[idx].1;
                 if matches!(parent.block_type, BlockType::Loop | BlockType::ForEach) {
                     return true;
                 }
