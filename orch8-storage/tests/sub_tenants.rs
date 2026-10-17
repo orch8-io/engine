@@ -396,3 +396,238 @@ async fn embed_theme_and_release_target_persist() {
         );
     }
 }
+
+/// Sequence stored with an explicit name/version/namespace and gallery flag.
+async fn named_sequence(
+    storage: &dyn StorageBackend,
+    tenant: &TenantId,
+    namespace: &str,
+    name: &str,
+    version: i32,
+    sub: Option<&str>,
+    gallery: bool,
+) -> SequenceDefinition {
+    let mut seq = SequenceDefinition {
+        placement: None,
+        sub_tenant: sub.map(ToString::to_string),
+        embed: gallery.then(|| SequenceEmbed {
+            gallery: true,
+            ..SequenceEmbed::default()
+        }),
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
+        id: SequenceId::new(),
+        tenant_id: tenant.clone(),
+        namespace: Namespace::new(namespace),
+        name: name.to_string(),
+        version,
+        deprecated: false,
+        status: SequenceStatus::default(),
+        blocks: Vec::new(),
+        interceptors: None,
+        input_schema: None,
+        sla: None,
+        on_failure: None,
+        on_cancel: None,
+        created_at: Utc::now(),
+    };
+    seq.created_at = Utc::now();
+    storage.create_sequence(&seq).await.unwrap();
+    seq
+}
+
+/// EM-02: the embed listing is evaluated in SQL: latest version per name,
+/// only owned / gallery / admitted tenant-level, bounded by `limit`.
+#[tokio::test]
+async fn embed_visible_sequences_are_filtered_and_latest_per_name() {
+    use orch8_storage::EmbedTenantLevel;
+    for backend in backends().await {
+        let (name, storage) = (backend.name(), std::sync::Arc::clone(&backend.storage));
+        let s = storage.as_ref();
+        let t = tenant();
+        // A foreign sub-tenant crowds the ordering with many versions.
+        for v in 1..=30 {
+            named_sequence(s, &t, "default", "aaa", v, Some("globex"), false).await;
+        }
+        for v in 1..=3 {
+            named_sequence(s, &t, "default", "mine", v, Some("acme"), false).await;
+        }
+        named_sequence(s, &t, "default", "tenant-a", 1, None, false).await;
+        named_sequence(s, &t, "internal", "tenant-b", 1, None, false).await;
+        named_sequence(s, &t, "embed-gallery", "tpl", 1, None, true).await;
+        // Same flag outside the gallery namespace is not a gallery template.
+        named_sequence(s, &t, "default", "fake-gallery", 1, None, true).await;
+        let other_tenant = tenant();
+        named_sequence(s, &other_tenant, "default", "mine", 9, Some("acme"), false).await;
+
+        let list = |level: EmbedTenantLevel| {
+            let (storage, t) = (std::sync::Arc::clone(&storage), t.clone());
+            async move {
+                let mut rows = storage
+                    .list_embed_visible_sequences(&t, "acme", &level, 1_000)
+                    .await
+                    .unwrap();
+                rows.sort_by(|a, b| {
+                    (a.namespace.as_str(), a.name.as_str())
+                        .cmp(&(b.namespace.as_str(), b.name.as_str()))
+                });
+                rows.into_iter()
+                    .map(|r| (r.namespace.as_str().to_string(), r.name, r.version))
+                    .collect::<Vec<_>>()
+            }
+        };
+        let own = ("default".to_string(), "mine".to_string(), 3);
+        let tpl = ("embed-gallery".to_string(), "tpl".to_string(), 1);
+        assert_eq!(
+            list(EmbedTenantLevel::None).await,
+            vec![own.clone(), tpl.clone()],
+            "{name}"
+        );
+        assert_eq!(
+            list(EmbedTenantLevel::Names(vec![(
+                "internal".into(),
+                "tenant-b".into()
+            )]))
+            .await,
+            vec![
+                own.clone(),
+                tpl.clone(),
+                ("internal".to_string(), "tenant-b".to_string(), 1)
+            ],
+            "{name}"
+        );
+        let all = list(EmbedTenantLevel::All).await;
+        let names: Vec<&str> = all.iter().map(|r| r.1.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["fake-gallery", "mine", "tenant-a", "tpl", "tenant-b"],
+            "{name}"
+        );
+        assert!(!names.contains(&"aaa"), "{name}: foreign sub-tenant hidden");
+
+        // Deprecated latest versions fall back to the previous one.
+        let v3 = storage
+            .get_sequence_by_name(&t, &Namespace::new("default"), "mine", Some(3))
+            .await
+            .unwrap()
+            .unwrap();
+        storage.deprecate_sequence(v3.id).await.unwrap();
+        assert_eq!(list(EmbedTenantLevel::None).await[0].2, 2, "{name}");
+
+        // `limit` bounds the result.
+        let limited = storage
+            .list_embed_visible_sequences(&t, "acme", &EmbedTenantLevel::All, 2)
+            .await
+            .unwrap();
+        assert_eq!(limited.len(), 2, "{name}");
+
+        assert_eq!(
+            storage
+                .count_sub_tenant_sequence_names(&t, "acme")
+                .await
+                .unwrap(),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            storage
+                .count_sub_tenant_sequence_names(&t, "globex")
+                .await
+                .unwrap(),
+            1,
+            "{name}: 30 versions of one name count once"
+        );
+    }
+}
+
+/// EM-04: suspended sub-tenants and revoked tokens are reported; EM-06:
+/// default limits are inserted only when absent.
+#[tokio::test]
+async fn embed_revocation_and_default_limits() {
+    for backend in backends().await {
+        let (name, storage) = (backend.name(), std::sync::Arc::clone(&backend.storage));
+        let t = tenant();
+        let jti = Uuid::new_v4();
+        let revoked = |sub: &'static str, jti: Uuid| {
+            let (storage, t) = (std::sync::Arc::clone(&storage), t.clone());
+            async move { storage.embed_access_revoked(&t, sub, jti).await.unwrap() }
+        };
+        assert!(!revoked("acme", jti).await, "{name}");
+
+        storage
+            .revoke_embed_token(&t, jti, Utc::now() + Duration::hours(1))
+            .await
+            .unwrap();
+        // Idempotent.
+        storage
+            .revoke_embed_token(&t, jti, Utc::now() + Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(revoked("acme", jti).await, "{name}");
+        assert!(!revoked("acme", Uuid::new_v4()).await, "{name}");
+        // Scoped to the minting tenant.
+        assert!(
+            !storage
+                .embed_access_revoked(&tenant(), "acme", jti)
+                .await
+                .unwrap(),
+            "{name}"
+        );
+        // Expired revocations are purged on the next revoke.
+        let old = Uuid::new_v4();
+        storage
+            .revoke_embed_token(&t, old, Utc::now() - Duration::hours(1))
+            .await
+            .unwrap();
+        storage
+            .revoke_embed_token(&t, Uuid::new_v4(), Utc::now() + Duration::hours(1))
+            .await
+            .unwrap();
+        assert!(!revoked("acme", old).await, "{name}: purged");
+
+        let fresh = Uuid::new_v4();
+        storage
+            .set_sub_tenant_suspended(&t, "acme", true)
+            .await
+            .unwrap();
+        assert!(revoked("acme", fresh).await, "{name}");
+        assert!(!revoked("globex", fresh).await, "{name}");
+        storage
+            .set_sub_tenant_suspended(&t, "acme", false)
+            .await
+            .unwrap();
+        assert!(!revoked("acme", fresh).await, "{name}");
+
+        let defaults = SubTenantLimits {
+            max_executions_per_month: Some(10),
+            max_concurrent: Some(2),
+        };
+        assert!(
+            storage
+                .ensure_sub_tenant_limits(&t, "acme", &defaults)
+                .await
+                .unwrap(),
+            "{name}"
+        );
+        let explicit = SubTenantLimits {
+            max_executions_per_month: None,
+            max_concurrent: Some(50),
+        };
+        storage
+            .put_sub_tenant_limits(&t, "acme", &explicit)
+            .await
+            .unwrap();
+        assert!(
+            !storage
+                .ensure_sub_tenant_limits(&t, "acme", &defaults)
+                .await
+                .unwrap(),
+            "{name}: never overwrites"
+        );
+        assert_eq!(
+            storage.get_sub_tenant_limits(&t, "acme").await.unwrap(),
+            Some(explicit),
+            "{name}"
+        );
+    }
+}

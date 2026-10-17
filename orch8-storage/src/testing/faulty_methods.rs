@@ -10,6 +10,8 @@ fault_impl! {
         async fn get_sequence_by_name(&self, tenant_id: &TenantId, namespace: &Namespace, name: &str, version: Option<i32>) -> Result<Option<SequenceDefinition>, StorageError>;
         async fn list_sequence_versions(&self, tenant_id: &TenantId, namespace: &Namespace, name: &str) -> Result<Vec<SequenceDefinition>, StorageError>;
         async fn list_sequences(&self, tenant_id: Option<&TenantId>, namespace: Option<&Namespace>, limit: u32, offset: u32) -> Result<Vec<SequenceDefinition>, StorageError>;
+        async fn list_embed_visible_sequences(&self, tenant_id: &TenantId, sub_tenant: &str, tenant_level: &crate::EmbedTenantLevel, limit: u32) -> Result<Vec<SequenceDefinition>, StorageError>;
+        async fn count_sub_tenant_sequence_names(&self, tenant_id: &TenantId, sub_tenant: &str) -> Result<u64, StorageError>;
         async fn deprecate_sequence(&self, id: SequenceId) -> Result<(), StorageError>;
         async fn update_sequence_status(&self, id: SequenceId, status: &str) -> Result<(), StorageError>;
         async fn delete_sequence(&self, id: SequenceId) -> Result<(), StorageError>;
@@ -522,6 +524,10 @@ fault_impl! {
         async fn put_sub_tenant_limits(&self, tenant_id: &TenantId, sub_tenant: &str, limits: &orch8_types::sub_tenant::SubTenantLimits) -> Result<(), StorageError>;
         async fn sub_tenant_usage(&self, tenant_id: &TenantId, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<orch8_types::sub_tenant::SubTenantUsage>, StorageError>;
         async fn count_active_sub_tenants(&self, since: DateTime<Utc>) -> Result<u64, StorageError>;
+        async fn ensure_sub_tenant_limits(&self, tenant_id: &TenantId, sub_tenant: &str, limits: &orch8_types::sub_tenant::SubTenantLimits) -> Result<bool, StorageError>;
+        async fn set_sub_tenant_suspended(&self, tenant_id: &TenantId, sub_tenant: &str, suspended: bool) -> Result<(), StorageError>;
+        async fn revoke_embed_token(&self, tenant_id: &TenantId, jti: Uuid, expires_at: DateTime<Utc>) -> Result<(), StorageError>;
+        async fn embed_access_revoked(&self, tenant_id: &TenantId, sub_tenant: &str, jti: Uuid) -> Result<bool, StorageError>;
         async fn get_embed_theme(&self, tenant_id: &TenantId) -> Result<Option<orch8_types::sub_tenant::EmbedTheme>, StorageError>;
         async fn put_embed_theme(&self, tenant_id: &TenantId, theme: &orch8_types::sub_tenant::EmbedTheme) -> Result<(), StorageError>;
         async fn set_release_target(&self, release_id: Uuid, target: Option<&orch8_types::release::ReleaseTarget>) -> Result<bool, StorageError>;

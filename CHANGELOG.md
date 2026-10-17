@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Embed surface hardening
+
+- **Breaking: embed tokens without a `sequences` allowlist no longer reach
+  tenant-level sequences.** `sequences: null`/`[]` used to mean every
+  tenant-level sequence (so a token could run internal/admin sequences). It now
+  grants only the sub-tenant's own sequences and the read-only gallery. Opt in
+  with `["name"]` (namespace `default`), `["namespace/name"]` or `["*"]`; entries
+  match namespace and name together. Gallery templates are never runnable.
+- **`GET /embed/sequences` is filtered in SQL** (latest version per name; own,
+  gallery and allowlisted only), so a sub-tenant with many versions can no
+  longer push everyone else's sequences and the gallery past a 1000-row scan.
+  Redacted tenant-level definitions are an allow-list projection (block types,
+  ids, handler names, nesting) instead of only blanking `params`.
+- **Builder caps**: `[embed] max_sequences_per_sub_tenant` (200),
+  `max_versions_per_sequence` (100; `429 sub_tenant_quota_exceeded`), and a 1 MiB
+  body limit on `PUT /embed/sequences/{name}` (413).
+- **Per-sub-tenant protection**: token-bucket limiter on `/embed/*`
+  (`rate_limit_per_sec` 20, `rate_limit_burst` 60), and default run caps for
+  sub-tenants without an explicit limits row (`default_max_concurrent_per_sub_tenant`
+  100, `default_max_executions_per_month_per_sub_tenant` 100000; `0` disables).
+- **Revocation**: `POST /embed/tokens/{jti}/revoke` and
+  `POST /sub-tenants/{sub}/suspend|resume` (Operator). `POST /embed/tokens` now
+  returns `token_id`. Postgres migrations 115 (tables) and 116 (index).
+- `POST /embed/runs` idempotency keys are scoped per sub-tenant (max 128 bytes);
+  `list_runs`/`list_approvals` no longer return short pages when hidden runs are
+  interleaved; soft license enforcement never awaits the database on the request
+  path; `X-Orch8-Sub-Tenant` is rejected with 400 on routes that do not honour
+  it; a startup warning is logged for `[embed] allowed_origins = "*"`.
+
 ### Review round 2: API-driven cancel
 
 - **Operator cancels now run saga compensation and `on_cancel` hooks.**

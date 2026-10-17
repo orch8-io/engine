@@ -133,8 +133,44 @@ x-tenant-id: <tenant>
   "ttl_seconds": 900 }
 ```
 
-Response: `{ "token": "o8e1.…", "expires_at": "…" }`. `ttl_seconds` defaults to
-900 and may not exceed 3600. There is no refresh; mint a new token.
+Response: `{ "token": "o8e1.…", "token_id": "<jti>", "expires_at": "…" }`.
+`ttl_seconds` defaults to 900 and may not exceed 3600. There is no refresh;
+mint a new token.
+
+`sequences` lists the **tenant-level** sequences the token may see and run, in
+addition to the customer's own sequences (always) and the read-only gallery.
+Entries are `"name"` (namespace `default`), `"namespace/name"`, or `"*"` for
+every tenant-level sequence. **`null` or `[]` grants no tenant-level access**
+(changed: it used to mean every tenant-level sequence, which let a token run
+internal sequences). Matching is on namespace and name together. Gallery
+templates are never runnable, even when listed or covered by `"*"`.
+
+#### Revocation
+
+Tokens are signed but not stateless to the engine: every embed request checks
+a revocation list (cached for 5 seconds per node).
+
+- `POST /api/v1/embed/tokens/{jti}/revoke` (Operator) revokes one token by the
+  `token_id` returned at mint time.
+- `POST /api/v1/sub-tenants/{sub}/suspend` (Operator) makes every embed token of
+  the sub-tenant fail with `401` until `POST …/resume`. Resuming does not
+  un-revoke individually revoked tokens.
+
+Revocation is enforced on `/embed/*` only. Suspension does not stop runs that
+are already executing, and does not affect `X-Orch8-Sub-Tenant` calls made
+with a tenant API key.
+
+#### Limits on the embed surface
+
+Per `(tenant, sub-tenant)`: a token-bucket rate limit on every `/embed/*`
+request (`[embed] rate_limit_per_sec`, `rate_limit_burst`; `429 rate_limited`),
+default run caps applied the first time a sub-tenant without a limits row
+starts a run through an embed token (`default_max_concurrent_per_sub_tenant`,
+`default_max_executions_per_month_per_sub_tenant`; an explicit
+`PUT /sub-tenants/{sub}/limits` always wins), and builder caps
+(`max_sequences_per_sub_tenant`, `max_versions_per_sequence`, 1 MiB per
+`PUT /embed/sequences/{name}` body). See
+[CONFIGURATION.md](CONFIGURATION.md#embed).
 
 | Scope | Grants |
 | --- | --- |
@@ -180,7 +216,8 @@ sub-tenant.
 What an embedded viewer sees:
 
 - **Runs.** Only runs of the token's sub-tenant, and only of sequences the
-  token may run. A run of another sub-tenant is a 404, never a 403.
+  token may run. `idempotency_key` (at most 128 bytes) is scoped to the
+  sub-tenant, so two customers can reuse the same key. A run of another sub-tenant is a 404, never a 403.
 - **Outputs.** No context, metadata or step output is ever returned, except
   outputs of steps the sequence lists in `embed.visible_outputs`:
 
@@ -189,11 +226,14 @@ What an embedded viewer sees:
   ```
 
 - **Sequences.** A token sees its sub-tenant's own sequences, gallery
-  templates (see below), and tenant-level sequences its `sequences` list admits
-  (all of them when `sequences` is `null`). Owned sequences and gallery
+  templates (see below), and the tenant-level sequences its `sequences` list
+  admits (none when `sequences` is `null`). Owned sequences and gallery
   templates return the full `definition`. Other tenant-level sequences return
-  a definition with every step's `params` emptied (`"redacted": true`) so
-  URLs, prompts and credential references are not disclosed.
+  an allow-list projection (`"redacted": true`): block types, ids, step handler
+  names and nesting only. Params, conditions, inputs, cache/queue keys,
+  placement, interceptors and sub-sequence targets are never included.
+  `GET /embed/sequences` is filtered in the database and returns the latest
+  version of each visible name.
 - **Gallery templates.** Tenant-level sequences in namespace `embed-gallery`
   with `"embed": { "gallery": true, "title": …, "template": … }` are listed to
   every sub-tenant as read-only. A builder copies one by reading it and writing

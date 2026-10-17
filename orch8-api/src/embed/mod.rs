@@ -13,6 +13,7 @@
 //!   raw instance context, metadata, or unlisted step outputs.
 //! * All embed routes answer 404 while no `[embed] token_secret` is set.
 
+pub mod guard;
 pub mod runs;
 pub mod sequences;
 pub mod token;
@@ -33,6 +34,7 @@ use crate::auth::OptionalTenant;
 use crate::error::ApiError;
 use crate::license::{License, SoftEnforcer};
 
+pub use guard::{EmbedLimits, EmbedRateLimiter, RevocationCache};
 pub use token::{EmbedPrincipal, EmbedScope, EmbedSigner};
 
 /// Process-wide embedded/licensing runtime shared through [`AppState`].
@@ -44,6 +46,10 @@ pub struct EmbeddedRuntime {
     pub allowed_origins: Vec<String>,
     pub license: License,
     pub enforcer: SoftEnforcer,
+    /// Resolved `[embed]` caps and rate limits.
+    pub limits: EmbedLimits,
+    pub rate_limiter: EmbedRateLimiter,
+    pub revocations: RevocationCache,
 }
 
 impl EmbeddedRuntime {
@@ -68,6 +74,9 @@ impl EmbeddedRuntime {
             allowed_origins: parse_origins(&embed.allowed_origins),
             license: License::load(license.key.expose()),
             enforcer: SoftEnforcer::default(),
+            limits: EmbedLimits::from(embed),
+            rate_limiter: EmbedRateLimiter::default(),
+            revocations: RevocationCache::default(),
         })
     }
 
@@ -79,7 +88,49 @@ impl EmbeddedRuntime {
             allowed_origins: Vec::new(),
             license,
             enforcer: SoftEnforcer::default(),
+            limits: EmbedLimits::default(),
+            rate_limiter: EmbedRateLimiter::default(),
+            revocations: RevocationCache::default(),
         }
+    }
+
+    /// Verified-principal gate shared by every embed-token route: the
+    /// per-sub-tenant rate limit, then revocation (suspended sub-tenant or
+    /// revoked `jti`, cached for a few seconds). A storage failure while
+    /// checking revocation fails closed.
+    pub async fn admit(
+        &self,
+        state: &AppState,
+        principal: &EmbedPrincipal,
+    ) -> Result<(), ApiError> {
+        if !self.rate_limiter.allow(
+            principal.tenant_id.as_str(),
+            &principal.sub_tenant,
+            &self.limits,
+        ) {
+            return Err(ApiError::RateLimited(
+                "embed request rate exceeded for this sub-tenant".into(),
+            ));
+        }
+        let revoked = if let Some(cached) = self.revocations.get(principal.token_id) {
+            cached
+        } else {
+            let fresh = state
+                .storage
+                .embed_access_revoked(
+                    &principal.tenant_id,
+                    &principal.sub_tenant,
+                    principal.token_id,
+                )
+                .await
+                .map_err(|e| ApiError::from_storage(e, "embed_token"))?;
+            self.revocations.put(principal.token_id, fresh);
+            fresh
+        };
+        if revoked {
+            return Err(ApiError::Unauthorized);
+        }
+        Ok(())
     }
 }
 
@@ -120,6 +171,7 @@ pub fn is_token_route(method: &Method, path: &str) -> bool {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/embed/tokens", post(token::issue_token))
+        .route("/embed/tokens/{jti}/revoke", post(token::revoke_token))
         .route("/embed/runs", get(runs::list_runs).post(runs::start_run))
         .route("/embed/runs/{id}", get(runs::get_run))
         .route("/embed/approvals", get(runs::list_approvals))
@@ -127,7 +179,9 @@ pub fn routes() -> Router<AppState> {
         .route("/embed/sequences", get(sequences::list_sequences))
         .route(
             "/embed/sequences/{name}",
-            get(sequences::get_sequence).put(sequences::put_sequence),
+            get(sequences::get_sequence).merge(axum::routing::put(sequences::put_sequence).layer(
+                axum::extract::DefaultBodyLimit::max(sequences::PUT_BODY_LIMIT_BYTES),
+            )),
         )
         .route("/embed/theme", get(get_theme).put(put_theme))
 }
@@ -192,10 +246,11 @@ pub(crate) async fn get_theme(
     // caller and bound its tenant.
     let tenant = if bearer.is_some() {
         let token = token::bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
-        signer
+        let principal = signer
             .verify(token, Utc::now())
-            .ok_or(ApiError::Unauthorized)?
-            .tenant_id
+            .ok_or(ApiError::Unauthorized)?;
+        state.embedded.admit(&state, &principal).await?;
+        principal.tenant_id
     } else {
         crate::sub_tenants::require_tenant(&tenant_ctx)?
     };
@@ -323,6 +378,7 @@ mod tests {
         }
         for (m, p) in [
             (Method::POST, "/api/v1/embed/tokens"),
+            (Method::POST, "/api/v1/embed/tokens/abc/revoke"),
             (Method::PUT, "/api/v1/embed/theme"),
             (Method::DELETE, "/api/v1/embed/runs/abc"),
             (Method::GET, "/api/v1/embed/runs/abc/extra"),

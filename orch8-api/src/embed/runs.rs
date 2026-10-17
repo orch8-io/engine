@@ -29,6 +29,14 @@ const DEFAULT_PAGE: u32 = 20;
 const MAX_PAGE: u32 = 100;
 const MAX_COMMENT_CHARS: usize = 2_000;
 const MAX_INPUT_BYTES: usize = 256 * 1024;
+/// Smallest chunk the visibility scan reads at a time.
+const MIN_SCAN_CHUNK: u32 = 50;
+/// Most raw rows one list request scans looking for visible ones.
+const MAX_SCAN_ROWS: u64 = 1_000;
+/// Waiting runs read per page, and pages per request, by `list_approvals`.
+const APPROVAL_PAGE: u32 = 200;
+const APPROVAL_MAX_PAGES: u64 = 5;
+const APPROVAL_MAX_ITEMS: usize = 200;
 
 fn encode_cursor(offset: u64) -> String {
     URL_SAFE_NO_PAD.encode(format!("o:{offset}"))
@@ -144,6 +152,7 @@ pub(crate) struct EmbedRunList {
     ),
     security(("embed_token" = []))
 )]
+#[allow(clippy::too_many_lines)] // scan until the page is full → hydrate current steps → cursor
 pub(crate) async fn list_runs(
     State(state): State<AppState>,
     principal: EmbedPrincipal,
@@ -157,45 +166,75 @@ pub(crate) async fn list_runs(
         sub_tenant: Some(principal.sub_tenant.clone()),
         ..InstanceFilter::default()
     };
-    let mut instances = state
-        .storage
-        .list_instances(
-            &filter,
-            &Pagination {
-                offset,
-                limit: limit + 1,
-                sort_ascending: false,
-            },
-        )
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instances"))?;
-    let has_more = instances.len() > limit as usize;
-    instances.truncate(limit as usize);
-
-    let sequence_ids: Vec<SequenceId> = instances
-        .iter()
-        .map(|i| i.sequence_id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let sequences: HashMap<SequenceId, SequenceDefinition> = state
-        .storage
-        .get_sequences(&sequence_ids)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "sequence"))?
-        .into_iter()
-        .filter(|s| s.tenant_id == principal.tenant_id)
-        .map(|s| (s.id, s))
-        .collect();
-
-    let mut items = Vec::with_capacity(instances.len());
-    for instance in &instances {
-        let Some(sequence) = sequences.get(&instance.sequence_id) else {
-            continue;
-        };
-        if !principal.can_run(sequence) {
-            continue;
+    // Visibility depends on the run's sequence, which storage cannot filter
+    // on, so scan forward in chunks until the page is full (EM-08) instead of
+    // paginating first and filtering after (short pages with a cursor).
+    let chunk = limit.max(MIN_SCAN_CHUNK);
+    let mut pos = offset;
+    let mut scanned = 0u64;
+    let mut next_cursor = None;
+    let mut selected: Vec<(TaskInstance, SequenceDefinition)> = Vec::new();
+    'scan: loop {
+        let batch = state
+            .storage
+            .list_instances(
+                &filter,
+                &Pagination {
+                    offset: pos,
+                    limit: chunk,
+                    sort_ascending: false,
+                },
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instances"))?;
+        if batch.is_empty() {
+            break;
         }
+        let batch_len = batch.len() as u64;
+        let sequence_ids: Vec<SequenceId> = batch
+            .iter()
+            .map(|i| i.sequence_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let sequences: HashMap<SequenceId, SequenceDefinition> = state
+            .storage
+            .get_sequences(&sequence_ids)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "sequence"))?
+            .into_iter()
+            .filter(|s| s.tenant_id == principal.tenant_id)
+            .map(|s| (s.id, s))
+            .collect();
+        for (index, instance) in batch.into_iter().enumerate() {
+            let Some(sequence) = sequences
+                .get(&instance.sequence_id)
+                .filter(|s| principal.can_run(s))
+            else {
+                continue;
+            };
+            if selected.len() == limit as usize {
+                // The next visible run starts the following page.
+                next_cursor = Some(encode_cursor(pos + index as u64));
+                break 'scan;
+            }
+            selected.push((instance, sequence.clone()));
+        }
+        pos += batch_len;
+        scanned += batch_len;
+        if batch_len < u64::from(chunk) {
+            break;
+        }
+        if scanned >= MAX_SCAN_ROWS {
+            // Bounded work per request: hand back a (possibly short) page
+            // plus a cursor to keep scanning from.
+            next_cursor = Some(encode_cursor(pos));
+            break;
+        }
+    }
+
+    let mut items = Vec::with_capacity(selected.len());
+    for (instance, sequence) in &selected {
         let current = if instance.state.is_terminal() {
             None
         } else {
@@ -227,7 +266,6 @@ pub(crate) async fn list_runs(
             current_step: current,
         });
     }
-    let next_cursor = has_more.then(|| encode_cursor(offset + u64::from(limit)));
     Ok(Json(EmbedRunList { items, next_cursor }))
 }
 
@@ -377,6 +415,26 @@ pub(crate) struct StartRunRequest {
     pub idempotency_key: Option<String>,
 }
 
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
+
+/// Namespace a caller-supplied idempotency key by sub-tenant (EM-03): storage
+/// uniqueness is `(tenant_id, key)`, so unscoped keys would let one end
+/// customer learn or suppress another's run ids.
+fn scoped_idempotency_key(
+    sub_tenant: &str,
+    key: Option<String>,
+) -> Result<Option<String>, ApiError> {
+    let Some(key) = key.filter(|k| !k.is_empty()) else {
+        return Ok(None);
+    };
+    if key.len() > MAX_IDEMPOTENCY_KEY_BYTES {
+        return Err(ApiError::InvalidArgument(format!(
+            "idempotency_key must be at most {MAX_IDEMPOTENCY_KEY_BYTES} bytes"
+        )));
+    }
+    Ok(Some(format!("sub:{sub_tenant}:{key}")))
+}
+
 /// Resolve the latest version of a sequence the principal can see (see
 /// [`EmbedPrincipal::visibility`]); anything else is a 404.
 pub(crate) async fn resolve_visible_sequence(
@@ -426,6 +484,15 @@ pub(crate) async fn start_run(
             "embed token does not admit runs of this sequence".into(),
         ));
     }
+    // Sub-tenants without an explicit limits row get the configured default
+    // caps (EM-06); an operator-set row is never overwritten.
+    if let Some(defaults) = state.embedded.limits.default_sub_tenant_limits() {
+        state
+            .storage
+            .ensure_sub_tenant_limits(&principal.tenant_id, &principal.sub_tenant, &defaults)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "sub_tenant_limits"))?;
+    }
     let context = orch8_types::context::ExecutionContext {
         data: if req.input.is_null() {
             serde_json::json!({})
@@ -449,7 +516,7 @@ pub(crate) async fn start_run(
         next_fire_at: None,
         concurrency_key: None,
         max_concurrency: None,
-        idempotency_key: req.idempotency_key.filter(|k| !k.is_empty()),
+        idempotency_key: scoped_idempotency_key(&principal.sub_tenant, req.idempotency_key)?,
         budget: None,
         sub_tenant: None,
     };
@@ -566,53 +633,66 @@ pub(crate) async fn list_approvals(
         sub_tenant: Some(principal.sub_tenant.clone()),
         ..InstanceFilter::default()
     };
-    let pairs = state
-        .storage
-        .list_waiting_with_trees(
-            &filter,
-            &Pagination {
-                offset: 0,
-                limit: 200,
-                sort_ascending: false,
-            },
-        )
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instances"))?;
-    let sequence_ids: Vec<SequenceId> = pairs
-        .iter()
-        .map(|(i, _)| i.sequence_id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let sequences: HashMap<SequenceId, SequenceDefinition> = state
-        .storage
-        .get_sequences(&sequence_ids)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "sequence"))?
-        .into_iter()
-        .map(|s| (s.id, s))
-        .collect();
-    let mut items = Vec::new();
-    for (instance, tree) in &pairs {
-        // Defence in depth: the storage filter already scoped these.
-        if instance.tenant_id != principal.tenant_id
-            || instance.sub_tenant.as_deref() != Some(principal.sub_tenant.as_str())
-        {
-            continue;
+    // Page through waiting runs until enough visible approvals are found:
+    // taking only the newest page and filtering afterwards would hide older
+    // approvals behind runs of sequences the token cannot see (EM-08).
+    let mut items: Vec<EmbedApproval> = Vec::new();
+    'pages: for page in 0..APPROVAL_MAX_PAGES {
+        let pairs = state
+            .storage
+            .list_waiting_with_trees(
+                &filter,
+                &Pagination {
+                    offset: page * u64::from(APPROVAL_PAGE),
+                    limit: APPROVAL_PAGE,
+                    sort_ascending: false,
+                },
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instances"))?;
+        let full_page = pairs.len() == APPROVAL_PAGE as usize;
+        let sequence_ids: Vec<SequenceId> = pairs
+            .iter()
+            .map(|(i, _)| i.sequence_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let sequences: HashMap<SequenceId, SequenceDefinition> = state
+            .storage
+            .get_sequences(&sequence_ids)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "sequence"))?
+            .into_iter()
+            .map(|s| (s.id, s))
+            .collect();
+        for (instance, tree) in &pairs {
+            // Defence in depth: the storage filter already scoped these.
+            if instance.tenant_id != principal.tenant_id
+                || instance.sub_tenant.as_deref() != Some(principal.sub_tenant.as_str())
+            {
+                continue;
+            }
+            let Some(sequence) = sequences.get(&instance.sequence_id) else {
+                continue;
+            };
+            if !principal.can_run(sequence) {
+                continue;
+            }
+            items.extend(
+                pending_for(&state, instance, tree, sequence)
+                    .await?
+                    .into_iter()
+                    .map(to_embed),
+            );
+            if items.len() >= APPROVAL_MAX_ITEMS {
+                break 'pages;
+            }
         }
-        let Some(sequence) = sequences.get(&instance.sequence_id) else {
-            continue;
-        };
-        if !principal.can_run(sequence) {
-            continue;
+        if !full_page {
+            break;
         }
-        items.extend(
-            pending_for(&state, instance, tree, sequence)
-                .await?
-                .into_iter()
-                .map(to_embed),
-        );
     }
+    items.truncate(APPROVAL_MAX_ITEMS);
     Ok(Json(EmbedApprovalList { items }))
 }
 
@@ -762,5 +842,19 @@ mod tests {
         let id = approval_id(instance, &block);
         assert_eq!(parse_approval_id(&id), Some((instance, block)));
         assert_eq!(parse_approval_id("nope"), None);
+    }
+
+    #[test]
+    fn idempotency_keys_are_scoped_per_sub_tenant() {
+        let a = scoped_idempotency_key("acme", Some("k1".into())).unwrap();
+        let b = scoped_idempotency_key("globex", Some("k1".into())).unwrap();
+        assert_eq!(a.as_deref(), Some("sub:acme:k1"));
+        assert_ne!(a, b);
+        assert_eq!(
+            scoped_idempotency_key("acme", Some(String::new())).unwrap(),
+            None
+        );
+        assert_eq!(scoped_idempotency_key("acme", None).unwrap(), None);
+        assert!(scoped_idempotency_key("acme", Some("x".repeat(129))).is_err());
     }
 }

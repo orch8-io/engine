@@ -254,6 +254,96 @@ impl crate::TenancyStore for SqliteStorage {
         Ok(to_u64(n))
     }
 
+    async fn ensure_sub_tenant_limits(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        limits: &SubTenantLimits,
+    ) -> Result<bool, StorageError> {
+        let monthly = limits
+            .max_executions_per_month
+            .map(|v| i64::try_from(v).unwrap_or(i64::MAX));
+        let result = sqlx::query(
+            "INSERT INTO sub_tenant_limits \
+                (tenant_id, sub_tenant, max_executions_per_month, max_concurrent, updated_at) \
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT (tenant_id, sub_tenant) DO NOTHING",
+        )
+        .bind(tenant_id.as_str())
+        .bind(sub_tenant)
+        .bind(monthly)
+        .bind(limits.max_concurrent.map(i64::from))
+        .bind(ts(Utc::now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn set_sub_tenant_suspended(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        suspended: bool,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO sub_tenant_status (tenant_id, sub_tenant, status, updated_at) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT (tenant_id, sub_tenant) DO UPDATE SET \
+                status = excluded.status, updated_at = excluded.updated_at",
+        )
+        .bind(tenant_id.as_str())
+        .bind(sub_tenant)
+        .bind(if suspended { "suspended" } else { "active" })
+        .bind(ts(Utc::now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn revoke_embed_token(
+        &self,
+        tenant_id: &TenantId,
+        jti: Uuid,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let now = Utc::now();
+        // Revoked rows past their token's expiry are dead weight.
+        sqlx::query("DELETE FROM embed_revoked_tokens WHERE expires_at < ?")
+            .bind(ts(now))
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO embed_revoked_tokens (jti, tenant_id, expires_at, revoked_at) \
+             VALUES (?, ?, ?, ?) ON CONFLICT (jti) DO NOTHING",
+        )
+        .bind(jti.to_string())
+        .bind(tenant_id.as_str())
+        .bind(ts(expires_at))
+        .bind(ts(now))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn embed_access_revoked(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        jti: Uuid,
+    ) -> Result<bool, StorageError> {
+        let revoked: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sub_tenant_status \
+                 WHERE tenant_id=? AND sub_tenant=? AND status='suspended') \
+                 OR EXISTS(SELECT 1 FROM embed_revoked_tokens WHERE jti=? AND tenant_id=?)",
+        )
+        .bind(tenant_id.as_str())
+        .bind(sub_tenant)
+        .bind(jti.to_string())
+        .bind(tenant_id.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(revoked != 0)
+    }
+
     async fn get_embed_theme(
         &self,
         tenant_id: &TenantId,

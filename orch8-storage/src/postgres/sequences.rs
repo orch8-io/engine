@@ -168,6 +168,71 @@ pub(super) async fn list_all(
     rows.into_iter().map(SequenceRow::into_definition).collect()
 }
 
+/// Latest non-deprecated version per `(namespace, name)` visible to an embed
+/// sub-tenant (EM-02). Visibility is evaluated in SQL so a sub-tenant that
+/// stores many versions of one name cannot crowd out the rest.
+pub(super) async fn list_embed_visible(
+    store: &PostgresStorage,
+    tenant_id: &TenantId,
+    sub_tenant: &str,
+    tenant_level: &crate::EmbedTenantLevel,
+    limit: u32,
+) -> Result<Vec<SequenceDefinition>, StorageError> {
+    let (all, namespaces, names): (bool, Vec<String>, Vec<String>) = match tenant_level {
+        crate::EmbedTenantLevel::None => (false, Vec::new(), Vec::new()),
+        crate::EmbedTenantLevel::All => (true, Vec::new(), Vec::new()),
+        crate::EmbedTenantLevel::Names(pairs) => (
+            false,
+            pairs.iter().map(|(ns, _)| ns.clone()).collect(),
+            pairs.iter().map(|(_, name)| name.clone()).collect(),
+        ),
+    };
+    let rows = sqlx::query_as::<_, SequenceRow>(
+        r"SELECT DISTINCT ON (namespace, name)
+                 id, tenant_id, namespace, name, definition, version, deprecated, status, created_at
+          FROM sequences
+          WHERE tenant_id = $1 AND deprecated = false
+            AND (
+                definition->>'sub_tenant' = $2
+                OR (definition->>'sub_tenant' IS NULL AND (
+                    (namespace = $3 AND definition->'embed'->>'gallery' = 'true')
+                    OR $4
+                    OR (namespace, name) IN (SELECT * FROM unnest($5::text[], $6::text[]))
+                ))
+            )
+          ORDER BY namespace, name, version DESC
+          LIMIT $7",
+    )
+    .bind(tenant_id.as_str())
+    .bind(sub_tenant)
+    .bind(orch8_types::sub_tenant::GALLERY_NAMESPACE)
+    .bind(all)
+    .bind(namespaces)
+    .bind(names)
+    .bind(i64::from(limit))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.into_iter().map(SequenceRow::into_definition).collect()
+}
+
+pub(super) async fn count_sub_tenant_names(
+    store: &PostgresStorage,
+    tenant_id: &TenantId,
+    sub_tenant: &str,
+) -> Result<u64, StorageError> {
+    let n: i64 = sqlx::query_scalar(
+        r"SELECT COUNT(*) FROM (
+              SELECT DISTINCT namespace, name FROM sequences
+              WHERE tenant_id = $1 AND definition->>'sub_tenant' = $2
+          ) AS owned",
+    )
+    .bind(tenant_id.as_str())
+    .bind(sub_tenant)
+    .fetch_one(&store.pool)
+    .await?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
 pub(super) async fn deprecate(store: &PostgresStorage, id: SequenceId) -> Result<(), StorageError> {
     sqlx::query("UPDATE sequences SET deprecated = TRUE WHERE id = $1")
         .bind(id.into_uuid())

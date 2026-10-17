@@ -578,6 +578,14 @@ async fn main() -> anyhow::Result<()> {
 /// it into a non-zero exit after the graceful drain.
 static ENGINE_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Whether `[embed] allowed_origins` contains the `*` wildcard, which makes
+/// the embed routes answer CORS preflights for (and echo) any Origin,
+/// including `null` (EM-13). Bearer tokens are not ambient credentials, so
+/// this is a warning rather than a startup error.
+fn embed_origins_is_wildcard(embed_origins: &str) -> bool {
+    embed_origins.split(',').any(|o| o.trim() == "*")
+}
+
 /// Embed tokens + license. An invalid embed secret refuses to start (never
 /// a silent disable); a bad license only logs (soft enforcement).
 fn build_embedded_runtime(
@@ -587,6 +595,14 @@ fn build_embedded_runtime(
         orch8_api::embed::EmbeddedRuntime::from_config(&config.embed, &config.license)
             .map_err(|error| anyhow::anyhow!("invalid embed configuration: {error}"))?,
     );
+    if embedded.signer.is_some() && embed_origins_is_wildcard(&config.embed.allowed_origins) {
+        tracing::warn!(
+            "[embed] allowed_origins contains '*': any website (including sandboxed `null` \
+             origins) may call /api/v1/embed/* from a browser. Embed tokens are bearer \
+             credentials, so a leaked token is usable from any page; list your product's \
+             origins explicitly."
+        );
+    }
     let license = embedded.license.info(chrono::Utc::now());
     tracing::info!(
         embed = embedded.signer.is_some(),
@@ -2507,6 +2523,16 @@ mod tests {
         assert!(validate_auth_config(true, true, false, "https://app.example.com, *").is_err());
         // Valid explicit list is accepted.
         assert!(validate_auth_config(true, true, false, "https://app.example.com").is_ok());
+    }
+
+    #[test]
+    fn embed_wildcard_origin_is_detected() {
+        assert!(embed_origins_is_wildcard("*"));
+        assert!(embed_origins_is_wildcard("https://a.example, *"));
+        assert!(!embed_origins_is_wildcard(
+            "https://a.example,https://b.example"
+        ));
+        assert!(!embed_origins_is_wildcard(""));
     }
 
     /// L-6: `--insecure-auth` alone must be sufficient to boot without an API

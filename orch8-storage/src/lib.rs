@@ -66,7 +66,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 111;
+pub const STORAGE_SCHEMA_VERSION: u32 = 116;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -172,6 +172,18 @@ pub enum EmitDedupeOutcome {
 // Sub-trait 1: SequenceStore
 // ============================================================================
 
+/// Which tenant-level (not sub-tenant-owned) sequences an embed token admits
+/// besides gallery templates, which are always listable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbedTenantLevel {
+    /// No tenant-level sequence.
+    None,
+    /// Every tenant-level sequence.
+    All,
+    /// Exactly these `(namespace, name)` pairs.
+    Names(Vec<(String, String)>),
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait SequenceStore: Send + Sync + 'static {
@@ -216,6 +228,25 @@ pub trait SequenceStore: Send + Sync + 'static {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<SequenceDefinition>, StorageError>;
+
+    /// Latest non-deprecated version of every sequence name an embed
+    /// sub-tenant may see, filtered in SQL (EM-02): its own sequences, gallery
+    /// templates, and the tenant-level sequences admitted by `tenant_level`.
+    /// At most `limit` rows, ordered by `(namespace, name)`.
+    async fn list_embed_visible_sequences(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        tenant_level: &EmbedTenantLevel,
+        limit: u32,
+    ) -> Result<Vec<SequenceDefinition>, StorageError>;
+
+    /// Number of distinct `(namespace, name)` sequences owned by `sub_tenant`.
+    async fn count_sub_tenant_sequence_names(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+    ) -> Result<u64, StorageError>;
 
     /// Mark a sequence version as deprecated.
     async fn deprecate_sequence(&self, id: SequenceId) -> Result<(), StorageError>;
@@ -4167,6 +4198,42 @@ pub trait TenancyStore: Send + Sync + 'static {
     /// Distinct `(tenant, sub_tenant)` pairs that started an execution since
     /// `since`, across all tenants (license soft-enforcement).
     async fn count_active_sub_tenants(&self, since: DateTime<Utc>) -> Result<u64, StorageError>;
+
+    /// Insert `limits` for the sub-tenant only when it has no limits row yet
+    /// (default caps for embed-started runs). `true` when inserted.
+    async fn ensure_sub_tenant_limits(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        limits: &orch8_types::sub_tenant::SubTenantLimits,
+    ) -> Result<bool, StorageError>;
+
+    /// Suspend or resume a sub-tenant: while suspended, every embed token of
+    /// the sub-tenant is refused (EM-04).
+    async fn set_sub_tenant_suspended(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        suspended: bool,
+    ) -> Result<(), StorageError>;
+
+    /// Revoke one embed token by its `jti`; `expires_at` lets the row be
+    /// purged once the token would have expired anyway.
+    async fn revoke_embed_token(
+        &self,
+        tenant_id: &TenantId,
+        jti: Uuid,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+
+    /// Whether embed access is revoked: the sub-tenant is suspended, or the
+    /// token `jti` was revoked.
+    async fn embed_access_revoked(
+        &self,
+        tenant_id: &TenantId,
+        sub_tenant: &str,
+        jti: Uuid,
+    ) -> Result<bool, StorageError>;
 
     async fn get_embed_theme(
         &self,

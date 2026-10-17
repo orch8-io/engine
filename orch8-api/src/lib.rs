@@ -336,6 +336,11 @@ pub fn build_router(state: AppState) -> Router {
     if state.mobile_sync_enabled {
         api = api.merge(mobile_sync::routes());
     }
+    // EM-11: the sub-tenant header scopes only a handful of routes; refuse it
+    // elsewhere rather than silently ignoring it.
+    let api = api.layer(axum::middleware::from_fn(
+        sub_tenants::reject_unhonoured_sub_tenant_header,
+    ));
     // Soft license enforcement: annotates responses, never blocks.
     let api = api.layer(axum::middleware::from_fn_with_state(
         state.clone(),

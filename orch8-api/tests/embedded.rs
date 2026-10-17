@@ -416,7 +416,14 @@ async fn embed_tokens_are_bound_to_tenant_sub_tenant_and_scopes() {
         let globex_run = start_ok(&case, &t, seq, Some("globex")).await;
         start_ok(&case, &t, seq, None).await;
 
-        let token = mint(&case, &t, "acme", &["runs:read", "runs:start"], Value::Null).await;
+        let token = mint(
+            &case,
+            &t,
+            "acme",
+            &["runs:read", "runs:start"],
+            json!(["*"]),
+        )
+        .await;
         assert!(token.starts_with("o8e1."));
 
         let runs: Value = case
@@ -643,7 +650,7 @@ async fn embed_approvals_list_resolve_and_conflict() {
                 .unwrap();
         }
 
-        let token = mint(&case, &t, "acme", &["approvals:resolve"], Value::Null).await;
+        let token = mint(&case, &t, "acme", &["approvals:resolve"], json!(["*"])).await;
         let list: Value = case
             .embed_get("/embed/approvals", &token)
             .send()
@@ -710,7 +717,7 @@ async fn embed_approvals_list_resolve_and_conflict() {
         let globex_list: Value = case
             .embed_get(
                 "/embed/approvals",
-                &mint(&case, &t, "globex", &["approvals:resolve"], Value::Null).await,
+                &mint(&case, &t, "globex", &["approvals:resolve"], json!(["*"])).await,
             )
             .send()
             .await
@@ -786,7 +793,7 @@ async fn embed_sequences_visibility_builder_and_gallery() {
             &t,
             "acme",
             &["sequences:read", "builder:edit"],
-            Value::Null,
+            json!(["*"]),
         )
         .await;
         let list: Value = case
@@ -940,7 +947,7 @@ async fn theme_is_normalised_and_badge_needs_white_label() {
                 .await
                 .unwrap();
             assert_eq!(put.status(), StatusCode::OK, "{}", case.name);
-            let token = mint(&case, &t, "acme", &["runs:read"], Value::Null).await;
+            let token = mint(&case, &t, "acme", &["runs:read"], json!(["*"])).await;
             let theme: Value = case
                 .embed_get("/embed/theme", &token)
                 .send()
@@ -1112,5 +1119,566 @@ async fn release_target_routes_by_sub_tenant() {
             .unwrap();
         let plain = start_ok(&case, &t, baseline, None).await;
         assert_eq!(sequence_of(plain).await, candidate, "{}", case.name);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embed hardening regressions (EM-02 .. EM-11)
+// ---------------------------------------------------------------------------
+
+fn tuned_runtime(tune: impl FnOnce(&mut EmbeddedRuntime)) -> EmbeddedRuntime {
+    let mut rt = runtime(License::unlicensed());
+    tune(&mut rt);
+    rt
+}
+
+async fn put_seq(case: &Case, token: &str, name: &str) -> reqwest::Response {
+    case.client
+        .put(case.url(&format!("/embed/sequences/{name}")))
+        .bearer_auth(token)
+        .json(&json!({"blocks": [{"type": "step", "id": "a", "handler": "noop", "params": {}}]}))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn embed_json(case: &Case, path: &str, token: &str) -> Value {
+    case.embed_get(path, token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+fn item_names(list: &Value) -> Vec<String> {
+    list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// EM-02: another sub-tenant crowding the ORDER BY with >1000 versions of an
+/// early-sorting name must not hide anyone else's sequences, and the builder
+/// is capped per name and per sub-tenant, and the PUT body is bounded.
+#[tokio::test]
+async fn embed_listing_is_filtered_in_sql_and_builder_is_capped() {
+    let rt = tuned_runtime(|rt| {
+        rt.limits.max_versions_per_sequence = 3;
+        rt.limits.max_sequences_per_sub_tenant = 2;
+    });
+    for case in cases_with(Some(rt)).await {
+        let t = tenant();
+        let (_, shared) = sequence(&case, &t, None, "default", json!({})).await;
+        let (_, gallery) = sequence(
+            &case,
+            &t,
+            None,
+            "embed-gallery",
+            json!({"embed": {"gallery": true}}),
+        )
+        .await;
+        for version in 1..=1_100 {
+            let seq: orch8_types::sequence::SequenceDefinition = serde_json::from_value(json!({
+                "id": Uuid::now_v7(), "tenant_id": t, "namespace": "default",
+                "name": "aaa-crowd", "version": version, "created_at": Utc::now(),
+                "sub_tenant": "globex", "blocks": [],
+            }))
+            .unwrap();
+            case.server.storage.create_sequence(&seq).await.unwrap();
+        }
+        let token = mint(
+            &case,
+            &t,
+            "acme",
+            &["sequences:read", "builder:edit"],
+            json!(["*"]),
+        )
+        .await;
+        assert_eq!(
+            put_seq(&case, &token, "f1").await.status(),
+            StatusCode::CREATED
+        );
+        let names = item_names(&embed_json(&case, "/embed/sequences", &token).await);
+        for expected in [shared.as_str(), gallery.as_str(), "f1"] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "{}: {expected} in {names:?}",
+                case.name
+            );
+        }
+        assert!(
+            !names.iter().any(|n| n == "aaa-crowd"),
+            "{}: foreign sub-tenant",
+            case.name
+        );
+
+        // Per-name version cap (3), then the per-sub-tenant name cap (2).
+        for _ in 0..2 {
+            assert_eq!(
+                put_seq(&case, &token, "f1").await.status(),
+                StatusCode::CREATED
+            );
+        }
+        let over_versions = put_seq(&case, &token, "f1").await;
+        assert_eq!(
+            over_versions.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            case.name
+        );
+        assert_eq!(error_code(over_versions).await, "sub_tenant_quota_exceeded");
+        assert_eq!(
+            put_seq(&case, &token, "f2").await.status(),
+            StatusCode::CREATED
+        );
+        let over_names = put_seq(&case, &token, "f3").await;
+        assert_eq!(
+            over_names.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            case.name
+        );
+        // Existing names stay writable up to their own cap.
+        assert_eq!(
+            put_seq(&case, &token, "f2").await.status(),
+            StatusCode::CREATED
+        );
+
+        // Oversized definitions are refused before decoding.
+        let huge = case
+            .client
+            .put(case.url("/embed/sequences/f2"))
+            .bearer_auth(&token)
+            .json(&json!({"blocks": [], "pad": "x".repeat(1_200_000)}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            huge.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{}",
+            case.name
+        );
+    }
+}
+
+/// EM-03: the dedupe key is scoped to the sub-tenant.
+#[tokio::test]
+async fn embed_idempotency_keys_do_not_cross_sub_tenants() {
+    for case in cases().await {
+        let t = tenant();
+        let (_, name) = sequence(&case, &t, None, "default", json!({})).await;
+        let acme = mint(&case, &t, "acme", &["runs:start"], json!(["*"])).await;
+        let globex = mint(&case, &t, "globex", &["runs:start"], json!(["*"])).await;
+        let start = |token: &str, key: String| {
+            case.embed_post("/embed/runs", token)
+                .json(&json!({"sequence": name, "idempotency_key": key}))
+                .send()
+        };
+        let a1 = start(&acme, "order-1".into()).await.unwrap();
+        assert_eq!(a1.status(), StatusCode::CREATED, "{}", case.name);
+        let a1: Value = a1.json().await.unwrap();
+        let g1 = start(&globex, "order-1".into()).await.unwrap();
+        assert_eq!(
+            g1.status(),
+            StatusCode::CREATED,
+            "{}: no cross-sub-tenant dedupe",
+            case.name
+        );
+        let g1: Value = g1.json().await.unwrap();
+        assert_ne!(a1["id"], g1["id"], "{}", case.name);
+        let a2 = start(&acme, "order-1".into()).await.unwrap();
+        assert_eq!(
+            a2.status(),
+            StatusCode::OK,
+            "{}: same sub-tenant dedupes",
+            case.name
+        );
+        assert_eq!(a2.json::<Value>().await.unwrap()["id"], a1["id"]);
+        let long = start(&acme, "k".repeat(129)).await.unwrap();
+        assert_eq!(long.status(), StatusCode::BAD_REQUEST, "{}", case.name);
+    }
+}
+
+/// EM-05: no allowlist means no tenant-level access; the allowlist matches
+/// (namespace, name); gallery templates are never runnable.
+#[tokio::test]
+async fn embed_tenant_level_access_needs_an_allowlist_and_gallery_is_read_only() {
+    for case in cases().await {
+        let t = tenant();
+        let (_, internal) = sequence(&case, &t, None, "default", json!({})).await;
+        let (_, other_ns) = sequence(&case, &t, None, "internal", json!({})).await;
+        let (_, gallery) = sequence(
+            &case,
+            &t,
+            None,
+            "embed-gallery",
+            json!({"embed": {"gallery": true}}),
+        )
+        .await;
+        let run = |token: &str, name: &str, ns: &str| {
+            case.embed_post("/embed/runs", token)
+                .json(&json!({"sequence": name, "namespace": ns}))
+                .send()
+        };
+        let bare = mint(
+            &case,
+            &t,
+            "acme",
+            &["runs:start", "sequences:read"],
+            Value::Null,
+        )
+        .await;
+        assert_eq!(
+            run(&bare, &internal, "default").await.unwrap().status(),
+            StatusCode::NOT_FOUND,
+            "{}: null allowlist = no tenant-level sequences",
+            case.name
+        );
+        let names = item_names(&embed_json(&case, "/embed/sequences", &bare).await);
+        assert!(!names.contains(&internal), "{}", case.name);
+        assert!(names.contains(&gallery), "{}", case.name);
+
+        let by_name = mint(&case, &t, "acme", &["runs:start"], json!([other_ns])).await;
+        assert_eq!(
+            run(&by_name, &other_ns, "internal").await.unwrap().status(),
+            StatusCode::NOT_FOUND,
+            "{}: a bare name only matches the default namespace",
+            case.name
+        );
+        let qualified = mint(
+            &case,
+            &t,
+            "acme",
+            &["runs:start"],
+            json!([format!("internal/{other_ns}")]),
+        )
+        .await;
+        assert_eq!(
+            run(&qualified, &other_ns, "internal")
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CREATED,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            run(&qualified, &internal, "default")
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{}",
+            case.name
+        );
+
+        let star = mint(&case, &t, "acme", &["runs:start"], json!(["*"])).await;
+        assert_eq!(
+            run(&star, &internal, "default").await.unwrap().status(),
+            StatusCode::CREATED,
+            "{}",
+            case.name
+        );
+        let denied = run(&star, &gallery, "embed-gallery").await.unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN, "{}", case.name);
+        assert_eq!(error_code(denied).await, "embed_scope_denied");
+    }
+}
+
+/// EM-08: `list_runs` fills the page past runs the token cannot see, and
+/// `list_approvals` looks beyond the newest 200 waiting runs.
+#[tokio::test]
+async fn embed_lists_skip_hidden_runs_instead_of_returning_short_pages() {
+    for case in cases().await {
+        let t = tenant();
+        let (hidden_id, _) = sequence(&case, &t, None, "default", json!({})).await;
+        let (owned_id, _) = sequence(&case, &t, Some("acme"), "default", json!({})).await;
+        let storage = &case.server.storage;
+        let mut owned_runs = Vec::new();
+        for _ in 0..3 {
+            owned_runs.push(start_ok(&case, &t, owned_id, Some("acme")).await);
+        }
+        // The owned run holding an approval is made waiting first, so it is
+        // the OLDEST waiting run.
+        storage
+            .save_block_output(&orch8_types::output::BlockOutput {
+                id: Uuid::now_v7(),
+                instance_id: InstanceId::from_uuid(owned_runs[0]),
+                block_id: BlockId::new("fetch".to_string()),
+                output: json!({}),
+                output_ref: None,
+                output_size: 2,
+                attempt: 0,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_instance_state(
+                InstanceId::from_uuid(owned_runs[0]),
+                InstanceState::Waiting,
+                None,
+            )
+            .await
+            .unwrap();
+        for _ in 0..205 {
+            let run = start_ok(&case, &t, hidden_id, Some("acme")).await;
+            storage
+                .update_instance_state(InstanceId::from_uuid(run), InstanceState::Waiting, None)
+                .await
+                .unwrap();
+        }
+
+        let token = mint(
+            &case,
+            &t,
+            "acme",
+            &["runs:read", "approvals:resolve"],
+            Value::Null,
+        )
+        .await;
+        let page1 = embed_json(&case, "/embed/runs?limit=2", &token).await;
+        assert_eq!(
+            page1["items"].as_array().unwrap().len(),
+            2,
+            "{}: {page1}",
+            case.name
+        );
+        let cursor = page1["next_cursor"].as_str().expect("more runs remain");
+        let page2 = embed_json(
+            &case,
+            &format!("/embed/runs?limit=2&cursor={cursor}"),
+            &token,
+        )
+        .await;
+        assert_eq!(
+            page2["items"].as_array().unwrap().len(),
+            1,
+            "{}: {page2}",
+            case.name
+        );
+        assert!(page2["next_cursor"].is_null(), "{}: {page2}", case.name);
+        for item in page1["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(page2["items"].as_array().unwrap())
+        {
+            assert!(
+                owned_runs.iter().any(|r| item["id"] == r.to_string()),
+                "{}: only visible runs are listed",
+                case.name
+            );
+        }
+
+        let approvals = embed_json(&case, "/embed/approvals", &token).await;
+        assert_eq!(
+            approvals["items"].as_array().unwrap().len(),
+            1,
+            "{}: older approval behind 205 hidden waiting runs: {approvals}",
+            case.name
+        );
+    }
+}
+
+/// EM-04: suspending a sub-tenant or revoking a token makes embed tokens
+/// fail; resuming restores them.
+#[tokio::test]
+async fn embed_tokens_can_be_revoked_and_sub_tenants_suspended() {
+    for case in cases().await {
+        let t = tenant();
+        let mint_full = |sub: &str| {
+            let body = json!({"sub_tenant": sub, "scopes": ["runs:read"], "ttl_seconds": 600});
+            let request = case.post("/embed/tokens", &t).json(&body);
+            async move {
+                let response = request.send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::CREATED);
+                response.json::<Value>().await.unwrap()
+            }
+        };
+        let first = mint_full("acme").await;
+        let second = mint_full("acme").await;
+        let globex = mint_full("globex").await;
+        let tok = |v: &Value| v["token"].as_str().unwrap().to_string();
+        let status = |token: String| {
+            let request = case.embed_get("/embed/runs", &token);
+            async move { request.send().await.unwrap().status() }
+        };
+        assert_eq!(status(tok(&first)).await, StatusCode::OK, "{}", case.name);
+
+        // Revoke one token by jti: only that token dies.
+        let jti = first["token_id"].as_str().unwrap();
+        let revoke = case
+            .post(&format!("/embed/tokens/{jti}/revoke"), &t)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoke.status(), StatusCode::NO_CONTENT, "{}", case.name);
+        assert_eq!(
+            status(tok(&first)).await,
+            StatusCode::UNAUTHORIZED,
+            "{}",
+            case.name
+        );
+        assert_eq!(status(tok(&second)).await, StatusCode::OK, "{}", case.name);
+
+        // Suspend the sub-tenant: all its tokens fail, others are untouched.
+        let suspend = case
+            .post("/sub-tenants/acme/suspend", &t)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(suspend.status(), StatusCode::NO_CONTENT, "{}", case.name);
+        assert_eq!(
+            status(tok(&second)).await,
+            StatusCode::UNAUTHORIZED,
+            "{}",
+            case.name
+        );
+        assert_eq!(status(tok(&globex)).await, StatusCode::OK, "{}", case.name);
+        let resume = case
+            .post("/sub-tenants/acme/resume", &t)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resume.status(), StatusCode::NO_CONTENT, "{}", case.name);
+        assert_eq!(status(tok(&second)).await, StatusCode::OK, "{}", case.name);
+        assert_eq!(
+            status(tok(&first)).await,
+            StatusCode::UNAUTHORIZED,
+            "{}: resume does not un-revoke a token",
+            case.name
+        );
+
+        // An embed token cannot operate the admin routes.
+        let by_token = case
+            .client
+            .post(case.url("/sub-tenants/acme/suspend"))
+            .bearer_auth(tok(&second))
+            .send()
+            .await
+            .unwrap();
+        assert!(by_token.status().is_client_error(), "{}", case.name);
+    }
+}
+
+/// EM-06: per-sub-tenant request rate limit and default run caps.
+#[tokio::test]
+async fn embed_requests_are_rate_limited_and_default_capped_per_sub_tenant() {
+    let rt = tuned_runtime(|rt| {
+        rt.limits.rate_limit_per_sec = 1;
+        rt.limits.rate_limit_burst = 8;
+        rt.limits.default_max_concurrent = 1;
+    });
+    for case in cases_with(Some(rt)).await {
+        let t = tenant();
+        let (_, name) = sequence(&case, &t, None, "default", json!({})).await;
+        let acme = mint(
+            &case,
+            &t,
+            "acme",
+            &["runs:read", "runs:start"],
+            json!(["*"]),
+        )
+        .await;
+        let globex = mint(
+            &case,
+            &t,
+            "globex",
+            &["runs:read", "runs:start"],
+            json!(["*"]),
+        )
+        .await;
+
+        // Default concurrent cap (1): the second embed-started run is refused,
+        let start = |token: &str| {
+            case.embed_post("/embed/runs", token)
+                .json(&json!({"sequence": name}))
+                .send()
+        };
+        assert_eq!(start(&acme).await.unwrap().status(), StatusCode::CREATED);
+        let capped = start(&acme).await.unwrap();
+        assert_eq!(
+            capped.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            case.name
+        );
+        assert_eq!(error_code(capped).await, "sub_tenant_quota_exceeded");
+        // another sub-tenant has its own allowance,
+        assert_eq!(start(&globex).await.unwrap().status(), StatusCode::CREATED);
+        // and an operator-set limit is never overwritten by the default.
+        let put = case
+            .put("/sub-tenants/globex/limits", &t)
+            .json(&json!({"max_concurrent": 5}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+        assert_eq!(start(&globex).await.unwrap().status(), StatusCode::CREATED);
+
+        // Token bucket: a burst per sub-tenant, then 429 `rate_limited`.
+        let limited = loop {
+            let r = case.embed_get("/embed/runs", &acme).send().await.unwrap();
+            if r.status() == StatusCode::TOO_MANY_REQUESTS {
+                break r;
+            }
+        };
+        assert_eq!(error_code(limited).await, "rate_limited", "{}", case.name);
+        let ok = case.embed_get("/embed/runs", &globex).send().await.unwrap();
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "{}: independent bucket",
+            case.name
+        );
+    }
+}
+
+/// EM-11: the sub-tenant header is refused where it is not honoured.
+#[tokio::test]
+async fn sub_tenant_header_is_rejected_on_routes_that_ignore_it() {
+    for case in cases().await {
+        let t = tenant();
+        let (seq, _) = sequence(&case, &t, None, "default", json!({})).await;
+        let run = start_ok(&case, &t, seq, Some("acme")).await;
+        for path in [
+            format!("/instances/{run}/children"),
+            format!("/instances/{run}/outputs"),
+            format!("/instances/{run}/logs"),
+        ] {
+            let response = case
+                .get(&path, &t)
+                .header("x-orch8-sub-tenant", "acme")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{}: {path}",
+                case.name
+            );
+            let without = case.get(&path, &t).send().await.unwrap();
+            assert_ne!(
+                without.status(),
+                StatusCode::BAD_REQUEST,
+                "{}: {path}",
+                case.name
+            );
+        }
+        // Routes that honour it still do.
+        let own = case
+            .get(&format!("/instances/{run}"), &t)
+            .header("x-orch8-sub-tenant", "acme")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(own.status(), StatusCode::OK, "{}", case.name);
     }
 }

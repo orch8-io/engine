@@ -120,6 +120,12 @@ Embedded surface for vendors; see [Embedded Orch8](EMBEDDED.md).
 | `token_secret` | string | `""` | Hex HMAC secret (≥ 32 bytes decoded) that signs `o8e1.` embed tokens. Empty = every `/api/v1/embed/*` route answers 404. An invalid value refuses startup |
 | `token_secret_previous` | string | `""` | Comma-separated retired hex secrets that still verify embed tokens (never used to mint). Set the old `token_secret` here while rotating to a new one; remove it after the longest token lifetime (1 h). |
 | `allowed_origins` | string | `""` | Comma-separated browser origins granted CORS on the embed-token routes only (`*` = any) |
+| `max_sequences_per_sub_tenant` | int | `200` | Distinct sequence names one sub-tenant may own through the embedded builder (`0` = unlimited) |
+| `max_versions_per_sequence` | int | `100` | Versions kept per sub-tenant-owned sequence name; further `PUT`s answer 429 (`0` = unlimited) |
+| `default_max_concurrent_per_sub_tenant` | int | `100` | Concurrent-run cap given to a sub-tenant with no explicit limits row on its first embed-started run (`0` = unlimited). An explicit `PUT /sub-tenants/{sub}/limits` always wins |
+| `default_max_executions_per_month_per_sub_tenant` | int | `100000` | Monthly-execution cap applied likewise (`0` = unlimited) |
+| `rate_limit_per_sec` | int | `20` | Sustained requests/second per `(tenant, sub-tenant)` on `/embed/*` token routes (429 beyond; `0` disables) |
+| `rate_limit_burst` | int | `60` | Token-bucket burst for that limiter |
 
 ---
 

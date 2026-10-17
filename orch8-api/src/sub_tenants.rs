@@ -6,11 +6,15 @@
 //! tenant. It is not an authorization boundary for end customers — that is
 //! the job of scoped embed tokens (`crate::embed`).
 
+use axum::extract::Request;
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
+use axum::http::{Method, StatusCode};
+use axum::middleware::Next;
 use axum::response::IntoResponse;
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::response::Response;
+use axum::routing::{get, post};
+use axum::{Extension, Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -115,9 +119,40 @@ fn path_sub_tenant(sub: &str) -> Result<(), ApiError> {
     validate_sub_tenant(sub).map_err(|e| ApiError::InvalidArgument(format!("sub_tenant: {e}")))
 }
 
+/// Routes that read `X-Orch8-Sub-Tenant`: instance create / batch / list /
+/// get and sequence create. Matches the method and the path without the
+/// `/api/v1` prefix.
+#[must_use]
+pub fn honours_sub_tenant_header(method: &Method, path: &str) -> bool {
+    let path = path.strip_prefix(crate::API_V1_PREFIX).unwrap_or(path);
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (method, segments.as_slice()) {
+        (&Method::POST, ["instances" | "sequences"] | ["instances", "batch"])
+        | (&Method::GET, ["instances"]) => true,
+        (&Method::GET, ["instances", id]) => uuid::Uuid::parse_str(id).is_ok(),
+        _ => false,
+    }
+}
+
+/// Reject `X-Orch8-Sub-Tenant` on routes that do not honour it (EM-11): a
+/// vendor proxy that attaches the header everywhere must learn it is not
+/// being scoped, instead of silently getting tenant-wide behaviour.
+pub async fn reject_unhonoured_sub_tenant_header(request: Request, next: Next) -> Response {
+    if request.headers().contains_key(SUB_TENANT_HEADER)
+        && !honours_sub_tenant_header(request.method(), request.uri().path())
+    {
+        return axum::response::IntoResponse::into_response(ApiError::InvalidArgument(format!(
+            "{SUB_TENANT_HEADER} is not supported on this route (it scopes instance create/list/get/batch and sequence create only); remove the header"
+        )));
+    }
+    next.run(request).await
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sub-tenants/{sub}/limits", get(get_limits).put(put_limits))
+        .route("/sub-tenants/{sub}/suspend", post(suspend))
+        .route("/sub-tenants/{sub}/resume", post(resume))
         .route("/usage/sub-tenants", get(usage))
 }
 
@@ -183,6 +218,63 @@ pub(crate) async fn put_limits(
         .await
         .map_err(|e| ApiError::from_storage(e, "sub_tenant_limits"))?;
     Ok(Json(limits_response(sub, limits)))
+}
+
+async fn set_suspended(
+    state: &AppState,
+    tenant_ctx: &OptionalTenant,
+    principal: Option<&Extension<crate::auth::PrincipalContext>>,
+    sub: &str,
+    suspended: bool,
+) -> Result<StatusCode, ApiError> {
+    if !crate::auth::principal_is_operator(principal.map(|Extension(p)| p)) {
+        return Err(ApiError::Forbidden(
+            "suspending sub-tenants requires the operator capability".into(),
+        ));
+    }
+    let tenant = require_tenant(tenant_ctx)?;
+    path_sub_tenant(sub)?;
+    state
+        .storage
+        .set_sub_tenant_suspended(&tenant, sub, suspended)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sub_tenant"))?;
+    // Make the change visible to this node's embed guard immediately; other
+    // nodes pick it up within the revocation-cache TTL (a few seconds).
+    state.embedded.revocations.clear();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(post, path = "/sub-tenants/{sub}/suspend", tag = "sub-tenants", operation_id = "suspend_sub_tenant",
+    params(("sub" = String, Path, description = "Sub-tenant id")),
+    responses(
+        (status = 204, description = "Every embed token of the sub-tenant is refused (401) within a few seconds"),
+        (status = 403, description = "Operator capability required"),
+    )
+)]
+pub(crate) async fn suspend(
+    State(state): State<AppState>,
+    tenant_ctx: OptionalTenant,
+    principal: Option<Extension<crate::auth::PrincipalContext>>,
+    Path(sub): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    set_suspended(&state, &tenant_ctx, principal.as_ref(), &sub, true).await
+}
+
+#[utoipa::path(post, path = "/sub-tenants/{sub}/resume", tag = "sub-tenants", operation_id = "resume_sub_tenant",
+    params(("sub" = String, Path, description = "Sub-tenant id")),
+    responses(
+        (status = 204, description = "Embed tokens of the sub-tenant are accepted again"),
+        (status = 403, description = "Operator capability required"),
+    )
+)]
+pub(crate) async fn resume(
+    State(state): State<AppState>,
+    tenant_ctx: OptionalTenant,
+    principal: Option<Extension<crate::auth::PrincipalContext>>,
+    Path(sub): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    set_suspended(&state, &tenant_ctx, principal.as_ref(), &sub, false).await
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -273,6 +365,33 @@ mod tests {
             header.enforce_access(None, "x"),
             Err(ApiError::NotFound(_))
         ));
+    }
+
+    /// EM-11: the header is only accepted where it is honoured.
+    #[test]
+    fn header_is_honoured_only_on_scoping_routes() {
+        let id = uuid::Uuid::new_v4();
+        for (m, p) in [
+            (Method::POST, "/api/v1/instances".to_string()),
+            (Method::POST, "/instances/batch".to_string()),
+            (Method::GET, "/api/v1/instances".to_string()),
+            (Method::GET, format!("/api/v1/instances/{id}")),
+            (Method::POST, "/api/v1/sequences".to_string()),
+        ] {
+            assert!(honours_sub_tenant_header(&m, &p), "{m} {p}");
+        }
+        for (m, p) in [
+            (Method::GET, format!("/api/v1/instances/{id}/children")),
+            (Method::GET, format!("/api/v1/instances/{id}/logs")),
+            (Method::GET, format!("/api/v1/instances/{id}/outputs")),
+            (Method::POST, format!("/api/v1/instances/{id}/signals")),
+            (Method::GET, "/api/v1/instances/dlq".to_string()),
+            (Method::GET, "/api/v1/sequences".to_string()),
+            (Method::GET, "/api/v1/embed/runs".to_string()),
+            (Method::GET, "/api/v1/changes".to_string()),
+        ] {
+            assert!(!honours_sub_tenant_header(&m, &p), "{m} {p}");
+        }
     }
 
     #[test]
