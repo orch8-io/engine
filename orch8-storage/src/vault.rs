@@ -272,17 +272,17 @@ impl CredentialSource for FileCredentials {
             .cached
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Ok(now) = Self::stamp(&self.path) {
-            if guard.0 != Some(now) {
-                match Self::load(&self.path) {
-                    Ok(creds) => {
-                        tracing::info!(path = %self.path.display(), "KMS credentials reloaded");
-                        *guard = (Some(now), creds);
-                    }
-                    Err(e) => {
-                        // Keep the previous stamp so the next call retries.
-                        tracing::warn!(error = %e, "KMS credentials reload failed; keeping previous");
-                    }
+        if let Ok(now) = Self::stamp(&self.path)
+            && guard.0 != Some(now)
+        {
+            match Self::load(&self.path) {
+                Ok(creds) => {
+                    tracing::info!(path = %self.path.display(), "KMS credentials reloaded");
+                    *guard = (Some(now), creds);
+                }
+                Err(e) => {
+                    // Keep the previous stamp so the next call retries.
+                    tracing::warn!(error = %e, "KMS credentials reload failed; keeping previous");
                 }
             }
         }
@@ -951,7 +951,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// L5-04: the SigV4 `Credential=` scope of a live KMS request follows the
+    /// L5-04: the `SigV4` `Credential=` scope of a live KMS request follows the
     /// credential source at call time, not a boot snapshot.
     #[tokio::test]
     async fn kms_requests_sign_with_rotated_credentials() {

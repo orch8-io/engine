@@ -1127,7 +1127,7 @@ const GRPC_MAX_CONNECTION_AGE: std::time::Duration = std::time::Duration::from_s
 const GRPC_MAX_CONNECTION_AGE_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 // Every argument is an independent piece of process wiring shared with HTTP.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn spawn_grpc_server(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
