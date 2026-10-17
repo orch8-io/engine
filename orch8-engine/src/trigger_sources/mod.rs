@@ -135,6 +135,20 @@ pub const fn is_compiled_in(trigger_type: &TriggerType) -> bool {
     }
 }
 
+/// Whether tenant-defined message triggers may fall back to the engine's own
+/// cloud identity (`AWS_*` env, `GOOGLE_APPLICATION_CREDENTIALS`, GCE/GKE
+/// metadata server) when their config carries no credentials.
+///
+/// Off by default: a tenant that could create an `sqs`/`pubsub` trigger
+/// without credentials would otherwise read and delete messages with the
+/// operator's identity (confused deputy). Operators who run single-tenant
+/// installs and rely on workload identity opt in with
+/// `ORCH8_ALLOW_AMBIENT_TRIGGER_CREDENTIALS=true`.
+#[must_use]
+pub fn ambient_credentials_allowed() -> bool {
+    std::env::var("ORCH8_ALLOW_AMBIENT_TRIGGER_CREDENTIALS").is_ok_and(|v| v == "true")
+}
+
 /// The trigger config with every `credentials://` reference resolved
 /// (tenant-scoped), so secrets never have to be stored inline.
 pub async fn resolved_config(
