@@ -132,6 +132,103 @@ async fn transition_instance_inner(
     Ok(())
 }
 
+/// Maximum orphans cancelled per sweep round.
+const ORPHAN_SWEEP_BATCH: u32 = 200;
+/// Rounds per call: one per nesting level, so a whole chain of sub-sequences
+/// unwinds in a single call (`MAX_SUB_SEQUENCE_DEPTH` is 16).
+const ORPHAN_SWEEP_ROUNDS: usize = 17;
+
+/// Cancel every live sub-workflow whose parent has already failed or been
+/// cancelled (L3-07).
+///
+/// A parent that reaches `Failed`/`Cancelled` can never observe its children
+/// again, but nothing stopped them: a cancelled parent left its child chain
+/// running (and calling external systems) to the end. Doing this as a sweep
+/// over `list_orphaned_children` instead of at each of the many terminal
+/// transition sites means every path (signal, API state change, bulk cancel,
+/// step failure, budget kill, reaper) is covered, and a crash between the
+/// parent's transition and the cascade only delays it. Grandchildren are
+/// handled by further rounds. Returns the instances cancelled (as read just before the cancel).
+pub async fn cancel_orphaned_children(
+    storage: &dyn StorageBackend,
+) -> Result<Vec<orch8_types::instance::TaskInstance>, EngineError> {
+    let mut cancelled = Vec::new();
+    for _ in 0..ORPHAN_SWEEP_ROUNDS {
+        let ids = storage.list_orphaned_children(ORPHAN_SWEEP_BATCH).await?;
+        if ids.is_empty() {
+            break;
+        }
+        let mut progressed = false;
+        for id in ids {
+            let Some(inst) = storage.get_instance(id).await? else {
+                continue;
+            };
+            if inst.state.is_terminal() {
+                continue;
+            }
+            match transition_instance(
+                storage,
+                id,
+                Some(&inst.tenant_id),
+                inst.state,
+                InstanceState::Cancelled,
+                None,
+            )
+            .await
+            {
+                Ok(()) => {
+                    progressed = true;
+                    cancelled.push(inst.clone());
+                    info!(
+                        instance_id = %id,
+                        parent_id = ?inst.parent_instance_id,
+                        "cancelled sub-workflow of a failed/cancelled parent"
+                    );
+                    cancel_live_nodes(storage, id).await;
+                    crate::signals::purge_live_worker_tasks(storage, id).await;
+                }
+                // Lost a race with the child's own writer: it moved on (and
+                // the next round sees its new state), nothing to do.
+                Err(EngineError::InvalidTransition { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    Ok(cancelled)
+}
+
+/// Mark the still-active execution nodes of a cancelled instance `Cancelled`
+/// so its tree does not keep showing running work. Best-effort.
+async fn cancel_live_nodes(storage: &dyn StorageBackend, instance_id: InstanceId) {
+    use orch8_types::execution::NodeState;
+    let tree = match storage.get_execution_tree(instance_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(instance_id = %instance_id, error = %e, "orphan cancel: failed to load tree");
+            return;
+        }
+    };
+    let ids: Vec<_> = tree
+        .iter()
+        .filter(|n| {
+            matches!(
+                n.state,
+                NodeState::Pending | NodeState::Running | NodeState::Waiting
+            )
+        })
+        .map(|n| n.id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    if let Err(e) = storage.update_nodes_state(&ids, NodeState::Cancelled).await {
+        warn!(instance_id = %instance_id, error = %e, "orphan cancel: failed to cancel nodes");
+    }
+}
+
 /// Record an audit log entry for a state transition.
 /// This is best-effort — audit failures are logged but do not block execution.
 pub async fn audit_transition(

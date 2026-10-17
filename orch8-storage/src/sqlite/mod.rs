@@ -991,6 +991,10 @@ impl crate::InstanceStore for SqliteStorage {
         misc::get_child_instances(self, parent_instance_id).await
     }
 
+    async fn list_orphaned_children(&self, limit: u32) -> Result<Vec<InstanceId>, StorageError> {
+        misc::list_orphaned_children(self, limit).await
+    }
+
     // === Dynamic Step Injection ===
 
     async fn inject_blocks(

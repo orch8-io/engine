@@ -14,6 +14,7 @@ mod sla;
 #[cfg(test)]
 mod tests;
 
+pub use dispatch::SUPERSEDED_CHILD_KEY;
 pub(crate) use dispatch::awaited_sub_sequence_child_terminal;
 use dispatch::dispatch_block;
 use sla::check_sla_deadlines;
@@ -213,12 +214,20 @@ pub async fn ensure_execution_tree(
     // flat path already completed must start Completed, or the evaluator
     // re-dispatches them — re-running their side effects, or tripping the
     // effect guard on the committed receipt.
+    //
+    // The same applies to a tree rebuilt after a DLQ retry / resume-from
+    // (the old tree is deleted, real outputs are kept): steps and
+    // sub-sequences nested in composites that already produced output stay
+    // done, so only the failed leaf re-runs (L3-05). Blocks under a
+    // loop / for_each are excluded: their outputs belong to earlier
+    // iterations and the loop re-enters its body.
     let completed = storage.get_completed_block_ids(instance.id).await?;
     if !completed.is_empty() {
         let now = chrono::Utc::now();
+        let iterating: std::collections::HashSet<ExecutionNodeId> = nodes_under_iteration(&nodes);
         for node in &mut nodes {
-            if node.parent_id.is_none()
-                && node.block_type == BlockType::Step
+            if matches!(node.block_type, BlockType::Step | BlockType::SubSequence)
+                && !iterating.contains(&node.id)
                 && completed.contains(&node.block_id)
             {
                 node.state = NodeState::Completed;
@@ -237,6 +246,29 @@ pub async fn ensure_execution_tree(
     }
 
     Ok(nodes)
+}
+
+/// Ids of the nodes that have a `loop` / `for_each` ancestor.
+fn nodes_under_iteration(nodes: &[ExecutionNode]) -> std::collections::HashSet<ExecutionNodeId> {
+    let by_id: std::collections::HashMap<ExecutionNodeId, &ExecutionNode> =
+        nodes.iter().map(|n| (n.id, n)).collect();
+    nodes
+        .iter()
+        .filter(|n| {
+            let mut cur = n.parent_id;
+            while let Some(pid) = cur {
+                let Some(parent) = by_id.get(&pid) else {
+                    break;
+                };
+                if matches!(parent.block_type, BlockType::Loop | BlockType::ForEach) {
+                    return true;
+                }
+                cur = parent.parent_id;
+            }
+            false
+        })
+        .map(|n| n.id)
+        .collect()
 }
 
 /// Invoke `f` for each child block slice of a composite, in the order
@@ -391,6 +423,89 @@ pub(crate) async fn compact_iteration_outputs(
         }
     }
     Ok(deleted)
+}
+
+/// Reasons `instance` cannot be rebound to `target` without corrupting its
+/// execution state (L3-09); empty means compatible.
+///
+/// A running instance owns an execution tree built from its current
+/// sequence. The evaluator resolves every node's block through the sequence
+/// it is bound to, so after a rebind each live node must still map to a block
+/// of the same type under the same parent: a node whose block was removed,
+/// retyped or re-parented can never finish (or finishes through the wrong
+/// handler). Finished nodes of removed blocks are history and are allowed;
+/// blocks injected into the instance count as part of the target. An
+/// instance without a tree (flat path) parked on a step needs that step in
+/// the target.
+pub async fn migration_incompatibilities(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    target: &SequenceDefinition,
+) -> Result<Vec<String>, EngineError> {
+    use std::collections::HashMap;
+
+    type Index<'a> = HashMap<&'a BlockId, (BlockType, Option<&'a BlockId>)>;
+    fn walk<'a>(blocks: &'a [BlockDefinition], parent: Option<&'a BlockId>, index: &mut Index<'a>) {
+        for block in blocks {
+            let (id, block_type) = block_meta(block);
+            index.insert(id, (block_type, parent));
+            for_each_child_slice(block, &mut |_, children| walk(children, Some(id), index));
+        }
+    }
+
+    let blocks = merged_blocks(storage, instance.id, target).await?;
+    let mut index = Index::new();
+    walk(&blocks, None, &mut index);
+
+    let tree = storage.get_execution_tree(instance.id).await?;
+    let nodes: HashMap<ExecutionNodeId, &ExecutionNode> = tree.iter().map(|n| (n.id, n)).collect();
+    let mut problems = Vec::new();
+    for node in &tree {
+        let live = matches!(
+            node.state,
+            NodeState::Pending | NodeState::Running | NodeState::Waiting
+        );
+        let Some((block_type, parent)) = index.get(&node.block_id) else {
+            if live {
+                problems.push(format!(
+                    "block '{}' is {:?} in the instance's execution tree but does not exist in the target sequence",
+                    node.block_id, node.state
+                ));
+            }
+            continue;
+        };
+        if *block_type != node.block_type {
+            problems.push(format!(
+                "block '{}' is a {:?} in the instance's execution tree but a {:?} in the target sequence",
+                node.block_id, node.block_type, block_type
+            ));
+            continue;
+        }
+        let tree_parent = node
+            .parent_id
+            .and_then(|p| nodes.get(&p))
+            .map(|p| &p.block_id);
+        if tree_parent != *parent {
+            problems.push(format!(
+                "block '{}' sits under {} in the instance's execution tree but under {} in the target sequence",
+                node.block_id,
+                tree_parent.map_or("the root".to_owned(), |p| format!("'{p}'")),
+                parent.map_or("the root".to_owned(), |p| format!("'{p}'")),
+            ));
+        }
+    }
+    if tree.is_empty()
+        && instance.state == InstanceState::Waiting
+        && let Some(step) = &instance.context.runtime.current_step
+        && !index.contains_key(step)
+    {
+        problems.push(format!(
+            "the instance is waiting on step '{step}', which does not exist in the target sequence"
+        ));
+    }
+    problems.sort();
+    problems.dedup();
+    Ok(problems)
 }
 
 fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {

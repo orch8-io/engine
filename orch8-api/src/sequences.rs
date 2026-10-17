@@ -460,6 +460,7 @@ pub(crate) struct MigrateInstanceRequest {
         (status = 200, description = "Instance migrated to new sequence version"),
         (status = 400, description = "Instance in terminal state"),
         (status = 404, description = "Instance or sequence not found"),
+        (status = 409, description = "Target sequence is structurally incompatible with the instance's execution state"),
     )
 )]
 pub(crate) async fn migrate_instance(
@@ -517,6 +518,26 @@ pub(crate) async fn migrate_instance(
         return Err(ApiError::Forbidden(format!(
             "sequence {} belongs to a different tenant than instance {}",
             req.target_sequence_id, req.instance_id
+        )));
+    }
+
+    // Structural check: every live node of the instance's execution tree must
+    // still exist, with the same type and parent, in the target sequence.
+    // Rebinding blindly strands the instance (a removed block can never
+    // finish) or runs it through the wrong handler (a retyped one).
+    let problems = orch8_engine::evaluator::migration_incompatibilities(
+        state.storage.as_ref(),
+        &instance,
+        &target_seq,
+    )
+    .await
+    .map_err(ApiError::from)?;
+    if !problems.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "sequence {} is structurally incompatible with instance {}: {}",
+            req.target_sequence_id,
+            req.instance_id,
+            problems.join("; ")
         )));
     }
 

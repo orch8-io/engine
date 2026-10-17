@@ -185,6 +185,32 @@ pub(super) async fn get_child_instances(
     rows.iter().map(row_to_instance).collect()
 }
 
+pub(super) async fn list_orphaned_children(
+    storage: &SqliteStorage,
+    limit: u32,
+) -> Result<Vec<InstanceId>, StorageError> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT c.id FROM task_instances c \
+         WHERE c.state IN ('scheduled', 'running', 'waiting', 'paused') \
+           AND c.parent_instance_id IS NOT NULL \
+           AND EXISTS ( \
+               SELECT 1 FROM task_instances p \
+               WHERE p.id = c.parent_instance_id \
+                 AND p.state IN ('failed', 'cancelled')) \
+         LIMIT ?1",
+    )
+    .bind(i64::from(limit))
+    .fetch_all(&storage.pool)
+    .await?;
+    rows.iter()
+        .map(|id| {
+            uuid::Uuid::parse_str(id)
+                .map(InstanceId::from_uuid)
+                .map_err(|e| StorageError::Query(format!("invalid instance id {id}: {e}")))
+        })
+        .collect()
+}
+
 // === Task Queue Routing ===
 
 pub(super) async fn claim_worker_tasks_from_queue(

@@ -138,6 +138,9 @@ pub async fn tick_once(
         &hooks,
     )
     .await?;
+    // After the signal sweep so a parent cancelled by a signal this pass
+    // takes its children down in the same pass.
+    cancel_orphans(storage, handlers, sequence_cache, &hooks).await;
 
     // Like the SLA sweep below, the single-shot path carries no cursor and
     // scans the whole Waiting set.
@@ -338,6 +341,9 @@ pub async fn run_tick_loop_with_liveness(
                 {
                     error!(error = %e, "signalled instance processing failed");
                 }
+                // After the signal sweep: a parent cancelled by a signal this
+                // iteration takes its children down in the same iteration.
+                cancel_orphans(&storage, &handlers, &sequence_cache, &hooks).await;
                 // Check SLA deadlines for waiting instances (external worker
                 // dispatch). These instances are not claimed by the normal
                 // tick, but deadlines should still fire.
@@ -1220,11 +1226,19 @@ async fn process_one_signalled_instance(
             && let Ok(seq) = sequence_cache
                 .get_by_id(storage.as_ref(), inst.sequence_id)
                 .await
-            && seq.on_cancel.is_some()
         {
             let storage = Arc::clone(storage);
             let handlers = Arc::clone(handlers);
             hooks.spawn(async move {
+                // Sagas the cancel cut short owe their compensations (L3-11).
+                crate::handlers::saga::compensate_aborted_sagas(
+                    &storage,
+                    &handlers,
+                    &inst,
+                    &seq,
+                    "cancelled",
+                )
+                .await;
                 if let Some(ref blocks) = seq.on_cancel {
                     run_cleanup_hooks(&storage, &handlers, &inst, blocks, "on_cancel").await;
                 }
@@ -1775,7 +1789,7 @@ async fn run_cleanup_hooks(
 /// `ActivePieces`, gRPC, or wasm plugin), bounded by [`HOOK_DISPATCH_TIMEOUT`]
 /// so a hung cleanup hook cannot stall the tick loop it runs on. Returns
 /// `None` when the step must be skipped — the skip warning is already logged.
-async fn dispatch_cleanup_step(
+pub(crate) async fn dispatch_cleanup_step(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &orch8_types::instance::TaskInstance,
@@ -1851,7 +1865,7 @@ async fn dispatch_cleanup_step(
 /// Record the outcome of a cleanup-hook step: persist a successful output
 /// under the step's block id, or log the failure. Both error paths are
 /// swallowed — the instance is already terminal.
-async fn record_cleanup_output(
+pub(crate) async fn record_cleanup_output(
     storage: &Arc<dyn StorageBackend>,
     instance: &orch8_types::instance::TaskInstance,
     step: &orch8_types::sequence::StepDef,
@@ -3014,6 +3028,50 @@ async fn cooperatively_preempt(
     Ok(yielded)
 }
 
+/// Cancel live sub-workflows of failed/cancelled parents (L3-07). A storage
+/// error is logged and retried on the next tick.
+///
+/// Each cancelled child then gets what any other cancel gets, off the tick:
+/// the compensations of its interrupted sagas (L3-11) and its `on_cancel`
+/// cleanup hook.
+async fn cancel_orphans(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &Arc<HandlerRegistry>,
+    sequence_cache: &SequenceCache,
+    hooks: &HookTasks,
+) {
+    let cancelled = match crate::lifecycle::cancel_orphaned_children(storage.as_ref()).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "orphaned sub-workflow sweep failed");
+            return;
+        }
+    };
+    for inst in cancelled {
+        let Ok(seq) = sequence_cache
+            .get_by_id(storage.as_ref(), inst.sequence_id)
+            .await
+        else {
+            continue;
+        };
+        let storage = Arc::clone(storage);
+        let handlers = Arc::clone(handlers);
+        hooks.spawn(async move {
+            crate::handlers::saga::compensate_aborted_sagas(
+                &storage,
+                &handlers,
+                &inst,
+                &seq,
+                "cancelled",
+            )
+            .await;
+            if let Some(ref blocks) = seq.on_cancel {
+                run_cleanup_hooks(&storage, &handlers, &inst, blocks, "on_cancel").await;
+            }
+        });
+    }
+}
+
 /// If this instance has a `parent_instance_id`, transition the parent from
 /// `Waiting` -> `Scheduled` so it is picked up on the next tick and can observe
 /// the child's terminal state.
@@ -3286,6 +3344,7 @@ async fn retry_deferred_parent_wakes(storage: &Arc<dyn StorageBackend>) {
 async fn fail_if_over_step_budget(
     ctx: &InstanceRunCtx<'_>,
     instance: &orch8_types::instance::TaskInstance,
+    sequence: &SequenceDefinition,
 ) -> Result<bool, EngineError> {
     let instance_id = instance.id;
     if ctx.max_steps_per_instance > 0 {
@@ -3308,6 +3367,18 @@ async fn fail_if_over_step_budget(
                 None,
             )
             .await?;
+            // L3-11: undo the completed steps of any saga the budget kill
+            // cut short, and (like every other terminal path) wake a
+            // sub-sequence parent that is waiting on this instance.
+            crate::handlers::saga::compensate_aborted_sagas(
+                ctx.storage,
+                ctx.handlers,
+                instance,
+                sequence,
+                "step_budget",
+            )
+            .await;
+            wake_parent_if_child(ctx.storage.as_ref(), instance).await;
             return Ok(true);
         }
     }
@@ -3360,7 +3431,7 @@ async fn process_instance_tree(
         storage, handlers, ..
     } = *ctx;
 
-    if fail_if_over_step_budget(ctx, instance).await? {
+    if fail_if_over_step_budget(ctx, instance, sequence).await? {
         return Ok(());
     }
 
@@ -3514,6 +3585,15 @@ async fn run_tree_terminal_effects(
     let instance_id = instance.id;
     match target {
         InstanceState::Cancelled => {
+            // Undo the completed steps of sagas the cancel cut short (L3-11).
+            crate::handlers::saga::compensate_aborted_sagas(
+                ctx.storage,
+                ctx.handlers,
+                instance,
+                sequence,
+                "cancelled",
+            )
+            .await;
             // Best-effort cleanup: on_cancel.
             if let Some(ref blocks) = sequence.on_cancel {
                 run_cleanup_hooks(ctx.storage, ctx.handlers, instance, blocks, "on_cancel").await;
@@ -3521,6 +3601,16 @@ async fn run_tree_terminal_effects(
             info!(instance_id = %instance_id, "instance cancelled (tree evaluation)");
         }
         InstanceState::Failed => {
+            // Sagas that did not roll themselves back (a failure elsewhere
+            // in the tree) still owe their compensations (L3-11).
+            crate::handlers::saga::compensate_aborted_sagas(
+                ctx.storage,
+                ctx.handlers,
+                instance,
+                sequence,
+                "failed",
+            )
+            .await;
             // Best-effort cleanup: on_failure.
             if let Some(ref blocks) = sequence.on_failure {
                 run_cleanup_hooks(ctx.storage, ctx.handlers, instance, blocks, "on_failure").await;
@@ -3578,6 +3668,16 @@ async fn handle_tree_eval_error(
         None,
     )
     .await?;
+    // Sagas the evaluation error cut short still owe their compensations
+    // (L3-11).
+    crate::handlers::saga::compensate_aborted_sagas(
+        ctx.storage,
+        ctx.handlers,
+        instance,
+        sequence,
+        "evaluation_error",
+    )
+    .await;
     // Best-effort cleanup: on_failure (tree evaluation blew up).
     if let Some(ref blocks) = sequence.on_failure {
         run_cleanup_hooks(ctx.storage, ctx.handlers, instance, blocks, "on_failure").await;

@@ -89,6 +89,58 @@ fn find_activation_child<'c>(
         })
 }
 
+/// The loop / `for_each` part of an activation key (everything after the node
+/// id), which is stable across a tree rebuild.
+fn activation_suffix(activation: &str) -> &str {
+    activation.split_once('/').map_or("", |(_, rest)| rest)
+}
+
+/// Marker `resume-from-block` sets on the children of the blocks it wipes:
+/// an explicit "run this block again" must not adopt the old child.
+pub const SUPERSEDED_CHILD_KEY: &str = "_superseded";
+
+/// Find the child a previous run of this sub-sequence block spawned (same
+/// block, same loop iteration, different node id because the execution tree
+/// was rebuilt) and re-bind it to the new activation. A `Failed` child is
+/// retried so the DLQ retry resumes the failed leaf of the whole chain
+/// instead of re-running it. `Cancelled` and superseded children are not
+/// adopted: the caller spawns a fresh one.
+async fn adopt_previous_child(
+    storage: &dyn StorageBackend,
+    children: &[TaskInstance],
+    block_id: &str,
+    activation: &str,
+) -> Result<Option<TaskInstance>, EngineError> {
+    use orch8_types::instance::InstanceState;
+
+    let suffix = activation_suffix(activation);
+    let Some(prev) = children.iter().rev().find(|c| {
+        c.metadata
+            .get("_parent_block_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(block_id)
+            && c.metadata
+                .get(PARENT_ACTIVATION_KEY)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|a| activation_suffix(a) == suffix)
+            && c.state != InstanceState::Cancelled
+            && c.metadata.get(SUPERSEDED_CHILD_KEY).is_none()
+    }) else {
+        return Ok(None);
+    };
+    storage
+        .merge_instance_metadata(
+            prev.id,
+            &serde_json::json!({ PARENT_ACTIVATION_KEY: activation }),
+        )
+        .await?;
+    if prev.state == InstanceState::Failed {
+        orch8_storage::lifecycle::retry_failed_instance(storage, prev.id).await?;
+        return Ok(storage.get_instance(prev.id).await?);
+    }
+    Ok(Some(prev.clone()))
+}
+
 /// `true` when a `Waiting` `SubSequence` node of `instance` has a child (for
 /// its current activation) that is already terminal — i.e. the parent parked
 /// but its awaited child finished before the parent reached `Waiting`, so the
@@ -326,7 +378,23 @@ pub(super) async fn dispatch_block(
             let activation =
                 sub_sequence_activation_key(storage.as_ref(), instance, node, tree).await?;
             let children = storage.get_child_instances(instance.id).await?;
-            let existing_child = find_activation_child(&children, ss_def.id.as_str(), &activation);
+            // After a DLQ retry / resume-from the execution tree is rebuilt
+            // with fresh node ids, so no child matches the new activation
+            // key. Adopt the previous run's child instead of spawning a
+            // second one (L3-05): a completed child is reused, a failed one
+            // is retried (resuming only its failed leaf), a live one is
+            // awaited.
+            let adopted = if node.state != NodeState::Waiting
+                && find_activation_child(&children, ss_def.id.as_str(), &activation).is_none()
+            {
+                adopt_previous_child(storage.as_ref(), &children, ss_def.id.as_str(), &activation)
+                    .await?
+            } else {
+                None
+            };
+            let existing_child = adopted
+                .as_ref()
+                .or_else(|| find_activation_child(&children, ss_def.id.as_str(), &activation));
 
             if let Some(child) = existing_child {
                 // Child exists — check if it's done.

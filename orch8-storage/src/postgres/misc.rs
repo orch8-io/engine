@@ -182,6 +182,26 @@ pub(super) async fn get_child_instances(
     rows.into_iter().map(InstanceRow::into_instance).collect()
 }
 
+pub(super) async fn list_orphaned_children(
+    store: &PostgresStorage,
+    limit: u32,
+) -> Result<Vec<InstanceId>, StorageError> {
+    let rows: Vec<uuid::Uuid> = sqlx::query_scalar(
+        r"SELECT c.id FROM task_instances c
+           WHERE c.state IN ('scheduled', 'running', 'waiting', 'paused')
+             AND c.parent_instance_id IS NOT NULL
+             AND EXISTS (
+                 SELECT 1 FROM task_instances p
+                 WHERE p.id = c.parent_instance_id
+                   AND p.state IN ('failed', 'cancelled'))
+           LIMIT $1",
+    )
+    .bind(i64::from(limit))
+    .fetch_all(&store.pool)
+    .await?;
+    Ok(rows.into_iter().map(InstanceId::from_uuid).collect())
+}
+
 // === Task Queue Routing ===
 
 pub(super) async fn claim_worker_tasks_from_queue(

@@ -1199,6 +1199,31 @@ pub async fn resume_from_block(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_tasks"))?;
 
+    // Children the wiped sub-sequence blocks spawned belong to the run being
+    // redone: mark them so the rebuilt tree spawns fresh ones instead of
+    // adopting them (L3-05 adoption is for DLQ retry, not for an explicit
+    // "run this block again").
+    let wiped_children = state
+        .storage
+        .get_child_instances(instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instances"))?;
+    for child in wiped_children.iter().filter(|c| {
+        c.metadata
+            .get("_parent_block_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|b| wipe_ids.iter().any(|w| w.as_str() == b))
+    }) {
+        state
+            .storage
+            .merge_instance_metadata(
+                child.id,
+                &serde_json::json!({ orch8_engine::evaluator::SUPERSEDED_CHILD_KEY: true }),
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instance"))?;
+    }
+
     if let Some(context) = patched_context {
         state
             .storage
