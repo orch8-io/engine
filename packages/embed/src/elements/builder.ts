@@ -103,6 +103,11 @@ export class Orch8BuilderElement extends Orch8Element {
     return Boolean(this.sequence);
   }
 
+  /** Unsaved edits are never replaced by a reload triggered by a credential/endpoint swap. */
+  protected override hasUnsavedChanges(): boolean {
+    return this.dirty;
+  }
+
   protected override onAttributeChanged(name: string): void {
     if (name === "sequence") {
       this.definition = null;
@@ -290,6 +295,11 @@ export class Orch8BuilderElement extends Orch8Element {
     try {
       const res = await this.client.putSequence(name, definition);
       const saved = unwrapDefinition(res) ?? definition;
+      if (this.sequence !== name) {
+        // The element moved to another sequence mid-save: the PUT landed, but must not clobber the new model.
+        this.emit<SequenceSavedDetail>("orch8-sequence-saved", { name, definition: saved });
+        return true;
+      }
       this.setModel(saved);
       this.saveMessage = { text: this.t("builderSaved"), error: false };
       this.announce(this.t("builderSaved"));

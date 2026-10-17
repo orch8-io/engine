@@ -4,7 +4,7 @@
  * custom-element tag with its attributes; the elements are registered and
  * JS-only props (tokenProvider, strings, fetchImpl) are assigned after mount.
  */
-import { createElement, forwardRef, useEffect, useImperativeHandle, useRef, type CSSProperties } from "react";
+import { createElement, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, type CSSProperties } from "react";
 import { defineOrch8Elements } from "./define.js";
 import type { Orch8ApprovalsElement, ApprovalResolvedDetail } from "./elements/approvals.js";
 import type { Orch8BadgeElement } from "./elements/badge.js";
@@ -12,6 +12,7 @@ import type { Orch8BuilderElement, SequenceSavedDetail } from "./elements/builde
 import type { Orch8RunTimelineElement } from "./elements/run-timeline.js";
 import type { Orch8RunsElement, RunSelectDetail } from "./elements/runs.js";
 import type { Orch8Strings } from "./i18n.js";
+import { Orch8EmbedError } from "./client.js";
 import type { TokenProvider } from "./token.js";
 import type { RunDetail } from "./types.js";
 
@@ -28,6 +29,8 @@ export interface Orch8CommonProps {
   locale?: string;
   /** Vendor slug used in the "Powered by" link. */
   vendor?: string;
+  /** CSP nonce for the `<style>` fallback used by browsers without constructable stylesheets. */
+  nonce?: string;
   fetchImpl?: typeof fetch;
   id?: string;
   className?: string;
@@ -40,6 +43,18 @@ interface WrapperSpec {
   tag: string;
   attrs: Record<string, string>;
   events: Record<string, string>;
+}
+
+/** `useLayoutEffect` warns on the server in React 18; fall back to `useEffect` there. */
+const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+function shallowEqual(a: object | undefined, b: object | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const ra = a as Record<string, unknown>;
+  const rb = b as Record<string, unknown>;
+  const ka = Object.keys(ra);
+  return ka.length === Object.keys(rb).length && ka.every((k) => Object.is(ra[k], rb[k]));
 }
 
 function toAttr(value: unknown): string | undefined {
@@ -55,18 +70,45 @@ function createWrapper<E extends HTMLElement, P extends Orch8CommonProps>(spec: 
     const record = props as unknown as Record<string, unknown>;
     const common = props as unknown as Orch8CommonProps;
 
-    useEffect(() => {
-      defineOrch8Elements();
-    }, []);
-
     const { tokenProvider, strings, fetchImpl } = common;
-    useEffect(() => {
+
+    // Props that are usually inline literals (arrow functions, objects) change identity on every
+    // render. Hold the latest in refs behind a stable trampoline so the element is only touched
+    // when something meaningful changes.
+    const providerRef = useRef<TokenProvider | undefined>(tokenProvider);
+    useIsoLayoutEffect(() => {
+      providerRef.current = tokenProvider;
+    });
+    const trampoline = useRef<TokenProvider | null>(null);
+    trampoline.current ??= (ctx) => {
+      const fn = providerRef.current;
+      if (!fn) throw new Orch8EmbedError("config", "tokenProvider was removed");
+      return fn(ctx);
+    };
+    const hasProvider = Boolean(tokenProvider);
+    const lastStrings = useRef<Partial<Orch8Strings> | undefined>(undefined);
+
+    // Layout effects: props land before the element's first (microtask-scheduled) load, so there
+    // is no "not configured" flash. The elements must be defined first so the setters exist.
+    useIsoLayoutEffect(() => {
+      defineOrch8Elements();
       const el = inner.current as unknown as Record<string, unknown> | null;
       if (!el) return;
-      if (tokenProvider) el.tokenProvider = tokenProvider;
-      if (strings) el.strings = strings;
-      if (fetchImpl) el.fetchImpl = fetchImpl;
-    }, [tokenProvider, strings, fetchImpl]);
+      el.tokenProvider = hasProvider ? trampoline.current : null;
+    }, [hasProvider]);
+
+    useIsoLayoutEffect(() => {
+      const el = inner.current as unknown as Record<string, unknown> | null;
+      if (!el) return;
+      el.fetchImpl = fetchImpl;
+    }, [fetchImpl]);
+
+    useIsoLayoutEffect(() => {
+      const el = inner.current as unknown as Record<string, unknown> | null;
+      if (!el || shallowEqual(lastStrings.current, strings)) return;
+      lastStrings.current = strings;
+      el.strings = strings ?? {};
+    }, [strings]);
 
     // Keep handlers in a ref so listeners are attached once.
     const handlers = useRef(record);
@@ -85,7 +127,7 @@ function createWrapper<E extends HTMLElement, P extends Orch8CommonProps>(spec: 
       return () => entries.forEach((off) => off());
     }, []);
 
-    const domProps: Record<string, unknown> = { ref: inner, id: common.id, className: common.className, style: common.style };
+    const domProps: Record<string, unknown> = { ref: inner, id: common.id, class: common.className, style: common.style };
     const commonAttrs: Record<string, string> = {
       baseUrl: "base-url",
       token: "token",
@@ -93,6 +135,7 @@ function createWrapper<E extends HTMLElement, P extends Orch8CommonProps>(spec: 
       colorScheme: "color-scheme",
       locale: "locale",
       vendor: "vendor",
+      nonce: "nonce",
     };
     for (const [prop, attr] of Object.entries({ ...commonAttrs, ...spec.attrs })) {
       const v = toAttr(record[prop]);

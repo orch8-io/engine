@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { badgeHref } from "../src/badge.js";
 import { cssVarsRule, safeLogoUrl, sanitizeCssVars } from "../src/theme.js";
-import { BASE, makeToken, mockEngine, mount, THEME, waitFor } from "./helpers.js";
+import { BASE, makeToken, mockEngine, mount, styleText, THEME, waitFor } from "./helpers.js";
 
 describe("theme", () => {
   it("normalises names and drops unsafe values", () => {
@@ -32,7 +32,7 @@ describe("theme", () => {
     );
     const img = await waitFor(() => root.querySelector<HTMLImageElement>("img.logo"));
     expect(img.getAttribute("alt")).toBe("");
-    const styles = Array.from(root.querySelectorAll("style")).map((s) => s.textContent).join("\n");
+    const styles = styleText(root);
     expect(styles).toContain("--orch8-accent: #abcdef;");
     expect(styles).toContain("--orch8-radius: 2px;");
   });

@@ -29,7 +29,7 @@ export interface Call {
   body: unknown;
 }
 
-type StaticReply = { status?: number; body?: unknown; headers?: Record<string, string> };
+type StaticReply = { status?: number; body?: unknown; /** Sent verbatim instead of JSON-encoding `body`. */ raw?: string; headers?: Record<string, string> };
 type Reply = StaticReply | ((call: Call) => StaticReply);
 
 /**
@@ -70,7 +70,7 @@ export function mockEngine(routes: Record<string, Reply | Reply[]>) {
       reply = route[Math.min(n, route.length - 1)]!;
     } else reply = route;
     const r = typeof reply === "function" ? reply(call) : reply;
-    return new Response(r.body === undefined ? "" : JSON.stringify(r.body), {
+    return new Response(r.raw ?? (r.body === undefined ? "" : JSON.stringify(r.body)), {
       status: r.status ?? 200,
       headers: { "content-type": "application/json", ...(r.headers ?? {}) },
     });
@@ -110,6 +110,15 @@ export function mount<K extends keyof HTMLElementTagNameMap>(
   for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
   document.body.appendChild(el);
   return { el, root: el.shadowRoot! };
+}
+
+/** All CSS applied to a shadow root, whether adopted or in `<style>` elements. */
+export function styleText(root: ShadowRoot): string {
+  const adopted = (root.adoptedStyleSheets ?? []).map((sheet) =>
+    Array.from(sheet.cssRules ?? []).map((r) => r.cssText).join("\n"),
+  );
+  const inline = Array.from(root.querySelectorAll("style")).map((s) => s.textContent ?? "");
+  return [...adopted, ...inline].join("\n");
 }
 
 export function text(root: ParentNode): string {

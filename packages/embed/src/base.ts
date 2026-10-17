@@ -2,10 +2,11 @@ import { renderBadge } from "./badge.js";
 import { EmbedClient, Orch8EmbedError } from "./client.js";
 import { h } from "./dom.js";
 import { defaultStrings, formatString, type Orch8StringKey, type Orch8Strings } from "./i18n.js";
-import { baseCss } from "./styles.js";
+import { baseCss, createStyleSlot, type StyleSlot } from "./styles.js";
 import { cssVarsRule, DEFAULT_THEME, loadTheme, safeLogoUrl, sanitizeCssVars } from "./theme.js";
 import { decodeEmbedToken, type TokenProvider } from "./token.js";
 import type { EmbedTheme } from "./types.js";
+import { VERSION } from "./version.js";
 
 /**
  * SSR guard: on the server `HTMLElement` doesn't exist, so the classes extend an
@@ -14,18 +15,41 @@ import type { EmbedTheme } from "./types.js";
 export const HTMLElementBase: typeof HTMLElement =
   typeof HTMLElement === "undefined" ? (class {} as unknown as typeof HTMLElement) : HTMLElement;
 
-export const BASE_ATTRIBUTES = ["token", "base-url", "color-scheme", "theme", "locale", "vendor"] as const;
+export const BASE_ATTRIBUTES = ["token", "base-url", "color-scheme", "theme", "locale", "vendor", "nonce"] as const;
 
 type LoadMode = "initial" | "refresh";
+
+/** Returned by `load()` when a refresh found nothing new, so the DOM is left alone. */
+export type LoadResult = void | "unchanged";
+
+function identityOf(token: string | null): string | null {
+  const p = decodeEmbedToken(token);
+  return p ? `${p.tid}|${p.sub}` : null;
+}
+
+function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  return ka.every((k) => Object.is(a[k], b[k]));
+}
 
 /**
  * Shared plumbing: shadow root, client construction, theme, i18n, lifecycle,
  * loading/error states, polling and the live region.
  */
 export abstract class Orch8Element extends HTMLElementBase {
+  /** Package version, compared by `defineOrch8Elements` to detect duplicate copies. */
+  static readonly orch8Version: string = VERSION;
+
   protected readonly root: ShadowRoot;
   protected readonly body: HTMLDivElement;
-  private readonly themeStyle: HTMLStyleElement;
+  private baseSlot: StyleSlot | null = null;
+  private themeSlot: StyleSlot | null = null;
+  private themeCss = "";
+  private visibleObserver: IntersectionObserver | null = null;
+  private inView = true;
+  private lastRenderAt = 0;
+
   private readonly live: HTMLDivElement;
   private readonly footer: HTMLDivElement;
   private _client: EmbedClient | null = null;
@@ -48,18 +72,23 @@ export abstract class Orch8Element extends HTMLElementBase {
   constructor() {
     super();
     this.root = this.attachShadow({ mode: "open" });
-    const style = document.createElement("style");
-    style.textContent = baseCss + this.extraCss();
-    this.themeStyle = document.createElement("style");
     this.body = h("div", { part: "body", class: "body" });
     this.live = h("div", { class: "sr-only", role: "status", "aria-live": "polite", "aria-atomic": "true" });
     this.footer = h("div", { class: "footer", part: "footer" });
-    this.root.append(style, this.themeStyle, this.body, this.footer, this.live);
+    this.root.append(this.body, this.footer, this.live);
   }
 
   /** Element-specific CSS appended to the base sheet. */
   protected extraCss(): string {
     return "";
+  }
+
+  /** Installs the stylesheets (CSP-safe: adopted sheets, `<style nonce>` fallback). */
+  private ensureStyles(): void {
+    if (this.baseSlot) return;
+    const nonce = this.getAttribute("nonce");
+    this.baseSlot = createStyleSlot(this.root, baseCss + this.extraCss(), nonce, true);
+    this.themeSlot = createStyleSlot(this.root, this.themeCss, nonce, false);
   }
 
   // ---- public API -------------------------------------------------------
@@ -85,7 +114,9 @@ export abstract class Orch8Element extends HTMLElementBase {
     return this._tokenProvider;
   }
   set tokenProvider(fn: TokenProvider | null) {
-    this._tokenProvider = typeof fn === "function" ? fn : null;
+    const next = typeof fn === "function" ? fn : null;
+    if (next === this._tokenProvider) return;
+    this._tokenProvider = next;
     this.invalidate();
   }
 
@@ -94,6 +125,7 @@ export abstract class Orch8Element extends HTMLElementBase {
     return this._fetch;
   }
   set fetchImpl(fn: typeof fetch | undefined) {
+    if (fn === this._fetch) return;
     this._fetch = fn;
     this.invalidate();
   }
@@ -103,7 +135,9 @@ export abstract class Orch8Element extends HTMLElementBase {
     return this._strings;
   }
   set strings(value: Partial<Orch8Strings>) {
-    this._strings = value && typeof value === "object" ? { ...value } : {};
+    const next = value && typeof value === "object" ? { ...value } : {};
+    if (shallowEqual(next, this._strings)) return; // inline object literals re-assign every render
+    this._strings = next;
     if (this.isConnected) this.render();
   }
 
@@ -115,6 +149,16 @@ export abstract class Orch8Element extends HTMLElementBase {
   // ---- lifecycle --------------------------------------------------------
 
   connectedCallback(): void {
+    this.ensureStyles();
+    if (typeof IntersectionObserver === "function") {
+      this.visibleObserver = new IntersectionObserver((entries) => {
+        const last = entries[entries.length - 1];
+        if (!last) return;
+        this.inView = last.isIntersecting;
+        if (this.inView && this.pollTimer === null && !document.hidden && this.wantsPolling()) this.schedulePoll(0);
+      });
+      this.visibleObserver.observe(this);
+    }
     this.visibilityHandler = () => {
       if (!document.hidden && this.pollTimer === null && this.wantsPolling()) this.schedulePoll(0);
     };
@@ -128,6 +172,9 @@ export abstract class Orch8Element extends HTMLElementBase {
     this.clearPoll();
     if (this.visibilityHandler) document.removeEventListener("visibilitychange", this.visibilityHandler);
     this.visibilityHandler = null;
+    this.visibleObserver?.disconnect();
+    this.visibleObserver = null;
+    this.inView = true;
   }
 
   attributeChangedCallback(name: string, oldValue: string | null, newValue: string | null): void {
@@ -144,9 +191,32 @@ export abstract class Orch8Element extends HTMLElementBase {
       this.renderFooter();
       return;
     }
-    if (name === "token" || name === "base-url") this._client = null;
+    if (name === "nonce") {
+      this.baseSlot?.setNonce(newValue);
+      this.themeSlot?.setNonce(newValue);
+      return;
+    }
+    if (name === "token" || name === "base-url") {
+      this._client = null;
+      if (name === "token") {
+        // Rotation of the same identity (refreshed token): swap the credential, keep the view.
+        const before = identityOf(oldValue);
+        if (before !== null && before === identityOf(newValue)) {
+          if (this.isConnected && this.phase === "error") this.scheduleLoad("initial");
+          return;
+        }
+      }
+      // Never overwrite unsaved edits: the model stays, only the credential/endpoint changes.
+      if (this.hasUnsavedChanges()) return;
+      this.serverTheme = null;
+    }
     this.onAttributeChanged(name);
     if (this.isConnected) this.scheduleLoad("initial");
+  }
+
+  /** True while the user has unsaved input that a reload would wipe. */
+  protected hasUnsavedChanges(): boolean {
+    return false;
   }
 
   /** Hook for subclass-specific attribute handling before reload. */
@@ -265,7 +335,7 @@ export abstract class Orch8Element extends HTMLElementBase {
       h(
         "h2",
         { class: "title", part: "title" },
-        logo ? h("img", { class: "logo", src: logo, alt: "", part: "logo" }) : null,
+        logo ? h("img", { class: "logo", src: logo, alt: "", part: "logo", referrerpolicy: "no-referrer", decoding: "async" }) : null,
         title,
       ),
       actions.some(Boolean) ? h("div", { class: "actions" }, ...actions) : null,
@@ -290,12 +360,13 @@ export abstract class Orch8Element extends HTMLElementBase {
   // ---- data loading -----------------------------------------------------
 
   /** Subclasses fetch into their own state. Throwing renders the error state. */
-  protected abstract load(signal: AbortSignal, mode: LoadMode): Promise<void>;
+  protected abstract load(signal: AbortSignal, mode: LoadMode): Promise<LoadResult>;
   /** Renders `this.body` from loaded state (status is "ready"). */
   protected abstract renderContent(): void;
 
   /** Re-renders according to the current status. */
   protected render(): void {
+    this.lastRenderAt = Date.now();
     if (this.phase === "error") this.renderError(this.lastError);
     else if (this.phase === "loading" && this.ready()) this.renderLoading();
     else this.renderContent();
@@ -313,9 +384,15 @@ export abstract class Orch8Element extends HTMLElementBase {
     return true;
   }
 
+  /** A credential source (provider / fetch) was swapped: keep a working view, recover a broken one. */
   private invalidate(): void {
     this._client = null;
-    if (this.isConnected) this.scheduleLoad("initial");
+    if (this.isConnected && this.phase !== "ready") this.scheduleLoad("initial");
+  }
+
+  /** Max age of a skipped render; elements that show relative times use a finite value. */
+  protected renderStaleMs(): number {
+    return Number.POSITIVE_INFINITY;
   }
 
   protected scheduleLoad(mode: LoadMode): void {
@@ -338,6 +415,7 @@ export abstract class Orch8Element extends HTMLElementBase {
     this.pollTimer = setTimeout(() => {
       this.pollTimer = null;
       if (typeof document !== "undefined" && document.hidden) return; // resumed by visibilitychange
+      if (!this.inView) return; // resumed by the IntersectionObserver
       void this.runLoad("refresh");
     }, delay);
   }
@@ -362,33 +440,39 @@ export abstract class Orch8Element extends HTMLElementBase {
       this.setBusy(true);
     }
     try {
-      await this.load(ctl.signal, mode);
+      const result = await this.load(ctl.signal, mode);
       if (ctl.signal.aborted) return;
       this.pollFailures = 0;
+      const unchanged =
+        result === "unchanged" &&
+        mode === "refresh" &&
+        this.phase === "ready" &&
+        Date.now() - this.lastRenderAt < this.renderStaleMs();
       this.phase = "ready";
       this.lastError = null;
-      this.render();
+      if (!unchanged) this.render();
       // Theme after the first successful call so a refreshed token is used.
       if (!this.serverTheme) await this.fetchTheme();
     } catch (err) {
       if (ctl.signal.aborted || (err instanceof Orch8EmbedError && err.kind === "aborted")) return;
-      if (mode === "refresh") {
+      const fatal =
+        err instanceof Orch8EmbedError && ["config", "forbidden", "unauthorized", "not_found"].includes(err.kind);
+      if (mode === "refresh" && !fatal) {
         this.pollFailures += 1;
         this.showReconnecting(true);
       } else {
         this.fail(err);
         if (!this.serverTheme) await this.fetchTheme();
       }
-      if (err instanceof Orch8EmbedError && ["config", "forbidden", "unauthorized", "not_found"].includes(err.kind)) {
-        return; // polling won't fix these
-      }
+      if (fatal) return; // polling won't fix these; the real error state is shown
     } finally {
       if (this.abortCtl === ctl) this.setBusy(false);
     }
     if (mode === "refresh" && this.pollFailures === 0) this.showReconnecting(false);
     if (this.wantsPolling()) {
       const base = this.pollInterval();
-      const delay = this.pollFailures ? Math.min(base * 2 ** this.pollFailures, 60_000) : base;
+      const backoff = this.pollFailures ? Math.min(base * 2 ** this.pollFailures, 60_000) : base;
+      const delay = backoff + Math.random() * backoff * 0.1; // jitter so widgets don't poll in lockstep
       this.schedulePoll(delay);
     }
   }
@@ -432,7 +516,8 @@ export abstract class Orch8Element extends HTMLElementBase {
       }
     }
     // Attribute values override the server theme; page CSS on the host still wins over both.
-    this.themeStyle.textContent = cssVarsRule({ ...server, ...attr });
+    this.themeCss = cssVarsRule({ ...server, ...attr });
+    this.themeSlot?.set(this.themeCss);
     this.renderFooter();
   }
 

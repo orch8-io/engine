@@ -1,4 +1,4 @@
-import { BASE_ATTRIBUTES, Orch8Element, type LoadMode } from "../base.js";
+import { BASE_ATTRIBUTES, Orch8Element, type LoadMode, type LoadResult } from "../base.js";
 import { Orch8EmbedError } from "../client.js";
 import { formatDateTime, formatRelative, h, uid } from "../dom.js";
 import type { Approval, ApprovalChoice } from "../types.js";
@@ -35,6 +35,7 @@ export class Orch8ApprovalsElement extends Orch8Element {
   private list: HTMLUListElement | null = null;
   private renderedLocale: string | undefined | null = null;
   private renderedStrings: unknown = null;
+  private signature = "";
 
   protected override extraCss(): string {
     return `
@@ -62,12 +63,31 @@ export class Orch8ApprovalsElement extends Orch8Element {
   protected override onAttributeChanged(): void {
     this.cards.clear();
     this.list = null;
+    this.signature = "";
   }
 
-  protected async load(signal: AbortSignal, _mode: LoadMode): Promise<void> {
+  /** A half-typed comment or a picked choice must survive credential swaps. */
+  protected override hasUnsavedChanges(): boolean {
+    for (const card of this.cards.values()) {
+      const comment = card.form.querySelector<HTMLTextAreaElement>("textarea");
+      if (comment && comment.value.trim() !== "") return true;
+      if (card.form.querySelector('input[type="radio"]:checked')) return true;
+    }
+    return false;
+  }
+
+  protected override renderStaleMs(): number {
+    return 60_000; // "requested 5 minutes ago" must not go stale
+  }
+
+  protected async load(signal: AbortSignal, mode: LoadMode): Promise<LoadResult> {
     const res = await this.client.listApprovals(signal);
     const only = this.getAttribute("instance-id");
     this.approvals = only ? res.items.filter((a) => a.instance_id === only) : res.items;
+    const signature = JSON.stringify(this.approvals);
+    const same = signature === this.signature;
+    this.signature = signature;
+    if (same && mode === "refresh") return "unchanged";
   }
 
   private choicesFor(a: Approval): ApprovalChoice[] {
@@ -219,8 +239,8 @@ export class Orch8ApprovalsElement extends Orch8Element {
       this.list = h("ul", { class: "plain", part: "list", "aria-labelledby": titleId });
       this.body.replaceChildren(header, this.list);
     } else {
-      // Refresh header in place (logo may have arrived).
-      this.body.firstElementChild?.replaceWith(header);
+      // Refresh header in place (logo may have arrived). Select it: a reconnect banner may be first.
+      this.body.querySelector(":scope > .header")?.replaceWith(header);
     }
 
     const wanted = new Set(this.approvals.map((a) => a.id));

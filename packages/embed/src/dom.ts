@@ -91,7 +91,8 @@ export function formatDuration(ms: number): string {
 export function jsonPreview(value: unknown, max = 10_000): string {
   let text: string;
   try {
-    text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    // JSON.stringify returns undefined (not a string) for undefined, functions and symbols.
+    text = typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? String(value));
   } catch {
     text = String(value);
   }
