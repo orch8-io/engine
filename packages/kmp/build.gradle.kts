@@ -90,7 +90,7 @@ kotlin {
                 // orch8-mobile/uniffi.toml ([bindings.kotlin] package_name).
                 kotlin.srcDir("../../orch8-mobile/bindings/kotlin")
                 dependencies {
-                    implementation("net.java.dev.jna:jna:5.15.0")
+                    implementation("net.java.dev.jna:jna:5.17.0")
                 }
             }
         }

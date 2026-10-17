@@ -6,6 +6,7 @@ export {
   Orch8Client,
   PermanentHandlerError,
   parseTaskContext,
+  orch8ErrorKind,
   EVENTS,
   MAX_DELEGATION_TTL_SECS,
 } from "./core";

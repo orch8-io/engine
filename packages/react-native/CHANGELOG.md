@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Default database location moves to a non-backed-up directory (iOS
+  Application Support with `isExcludedFromBackup`, Android `noBackupFilesDir`);
+  an existing database at the old default is still used.
+- Shut the engine down when the native module is invalidated; events never
+  throw when the JS runtime is gone and handlers fail fast without a listener.
+- Rejections now use `ORCH8_<KIND>` codes plus `userInfo.kind`; the old code is
+  in `userInfo.legacyCode`. New `orch8ErrorKind()` helper and `Orch8ErrorKind`.
+- Re-`initialize` shuts the previous engine down before opening the new one.
 - Fix the native modules against the current Orch8Mobile surface: full
   `MobileEngineConfig` (sync, telemetry, sequences URL, memory budget), every
   JS method now has a native implementation on both platforms, `sync` passes

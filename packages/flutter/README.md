@@ -27,6 +27,36 @@ thread waits for the returned future (up to `handlerTimeoutMs`). Throw
 `PermanentHandlerException` to fail without retry; any other error is
 retryable.
 
+## Where the database lives, backups and lifecycle
+
+When `dbPath` is omitted the database is created in a location that is **not
+backed up**:
+
+| Platform | Default | Notes |
+|---|---|---|
+| iOS | `<Application Support>/Orch8/orch8.db` | hidden from Files, `isExcludedFromBackup`, protection class `completeUntilFirstUserAuthentication` (readable by background tasks after the first unlock) |
+| Android | `<noBackupFilesDir>/orch8.db` | excluded from Auto Backup and device transfer |
+
+A database that already exists at the previous default (iOS `Documents/orch8.db`,
+Android `getDatabasePath("orch8.db")`) keeps being used, so upgrades do not lose
+data; it stays subject to the OS backup rules of that location. Pass `dbPath`
+to choose a location explicitly. If you want the workflow state to be restored
+from a backup, set `dbPath` to a backed-up directory and add the matching
+Android `dataExtractionRules` / `fullBackupContent` entry yourself.
+
+The engine is shut down automatically when the Flutter engine is detached
+(`onDetachedFromEngine` on Android, `detachFromEngine` on iOS). Step handlers and the token provider are Dart
+functions: they need a live Flutter engine/isolate. When none is
+available (headless/background launch without Dart, or after detach) the step
+fails immediately as retryable instead of waiting for `handlerTimeoutMs`.
+
+## Errors
+
+Failures are `PlatformException`s with `code = "ORCH8_<KIND>"` (for example
+`ORCH8_NOT_FOUND`) and `details['kind']`; use `orch8ErrorKindOf(error)` to
+classify them as an `Orch8ErrorKind`. The previous code (`ORCH8_ERROR`,
+`INIT_ERROR`) is available as `details['legacyCode']`.
+
 ## Runtime node (engine release after 0.7.1)
 
 The device can join the distributed-execution mesh as a runtime of kind

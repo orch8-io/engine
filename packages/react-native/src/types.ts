@@ -260,3 +260,23 @@ export type StepHandler = (
   input: string,
   context: HandlerContext
 ) => Promise<unknown> | unknown;
+
+/**
+ * Error category reported by the native engine. Mirrors the Rust `MobileError`
+ * and `SyncError` variants (and `Orch8ErrorKind` in the KMP and Flutter SDKs).
+ * Native promise rejections carry `code = "ORCH8_<KIND>"` (e.g.
+ * `ORCH8_NOT_FOUND`) and `userInfo.kind`; `userInfo.legacyCode` holds the
+ * pre-0.8 code (`ORCH8_ERROR` / `INIT_ERROR`).
+ */
+export type Orch8ErrorKind =
+  | "engine"
+  | "storage"
+  | "invalid_input"
+  | "not_found"
+  | "resource_limit"
+  | "already_exists"
+  | "shutdown"
+  | "network"
+  | "signature_invalid"
+  | "invalid_manifest"
+  | "unknown";

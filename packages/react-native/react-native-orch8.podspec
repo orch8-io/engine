@@ -17,6 +17,7 @@ Pod::Spec.new do |s|
   s.platforms    = { ios: "16.0" }
   s.swift_version = "5.9"
   s.source_files = "ios/**/*.{h,m,mm,swift}"
+  s.resource_bundles = { "react-native-orch8-privacy" => ["ios/PrivacyInfo.xcprivacy"] }
   s.dependency     "React-Core"
   s.dependency     "Orch8Mobile", orch8_native_version
 end

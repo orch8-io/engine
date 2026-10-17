@@ -6,3 +6,11 @@ rustflags = ["-C", "link-arg=-mios-simulator-version-min=16.0"]
 
 [target.x86_64-apple-ios]
 rustflags = ["-C", "link-arg=-mios-simulator-version-min=16.0"]
+
+# Android 15+ devices may use 16 KB pages; Google Play requires 16 KB ELF
+# alignment for new submissions. NDK r27 defaults to 4 KB, so set it explicitly.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

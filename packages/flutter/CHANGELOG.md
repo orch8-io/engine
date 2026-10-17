@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Shut the engine down when the plugin detaches from the Flutter engine
+  (Android and iOS); re-`initialize` shuts the previous engine down first.
+- Default database location moves to a non-backed-up directory (iOS
+  Application Support with `isExcludedFromBackup`, Android `noBackupFilesDir`);
+  an existing database at the old default is still used.
+- Errors use `ORCH8_<KIND>` codes plus `details['kind']`; the old code is in
+  `details['legacyCode']`. New `Orch8ErrorKind` and `orch8ErrorKindOf()`.
 - Fix the native plugins against the current Orch8Mobile surface: full
   `MobileEngineConfig` (sync, telemetry, sequences URL, memory budget), native
   implementations for every Dart method (`registerHandler`, `tickOnce`,

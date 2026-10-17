@@ -10,6 +10,7 @@ import Orch8Mobile
 /// main thread.
 public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
     private let lock = NSLock()
+    private let initLock = NSLock()
     private var _engine: MobileEngine?
     private var handlerTimeoutMs: UInt64 = 30_000
     private var eventSink: FlutterEventSink?
@@ -29,6 +30,23 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
         instance.channel = channel
         registrar.addMethodCallDelegate(instance, channel: channel)
         eventChannel.setStreamHandler(instance)
+        // Publishing makes Flutter call `detachFromEngine(for:)` on teardown.
+        registrar.publish(instance)
+    }
+
+    /// The Flutter engine is going away: stop the Orch8 engine so it no longer
+    /// calls handlers that cannot answer (each would burn a retry attempt) and
+    /// releases the SQLite file before a later attach opens another engine.
+    public func detachFromEngine(for registrar: FlutterPluginRegistrar) {
+        lock.lock()
+        let engine = _engine
+        _engine = nil
+        lock.unlock()
+        channel = nil
+        eventSink = nil
+        if let engine {
+            workQueue.async { engine.shutdown() }
+        }
     }
 
     // MARK: - Dispatch
@@ -50,7 +68,7 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
             } catch let error as InvalidArgument {
                 reply = FlutterError(code: "INVALID_ARGUMENT", message: error.message, details: nil)
             } catch {
-                reply = FlutterError(code: "ORCH8_ERROR", message: "\(error)", details: nil)
+                reply = Orch8Support.flutterError(error)
             }
             DispatchQueue.main.async { result(reply) }
         }
@@ -271,9 +289,7 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
     }
 
     private func handleInitialize(_ args: [String: Any], result: @escaping FlutterResult) {
-        let dbPath = args["dbPath"] as? String
-            ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("orch8.db").path
+        let dbPath = args["dbPath"] as? String ?? Orch8Support.defaultDatabasePath()
 
         func u64(_ key: String, _ fallback: UInt64) -> UInt64 {
             guard let n = args[key] as? NSNumber, n.int64Value >= 0 else { return fallback }
@@ -310,17 +326,24 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
         workQueue.async {
             let reply: Any?
             do {
+                // Serialize re-initialization and release the SQLite file held
+                // by a previous engine before opening a new one on the same path.
+                self.initLock.lock()
+                defer { self.initLock.unlock() }
+                self.lock.lock()
+                let previous = self._engine
+                self._engine = nil
+                self.lock.unlock()
+                previous?.shutdown()
                 let engine = try MobileEngine(dbPath: dbPath, config: config)
                 engine.setListener(listener: FlutterEngineListener(plugin: self))
                 self.lock.lock()
-                let previous = self._engine
                 self._engine = engine
                 self.handlerTimeoutMs = config.handlerTimeoutMs
                 self.lock.unlock()
-                previous?.shutdown()
                 reply = nil
             } catch {
-                reply = FlutterError(code: "INIT_ERROR", message: "\(error)", details: nil)
+                reply = Orch8Support.flutterError(error, legacyCode: "INIT_ERROR")
             }
             DispatchQueue.main.async { result(reply) }
         }

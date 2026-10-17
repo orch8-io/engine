@@ -275,6 +275,15 @@ engine.stopDelegation()    // pause; journaled delegations resume on the next st
 
 `onPushReceived()` / `onPushWake(...)` advance pending delegations at once.
 
+## Database location and backups
+
+`Orch8Engine.open(context, ...)` (Android) uses `noBackupFilesDir`, which is
+excluded from Auto Backup and device transfer. `Orch8Ios.defaultDatabasePath()`
+(iOS) returns `<Application Support>/Orch8/orch8.db`, excluded from backup and
+protected until first unlock. A database that already exists at the previous
+default (`getDatabasePath(...)` / `<Documents>/orch8.db`) keeps being used, so
+upgrades do not lose data. Pass your own path to override.
+
 ## API map
 
 | `MobileEngine` (Swift / Android) | `Orch8Engine` (KMP) |

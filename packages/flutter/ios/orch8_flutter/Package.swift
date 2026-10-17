@@ -22,7 +22,8 @@ let package = Package(
             dependencies: [
                 .product(name: "FlutterFramework", package: "FlutterFramework"),
                 .product(name: "Orch8Mobile", package: "orch8-mobile-swift"),
-            ]
+            ],
+            resources: [.copy("PrivacyInfo.xcprivacy")]
         ),
     ]
 )

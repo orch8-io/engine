@@ -11,6 +11,9 @@ on:
       - "orch8-types/**"
       - "packages/**"
       - "scripts/check-sdk-versions.sh"
+      - "scripts/check-android-elf-align.sh"
+      - "Cargo.toml"
+      - ".cargo/**"
       - ".github/workflows/mobile.yml"
   pull_request:
     branches: [main]
@@ -21,6 +24,9 @@ on:
       - "orch8-types/**"
       - "packages/**"
       - "scripts/check-sdk-versions.sh"
+      - "scripts/check-android-elf-align.sh"
+      - "Cargo.toml"
+      - ".cargo/**"
       - ".github/workflows/mobile.yml"
   workflow_dispatch:
     inputs:
@@ -126,6 +132,11 @@ jobs:
 
       - name: Build liborch8_mobile
         run: cargo build --profile mobile-release --target ${{ matrix.target }} -p orch8-mobile
+
+      - name: Verify 16 KB ELF alignment
+        env:
+          READELF: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf
+        run: ./scripts/check-android-elf-align.sh target/${{ matrix.target }}/mobile-release/liborch8_mobile.so
 
       - name: Upload shared library
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -275,6 +286,69 @@ jobs:
             exit 1
           fi
           gradle :orch8-mobile:publishReleasePublicationToGitHubPackagesRepository
+
+  # -- Wrapper package tests -------------------------------------------------
+  # Pure-logic tests for the SDK wrappers. They do not need the Rust build.
+  swift-tests:
+    name: Swift package tests
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The package is iOS-only (binary XCFramework), so `swift test` on the
+      # macOS host cannot link it: run the tests on an iOS simulator.
+      - name: Test on an iOS simulator
+        working-directory: packages/swift
+        run: |
+          UDID="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devs = json.load(sys.stdin)["devices"]
+          for runtime, items in sorted(devs.items(), reverse=True):
+              if "iOS" not in runtime:
+                  continue
+              for d in items:
+                  if d["name"].startswith("iPhone") and d["isAvailable"]:
+                      print(d["udid"]); sys.exit(0)
+          sys.exit("no iPhone simulator available")
+          ')"
+          xcodebuild test -scheme Orch8Mobile -destination "platform=iOS Simulator,id=${UDID}"
+
+  flutter-tests:
+    name: Flutter analyze and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Flutter (stable)
+        run: |
+          git clone --depth 1 --branch stable https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Analyze
+        working-directory: packages/flutter
+        run: |
+          flutter pub get
+          flutter analyze
+      - name: Test
+        working-directory: packages/flutter
+        run: flutter test
+
+  react-native-tests:
+    name: React Native typecheck and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: packages/react-native/package-lock.json
+      - name: Typecheck and test
+        working-directory: packages/react-native
+        run: |
+          npm ci
+          npm run typescript
+          npm test
 
   # GitHub Release creation and native release assets are owned exclusively by
   # release.yml. Keeping a second publisher here creates a race and can produce
