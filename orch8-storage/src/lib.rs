@@ -1668,9 +1668,15 @@ pub trait WorkerStore: Send + Sync + 'static {
 
     /// Aggregate worker task statistics: counts by state, by handler, and active workers.
     /// When `tenant_id` is provided, stats are scoped to tasks belonging to that tenant's instances.
+    ///
+    /// `window_secs = None` counts every row (lifetime). `Some(n)` restricts the
+    /// terminal states (`completed`, `failed`) to rows whose `completed_at` falls
+    /// in the last `n` seconds, so per-handler failure rates reflect the current
+    /// window; `pending` and `claimed` rows are live gauges and are always counted.
     async fn worker_task_stats(
         &self,
         tenant_id: Option<&orch8_types::ids::TenantId>,
+        window_secs: Option<u32>,
     ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
 
     /// Claimable pending worker tasks of live instances, grouped by tenant,

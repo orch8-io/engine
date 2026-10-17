@@ -97,23 +97,33 @@ const PAGE_GLOSSARY = [
   },
 ];
 
+/** Window for the per-handler failure rate that feeds the Attention panel. */
+const ATTENTION_WINDOW_SECS = 300;
+
 export default function Overview() {
   usePageTitle("Overview");
   const navigate = useNavigate();
   const clock = useClock();
 
   const statsFetcher = useCallback((signal?: AbortSignal) => getWorkerTaskStats(signal), []);
+  const recentStatsFetcher = useCallback(
+    (signal?: AbortSignal) => getWorkerTaskStats(signal, ATTENTION_WINDOW_SECS),
+    [],
+  );
   const breakersFetcher = useCallback((signal?: AbortSignal) => listCircuitBreakers(signal), []);
   const nodesFetcher = useCallback((signal?: AbortSignal) => listClusterNodes(signal), []);
   const dlqFetcher = useCallback((signal?: AbortSignal) => listDlq({ limit: "50" }, signal), []);
 
   const stats = usePolling<WorkerTaskStats>(statsFetcher);
+  // Windowed counts drive the Attention panel; the lifetime `stats` feed drives the table.
+  const recentStats = usePolling<WorkerTaskStats>(recentStatsFetcher);
   const breakers = usePolling<CircuitBreakerState[]>(breakersFetcher, 2000);
   const nodes = usePolling<ClusterNode[]>(nodesFetcher, 2000);
   const dlq = usePolling<TaskInstance[]>(dlqFetcher, 5000);
 
   const windowed = useWindowedStats(stats.data, 60);
   const handlerRows = useHandlerRows(stats.data);
+  const recentHandlerRows = useHandlerRows(recentStats.data);
 
   if (stats.error instanceof AuthError) {
     navigate("/settings");
@@ -185,7 +195,9 @@ export default function Overview() {
     reasons.push("no active workers");
   }
 
-  const badHandlers = handlerRows.filter((h) => h.total >= 5 && h.failureRate >= 10);
+  const badHandlers = recentHandlerRows.filter(
+    (h) => h.completed + h.failed >= 5 && h.failureRate >= 10,
+  );
 
   const showAttention =
     openBreakers.length > 0 ||
@@ -412,7 +424,7 @@ export default function Overview() {
                   <span className="text-warn tabular font-mono text-[12px]">
                     {h.failureRate.toFixed(h.failureRate < 10 ? 1 : 0)}% failure
                   </span>
-                  <span className="text-muted">above the 10% alert threshold over the current window</span>
+                  <span className="text-muted">above the 10% alert threshold over the last 5 minutes</span>
                 </li>
               ))}
             </ul>

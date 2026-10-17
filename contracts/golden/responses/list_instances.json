@@ -1,0 +1,35 @@
+{
+  "has_more": false,
+  "items": [
+    {
+      "context": {
+        "audit": [],
+        "config": {},
+        "data": {
+          "x": 1
+        },
+        "runtime": {
+          "attempt": 0,
+          "current_step": null,
+          "current_step_started_at": null,
+          "dry_run": false,
+          "dry_run_auto_approve": false,
+          "resource_key": null,
+          "started_at": null,
+          "total_steps_executed": 0
+        }
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "id": "00000000-0000-0000-0000-000000000000",
+      "metadata": null,
+      "namespace": "ns",
+      "next_fire_at": "2026-01-01T00:00:00Z",
+      "priority": "High",
+      "sequence_id": "00000000-0000-0000-0000-000000000000",
+      "state": "scheduled",
+      "tenant_id": "golden",
+      "timezone": "UTC",
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+  ]
+}

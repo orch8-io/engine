@@ -1038,14 +1038,22 @@ pub(super) async fn list(
 pub(super) async fn stats(
     store: &PostgresStorage,
     tenant_id: Option<&orch8_types::ids::TenantId>,
+    window_secs: Option<u32>,
 ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
     // Count by state + handler_name
-    let mut qb =
-        sqlx::QueryBuilder::new("SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks");
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks WHERE TRUE",
+    );
     if let Some(tid) = tenant_id {
-        qb.push(" WHERE instance_id IN (SELECT id FROM task_instances WHERE tenant_id =")
+        qb.push(" AND instance_id IN (SELECT id FROM task_instances WHERE tenant_id =")
             .push_bind(tid.as_str())
             .push(")");
+    }
+    if let Some(secs) = window_secs {
+        // Terminal rows only count inside the window; live gauges always count.
+        qb.push(" AND (state NOT IN ('completed', 'failed') OR completed_at >= NOW() - make_interval(secs => ")
+            .push_bind(f64::from(secs))
+            .push("))");
     }
     qb.push(" GROUP BY state, handler_name");
     let counts = qb

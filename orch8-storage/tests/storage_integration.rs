@@ -3153,7 +3153,7 @@ async fn worker_task_list_and_stats() {
     assert_eq!(listed.len(), 2);
 
     // Stats.
-    let stats = s.worker_task_stats(None).await.unwrap();
+    let stats = s.worker_task_stats(None, None).await.unwrap();
     assert!(stats.by_state.contains_key("pending"));
 }
 

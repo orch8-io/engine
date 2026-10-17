@@ -125,18 +125,7 @@ impl std::fmt::Display for InstanceState {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    ToSchema,
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, ToSchema,
 )]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[repr(i16)]
@@ -147,6 +136,45 @@ pub enum Priority {
     Normal = 1,
     High = 2,
     Critical = 3,
+}
+
+/// Lenient wire decoding. The canonical serialized form is the `PascalCase`
+/// name (`"Normal"`), but names are accepted case-insensitively and the
+/// integer levels `0..=3` are accepted too, so older or hand-written clients
+/// that send `"normal"` or `1` keep working.
+impl<'de> Deserialize<'de> for Priority {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = Priority;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a priority name (low, normal, high, critical) or an integer 0..=3")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Priority, E> {
+                match v.to_ascii_lowercase().as_str() {
+                    "low" => Ok(Priority::Low),
+                    "normal" => Ok(Priority::Normal),
+                    "high" => Ok(Priority::High),
+                    "critical" => Ok(Priority::Critical),
+                    _ => Err(E::custom(format!(
+                        "unknown priority '{v}' (expected low, normal, high or critical)"
+                    ))),
+                }
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Priority, E> {
+                i16::try_from(v)
+                    .ok()
+                    .and_then(|n| Priority::try_from(n).ok())
+                    .ok_or_else(|| E::custom(format!("unknown priority value: {v}")))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Priority, E> {
+                i64::try_from(v)
+                    .map_err(|_| E::custom(format!("unknown priority value: {v}")))
+                    .and_then(|n| self.visit_i64(n))
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
 }
 
 impl TryFrom<i16> for Priority {
@@ -365,6 +393,30 @@ pub struct TaskInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn priority_serializes_pascal_case_and_decodes_leniently() {
+        assert_eq!(serde_json::to_string(&Priority::High).unwrap(), "\"High\"");
+        for (raw, want) in [
+            ("\"Low\"", Priority::Low),
+            ("\"normal\"", Priority::Normal),
+            ("\"HIGH\"", Priority::High),
+            ("\"Critical\"", Priority::Critical),
+            ("0", Priority::Low),
+            ("1", Priority::Normal),
+            ("2", Priority::High),
+            ("3", Priority::Critical),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<Priority>(raw).unwrap(),
+                want,
+                "{raw}"
+            );
+        }
+        for bad in ["\"urgent\"", "4", "-1", "1.5", "null", "true"] {
+            assert!(serde_json::from_str::<Priority>(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn valid_transitions() {

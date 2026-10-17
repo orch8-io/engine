@@ -8858,7 +8858,20 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "window_secs",
+            "in": "query",
+            "description": "When set (1..=604800), `completed`/`failed` rows are counted only if finished within the last N seconds, so `by_handler` failure rates reflect a recent window; `pending`/`claimed` are live gauges and always counted. Omit for lifetime counts (default).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ]
       }
     },
     "/workers/tasks/{id}/artifacts/{upload_id}": {

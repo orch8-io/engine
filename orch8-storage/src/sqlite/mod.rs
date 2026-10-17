@@ -1647,8 +1647,9 @@ impl crate::WorkerStore for SqliteStorage {
     async fn worker_task_stats(
         &self,
         tenant_id: Option<&orch8_types::ids::TenantId>,
+        window_secs: Option<u32>,
     ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
-        workers::stats(self, tenant_id).await
+        workers::stats(self, tenant_id, window_secs).await
     }
 
     async fn pending_worker_task_depth(
