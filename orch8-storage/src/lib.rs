@@ -66,7 +66,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 110;
+pub const STORAGE_SCHEMA_VERSION: u32 = 111;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -2947,7 +2947,11 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// oldest first, for the instance-retention sweep. Read outside any
     /// transaction (L1-05). Never returns the child of a parent that is still
     /// live (L3-08): the parent would find its sub-sequence child gone and
-    /// spawn it again.
+    /// spawn it again. Also never returns an instance that still has any
+    /// child row: the purge cannot delete such a parent (FK) unless the whole
+    /// family is in the batch, so listing it would let blocked parents at the
+    /// head of the oldest-first scan starve retention (D-01). Children go
+    /// first; the parent becomes a candidate on a later pass.
     async fn list_instance_gc_candidates(
         &self,
         cutoff: DateTime<Utc>,

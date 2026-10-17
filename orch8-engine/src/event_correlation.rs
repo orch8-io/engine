@@ -173,7 +173,7 @@ pub async fn register_wait(
         return storage
             .get_event_wait(instance_id, &block_id)
             .await?
-            .ok_or_else(|| StorageError::NotFound {
+            .ok_or(StorageError::NotFound {
                 entity: "event_wait",
                 id: block_id,
             });

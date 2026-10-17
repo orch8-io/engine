@@ -34,6 +34,49 @@ pub(super) fn ts(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339()
 }
 
+/// Rows per statement for bounded retention deletes (mirrors Postgres
+/// `BULK_STATEMENT_BATCH`).
+const BULK_BATCH: i64 = 5_000;
+/// Batches per call (mirrors Postgres `BULK_MAX_BATCHES`).
+const BULK_MAX_BATCHES: u32 = 40;
+/// Wall-clock budget per call (mirrors Postgres `BULK_TIME_BUDGET`).
+const BULK_TIME_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Run a `DELETE ... LIMIT ?2` (cutoff as `?1`) in batches until a short
+/// batch, [`BULK_MAX_BATCHES`], or [`BULK_TIME_BUDGET`], so the single
+/// writer lock is held briefly and one call cannot run unbounded (D-02).
+pub(super) async fn bulk_delete_before(
+    pool: &sqlx::SqlitePool,
+    sql: &'static str,
+    cutoff: &str,
+) -> Result<u64, StorageError> {
+    bulk_delete_batched(pool, sql, cutoff, BULK_BATCH, BULK_MAX_BATCHES).await
+}
+
+async fn bulk_delete_batched(
+    pool: &sqlx::SqlitePool,
+    sql: &'static str,
+    cutoff: &str,
+    batch: i64,
+    max_batches: u32,
+) -> Result<u64, StorageError> {
+    let started = std::time::Instant::now();
+    let mut total = 0;
+    for _ in 0..max_batches {
+        let deleted = sqlx::query(sql)
+            .bind(cutoff)
+            .bind(batch)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        total += deleted;
+        if deleted < batch.unsigned_abs() || started.elapsed() >= BULK_TIME_BUDGET {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 pub(super) fn parse_ts(s: &str) -> Result<DateTime<Utc>, StorageError> {
     // Try RFC 3339 first (the canonical format written by ts()).
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
@@ -678,5 +721,47 @@ mod tests {
     fn parse_json_invalid_errors() {
         let err = parse_json::<serde_json::Value>("not json").unwrap_err();
         assert!(matches!(err, StorageError::Serialization(_)));
+    }
+
+    /// D-02: a bounded delete stops at the per-call batch cap (the next tick
+    /// continues) instead of draining an arbitrarily large backlog at once.
+    #[tokio::test]
+    async fn bulk_delete_batched_stops_at_batch_cap() {
+        let storage = crate::sqlite::SqliteStorage::in_memory().await.unwrap();
+        let pool = &storage.pool;
+        sqlx::query("CREATE TABLE bulk_t (id INTEGER PRIMARY KEY, at TEXT NOT NULL)")
+            .execute(pool)
+            .await
+            .unwrap();
+        for i in 0..10 {
+            sqlx::query("INSERT INTO bulk_t (id, at) VALUES (?1, '2000-01-01')")
+                .bind(i)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        let sql = "DELETE FROM bulk_t WHERE id IN \
+                   (SELECT id FROM bulk_t WHERE at < ?1 LIMIT ?2)";
+        let first = bulk_delete_batched(pool, sql, "2001-01-01", 2, 3)
+            .await
+            .unwrap();
+        assert_eq!(first, 6, "3 batches of 2, then stop");
+        let rest = bulk_delete_batched(pool, sql, "2001-01-01", 2, 100)
+            .await
+            .unwrap();
+        assert_eq!(rest, 4, "short batch ends the drain");
+    }
+
+    /// D-02: both backends carry the partial parked-row index.
+    #[tokio::test]
+    async fn parked_outbox_partial_index_exists() {
+        let storage = crate::sqlite::SqliteStorage::in_memory().await.unwrap();
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_webhook_outbox_parked_created'",
+        )
+        .fetch_one(&storage.pool)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
     }
 }

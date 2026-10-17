@@ -264,6 +264,17 @@ pub async fn run_tick_loop_with_liveness(
     let mut sla_cursor = SlaSweepCursor::default();
     // Rotating cursor for the Waiting deadline/timeout sweep (L6-04).
     let mut waiting_cursor = WaitingSweepCursor::default();
+    // One hook pool for the loop's lifetime: the per-tenant / queue bounds
+    // only mean something if they span iterations (D-05).
+    let hooks = HookTasks::default();
+    // Stamp liveness between phases, not only at the end of the iteration:
+    // under DB slowness claim + marker preload + sweeps can together exceed
+    // the readiness window although every phase is making progress (D-04).
+    let stamp = || {
+        if let Some(liveness) = &liveness {
+            liveness.record_tick();
+        }
+    };
 
     loop {
         tokio::select! {
@@ -272,6 +283,11 @@ pub async fn run_tick_loop_with_liveness(
                 let grace = Duration::from_secs(config.shutdown_grace_period_secs);
                 if tokio::time::timeout(grace, wait_for_drain(&semaphore, max_concurrent)).await.is_err() {
                     warn!("grace period expired, some tasks may not have completed");
+                }
+                // Cancel/escalation hooks are best-effort but owed: give them
+                // a bounded window, then abort the stragglers.
+                if !hooks.drain(grace).await {
+                    warn!("grace period expired, some cancel/escalation hooks were aborted");
                 }
                 info!("tick loop stopped");
                 return Ok(());
@@ -320,11 +336,10 @@ pub async fn run_tick_loop_with_liveness(
                         }
                     }
                 }
+                stamp();
                 retry_deferred_parent_wakes(&storage).await;
-                // Hooks spawned by this iteration's sweeps run off the tick
-                // (bounded); dropping the handles at the end of the
-                // iteration detaches them.
-                let hooks = HookTasks::default();
+                // Hooks spawned by the sweeps run off the tick on the
+                // loop-wide bounded pool.
                 // Process signals for paused/waiting instances that won't be
                 // picked up by claim_due_instances (which only claims
                 // scheduled instances). Without this, resume/cancel signals
@@ -344,6 +359,7 @@ pub async fn run_tick_loop_with_liveness(
                 // After the signal sweep: a parent cancelled by a signal this
                 // iteration takes its children down in the same iteration.
                 cancel_orphans(&storage, &handlers, &sequence_cache, &hooks).await;
+                stamp();
                 // Check SLA deadlines for waiting instances (external worker
                 // dispatch). These instances are not claimed by the normal
                 // tick, but deadlines should still fire.
@@ -363,6 +379,7 @@ pub async fn run_tick_loop_with_liveness(
                 ).await {
                     error!(error = %e, "waiting deadline processing failed");
                 }
+                stamp();
                 // Alert-only SLA sweep over active instances (max_runtime /
                 // max_step_runtime). Emits webhook + metric on breach; never
                 // changes instance state. Rotates through the active set via
@@ -379,9 +396,7 @@ pub async fn run_tick_loop_with_liveness(
                 ).await {
                     error!(error = %e, "sla breach sweep failed");
                 }
-                if let Some(liveness) = &liveness {
-                    liveness.record_tick();
-                }
+                stamp();
                 crate::metrics::loop_pass("tick");
             }
         }
@@ -1229,7 +1244,8 @@ async fn process_one_signalled_instance(
         {
             let storage = Arc::clone(storage);
             let handlers = Arc::clone(handlers);
-            hooks.spawn(async move {
+            let tenant = inst.tenant_id.clone();
+            hooks.spawn(tenant.as_str(), async move {
                 // Sagas the cancel cut short owe their compensations (L3-11).
                 crate::handlers::saga::compensate_aborted_sagas(
                     &storage,
@@ -1249,40 +1265,151 @@ async fn process_one_signalled_instance(
 }
 
 /// Max cleanup / escalation hooks the sweeps run concurrently off the tick
-/// (L2-06). Each hook is still bounded by [`HOOK_DISPATCH_TIMEOUT`].
+/// (L2-06), across all tenants. Each hook is still bounded by
+/// [`HOOK_DISPATCH_TIMEOUT`].
 const HOOK_CONCURRENCY: usize = 16;
-static HOOK_PERMITS: Semaphore = Semaphore::const_new(HOOK_CONCURRENCY);
 
-/// Hooks a sweep pass spawned off the tick task. The tick loop drops the
-/// handles (the hooks keep running, at most [`HOOK_CONCURRENCY`] at a time);
-/// `tick_once` awaits them so single-shot callers observe the hook outcome.
-#[derive(Default)]
-pub(crate) struct HookTasks(std::sync::Mutex<Vec<JoinHandle<()>>>);
+/// Max hooks of one tenant running at once (D-05): a tenant whose hook
+/// target hangs for [`HOOK_DISPATCH_TIMEOUT`] must not occupy every global
+/// permit and starve the other tenants' cancel/escalation hooks.
+const HOOK_PER_TENANT_CONCURRENCY: usize = 4;
+
+/// Max hooks accepted but not yet finished (running + waiting for a permit).
+/// Beyond this a new hook is dropped and counted in
+/// `orch8_hooks_dropped_total` instead of queueing without bound (D-05).
+const HOOK_QUEUE_CAPACITY: usize = 1024;
+
+/// Tenant-semaphore map size above which idle entries are pruned.
+const HOOK_TENANT_MAP_PRUNE_AT: usize = 1024;
+
+struct HookPool {
+    global: Arc<Semaphore>,
+    tenants: std::sync::Mutex<HashMap<String, Arc<Semaphore>>>,
+    /// Hooks spawned and not yet finished (queued or running).
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+    tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
+}
+
+/// Decrements the pending count when the hook finishes or is aborted.
+struct PendingGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Cleanup / escalation hooks the sweeps spawn off the tick task.
+///
+/// One pool lives for the whole tick loop (cloning shares it). Hooks are
+/// bounded three ways (D-05): at most [`HOOK_CONCURRENCY`] run at once,
+/// at most [`HOOK_PER_TENANT_CONCURRENCY`] per tenant, and at most
+/// [`HOOK_QUEUE_CAPACITY`] are queued or running (overflow is dropped and
+/// counted). They are tracked in a `JoinSet` so shutdown can [`drain`]
+/// them (bounded wait, then abort) and `tick_once` can [`join_all`].
+///
+/// [`drain`]: HookTasks::drain
+/// [`join_all`]: HookTasks::join_all
+#[derive(Clone)]
+pub(crate) struct HookTasks(Arc<HookPool>);
+
+impl Default for HookTasks {
+    fn default() -> Self {
+        Self(Arc::new(HookPool {
+            global: Arc::new(Semaphore::new(HOOK_CONCURRENCY)),
+            tenants: std::sync::Mutex::new(HashMap::new()),
+            pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
+        }))
+    }
+}
 
 impl HookTasks {
-    fn spawn<F>(&self, hook: F)
+    /// Spawn `hook` for `tenant`, or drop it when the queue is full.
+    fn spawn<F>(&self, tenant: &str, hook: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let handle = tokio::spawn(async move {
-            // The semaphore is never closed, so acquire cannot fail.
-            let _permit = HOOK_PERMITS.acquire().await;
+        let pool = &self.0;
+        if pool.pending.fetch_add(1, Ordering::AcqRel) >= HOOK_QUEUE_CAPACITY {
+            pool.pending.fetch_sub(1, Ordering::AcqRel);
+            crate::metrics::inc(crate::metrics::HOOKS_DROPPED);
+            warn!(
+                tenant_id = tenant,
+                capacity = HOOK_QUEUE_CAPACITY,
+                "hook queue full; dropping cancel/escalation hook"
+            );
+            return;
+        }
+        let guard = PendingGuard(Arc::clone(&pool.pending));
+        let tenant_sem = {
+            let mut tenants = pool
+                .tenants
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tenants.len() >= HOOK_TENANT_MAP_PRUNE_AT {
+                tenants.retain(|_, sem| Arc::strong_count(sem) > 1);
+            }
+            Arc::clone(
+                tenants
+                    .entry(tenant.to_owned())
+                    .or_insert_with(|| Arc::new(Semaphore::new(HOOK_PER_TENANT_CONCURRENCY))),
+            )
+        };
+        let global = Arc::clone(&pool.global);
+        let mut tasks = pool
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Reap finished hooks so the set does not grow with the process.
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(async move {
+            let _guard = guard;
+            // Tenant permit first: a tenant's excess hooks wait here without
+            // holding a global permit. The semaphores are never closed.
+            let _tenant_permit = tenant_sem.acquire_owned().await;
+            let _permit = global.acquire_owned().await;
             hook.await;
         });
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(handle);
     }
 
-    async fn join_all(self) {
-        let handles = self
-            .0
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for handle in handles {
-            let _ = handle.await;
+    /// Hooks accepted and not yet finished.
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> usize {
+        self.0.pending.load(Ordering::Acquire)
+    }
+
+    /// Wait up to `wait` for every spawned hook, then abort the rest.
+    /// Returns `true` when all finished in time.
+    async fn drain(&self, wait: Duration) -> bool {
+        let mut set = std::mem::take(
+            &mut *self
+                .0
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let finished = tokio::time::timeout(wait, async {
+            while set.join_next().await.is_some() {}
+        })
+        .await
+        .is_ok();
+        if !finished {
+            set.abort_all();
         }
+        finished
+    }
+
+    /// Wait for every spawned hook (single-shot callers).
+    async fn join_all(self) {
+        let mut set = std::mem::take(
+            &mut *self
+                .0
+                .tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        while set.join_next().await.is_some() {}
     }
 }
 
@@ -2397,7 +2524,7 @@ pub(crate) async fn handle_deadline_breach(
             }
         };
         match hooks {
-            Some(hooks) => hooks.spawn(run),
+            Some(hooks) => hooks.spawn(instance.tenant_id.as_str(), run),
             None => run.await,
         }
     }
@@ -3056,7 +3183,8 @@ async fn cancel_orphans(
         };
         let storage = Arc::clone(storage);
         let handlers = Arc::clone(handlers);
-        hooks.spawn(async move {
+        let tenant = inst.tenant_id.clone();
+        hooks.spawn(tenant.as_str(), async move {
             crate::handlers::saga::compensate_aborted_sagas(
                 &storage,
                 &handlers,

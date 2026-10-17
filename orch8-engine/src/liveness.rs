@@ -12,7 +12,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Floor for the readiness staleness window, whatever the tick interval.
-const MIN_READY_STALE: Duration = Duration::from_secs(30);
+/// One iteration (claim + marker preload + sweeps) can legitimately take
+/// tens of seconds when the database is slow; a 30 s floor made
+/// `/health/ready` flap to 503 under such load (D-04).
+const MIN_READY_STALE: Duration = Duration::from_secs(90);
 
 /// Shared, lock-free tick heartbeat. Cheap to read from request handlers.
 #[derive(Debug)]
@@ -31,7 +34,7 @@ pub struct EngineLiveness {
 }
 
 impl EngineLiveness {
-    /// `tick_interval` sizes the readiness window (`max(10 × tick, 30 s)`);
+    /// `tick_interval` sizes the readiness window (`max(10 × tick, 90 s)`);
     /// `live_stale_after` is the liveness window. A zero liveness window
     /// disables the liveness check (readiness still applies).
     #[must_use]
@@ -78,7 +81,7 @@ impl EngineLiveness {
     }
 
     /// `true` when an armed engine has not completed a tick within the
-    /// readiness window (`max(10 × tick, 30 s)`).
+    /// readiness window (`max(10 × tick, 90 s)`).
     #[must_use]
     pub fn is_ready_stale(&self) -> bool {
         self.tick_age()
@@ -116,7 +119,7 @@ mod tests {
         assert!(!l.is_live_stale());
         std::thread::sleep(Duration::from_millis(40));
         assert!(l.is_live_stale(), "no tick for 40ms > 20ms window");
-        // Readiness floor is 30 s, so it is not stale yet.
+        // Readiness floor is 90 s, so it is not stale yet.
         assert!(!l.is_ready_stale());
         l.record_tick();
         assert!(!l.is_live_stale());
@@ -131,6 +134,10 @@ mod tests {
         assert_eq!(l.ready_stale_after, Duration::from_secs(100));
         let l = EngineLiveness::new(Duration::from_millis(100), Duration::ZERO);
         assert_eq!(l.ready_stale_after, MIN_READY_STALE);
+        assert!(
+            MIN_READY_STALE >= Duration::from_secs(90),
+            "a slow-but-progressing DB iteration must not flap readiness (D-04)"
+        );
         l.arm();
         assert!(!l.is_live_stale(), "zero window disables liveness");
     }

@@ -73,7 +73,7 @@ Returns 200 while the process is running. On nodes that run the engine it return
 GET /health/ready
 ```
 
-Returns 200 only if the database is reachable **and** the engine tick loop is running and has completed an iteration within `max(10 × tick_interval, 30 s)`. A server whose scheduler has died reports 503 even with a healthy database, so the load balancer stops routing work to a node that would accept instances but never execute them.
+Returns 200 only if the database is reachable **and** the engine tick loop is running and has completed an iteration within `max(10 × tick_interval, 90 s)`. A server whose scheduler has died reports 503 even with a healthy database, so the load balancer stops routing work to a node that would accept instances but never execute them.
 
 **Response:** `200 OK` or `503 Service Unavailable`
 
@@ -1192,7 +1192,7 @@ All blocks are defined in the `blocks` array of a sequence. Blocks can nest arbi
 |---------|--------|--------|
 | `noop` | _(none)_ | `{}` |
 | `log` | `message` (string), `level` ("debug"/"info"/"warn") | `{ "message": "..." }` |
-| `sleep` | `duration_ms` (integer, default 100, max 60000; longer waits fail the step, use the durable step `delay` field) | `{ "slept_ms": N }` |
+| `sleep` | `duration_ms` (integer, default 100; over 60000 the instance is parked durably for that long, like the step `delay` field, instead of sleeping in-process; the sequence lint still warns, prefer `delay`) | `{ "slept_ms": N }` |
 | `fail` | `message` (string) | _(step fails with the given message)_ |
 | `http_request` | `url`, `method` ("GET"/"POST"/"PUT"/"DELETE"), `body`, `timeout_ms` (default 10000) | `{ "status": 200, "body": "..." }` |
 | `llm_call` | `provider`, `model`, `messages`, `temperature`, `max_tokens` | `{ "content": "...", "usage": {...} }` |

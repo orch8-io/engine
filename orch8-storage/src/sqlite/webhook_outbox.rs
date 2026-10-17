@@ -252,10 +252,15 @@ pub(super) async fn delete_parked_before(
     storage: &SqliteStorage,
     cutoff: chrono::DateTime<chrono::Utc>,
 ) -> Result<u64, StorageError> {
-    let result =
-        sqlx::query("DELETE FROM webhook_outbox WHERE status='parked' AND created_at < ?1")
-            .bind(ts(cutoff))
-            .execute(&storage.pool)
-            .await?;
-    Ok(result.rows_affected())
+    // Bounded (D-02): short writer-lock holds and a per-call cap; the next
+    // tick continues a large backlog.
+    super::helpers::bulk_delete_before(
+        &storage.pool,
+        "DELETE FROM webhook_outbox WHERE id IN \
+         (SELECT id FROM webhook_outbox \
+          WHERE status='parked' AND created_at < ?1 \
+          ORDER BY created_at LIMIT ?2)",
+        &ts(cutoff),
+    )
+    .await
 }

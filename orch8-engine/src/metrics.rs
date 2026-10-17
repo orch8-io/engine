@@ -57,6 +57,8 @@ pub const TRIGGER_EVENTS_DROPPED: &str = "orch8_trigger_events_dropped_total";
 /// Redis stream entries moved to the dead-letter stream after exceeding
 /// their delivery cap.
 pub const TRIGGER_DEAD_LETTERED: &str = "orch8_trigger_dead_lettered_total";
+/// Cancel / escalation hooks dropped because the hook queue was full (D-05).
+pub const HOOKS_DROPPED: &str = "orch8_hooks_dropped_total";
 /// Parked webhook outbox rows deleted by the retention sweep.
 pub const GC_WEBHOOK_PARKED_DELETED: &str = "orch8_gc_webhook_parked_deleted_total";
 /// Items returned by `ActivePieces` sidecar polls (one instance per item).

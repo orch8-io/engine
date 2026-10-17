@@ -103,7 +103,7 @@ pub(super) async fn update(
     sqlx::query(
         r"UPDATE credentials SET tenant_id=?2, name=?3, kind=?4, value=?5,
           expires_at=?6, refresh_url=?7, refresh_token=?8, enabled=?9, description=?10,
-          updated_at=?11
+          updated_at=?11, refresh_failures=0, refresh_claimed_until=NULL
           WHERE id=?1",
     )
     .bind(&credential.id)
@@ -139,7 +139,7 @@ pub(super) async fn update_cas(
     let result = sqlx::query(
         r"UPDATE credentials SET tenant_id=?2, name=?3, kind=?4, value=?5,
           expires_at=?6, refresh_url=?7, refresh_token=?8, enabled=?9, description=?10,
-          updated_at=?11
+          updated_at=?11, refresh_failures=0, refresh_claimed_until=NULL
           WHERE id=?1 AND updated_at=?12",
     )
     .bind(&credential.id)

@@ -1412,6 +1412,9 @@ CREATE INDEX IF NOT EXISTS idx_mobile_instance_status_terminal_updated
     ON mobile_instance_status(updated_at) WHERE state IN ('completed', 'failed', 'cancelled');
 CREATE INDEX IF NOT EXISTS idx_mobile_approval_requests_settled_created
     ON mobile_approval_requests(created_at) WHERE state <> 'pending';
+-- Parked-row prune (Postgres migration 111).
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_parked_created
+    ON webhook_outbox(created_at) WHERE status = 'parked';
 "#;
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is

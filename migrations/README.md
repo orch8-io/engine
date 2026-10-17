@@ -65,9 +65,9 @@ the migration record before the next `orch8 migrate`:
 DELETE FROM _sqlx_migrations WHERE version = 82;
 ```
 
-## Upgrading large installs to 100–106
+## Upgrading large installs to 100–106 and 111
 
-Migrations 100–106 add indexes to hot tables (`task_instances`,
+Migrations 100–106 and 111 add indexes to hot tables (`task_instances`,
 `worker_tasks`, `signal_inbox`, `usage_events`, `webhook_outbox`, the
 continuity tables). Each file builds them with a plain
 `CREATE INDEX IF NOT EXISTS`, which blocks writes to the table while it runs.

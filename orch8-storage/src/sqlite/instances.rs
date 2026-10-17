@@ -1192,6 +1192,9 @@ pub(super) async fn list_instance_gc_candidates(
                SELECT 1 FROM task_instances p \
                WHERE p.id = t.parent_instance_id \
                  AND p.state NOT IN ('completed', 'failed', 'cancelled')) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM task_instances c \
+               WHERE c.parent_instance_id = t.id) \
          ORDER BY t.updated_at ASC LIMIT ?2",
     )
     .bind(ts(cutoff))
