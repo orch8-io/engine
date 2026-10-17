@@ -27,6 +27,9 @@ version_checks=(
   "packages/react-native/ios/Orch8Module.swift|?? \"$sdk_version\""
   "packages/react-native/package.json|\"version\": \"$sdk_version\""
   "packages/swift/Sources/Orch8Mobile/Orch8Mobile.swift|orch8MobileVersion = \"$sdk_version\""
+  "packages/swift/Orch8Mobile.podspec|s.version             = '$sdk_version'"
+  "packages/kmp/ios-bridge/install-bridge.sh|version=\"\${3:-$sdk_version}\""
+  "packages/kmp/ios-bridge/install-bridge.sh|(default: $sdk_version)"
 )
 
 failed=0

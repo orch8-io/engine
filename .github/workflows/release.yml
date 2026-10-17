@@ -458,6 +458,11 @@ jobs:
       - name: Build liborch8_mobile
         run: cargo build --profile mobile-release --target ${{ matrix.target }} -p orch8-mobile
 
+      - name: Verify 16 KB ELF alignment
+        env:
+          READELF: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf
+        run: ./scripts/check-android-elf-align.sh target/${{ matrix.target }}/mobile-release/liborch8_mobile.so
+
       - name: Upload shared library
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
