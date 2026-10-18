@@ -293,12 +293,30 @@ jobs:
     name: Swift package tests
     runs-on: macos-latest
     timeout-minutes: 30
+    needs: [xcframework]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download current XCFramework
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Orch8Mobile.xcframework
+          path: artifacts/xcframework
+      - name: Use current XCFramework
+        run: |
+          if [[ -f artifacts/xcframework/Info.plist ]]; then
+            mv artifacts/xcframework packages/swift/Orch8Mobile.xcframework
+          elif [[ -f artifacts/xcframework/Orch8Mobile.xcframework/Info.plist ]]; then
+            mv artifacts/xcframework/Orch8Mobile.xcframework packages/swift/
+          else
+            echo '::error::Downloaded XCFramework is missing Info.plist'
+            exit 1
+          fi
       # The package is iOS-only (binary XCFramework), so `swift test` on the
       # macOS host cannot link it: run the tests on an iOS simulator.
       - name: Test on an iOS simulator
         working-directory: packages/swift
+        env:
+          ORCH8_MOBILE_LOCAL_XCFRAMEWORK: "1"
         run: |
           UDID="$(xcrun simctl list devices available -j | python3 -c '
           import json, sys
