@@ -448,12 +448,13 @@ pub(crate) async fn execute_step_node_with_clock(
             patched.context.runtime.current_step_started_at = Some(node_started);
             patched
         });
-        let deferred = crate::scheduler::check_human_input_at(
+        let deferred = crate::scheduler::check_human_input_at_with_claim(
             storage.as_ref(),
             gate_instance.as_ref().unwrap_or(instance),
             step_def,
             human_def,
             clock.now(),
+            claim_token,
         )
         .await?;
         if deferred {

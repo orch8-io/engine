@@ -713,13 +713,33 @@ pub async fn check_human_input(
 
 /// [`check_human_input`] with an explicit "now" — the scheduler passes its
 /// clock's instant here so input timeouts respect virtual time in tests.
-#[allow(clippy::too_many_lines)]
 pub async fn check_human_input_at(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
     now: DateTime<Utc>,
+) -> Result<bool, EngineError> {
+    check_human_input_at_with_claim(
+        storage,
+        instance,
+        step_def,
+        human_def,
+        now,
+        instance.updated_at,
+    )
+    .await
+}
+
+/// Check a tree gate with the lease token captured at claim time.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub(crate) async fn check_human_input_at_with_claim(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    human_def: &orch8_types::sequence::HumanInputDef,
+    now: DateTime<Utc>,
+    claim_token: DateTime<Utc>,
 ) -> Result<bool, EngineError> {
     // Dry-run auto-approve: resolve the gate with the default (first) choice so
     // the simulation flows past human gates instead of pausing. Behaviorally
@@ -909,7 +929,7 @@ pub async fn check_human_input_at(
                         storage,
                         instance.id,
                         Some(&instance.tenant_id),
-                        instance.updated_at,
+                        claim_token,
                         InstanceState::Running,
                         InstanceState::Scheduled,
                         Some(now),
