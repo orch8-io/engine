@@ -113,7 +113,8 @@ final class DistributedWorkerClientTests: XCTestCase {
         )
 
         let request = try XCTUnwrap(WorkerURLProtocol.lastRequest())
-        let body = try XCTUnwrap(String(data: try XCTUnwrap(request.httpBody), encoding: .utf8))
+        let data = try XCTUnwrap(request.httpBody, "URLProtocol did not capture the complete request body")
+        let body = try XCTUnwrap(String(data: data, encoding: .utf8))
         XCTAssertTrue(body.contains("\"claim_epoch\":18446744073709551615"), body)
     }
 
@@ -200,8 +201,9 @@ final class DistributedWorkerClientTests: XCTestCase {
     }
 
     private func jsonBody(_ request: URLRequest) throws -> [String: Any] {
-        try XCTUnwrap(
-            JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any]
+        let data = try XCTUnwrap(request.httpBody, "URLProtocol did not capture the JSON request body")
+        return try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
     }
 }
