@@ -117,9 +117,11 @@ describe("push wake outbox — enqueue persistence", () => {
     assert.ok(wakes.every((w) => w.attempts === 0));
     for (const [index, wake] of wakes.entries()) {
       if (wake.id === newest.id) continue;
+      const successor = wakes[index + 1];
+      assert.ok(successor, "a superseded wake has a successor");
       assert.equal(wake.status, "terminal", "older wakes are collapsed");
       assert.equal(wake.terminal_reason, "superseded");
-      assert.equal(wake.superseded_by, wakes[index + 1].command_id);
+      assert.equal(wake.superseded_by, successor.command_id);
       assert.equal(wake.collapse_key, newest.collapse_key);
     }
   });

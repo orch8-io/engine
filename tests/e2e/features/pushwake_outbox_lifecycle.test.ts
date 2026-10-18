@@ -65,10 +65,11 @@ describe("push wake outbox — lifecycle and drain guarantees", () => {
     assert.equal(wakes.length, 2);
     const pending = wakes.filter((wake) => wake.status === "pending");
     assert.equal(pending.length, 1, "only the newest command needs a wake");
+    const newest = only(pending, "pending wakes");
     const superseded = wakes.find((wake) => wake.status === "terminal");
     assert.ok(superseded, "older wake is retained as superseded evidence");
     assert.equal(superseded.terminal_reason, "superseded");
-    assert.equal(superseded.superseded_by, pending[0].command_id);
+    assert.equal(superseded.superseded_by, newest.command_id);
     for (const wake of wakes) {
       assert.equal(wake.attempts, 0, "no attempt may be recorded");
       assert.equal(wake.lease_until, null, "no lease may be written");
