@@ -11,10 +11,9 @@
  *   - migrations/079_push_wake_governance.sql  (execution/topic/collapse cols)
  *   - orch8-api/src/mobile_sync.rs             (route surface)
  *
- * NOTE: the server binary wires `NoopPushProvider` unconditionally
- * (orch8-server/src/main.rs `build_app_state`), so no row is ever claimed or
- * delivered in this environment. Delivery-side lifecycle is covered in
- * pushwake_outbox_lifecycle.test.ts only to the extent the binary allows.
+ * The server uses `NoopPushProvider` in this environment, so no row is
+ * delivered. New commands still supersede older pending wakes for the same
+ * device; the newest wake is sufficient to fetch the full command mailbox.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -76,15 +75,15 @@ describe("push wake outbox — enqueue persistence", () => {
     assert.ok(wake.created_at, "created_at populated");
   });
 
-  it("wake rows carry no collapse metadata when enqueued through the plain command API", async () => {
+  it("command wakes carry device-scoped collapse metadata", async () => {
     const tenant = uid("t");
     const device = await mustRegisterDevice(tenant, deviceSpec());
     await createCommand(tenant, device.device_id, "ping", {});
 
     const wake = only(await wakeRowsForDevice(device.device_id), "wakes");
     assert.equal(wake.execution_id, null);
-    assert.equal(wake.topic, null);
-    assert.equal(wake.collapse_key, null);
+    assert.equal(wake.topic, "mobile_command");
+    assert.ok(wake.collapse_key, "command wakes need a collapse key");
     assert.equal(wake.superseded_by, null);
   });
 
@@ -111,10 +110,18 @@ describe("push wake outbox — enqueue persistence", () => {
       5,
       "wake ids are unique",
     );
-    assert.ok(
-      wakes.every((w) => w.status === "pending" && w.attempts === 0),
-      "all fresh wakes are pending with zero attempts",
-    );
+    const newest = wakes.find((w) => w.command_id === commands.at(-1)?.id);
+    assert.ok(newest, "newest command has a wake");
+    assert.equal(newest.status, "pending");
+    assert.equal(newest.superseded_by, null);
+    assert.ok(wakes.every((w) => w.attempts === 0));
+    for (const [index, wake] of wakes.entries()) {
+      if (wake.id === newest.id) continue;
+      assert.equal(wake.status, "terminal", "older wakes are collapsed");
+      assert.equal(wake.terminal_reason, "superseded");
+      assert.equal(wake.superseded_by, wakes[index + 1].command_id);
+      assert.equal(wake.collapse_key, newest.collapse_key);
+    }
   });
 
   it("approval resolution enqueues a complete_step command AND its wake", async () => {

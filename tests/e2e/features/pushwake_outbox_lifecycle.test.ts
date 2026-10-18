@@ -6,8 +6,9 @@
  * `Arc::new(orch8_push::NoopPushProvider)`), and `PushOutboxWorker::drain_once`
  * returns early without claiming when `provider.is_configured()` is false.
  * docs/PUSH_DELIVERY.md states this as a guarantee: "When no real provider is
- * configured, the worker leaves rows pending; a no-op provider never
- * manufactures successful delivery evidence."
+ * configured, the worker leaves eligible rows pending; a no-op provider never
+ * manufactures successful delivery evidence." Newer commands may supersede
+ * older pending wakes for the same device before the worker sees them.
  *
  * These tests pin that guarantee against the real 1-second worker loop, and
  * cover the ack-correlation path (`record_command_acks`) that IS reachable:
@@ -52,7 +53,7 @@ describe("push wake outbox — lifecycle and drain guarantees", () => {
     await stopServer(server);
   });
 
-  it("noop provider never claims due wakes: rows stay pending with zero attempts", async () => {
+  it("noop provider leaves the newest wake pending without recording delivery attempts", async () => {
     const tenant = uid("t");
     const device = await mustRegisterDevice(tenant, deviceSpec());
     await createCommand(tenant, device.device_id, "ping", {});
@@ -62,13 +63,17 @@ describe("push wake outbox — lifecycle and drain guarantees", () => {
 
     const wakes = await wakeRowsForDevice(device.device_id);
     assert.equal(wakes.length, 2);
+    const pending = wakes.filter((wake) => wake.status === "pending");
+    assert.equal(pending.length, 1, "only the newest command needs a wake");
+    const superseded = wakes.find((wake) => wake.status === "terminal");
+    assert.ok(superseded, "older wake is retained as superseded evidence");
+    assert.equal(superseded.terminal_reason, "superseded");
+    assert.equal(superseded.superseded_by, pending[0].command_id);
     for (const wake of wakes) {
-      assert.equal(wake.status, "pending", "unconfigured provider must not claim");
       assert.equal(wake.attempts, 0, "no attempt may be recorded");
       assert.equal(wake.lease_until, null, "no lease may be written");
       assert.equal(wake.delivered_at, null, "no delivery evidence may be manufactured");
       assert.equal(wake.last_error, null);
-      assert.equal(wake.terminal_reason, null);
     }
   });
 
