@@ -684,10 +684,7 @@ pub async fn drive(
             | InstanceState::Waiting
             | InstanceState::Paused => return,
             InstanceState::Scheduled => {
-                storage
-                    .update_instance_state(instance_id, InstanceState::Running, None)
-                    .await
-                    .unwrap();
+                claim_for_drive(storage, &inst).await;
             }
             _ => {}
         }
@@ -727,10 +724,7 @@ pub async fn drive_n(
             return;
         }
         if inst.state == InstanceState::Scheduled {
-            storage
-                .update_instance_state(instance_id, InstanceState::Running, None)
-                .await
-                .unwrap();
+            claim_for_drive(storage, &inst).await;
         }
         let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
         let outcome = evaluator::evaluate(storage, handlers, &inst, sequence)
@@ -740,6 +734,22 @@ pub async fn drive_n(
             return;
         }
     }
+}
+
+/// Resume a scheduled fixture through the real lease path. A direct state
+/// update leaves its previous `claimed_at` token in place and makes fenced
+/// tree retries fail even though the test is acting as the new owner.
+async fn claim_for_drive(storage: &Arc<dyn StorageBackend>, instance: &TaskInstance) {
+    let due_at = instance
+        .next_fire_at
+        .unwrap_or_else(Utc::now)
+        .max(Utc::now());
+    let claimed = storage.claim_due_instances(due_at, 1024, 0).await.unwrap();
+    assert!(
+        claimed.iter().any(|candidate| candidate.id == instance.id),
+        "fixture instance {} was not claimed",
+        instance.id
+    );
 }
 
 // ------------------------------------------------------------------
