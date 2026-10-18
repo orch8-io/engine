@@ -248,8 +248,12 @@ private final class WorkerURLProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        // URLSession can move httpBody to a stream before handing the request
+        // to URLProtocol on iOS. Preserve the body for the wire-contract tests.
+        var recordedRequest = request
+        recordedRequest.httpBody = Self.requestBody(request, task: task)
         Self.lock.lock()
-        Self.capturedRequest = request
+        Self.capturedRequest = recordedRequest
         var status = Self.responseStatus
         var data = Self.responseData
         if !Self.queued.isEmpty {
@@ -268,4 +272,26 @@ private final class WorkerURLProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() {}
+
+    private static func requestBody(_ request: URLRequest, task: URLSessionTask?) -> Data? {
+        if let body = request.httpBody ?? task?.originalRequest?.httpBody ?? task?.currentRequest?.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream
+            ?? task?.originalRequest?.httpBodyStream
+            ?? task?.currentRequest?.httpBodyStream else {
+            return nil
+        }
+        stream.open()
+        defer { stream.close() }
+        let bufferSize = 4096
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        var body = Data()
+        while true {
+            let count = stream.read(&buffer, maxLength: bufferSize)
+            if count < 0 { return nil }
+            if count == 0 { return body }
+            body.append(contentsOf: buffer.prefix(count))
+        }
+    }
 }
