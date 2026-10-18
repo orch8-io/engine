@@ -112,10 +112,11 @@ pub(super) async fn check_budget(
         )
         .await?;
 
-    crate::lifecycle::transition_instance(
+    crate::lifecycle::transition_claimed_instance(
         storage.as_ref(),
         instance.id,
         Some(&instance.tenant_id),
+        instance.updated_at,
         InstanceState::Running,
         InstanceState::Paused,
         None,
@@ -326,11 +327,13 @@ pub(crate) async fn step_preamble_deferral(
 pub(crate) async fn park_tree_instance_until(
     storage: &dyn StorageBackend,
     instance_id: orch8_types::ids::InstanceId,
+    claim_token: DateTime<Utc>,
     fire_at: DateTime<Utc>,
 ) -> Result<(), EngineError> {
     if storage
-        .conditional_update_instance_state(
+        .conditional_update_claimed_instance_state(
             instance_id,
+            claim_token,
             InstanceState::Running,
             InstanceState::Scheduled,
             Some(fire_at),
@@ -344,8 +347,9 @@ pub(crate) async fn park_tree_instance_until(
         && current.next_fire_at.is_none_or(|t| t > fire_at)
     {
         storage
-            .conditional_update_instance_state(
+            .conditional_update_claimed_instance_state(
                 instance_id,
+                claim_token,
                 InstanceState::Scheduled,
                 InstanceState::Scheduled,
                 Some(fire_at),
@@ -361,10 +365,11 @@ async fn defer_flat_instance(
     instance: &orch8_types::instance::TaskInstance,
     fire_at: DateTime<Utc>,
 ) -> Result<(), EngineError> {
-    crate::lifecycle::transition_instance(
+    crate::lifecycle::transition_claimed_instance(
         storage,
         instance.id,
         Some(&instance.tenant_id),
+        instance.updated_at,
         InstanceState::Running,
         InstanceState::Scheduled,
         Some(fire_at),
@@ -900,10 +905,11 @@ pub async fn check_human_input_at(
                     storage.save_block_output(&output).await?;
                     // Re-schedule immediately so the next tick sees the block
                     // output in completed_blocks and skips this step.
-                    crate::lifecycle::transition_instance(
+                    crate::lifecycle::transition_claimed_instance(
                         storage,
                         instance.id,
                         Some(&instance.tenant_id),
+                        instance.updated_at,
                         InstanceState::Running,
                         InstanceState::Scheduled,
                         Some(now),
@@ -1014,10 +1020,11 @@ pub(super) async fn execute_step_block(
             block_id = %step_def.id,
             "debug breakpoint hit, pausing instance"
         );
-        crate::lifecycle::transition_instance(
+        crate::lifecycle::transition_claimed_instance(
             storage.as_ref(),
             instance_id,
             Some(&instance.tenant_id),
+            instance.updated_at,
             InstanceState::Running,
             InstanceState::Paused,
             None,
@@ -1184,10 +1191,11 @@ pub(super) async fn execute_step_block(
             // satisfied, so without this the instance would park with
             // nothing listening for its events.
             crate::event_correlation::register_wait_before_park(storage, instance, step_def).await;
-            crate::lifecycle::transition_instance(
+            crate::lifecycle::transition_claimed_instance(
                 storage.as_ref(),
                 instance_id,
                 Some(&instance.tenant_id),
+                instance.updated_at,
                 InstanceState::Running,
                 InstanceState::Waiting,
                 None,
@@ -1252,10 +1260,11 @@ pub(super) async fn execute_step_block(
         ) {
             crate::handlers::step_block::BreakerDecision::Proceed(cow) => cow,
             crate::handlers::step_block::BreakerDecision::Defer { fire_at } => {
-                crate::lifecycle::transition_instance(
+                crate::lifecycle::transition_claimed_instance(
                     storage.as_ref(),
                     instance_id,
                     Some(&instance.tenant_id),
+                    instance.updated_at,
                     InstanceState::Running,
                     InstanceState::Scheduled,
                     Some(fire_at),
@@ -1471,10 +1480,11 @@ pub(super) async fn execute_step_block(
             .await
             {
                 crate::handlers::param_resolve::SelfModifyResult::Applied => {
-                    crate::lifecycle::transition_instance(
+                    crate::lifecycle::transition_claimed_instance(
                         storage.as_ref(),
                         instance_id,
                         Some(&instance.tenant_id),
+                        instance.updated_at,
                         InstanceState::Running,
                         InstanceState::Scheduled,
                         Some(clock.now()),
@@ -1603,10 +1613,11 @@ pub(super) async fn execute_step_block(
                 instance_id,
                 serde_json::json!({ "error": e.to_string() }),
             );
-            crate::lifecycle::transition_instance_with_webhook(
+            crate::lifecycle::transition_claimed_instance_with_webhook(
                 storage.as_ref(),
                 instance_id,
                 Some(&instance.tenant_id),
+                instance.updated_at,
                 InstanceState::Running,
                 InstanceState::Failed,
                 None,
@@ -1684,10 +1695,11 @@ async fn fail_retryable_instance(
             "block_id": step_def.id.as_str(),
         }),
     );
-    crate::lifecycle::transition_instance_with_webhook(
+    crate::lifecycle::transition_claimed_instance_with_webhook(
         storage,
         instance_id,
         Some(&instance.tenant_id),
+        instance.updated_at,
         InstanceState::Running,
         InstanceState::Failed,
         None,
@@ -1787,10 +1799,11 @@ pub(super) async fn handle_retryable_failure(
             "retryable failure, re-scheduling with backoff"
         );
 
-        crate::lifecycle::transition_instance(
+        crate::lifecycle::transition_claimed_instance(
             storage,
             instance_id,
             Some(&instance.tenant_id),
+            instance.updated_at,
             InstanceState::Running,
             InstanceState::Scheduled,
             Some(fire_at),
@@ -1805,10 +1818,11 @@ pub(super) async fn handle_retryable_failure(
         instance_id,
         serde_json::json!({ "error": message }),
     );
-    crate::lifecycle::transition_instance_with_webhook(
+    crate::lifecycle::transition_claimed_instance_with_webhook(
         storage,
         instance_id,
         Some(&instance.tenant_id),
+        instance.updated_at,
         InstanceState::Running,
         InstanceState::Failed,
         None,
@@ -1854,10 +1868,11 @@ pub(super) async fn fail_instance_with_error(
         instance_id,
         serde_json::json!({ "error": error }),
     );
-    crate::lifecycle::transition_instance_with_webhook(
+    crate::lifecycle::transition_claimed_instance_with_webhook(
         storage,
         instance_id,
         Some(&instance.tenant_id),
+        instance.updated_at,
         InstanceState::Running,
         InstanceState::Failed,
         None,
@@ -1908,10 +1923,11 @@ pub(super) async fn dispatch_to_external_worker(
     }
 
     // Transition instance Running -> Waiting so the scheduler doesn't re-claim it.
-    crate::lifecycle::transition_instance(
+    crate::lifecycle::transition_claimed_instance(
         storage,
         instance.id,
         Some(&instance.tenant_id),
+        instance.updated_at,
         InstanceState::Running,
         InstanceState::Waiting,
         None,

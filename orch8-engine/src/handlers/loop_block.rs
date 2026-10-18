@@ -267,8 +267,9 @@ pub(crate) async fn execute_loop_with_clock(
     if let Some(interval_secs) = loop_def.poll_interval {
         let next_fire = poll_fire_at(clock.now(), interval_secs);
         let transitioned = storage
-            .conditional_update_instance_state(
+            .conditional_update_claimed_instance_state(
                 instance.id,
+                instance.updated_at,
                 InstanceState::Running,
                 InstanceState::Scheduled,
                 Some(next_fire),

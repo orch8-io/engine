@@ -394,7 +394,13 @@ pub(crate) async fn execute_step_node_with_clock(
         crate::scheduler::step_preamble_deferral(storage.as_ref(), instance, step_def, clock)
             .await?
     {
-        crate::scheduler::park_tree_instance_until(storage.as_ref(), instance.id, fire_at).await?;
+        crate::scheduler::park_tree_instance_until(
+            storage.as_ref(),
+            instance.id,
+            instance.updated_at,
+            fire_at,
+        )
+        .await?;
         return Ok(false);
     }
 
@@ -554,8 +560,9 @@ pub(crate) async fn execute_step_node_with_clock(
         BreakerDecision::Proceed(cow) => cow,
         BreakerDecision::Defer { fire_at } => {
             storage
-                .conditional_update_instance_state(
+                .conditional_update_claimed_instance_state(
                     instance.id,
+                    instance.updated_at,
                     orch8_types::instance::InstanceState::Running,
                     orch8_types::instance::InstanceState::Scheduled,
                     Some(fire_at),
@@ -882,10 +889,11 @@ pub(crate) async fn execute_step_node_with_clock(
                     message = %message,
                     "tree path: retryable failure, re-scheduling instance with backoff"
                 );
-                crate::lifecycle::transition_instance(
+                crate::lifecycle::transition_claimed_instance(
                     storage.as_ref(),
                     instance.id,
                     Some(&instance.tenant_id),
+                    instance.updated_at,
                     orch8_types::instance::InstanceState::Running,
                     orch8_types::instance::InstanceState::Scheduled,
                     Some(fire_at),

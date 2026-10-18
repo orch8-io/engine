@@ -464,7 +464,10 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
     // instances share a concurrency_key, more than `max_concurrency` may be
     // Running simultaneously. We put the excess back to Scheduled here,
     // synchronously, so the observable Running count never exceeds the limit.
-    let claimed_ids: Vec<_> = instances.iter().map(|instance| instance.id).collect();
+    let claimed_ids: Vec<_> = instances
+        .iter()
+        .map(|instance| (instance.id, instance.updated_at))
+        .collect();
     let mut instances = match enforce_concurrency_limits(ctx.storage, instances, ctx.clock).await {
         Ok(instances) => instances,
         Err(error) => {
@@ -504,7 +507,10 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
     let (signals_map, completed_map) = match prefetch {
         Ok(prefetched) => prefetched,
         Err(error) => {
-            let ids: Vec<_> = instances.iter().map(|instance| instance.id).collect();
+            let ids: Vec<_> = instances
+                .iter()
+                .map(|instance| (instance.id, instance.updated_at))
+                .collect();
             reschedule_claimed_after_setup_error(
                 ctx.storage,
                 &ids,
@@ -540,8 +546,9 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             );
             if let Err(e) = ctx
                 .storage
-                .conditional_update_instance_state(
+                .conditional_update_claimed_instance_state(
                     instance.id,
+                    instance.updated_at,
                     InstanceState::Running,
                     InstanceState::Scheduled,
                     Some(ctx.clock.now()),
@@ -684,7 +691,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     cancel: &cancel,
                     clock: &clock,
                     lease_lost: &lease_lost_inner,
-                    claim_token: Some(claim_token),
+                    claim_token,
                 };
                 process_instance(&ctx, instance, data).await
             })
@@ -719,8 +726,9 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                                 + chrono::Duration::from_std(delay)
                                     .unwrap_or(chrono::Duration::seconds(60));
                             if let Err(te) = storage
-                                .conditional_update_instance_state(
+                                .conditional_update_claimed_instance_state(
                                     instance_id,
+                                    claim_token,
                                     InstanceState::Running,
                                     InstanceState::Scheduled,
                                     Some(fire_at),
@@ -736,15 +744,18 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                         }
                         transient_retries::Decision::Exhausted { attempts } => {
                             crate::metrics::inc(crate::metrics::INSTANCE_TRANSIENT_RETRY_EXHAUSTED);
-                            record_transient_exhaustion(&storage, instance_id, attempts, &e).await;
-                            mark_instance_failed(
+                            if mark_instance_failed(
                                 &storage,
                                 instance_id,
+                                claim_token,
                                 &e,
                                 "instance kept failing with a transient-classified error; retries exhausted (transient_retry_exhausted)",
                                 "failed to transition instance to Failed after transient retries were exhausted",
                             )
-                            .await;
+                            .await
+                            {
+                                record_transient_exhaustion(&storage, instance_id, attempts, &e).await;
+                            }
                         }
                     }
                 }
@@ -752,6 +763,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     mark_instance_failed(
                         &storage,
                         instance_id,
+                        claim_token,
                         &e,
                         "instance processing failed",
                         "failed to transition instance to Failed after processing error",
@@ -762,6 +774,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     mark_instance_failed(
                         &storage,
                         instance_id,
+                        claim_token,
                         &join_err,
                         "instance processing panicked",
                         "failed to transition instance to Failed after panic",
@@ -925,14 +938,15 @@ async fn record_transient_exhaustion(
 /// concurrent signal or operator already moved to another state.
 async fn defer_running_instances(
     storage: &Arc<dyn StorageBackend>,
-    ids: &[InstanceId],
+    claims: &[(InstanceId, chrono::DateTime<Utc>)],
     fire_at: chrono::DateTime<Utc>,
 ) -> Result<(), EngineError> {
     let mut first_error = None;
-    for &id in ids {
+    for &(id, claim_token) in claims {
         if let Err(error) = storage
-            .conditional_update_instance_state(
+            .conditional_update_claimed_instance_state(
                 id,
+                claim_token,
                 InstanceState::Running,
                 InstanceState::Scheduled,
                 Some(fire_at),
@@ -950,12 +964,12 @@ async fn defer_running_instances(
 /// setup error while making every claimed row immediately eligible to retry.
 async fn reschedule_claimed_after_setup_error(
     storage: &Arc<dyn StorageBackend>,
-    ids: &[InstanceId],
+    claims: &[(InstanceId, chrono::DateTime<Utc>)],
     fire_at: chrono::DateTime<Utc>,
     phase: &'static str,
 ) {
-    if let Err(error) = defer_running_instances(storage, ids, fire_at).await {
-        error!(%error, phase, count = ids.len(), "failed to reschedule claimed instances after scheduler setup error");
+    if let Err(error) = defer_running_instances(storage, claims, fire_at).await {
+        error!(%error, phase, count = claims.len(), "failed to reschedule claimed instances after scheduler setup error");
     }
 }
 
@@ -966,30 +980,38 @@ async fn reschedule_claimed_after_setup_error(
 async fn mark_instance_failed(
     storage: &Arc<dyn StorageBackend>,
     instance_id: InstanceId,
+    claim_token: chrono::DateTime<Utc>,
     cause: &(dyn std::fmt::Display + Send + Sync),
     cause_label: &'static str,
     transition_label: &'static str,
-) {
-    crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
+) -> bool {
     error!(
         instance_id = %instance_id,
         error = %cause,
         "{cause_label}"
     );
-    if let Err(te) = storage
-        .conditional_update_instance_state(
+    match storage
+        .conditional_update_claimed_instance_state(
             instance_id,
+            claim_token,
             InstanceState::Running,
             InstanceState::Failed,
             None,
         )
         .await
     {
-        error!(
-            instance_id = %instance_id,
-            error = %te,
-            "{transition_label}"
-        );
+        Ok(true) => {
+            crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
+            true
+        }
+        Ok(false) => {
+            debug!(instance_id = %instance_id, "failure transition skipped: claim no longer owns instance");
+            false
+        }
+        Err(te) => {
+            error!(instance_id = %instance_id, error = %te, "{transition_label}");
+            false
+        }
     }
 }
 
@@ -1065,7 +1087,7 @@ async fn enforce_concurrency_limits(
     }
 
     let defer_at = clock.now() + chrono::Duration::seconds(1);
-    let mut deferred_ids: Vec<InstanceId> = Vec::with_capacity(deferred_indices.len());
+    let mut deferred_claims = Vec::with_capacity(deferred_indices.len());
     for &idx in &deferred_indices {
         let inst = &instances[idx];
         debug!(
@@ -1073,9 +1095,9 @@ async fn enforce_concurrency_limits(
             concurrency_key = %inst.concurrency_key.as_deref().unwrap_or(""),
             "concurrency limit exceeded at claim time, deferring"
         );
-        deferred_ids.push(inst.id);
+        deferred_claims.push((inst.id, inst.updated_at));
     }
-    defer_running_instances(storage, &deferred_ids, defer_at).await?;
+    defer_running_instances(storage, &deferred_claims, defer_at).await?;
 
     // Order-preserving removal: `swap_remove` would pull tail elements into
     // the holes, scrambling the priority order established by
@@ -2689,9 +2711,8 @@ struct InstanceRunCtx<'a> {
     /// Set once the instance's lease heartbeat has failed
     /// [`HEARTBEAT_LEASE_LOST_AFTER`] times in a row (ENG-R-N8).
     pub lease_lost: &'a std::sync::atomic::AtomicBool,
-    /// The claim token this run holds (see `heartbeat_instance`); `None`
-    /// when the instance was not claimed through `claim_due_instances`.
-    pub claim_token: Option<chrono::DateTime<chrono::Utc>>,
+    /// The claim token this run holds (see `heartbeat_instance`).
+    pub claim_token: chrono::DateTime<chrono::Utc>,
 }
 
 /// Process a single claimed instance: execute ALL pending steps in one go.
@@ -2717,10 +2738,11 @@ async fn process_instance(
         crate::ownership::LocalOwnership::Owned => {}
         crate::ownership::LocalOwnership::Transferring => {
             info!(%instance_id, "continuity execution is transferring; deferring instance");
-            crate::lifecycle::transition_instance(
+            crate::lifecycle::transition_claimed_instance(
                 storage.as_ref(),
                 instance_id,
                 Some(&instance.tenant_id),
+                ctx.claim_token,
                 InstanceState::Running,
                 InstanceState::Scheduled,
                 Some(chrono::Utc::now() + chrono::Duration::seconds(30)),
@@ -2730,10 +2752,11 @@ async fn process_instance(
         }
         crate::ownership::LocalOwnership::Superseded => {
             warn!(%instance_id, "continuity execution is owned elsewhere; parking local instance");
-            crate::lifecycle::transition_instance(
+            crate::lifecycle::transition_claimed_instance(
                 storage.as_ref(),
                 instance_id,
                 Some(&instance.tenant_id),
+                ctx.claim_token,
                 InstanceState::Running,
                 InstanceState::Waiting,
                 None,
@@ -2818,10 +2841,11 @@ async fn finalize_completed(
 
     let completed_event =
         crate::webhooks::instance_event("instance.completed", instance_id, serde_json::json!({}));
-    crate::lifecycle::transition_instance_with_webhook(
+    crate::lifecycle::transition_claimed_instance_with_webhook(
         ctx.storage.as_ref(),
         instance_id,
         Some(&instance.tenant_id),
+        ctx.claim_token,
         InstanceState::Running,
         InstanceState::Completed,
         None,
@@ -2979,8 +3003,9 @@ async fn defer_if_over_concurrency(
         if position > i64::from(max) {
             let defer_at = ctx.clock.now() + chrono::Duration::seconds(2);
             ctx.storage
-                .conditional_update_instance_state(
+                .conditional_update_claimed_instance_state(
                     instance_id,
+                    ctx.claim_token,
                     InstanceState::Running,
                     InstanceState::Scheduled,
                     Some(defer_at),
@@ -3151,10 +3176,11 @@ async fn execute_step_loop(
                         max = ctx.max_steps_per_instance,
                         "instance exceeded max_steps_per_instance, failing"
                     );
-                    crate::lifecycle::transition_instance(
+                    crate::lifecycle::transition_claimed_instance(
                         ctx.storage.as_ref(),
                         instance_id,
                         Some(&instance.tenant_id),
+                        ctx.claim_token,
                         InstanceState::Running,
                         InstanceState::Failed,
                         None,
@@ -3162,7 +3188,7 @@ async fn execute_step_loop(
                     .await?;
                     return Ok(false);
                 }
-                if cooperatively_preempt(ctx.storage, instance, ctx.clock).await? {
+                if cooperatively_preempt(ctx.storage, instance, ctx.clock, ctx.claim_token).await? {
                     return Ok(false);
                 }
             }
@@ -3190,7 +3216,7 @@ async fn execute_step_loop(
                 if let Err(pos) = completed_blocks.binary_search(&step_def.id) {
                     completed_blocks.insert(pos, step_def.id.clone());
                 }
-                if cooperatively_preempt(ctx.storage, instance, ctx.clock).await? {
+                if cooperatively_preempt(ctx.storage, instance, ctx.clock, ctx.claim_token).await? {
                     return Ok(false);
                 }
             }
@@ -3207,6 +3233,7 @@ async fn cooperatively_preempt(
     storage: &Arc<dyn StorageBackend>,
     instance: &orch8_types::instance::TaskInstance,
     clock: &SharedClock,
+    claim_token: chrono::DateTime<Utc>,
 ) -> Result<bool, EngineError> {
     let now = clock.now();
     if !storage
@@ -3216,8 +3243,9 @@ async fn cooperatively_preempt(
         return Ok(false);
     }
     let yielded = storage
-        .conditional_update_instance_state(
+        .conditional_update_claimed_instance_state(
             instance.id,
+            claim_token,
             InstanceState::Running,
             InstanceState::Scheduled,
             Some(now),
@@ -3364,10 +3392,11 @@ async fn handle_tree_more_work(
     if current == InstanceState::Paused || current.is_terminal() {
         // Terminal/paused — leave state as-is.
     } else if has_waiting_nodes {
-        match crate::lifecycle::transition_instance(
+        match crate::lifecycle::transition_claimed_instance(
             ctx.storage.as_ref(),
             instance_id,
             Some(&instance.tenant_id),
+            ctx.claim_token,
             InstanceState::Running,
             InstanceState::Waiting,
             None,
@@ -3385,10 +3414,11 @@ async fn handle_tree_more_work(
                 );
             }
         }
-    } else if let Err(e) = crate::lifecycle::transition_instance(
+    } else if let Err(e) = crate::lifecycle::transition_claimed_instance(
         ctx.storage.as_ref(),
         instance_id,
         Some(&instance.tenant_id),
+        ctx.claim_token,
         current,
         InstanceState::Scheduled,
         Some(ctx.clock.now()),
@@ -3590,10 +3620,11 @@ async fn fail_if_over_step_budget(
                 max = ctx.max_steps_per_instance,
                 "instance exceeded max_steps_per_instance (tree path), failing"
             );
-            crate::lifecycle::transition_instance(
+            crate::lifecycle::transition_claimed_instance(
                 ctx.storage.as_ref(),
                 instance_id,
                 Some(&instance.tenant_id),
+                ctx.claim_token,
                 InstanceState::Running,
                 InstanceState::Failed,
                 None,
@@ -3628,16 +3659,11 @@ fn lease_presumed_lost(ctx: &InstanceRunCtx<'_>) -> bool {
 /// another claim already owns the row: releasing it then would yank the new
 /// owner's run back to `Scheduled`.
 async fn hand_back_after_lease_loss(ctx: &InstanceRunCtx<'_>, instance_id: InstanceId) {
-    if let Some(token) = ctx.claim_token {
-        let lease = ctx.storage.heartbeat_instance(instance_id, token).await;
-        if matches!(lease, Ok(orch8_storage::InstanceLease::Lost)) {
-            return;
-        }
-    }
     if let Err(e) = ctx
         .storage
-        .conditional_update_instance_state(
+        .conditional_update_claimed_instance_state(
             instance_id,
+            ctx.claim_token,
             InstanceState::Running,
             InstanceState::Scheduled,
             Some(ctx.clock.now()),
@@ -3763,10 +3789,11 @@ async fn handle_tree_done(
         _ => None,
     };
     let transition = if let Some(event) = terminal_event.as_ref() {
-        crate::lifecycle::transition_instance_with_webhook(
+        crate::lifecycle::transition_claimed_instance_with_webhook(
             ctx.storage.as_ref(),
             instance_id,
             Some(&instance.tenant_id),
+            ctx.claim_token,
             current,
             target,
             None,
@@ -3775,10 +3802,11 @@ async fn handle_tree_done(
         )
         .await
     } else {
-        crate::lifecycle::transition_instance(
+        crate::lifecycle::transition_claimed_instance(
             ctx.storage.as_ref(),
             instance_id,
             Some(&instance.tenant_id),
+            ctx.claim_token,
             current,
             target,
             None,
@@ -3891,10 +3919,11 @@ async fn handle_tree_eval_error(
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
     error!(instance_id = %instance_id, error = %error, "tree evaluation failed");
-    crate::lifecycle::transition_instance(
+    crate::lifecycle::transition_claimed_instance(
         ctx.storage.as_ref(),
         instance_id,
         Some(&instance.tenant_id),
+        ctx.claim_token,
         InstanceState::Running,
         InstanceState::Failed,
         None,

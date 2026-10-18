@@ -42,7 +42,9 @@ fault_impl! {
         async fn update_instance_state(&self, id: InstanceId, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
         async fn batch_reschedule_instances(&self, ids: &[InstanceId], fire_at: DateTime<Utc>) -> Result<(), StorageError>;
         async fn conditional_update_instance_state(&self, id: InstanceId, _expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
+        async fn conditional_update_claimed_instance_state(&self, id: InstanceId, claimed_at: DateTime<Utc>, expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
         async fn conditional_update_instance_state_with_outbox(&self, id: InstanceId, expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
+        async fn conditional_update_claimed_instance_state_with_outbox(&self, id: InstanceId, claimed_at: DateTime<Utc>, expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
         async fn reset_instance_run(&self, id: InstanceId, run_id: &str) -> Result<(), StorageError>;
         async fn update_instance_context(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext) -> Result<(), StorageError>;
         async fn update_instance_context_cas(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext, _expected_updated_at: DateTime<Utc>) -> Result<bool, StorageError>;

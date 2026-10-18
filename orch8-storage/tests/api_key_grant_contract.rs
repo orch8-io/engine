@@ -57,6 +57,5 @@ async fn empty_grant_never_reads_back_as_every_capability(s: &dyn StorageBackend
 
 backend_contract!(
     scoped_grant_reads_back_exactly,
-    #[ignore = "BUG: an empty persisted capability list is read back as ApiCapability::all() (T4 #4) — fixed on test/bugs"]
     empty_grant_never_reads_back_as_every_capability,
 );

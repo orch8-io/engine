@@ -2390,7 +2390,6 @@ mod tests {
     /// `orch8-grpc/src/worker_client.rs` always releases a task through the
     /// unary `ReleaseTask`, so an executor node must accept it.
     #[test]
-    #[ignore = "BUG: EXECUTOR_GRPC_RPCS omits /orch8.Orch8Service/ReleaseTask — fixed on test/bugs"]
     fn executor_surface_lets_remote_workers_release_tasks() {
         assert!(EXECUTOR_GRPC_RPCS.contains(&"/orch8.Orch8Service/ReleaseTask"));
     }

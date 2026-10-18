@@ -188,6 +188,8 @@ pub(super) struct InstanceRow {
     pub budget: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub claimed_at: Option<DateTime<Utc>>,
     pub sub_tenant: Option<String>,
 }
 

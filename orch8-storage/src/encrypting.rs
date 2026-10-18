@@ -1521,7 +1521,9 @@ passthrough_impl! {
     async fn update_instance_state(&self, id: InstanceId, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
     async fn batch_reschedule_instances(&self, ids: &[InstanceId], fire_at: DateTime<Utc>) -> Result<(), StorageError>;
     async fn conditional_update_instance_state(&self, id: InstanceId, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
+    async fn conditional_update_claimed_instance_state(&self, id: InstanceId, claimed_at: DateTime<Utc>, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
     async fn conditional_update_instance_state_with_outbox(&self, id: InstanceId, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
+    async fn conditional_update_claimed_instance_state_with_outbox(&self, id: InstanceId, claimed_at: DateTime<Utc>, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
     async fn update_instance_sequence(&self, id: InstanceId, new_sequence_id: orch8_types::ids::SequenceId) -> Result<(), StorageError>;
     async fn count_instances(&self, filter: &orch8_types::filter::InstanceFilter) -> Result<u64, StorageError>;
     async fn any_instance_in_state(&self, state: orch8_types::instance::InstanceState) -> Result<bool, StorageError>;

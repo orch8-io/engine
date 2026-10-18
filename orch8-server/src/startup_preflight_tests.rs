@@ -555,7 +555,6 @@ fn federation_peers_beyond_each_limit_are_rejected_with_the_rule_broken() {
 /// trust root in that form (or be rejected up front); an accepted
 /// uppercase digest would make every envelope from that peer fail.
 #[test]
-#[ignore = "BUG: uppercase trust_root_sha256 passes preflight but never matches the lowercase digest — fixed on test/bugs"]
 fn accepted_federation_trust_roots_match_the_verifiers_lowercase_digest() {
     let peers = peer_with("trust_root_sha256", serde_json::json!("A1".repeat(32)));
 
