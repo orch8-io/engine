@@ -361,29 +361,8 @@ pub(super) async fn claim_due(
         .await?
     };
 
-    // Lease age is compared against database time by the reaper. Use that
-    // same clock for claims so a node with a fast clock cannot delay crash
-    // recovery. A virtual scheduler clock may stand still across claims, so
-    // also advance strictly beyond the prior token.
-    let lease_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(&mut *tx)
-        .await?;
     let previous_claim = candidate_rows.iter().filter_map(|row| row.claimed_at).max();
-    let claim_at = match previous_claim {
-        Some(previous) => {
-            let next = previous
-                .checked_add_signed(chrono::Duration::microseconds(1))
-                .ok_or_else(|| {
-                    StorageError::Constraint("claim token timestamp exhausted".into())
-                })?;
-            lease_now.max(next)
-        }
-        None => lease_now,
-    };
-    // Postgres timestamps have microsecond precision. Return the same value
-    // the database stores, including when a virtual clock has nanoseconds.
-    let claim_at = DateTime::<Utc>::from_timestamp_micros(claim_at.timestamp_micros())
-        .ok_or_else(|| StorageError::Constraint("claim token timestamp exhausted".into()))?;
+    let claim_at = next_claim_timestamp(&mut tx, previous_claim).await?;
     let all_candidates: Vec<TaskInstance> = candidate_rows
         .into_iter()
         .map(InstanceRow::into_instance)
@@ -421,6 +400,31 @@ pub(super) async fn claim_due(
             i
         })
         .collect())
+}
+
+/// Stamp claims from the same clock the stale reaper uses, then advance past
+/// the prior token even when a virtual scheduler clock stands still.
+async fn next_claim_timestamp(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    previous_claim: Option<DateTime<Utc>>,
+) -> Result<DateTime<Utc>, StorageError> {
+    let lease_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **tx)
+        .await?;
+    let claim_at = match previous_claim {
+        Some(previous) => {
+            let next = previous
+                .checked_add_signed(chrono::Duration::microseconds(1))
+                .ok_or_else(|| {
+                    StorageError::Constraint("claim token timestamp exhausted".into())
+                })?;
+            lease_now.max(next)
+        }
+        None => lease_now,
+    };
+    // Postgres has microsecond precision. Return exactly the stored token.
+    DateTime::<Utc>::from_timestamp_micros(claim_at.timestamp_micros())
+        .ok_or_else(|| StorageError::Constraint("claim token timestamp exhausted".into()))
 }
 
 /// Filter candidates by `concurrency_key` / `max_concurrency` within a transaction.

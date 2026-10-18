@@ -1812,7 +1812,16 @@ pub(super) async fn handle_retryable_failure(
         return Ok(());
     }
 
-    // No retry policy — fail the instance.
+    fail_without_retry_policy(storage, instance, webhook_config, message).await
+}
+
+async fn fail_without_retry_policy(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    webhook_config: &WebhookConfig,
+    message: &str,
+) -> Result<(), EngineError> {
+    let instance_id = instance.id;
     let failed_event = crate::webhooks::instance_event(
         "instance.failed",
         instance_id,

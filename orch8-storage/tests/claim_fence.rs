@@ -97,7 +97,7 @@ backend_test!(
                     InstanceState::Running,
                     InstanceState::Failed,
                     None,
-                    &[stale_event.clone()],
+                    std::slice::from_ref(&stale_event),
                 )
                 .await
                 .unwrap()
@@ -112,7 +112,7 @@ backend_test!(
                     InstanceState::Running,
                     InstanceState::Failed,
                     None,
-                    &[current_event.clone()],
+                    std::slice::from_ref(&current_event),
                 )
                 .await
                 .unwrap()
@@ -130,7 +130,10 @@ backend_test!(
                 .state(InstanceState::Running)
                 .build();
             if batch {
-                b.storage.create_instances_batch(&[instance.clone()]).await.unwrap();
+                b.storage
+                    .create_instances_batch(std::slice::from_ref(&instance))
+                    .await
+                    .unwrap();
             } else {
                 b.storage.create_instance(&instance).await.unwrap();
             }

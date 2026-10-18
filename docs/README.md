@@ -125,6 +125,7 @@ open-item lists.
 - [Changelog](../CHANGELOG.md) — release history and unreleased changes.
 - [Rust review](RUST_REVIEW.md) — July 2026 best-practice review record.
 - [Security audit](SECURITY_AUDIT.md) — second Rust security audit record.
+- [Long-running engine review](reviews/2026-10-18-long-running-engine.md) — October 2026 lease, lifecycle, and recovery audit.
 
 ## Accuracy contract
 
