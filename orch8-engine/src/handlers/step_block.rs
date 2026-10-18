@@ -337,7 +337,17 @@ pub async fn execute_step_node(
     outputs: &OutputsSnapshot,
 ) -> Result<bool, EngineError> {
     let clock = orch8_types::clock::SharedClock::default();
-    execute_step_node_with_clock(storage, handlers, instance, node, step_def, outputs, &clock).await
+    execute_step_node_with_clock(
+        storage,
+        handlers,
+        instance,
+        node,
+        step_def,
+        outputs,
+        &clock,
+        instance.updated_at,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -349,6 +359,7 @@ pub(crate) async fn execute_step_node_with_clock(
     step_def: &StepDef,
     outputs: &OutputsSnapshot,
     clock: &orch8_types::clock::SharedClock,
+    claim_token: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, EngineError> {
     // Conditional guard: if `when` is set, evaluate the expression against
     // the current context + outputs. Skip the step entirely if falsy. Strict
@@ -394,7 +405,13 @@ pub(crate) async fn execute_step_node_with_clock(
         crate::scheduler::step_preamble_deferral(storage.as_ref(), instance, step_def, clock)
             .await?
     {
-        crate::scheduler::park_tree_instance_until(storage.as_ref(), instance.id, fire_at).await?;
+        crate::scheduler::park_tree_instance_until(
+            storage.as_ref(),
+            instance.id,
+            claim_token,
+            fire_at,
+        )
+        .await?;
         return Ok(false);
     }
 
@@ -431,12 +448,13 @@ pub(crate) async fn execute_step_node_with_clock(
             patched.context.runtime.current_step_started_at = Some(node_started);
             patched
         });
-        let deferred = crate::scheduler::check_human_input_at(
+        let deferred = crate::scheduler::check_human_input_at_with_claim(
             storage.as_ref(),
             gate_instance.as_ref().unwrap_or(instance),
             step_def,
             human_def,
             clock.now(),
+            claim_token,
         )
         .await?;
         if deferred {
@@ -554,8 +572,9 @@ pub(crate) async fn execute_step_node_with_clock(
         BreakerDecision::Proceed(cow) => cow,
         BreakerDecision::Defer { fire_at } => {
             storage
-                .conditional_update_instance_state(
+                .conditional_update_claimed_instance_state(
                     instance.id,
+                    claim_token,
                     orch8_types::instance::InstanceState::Running,
                     orch8_types::instance::InstanceState::Scheduled,
                     Some(fire_at),
@@ -882,10 +901,11 @@ pub(crate) async fn execute_step_node_with_clock(
                     message = %message,
                     "tree path: retryable failure, re-scheduling instance with backoff"
                 );
-                crate::lifecycle::transition_instance(
+                crate::lifecycle::transition_claimed_instance(
                     storage.as_ref(),
                     instance.id,
                     Some(&instance.tenant_id),
+                    claim_token,
                     orch8_types::instance::InstanceState::Running,
                     orch8_types::instance::InstanceState::Scheduled,
                     Some(fire_at),

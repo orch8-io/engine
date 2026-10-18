@@ -935,15 +935,15 @@ fn memory_content_sha256(content: &Value) -> Result<String, StepError> {
 }
 
 fn matches_content_commitment(record: &Value, governance: &Value) -> bool {
-    let legacy = match governance.get("schema_version") {
-        None => true,
-        Some(version) if version.as_u64() == Some(1) => false,
-        // Unknown governed schemas must not be interpreted as this version.
-        Some(_) => return false,
-    };
+    // An ungoverned record is handled separately by `governed_records` for
+    // instance-local compatibility. Once a governance envelope exists, its
+    // version and commitment are both mandatory: treating a missing version
+    // as legacy lets a tampered record remove both fields and bypass hashing.
+    if governance.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return false;
+    }
     let Some(expected) = governance.get("content_sha256") else {
-        // Only unversioned legacy records may omit the commitment.
-        return legacy;
+        return false;
     };
     let Some(expected) = expected.as_str() else {
         return false;
@@ -1827,7 +1827,6 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "BUG: governed record with schema_version and content_sha256 stripped is accepted as legacy (T4 #6) — fixed on test/bugs"]
         fn stripping_the_schema_version_does_not_bypass_the_content_commitment() {
             let mut record = governed_record(&authorization(), now() + Duration::seconds(10));
             let governance = record["governance"].as_object_mut().unwrap();

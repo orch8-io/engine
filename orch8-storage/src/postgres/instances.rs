@@ -41,8 +41,8 @@ pub(super) const INSTANCE_INSERT_SQL: &str = r"
          priority, timezone, metadata, context,
          concurrency_key, max_concurrency, idempotency_key,
          session_id, parent_instance_id, budget,
-         created_at, updated_at, sub_tenant)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+         created_at, updated_at, sub_tenant, claimed_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 ";
 
 /// Bind a `TaskInstance` to an already-prepared query in the canonical column
@@ -79,6 +79,10 @@ pub(super) fn bind_instance_insert<'q>(
         .bind(inst.created_at)
         .bind(inst.updated_at)
         .bind(inst.sub_tenant.as_deref())
+        .bind(
+            matches!(inst.state, InstanceState::Running | InstanceState::Waiting)
+                .then_some(inst.updated_at),
+        )
 }
 
 pub(super) async fn create(
@@ -202,7 +206,7 @@ async fn insert_batch_tx(
                  priority, timezone, metadata, context,
                  concurrency_key, max_concurrency, idempotency_key,
                  session_id, parent_instance_id, budget,
-                 created_at, updated_at, sub_tenant) ",
+                 created_at, updated_at, sub_tenant, claimed_at) ",
         );
         qb.push_values(
             chunk.iter().zip(rows.iter()),
@@ -228,7 +232,11 @@ async fn insert_batch_tx(
                     .push_bind(budget.as_ref())
                     .push_bind(inst.created_at)
                     .push_bind(inst.updated_at)
-                    .push_bind(inst.sub_tenant.as_deref());
+                    .push_bind(inst.sub_tenant.as_deref())
+                    .push_bind(
+                        matches!(inst.state, InstanceState::Running | InstanceState::Waiting)
+                            .then_some(inst.updated_at),
+                    );
             },
         );
         let result = qb.build().execute(&mut **transaction).await?;
@@ -353,6 +361,8 @@ pub(super) async fn claim_due(
         .await?
     };
 
+    let previous_claim = candidate_rows.iter().filter_map(|row| row.claimed_at).max();
+    let claim_at = next_claim_timestamp(&mut tx, previous_claim).await?;
     let all_candidates: Vec<TaskInstance> = candidate_rows
         .into_iter()
         .map(InstanceRow::into_instance)
@@ -372,7 +382,7 @@ pub(super) async fn claim_due(
         sqlx::query(
             r"UPDATE task_instances SET state = 'running', updated_at = $1, claimed_at = $1 WHERE id = ANY($2)",
         )
-        .bind(now)
+        .bind(claim_at)
         .bind(&ids)
         .execute(&mut *tx)
         .await?;
@@ -386,10 +396,35 @@ pub(super) async fn claim_due(
         .into_iter()
         .map(|mut i| {
             i.state = InstanceState::Running;
-            i.updated_at = now;
+            i.updated_at = claim_at;
             i
         })
         .collect())
+}
+
+/// Stamp claims from the same clock the stale reaper uses, then advance past
+/// the prior token even when a virtual scheduler clock stands still.
+async fn next_claim_timestamp(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    previous_claim: Option<DateTime<Utc>>,
+) -> Result<DateTime<Utc>, StorageError> {
+    let lease_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **tx)
+        .await?;
+    let claim_at = match previous_claim {
+        Some(previous) => {
+            let next = previous
+                .checked_add_signed(chrono::Duration::microseconds(1))
+                .ok_or_else(|| {
+                    StorageError::Constraint("claim token timestamp exhausted".into())
+                })?;
+            lease_now.max(next)
+        }
+        None => lease_now,
+    };
+    // Postgres has microsecond precision. Return exactly the stored token.
+    DateTime::<Utc>::from_timestamp_micros(claim_at.timestamp_micros())
+        .ok_or_else(|| StorageError::Constraint("claim token timestamp exhausted".into()))
 }
 
 /// Filter candidates by `concurrency_key` / `max_concurrency` within a transaction.
@@ -560,6 +595,28 @@ pub(super) async fn conditional_update_state(
     Ok(result.rows_affected() > 0)
 }
 
+pub(super) async fn conditional_update_claimed_state(
+    store: &PostgresStorage,
+    id: InstanceId,
+    claimed_at: DateTime<Utc>,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "UPDATE task_instances SET state = $2, next_fire_at = $3, updated_at = NOW() \
+         WHERE id = $1 AND state = $4 AND claimed_at = $5",
+    )
+    .bind(id.into_uuid())
+    .bind(new_state.to_string())
+    .bind(next_fire_at)
+    .bind(expected_state.to_string())
+    .bind(claimed_at)
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Transactional variant: CAS the state and enqueue its webhook rows in the
 /// same commit. A lost CAS queues no events.
 pub(super) async fn conditional_update_state_with_outbox(
@@ -580,6 +637,38 @@ pub(super) async fn conditional_update_state_with_outbox(
     .bind(new_state.to_string())
     .bind(next_fire_at)
     .bind(expected_state.to_string())
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    for entry in entries {
+        super::webhook_outbox::park_tx(&mut tx, entry).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub(super) async fn conditional_update_claimed_state_with_outbox(
+    store: &PostgresStorage,
+    id: InstanceId,
+    claimed_at: DateTime<Utc>,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+    entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
+) -> Result<bool, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let result = sqlx::query(
+        "UPDATE task_instances SET state = $2, next_fire_at = $3, updated_at = NOW() \
+         WHERE id = $1 AND state = $4 AND claimed_at = $5",
+    )
+    .bind(id.into_uuid())
+    .bind(new_state.to_string())
+    .bind(next_fire_at)
+    .bind(expected_state.to_string())
+    .bind(claimed_at)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
@@ -854,7 +943,7 @@ pub(super) async fn create_batch_externalized(
                  priority, timezone, metadata, context,
                  concurrency_key, max_concurrency, idempotency_key,
                  session_id, parent_instance_id, budget,
-                 created_at, updated_at, sub_tenant) ",
+                 created_at, updated_at, sub_tenant, claimed_at) ",
         );
         let mut idx = 0usize;
         qb.push_values(chunk, |mut b, (inst, _)| {
@@ -882,7 +971,11 @@ pub(super) async fn create_batch_externalized(
                 .push_bind(budget)
                 .push_bind(inst.created_at)
                 .push_bind(inst.updated_at)
-                .push_bind(inst.sub_tenant.as_deref());
+                .push_bind(inst.sub_tenant.as_deref())
+                .push_bind(
+                    matches!(inst.state, InstanceState::Running | InstanceState::Waiting)
+                        .then_some(inst.updated_at),
+                );
         });
         let result = qb.build().execute(&mut *tx).await?;
         count += result.rows_affected();

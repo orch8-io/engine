@@ -594,20 +594,27 @@ pub trait InstanceStore: Send + Sync + 'static {
     /// `expected_state`. Returns `true` if the row was updated, `false` if
     /// the state had already moved (concurrent writer won the race).
     ///
-    /// Default implementation falls through to `update_instance_state`
-    /// without the guard -- production backends override with
-    /// `WHERE id = $1 AND state = $expected`.
+    /// Implementations must enforce the guard in storage. A fallback to an
+    /// unconditional update would silently break scheduler race protection.
     async fn conditional_update_instance_state(
         &self,
         id: InstanceId,
-        _expected_state: InstanceState,
+        expected_state: InstanceState,
         new_state: InstanceState,
         next_fire_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, StorageError> {
-        self.update_instance_state(id, new_state, next_fire_at)
-            .await?;
-        Ok(true)
-    }
+    ) -> Result<bool, StorageError>;
+
+    /// Change a claimed instance only while this exact claim still owns it.
+    /// The state and claim token must be checked in the same database update;
+    /// a heartbeat followed by a state-only CAS leaves a reclaim race.
+    async fn conditional_update_claimed_instance_state(
+        &self,
+        id: InstanceId,
+        claimed_at: DateTime<Utc>,
+        expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError>;
 
     /// CAS the instance state AND enqueue webhook outbox rows in one
     /// transaction, so a terminal transition can never commit without its
@@ -620,6 +627,17 @@ pub trait InstanceStore: Send + Sync + 'static {
     async fn conditional_update_instance_state_with_outbox(
         &self,
         id: InstanceId,
+        expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
+    ) -> Result<bool, StorageError>;
+
+    /// Claim-fenced terminal transition with webhook rows in one transaction.
+    async fn conditional_update_claimed_instance_state_with_outbox(
+        &self,
+        id: InstanceId,
+        claimed_at: DateTime<Utc>,
         expected_state: InstanceState,
         new_state: InstanceState,
         next_fire_at: Option<DateTime<Utc>>,

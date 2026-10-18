@@ -23,7 +23,41 @@ pub async fn transition_instance(
     to: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
 ) -> Result<(), EngineError> {
-    transition_instance_inner(storage, instance_id, tenant_id, from, to, next_fire_at, &[]).await
+    transition_instance_inner(
+        storage,
+        instance_id,
+        tenant_id,
+        None,
+        from,
+        to,
+        next_fire_at,
+        &[],
+    )
+    .await
+}
+
+/// Transition a Running instance only while the caller still owns its claim.
+#[allow(clippy::too_many_arguments)]
+pub async fn transition_claimed_instance(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    tenant_id: Option<&TenantId>,
+    claim_token: DateTime<Utc>,
+    from: InstanceState,
+    to: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<(), EngineError> {
+    transition_instance_inner(
+        storage,
+        instance_id,
+        tenant_id,
+        Some(claim_token),
+        from,
+        to,
+        next_fire_at,
+        &[],
+    )
+    .await
 }
 
 /// Transition an instance and durably enqueue one webhook row per configured
@@ -45,6 +79,34 @@ pub async fn transition_instance_with_webhook(
         storage,
         instance_id,
         tenant_id,
+        None,
+        from,
+        to,
+        next_fire_at,
+        &entries,
+    )
+    .await
+}
+
+/// Claim-fenced transition that commits its webhook rows with the state.
+#[allow(clippy::too_many_arguments)]
+pub async fn transition_claimed_instance_with_webhook(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    tenant_id: Option<&TenantId>,
+    claim_token: DateTime<Utc>,
+    from: InstanceState,
+    to: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+    webhook_config: &WebhookConfig,
+    event: &crate::webhooks::WebhookEvent,
+) -> Result<(), EngineError> {
+    let entries = crate::webhooks::pending_entries(webhook_config, event);
+    transition_instance_inner(
+        storage,
+        instance_id,
+        tenant_id,
+        Some(claim_token),
         from,
         to,
         next_fire_at,
@@ -58,6 +120,7 @@ async fn transition_instance_inner(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
     tenant_id: Option<&TenantId>,
+    claim_token: Option<DateTime<Utc>>,
     from: InstanceState,
     to: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
@@ -80,20 +143,46 @@ async fn transition_instance_inner(
     // Atomic CAS: only update if the row is still in `from` state.
     // Prevents a concurrent cancel/fail from being silently overwritten
     // by a late scheduler or worker callback.
-    let updated = if outbox_entries.is_empty() {
-        storage
-            .conditional_update_instance_state(instance_id, from, to, next_fire_at)
-            .await?
-    } else {
-        storage
-            .conditional_update_instance_state_with_outbox(
-                instance_id,
-                from,
-                to,
-                next_fire_at,
-                outbox_entries,
-            )
-            .await?
+    let updated = match (claim_token, outbox_entries.is_empty()) {
+        (Some(token), true) => {
+            storage
+                .conditional_update_claimed_instance_state(
+                    instance_id,
+                    token,
+                    from,
+                    to,
+                    next_fire_at,
+                )
+                .await?
+        }
+        (Some(token), false) => {
+            storage
+                .conditional_update_claimed_instance_state_with_outbox(
+                    instance_id,
+                    token,
+                    from,
+                    to,
+                    next_fire_at,
+                    outbox_entries,
+                )
+                .await?
+        }
+        (None, true) => {
+            storage
+                .conditional_update_instance_state(instance_id, from, to, next_fire_at)
+                .await?
+        }
+        (None, false) => {
+            storage
+                .conditional_update_instance_state_with_outbox(
+                    instance_id,
+                    from,
+                    to,
+                    next_fire_at,
+                    outbox_entries,
+                )
+                .await?
+        }
     };
     if !updated {
         warn!(
@@ -491,6 +580,92 @@ mod tests {
                 && entry.instance_id == Some(inst.id.into_uuid())
                 && entry.payload["data"]["run_id"] == "run-1"
         }));
+    }
+
+    #[tokio::test]
+    async fn claimed_terminal_transition_rejects_replaced_owner_without_webhook() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let inst = mk_scheduled_instance();
+        storage.create_instance(&inst).await.unwrap();
+        let now = Utc::now() + chrono::Duration::seconds(1);
+        let first = storage
+            .claim_due_instances(now, 1, 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        transition_claimed_instance(
+            &storage,
+            inst.id,
+            Some(&inst.tenant_id),
+            first.updated_at,
+            InstanceState::Running,
+            InstanceState::Scheduled,
+            Some(now),
+        )
+        .await
+        .unwrap();
+        let second = storage
+            .claim_due_instances(now, 1, 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_ne!(first.updated_at, second.updated_at);
+
+        let config = WebhookConfig {
+            urls: vec!["https://hooks.example.com/failure".into()],
+            ..WebhookConfig::default()
+        };
+        let event = crate::webhooks::instance_event("instance.failed", inst.id, json!({}));
+        let stale = transition_claimed_instance_with_webhook(
+            &storage,
+            inst.id,
+            Some(&inst.tenant_id),
+            first.updated_at,
+            InstanceState::Running,
+            InstanceState::Failed,
+            None,
+            &config,
+            &event,
+        )
+        .await;
+        assert!(matches!(stale, Err(EngineError::InvalidTransition { .. })));
+        assert_eq!(
+            storage.get_instance(inst.id).await.unwrap().unwrap().state,
+            InstanceState::Running
+        );
+        assert!(
+            storage
+                .claim_due_webhook_outbox(Utc::now(), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        transition_claimed_instance_with_webhook(
+            &storage,
+            inst.id,
+            Some(&inst.tenant_id),
+            second.updated_at,
+            InstanceState::Running,
+            InstanceState::Failed,
+            None,
+            &config,
+            &event,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage
+                .claim_due_webhook_outbox(Utc::now(), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

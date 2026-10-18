@@ -1937,7 +1937,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG: `order-id` and `order_id` both sanitize to `order_id`, emitting duplicate native fields — fixed on test/bugs"]
     fn colliding_sanitized_field_names_get_distinct_native_identifiers() {
         let schema = json!({
             "type": "object",

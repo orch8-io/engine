@@ -542,7 +542,6 @@ backend_contract!(
     device_registration_refuses_cross_tenant_overwrite,
     empty_ack_list_acknowledges_nothing,
     ack_marks_only_the_listed_commands_of_that_device,
-    #[ignore = "BUG: record_command_acks has no tenant predicate, so an ack marks another tenant's wake for the same device id — fixed on test/bugs"]
     ack_never_marks_another_tenants_wake_for_the_same_device_id,
     newer_collapsible_wake_supersedes_pending_wake_of_the_same_execution,
     collapsible_supersede_never_crosses_tenants,

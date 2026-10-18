@@ -109,17 +109,27 @@ async fn cooperative_preemption_reschedules_lower_priority_instance() {
         created_at: now,
         updated_at: now,
     };
-    let low = make(Priority::Low, InstanceState::Running, None);
+    let low = make(
+        Priority::Low,
+        InstanceState::Scheduled,
+        Some(now - chrono::Duration::seconds(1)),
+    );
     let high = make(
         Priority::High,
         InstanceState::Scheduled,
         Some(now - chrono::Duration::seconds(1)),
     );
     storage.create_instance(&low).await.unwrap();
+    let low = storage
+        .claim_due_instances(Utc::now(), 1, 0)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
     storage.create_instance(&high).await.unwrap();
 
     assert!(
-        cooperatively_preempt(&storage, &low, &SharedClock::default())
+        cooperatively_preempt(&storage, &low, &SharedClock::default(), low.updated_at)
             .await
             .unwrap()
     );
@@ -396,20 +406,15 @@ async fn scheduler_fast_path_retryable_failure_honours_max_attempts() {
     let mut final_state = None;
     for _ in 0..10 {
         // Simulate the scheduler claim: a rescheduled instance sits in
-        // `Scheduled`; move it back to `Running` before the next execution.
+        // `Scheduled`; claim it again to issue a fresh ownership token.
         let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
         let inst = if inst.state == InstanceState::Scheduled {
-            crate::lifecycle::transition_instance(
-                storage.as_ref(),
-                instance_id,
-                Some(&inst.tenant_id),
-                InstanceState::Scheduled,
-                InstanceState::Running,
-                None,
-            )
-            .await
-            .unwrap();
-            storage.get_instance(instance_id).await.unwrap().unwrap()
+            storage
+                .claim_due_instances(Utc::now() + chrono::Duration::seconds(1), 1, 0)
+                .await
+                .unwrap()
+                .pop()
+                .expect("rescheduled instance is due")
         } else {
             inst
         };
@@ -999,9 +1004,15 @@ async fn deferral_only_reschedules_instances_that_are_still_running() {
         running_id,
         None,
         None,
-        InstanceState::Running,
+        InstanceState::Scheduled,
     )
     .await;
+    let running_claim = storage
+        .claim_due_instances(Utc::now(), 1, 0)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
     seed_instance_with_concurrency(
         storage.as_ref(),
         cancelled_id,
@@ -1012,9 +1023,17 @@ async fn deferral_only_reschedules_instances_that_are_still_running() {
     .await;
 
     let fire_at = Utc::now() + chrono::Duration::seconds(5);
-    defer_running_instances(&storage, &[running_id, cancelled_id], fire_at)
-        .await
-        .unwrap();
+    let cancelled = storage.get_instance(cancelled_id).await.unwrap().unwrap();
+    defer_running_instances(
+        &storage,
+        &[
+            (running_id, running_claim.updated_at),
+            (cancelled_id, cancelled.updated_at),
+        ],
+        fire_at,
+    )
+    .await
+    .unwrap();
 
     let running = storage.get_instance(running_id).await.unwrap().unwrap();
     assert_eq!(running.state, InstanceState::Scheduled);
@@ -1163,13 +1182,18 @@ async fn wait_for_input_baseline_survives_reentry() {
         .current_step_started_at
         .expect("first entry stamps current_step_started_at");
 
-    // Simulate a wake: back to Running, then re-enter the same step later.
+    // Simulate a wake and a fresh claim before re-entering the same step.
     storage
-        .update_instance_state(instance_id, InstanceState::Running, None)
+        .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(15)).await;
-    let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    let instance = storage
+        .claim_due_instances(Utc::now() + chrono::Duration::seconds(1), 1, 0)
+        .await
+        .unwrap()
+        .pop()
+        .expect("woken instance is due");
     let outcome = execute_step_block(
         &storage,
         &registry,
@@ -1586,7 +1610,7 @@ async fn lease_lost_stops_flat_loop_before_next_step() {
         cancel: &cancel,
         clock: &clock,
         lease_lost: &lease_lost,
-        claim_token: None,
+        claim_token: instance.updated_at,
     };
 
     let finished = execute_step_loop(&ctx, &instance, &sequence, &blocks, Vec::new())
@@ -1638,7 +1662,7 @@ async fn lease_lost_to_other_claim_does_not_release_instance() {
         cancel: &cancel,
         clock: &clock,
         lease_lost: &lease_lost,
-        claim_token: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+        claim_token: chrono::Utc::now() - chrono::Duration::hours(1),
     };
 
     let finished = execute_step_loop(&ctx, &instance, &sequence, &blocks, Vec::new())
@@ -1704,7 +1728,7 @@ async fn run_tree_with_lease_flag(
         cancel: &cancel,
         clock: &clock,
         lease_lost,
-        claim_token,
+        claim_token: claim_token.unwrap_or(instance.updated_at),
     };
     process_instance_tree(&ctx, instance, &two_step_composite_sequence())
         .await
@@ -2228,7 +2252,7 @@ async fn run_process_instance(storage: &Arc<dyn StorageBackend>, instance: TaskI
         cancel: &cancel,
         clock: &clock,
         lease_lost: &lease_lost,
-        claim_token: None,
+        claim_token: instance.updated_at,
     };
     process_instance(
         &ctx,
@@ -2473,7 +2497,7 @@ async fn run_more_work_with(
         cancel: &cancel,
         clock: &clock,
         lease_lost: &lease_lost,
-        claim_token: None,
+        claim_token: parent.updated_at,
     };
     handle_tree_more_work(&ctx, parent, seq, has_waiting_nodes)
         .await

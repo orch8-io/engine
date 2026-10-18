@@ -809,6 +809,25 @@ impl crate::InstanceStore for SqliteStorage {
         instances::conditional_update_state(self, id, expected_state, new_state, next_fire_at).await
     }
 
+    async fn conditional_update_claimed_instance_state(
+        &self,
+        id: InstanceId,
+        claimed_at: DateTime<Utc>,
+        expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        instances::conditional_update_claimed_state(
+            self,
+            id,
+            claimed_at,
+            expected_state,
+            new_state,
+            next_fire_at,
+        )
+        .await
+    }
+
     async fn conditional_update_instance_state_with_outbox(
         &self,
         id: InstanceId,
@@ -820,6 +839,27 @@ impl crate::InstanceStore for SqliteStorage {
         instances::conditional_update_state_with_outbox(
             self,
             id,
+            expected_state,
+            new_state,
+            next_fire_at,
+            entries,
+        )
+        .await
+    }
+
+    async fn conditional_update_claimed_instance_state_with_outbox(
+        &self,
+        id: InstanceId,
+        claimed_at: DateTime<Utc>,
+        expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
+    ) -> Result<bool, StorageError> {
+        instances::conditional_update_claimed_state_with_outbox(
+            self,
+            id,
+            claimed_at,
             expected_state,
             new_state,
             next_fire_at,

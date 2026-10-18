@@ -402,6 +402,15 @@ async fn run_start_is_first_writer_wins_and_reset_clears_old_budget_state() {
 // reclaimed by recover_stale_instances out from under itself.
 // ---------------------------------------------------------------------------
 
+async fn backdate_lease_heartbeat(s: &SqliteStorage, id: InstanceId) {
+    sqlx::query("UPDATE task_instances SET updated_at = ? WHERE id = ?")
+        .bind((Utc::now() - Duration::hours(1)).to_rfc3339())
+        .bind(id.to_string())
+        .execute(s.pool())
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn heartbeat_instance_prevents_stale_recovery() {
     let s = store().await;
@@ -411,12 +420,10 @@ async fn heartbeat_instance_prevents_stale_recovery() {
     // while (not one that crashed).
     let inst = make_instance(InstanceState::Scheduled);
     s.create_instance(&inst).await.unwrap();
-    let claimed = s
-        .claim_due_instances(Utc::now() - Duration::hours(1), 10, 0)
-        .await
-        .unwrap();
+    let claimed = s.claim_due_instances(Utc::now(), 10, 0).await.unwrap();
     assert_eq!(claimed.len(), 1);
     let token = claimed[0].updated_at;
+    backdate_lease_heartbeat(&s, inst.id).await;
 
     // The scheduler's heartbeat task renews the lease.
     assert_eq!(
@@ -450,12 +457,10 @@ async fn heartbeat_reports_lost_lease_after_reclaim() {
     s.create_instance(&inst).await.unwrap();
 
     // Node A claims, then stalls (no heartbeat for over an hour).
-    let a = s
-        .claim_due_instances(Utc::now() - Duration::hours(1), 10, 0)
-        .await
-        .unwrap();
+    let a = s.claim_due_instances(Utc::now(), 10, 0).await.unwrap();
     assert_eq!(a.len(), 1);
     let token_a = a[0].updated_at;
+    backdate_lease_heartbeat(&s, inst.id).await;
 
     // The reaper resets it: A's lease is already gone before anyone re-claims.
     assert_eq!(
