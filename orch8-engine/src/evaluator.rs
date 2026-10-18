@@ -73,6 +73,8 @@ pub enum EvalOutcome {
 struct EvalContext {
     tree: Vec<ExecutionNode>,
     instance: TaskInstance,
+    /// Stable lease token; ordinary context writes can change `updated_at`.
+    claim_token: chrono::DateTime<chrono::Utc>,
     clock: orch8_types::clock::SharedClock,
     /// When true, the tree must be re-read from storage before the next use.
     tree_stale: bool,
@@ -556,13 +558,35 @@ pub async fn evaluate_with_clock(
 /// set (the scheduler's lease-lost flag), so no further node is dispatched
 /// after the instance's lease is presumed lost. Stopping early reports
 /// [`EvalOutcome::MoreWork`].
-#[allow(clippy::too_many_lines)]
 pub async fn evaluate_fenced(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
     sequence: &SequenceDefinition,
     clock: &orch8_types::clock::SharedClock,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<EvalOutcome, EngineError> {
+    evaluate_with_claim_token(
+        storage,
+        handlers,
+        instance,
+        sequence,
+        clock,
+        instance.updated_at,
+        stop,
+    )
+    .await
+}
+
+/// Evaluate work claimed by the scheduler using its immutable lease token.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn evaluate_with_claim_token(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    instance: &TaskInstance,
+    sequence: &SequenceDefinition,
+    clock: &orch8_types::clock::SharedClock,
+    claim_token: chrono::DateTime<chrono::Utc>,
     stop: &std::sync::atomic::AtomicBool,
 ) -> Result<EvalOutcome, EngineError> {
     // Merge sequence blocks with any dynamically injected blocks.
@@ -587,6 +611,7 @@ pub async fn evaluate_fenced(
     let mut ctx = EvalContext {
         tree: initial_tree,
         instance: initial_instance,
+        claim_token,
         clock: clock.clone(),
         tree_stale: false,
         instance_stale: false,
@@ -907,6 +932,7 @@ async fn phase_root_activation(
             sequence.interceptors.as_ref(),
             outputs_snapshot,
             &ctx.clock,
+            ctx.claim_token,
         )
         .await?;
         ctx.tree_stale = true;
@@ -969,6 +995,7 @@ async fn phase_running_steps(
                     sequence.interceptors.as_ref(),
                     outputs_snapshot,
                     &ctx.clock,
+                    ctx.claim_token,
                 ),
                 dispatch_block(
                     storage,
@@ -980,6 +1007,7 @@ async fn phase_running_steps(
                     sequence.interceptors.as_ref(),
                     outputs_snapshot,
                     &ctx.clock,
+                    ctx.claim_token,
                 ),
             )
         })
@@ -1015,6 +1043,7 @@ async fn phase_running_steps(
         sequence.interceptors.as_ref(),
         outputs_snapshot,
         &ctx.clock,
+        ctx.claim_token,
     )
     .await?;
     ctx.tree_stale = true;
@@ -1137,6 +1166,7 @@ async fn phase_composite_reevaluation(
             sequence.interceptors.as_ref(),
             outputs_snapshot,
             &ctx.clock,
+            ctx.claim_token,
         )
         .await?;
         if may_mutate_instance(block) {

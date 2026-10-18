@@ -3701,12 +3701,13 @@ async fn process_instance_tree(
         return Ok(());
     }
 
-    match crate::evaluator::evaluate_fenced(
+    match crate::evaluator::evaluate_with_claim_token(
         storage,
         handlers,
         instance,
         sequence,
         ctx.clock,
+        ctx.claim_token,
         ctx.lease_lost,
     )
     .await

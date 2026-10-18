@@ -337,7 +337,17 @@ pub async fn execute_step_node(
     outputs: &OutputsSnapshot,
 ) -> Result<bool, EngineError> {
     let clock = orch8_types::clock::SharedClock::default();
-    execute_step_node_with_clock(storage, handlers, instance, node, step_def, outputs, &clock).await
+    execute_step_node_with_clock(
+        storage,
+        handlers,
+        instance,
+        node,
+        step_def,
+        outputs,
+        &clock,
+        instance.updated_at,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -349,6 +359,7 @@ pub(crate) async fn execute_step_node_with_clock(
     step_def: &StepDef,
     outputs: &OutputsSnapshot,
     clock: &orch8_types::clock::SharedClock,
+    claim_token: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, EngineError> {
     // Conditional guard: if `when` is set, evaluate the expression against
     // the current context + outputs. Skip the step entirely if falsy. Strict
@@ -397,7 +408,7 @@ pub(crate) async fn execute_step_node_with_clock(
         crate::scheduler::park_tree_instance_until(
             storage.as_ref(),
             instance.id,
-            instance.updated_at,
+            claim_token,
             fire_at,
         )
         .await?;
@@ -562,7 +573,7 @@ pub(crate) async fn execute_step_node_with_clock(
             storage
                 .conditional_update_claimed_instance_state(
                     instance.id,
-                    instance.updated_at,
+                    claim_token,
                     orch8_types::instance::InstanceState::Running,
                     orch8_types::instance::InstanceState::Scheduled,
                     Some(fire_at),
@@ -893,7 +904,7 @@ pub(crate) async fn execute_step_node_with_clock(
                     storage.as_ref(),
                     instance.id,
                     Some(&instance.tenant_id),
-                    instance.updated_at,
+                    claim_token,
                     orch8_types::instance::InstanceState::Running,
                     orch8_types::instance::InstanceState::Scheduled,
                     Some(fire_at),

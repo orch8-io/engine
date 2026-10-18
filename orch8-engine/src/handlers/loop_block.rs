@@ -73,7 +73,16 @@ pub async fn execute_loop(
     tree: &[ExecutionNode],
 ) -> Result<bool, EngineError> {
     let clock = orch8_types::clock::SharedClock::default();
-    execute_loop_with_clock(storage, instance, node, loop_def, tree, &clock).await
+    execute_loop_with_clock(
+        storage,
+        instance,
+        node,
+        loop_def,
+        tree,
+        &clock,
+        instance.updated_at,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -84,6 +93,7 @@ pub(crate) async fn execute_loop_with_clock(
     loop_def: &LoopDef,
     tree: &[ExecutionNode],
     clock: &orch8_types::clock::SharedClock,
+    claim_token: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, EngineError> {
     // Empty body: nothing to run. Completing immediately prevents a
     // condition-truthy loop from spinning on a no-op body forever.
@@ -269,7 +279,7 @@ pub(crate) async fn execute_loop_with_clock(
         let transitioned = storage
             .conditional_update_claimed_instance_state(
                 instance.id,
-                instance.updated_at,
+                claim_token,
                 InstanceState::Running,
                 InstanceState::Scheduled,
                 Some(next_fire),
