@@ -47,7 +47,8 @@ describe("Bulk Operations Combinations", () => {
     );
     assert.ok(result.count >= 1, "should affect at least one instance");
 
-    const afterA = await client.getInstance(idA);
+    // Cancellation is queued as a durable signal and applied by the scheduler.
+    const afterA = await client.waitForState(idA, "cancelled");
     const afterB = await client.getInstance(idB);
     assert.equal(afterA.state, "cancelled", "instance A should be cancelled");
     assert.equal(afterB.state, "scheduled", "instance B should remain scheduled");
@@ -77,7 +78,7 @@ describe("Bulk Operations Combinations", () => {
       "cancelled",
     );
 
-    const afterSched = await client.getInstance(schedId);
+    const afterSched = await client.waitForState(schedId, "cancelled");
     const afterRun = await client.getInstance(runId);
     assert.equal(afterSched.state, "cancelled", "scheduled instance should be cancelled");
     assert.equal(afterRun.state, "completed", "completed instance should NOT be affected");
@@ -196,7 +197,7 @@ describe("Bulk Operations Combinations", () => {
       "cancelled",
     );
 
-    const afterAlpha = await client.getInstance(alphaId);
+    const afterAlpha = await client.waitForState(alphaId, "cancelled");
     const afterBeta = await client.getInstance(betaId);
     assert.equal(afterAlpha.state, "cancelled", "alpha should be cancelled");
     assert.equal(afterBeta.state, "scheduled", "beta should remain scheduled");

@@ -53,7 +53,7 @@ describe("Bulk Operations", () => {
 
     // Verify each instance now reports cancelled.
     for (const id of ids) {
-      const inst = await client.getInstance(id);
+      const inst = await client.waitForState(id, "cancelled");
       assert.equal(inst.state, "cancelled", `instance ${id} should be cancelled`);
     }
   });

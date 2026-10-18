@@ -92,7 +92,7 @@ describe("Bulk Cancel with Expression Filter", () => {
 
     // All "low priority" (sequence A) instances should be cancelled.
     for (const id of lowIds) {
-      const inst = await client.getInstance(id);
+      const inst = await client.waitForState(id, "cancelled");
       assert.equal(inst.state, "cancelled", `low-priority instance ${id} should be cancelled`);
     }
 

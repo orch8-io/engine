@@ -106,8 +106,13 @@ fn sigkill_mid_step_recovers_the_instance_without_repeating_committed_effects() 
         );
         let id = plane.create_instance(&node, sequence, &json!({}));
         wait_for("`a` committed and `b` in flight", LONG, || {
-            let running = plane.instance(&node, id)["state"] == "running";
-            (running && plane.block_outputs(&node, id, "a").len() == 1).then_some(())
+            let instance = plane.instance(&node, id);
+            // A step writes an in-progress sentinel before dispatch. Seeing
+            // one output for `a` alone can mean the HTTP effect is still
+            // running; crash only after the scheduler has advanced to `b`.
+            let b_in_flight = instance["state"] == "running"
+                && instance["context"]["runtime"]["current_step"] == "b";
+            (b_in_flight && plane.block_outputs(&node, id, "a").len() == 1).then_some(())
         });
 
         node.kill();

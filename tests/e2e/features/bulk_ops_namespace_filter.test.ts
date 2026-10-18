@@ -57,7 +57,7 @@ describe("Bulk Ops Namespace Filter", () => {
       `expected at least 1 cancelled, got ${(res as any).count}`,
     );
 
-    const alpha = await client.getInstance(idAlpha);
+    const alpha = await client.waitForState(idAlpha, "cancelled");
     const beta = await client.getInstance(idBeta);
 
     assert.equal(alpha.state, "cancelled", "alpha should be cancelled");
