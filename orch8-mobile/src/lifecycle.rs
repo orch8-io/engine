@@ -94,8 +94,8 @@ impl InstanceLifecycleManager {
             .last_compaction
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let due = deleted > 0
-            || last.is_none_or(|at| now.duration_since(at) >= IDLE_COMPACTION_INTERVAL);
+        let due =
+            deleted > 0 || last.is_none_or(|at| now.duration_since(at) >= IDLE_COMPACTION_INTERVAL);
         if due {
             *last = Some(now);
         }
@@ -554,7 +554,10 @@ mod tests {
     async fn mc07_idle_gc_passes_do_not_compact_more_than_hourly() {
         let (lifecycle, _ms, _dir) = setup().await;
         let t0 = std::time::Instant::now();
-        assert!(lifecycle.compaction_due(0, t0), "first pass establishes a baseline");
+        assert!(
+            lifecycle.compaction_due(0, t0),
+            "first pass establishes a baseline"
+        );
         assert!(!lifecycle.compaction_due(0, t0 + Duration::from_secs(60)));
         assert!(!lifecycle.compaction_due(0, t0 + Duration::from_secs(59 * 60)));
         assert!(

@@ -119,11 +119,15 @@ mod tests {
     fn rejects_each_bound() {
         let long = "x".repeat(129);
         assert_eq!(
-            validate_event_fields(&long, "{}", dev(), 0).unwrap_err().code,
+            validate_event_fields(&long, "{}", dev(), 0)
+                .unwrap_err()
+                .code,
             "invalid_event_type"
         );
         assert_eq!(
-            validate_event_fields("a", "not json", dev(), 0).unwrap_err().code,
+            validate_event_fields("a", "not json", dev(), 0)
+                .unwrap_err()
+                .code,
             "invalid_payload_json"
         );
         let big = format!("\"{}\"", "x".repeat(MAX_TELEMETRY_EVENT_PAYLOAD_BYTES));

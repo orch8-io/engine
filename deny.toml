@@ -11,6 +11,15 @@ ignore = [
     # requirement past 0.41.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # RUSTSEC-2026-0367/0368/0369 affect zip's ZipArchive::extract and
+    # stream extraction. zip 8.6 is only a build dependency of
+    # utoipa-swagger-ui 10.0.1, whose build.rs iterates with by_index and
+    # copies files itself; neither affected extraction API is called. Its
+    # manifest requires zip ^8.6, while the fix is in zip 9. Remove this
+    # exception once utoipa-swagger-ui accepts zip 9.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
 ]
 
 [licenses]

@@ -1433,9 +1433,13 @@ fn spawn_engine_now(
     // hit the same in-memory state the scheduler consults — and so the
     // engine's check/record_* calls roll up into the rows persisted by the
     // inspection endpoints.
-    let handlers = handlers.with_circuit_breakers(cb_registry).with_embed_sandbox(
-        orch8_engine::embed_sandbox::SandboxPolicy::from_config_list(&config.embed.sandbox_handlers),
-    );
+    let handlers = handlers
+        .with_circuit_breakers(cb_registry)
+        .with_embed_sandbox(
+            orch8_engine::embed_sandbox::SandboxPolicy::from_config_list(
+                &config.embed.sandbox_handlers,
+            ),
+        );
     if config.alerts.enabled {
         let alert_storage = Arc::clone(&storage);
         let alert_config = config.alerts.clone();

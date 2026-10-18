@@ -232,7 +232,11 @@ pub(super) async fn upsert_mobile_instance_status_batch(
     let mut order: Vec<(&str, &str)> = Vec::new();
     let mut newest: std::collections::HashMap<
         (&str, &str),
-        (chrono::DateTime<chrono::Utc>, String, &crate::MobileInstanceStatus),
+        (
+            chrono::DateTime<chrono::Utc>,
+            String,
+            &crate::MobileInstanceStatus,
+        ),
     > = std::collections::HashMap::with_capacity(statuses.len());
     for status in statuses {
         let (at, text) = status_updated_at(status, now)?;

@@ -259,7 +259,9 @@ impl SyncReporter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = SyncAttempt {
             wall: self.clock.now() - chrono::Duration::seconds(i64::from(MIN_SYNC_INTERVAL_SECS)),
-            mono: Instant::now().checked_sub(back).unwrap_or_else(Instant::now),
+            mono: Instant::now()
+                .checked_sub(back)
+                .unwrap_or_else(Instant::now),
         };
         self.push_generation.fetch_add(1, Ordering::Release);
     }
@@ -433,7 +435,10 @@ impl SyncReporter {
                 .collect()
         };
         if !new_terminal.is_empty() {
-            match mobile_storage.list_sync_instances_by_ids(&new_terminal).await {
+            match mobile_storage
+                .list_sync_instances_by_ids(&new_terminal)
+                .await
+            {
                 Ok(list) => instances.extend(list),
                 Err(e) => {
                     debug!(error = %e, "scan_and_queue: failed to load terminal instances");
@@ -485,12 +490,9 @@ impl SyncReporter {
                 .approvals
                 .iter()
                 .filter(|entry| {
-                    cache
-                        .approvals
-                        .get(&entry.entry.0)
-                        .is_none_or(|(fp, at)| {
-                            *fp != entry.fingerprint || now - *at >= SCAN_HEARTBEAT
-                        })
+                    cache.approvals.get(&entry.entry.0).is_none_or(|(fp, at)| {
+                        *fp != entry.fingerprint || now - *at >= SCAN_HEARTBEAT
+                    })
                 })
                 .collect();
             (statuses, approvals)
@@ -2583,8 +2585,12 @@ mod tests {
         let base = chrono::Utc::now();
         // 130 terminal transitions + 30 active, all between two scans.
         for i in 0..130 {
-            insert_raw_instance(mobile, "completed", base + chrono::Duration::milliseconds(i))
-                .await;
+            insert_raw_instance(
+                mobile,
+                "completed",
+                base + chrono::Duration::milliseconds(i),
+            )
+            .await;
         }
         for i in 0..30 {
             insert_raw_instance(mobile, "running", base + chrono::Duration::milliseconds(i)).await;
@@ -2698,7 +2704,10 @@ mod tests {
             2,
             "redelivery must reuse the replacement, not start a third instance"
         );
-        assert_ne!(state_of(&storage, &replacement).await, InstanceState::Cancelled);
+        assert_ne!(
+            state_of(&storage, &replacement).await,
+            InstanceState::Cancelled
+        );
 
         // Crash point two: old already cancelled -> terminal skip, still no
         // extra instance and the replacement survives.
@@ -2749,7 +2758,11 @@ mod tests {
             serde_json::json!({ "sequence_name": "wf-a" }),
         );
         reporter.execute_command(&other, &storage, &lifecycle).await;
-        assert_eq!(count_instances(&storage).await, 2, "distinct commands stay distinct");
+        assert_eq!(
+            count_instances(&storage).await,
+            2,
+            "distinct commands stay distinct"
+        );
     }
 
     #[tokio::test]

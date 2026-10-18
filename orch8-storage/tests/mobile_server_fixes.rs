@@ -7,9 +7,7 @@ use orch8_storage::testing::backends::BackendKind;
 use orch8_storage::{
     MobileApprovalRequest, MobileCommand, MobileDevice, MobileInstanceStatus, TelemetryEvent,
 };
-use orch8_types::continuity::{
-    RuntimeCapabilities, RuntimeId, RuntimeKind, RuntimeTrustLevel,
-};
+use orch8_types::continuity::{RuntimeCapabilities, RuntimeId, RuntimeKind, RuntimeTrustLevel};
 use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
 

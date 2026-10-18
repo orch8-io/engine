@@ -267,7 +267,7 @@ async fn r2_for_each_3_over_loop_0_items_completes_immediately() {
     );
 }
 
-/// `build_sequence` with the for_each's `item_var` renamed.
+/// `build_sequence` with the `for_each` block's `item_var` renamed.
 fn sequence_with_item_var(item_var: &str) -> SequenceDefinition {
     let mut seq = build_sequence();
     if let BlockDefinition::ForEach(fe) = &mut seq.blocks[0] {

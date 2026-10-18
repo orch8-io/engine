@@ -96,7 +96,10 @@ impl Stream {
     }
 
     fn assert_no_frames(&mut self) {
-        assert!(self.receiver.try_recv().is_err(), "no server frame expected");
+        assert!(
+            self.receiver.try_recv().is_err(),
+            "no server frame expected"
+        );
     }
 }
 

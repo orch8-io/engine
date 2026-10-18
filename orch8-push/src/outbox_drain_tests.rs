@@ -491,7 +491,11 @@ async fn drain_sends_a_claimed_batch_concurrently_up_to_the_configured_bound() {
 
     assert_eq!(worker.drain_once(now()).await.unwrap(), 9);
     assert_eq!(provider.calls.load(SeqCst), 9);
-    assert_eq!(provider.max.load(SeqCst), 3, "bounded concurrency, not sequential");
+    assert_eq!(
+        provider.max.load(SeqCst),
+        3,
+        "bounded concurrency, not sequential"
+    );
     assert_eq!(store.outcomes.lock().unwrap().len(), 9);
     // Slots are refilled as calls finish: the first claim fills the 3 slots,
     // later claims top up what freed.
@@ -532,7 +536,11 @@ async fn one_hung_provider_call_does_not_block_the_wakes_behind_it() {
     assert_eq!(outcomes.len(), 6);
     // The five healthy wakes were delivered while the hung one was still
     // pending; the timed-out call is recorded last.
-    assert!(outcomes[..5].iter().all(|o| matches!(o, WakeAttemptOutcome::Delivered)));
+    assert!(
+        outcomes[..5]
+            .iter()
+            .all(|o| matches!(o, WakeAttemptOutcome::Delivered))
+    );
     assert!(matches!(outcomes[5], WakeAttemptOutcome::Retry { .. }));
 }
 
@@ -548,8 +556,11 @@ async fn dropping_the_drain_aborts_in_flight_calls_so_shutdown_is_prompt() {
     // Default provider timeout is 75 s; cancellation must not wait for it.
     let worker = PushOutboxWorker::new(store.clone(), Arc::new(HangingForTokenProvider));
     let started = std::time::Instant::now();
-    let result =
-        tokio::time::timeout(std::time::Duration::from_millis(100), worker.drain_once(now())).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        worker.drain_once(now()),
+    )
+    .await;
     assert!(result.is_err(), "drain is still waiting on the hung call");
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }

@@ -137,7 +137,8 @@ fn fcm_token_level_rejection(body: &str) -> bool {
         .get("message")
         .and_then(|m| m.as_str())
         .unwrap_or_default();
-    status == Some("INVALID_ARGUMENT") && message.to_ascii_lowercase().contains("registration token")
+    status == Some("INVALID_ARGUMENT")
+        && message.to_ascii_lowercase().contains("registration token")
 }
 
 #[derive(serde::Deserialize)]

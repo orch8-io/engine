@@ -1,8 +1,8 @@
-//! Golden-response corpus (review fix plan, "OpenAPI validation + golden corpus").
+//! Golden-response corpus (review fix plan, "`OpenAPI` validation + golden corpus").
 //!
 //! Drives real HTTP calls through the production router, then
 //!   1. validates every response body against the operation's response schema
-//!      in the generated OpenAPI document, and
+//!      in the generated `OpenAPI` document, and
 //!   2. compares the volatile-normalised body with the committed fixture under
 //!      `contracts/golden/responses/<name>.json`.
 //!
@@ -72,7 +72,7 @@ fn validate_against_openapi(doc: &Value, path: &str, method: &str, status: u16, 
 }
 
 /// Known spec-vs-server drift, allowlisted once so the gate can land; burn down,
-/// never add. Each entry is a fixture name whose OpenAPI check is skipped.
+/// never add. Each entry is a fixture name whose `OpenAPI` check is skipped.
 ///
 /// * `list_instances`: the spec documents a bare array but the server returns
 ///   a page object `{ "items": [...], "has_more": bool }`.
@@ -117,6 +117,7 @@ async fn json_of(resp: reqwest::Response, expect: StatusCode) -> Value {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One corpus pass keeps fixture validation and HTTP assertions together.
 async fn golden_corpus_matches_responses_and_openapi() {
     let g = Golden {
         doc: serde_json::to_value(ApiDoc::openapi()).unwrap(),

@@ -117,7 +117,9 @@ struct RetryGate {
 
 impl RetryGate {
     fn due(&self, id: &str, now: Instant) -> bool {
-        self.lock().get(id).is_none_or(|(_, next_at)| now >= *next_at)
+        self.lock()
+            .get(id)
+            .is_none_or(|(_, next_at)| now >= *next_at)
     }
 
     fn attempts(&self, id: &str) -> u32 {
@@ -1414,13 +1416,16 @@ mod tests {
             .unwrap();
         }
 
-        let removed = purge_finished(&pool, now - FINISHED_RETENTION).await.unwrap();
+        let removed = purge_finished(&pool, now - FINISHED_RETENTION)
+            .await
+            .unwrap();
         assert_eq!(removed, 2);
-        let left: Vec<String> =
-            sqlx::query_scalar("SELECT delegation_id FROM mobile_delegations ORDER BY delegation_id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let left: Vec<String> = sqlx::query_scalar(
+            "SELECT delegation_id FROM mobile_delegations ORDER BY delegation_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         assert_eq!(left, vec!["old-open", "recent-resolved"]);
     }
 

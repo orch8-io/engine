@@ -42,8 +42,14 @@ async fn placement_candidates_include_cloud_and_desktop_among_thousands_of_newer
     let tenant = TenantId::unchecked("fleet");
     let cloud = runtime(RuntimeKind::Server, 900, 3600);
     let desktop = runtime(RuntimeKind::Desktop, 900, 3600);
-    storage.upsert_runtime_capabilities(&tenant, &cloud).await.unwrap();
-    storage.upsert_runtime_capabilities(&tenant, &desktop).await.unwrap();
+    storage
+        .upsert_runtime_capabilities(&tenant, &cloud)
+        .await
+        .unwrap();
+    storage
+        .upsert_runtime_capabilities(&tenant, &desktop)
+        .await
+        .unwrap();
     for _ in 0..1_100 {
         storage
             .upsert_runtime_capabilities(&tenant, &runtime(RuntimeKind::Mobile, 1, 3600))
@@ -114,7 +120,10 @@ async fn gc_prunes_registrations_expired_beyond_the_retention_but_keeps_recent_o
     let just_expired = runtime(RuntimeKind::Mobile, 600, 60);
     let live = runtime(RuntimeKind::Mobile, 1, 3600);
     for r in [&long_dead, &just_expired, &live] {
-        storage.upsert_runtime_capabilities(&tenant, r).await.unwrap();
+        storage
+            .upsert_runtime_capabilities(&tenant, r)
+            .await
+            .unwrap();
     }
 
     gc_tick(storage.as_ref(), &GcOptions::default(), Utc::now()).await;

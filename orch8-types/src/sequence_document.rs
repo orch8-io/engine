@@ -135,7 +135,7 @@ fn strip_location_suffix(message: &str) -> String {
 }
 
 /// Upper bound on the size of a YAML document *after* alias expansion, in
-/// abstract bytes (each node costs [`YAML_NODE_COST`] plus its string length).
+/// abstract bytes (each node has a fixed cost plus its string length).
 ///
 /// YAML anchors/aliases let a ~1 KB body expand into millions of values
 /// ("billion laughs"); the YAML library's repetition limit does not bound the

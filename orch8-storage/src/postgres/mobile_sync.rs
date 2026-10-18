@@ -436,7 +436,13 @@ impl crate::MobileSyncStore for PostgresStorage {
         let mut seen = std::collections::HashSet::with_capacity(approvals.len());
         let unique: Vec<&crate::MobileApprovalRequest> = approvals
             .iter()
-            .filter(|a| seen.insert((a.device_id.as_str(), a.instance_id.as_str(), a.block_id.as_str())))
+            .filter(|a| {
+                seen.insert((
+                    a.device_id.as_str(),
+                    a.instance_id.as_str(),
+                    a.block_id.as_str(),
+                ))
+            })
             .collect();
         let ids: Vec<&str> = unique.iter().map(|a| a.id.as_str()).collect();
         let device_ids: Vec<&str> = unique.iter().map(|a| a.device_id.as_str()).collect();

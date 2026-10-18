@@ -39,10 +39,10 @@ pub(super) async fn heartbeat(storage: &SqliteStorage, node_id: Uuid) -> Result<
                                THEN NULL ELSE stopped_at END
          WHERE id=?1",
     )
-        .bind(node_id.to_string())
-        .bind(ts(Utc::now()))
-        .execute(&storage.pool)
-        .await?;
+    .bind(node_id.to_string())
+    .bind(ts(Utc::now()))
+    .execute(&storage.pool)
+    .await?;
     Ok(())
 }
 

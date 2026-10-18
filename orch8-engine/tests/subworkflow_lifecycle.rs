@@ -2,6 +2,7 @@
 //! L3-07, L3-11), driven through the real scheduler on virtual time
 //! ([`TestEngine`]) on `SQLite` and, when `DATABASE_URL` is set, Postgres.
 
+use chrono::Timelike;
 use serde_json::json;
 
 use orch8_engine::testing::TestEngine;
@@ -527,6 +528,11 @@ async fn l3_11_step_budget_kill_compensates_the_saga() {
         };
         let (builder, log) = saga_engine_builder(&backend);
         let engine = builder
+            .start_at(
+                (chrono::Utc::now() + chrono::Duration::days(1))
+                    .with_nanosecond(123_456_789)
+                    .unwrap(),
+            )
             .config(|c| c.max_steps_per_instance = 2)
             .build()
             .await;

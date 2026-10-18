@@ -377,7 +377,11 @@ async fn auth_rejection_refresh_is_rate_limited_across_wakes() {
         exchanges + 1,
         "the rejected second wake costs at most one lazy token mint"
     );
-    assert_eq!(mock.state.deliveries.lock().await.len(), 4, "one delivery try, no churn");
+    assert_eq!(
+        mock.state.deliveries.lock().await.len(),
+        4,
+        "one delivery try, no churn"
+    );
 }
 
 #[tokio::test]
@@ -401,7 +405,11 @@ async fn sender_id_mismatch_quarantines_the_token_without_touching_oauth() {
         .send_silent_push("device-token", "android")
         .await;
     assert!(matches!(result, Err(PushError::InvalidToken)));
-    assert_eq!(mock.state.token_bodies.lock().await.len(), 1, "no re-mint, no retries");
+    assert_eq!(
+        mock.state.token_bodies.lock().await.len(),
+        1,
+        "no re-mint, no retries"
+    );
     assert_eq!(mock.state.deliveries.lock().await.len(), 1);
 }
 
@@ -413,7 +421,8 @@ fn invalid_argument_about_the_registration_token_is_a_token_rejection() {
         FcmOutcome::InvalidToken
     );
     // A payload-shaped INVALID_ARGUMENT stays a permanent (non-token) error.
-    let payload = r#"{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"Invalid JSON payload"}}"#;
+    let payload =
+        r#"{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"Invalid JSON payload"}}"#;
     assert_eq!(
         classify_fcm_response(StatusCode::BAD_REQUEST, payload),
         FcmOutcome::Permanent

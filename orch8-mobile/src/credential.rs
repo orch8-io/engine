@@ -350,7 +350,11 @@ mod tests {
             .unwrap()
             .retry_at = Instant::now();
         assert!(!credential.refresh_after_unauthorized("dst_first").await);
-        assert_eq!(provider.refreshes.load(Ordering::SeqCst), 2, "retried after backoff");
+        assert_eq!(
+            provider.refreshes.load(Ordering::SeqCst),
+            2,
+            "retried after backoff"
+        );
     }
 
     #[tokio::test]

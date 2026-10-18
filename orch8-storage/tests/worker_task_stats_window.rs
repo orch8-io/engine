@@ -1,6 +1,6 @@
 //! `worker_task_stats(window_secs)`: terminal rows are windowed by
 //! `completed_at`, live gauges are not, `None` keeps lifetime counts.
-//! Runs on SQLite and (when `DATABASE_URL` is set) Postgres.
+//! Runs on `SQLite` and (when `DATABASE_URL` is set) Postgres.
 
 use chrono::{Duration, Utc};
 use serde_json::json;

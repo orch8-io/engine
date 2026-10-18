@@ -591,7 +591,8 @@ impl Orch8GrpcService {
                 continue;
             }
             let task_json = to_json_string(&task)?;
-            if task_json.len() > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
+            if task_json.len()
+                > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
             {
                 continue;
             }
@@ -1909,7 +1910,13 @@ impl Orch8Service for Orch8GrpcService {
             let mut outstanding = std::collections::HashSet::new();
             if !draining
                 && let Err(status) = service
-                    .adopt_held_tasks(&open, tenant.as_ref(), max_in_flight, &mut outstanding, &sender)
+                    .adopt_held_tasks(
+                        &open,
+                        tenant.as_ref(),
+                        max_in_flight,
+                        &mut outstanding,
+                        &sender,
+                    )
                     .await
             {
                 let _ = sender.send(Err(status)).await;

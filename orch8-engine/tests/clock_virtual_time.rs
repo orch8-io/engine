@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{TimeZone, Utc};
+use chrono::{TimeZone, Timelike, Utc};
 use tokio_util::sync::CancellationToken;
 
 use orch8_engine::clock::{Clock, ManualClock, SharedClock};
@@ -64,7 +64,12 @@ async fn three_day_delay_completes_with_manual_clock() {
     s.create_instance(&inst).await.unwrap();
 
     // ManualClock discipline: start at (or after) real time, move forward only.
-    let start = Utc::now();
+    // The storage backends persist fire times at microsecond precision.
+    // Start between microseconds to catch a marker that cannot be reached
+    // when the clock advances to the exact persisted fire time.
+    let start = (Utc::now() + chrono::Duration::days(1))
+        .with_nanosecond(123_456_789)
+        .unwrap();
     let manual = Arc::new(ManualClock::new(start));
     let config = config_with_clock(&manual);
     let h = Arc::new(registry());
@@ -86,8 +91,8 @@ async fn three_day_delay_completes_with_manual_clock() {
     let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
     assert_eq!(refreshed.state, InstanceState::Scheduled);
 
-    // Advance 3 days (+1 minute of slack) — the delay has now been served.
-    manual.advance(chrono::Duration::days(3) + chrono::Duration::minutes(1));
+    // The exact persisted fire time must be enough to serve the delay.
+    manual.set(fire_at);
     tick(&s, &h, &config).await;
 
     let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();

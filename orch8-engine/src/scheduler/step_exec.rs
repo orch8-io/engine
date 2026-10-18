@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -136,6 +136,23 @@ pub(crate) fn delay_marker_key(block_id: &orch8_types::ids::BlockId) -> String {
     format!("{DELAY_UNTIL_PREFIX}{}", block_id.as_str())
 }
 
+/// `PostgreSQL` stores `next_fire_at` at microsecond precision. Round delay
+/// markers up to the same precision so claiming at the persisted fire time
+/// also satisfies the marker. This applies to legacy markers with nanoseconds.
+fn delay_fire_at_storage_precision(fire_at: DateTime<Utc>) -> DateTime<Utc> {
+    let nanos = fire_at.nanosecond();
+    let micros = fire_at
+        .with_nanosecond(nanos - nanos % 1_000)
+        .unwrap_or(fire_at);
+    if nanos.is_multiple_of(1_000) {
+        micros
+    } else {
+        micros
+            .checked_add_signed(chrono::Duration::microseconds(1))
+            .unwrap_or(fire_at)
+    }
+}
+
 /// Resolve the step's `delay` into a deferral target, or `None` when the
 /// step may run now.
 ///
@@ -174,7 +191,7 @@ async fn step_delay_until(
         meta.get(&marker_key)
             .and_then(|v| v.as_str())
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|until| until.with_timezone(&Utc))
+            .map(|until| delay_fire_at_storage_precision(until.with_timezone(&Utc)))
     };
     let mut until = recorded(&instance.metadata);
     if until.is_none()
@@ -201,6 +218,7 @@ async fn step_delay_until(
         (None, None) => return Ok(None),
     };
 
+    let fire_at = delay_fire_at_storage_precision(fire_at);
     storage
         .merge_instance_metadata(
             instance.id,

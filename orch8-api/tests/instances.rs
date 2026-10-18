@@ -213,7 +213,7 @@ async fn batch_create_rejects_empty_namespace() {
 }
 
 /// API-07: `limit=0` used to return `items: []` with `has_more: true`, so a
-/// client paging "until has_more is false" looped forever. Like the other
+/// client paging "until `has_more` is false" looped forever. Like the other
 /// list endpoints (`clamp(1, ..)`), the limit is clamped to at least one row.
 #[tokio::test]
 async fn list_instances_with_limit_zero_returns_a_non_empty_page() {

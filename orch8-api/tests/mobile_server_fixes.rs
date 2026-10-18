@@ -214,8 +214,17 @@ async fn rollback_check_storage_failure_never_fails_the_report_or_unpublishes() 
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     settle().await;
-    assert!(faults.injected("query_error_stats") >= 1, "the check ran and hit the fault");
-    assert!(storage.list_rollback_history(None, None, 10).await.unwrap().is_empty());
+    assert!(
+        faults.injected("query_error_stats") >= 1,
+        "the check ran and hit the fault"
+    );
+    assert!(
+        storage
+            .list_rollback_history(None, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     // The report itself failing to persist is still surfaced to the device.
     faults.on("ingest_telemetry_error").fail_permanent();
@@ -439,7 +448,11 @@ async fn one_corrupt_command_is_skipped_not_fatal_to_the_sync_response() {
     srv.storage.create_mobile_command(&good).await.unwrap();
 
     let resp = sync(&srv, &client, json!({})).await;
-    assert_eq!(resp.status(), StatusCode::OK, "a bad row must not 500 the sync");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a bad row must not 500 the sync"
+    );
     let body: Value = resp.json().await.unwrap();
     let commands = body["commands"].as_array().unwrap();
     assert_eq!(commands.len(), 1);
@@ -459,9 +472,16 @@ async fn retried_step_delegation_does_not_mint_a_second_command() {
             StatusCode::OK
         );
     }
-    let pending = srv.storage.fetch_pending_commands(DEVICE_ID, 50).await.unwrap();
+    let pending = srv
+        .storage
+        .fetch_pending_commands(DEVICE_ID, 50)
+        .await
+        .unwrap();
     assert_eq!(
-        pending.iter().filter(|c| c.command_type == "step_result").count(),
+        pending
+            .iter()
+            .filter(|c| c.command_type == "step_result")
+            .count(),
         1,
         "same (device, request_id) maps to one command"
     );
@@ -471,7 +491,11 @@ async fn retried_step_delegation_does_not_mint_a_second_command() {
         "handler": "h", "params": {}
     }]});
     assert_eq!(sync(&srv, &client, other).await.status(), StatusCode::OK);
-    let pending = srv.storage.fetch_pending_commands(DEVICE_ID, 50).await.unwrap();
+    let pending = srv
+        .storage
+        .fetch_pending_commands(DEVICE_ID, 50)
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 2);
 }
 

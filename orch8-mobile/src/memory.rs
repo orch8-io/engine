@@ -119,7 +119,14 @@ fn darwin_footprint() -> Option<u64> {
     let mut count = u32::try_from(buf.len() * 2).ok()?;
     // SAFETY: `buf` is valid for `count` natural_t words, `count` is a valid
     // in/out pointer, and `mach_task_self_` is initialized by libSystem.
-    let status = unsafe { task_info(mach_task_self_, TASK_VM_INFO, buf.as_mut_ptr(), &raw mut count) };
+    let status = unsafe {
+        task_info(
+            mach_task_self_,
+            TASK_VM_INFO,
+            buf.as_mut_ptr(),
+            &raw mut count,
+        )
+    };
     if status != KERN_SUCCESS {
         return None;
     }

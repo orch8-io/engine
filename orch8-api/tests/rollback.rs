@@ -1,6 +1,6 @@
 use orch8_api::test_harness::{TestServer, spawn_test_server};
-use orch8_storage::{AdminStore, SequenceStore};
 use orch8_storage::testing::fixtures::SequenceBuilder;
+use orch8_storage::{AdminStore, SequenceStore};
 
 /// Register a production sequence the rollback check may act on. The check
 /// refuses unknown or unpublished (client-supplied) sequence names.
