@@ -2384,13 +2384,14 @@ async fn emit_sla_alerts(
         .collect();
     let existing = ctx.storage.get_block_outputs_batch(&keys).await?;
 
-    let mut existing_ref = std::collections::HashSet::with_capacity(existing.len());
-    for key in existing.keys() {
-        existing_ref.insert((&key.0, &key.1));
-    }
+    // ⚡ Bolt: Build a flat Vec sorted by the composite key instead of a HashSet.
+    // This provides O(log N) zero-allocation lookups avoiding both hashing overhead
+    // and the `.clone()` on BlockId inside the loop required by `HashMap::contains_key`.
+    let mut existing_refs: Vec<(&InstanceId, &BlockId)> = existing.keys().map(|(i, b)| (i, b)).collect();
+    existing_refs.sort_unstable_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
 
     for c in candidates {
-        if existing_ref.contains(&(&c.instance_id, &c.block_id)) {
+        if existing_refs.binary_search_by(|(i, b)| i.cmp(&&c.instance_id).then_with(|| b.cmp(&&c.block_id))).is_ok() {
             continue;
         }
         // Persist the sentinel BEFORE emitting so a crash mid-emit cannot
