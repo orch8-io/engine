@@ -1,6 +1,7 @@
 //! Criterion benchmarks for engine hot paths: expression processing, template
 //! resolution, externalized-marker preload.
 
+use std::future::Future;
 use std::hint::black_box;
 use std::sync::Arc;
 
@@ -19,6 +20,12 @@ use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
 use orch8_types::ids::{BlockId, ExecutionNodeId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus, StepDef};
+
+// Criterion runs an async benchmark's batch setup inside the Tokio runtime.
+// Blocking that runtime directly panics; move setup onto its blocking thread.
+fn block_on_in_place<F: Future>(future: F) -> F::Output {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+}
 
 fn make_sequence() -> SequenceDefinition {
     SequenceDefinition {
@@ -481,12 +488,12 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
     c.bench_function("evaluate_flat_10_steps", |b| {
         b.to_async(&rt).iter_batched(
             || {
-                let s = rt.block_on(SqliteStorage::in_memory()).unwrap();
+                let s = block_on_in_place(SqliteStorage::in_memory()).unwrap();
                 let seq = make_sequence();
-                rt.block_on(s.create_sequence(&seq)).unwrap();
+                block_on_in_place(s.create_sequence(&seq)).unwrap();
                 let mut inst = make_instance(seq.id);
                 inst.state = InstanceState::Running;
-                rt.block_on(s.create_instance(&inst)).unwrap();
+                block_on_in_place(s.create_instance(&inst)).unwrap();
 
                 let mut nodes = Vec::new();
                 for i in 0..10 {
@@ -502,11 +509,10 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
                         completed_at: None,
                     });
                 }
-                rt.block_on(s.create_execution_nodes_batch(&nodes)).unwrap();
-                (s, inst)
+                block_on_in_place(s.create_execution_nodes_batch(&nodes)).unwrap();
+                (s, inst, seq)
             },
-            |(s, inst)| async move {
-                let seq = make_sequence();
+            |(s, inst, seq)| async move {
                 let handlers = orch8_engine::handlers::HandlerRegistry::new();
                 let storage: Arc<dyn StorageBackend> = Arc::new(s);
                 let _ = orch8_engine::evaluator::evaluate(&storage, &handlers, &inst, &seq).await;
@@ -518,7 +524,7 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
     c.bench_function("evaluate_parallel_4_branches", |b| {
         b.to_async(&rt).iter_batched(
             || {
-                let s = rt.block_on(SqliteStorage::in_memory()).unwrap();
+                let s = block_on_in_place(SqliteStorage::in_memory()).unwrap();
                 let seq = SequenceDefinition {
                     embed: None,
                     sub_tenant: None,
@@ -571,10 +577,10 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
                     placement: None,
                     created_at: Utc::now(),
                 };
-                rt.block_on(s.create_sequence(&seq)).unwrap();
+                block_on_in_place(s.create_sequence(&seq)).unwrap();
                 let mut inst = make_instance(seq.id);
                 inst.state = InstanceState::Running;
-                rt.block_on(s.create_instance(&inst)).unwrap();
+                block_on_in_place(s.create_instance(&inst)).unwrap();
                 (s, inst, seq)
             },
             |(s, inst, seq)| async move {
@@ -685,62 +691,6 @@ fn bench_parallel_in_process_latency(c: &mut Criterion) {
     });
 }
 
-// ---- Scheduler tick throughput benchmark -----------------------------------
-
-fn bench_scheduler_tick(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-
-    c.bench_function("scheduler_tick_50_instances", |b| {
-        b.to_async(&rt).iter_batched(
-            || {
-                let s = rt.block_on(SqliteStorage::in_memory()).unwrap();
-                let seq = make_sequence();
-                rt.block_on(s.create_sequence(&seq)).unwrap();
-                let batch: Vec<TaskInstance> = (0..50)
-                    .map(|_| {
-                        let mut inst = make_instance(seq.id);
-                        inst.state = InstanceState::Scheduled;
-                        inst.next_fire_at = Some(Utc::now() - chrono::Duration::seconds(10));
-                        inst
-                    })
-                    .collect();
-                rt.block_on(s.create_instances_batch(&batch)).unwrap();
-
-                let config = orch8_types::config::SchedulerConfig {
-                    tick_interval_ms: 1000,
-                    batch_size: 100,
-                    max_concurrent_steps: 50,
-                    max_instances_per_tenant: 0,
-                    stale_instance_threshold_secs: 300,
-                    node_reaper_tick_secs: 60,
-                    node_reaper_stale_secs: 300,
-                    worker_reaper_tick_secs: 60,
-                    worker_reaper_stale_secs: 300,
-                    cron_tick_secs: 60,
-                    shutdown_grace_period_secs: 10,
-                    max_context_bytes: 0,
-                    externalization_mode: orch8_types::config::ExternalizationMode::Never,
-                    externalize_output_threshold: 0,
-                    ..orch8_types::config::SchedulerConfig::default()
-                };
-                let handlers = orch8_engine::handlers::HandlerRegistry::new();
-                let cancel = tokio_util::sync::CancellationToken::new();
-                (s, config, handlers, cancel)
-            },
-            |(s, config, handlers, cancel)| async move {
-                let _ = orch8_engine::scheduler::run_tick_loop(
-                    Arc::new(s),
-                    Arc::new(handlers),
-                    &config,
-                    cancel,
-                )
-                .await;
-            },
-            BatchSize::SmallInput,
-        );
-    });
-}
-
 fn bench_tick_once(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
@@ -748,9 +698,9 @@ fn bench_tick_once(c: &mut Criterion) {
         c.bench_function(&format!("tick_once_{count}_instances"), |b| {
             b.to_async(&rt).iter_batched(
                 || {
-                    let s = rt.block_on(SqliteStorage::in_memory()).unwrap();
+                    let s = block_on_in_place(SqliteStorage::in_memory()).unwrap();
                     let seq = make_sequence();
-                    rt.block_on(s.create_sequence(&seq)).unwrap();
+                    block_on_in_place(s.create_sequence(&seq)).unwrap();
                     let batch: Vec<TaskInstance> = (0..count)
                         .map(|_| {
                             let mut inst = make_instance(seq.id);
@@ -759,7 +709,7 @@ fn bench_tick_once(c: &mut Criterion) {
                             inst
                         })
                         .collect();
-                    rt.block_on(s.create_instances_batch(&batch)).unwrap();
+                    block_on_in_place(s.create_instances_batch(&batch)).unwrap();
 
                     let config = orch8_types::config::SchedulerConfig {
                         tick_interval_ms: 1000,
@@ -884,7 +834,6 @@ criterion_group!(
     bench_flatten_blocks,
     bench_evaluate_deep_tree,
     bench_parallel_in_process_latency,
-    bench_scheduler_tick,
     bench_tick_once,
     bench_step_context_clone,
 );
