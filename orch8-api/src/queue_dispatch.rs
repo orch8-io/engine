@@ -131,6 +131,7 @@ pub(crate) async fn set_dispatch(
 )]
 pub(crate) async fn list_dispatch(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: OptionalTenant,
     Query(q): Query<ListDispatchQuery>,
 ) -> Result<impl IntoResponse, ApiError> {

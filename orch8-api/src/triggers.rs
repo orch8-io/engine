@@ -207,6 +207,7 @@ pub(crate) async fn create_trigger(
 )]
 pub(crate) async fn list_triggers(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<TriggerQuery>,
 ) -> Result<impl IntoResponse, ApiError> {

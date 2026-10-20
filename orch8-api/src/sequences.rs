@@ -390,6 +390,7 @@ pub(crate) struct ListSequencesQuery {
 )]
 pub(crate) async fn list_sequences(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListSequencesQuery>,
 ) -> Result<impl axum::response::IntoResponse, ApiError> {

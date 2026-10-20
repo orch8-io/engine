@@ -293,6 +293,7 @@ pub(crate) async fn next_fires(
 )]
 pub(crate) async fn list_cron(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListCronQuery>,
 ) -> Result<impl IntoResponse, ApiError> {

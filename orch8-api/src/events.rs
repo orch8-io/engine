@@ -201,6 +201,7 @@ fn default_limit() -> u32 {
 )]
 pub(crate) async fn list_events(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListEventsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {

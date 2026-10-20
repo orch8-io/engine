@@ -1,0 +1,4 @@
+## 2025-02-28 - [IDOR Vulnerability in Tenant Scoping Fallback]
+**Vulnerability:** In `orch8-api/src/auth.rs`, `scoped_tenant_id` prefers `tenant_ctx`, but falls back to `query_tenant_id` if not set. Unscoped callers could pass a `tenant_id` query parameter and list other tenants' resources if the endpoint didn't verify they were an admin (`require_admin`).
+**Learning:** Endpoints allowing cross-tenant listing through query parameters must explicitly enforce admin checks when `tenant_ctx` is missing. The `scoped_tenant_id` helper doesn't intrinsically enforce the caller is an admin.
+**Prevention:** Add `admin_ctx: crate::auth::OptionalAdmin` and `if tenant_ctx.is_none() && query.tenant_id.is_some() { crate::api_keys::require_admin(&admin_ctx)?; }` to all endpoints using `scoped_tenant_id` with an unscoped fallback for query parameters.

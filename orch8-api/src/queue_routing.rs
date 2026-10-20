@@ -97,6 +97,7 @@ pub(crate) async fn create_rule(
 )]
 pub(crate) async fn list_rules(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListRoutingQuery>,
 ) -> Result<impl IntoResponse, ApiError> {

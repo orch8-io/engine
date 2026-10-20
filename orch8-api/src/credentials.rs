@@ -233,6 +233,7 @@ async fn create_credential(
 
 async fn list_credentials(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<CredentialQuery>,
 ) -> Result<impl IntoResponse, ApiError> {

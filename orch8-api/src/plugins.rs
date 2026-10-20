@@ -134,6 +134,7 @@ fn validate_source(plugin_type: &PluginType, source: &str) -> Result<(), ApiErro
 
 async fn list_plugins(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<PluginQuery>,
 ) -> Result<impl IntoResponse, ApiError> {

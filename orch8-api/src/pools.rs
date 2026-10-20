@@ -142,6 +142,7 @@ pub(crate) struct ListPoolsQuery {
 )]
 pub(crate) async fn list_pools(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     axum::extract::Query(query): axum::extract::Query<ListPoolsQuery>,
 ) -> Result<Json<Vec<ResourcePool>>, ApiError> {

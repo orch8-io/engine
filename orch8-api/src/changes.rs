@@ -54,6 +54,7 @@ pub fn routes() -> Router<AppState> {
 )]
 pub(crate) async fn list_changes(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<ChangeQuery>,
 ) -> Result<Json<ChangePage>, ApiError> {
@@ -90,6 +91,7 @@ pub(crate) async fn list_changes(
 )]
 pub(crate) async fn stream_changes(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<ChangeQuery>,
     headers: HeaderMap,
@@ -224,6 +226,7 @@ mod tests {
         let response = stream_changes(
             State(state),
             None,
+            None, // tenant_ctx
             Query(ChangeQuery {
                 tenant_id: Some("idle-tenant".into()),
                 cursor: None,

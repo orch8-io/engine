@@ -219,7 +219,7 @@ async fn tool_list_sequences(
         query.insert("limit".into(), json!(limit));
     }
     let q: crate::sequences::ListSequencesQuery = parse_args(Value::Object(query))?;
-    rest_json(crate::sequences::list_sequences(State(state), tenant_ctx, Query(q)).await).await
+    rest_json(crate::sequences::list_sequences(State(state), None, tenant_ctx, Query(q)).await).await
 }
 
 /// `create_sequence`: validate and persist a complete sequence definition.

@@ -2015,6 +2015,7 @@ mod tests {
 )]
 pub(crate) async fn list_tasks(
     State(state): State<AppState>,
+    _admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<ListTasksQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
