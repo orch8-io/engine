@@ -357,6 +357,7 @@ fn conformance_sequence(tenant: &TenantId, run_id: Uuid) -> SequenceDefinition {
 fn conformance_instance(tenant: &TenantId, sequence_id: SequenceId, run_id: Uuid) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id,

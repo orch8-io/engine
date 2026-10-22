@@ -132,6 +132,7 @@ async fn deterministic_artifact_retry_rejects_changed_plaintext_through_encrypti
 fn mk_instance(tenant: &str, data: serde_json::Value) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),

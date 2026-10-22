@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Runtime claim metadata
+
+- Storage reads and claims retain `TaskInstance::claimed_at` separately from
+  context/heartbeat timestamps. Repeated public evaluator calls, loops and
+  self-modification no longer mistake a context update for claim loss.
+- Rust `TaskInstance` literals now initialize `claimed_at: None`; native storage
+  supplies the actual timestamp. This runtime field is excluded from JSON, so
+  API and backup documents retain their existing shape. Explicit drivers can
+  use the public `evaluate_with_claim_token` API with their original token.
+
 ### Step results after claim recovery
 
 - Late handlers cannot replace a newer execution's outputs, cached results,

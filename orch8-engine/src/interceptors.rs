@@ -126,6 +126,7 @@ mod tests {
     async fn seed_instance(storage: &dyn StorageBackend, id: InstanceId) {
         let now = Utc::now();
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),

@@ -100,6 +100,7 @@ async fn run_crash_recovery() -> Result<CrashRecoveryReport> {
     let sequence = demo_sequence(&tenant)?;
     let now = Utc::now();
     let instance = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: sequence.id,
@@ -422,6 +423,7 @@ async fn create_paused_instance(
 ) -> Result<TaskInstance> {
     let now = Utc::now();
     let instance = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: sequence.id,

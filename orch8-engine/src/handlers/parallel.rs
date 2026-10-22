@@ -198,6 +198,7 @@ mod tests {
         };
         s.create_sequence(&seq).await.unwrap();
         let inst_row = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: inst,
             sequence_id: seq.id,
@@ -229,6 +230,7 @@ mod tests {
     fn mk_instance(inst_id: InstanceId) -> TaskInstance {
         let now = chrono::Utc::now();
         TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: inst_id,
             sequence_id: SequenceId::new(),

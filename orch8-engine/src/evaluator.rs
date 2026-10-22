@@ -572,7 +572,7 @@ pub async fn evaluate_fenced(
         instance,
         sequence,
         clock,
-        instance.updated_at,
+        instance.claimed_at.unwrap_or(instance.updated_at),
         stop,
     )
     .await
@@ -580,7 +580,9 @@ pub async fn evaluate_fenced(
 
 /// Evaluate work claimed by the scheduler using its immutable lease token.
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn evaluate_with_claim_token(
+/// Evaluate using the caller's original claim explicitly, even when its
+/// instance context/heartbeat timestamps have since changed.
+pub async fn evaluate_with_claim_token(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,

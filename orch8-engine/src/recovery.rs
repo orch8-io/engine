@@ -119,6 +119,7 @@ mod tests {
         storage.create_sequence(&seq).await.unwrap();
 
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
@@ -213,6 +214,7 @@ mod tests {
         storage.create_sequence(&seq).await.unwrap();
 
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
@@ -302,6 +304,7 @@ mod tests {
         storage.create_sequence(&seq).await.unwrap();
 
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,

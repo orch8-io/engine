@@ -345,7 +345,7 @@ pub async fn execute_step_node(
         step_def,
         outputs,
         &clock,
-        instance.updated_at,
+        instance.claimed_at.unwrap_or(instance.updated_at),
     )
     .await
 }
@@ -1145,6 +1145,7 @@ mod tests {
     async fn seed_instance(storage: &SqliteStorage, id: InstanceId) {
         let now = Utc::now();
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
@@ -1240,6 +1241,7 @@ mod tests {
     ) {
         let now = Utc::now();
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),

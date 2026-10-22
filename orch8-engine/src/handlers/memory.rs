@@ -2029,6 +2029,7 @@ mod net_tests {
         let now = Utc::now();
         storage
             .create_instance(&TaskInstance {
+                claimed_at: None,
                 sub_tenant: None,
                 id: instance_id,
                 sequence_id,
