@@ -2526,33 +2526,54 @@ pub(crate) async fn handle_deadline_breach(
         "SLA deadline breached ({state_label})"
     );
 
-    // CAS the instance to Failed FIRST and run the side effects only if this
-    // node won: the deadline sweep runs on every node, and the escalation
-    // handler / breach output used to fire before the CAS — once per node
-    // per breach (ENG-R-N5). A lost CAS means another writer already moved
-    // the instance (failed it, cancelled it, completed it); either way this
-    // caller must stop, so report "handled".
-    match crate::lifecycle::transition_instance(
+    // Commit the breach marker with the terminal state. Only the CAS winner
+    // may escalate; failed writes leave the instance eligible for a retry.
+    if !from_state.can_transition_to(InstanceState::Failed) {
+        return Err(EngineError::InvalidTransition {
+            instance_id,
+            from: from_state,
+            to: InstanceState::Failed,
+        });
+    }
+    let breach_output = orch8_types::output::BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id,
+        block_id: step_def.id.clone(),
+        output: serde_json::json!({
+            "_error": "sla_deadline_breached",
+            "_deadline_ms": u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+            "_elapsed_ms": elapsed.num_milliseconds(),
+        }),
+        output_ref: None,
+        output_size: 0,
+        attempt: prev_output.as_ref().map_or(0, |o| o.attempt),
+        created_at: Utc::now(),
+    };
+    if !storage
+        .save_output_and_conditional_transition(
+            &breach_output,
+            from_state,
+            InstanceState::Failed,
+            None,
+        )
+        .await?
+    {
+        debug!(instance_id = %instance_id, block_id = %step_def.id,
+            "SLA breach: instance already moved by a concurrent writer; skipping escalation");
+        return Ok(true);
+    }
+    crate::lifecycle::audit_transition(
         storage.as_ref(),
         instance_id,
-        Some(&instance.tenant_id),
+        &instance.tenant_id,
         from_state,
         InstanceState::Failed,
         None,
     )
-    .await
-    {
-        Ok(()) => {}
-        Err(EngineError::InvalidTransition { .. }) => {
-            debug!(
-                instance_id = %instance_id,
-                block_id = %step_def.id,
-                "SLA breach: instance already moved by a concurrent writer; skipping escalation"
-            );
-            return Ok(true);
-        }
-        Err(e) => return Err(e),
-    }
+    .await;
+    crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
+    // Parent progress must not depend on a slow or rejected escalation.
+    wake_parent_if_child(storage.as_ref(), instance).await;
 
     // Invoke escalation handler if configured (never for a sandboxed
     // sub-tenant sequence unless the handler is allowlisted).
@@ -2615,30 +2636,6 @@ pub(crate) async fn handle_deadline_breach(
             None => run.await,
         }
     }
-
-    let breach_output = orch8_types::output::BlockOutput {
-        id: uuid::Uuid::now_v7(),
-        instance_id,
-        block_id: step_def.id.clone(),
-        output: serde_json::json!({
-            "_error": "sla_deadline_breached",
-            "_deadline_ms": u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
-            "_elapsed_ms": elapsed.num_milliseconds(),
-        }),
-        output_ref: None,
-        output_size: 0,
-        attempt: prev_output.as_ref().map_or(0, |o| o.attempt),
-        created_at: Utc::now(),
-    };
-    // Best-effort: the instance is already terminal, so a failed marker
-    // write must not surface as a sweep error.
-    if let Err(e) = storage.save_block_output(&breach_output).await {
-        warn!(instance_id = %instance_id, error = %e, "failed to record SLA breach output");
-    }
-    crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
-
-    // Wake parent: SLA deadline breach → terminal Failed.
-    wake_parent_if_child(storage.as_ref(), instance).await;
 
     Ok(true)
 }
