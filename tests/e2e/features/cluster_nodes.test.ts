@@ -7,14 +7,17 @@ import assert from "node:assert/strict";
 import { Orch8Client } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
 import type { ServerHandle } from "../harness.ts";
+import type { ClusterNode } from "../types.ts";
 
 const client = new Orch8Client();
 
 describe("Cluster Nodes", () => {
   let server: ServerHandle | undefined;
+  let runningNode: ClusterNode;
 
   before(async () => {
     server = await startServer();
+    runningNode = await client.waitForActiveClusterNode();
   });
 
   after(async () => {
@@ -29,13 +32,13 @@ describe("Cluster Nodes", () => {
 
   it("cluster node has expected fields", async () => {
     const nodes = await client.listClusterNodes();
-    if (nodes.length > 0) {
-      const node = nodes[0] as Record<string, unknown>;
-      // At minimum, a node should have an id or node_id.
-      assert.ok(
-        node.id || node.node_id,
-        "cluster node should have an identifier",
-      );
-    }
+    const node = nodes.find(node => node.id === runningNode.id);
+    assert.ok(node, "the running server must have a registry entry");
+    assert.ok(node.id, "cluster node should have an identifier");
+    assert.ok(node.name, "cluster node should have a name");
+    assert.equal(node.status, "active");
+    assert.equal(node.drain, false);
+    assert.ok(Number.isFinite(Date.parse(node.registered_at)));
+    assert.ok(Number.isFinite(Date.parse(node.last_heartbeat_at)));
   });
 });
