@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Externalized output history
+### Builtin state ownership
 
-- Each step execution stores its externalized payload under a distinct output
-  reference. Repeated blocks and retries no longer overwrite the payload of
-  earlier output rows. Existing references remain readable.
+- Ordinary claimed `set_state`, `merge_state`, and `delete_state` steps check
+  their original execution claim atomically with each state mutation. A late
+  builtin cannot overwrite or delete a replacement execution's KV values.
+- Rust `StepContext` constructors now supply `claim_token`; independent
+  lifecycle hooks, direct calls, and remote scratch stores use `None`.
+  Custom handlers can use `StepContext::set_state` and `delete_state` for
+  the same protection. Storage backends implement `delete_instance_kv_claimed`.
+  Handle `StepError::ClaimLost` as ownership loss, without failure or fallback.
 
 ### Parallel step deferrals
 
@@ -29,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supplies the actual timestamp. This runtime field is excluded from JSON, so
   API and backup documents retain their existing shape. Explicit drivers can
   use the public `evaluate_with_claim_token` API with their original token.
+
+### Externalized output history
+
+- Each step execution stores its externalized payload under a distinct output
+  reference. Repeated blocks and retries no longer overwrite the payload of
+  earlier output rows. Existing references remain readable.
 
 ### Step results after claim recovery
 

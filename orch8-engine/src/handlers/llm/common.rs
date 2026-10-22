@@ -828,6 +828,7 @@ mod tests {
         let err = resolve_api_key(&params, "openai")
             .expect_err("reading the engine encryption key must be refused");
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(message.contains("not permitted"), "got: {message}");
             }

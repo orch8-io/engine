@@ -327,6 +327,7 @@ async fn run_step_core(
     );
 
     let step_ctx = StepContext {
+        claim_token,
         instance_id,
         tenant_id: exec.tenant_id,
         block_id: exec.block_id,
@@ -422,6 +423,7 @@ async fn run_step_core(
 
             Ok(block_output)
         }
+        Err(StepError::ClaimLost) => Err(EngineError::ClaimLost { instance_id }),
         Err(step_err) => {
             if let Some(guard) = effect_guard.take() {
                 guard.mark_unknown().await?;
@@ -472,6 +474,7 @@ async fn maybe_externalize(
 
 fn map_step_error(err: StepError, instance_id: InstanceId, block_id: &BlockId) -> EngineError {
     match err {
+        StepError::ClaimLost => EngineError::ClaimLost { instance_id },
         StepError::Retryable { message, details } => EngineError::StepFailed {
             instance_id,
             block_id: block_id.clone(),

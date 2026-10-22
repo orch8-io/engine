@@ -47,6 +47,24 @@ pub(super) async fn cache(
     Ok(true)
 }
 
+pub(super) async fn delete_kv(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    key: &str,
+    claim_token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, instance_id, claim_token).await? else {
+        return Ok(false);
+    };
+    sqlx::query("DELETE FROM instance_kv_state WHERE instance_id=$1 AND key=$2")
+        .bind(instance_id.into_uuid())
+        .bind(key)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub(super) async fn externalized(
     store: &PostgresStorage,
     instance_id: InstanceId,

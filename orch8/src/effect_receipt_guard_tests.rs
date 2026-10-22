@@ -22,6 +22,7 @@ const TENANT: &str = "tenant_1";
 
 fn step(storage: Arc<dyn StorageBackend>, instance_id: InstanceId, dry_run: bool) -> StepContext {
     StepContext {
+        claim_token: None,
         instance_id,
         tenant_id: TenantId::unchecked(TENANT),
         block_id: BlockId::new("charge"),
@@ -165,6 +166,7 @@ fn storage_failures_map_to_retryable_only_when_transient() {
         let (is_retryable, message) = match mapped {
             StepError::Retryable { message, .. } => (true, message),
             StepError::Permanent { message, .. } => (false, message),
+            StepError::ClaimLost => panic!("unexpected claim loss"),
         };
         assert_eq!(is_retryable, retryable, "case: {case}");
         assert!(

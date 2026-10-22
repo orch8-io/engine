@@ -89,6 +89,9 @@ pub type StepHandler = Box<
 /// are newtype wrappers / small JSON / POD.
 #[derive(Clone)]
 pub struct StepContext {
+    /// Original scheduler claim for ordinary step execution. Independent cleanup
+    /// hooks, explicit direct calls and remote scratch stores use None.
+    pub claim_token: Option<chrono::DateTime<chrono::Utc>>,
     pub instance_id: InstanceId,
     pub tenant_id: TenantId,
     pub block_id: BlockId,
@@ -106,6 +109,46 @@ pub struct StepContext {
 }
 
 impl StepContext {
+    /// Mutate this instance's KV state under the original execution claim.
+    pub async fn set_state(&self, key: &str, value: &serde_json::Value) -> Result<(), StepError> {
+        if let Some(token) = self.claim_token {
+            if !self
+                .storage
+                .set_instance_kv_claimed(self.instance_id, key, value, token)
+                .await
+                .map_err(|error| state_storage_error(&error))?
+            {
+                return Err(StepError::ClaimLost);
+            }
+        } else {
+            self.storage
+                .set_instance_kv(self.instance_id, key, value)
+                .await
+                .map_err(|error| state_storage_error(&error))?;
+        }
+        Ok(())
+    }
+
+    /// Delete this instance's KV state under the original execution claim.
+    pub async fn delete_state(&self, key: &str) -> Result<(), StepError> {
+        if let Some(token) = self.claim_token {
+            if !self
+                .storage
+                .delete_instance_kv_claimed(self.instance_id, key, token)
+                .await
+                .map_err(|error| state_storage_error(&error))?
+            {
+                return Err(StepError::ClaimLost);
+            }
+        } else {
+            self.storage
+                .delete_instance_kv(self.instance_id, key)
+                .await
+                .map_err(|error| state_storage_error(&error))?;
+        }
+        Ok(())
+    }
+
     /// True when this instance is running in dry-run mode. Side-effecting
     /// handlers consult this and, when set, skip their real effect (HTTP/LLM
     /// call, signal, child-instance spawn, memory write, block injection, …)
@@ -116,6 +159,21 @@ impl StepContext {
     #[must_use]
     pub fn is_dry_run(&self) -> bool {
         self.context.runtime.dry_run
+    }
+}
+
+fn state_storage_error(error: &orch8_types::error::StorageError) -> StepError {
+    let message = format!("instance state storage error: {error}");
+    if error.is_transient() {
+        StepError::Retryable {
+            message,
+            details: None,
+        }
+    } else {
+        StepError::Permanent {
+            message,
+            details: None,
+        }
     }
 }
 
@@ -297,6 +355,7 @@ mod tests {
 
     fn mk_ctx(storage: Arc<dyn StorageBackend>) -> StepContext {
         StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("step_1"),
