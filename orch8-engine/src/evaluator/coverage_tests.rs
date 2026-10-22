@@ -9,6 +9,7 @@
 use orch8_types::sequence::{ParallelDef, StepDef};
 
 use super::*;
+use crate::handlers::step_deferral::PendingStepDeferrals;
 
 fn mk_step(id: &str) -> BlockDefinition {
     BlockDefinition::Step(Box::new(StepDef {
@@ -115,7 +116,14 @@ fn coverage_evaluator_001_pair_found_across_distinct_branches() {
     let handlers = registry();
     let block_map = flatten_blocks(&blocks);
     let index = build_node_index(&tree);
-    let pair = find_parallel_step_pair(&tree, &block_map, &handlers, &index).unwrap();
+    let pair = find_parallel_step_pair(
+        &tree,
+        &block_map,
+        &handlers,
+        &index,
+        &PendingStepDeferrals::default(),
+    )
+    .unwrap();
     assert_eq!(pair, [1, 2]);
 }
 
@@ -152,7 +160,16 @@ fn coverage_evaluator_002_same_branch_steps_are_never_paired() {
     let handlers = registry();
     let block_map = flatten_blocks(&blocks);
     let index = build_node_index(&tree);
-    assert!(find_parallel_step_pair(&tree, &block_map, &handlers, &index).is_none());
+    assert!(
+        find_parallel_step_pair(
+            &tree,
+            &block_map,
+            &handlers,
+            &index,
+            &PendingStepDeferrals::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -162,7 +179,16 @@ fn coverage_evaluator_003_pending_steps_are_not_paired() {
     let handlers = registry();
     let block_map = flatten_blocks(&blocks);
     let index = build_node_index(&tree);
-    assert!(find_parallel_step_pair(&tree, &block_map, &handlers, &index).is_none());
+    assert!(
+        find_parallel_step_pair(
+            &tree,
+            &block_map,
+            &handlers,
+            &index,
+            &PendingStepDeferrals::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -171,7 +197,16 @@ fn coverage_evaluator_004_unregistered_handler_is_not_paired() {
     let handlers = HandlerRegistry::new();
     let block_map = flatten_blocks(&blocks);
     let index = build_node_index(&tree);
-    assert!(find_parallel_step_pair(&tree, &block_map, &handlers, &index).is_none());
+    assert!(
+        find_parallel_step_pair(
+            &tree,
+            &block_map,
+            &handlers,
+            &index,
+            &PendingStepDeferrals::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -198,7 +233,16 @@ fn coverage_evaluator_005_steps_without_parallel_ancestor_are_not_paired() {
     let handlers = registry();
     let block_map = flatten_blocks(&blocks);
     let index = build_node_index(&tree);
-    assert!(find_parallel_step_pair(&tree, &block_map, &handlers, &index).is_none());
+    assert!(
+        find_parallel_step_pair(
+            &tree,
+            &block_map,
+            &handlers,
+            &index,
+            &PendingStepDeferrals::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -246,7 +290,16 @@ fn coverage_evaluator_006_distinct_parallels_are_not_cross_paired() {
     let handlers = registry();
     let block_map = flatten_blocks(&blocks);
     let index = build_node_index(&tree);
-    assert!(find_parallel_step_pair(&tree, &block_map, &handlers, &index).is_none());
+    assert!(
+        find_parallel_step_pair(
+            &tree,
+            &block_map,
+            &handlers,
+            &index,
+            &PendingStepDeferrals::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -256,7 +309,16 @@ fn coverage_evaluator_007_empty_tree_yields_no_pair() {
     let handlers = registry();
     let block_map = flatten_blocks(&blocks);
     let index = build_node_index(&tree);
-    assert!(find_parallel_step_pair(&tree, &block_map, &handlers, &index).is_none());
+    assert!(
+        find_parallel_step_pair(
+            &tree,
+            &block_map,
+            &handlers,
+            &index,
+            &PendingStepDeferrals::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -304,7 +366,13 @@ fn coverage_evaluator_008_three_branches_pair_the_first_two_seen() {
     let block_map = flatten_blocks(&blocks);
     let index = build_node_index(&tree);
     assert_eq!(
-        find_parallel_step_pair(&tree, &block_map, &handlers, &index),
+        find_parallel_step_pair(
+            &tree,
+            &block_map,
+            &handlers,
+            &index,
+            &PendingStepDeferrals::default()
+        ),
         Some([1, 2])
     );
 }
@@ -434,7 +502,13 @@ fn coverage_evaluator_012_step_inside_parallel_dispatches_with_transparent_nesti
     let block_map = flatten_blocks(&blocks);
     let index = build_node_index(&tree);
     assert_eq!(
-        find_parallel_step_pair(&tree, &block_map, &handlers, &index),
+        find_parallel_step_pair(
+            &tree,
+            &block_map,
+            &handlers,
+            &index,
+            &PendingStepDeferrals::default()
+        ),
         Some([2, 3])
     );
 }

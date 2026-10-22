@@ -75,6 +75,7 @@ struct EvalContext {
     instance: TaskInstance,
     /// Stable lease token; ordinary context writes can change `updated_at`.
     claim_token: chrono::DateTime<chrono::Utc>,
+    pending_deferrals: crate::handlers::step_deferral::PendingStepDeferrals,
     clock: orch8_types::clock::SharedClock,
     /// When true, the tree must be re-read from storage before the next use.
     tree_stale: bool,
@@ -83,6 +84,12 @@ struct EvalContext {
 }
 
 impl EvalContext {
+    async fn apply_deferrals(&self, storage: &dyn StorageBackend) -> Result<(), EngineError> {
+        self.pending_deferrals
+            .apply(storage, &self.instance, self.claim_token, Some(&self.tree))
+            .await
+    }
+
     /// Refresh the execution tree from storage if stale.
     async fn refresh_tree(
         &mut self,
@@ -123,6 +130,8 @@ impl EvalContext {
 enum IterAction {
     /// Phase handled work — restart the loop from the top.
     Continue,
+    /// Only fresh deferrals were recorded; they do not consume the work budget.
+    Deferred,
     /// Phase determined a terminal result — return immediately.
     Return(EvalOutcome),
     /// Phase had no actionable work — fall through to the next phase.
@@ -614,6 +623,7 @@ pub async fn evaluate_with_claim_token(
         tree: initial_tree,
         instance: initial_instance,
         claim_token,
+        pending_deferrals: crate::handlers::step_deferral::PendingStepDeferrals::default(),
         clock: clock.clone(),
         tree_stale: false,
         instance_stale: false,
@@ -622,7 +632,9 @@ pub async fn evaluate_with_claim_token(
     let max_iterations = 200;
     let instance_id = instance.id;
 
-    for _ in 0..max_iterations {
+    let mut iterations = 0;
+    while iterations < max_iterations {
+        iterations += 1;
         if stop.load(std::sync::atomic::Ordering::Acquire) {
             debug!(instance_id = %instance_id, "evaluate: lease lost, stopping before next iteration");
             return Ok(EvalOutcome::MoreWork {
@@ -739,7 +751,7 @@ pub async fn evaluate_with_claim_token(
         )
         .await?
         {
-            IterAction::Continue => continue,
+            IterAction::Continue | IterAction::Deferred => continue,
             IterAction::Return(outcome) => return Ok(outcome),
             IterAction::FallThrough => {}
         }
@@ -756,6 +768,12 @@ pub async fn evaluate_with_claim_token(
         .await?
         {
             IterAction::Continue => continue,
+            IterAction::Deferred => {
+                // Each leaf can defer only once per evaluation. Visiting these
+                // bounded leaves must not repeatedly starve later ready work.
+                iterations -= 1;
+                continue;
+            }
             IterAction::Return(outcome) => return Ok(outcome),
             IterAction::FallThrough => {}
         }
@@ -772,11 +790,15 @@ pub async fn evaluate_with_claim_token(
         )
         .await?
         {
-            IterAction::Continue => continue,
-            IterAction::Return(outcome) => return Ok(outcome),
+            IterAction::Continue | IterAction::Deferred => continue,
+            IterAction::Return(outcome) => {
+                ctx.apply_deferrals(storage.as_ref()).await?;
+                return Ok(outcome);
+            }
             IterAction::FallThrough => {}
         }
 
+        ctx.apply_deferrals(storage.as_ref()).await?;
         // No actionable work this tick — either waiting for external work or stuck.
         if tracing::enabled!(tracing::Level::WARN) {
             warn!(
@@ -795,16 +817,16 @@ pub async fn evaluate_with_claim_token(
         });
     }
 
-    // Safety limit — defer to next tick. Report `has_waiting_nodes = true`
-    // so the scheduler transitions to Waiting instead of Scheduled, preventing
-    // an immediate re-claim that would busy-spin on every tick.
+    // A bounded pass must yield runnable work to the next scheduler tick.
+    // Waiting requires an external wake, which may never arrive for a long
+    // sequence. Do not apply future deferrals while runnable work remains.
     warn!(
         instance_id = %instance.id,
         max_iterations,
         "evaluate: iteration limit reached, deferring to next tick"
     );
     Ok(EvalOutcome::MoreWork {
-        has_waiting_nodes: true,
+        has_waiting_nodes: false,
     })
 }
 
@@ -935,7 +957,7 @@ async fn phase_root_activation(
             outputs_snapshot,
             &ctx.clock,
             ctx.claim_token,
-            None,
+            Some(&ctx.pending_deferrals),
         )
         .await?;
         ctx.tree_stale = true;
@@ -965,70 +987,32 @@ async fn phase_running_steps(
     // A Parallel may expose several runnable leaves at once. Execute at most
     // two in-process leaves from distinct branches in the same poll. Keeping
     // the bound here prevents a wide fan-out from creating unbounded futures.
-    if let Some([left_idx, right_idx]) =
-        find_parallel_step_pair(&ctx.tree, block_map, handlers, &node_index)
-    {
-        let left_node = &ctx.tree[left_idx];
-        let right_node = &ctx.tree[right_idx];
-        let Ok(left_block) = block_map
-            .binary_search_by_key(&&left_node.block_id, |(id, _)| *id)
-            .map(|idx| block_map[idx].1)
-        else {
-            return Ok(IterAction::FallThrough);
-        };
-        let Ok(right_block) = block_map
-            .binary_search_by_key(&&right_node.block_id, |(id, _)| *id)
-            .map(|idx| block_map[idx].1)
-        else {
-            return Ok(IterAction::FallThrough);
-        };
-
-        // Wait for both futures even if one fails. Dropping the sibling on the
-        // first error could interrupt a handler after it has committed an
-        // external side effect but before its durable completion is recorded.
-        let pending_deferrals = crate::handlers::step_deferral::PendingStepDeferrals::default();
-        let (left_result, right_result) = Box::pin(async {
-            tokio::join!(
-                dispatch_block(
-                    storage,
-                    handlers,
-                    &ctx.instance,
-                    left_node,
-                    left_block,
-                    &ctx.tree,
-                    sequence.interceptors.as_ref(),
-                    outputs_snapshot,
-                    &ctx.clock,
-                    ctx.claim_token,
-                    Some(&pending_deferrals),
-                ),
-                dispatch_block(
-                    storage,
-                    handlers,
-                    &ctx.instance,
-                    right_node,
-                    right_block,
-                    &ctx.tree,
-                    sequence.interceptors.as_ref(),
-                    outputs_snapshot,
-                    &ctx.clock,
-                    ctx.claim_token,
-                    Some(&pending_deferrals),
-                ),
-            )
-        })
+    if let Some(pair) = find_parallel_step_pair(
+        &ctx.tree,
+        block_map,
+        handlers,
+        &node_index,
+        &ctx.pending_deferrals,
+    ) {
+        return dispatch_parallel_steps(
+            storage,
+            handlers,
+            ctx,
+            pair,
+            block_map,
+            sequence,
+            outputs_snapshot,
+        )
         .await;
-        left_result?;
-        right_result?;
-        pending_deferrals
-            .apply(storage.as_ref(), &ctx.instance, ctx.claim_token)
-            .await?;
-        ctx.tree_stale = true;
-        ctx.instance_stale = true;
-        return Ok(IterAction::Continue);
     }
 
-    let Some(idx) = find_running_step_index(&ctx.tree, block_map, handlers, &node_index) else {
+    let Some(idx) = find_running_step_index(
+        &ctx.tree,
+        block_map,
+        handlers,
+        &node_index,
+        &ctx.pending_deferrals,
+    ) else {
         return Ok(IterAction::FallThrough);
     };
 
@@ -1053,12 +1037,89 @@ async fn phase_running_steps(
         outputs_snapshot,
         &ctx.clock,
         ctx.claim_token,
-        None,
+        Some(&ctx.pending_deferrals),
     )
     .await?;
+    let only_deferred = ctx.pending_deferrals.contains(node.id);
     ctx.tree_stale = true;
     ctx.instance_stale = true;
-    Ok(IterAction::Continue)
+    Ok(if only_deferred {
+        IterAction::Deferred
+    } else {
+        IterAction::Continue
+    })
+}
+
+/// Join both selected handlers before consuming either outcome or parking.
+async fn dispatch_parallel_steps(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    ctx: &mut EvalContext,
+    [left_idx, right_idx]: [usize; 2],
+    block_map: &[(&BlockId, &BlockDefinition)],
+    sequence: &SequenceDefinition,
+    outputs_snapshot: &OutputsSnapshot,
+) -> Result<IterAction, EngineError> {
+    let left_node = &ctx.tree[left_idx];
+    let right_node = &ctx.tree[right_idx];
+    let Ok(left_block) = block_map
+        .binary_search_by_key(&&left_node.block_id, |(id, _)| *id)
+        .map(|idx| block_map[idx].1)
+    else {
+        return Ok(IterAction::FallThrough);
+    };
+    let Ok(right_block) = block_map
+        .binary_search_by_key(&&right_node.block_id, |(id, _)| *id)
+        .map(|idx| block_map[idx].1)
+    else {
+        return Ok(IterAction::FallThrough);
+    };
+
+    // Wait for both futures even if one fails. Dropping the sibling on the
+    // first error could interrupt a handler after it has committed an
+    // external side effect but before its durable completion is recorded.
+    let (left_result, right_result) = Box::pin(async {
+        tokio::join!(
+            dispatch_block(
+                storage,
+                handlers,
+                &ctx.instance,
+                left_node,
+                left_block,
+                &ctx.tree,
+                sequence.interceptors.as_ref(),
+                outputs_snapshot,
+                &ctx.clock,
+                ctx.claim_token,
+                Some(&ctx.pending_deferrals),
+            ),
+            dispatch_block(
+                storage,
+                handlers,
+                &ctx.instance,
+                right_node,
+                right_block,
+                &ctx.tree,
+                sequence.interceptors.as_ref(),
+                outputs_snapshot,
+                &ctx.clock,
+                ctx.claim_token,
+                Some(&ctx.pending_deferrals),
+            ),
+        )
+    })
+    .await;
+    left_result?;
+    right_result?;
+    let only_deferred = ctx.pending_deferrals.contains(left_node.id)
+        && ctx.pending_deferrals.contains(right_node.id);
+    ctx.tree_stale = true;
+    ctx.instance_stale = true;
+    Ok(if only_deferred {
+        IterAction::Deferred
+    } else {
+        IterAction::Continue
+    })
 }
 
 /// Find two runnable, registered (in-process) steps that belong to distinct
@@ -1072,6 +1133,7 @@ fn find_parallel_step_pair(
     block_map: &[(&BlockId, &BlockDefinition)],
     handlers: &HandlerRegistry,
     node_index: &NodeIndex<'_>,
+    deferred: &crate::handlers::step_deferral::PendingStepDeferrals,
 ) -> Option<[usize; 2]> {
     // ⚡ Bolt: Use a flat Vec instead of a HashMap to avoid allocation overhead on the hot path.
     // The number of concurrent parallel branches is typically very small.
@@ -1085,6 +1147,7 @@ fn find_parallel_step_pair(
             continue;
         };
         if node.state != NodeState::Running
+            || deferred.contains(node.id)
             || !handlers.contains(&step_def.handler)
             || is_inside_decided_race(tree, block_map, node, node_index)
             || has_racing_composite_sibling(tree, block_map, node, node_index)
@@ -1273,9 +1336,10 @@ fn find_running_step_index(
     block_map: &[(&BlockId, &BlockDefinition)],
     handlers: &HandlerRegistry,
     node_index: &NodeIndex<'_>,
+    deferred: &crate::handlers::step_deferral::PendingStepDeferrals,
 ) -> Option<usize> {
     for (i, node) in tree.iter().enumerate() {
-        if node.state != NodeState::Running {
+        if node.state != NodeState::Running || deferred.contains(node.id) {
             continue;
         }
         if let Ok(BlockDefinition::Step(step_def)) = block_map
