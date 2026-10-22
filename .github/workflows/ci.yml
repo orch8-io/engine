@@ -35,7 +35,9 @@ jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # A cold workspace/native build plus Clippy, docs and all three lockfile
+    # audits exceeded 20 minutes on hosted runners (run 39724677904).
+    timeout-minutes: 30
     env:
       SQLX_OFFLINE: true
     steps:
