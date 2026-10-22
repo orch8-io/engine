@@ -512,6 +512,68 @@ impl Engine {
 mod tests {
     use super::*;
 
+    /// Install a scheduler task whose completion is controlled by the test.
+    async fn blocked_tick_loop() -> (Engine, Arc<tokio::sync::Notify>) {
+        let storage = crate::Storage::sqlite_in_memory().connect().await.unwrap();
+        let engine = Engine::from_parts(
+            storage,
+            HandlerRegistry::new(),
+            SchedulerConfig::default(),
+            TenantId::unchecked("default"),
+        );
+        let release = Arc::new(tokio::sync::Notify::new());
+        let wait = Arc::clone(&release);
+        *engine.inner.tick_task.lock().unwrap() = Some(tokio::spawn(async move {
+            wait.notified().await;
+        }));
+        (engine, release)
+    }
+
+    #[tokio::test]
+    async fn concurrent_shutdown_callers_wait_for_the_same_drain() {
+        let (engine, release) = blocked_tick_loop().await;
+        let first_engine = engine.clone();
+        let first = tokio::spawn(async move { first_engine.shutdown().await });
+        // On the current-thread runtime the first caller reaches its join
+        // await before this cancellation waiter is polled again.
+        engine.inner.cancel.cancelled().await;
+        let second = engine.shutdown();
+        tokio::pin!(second);
+        tokio::select! {
+            biased;
+            () = &mut second => panic!("a concurrent shutdown returned before drain completed"),
+            () = tokio::task::yield_now() => {}
+        }
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            first.await.unwrap();
+            second.await;
+        })
+        .await
+        .expect("all shutdown callers finish after drain");
+    }
+
+    #[tokio::test]
+    async fn cancelling_shutdown_preserves_the_join_for_a_later_caller() {
+        let (engine, release) = blocked_tick_loop().await;
+        let first_engine = engine.clone();
+        let first = tokio::spawn(async move { first_engine.shutdown().await });
+        engine.inner.cancel.cancelled().await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let second = engine.shutdown();
+        tokio::pin!(second);
+        tokio::select! {
+            biased;
+            () = &mut second => panic!("cancelling a caller detached the scheduler drain"),
+            () = tokio::task::yield_now() => {}
+        }
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .expect("a later caller can finish the original drain");
+    }
+
     /// L1: dropping the last handle cancels the background tick loop.
     #[tokio::test]
     async fn dropping_last_handle_cancels_tick_loop() {
