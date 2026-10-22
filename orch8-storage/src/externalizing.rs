@@ -137,6 +137,38 @@ pub fn externalize_fields(
     refs
 }
 
+/// Logical payload record for backup/restore. Codecs remain a backend detail;
+/// encryption remains a wrapper concern. Preserve ownership and GC timestamps.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExternalizedEntry {
+    pub instance_id: orch8_types::ids::InstanceId,
+    pub ref_key: String,
+    pub payload: Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub(crate) fn decode_payload(
+    payload: Option<Value>,
+    bytes: Option<Vec<u8>>,
+    codec: Option<&str>,
+) -> Result<Value, orch8_types::error::StorageError> {
+    use orch8_types::error::StorageError;
+    match codec {
+        Some("zstd") => {
+            crate::compression::decompress(&bytes.ok_or_else(|| {
+                StorageError::Query("externalized payload bytes are missing".into())
+            })?)
+        }
+        None => {
+            payload.ok_or_else(|| StorageError::Query("externalized payload is missing".into()))
+        }
+        Some(other) => Err(StorageError::Query(format!(
+            "unknown externalized payload codec: {other}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

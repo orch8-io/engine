@@ -11,6 +11,14 @@ pub(super) async fn create_node(
     store: &PostgresStorage,
     node: &ExecutionNode,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    create_node_on(&mut conn, node).await
+}
+
+pub(super) async fn create_node_on(
+    conn: &mut sqlx::PgConnection,
+    node: &ExecutionNode,
+) -> Result<(), StorageError> {
     sqlx::query(
         r"
         INSERT INTO execution_tree
@@ -27,7 +35,7 @@ pub(super) async fn create_node(
     .bind(node.state.to_string())
     .bind(node.started_at)
     .bind(node.completed_at)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

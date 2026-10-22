@@ -18,6 +18,7 @@ mod events;
 mod evidence;
 mod execution_tree;
 mod externalized;
+mod externalized_snapshot;
 mod federation;
 mod instances;
 mod kv_state;
@@ -33,6 +34,7 @@ mod queue_dispatch;
 mod queue_routing;
 mod rate_limits;
 mod releases;
+mod restore;
 mod rollback;
 mod rows;
 mod sequences;
@@ -505,6 +507,12 @@ impl crate::SequenceStore for PostgresStorage {
 
 #[async_trait]
 impl crate::InstanceStore for PostgresStorage {
+    async fn restore_instance_snapshot(
+        &self,
+        snapshot: &crate::restore::InstanceSnapshot,
+    ) -> Result<bool, StorageError> {
+        restore::restore(self, snapshot).await
+    }
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         instances::create(self, instance).await
     }
@@ -2749,6 +2757,20 @@ impl crate::ResourceStore for PostgresStorage {
         externalized::batch_save(self, instance_id, entries).await
     }
 
+    async fn list_externalized_entries(
+        &self,
+        instance_id: InstanceId,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::externalizing::ExternalizedEntry>, StorageError> {
+        externalized_snapshot::list(self, instance_id, after, limit).await
+    }
+    async fn restore_externalized_entry(
+        &self,
+        entry: &crate::externalizing::ExternalizedEntry,
+    ) -> Result<(), StorageError> {
+        externalized_snapshot::restore(self, entry).await
+    }
     async fn get_externalized_state(
         &self,
         instance_id: InstanceId,

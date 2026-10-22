@@ -895,6 +895,23 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
 - `orch8-mobile` no longer carries the unused `queue_step_delegation` outbox
   path; remote steps run through the leased worker loop instead.
 
+### Logical backup payloads
+
+- Backup format 2 includes externalized context and historical output payloads
+  with their ownership and expiry timestamps. Stored ciphertexts remain sealed.
+- Restore continues to read format 1 archives and reports their omitted payloads.
+  Version 2 archives with instances must contain the payload member.
+- Custom Rust storage backends now implement paginated payload catalog reads and
+  atomic, owner-safe payload restoration.
+
+### Atomic instance restore
+
+- Instance restore commits the instance, tree, outputs, and payloads together.
+  A failed write no longer causes a retry to skip a partially restored instance.
+- Concurrent imports preserve one complete copy and leave existing data intact.
+  Dry-run and restore reject malformed instance snapshots before catalog writes.
+- Custom Rust backends now implement `InstanceStore::restore_instance_snapshot`.
+
 ## [0.7.1] — 2026-07-30
 
 ### Fixed

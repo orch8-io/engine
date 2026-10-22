@@ -1120,6 +1120,22 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::InstanceStore for EncryptingStorage {
+    async fn restore_instance_snapshot(&self, snapshot: &crate::restore::InstanceSnapshot) -> Result<bool, StorageError> {
+        snapshot.checked_nodes()?;
+        let instance = self.encrypt_instance(&snapshot.instance)?.into_owned();
+        let outputs = snapshot.outputs.iter().map(|output| self.encrypt_block_output(output).map(std::borrow::Cow::into_owned)).collect::<Result<Vec<_>, _>>()?;
+        let mut payloads = Vec::with_capacity(snapshot.payloads.len());
+        for entry in &snapshot.payloads {
+            payloads.push(crate::externalizing::ExternalizedEntry {
+                instance_id: entry.instance_id, ref_key: entry.ref_key.clone(),
+                payload: self.seal_externalized(entry.instance_id, &entry.ref_key, &entry.payload).await?,
+                created_at: entry.created_at, expires_at: entry.expires_at,
+            });
+        }
+        self.inner.restore_instance_snapshot(&crate::restore::InstanceSnapshot {
+            instance, nodes: snapshot.nodes.clone(), outputs, payloads,
+        }).await
+    }
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         let encrypted = self.encrypt_instance(instance)?;
         self.inner.create_instance(encrypted.as_ref()).await
@@ -2727,6 +2743,19 @@ passthrough_impl! {
     async fn save_externalized_state_claimed(&self, instance_id: InstanceId, ref_key: &str, payload: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError> {
         let encrypted = self.seal_externalized(instance_id, ref_key, payload).await?;
         self.inner.save_externalized_state_claimed(instance_id, ref_key, &encrypted, claim_token).await
+    }
+    async fn list_externalized_entries(&self, instance_id: InstanceId, after: Option<&str>, limit: u32)
+        -> Result<Vec<crate::externalizing::ExternalizedEntry>, StorageError> {
+        let mut entries = self.inner.list_externalized_entries(instance_id, after, limit).await?;
+        for entry in &mut entries {
+            entry.payload = self.open_externalized(instance_id, &entry.ref_key, &entry.payload).await?;
+        }
+        Ok(entries)
+    }
+    async fn restore_externalized_entry(&self, entry: &crate::externalizing::ExternalizedEntry) -> Result<(), StorageError> {
+        let mut sealed = entry.clone();
+        sealed.payload = self.seal_externalized(entry.instance_id, &entry.ref_key, &entry.payload).await?;
+        self.inner.restore_externalized_entry(&sealed).await
     }
     async fn get_externalized_state(
         &self,

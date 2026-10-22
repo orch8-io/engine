@@ -1,11 +1,11 @@
 //! `orch8 backup` / `orch8 restore` — logical export/import of engine
 //! configuration (and optionally instances) for `SQLite` and `PostgreSQL`.
 //!
-//! Archive format (`format_version` 1): a `.tar.gz` containing
+//! Archive format (`format_version` 2; version 1 remains readable): a `.tar.gz` containing
 //! `manifest.json` plus one JSON-lines file per kind (`sequences.jsonl`,
 //! `triggers.jsonl`, `cron.jsonl`, `queue_routing.jsonl`,
 //! `credentials.jsonl`, and with `--include-instances` `instances.jsonl`,
-//! `execution_tree.jsonl`, `block_outputs.jsonl`). The manifest records the
+//! `execution_tree.jsonl`, `block_outputs.jsonl`, `externalized_state.jsonl`). The manifest records the
 //! record count and SHA-256 of every file; restore verifies them before
 //! writing anything.
 //!
@@ -21,7 +21,7 @@
 //! and skipped when it already exists. `--dry-run` reports what would be
 //! created without writing.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ use super::upgrade::{DbTarget, parse_target};
 use crate::OutputFormat;
 
 pub const FORMAT: &str = "orch8-backup";
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 /// Storage list calls without offsets cap at this many rows.
 const PAGE: u32 = 500;
 /// Restore verifies archives in memory, so bound both the compressed input and
@@ -66,6 +66,7 @@ const KNOWN_ARCHIVE_MEMBERS: &[&str] = &[
     "instances.jsonl",
     "execution_tree.jsonl",
     "block_outputs.jsonl",
+    "externalized_state.jsonl",
 ];
 
 const CREDENTIAL_WARNING: &str = "credential values are exported exactly as stored: encrypted \
@@ -137,6 +138,7 @@ pub struct Snapshot {
     pub instances: Option<Vec<Value>>,
     pub execution_tree: Option<Vec<Value>>,
     pub block_outputs: Option<Vec<Value>>,
+    pub externalized_state: Vec<Value>,
     pub warnings: Vec<String>,
 }
 
@@ -250,8 +252,29 @@ async fn open_target(target: &DbTarget) -> Result<Arc<dyn StorageBackend>> {
     }
 }
 
+/// Read the complete payload catalog for one instance using bounded pages.
+async fn snapshot_payloads(
+    storage: &dyn StorageBackend,
+    id: orch8_types::ids::InstanceId,
+) -> Result<Vec<Value>> {
+    let mut values = Vec::new();
+    let mut after = None;
+    loop {
+        let page = storage
+            .list_externalized_entries(id, after.as_deref(), PAGE)
+            .await?;
+        let count = page.len();
+        after = page.last().map(|entry| entry.ref_key.clone());
+        for entry in page {
+            values.push(serde_json::to_value(entry)?);
+        }
+        if count < PAGE as usize {
+            return Ok(values);
+        }
+    }
+}
+
 /// Read everything to back up.
-#[allow(clippy::too_many_lines)]
 pub async fn snapshot(storage: &dyn StorageBackend, include_instances: bool) -> Result<Snapshot> {
     let mut snap = Snapshot::default();
 
@@ -318,6 +341,8 @@ pub async fn snapshot(storage: &dyn StorageBackend, include_instances: bool) -> 
                 for output in storage.get_all_outputs(instance.id).await? {
                     outputs.push(serde_json::to_value(&output)?);
                 }
+                snap.externalized_state
+                    .extend(snapshot_payloads(storage, instance.id).await?);
                 instances.push(serde_json::to_value(&instance)?);
             }
             if n < PAGE as usize {
@@ -348,6 +373,15 @@ fn jsonl(records: &[Value]) -> Result<Vec<u8>> {
 
 /// Build the archive bytes for a snapshot.
 pub fn write_archive(snap: &Snapshot, source_backend: &str) -> Result<Vec<u8>> {
+    let includes_instances = snap.instances.is_some();
+    if snap.execution_tree.is_some() != includes_instances
+        || snap.block_outputs.is_some() != includes_instances
+        || (!includes_instances && !snap.externalized_state.is_empty())
+    {
+        bail!(
+            "instance snapshots require instances, execution trees, outputs and payloads together"
+        );
+    }
     let mut members: Vec<(String, &[Value])> = vec![
         ("sequences.jsonl".into(), &snap.sequences),
         ("triggers.jsonl".into(), &snap.triggers),
@@ -361,6 +395,7 @@ pub fn write_archive(snap: &Snapshot, source_backend: &str) -> Result<Vec<u8>> {
         members.push(("instances.jsonl".into(), i));
         members.push(("execution_tree.jsonl".into(), t));
         members.push(("block_outputs.jsonl".into(), o));
+        members.push(("externalized_state.jsonl".into(), &snap.externalized_state));
     }
     let mut files = Vec::new();
     let mut bodies = Vec::new();
@@ -430,6 +465,42 @@ impl Archive {
     }
 }
 
+fn validate_manifest_layout(
+    manifest: &Manifest,
+    members: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    if manifest.format != FORMAT {
+        bail!("not an orch8 backup (format '{}')", manifest.format);
+    }
+    if manifest.format_version > FORMAT_VERSION {
+        bail!(
+            "archive format version {} is newer than this binary supports ({FORMAT_VERSION}); \
+             upgrade orch8",
+            manifest.format_version
+        );
+    }
+    if manifest.format_version == 0 {
+        bail!("unsupported archive format version 0");
+    }
+    if manifest.format_version >= 2 {
+        let instance_members = [
+            "instances.jsonl",
+            "execution_tree.jsonl",
+            "block_outputs.jsonl",
+            "externalized_state.jsonl",
+        ];
+        for name in instance_members {
+            if manifest.include_instances && !members.contains_key(name) {
+                bail!("archive is missing {name}");
+            }
+            if !manifest.include_instances && members.contains_key(name) {
+                bail!("archive contains {name} without include_instances");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Read and verify an archive: known format/version, only expected regular
 /// files, sizes bounded, every checksum and record count matching.
 pub fn read_archive(bytes: &[u8]) -> Result<Archive> {
@@ -480,16 +551,7 @@ pub fn read_archive(bytes: &[u8]) -> Result<Archive> {
         .context("archive has no manifest.json")?;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("manifest.json is invalid")?;
-    if manifest.format != FORMAT {
-        bail!("not an orch8 backup (format '{}')", manifest.format);
-    }
-    if manifest.format_version > FORMAT_VERSION {
-        bail!(
-            "archive format version {} is newer than this binary supports ({FORMAT_VERSION}); \
-             upgrade orch8",
-            manifest.format_version
-        );
-    }
+    validate_manifest_layout(&manifest, &members)?;
     for file in &manifest.files {
         let body = members
             .get(&file.name)
@@ -555,6 +617,11 @@ pub async fn restore(
     dry_run: bool,
     include_instances: bool,
 ) -> Result<RestoreReport> {
+    let snapshots = if include_instances && archive.members.contains_key("instances.jsonl") {
+        instance_snapshots(archive)?
+    } else {
+        Vec::new()
+    };
     let mut report = RestoreReport {
         dry_run,
         warnings: archive.manifest.warnings.clone(),
@@ -626,53 +693,71 @@ pub async fn restore(
         );
     }
     if has_instances && include_instances {
-        let mut restored = BTreeSet::new();
-        for instance in archive.records::<TaskInstance>("instances.jsonl")? {
-            let exists = storage.get_instance(instance.id).await?.is_some();
-            if !exists {
-                if !dry_run {
-                    storage
-                        .create_instance(&instance)
-                        .await
-                        .with_context(|| format!("restore instance {}", instance.id))?;
-                }
-                restored.insert(instance.id);
-            }
+        if !archive.members.contains_key("externalized_state.jsonl") {
+            report.warnings.push("version 1 backups omit externalized payloads; referenced context or outputs may be incomplete".into());
+        }
+        for snapshot in snapshots {
+            let exists = if dry_run {
+                storage.get_instance(snapshot.instance.id).await?.is_some()
+            } else {
+                !storage
+                    .restore_instance_snapshot(&snapshot)
+                    .await
+                    .with_context(|| format!("restore instance {}", snapshot.instance.id))?
+            };
             report.tally("instances", exists);
-        }
-        let mut nodes_by_instance: BTreeMap<String, Vec<ExecutionNode>> = BTreeMap::new();
-        for node in archive.records::<ExecutionNode>("execution_tree.jsonl")? {
-            nodes_by_instance
-                .entry(node.instance_id.to_string())
-                .or_default()
-                .push(node);
-        }
-        for nodes in nodes_by_instance.into_values() {
-            let fresh = nodes
-                .first()
-                .is_some_and(|n| restored.contains(&n.instance_id));
-            for _ in &nodes {
-                report.tally("execution_tree", !fresh);
+            for _ in &snapshot.nodes {
+                report.tally("execution_tree", exists);
             }
-            if fresh && !dry_run {
-                storage
-                    .create_execution_nodes_batch(&nodes)
-                    .await
-                    .context("restore execution tree")?;
+            for _ in &snapshot.outputs {
+                report.tally("block_outputs", exists);
             }
-        }
-        for output in archive.records::<BlockOutput>("block_outputs.jsonl")? {
-            let fresh = restored.contains(&output.instance_id);
-            if fresh && !dry_run {
-                storage
-                    .save_block_output(&output)
-                    .await
-                    .context("restore block output")?;
+            for _ in &snapshot.payloads {
+                report.tally("externalized_state", exists);
             }
-            report.tally("block_outputs", !fresh);
         }
     }
     Ok(report)
+}
+
+fn instance_snapshots(archive: &Archive) -> Result<Vec<orch8_storage::restore::InstanceSnapshot>> {
+    let mut snapshots = Vec::new();
+    let mut positions = BTreeMap::new();
+    for instance in archive.records::<TaskInstance>("instances.jsonl")? {
+        if positions.insert(instance.id, snapshots.len()).is_some() {
+            bail!("archive contains duplicate instance ids");
+        }
+        snapshots.push(orch8_storage::restore::InstanceSnapshot {
+            instance,
+            nodes: Vec::new(),
+            outputs: Vec::new(),
+            payloads: Vec::new(),
+        });
+    }
+    for node in archive.records::<ExecutionNode>("execution_tree.jsonl")? {
+        let i = positions
+            .get(&node.instance_id)
+            .context("execution node has no archived instance")?;
+        snapshots[*i].nodes.push(node);
+    }
+    for output in archive.records::<BlockOutput>("block_outputs.jsonl")? {
+        let i = positions
+            .get(&output.instance_id)
+            .context("output has no archived instance")?;
+        snapshots[*i].outputs.push(output);
+    }
+    for entry in archive
+        .records::<orch8_storage::externalizing::ExternalizedEntry>("externalized_state.jsonl")?
+    {
+        let i = positions
+            .get(&entry.instance_id)
+            .context("payload has no archived instance")?;
+        snapshots[*i].payloads.push(entry);
+    }
+    for snapshot in &snapshots {
+        snapshot.validate()?;
+    }
+    Ok(snapshots)
 }
 
 fn render_restore(report: &RestoreReport) -> String {
