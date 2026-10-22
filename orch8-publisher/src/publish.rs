@@ -20,7 +20,7 @@ pub struct SequencePublisher {
     /// Contents of the last manifest this publisher uploaded, so a removal
     /// can be a read-modify-write of the current manifest instead of
     /// publishing a replacement that silently drops every other sequence.
-    last_manifest: std::sync::Mutex<Option<PublishedManifest>>,
+    last_manifest: tokio::sync::Mutex<Option<PublishedManifest>>,
 }
 
 /// Inputs of the last successfully published manifest.
@@ -57,7 +57,7 @@ impl SequencePublisher {
             tenant_id,
             signing_key_id,
             min_sdk_version: env!("CARGO_PKG_VERSION").to_string(),
-            last_manifest: std::sync::Mutex::new(None),
+            last_manifest: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -114,7 +114,12 @@ impl SequencePublisher {
             .map_err(PublishError::Cdn)?;
 
         let mut required_handlers: Vec<String> = Vec::new();
-        collect_required_handlers(&seq.blocks, &mut required_handlers);
+        for blocks in std::iter::once(seq.blocks.as_slice())
+            .chain(seq.on_failure.as_deref())
+            .chain(seq.on_cancel.as_deref())
+        {
+            collect_required_handlers(blocks, &mut required_handlers);
+        }
         required_handlers.sort_unstable();
         required_handlers.dedup();
 
@@ -135,9 +140,24 @@ impl SequencePublisher {
     pub async fn publish_manifest(
         &self,
         sequences: Vec<ManifestSequence>,
-        mut removed: Vec<crate::manifest::ManifestRemoved>,
+        removed: Vec<crate::manifest::ManifestRemoved>,
         other_keys: Vec<ManifestSigningKey>,
     ) -> Result<(), PublishError> {
+        // Keep the upload and local snapshot in the same critical section.
+        // Otherwise a concurrent removal can read an obsolete manifest and
+        // later overwrite a successful publication (or another removal).
+        let mut current = self.last_manifest.lock().await;
+        let published = self.upload_manifest(sequences, removed, other_keys).await?;
+        *current = Some(published);
+        Ok(())
+    }
+
+    async fn upload_manifest(
+        &self,
+        sequences: Vec<ManifestSequence>,
+        mut removed: Vec<crate::manifest::ManifestRemoved>,
+        other_keys: Vec<ManifestSigningKey>,
+    ) -> Result<PublishedManifest, PublishError> {
         // Enforce the documented 30-day retention for removed entries so the
         // signed manifest — pulled by every client on a 60s cache window —
         // does not grow without bound.
@@ -188,12 +208,8 @@ impl SequencePublisher {
             .await
             .map_err(PublishError::Cdn)?;
 
-        *self
-            .last_manifest
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(published);
         info!(tenant = %self.tenant_id, "published manifest");
-        Ok(())
+        Ok(published)
     }
 
     /// Seed the manifest-version floor from the currently published manifest
@@ -211,18 +227,14 @@ impl SequencePublisher {
         name: &str,
         removed_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), PublishError> {
-        let current = self
-            .last_manifest
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .ok_or_else(|| {
-                PublishError::Config(
-                    "current manifest unknown to this publisher; refusing to publish a \
+        let mut last_manifest = self.last_manifest.lock().await;
+        let current = last_manifest.clone().ok_or_else(|| {
+            PublishError::Config(
+                "current manifest unknown to this publisher; refusing to publish a \
                      manifest that would drop every sequence"
-                        .into(),
-                )
-            })?;
+                    .into(),
+            )
+        })?;
         let sequences = current
             .sequences
             .into_iter()
@@ -234,8 +246,11 @@ impl SequencePublisher {
             name: name.to_string(),
             removed_at,
         });
-        self.publish_manifest(sequences, removed, current.other_keys)
-            .await
+        let published = self
+            .upload_manifest(sequences, removed, current.other_keys)
+            .await?;
+        *last_manifest = Some(published);
+        Ok(())
     }
 }
 
@@ -318,6 +333,10 @@ fn collect_required_handlers(blocks: &[BlockDefinition], out: &mut Vec<String>) 
         }
     }
 }
+
+#[cfg(test)]
+#[path = "publish_concurrency_tests.rs"]
+mod concurrency_tests;
 
 #[cfg(test)]
 mod tests {
@@ -468,7 +487,7 @@ mod tests {
             .remove_from_manifest("a", chrono::Utc::now())
             .await
             .unwrap();
-        let current = publisher.last_manifest.lock().unwrap().clone().unwrap();
+        let current = publisher.last_manifest.lock().await.clone().unwrap();
         let names: Vec<&str> = current.sequences.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["b"]);
         assert_eq!(current.removed.len(), 1);
@@ -562,6 +581,30 @@ mod tests {
 
         let entry = publisher.publish_sequence(&seq, &key).await.unwrap();
         assert_eq!(entry.required_handlers, vec!["echo"]);
+    }
+
+    #[tokio::test]
+    async fn publish_sequence_includes_lifecycle_hook_handlers() {
+        let (publisher, key) = setup();
+        let mut seq = make_seq("hook-handlers", 1, "tenant1");
+        seq.on_failure = Some(serde_json::from_value(serde_json::json!([
+            {"type": "step", "id": "recover", "handler": "failure_handler", "fallback_handler": "backup"}
+        ])).unwrap());
+        seq.on_cancel = Some(
+            serde_json::from_value(serde_json::json!([
+                {"type": "parallel", "id": "cleanup", "branches": [
+                    [{"type": "step", "id": "cancel", "handler": "cancel_handler"}],
+                    [{"type": "step", "id": "log_cancel", "handler": "echo"}]
+                ]}
+            ]))
+            .unwrap(),
+        );
+
+        let entry = publisher.publish_sequence(&seq, &key).await.unwrap();
+        assert_eq!(
+            entry.required_handlers,
+            ["backup", "cancel_handler", "echo", "failure_handler"]
+        );
     }
 
     fn make_seq(name: &str, version: i32, tenant_id: &str) -> SequenceDefinition {
