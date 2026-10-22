@@ -74,6 +74,7 @@ impl DevServer {
             stream_limiter: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_STREAMS)),
             publisher: None,
             push_provider: Arc::new(orch8_push::NoopPushProvider),
+            webhook_config: Arc::default(),
             mobile_sync_enabled: false,
             mobile_sync_resolve_credentials: false,
             entitlements: orch8_api::entitlements::unlimited_provider(),
