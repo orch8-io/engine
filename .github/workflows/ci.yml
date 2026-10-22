@@ -77,6 +77,11 @@ jobs:
         run: |
           cargo install --locked "cargo-deny@^0.19"
           cargo deny check
+          # The default workspace graph omits optional features and the
+          # standalone Node/Python workspaces have independent lockfiles.
+          cargo deny --all-features check advisories
+          cargo deny --manifest-path packages/node-native/Cargo.toml check advisories
+          cargo deny --manifest-path packages/python-native/Cargo.toml check advisories
 
   test:
     name: Unit Tests
