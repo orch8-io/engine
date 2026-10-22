@@ -68,6 +68,7 @@ backend_test!(async fn step_writes_follow_the_running_claim(b) {
     assert!(b.storage.save_externalized_state_claimed(instance.id, "work-result", &json!("replacement"), current).await.unwrap());
     assert!(!b.storage.save_block_output_claimed(&output(instance.id, "stale"), old).await.unwrap());
     assert!(!b.storage.set_instance_kv_claimed(instance.id, "_cache:result", &json!("stale"), old).await.unwrap());
+    assert!(!b.storage.delete_instance_kv_claimed(instance.id, "_cache:result", old).await.unwrap());
     assert!(!b.storage.save_externalized_state_claimed(instance.id, "work-result", &json!("stale"), old).await.unwrap());
     assert_eq!(b.storage.get_block_output(instance.id, &BlockId::new("work")).await.unwrap().unwrap().output, replacement.output);
     assert_eq!(b.storage.get_instance_kv(instance.id, "_cache:result").await.unwrap(), Some(json!("replacement")));
@@ -76,12 +77,17 @@ backend_test!(async fn step_writes_follow_the_running_claim(b) {
     assert!(b.storage.save_block_output_claimed(&replacement, current).await.is_err());
     assert!(b.storage.set_instance_kv_claimed(instance.id, "after-error", &json!(true), current).await.unwrap());
     assert_eq!(b.storage.get_all_outputs(instance.id).await.unwrap().len(), 2);
+    assert!(b.storage.set_instance_kv_claimed(instance.id, "delete-me", &json!(true), current).await.unwrap());
+    assert!(b.storage.delete_instance_kv_claimed(instance.id, "delete-me", current).await.unwrap());
+    assert_eq!(b.storage.get_instance_kv(instance.id, "delete-me").await.unwrap(), None);
+    assert!(b.storage.delete_instance_kv_claimed(instance.id, "delete-me", current).await.unwrap());
     for state in [InstanceState::Paused, InstanceState::Completed] {
         // Administrative state changes do not grant an executing step a lease.
         b.storage.update_instance_state(instance.id, state, None).await.unwrap();
         assert!(!b.storage.update_node_state_claimed(instance.id, node.id, NodeState::Failed, current).await.unwrap());
         assert!(!b.storage.save_block_output_claimed(&output(instance.id, "terminal"), current).await.unwrap());
         assert!(!b.storage.set_instance_kv_claimed(instance.id, "_cache:result", &json!("terminal"), current).await.unwrap());
+        assert!(!b.storage.delete_instance_kv_claimed(instance.id, "_cache:result", current).await.unwrap());
         assert!(!b.storage.save_externalized_state_claimed(instance.id, "work-result", &json!("terminal"), current).await.unwrap());
     }
 });

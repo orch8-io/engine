@@ -2126,6 +2126,7 @@ mod net_tests {
         let tenant_id = TenantId::unchecked("t");
         seed_instance(&storage, instance_id, tenant_id.clone(), SequenceId::new()).await;
         StepContext {
+            claim_token: None,
             instance_id,
             tenant_id,
             block_id: BlockId::new("b"),
@@ -2250,6 +2251,7 @@ mod net_tests {
         )
         .await;
         let base = StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
@@ -2291,6 +2293,7 @@ mod net_tests {
         )
         .await;
         let base = StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
@@ -2573,6 +2576,7 @@ mod net_tests {
         .await
         .unwrap();
         let base = |tenant: &str, instance_id: InstanceId, params: Value| StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked(tenant),
             block_id: BlockId::new("memory"),
@@ -2792,6 +2796,7 @@ mod net_tests {
         .unwrap();
         let context = Arc::new(ExecutionContext::default());
         let make_ctx = |instance_id, retention_secs| StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: tenant.clone(),
             block_id: BlockId::new("memory"),

@@ -314,6 +314,7 @@ where
                     Ok(v) => v,
                     // A tool error becomes an observation so the model can react
                     // and self-correct rather than failing the whole agent.
+                    Err(StepError::ClaimLost) => return Err(StepError::ClaimLost),
                     Err(e) => json!({ "error": step_error_message(&e) }),
                 }
             };
@@ -770,6 +771,7 @@ fn result(
 
 fn step_error_message(e: &StepError) -> String {
     match e {
+        StepError::ClaimLost => e.to_string(),
         StepError::Permanent { message, .. } | StepError::Retryable { message, .. } => {
             message.clone()
         }
@@ -1793,6 +1795,7 @@ mod net_tests {
             .await
             .unwrap();
         let ctx = StepContext {
+            claim_token: None,
             instance_id,
             tenant_id,
             block_id: BlockId::new("b"),

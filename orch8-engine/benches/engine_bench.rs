@@ -807,6 +807,7 @@ fn bench_step_context_clone(c: &mut Criterion) {
         let data = make_context_data(target_bytes);
         let actual_bytes = data.to_string().len();
         let ctx = StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("bench"),
             block_id: BlockId::new("b1"),

@@ -257,6 +257,7 @@ mod tests {
         params: Value,
     ) -> StepContext {
         StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
@@ -419,6 +420,7 @@ mod tests {
         let mut context = ExecutionContext::default();
         context.runtime.dry_run = true;
         let c = StepContext {
+            claim_token: None,
             instance_id: id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),

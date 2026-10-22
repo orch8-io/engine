@@ -2897,6 +2897,16 @@ pub trait ResourceStore: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<HashMap<String, serde_json::Value>, StorageError>;
 
+    /// Delete only while Running under the original claim. Ownership and deletion
+    /// share one transaction. True includes deleting an already absent key;
+    /// false means ownership was lost and no key was changed.
+    async fn delete_instance_kv_claimed(
+        &self,
+        instance_id: InstanceId,
+        key: &str,
+        claim_token: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError>;
+
     async fn delete_instance_kv(
         &self,
         instance_id: InstanceId,

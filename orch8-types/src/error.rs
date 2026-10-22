@@ -384,14 +384,18 @@ mod tests {
                 assert_eq!(message, "rate limited");
                 assert_eq!(d.unwrap(), details);
             }
-            StepError::Permanent { .. } => panic!("expected Retryable"),
+            StepError::Permanent { .. } | StepError::ClaimLost => panic!("expected Retryable"),
         }
     }
 }
 
 /// Step-level errors returned by user-provided handlers.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum StepError {
+    /// The original execution no longer owns its scheduler claim. This is a
+    /// control outcome, not a handler failure eligible for retry or fallback.
+    #[error("execution claim lost")]
+    ClaimLost,
     #[error("retryable: {message}")]
     Retryable {
         message: String,
