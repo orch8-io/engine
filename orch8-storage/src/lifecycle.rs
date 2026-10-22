@@ -290,6 +290,7 @@ mod tests {
         use orch8_types::ids::{Namespace, SequenceId, TenantId};
         let now = Utc::now();
         let inst = orch8_types::instance::TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),

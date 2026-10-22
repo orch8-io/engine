@@ -56,6 +56,7 @@ fn mk_step(id: &str, handler: &str) -> StepDef {
 fn mk_instance(seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
@@ -107,6 +108,7 @@ async fn seed_instance(storage: &SqliteStorage, instance_id: InstanceId) {
     };
     storage.create_sequence(&seq).await.unwrap();
     let inst = TaskInstance {
+        claimed_at: None,
         id: instance_id,
         ..mk_instance(seq.id)
     };

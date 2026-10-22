@@ -104,7 +104,10 @@ async fn transient_storage_error_mid_step_reschedules_instead_of_failing() {
         .step("b", "noop")
         .build();
     let id = rig.seed(&seq).await;
-    rig.faults.on("save_block_output").times(1).fail_transient();
+    rig.faults
+        .on("save_block_output_claimed")
+        .times(1)
+        .fail_transient();
     let tick_at = rig.clock.now();
 
     rig.tick().await;
@@ -116,7 +119,7 @@ async fn transient_storage_error_mid_step_reschedules_instead_of_failing() {
         (160..=240).contains(&backoff_ms),
         "first transient retry must back off ~200 ms, got {backoff_ms} ms"
     );
-    assert_eq!(rig.faults.injected("save_block_output"), 1);
+    assert_eq!(rig.faults.injected("save_block_output_claimed"), 1);
 }
 
 /// T1-GAP-001, second half: once storage recovers, the next tick after the
@@ -129,7 +132,10 @@ async fn instance_completes_on_the_tick_after_a_transient_storage_error() {
         .step("b", "noop")
         .build();
     let id = rig.seed(&seq).await;
-    rig.faults.on("save_block_output").times(1).fail_transient();
+    rig.faults
+        .on("save_block_output_claimed")
+        .times(1)
+        .fail_transient();
     rig.tick().await;
 
     rig.clock.advance(ChronoDuration::seconds(1));
@@ -145,7 +151,10 @@ async fn permanent_storage_error_mid_step_fails_the_instance() {
     let rig = Rig::new().await;
     let seq = SequenceBuilder::new("t").step("a", "noop").build();
     let id = rig.seed(&seq).await;
-    rig.faults.on("save_block_output").times(1).fail_permanent();
+    rig.faults
+        .on("save_block_output_claimed")
+        .times(1)
+        .fail_permanent();
 
     rig.tick().await;
 

@@ -2279,6 +2279,7 @@ mod tests {
         backend.create_sequence(&v1).await.unwrap();
         let now = Utc::now();
         let instance = TaskInstance {
+            claimed_at: None,
             id: orch8_types::ids::InstanceId::new(),
             sub_tenant: None,
             sequence_id: v1.id,

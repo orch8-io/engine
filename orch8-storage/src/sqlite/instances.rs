@@ -393,6 +393,7 @@ async fn claim_due_inner(
         .map(|mut instance| {
             instance.state = InstanceState::Running;
             instance.updated_at = claim_at;
+            instance.claimed_at = Some(claim_at);
             instance
         })
         .collect())

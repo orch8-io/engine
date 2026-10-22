@@ -86,6 +86,10 @@ fault_impl! {
         async fn create_execution_nodes_batch(&self, nodes: &[ExecutionNode]) -> Result<(), StorageError>;
         async fn get_execution_tree(&self, instance_id: InstanceId) -> Result<Vec<ExecutionNode>, StorageError>;
         async fn update_node_state(&self, node_id: ExecutionNodeId, state: NodeState) -> Result<(), StorageError>;
+    async fn update_node_state_claimed(&self, instance_id: InstanceId, node_id: orch8_types::ids::ExecutionNodeId,
+        state: orch8_types::execution::NodeState, claim_token: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError>;
+
         async fn batch_activate_nodes(&self, node_ids: &[ExecutionNodeId]) -> Result<(), StorageError>;
         async fn update_nodes_state(&self, node_ids: &[ExecutionNodeId], state: NodeState) -> Result<(), StorageError>;
         async fn get_children(&self, parent_id: ExecutionNodeId) -> Result<Vec<ExecutionNode>, StorageError>;
@@ -96,6 +100,7 @@ fault_impl! {
 fault_impl! {
     [OUTPUT_STORE_METHODS] impl OutputStore {
         async fn save_block_output(&self, output: &BlockOutput) -> Result<(), StorageError>;
+        async fn save_block_output_claimed(&self, output: &BlockOutput, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn get_block_output(&self, instance_id: InstanceId, block_id: &BlockId) -> Result<Option<BlockOutput>, StorageError>;
         async fn get_block_outputs_batch(&self, keys: &[(InstanceId, &BlockId)]) -> Result<HashMap<(InstanceId, BlockId), BlockOutput>, StorageError>;
         async fn get_all_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
@@ -330,6 +335,7 @@ fault_impl! {
 fault_impl! {
     [RESOURCE_STORE_METHODS] impl ResourceStore {
         async fn set_instance_kv(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value) -> Result<(), StorageError>;
+        async fn set_instance_kv_claimed(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn get_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<Option<serde_json::Value>, StorageError>;
         async fn get_all_instance_kv(&self, instance_id: InstanceId) -> Result<HashMap<String, serde_json::Value>, StorageError>;
         async fn delete_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<(), StorageError>;
@@ -354,6 +360,7 @@ fault_impl! {
         async fn delete_expired_auxiliary(&self, retention: &AuxiliaryRetention, limit: u32) -> Result<u64, StorageError>;
         async fn compact_storage(&self) -> Result<(), StorageError>;
         async fn save_externalized_state(&self, instance_id: InstanceId, ref_key: &str, payload: &serde_json::Value) -> Result<(), StorageError>;
+        async fn save_externalized_state_claimed(&self, instance_id: InstanceId, ref_key: &str, payload: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn batch_save_externalized_state(&self, instance_id: InstanceId, entries: &[(String, serde_json::Value)]) -> Result<(), StorageError>;
         async fn get_externalized_state(&self, instance_id: InstanceId, ref_key: &str) -> Result<Option<serde_json::Value>, StorageError>;
         async fn batch_get_externalized_state(&self, refs: &[(InstanceId, String)]) -> Result<HashMap<(InstanceId, String), serde_json::Value>, StorageError>;

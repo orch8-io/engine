@@ -557,6 +557,7 @@ fn cfg_45_scheduler_config_max_instances_per_tenant_default() {
 #[test]
 fn inst_46_task_instance_serde_round_trip_all_fields() {
     let instance = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
@@ -599,6 +600,7 @@ fn inst_46_task_instance_serde_round_trip_all_fields() {
 #[test]
 fn inst_47_task_instance_optional_fields_none() {
     let instance = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
@@ -630,6 +632,7 @@ fn inst_47_task_instance_optional_fields_none() {
 #[test]
 fn inst_48_task_instance_metadata_json() {
     let instance = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),

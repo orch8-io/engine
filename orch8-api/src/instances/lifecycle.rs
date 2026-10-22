@@ -265,6 +265,7 @@ pub(crate) async fn create_instance_scoped(
     }
 
     let instance = TaskInstance {
+        claimed_at: None,
         id: InstanceId::new(),
         sub_tenant,
         sequence_id: effective_sequence_id,
@@ -529,6 +530,7 @@ pub async fn create_instances_batch(
                     .unwrap_or(&crate::entitlements::PlanEntitlements::unlimited()),
             );
             Ok::<_, ApiError>(TaskInstance {
+                claimed_at: None,
                 id: InstanceId::new(),
                 sub_tenant: sub_tenants.remove(&i).flatten(),
                 sequence_id: r.sequence_id,

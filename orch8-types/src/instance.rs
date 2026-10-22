@@ -355,6 +355,11 @@ impl Budget {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TaskInstance {
+    /// Original stored execution claim, independent of mutable `updated_at`.
+    /// Runtime storage metadata: excluded from API/backup JSON. New values
+    /// created explicitly in Running use their initial timestamp when inserted.
+    #[serde(skip)]
+    pub claimed_at: Option<DateTime<Utc>>,
     pub id: InstanceId,
     /// End customer (sub-tenant) inside `tenant_id`; `None` = tenant-level.
     #[serde(default, skip_serializing_if = "Option::is_none")]

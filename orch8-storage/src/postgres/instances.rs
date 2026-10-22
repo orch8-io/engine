@@ -268,7 +268,7 @@ pub(super) async fn get(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, budget, created_at, updated_at, sub_tenant
+                  session_id, parent_instance_id, budget, created_at, updated_at, claimed_at, sub_tenant
            FROM task_instances WHERE id = $1",
     )
     .bind(id.into_uuid())
@@ -397,6 +397,7 @@ pub(super) async fn claim_due(
         .map(|mut i| {
             i.state = InstanceState::Running;
             i.updated_at = claim_at;
+            i.claimed_at = Some(claim_at);
             i
         })
         .collect())
@@ -1123,7 +1124,7 @@ pub(super) async fn list(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, budget, created_at, updated_at, sub_tenant
+                  session_id, parent_instance_id, budget, created_at, updated_at, claimed_at, sub_tenant
            FROM task_instances WHERE 1=1",
     );
     apply_instance_filter(&mut qb, filter);
@@ -1158,7 +1159,7 @@ pub(super) async fn list_keyset(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, budget, created_at, updated_at, sub_tenant
+                  session_id, parent_instance_id, budget, created_at, updated_at, claimed_at, sub_tenant
            FROM task_instances WHERE 1=1",
     );
     apply_instance_filter(&mut qb, filter);
