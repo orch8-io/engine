@@ -95,6 +95,38 @@ enum Action {
     FailAfterCommit(ErrorFactory),
     /// Sleep (tokio time, so paused-clock tests stay instant), then forward.
     Delay(Duration),
+    /// Wait for a test-controlled release before forwarding.
+    Pause(Arc<PauseState>),
+}
+
+struct PauseState {
+    entered: tokio::sync::watch::Sender<bool>,
+    released: tokio::sync::watch::Sender<bool>,
+}
+
+/// Deterministic rendezvous for a paused storage call. Dropping releases it.
+#[must_use = "dropping the guard immediately releases the pause"]
+pub struct PauseGuard {
+    state: Arc<PauseState>,
+}
+
+impl PauseGuard {
+    /// Wait until a matching call has reached the pause.
+    pub async fn entered(&self) {
+        let mut entered = self.state.entered.subscribe();
+        let _ = entered.wait_for(|value| *value).await;
+    }
+
+    /// Let this and subsequent matching calls proceed, even if not yet entered.
+    pub fn release(&self) {
+        self.state.released.send_replace(true);
+    }
+}
+
+impl Drop for PauseGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 struct Rule {
@@ -228,6 +260,12 @@ impl FaultHandle {
                 tokio::time::sleep(d).await;
                 call.await
             }
+            Some(Action::Pause(state)) => {
+                state.entered.send_replace(true);
+                let mut released = state.released.subscribe();
+                let _ = released.wait_for(|value| *value).await;
+                call.await
+            }
         }
     }
 
@@ -321,6 +359,16 @@ impl RuleBuilder<'_> {
     /// under `#[tokio::test(start_paused = true)]`.
     pub fn delay(self, delay: Duration) {
         self.finish(Action::Delay(delay));
+    }
+
+    /// Pause matching calls until the returned guard releases or is dropped.
+    pub fn pause(self) -> PauseGuard {
+        let state = Arc::new(PauseState {
+            entered: tokio::sync::watch::channel(false).0,
+            released: tokio::sync::watch::channel(false).0,
+        });
+        self.finish(Action::Pause(Arc::clone(&state)));
+        PauseGuard { state }
     }
 }
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### PostgreSQL backup consistency
+
+- Logical PostgreSQL backups keep one read-only repeatable-read view across all
+  catalogs and instance data. A lost snapshot session fails backup instead of
+  silently mixing records from different commits. Normal server pools retain
+  their existing timeouts and connection recycling.
+
 ### Builtin state ownership
 
 - Ordinary claimed `set_state`, `merge_state`, and `delete_state` steps check

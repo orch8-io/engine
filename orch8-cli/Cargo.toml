@@ -56,3 +56,6 @@ nix = { version = "0.31", default-features = false, features = ["signal", "proce
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+orch8-storage = { path = "../orch8-storage", features = ["test-util"] }
