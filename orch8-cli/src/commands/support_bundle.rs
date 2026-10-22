@@ -24,7 +24,13 @@ pub struct SupportBundleCmd {
 }
 
 fn sensitive_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
+    // JSON fields and HTTP headers use snake_case, kebab-case and camelCase.
+    // Match their canonical spelling so a separator cannot hide a secret key.
+    let key: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|character| character.to_ascii_lowercase())
+        .collect();
     [
         "context",
         "payload",
@@ -37,10 +43,10 @@ fn sensitive_key(key: &str) -> bool {
         "token",
         "authorization",
         "cookie",
-        "api_key",
-        "encryption_key",
-        "private_key",
-        "database_url",
+        "apikey",
+        "encryptionkey",
+        "privatekey",
+        "databaseurl",
     ]
     .iter()
     .any(|needle| key.contains(needle))

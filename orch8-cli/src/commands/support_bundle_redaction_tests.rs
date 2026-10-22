@@ -26,6 +26,9 @@ fn keys_carrying_secrets_or_execution_data_are_redacted_and_metadata_survives() 
         "db_database_url",
         "encryption_key",
         "private_key",
+        "X-API-Key",
+        "apiKey",
+        "DATABASE-URL",
     ];
     let survives = [
         "id",
@@ -324,7 +327,8 @@ async fn local_config_is_included_with_every_secret_masked() {
              [database]\nurl = \"postgres://orch8:db-password@db/orch8\"\n\n\
              [license]\nkey = \"o8l1.license-secret\"\n\n\
              [node.managed_control_headers]\nAuthorization = \"Bearer header-auth-marker\"\n\
-             Cookie = \"session=header-cookie-marker\"\nfly-force-instance-id = \"route-1\"\n"
+             Cookie = \"session=header-cookie-marker\"\n\
+             X-API-Key = \"header-dash-key-marker\"\nxApiKey = \"header-camel-key-marker\"\nfly-force-instance-id = \"route-1\"\n"
         ),
     )
     .unwrap();
@@ -348,6 +352,8 @@ async fn local_config_is_included_with_every_secret_masked() {
         "license-secret",
         "header-auth-marker",
         "header-cookie-marker",
+        "header-dash-key-marker",
+        "header-camel-key-marker",
     ] {
         assert!(!raw.contains(secret), "config secret leaked: {secret}");
     }
