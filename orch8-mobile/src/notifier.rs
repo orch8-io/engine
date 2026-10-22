@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tracing::debug;
 
 use orch8_engine::sequence_cache::SequenceCache;
@@ -24,9 +24,14 @@ use crate::storage::MobileStorage;
 /// clearing a full set would re-notify every retained instance).
 const MAX_TRACKED: usize = 1000;
 
+// Callbacks share the runtime's blocking pool with handlers and memory probes.
+// Keep running plus queued listener work below its minimum four-thread pool.
+const MAX_IN_FLIGHT_CALLBACKS: usize = 2;
+
 /// Manages listener registration and bounded deduplication of lifecycle events.
 pub(crate) struct MobileNotifier {
     listener: Mutex<Option<Arc<dyn EngineListener>>>,
+    callback_slots: Arc<Semaphore>,
     terminal_seen: Mutex<HashSet<InstanceId>>,
     waiting_seen: Mutex<HashSet<(InstanceId, BlockId)>>,
     /// Terminal instance IDs already returned for dedup cleanup. Tracked
@@ -40,6 +45,7 @@ impl MobileNotifier {
     pub fn new() -> Self {
         Self {
             listener: Mutex::new(None),
+            callback_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_CALLBACKS)),
             terminal_seen: Mutex::new(HashSet::new()),
             waiting_seen: Mutex::new(HashSet::new()),
             cleanup_seen: Mutex::new(HashSet::new()),
@@ -64,8 +70,8 @@ impl MobileNotifier {
     /// Scan for terminal instances and fire `on_instance_completed` /
     /// `on_instance_failed` for each newly-seen instance.
     ///
-    /// Returns the list of terminal instance IDs that were notified, so the
-    /// caller can clean up dedup keys in the lifecycle manager. The scan runs
+    /// Returns newly terminal instance IDs for lifecycle dedup cleanup,
+    /// independently of callback admission or delivery. The scan runs
     /// even when no listener is registered — dedup cleanup must not depend on
     /// listener presence, or the dedup tables grow unboundedly — only the
     /// callbacks are gated on a listener.
@@ -115,7 +121,15 @@ impl MobileNotifier {
             let Ok(Some(inst)) = storage.get_instance(id).await else {
                 continue;
             };
-            if inst.state != projected_state || !self.terminal_seen.lock().await.insert(id) {
+            if inst.state != projected_state {
+                continue;
+            }
+            let Ok(permit) = Arc::clone(&self.callback_slots).try_acquire_owned() else {
+                // Leave this and subsequent rows unseen so a later scan can
+                // deliver them when a listener callback actually finishes.
+                break;
+            };
+            if !self.terminal_seen.lock().await.insert(id) {
                 continue;
             }
 
@@ -127,13 +141,19 @@ impl MobileNotifier {
                     debug!(instance_id = %id_str, "firing on_instance_completed");
                     let cb = Arc::clone(&listener);
                     let id = id_str.clone();
-                    tokio::task::spawn_blocking(move || cb.on_instance_completed(id, output));
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        cb.on_instance_completed(id, output);
+                    });
                 }
                 InstanceState::Failed => {
                     let error = serde_json::to_string(&inst.context.data).unwrap_or_default();
                     let cb = Arc::clone(&listener);
                     let id = id_str.clone();
-                    tokio::task::spawn_blocking(move || cb.on_instance_failed(id, error));
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        cb.on_instance_failed(id, error);
+                    });
                 }
                 _ => {}
             }
@@ -147,7 +167,9 @@ impl MobileNotifier {
     // ------------------------------------------------------------------
 
     /// Scan for waiting instances and fire `on_step_pending` for each newly-seen
-    /// instance+step combination.
+    /// instance+step combination. Terminal and pending callbacks share bounded
+    /// admission; rows deferred by a full callback pool remain eligible for the
+    /// next scan.
     pub async fn fire_step_pending_events(
         &self,
         storage: &Arc<dyn StorageBackend>,
@@ -178,15 +200,16 @@ impl MobileNotifier {
             );
         }
 
-        let mut unseen = Vec::with_capacity(instances.len());
-        for inst in instances {
-            if seen.insert((inst.id, inst.step_id.clone())) {
-                unseen.push(inst);
-            }
-        }
         drop(seen);
 
-        for inst in unseen {
+        for inst in instances {
+            let key = (inst.id, inst.step_id.clone());
+            if self.waiting_seen.lock().await.contains(&key) {
+                continue;
+            }
+            let Ok(permit) = Arc::clone(&self.callback_slots).try_acquire_owned() else {
+                break;
+            };
             let handler = sequence_cache
                 .get_by_id(storage.as_ref(), inst.sequence_id)
                 .await
@@ -201,11 +224,19 @@ impl MobileNotifier {
                 })
                 .unwrap_or_default();
 
+            // Only deduplicate after admission and all async lookup work.
+            // A cancelled scan must not suppress a callback it never spawned.
+            if !self.waiting_seen.lock().await.insert(key) {
+                continue;
+            }
             debug!(instance_id = %inst.id, step_id = %inst.step_id, handler = %handler, "firing on_step_pending");
             let cb = Arc::clone(&listener);
             let id = inst.id.to_string();
             let step = inst.step_id.into_string();
-            tokio::task::spawn_blocking(move || cb.on_step_pending(id, step, handler));
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                cb.on_step_pending(id, step, handler);
+            });
         }
     }
 }
@@ -279,6 +310,160 @@ mod tests {
         let id_str = instance.id.to_string();
         storage.create_instance(&instance).await.unwrap();
         (storage, mobile_storage, id_str)
+    }
+
+    struct GatedListener {
+        ids: std::sync::Mutex<Vec<String>>,
+        released: (std::sync::Mutex<bool>, std::sync::Condvar),
+    }
+
+    impl GatedListener {
+        fn record(&self, id: String) {
+            self.ids.lock().unwrap().push(id);
+            let mut released = self.released.0.lock().unwrap();
+            while !*released {
+                released = self.released.1.wait(released).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            *self.released.0.lock().unwrap() = true;
+            self.released.1.notify_all();
+        }
+    }
+
+    impl EngineListener for GatedListener {
+        fn on_instance_completed(&self, id: String, _output: String) {
+            self.record(id);
+        }
+        fn on_instance_failed(&self, id: String, _error: String) {
+            self.record(id);
+        }
+        fn on_step_pending(&self, id: String, _step: String, _handler: String) {
+            self.record(id);
+        }
+    }
+
+    struct ReleaseListener(Arc<GatedListener>);
+    impl Drop for ReleaseListener {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    async fn notification_backlog() -> (Arc<dyn StorageBackend>, Arc<MobileStorage>, HashSet<String>)
+    {
+        let (storage, mobile_storage, first_id) =
+            setup_storage_with_terminal_instance(InstanceState::Completed).await;
+        let base = storage
+            .get_instance(InstanceId::from_uuid(
+                uuid::Uuid::parse_str(&first_id).unwrap(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut expected = HashSet::from([first_id]);
+        for index in 1..12 {
+            let mut instance = base.clone();
+            instance.id = InstanceId::new();
+            instance.state = if index >= 6 {
+                instance.context.runtime.current_step = Some(BlockId::new("review"));
+                InstanceState::Waiting
+            } else if index % 2 == 0 {
+                InstanceState::Completed
+            } else {
+                InstanceState::Failed
+            };
+            expected.insert(instance.id.to_string());
+            storage.create_instance(&instance).await.unwrap();
+        }
+        (storage, mobile_storage, expected)
+    }
+
+    async fn check_bounded_callback_admission(waiting_first: bool) {
+        let (storage, mobile_storage, expected) = notification_backlog().await;
+        let notifier = MobileNotifier::new();
+        let listener = Arc::new(GatedListener {
+            ids: std::sync::Mutex::new(Vec::new()),
+            released: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        });
+        let _release = ReleaseListener(Arc::clone(&listener));
+        notifier.set_listener(listener.clone()).await;
+        let cache = Arc::new(SequenceCache::new(16, std::time::Duration::from_secs(60)));
+        if waiting_first {
+            notifier
+                .fire_step_pending_events(&storage, &mobile_storage, &cache)
+                .await;
+        }
+        let cleanup_ids = notifier
+            .fire_terminal_events(&storage, &mobile_storage)
+            .await;
+        assert_eq!(
+            cleanup_ids.len(),
+            6,
+            "cleanup must not wait on callback capacity"
+        );
+        notifier
+            .fire_step_pending_events(&storage, &mobile_storage, &cache)
+            .await;
+        let admitted =
+            notifier.terminal_seen.lock().await.len() + notifier.waiting_seen.lock().await.len();
+        assert_eq!(
+            admitted, 2,
+            "blocked listeners must bound running AND queued callback work"
+        );
+        assert!(
+            notifier
+                .fire_terminal_events(&storage, &mobile_storage)
+                .await
+                .is_empty()
+        );
+        notifier
+            .fire_step_pending_events(&storage, &mobile_storage, &cache)
+            .await;
+        assert_eq!(
+            notifier.terminal_seen.lock().await.len() + notifier.waiting_seen.lock().await.len(),
+            2
+        );
+
+        listener.release();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                notifier
+                    .fire_terminal_events(&storage, &mobile_storage)
+                    .await;
+                notifier
+                    .fire_step_pending_events(&storage, &mobile_storage, &cache)
+                    .await;
+                if listener.ids.lock().unwrap().len() == expected.len() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let delivered = listener.ids.lock().unwrap();
+        assert_eq!(
+            delivered.len(),
+            expected.len(),
+            "callbacks must not duplicate"
+        );
+        assert_eq!(
+            delivered.iter().cloned().collect::<HashSet<_>>(),
+            expected,
+            "capacity-deferred callbacks must remain eligible for later scans"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_callbacks_bound_admission_and_retry_deferred_notifications() {
+        check_bounded_callback_admission(false).await;
+    }
+
+    #[tokio::test]
+    async fn waiting_callbacks_share_admission_with_terminal_notifications() {
+        check_bounded_callback_admission(true).await;
     }
 
     #[tokio::test]
