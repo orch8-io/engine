@@ -643,11 +643,19 @@ pub(super) async fn delete_sentinels_for_instance(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<u64, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    delete_sentinels_for_instance_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn delete_sentinels_for_instance_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+) -> Result<u64, StorageError> {
     let result = sqlx::query(
         r"DELETE FROM block_outputs WHERE instance_id = $1 AND output_ref IN ('__in_progress__', '__error__')",
     )
     .bind(instance_id.into_uuid())
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected())
 }

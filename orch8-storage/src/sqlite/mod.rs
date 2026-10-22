@@ -740,6 +740,25 @@ impl crate::InstanceStore for SqliteStorage {
         claimed_writes::create_child(self, parent_id, child, claim_token).await
     }
 
+    async fn adopt_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child_id: InstanceId,
+        expected_activation: &str,
+        activation: &str,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<crate::ChildAdoption>, StorageError> {
+        claimed_writes::adopt_child(
+            self,
+            parent_id,
+            child_id,
+            expected_activation,
+            activation,
+            claim_token,
+        )
+        .await
+    }
+
     async fn create_instance_admitted(
         &self,
         instance: &TaskInstance,

@@ -106,7 +106,7 @@ pub const SUPERSEDED_CHILD_KEY: &str = "_superseded";
 /// instead of re-running it. `Cancelled` and superseded children are not
 /// adopted: the caller spawns a fresh one.
 async fn adopt_previous_child(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     children: &[TaskInstance],
     block_id: &str,
     activation: &str,
@@ -128,17 +128,7 @@ async fn adopt_previous_child(
     }) else {
         return Ok(None);
     };
-    storage
-        .merge_instance_metadata(
-            prev.id,
-            &serde_json::json!({ PARENT_ACTIVATION_KEY: activation }),
-        )
-        .await?;
-    if prev.state == InstanceState::Failed {
-        orch8_storage::lifecycle::retry_failed_instance(storage, prev.id).await?;
-        return Ok(storage.get_instance(prev.id).await?);
-    }
-    Ok(Some(prev.clone()))
+    storage.adopt_child_instance(prev, activation).await
 }
 
 /// `true` when a `Waiting` `SubSequence` node of `instance` has a child (for
@@ -352,8 +342,7 @@ pub(super) async fn dispatch_block(
             let adopted = if node.state != NodeState::Waiting
                 && find_activation_child(&children, ss_def.id.as_str(), &activation).is_none()
             {
-                adopt_previous_child(storage.as_ref(), &children, ss_def.id.as_str(), &activation)
-                    .await?
+                adopt_previous_child(&control, &children, ss_def.id.as_str(), &activation).await?
             } else {
                 None
             };

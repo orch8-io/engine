@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Composite write ownership
 
+- Adopting an earlier sub-sequence child retains the original parent claim.
+  Failed-child metadata, tree and sentinel cleanup, run reset and rescheduling
+  commit together, including rollback on cancellation. Replayed bindings reuse
+  the child; adopting a live child preserves its worker's execution claim.
 - Sub-sequence spawning holds the original parent claim through child insertion.
   A stale worker cannot launch a new child or alter the replacement parent's
   node or output. Native backend tests verify recovery waits for child insertion.
@@ -25,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Router output-read failures remain retryable instead of being converted into
   an empty input map and permanently memoizing the default branch.
 - Custom storage backends implement claim-aware node batches, context CAS/merge,
-  output and effect-receipt cleanup, child creation, metadata merges, and worker cancellation. Context CAS distinguishes claim loss (`None`) from
+  output and effect-receipt cleanup, child creation and adoption, metadata merges, and worker cancellation. Context CAS distinguishes claim loss (`None`) from
   ordinary contention (`Some(false)`); cancellation keeps its audit events in
   the same transaction. Native and encrypted backends implement these contracts.
 

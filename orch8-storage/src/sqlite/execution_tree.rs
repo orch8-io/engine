@@ -188,9 +188,17 @@ pub(super) async fn delete_tree(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    delete_tree_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn delete_tree_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+) -> Result<(), StorageError> {
     sqlx::query("DELETE FROM execution_tree WHERE instance_id = ?1")
         .bind(instance_id.into_uuid().to_string())
-        .execute(&storage.pool)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }

@@ -293,13 +293,7 @@ pub(super) async fn create_child(
     let Some(mut tx) = begin(store, parent_id, token).await? else {
         return Ok(false);
     };
-    let same_owner: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE id=$1 AND tenant_id=$2 AND namespace=$3 AND sub_tenant IS NOT DISTINCT FROM $4")
-        .bind(parent_id.into_uuid())
-        .bind(child.tenant_id.as_str())
-        .bind(child.namespace.as_str())
-        .bind(child.sub_tenant.as_deref())
-        .fetch_one(&mut *tx).await?;
-    if same_owner != 1 {
+    if !same_child_scope(&mut tx, parent_id, child).await? {
         tx.rollback().await?;
         return Ok(false);
     }
@@ -313,4 +307,100 @@ pub(super) async fn create_child(
     .await?;
     tx.commit().await?;
     Ok(true)
+}
+
+async fn same_child_scope(
+    conn: &mut sqlx::PgConnection,
+    parent_id: InstanceId,
+    child: &orch8_types::instance::TaskInstance,
+) -> Result<bool, StorageError> {
+    if child.parent_instance_id != Some(parent_id) || child.id == parent_id {
+        return Ok(false);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE id=$1 AND tenant_id=$2 AND namespace=$3 AND sub_tenant IS NOT DISTINCT FROM $4")
+        .bind(parent_id.into_uuid())
+        .bind(child.tenant_id.as_str())
+        .bind(child.namespace.as_str())
+        .bind(child.sub_tenant.as_deref())
+        .fetch_one(&mut *conn).await?;
+    Ok(count == 1)
+}
+
+pub(super) async fn adopt_child(
+    store: &PostgresStorage,
+    parent_id: InstanceId,
+    child_id: InstanceId,
+    expected_activation: &str,
+    activation: &str,
+    token: DateTime<Utc>,
+) -> Result<Option<crate::ChildAdoption>, StorageError> {
+    use orch8_types::instance::InstanceState;
+    let Some(mut tx) = begin(store, parent_id, token).await? else {
+        return Ok(None);
+    };
+    let locked: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT id FROM task_instances WHERE id=$1 FOR UPDATE")
+            .bind(child_id.into_uuid())
+            .fetch_optional(&mut *tx)
+            .await?;
+    if locked.is_none() {
+        tx.rollback().await?;
+        return Ok(Some(crate::ChildAdoption::Ineligible));
+    }
+    let Some(child) = super::instances::get_on(&mut tx, child_id).await? else {
+        tx.rollback().await?;
+        return Ok(Some(crate::ChildAdoption::Ineligible));
+    };
+    if child.state == InstanceState::Cancelled
+        || child.metadata.get("_superseded").is_some()
+        || !same_child_scope(&mut tx, parent_id, &child).await?
+    {
+        tx.rollback().await?;
+        return Ok(Some(crate::ChildAdoption::Ineligible));
+    }
+    let current_activation = child
+        .metadata
+        .get("_parent_activation")
+        .and_then(serde_json::Value::as_str);
+    // A retry of a committed old -> new request must not reset the child's
+    // run a second time, even if it has since run and failed again.
+    if current_activation == Some(activation) && expected_activation != activation {
+        tx.commit().await?;
+        return Ok(Some(crate::ChildAdoption::Adopted(Box::new(child))));
+    }
+    if current_activation != Some(expected_activation) {
+        tx.rollback().await?;
+        return Ok(Some(crate::ChildAdoption::Ineligible));
+    }
+    super::instances::merge_metadata_on(
+        &mut tx,
+        child_id,
+        &serde_json::json!({"_parent_activation": activation}),
+    )
+    .await?;
+    if child.state == InstanceState::Failed {
+        super::execution_tree::delete_tree_on(&mut tx, child_id).await?;
+        super::outputs::delete_sentinels_for_instance_on(&mut tx, child_id).await?;
+        super::instances::reset_run_on(&mut tx, child_id, &uuid::Uuid::now_v7().to_string())
+            .await?;
+        if !super::instances::conditional_update_state_on(
+            &mut tx,
+            child_id,
+            InstanceState::Failed,
+            InstanceState::Scheduled,
+            Some(Utc::now()),
+        )
+        .await?
+        {
+            tx.rollback().await?;
+            return Ok(Some(crate::ChildAdoption::Ineligible));
+        }
+    }
+    let adopted = super::instances::get_on(&mut tx, child_id)
+        .await?
+        .ok_or_else(|| {
+            StorageError::Query("adopted child disappeared inside its locked transaction".into())
+        })?;
+    tx.commit().await?;
+    Ok(Some(crate::ChildAdoption::Adopted(Box::new(adopted))))
 }

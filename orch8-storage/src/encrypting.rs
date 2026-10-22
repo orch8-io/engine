@@ -1153,6 +1153,23 @@ passthrough_impl! {
         self.inner.create_child_instance_claimed(parent_id, encrypted.as_ref(), claim_token).await
     }
 
+    async fn adopt_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child_id: InstanceId,
+        expected_activation: &str,
+        activation: &str,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<crate::ChildAdoption>, StorageError> {
+        let mut result = self.inner.adopt_child_instance_claimed(
+            parent_id, child_id, expected_activation, activation, claim_token,
+        ).await?;
+        if let Some(crate::ChildAdoption::Adopted(child)) = &mut result {
+            self.decrypt_instance(child)?;
+        }
+        Ok(result)
+    }
+
     async fn create_instances_batch(
         &self,
         instances: &[TaskInstance],

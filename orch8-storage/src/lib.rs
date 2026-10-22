@@ -1,3 +1,5 @@
+mod child_adoption;
+pub use child_adoption::ChildAdoption;
 pub mod api_key_cache;
 #[cfg(feature = "artifacts")]
 pub mod artifacts;
@@ -438,6 +440,21 @@ pub trait InstanceStore: Send + Sync + 'static {
         child: &TaskInstance,
         claim_token: DateTime<Utc>,
     ) -> Result<bool, StorageError>;
+
+    /// Rebind a previous child and retry it if failed, under the parent's claim.
+    /// None means claim loss. Ineligible children return Some(Ineligible) with
+    /// no changes. Metadata, failed-child tree/sentinel cleanup, run reset and
+    /// rescheduling commit together; errors leave both instances unchanged.
+    /// Replaying a committed old-to-new binding returns the child without
+    /// resetting its run again.
+    async fn adopt_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child_id: InstanceId,
+        expected_activation: &str,
+        activation: &str,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<crate::ChildAdoption>, StorageError>;
 
     /// Atomically insert an instance and its tree, outputs and payloads.
     /// True means every row committed. False means this instance id already

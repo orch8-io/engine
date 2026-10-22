@@ -241,9 +241,17 @@ pub(super) async fn get(
     storage: &SqliteStorage,
     id: InstanceId,
 ) -> Result<Option<TaskInstance>, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    get_on(&mut conn, id).await
+}
+
+pub(super) async fn get_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+) -> Result<Option<TaskInstance>, StorageError> {
     let row = sqlx::query("SELECT * FROM task_instances WHERE id=?1")
         .bind(id.to_string())
-        .fetch_optional(&storage.pool)
+        .fetch_optional(&mut *conn)
         .await?;
     row.as_ref().map(row_to_instance).transpose()
 }
@@ -530,6 +538,17 @@ pub(super) async fn conditional_update_state(
     new_state: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
 ) -> Result<bool, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    conditional_update_state_on(&mut conn, id, expected_state, new_state, next_fire_at).await
+}
+
+pub(super) async fn conditional_update_state_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<bool, StorageError> {
     let result = sqlx::query(
         "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1 AND state=?5",
     )
@@ -538,7 +557,7 @@ pub(super) async fn conditional_update_state(
     .bind(next_fire_at.map(ts))
     .bind(ts(Utc::now()))
     .bind(expected_state.to_string())
-    .execute(&storage.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected() > 0)
 }
@@ -714,6 +733,15 @@ pub(super) async fn reset_instance_run(
     id: InstanceId,
     run_id: &str,
 ) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    reset_instance_run_on(&mut conn, id, run_id).await
+}
+
+pub(super) async fn reset_instance_run_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+    run_id: &str,
+) -> Result<(), StorageError> {
     sqlx::query(
         "UPDATE task_instances \
          SET context = json_set(context, \
@@ -728,7 +756,7 @@ pub(super) async fn reset_instance_run(
     .bind(id.to_string())
     .bind(run_id)
     .bind(ts(Utc::now()))
-    .execute(&storage.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

@@ -96,6 +96,54 @@ pub trait ExecutionControl: Send + Sync {
         }
     }
 
+    /// Rebind or retry a previous child under this evaluation's parent claim.
+    async fn adopt_child_instance(
+        &self,
+        previous: &orch8_types::instance::TaskInstance,
+        activation: &str,
+    ) -> Result<Option<orch8_types::instance::TaskInstance>, EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            let expected = previous
+                .metadata
+                .get("_parent_activation")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    EngineError::InvalidConfig(
+                        "child adoption requires its previous activation".into(),
+                    )
+                })?;
+            match InstanceStore::adopt_child_instance_claimed(
+                self.backend(),
+                claim.instance_id,
+                previous.id,
+                expected,
+                activation,
+                claim.token,
+            )
+            .await?
+            {
+                None => Err(EngineError::ClaimLost {
+                    instance_id: claim.instance_id,
+                }),
+                Some(orch8_storage::ChildAdoption::Ineligible) => Ok(None),
+                Some(orch8_storage::ChildAdoption::Adopted(child)) => Ok(Some(*child)),
+            }
+        } else {
+            InstanceStore::merge_instance_metadata(
+                self.backend(),
+                previous.id,
+                &serde_json::json!({"_parent_activation": activation}),
+            )
+            .await?;
+            if previous.state == orch8_types::instance::InstanceState::Failed {
+                orch8_storage::lifecycle::retry_failed_instance(self.backend(), previous.id)
+                    .await?;
+                return Ok(InstanceStore::get_instance(self.backend(), previous.id).await?);
+            }
+            Ok(Some(previous.clone()))
+        }
+    }
+
     async fn get_block_output(
         &self,
         id: InstanceId,

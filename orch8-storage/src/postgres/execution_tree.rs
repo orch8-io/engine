@@ -225,9 +225,17 @@ pub(super) async fn delete_tree(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    delete_tree_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn delete_tree_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+) -> Result<(), StorageError> {
     sqlx::query("DELETE FROM execution_tree WHERE instance_id = $1")
         .bind(instance_id.into_uuid())
-        .execute(&store.pool)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }
