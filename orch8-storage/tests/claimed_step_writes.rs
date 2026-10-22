@@ -53,6 +53,9 @@ backend_test!(async fn step_writes_follow_the_running_claim(b) {
         InstanceState::Running, InstanceState::Scheduled, Some(now)).await.unwrap());
     // Cleared/released claims may not write, even before replacement is claimed.
     assert!(!b.storage.save_block_output_claimed(&output(instance.id, "released"), old).await.unwrap());
+    assert!(!b.storage.delete_instance_kv_claimed(instance.id, "_cache:result", old).await.unwrap());
+    assert_eq!(b.storage.get_instance_kv(instance.id, "_cache:result").await.unwrap(), Some(json!("first")));
+
     let second = b.storage.claim_due_instances(now, 1, 0).await.unwrap().pop().unwrap();
     let current = second.updated_at;
     assert!(b.storage.update_node_state_claimed(instance.id, node.id, NodeState::Completed, current).await.unwrap());

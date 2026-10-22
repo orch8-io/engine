@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Builtin state ownership
 
-- Scheduler-dispatched `set_state`, `merge_state`, and `delete_state` check
+- Ordinary claimed `set_state`, `merge_state`, and `delete_state` steps check
   their original execution claim atomically with each state mutation. A late
   builtin cannot overwrite or delete a replacement execution's KV values.
 - Rust `StepContext` constructors now supply `claim_token`; independent
