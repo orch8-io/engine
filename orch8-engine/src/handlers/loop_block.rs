@@ -1,6 +1,5 @@
 use tracing::{debug, warn};
 
-use orch8_storage::StorageBackend;
 #[cfg(test)]
 use orch8_types::execution::BlockType;
 use orch8_types::execution::{ExecutionNode, NodeState};
@@ -65,7 +64,7 @@ const RESET_PENDING_KEY: &str = "_reset_pending";
 /// Returns `Ok(true)` to indicate more work; the scheduler will re-dispatch.
 #[allow(clippy::too_many_lines)]
 pub async fn execute_loop(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,
@@ -87,7 +86,7 @@ pub async fn execute_loop(
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(crate) async fn execute_loop_with_clock(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     node: &ExecutionNode,
     loop_def: &LoopDef,
@@ -350,7 +349,7 @@ fn iteration_marker(
 /// next tick simply redoes the advance. No iteration is ever lost or run
 /// twice.
 async fn advance_iteration(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     node: &ExecutionNode,
     loop_def: &LoopDef,
@@ -365,7 +364,7 @@ async fn advance_iteration(
 
 /// Steps 2 and 3 of [`advance_iteration`].
 async fn finish_iteration_reset(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     node: &ExecutionNode,
     loop_def: &LoopDef,

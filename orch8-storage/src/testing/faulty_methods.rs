@@ -59,6 +59,8 @@ fault_impl! {
         async fn update_instance_context_externalized(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext, threshold_bytes: u32) -> Result<(), StorageError>;
         async fn update_instance_sequence(&self, id: InstanceId, new_sequence_id: SequenceId) -> Result<(), StorageError>;
         async fn merge_context_data(&self, id: InstanceId, key: &str, value: &serde_json::Value) -> Result<(), StorageError>;
+    async fn merge_instance_metadata_claimed(&self, id: InstanceId, patch: &serde_json::Value, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
         async fn merge_instance_metadata(&self, id: InstanceId, patch: &serde_json::Value) -> Result<(), StorageError>;
         async fn list_instances(&self, filter: &InstanceFilter, pagination: &Pagination) -> Result<Vec<TaskInstance>, StorageError>;
         async fn list_instances_keyset(&self, filter: &InstanceFilter, before: Option<InstanceId>, limit: u32) -> Result<Vec<TaskInstance>, StorageError>;
@@ -124,6 +126,9 @@ fault_impl! {
         async fn save_output_complete_node_and_transition(&self, output: &BlockOutput, node_id: orch8_types::ids::ExecutionNodeId, instance_id: InstanceId, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
         async fn save_output_complete_node_merge_context_and_transition(&self, output: &BlockOutput, node_id: orch8_types::ids::ExecutionNodeId, instance_id: InstanceId, context: &orch8_types::context::ExecutionContext, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
         async fn delete_block_outputs(&self, instance_id: InstanceId, block_id: &BlockId) -> Result<u64, StorageError>;
+    async fn delete_block_outputs_batch_claimed(&self, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+    async fn delete_block_output_by_id_claimed(&self, instance_id: InstanceId, id: Uuid, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
         async fn delete_block_outputs_batch(&self, instance_id: InstanceId, block_ids: &[BlockId]) -> Result<u64, StorageError>;
         async fn delete_all_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
         async fn delete_sentinel_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
@@ -454,6 +459,8 @@ fault_impl! {
         async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError>;
         async fn ensure_effect_receipt(&self, receipt: &EffectReceipt) -> Result<EffectReceipt, StorageError>;
         async fn find_unresolved_effect_receipt(&self, tenant_id: &TenantId, continuity_id: ContinuityId, instance_id: InstanceId, block_id: &orch8_types::ids::BlockId, attempt: u32) -> Result<Option<EffectReceipt>, StorageError>;
+    async fn delete_effect_receipts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+
         async fn delete_effect_receipts_for_blocks(&self, tenant_id: &TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
         async fn get_effect_receipt(&self, tenant_id: &TenantId, id: EffectId) -> Result<Option<EffectReceipt>, StorageError>;
         async fn cas_effect_receipt(&self, tenant_id: &TenantId, id: EffectId, expected_state: EffectState, next: &EffectReceipt) -> Result<bool, StorageError>;

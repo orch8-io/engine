@@ -277,12 +277,24 @@ pub(super) async fn delete_for_blocks(
     if block_ids.is_empty() {
         return Ok(0);
     }
+    let mut conn = store.pool.acquire().await?;
+    delete_for_blocks_on(&mut conn, instance_id, block_ids).await
+}
+
+pub(super) async fn delete_for_blocks_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+    block_ids: &[BlockId],
+) -> Result<u64, StorageError> {
+    if block_ids.is_empty() {
+        return Ok(0);
+    }
     let ids: Vec<&str> = block_ids.iter().map(orch8_types::BlockId::as_str).collect();
     let result =
         sqlx::query(r"DELETE FROM block_outputs WHERE instance_id = $1 AND block_id = ANY($2)")
             .bind(instance_id.into_uuid())
             .bind(&ids)
-            .execute(&store.pool)
+            .execute(&mut *conn)
             .await?;
     Ok(result.rows_affected())
 }
@@ -645,6 +657,19 @@ pub(super) async fn delete_by_id(store: &PostgresStorage, id: Uuid) -> Result<()
     sqlx::query(r"DELETE FROM block_outputs WHERE id = $1")
         .bind(id)
         .execute(&store.pool)
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn delete_owned_by_id_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+    id: Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query("DELETE FROM block_outputs WHERE id=$1 AND instance_id=$2")
+        .bind(id)
+        .bind(instance_id.into_uuid())
+        .execute(conn)
         .await?;
     Ok(())
 }

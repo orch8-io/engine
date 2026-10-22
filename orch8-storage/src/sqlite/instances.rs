@@ -1010,6 +1010,17 @@ pub(super) async fn merge_metadata(
     id: InstanceId,
     patch: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    let mut tx = super::helpers::begin_immediate(&storage.pool).await?;
+    merge_metadata_on(&mut tx, id, patch).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn merge_metadata_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+    patch: &serde_json::Value,
+) -> Result<(), StorageError> {
     // Shallow merge, matching Postgres `metadata || patch` and the trait
     // contract: top-level keys in `patch` replace existing ones wholesale
     // (a nested object is NOT merged into, and a `null` value is stored as
@@ -1020,11 +1031,10 @@ pub(super) async fn merge_metadata(
             "merge_instance_metadata: patch must be a JSON object".into(),
         ));
     };
-    let mut tx = super::helpers::begin_immediate(&storage.pool).await?;
     let current: Option<Option<String>> =
         sqlx::query_scalar("SELECT metadata FROM task_instances WHERE id = ?1")
             .bind(id.to_string())
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *conn)
             .await?;
     let Some(current) = current else {
         return Ok(());
@@ -1044,9 +1054,8 @@ pub(super) async fn merge_metadata(
         .bind(id.to_string())
         .bind(serde_json::to_string(&merged)?)
         .bind(ts(Utc::now()))
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 

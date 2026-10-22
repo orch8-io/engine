@@ -42,6 +42,29 @@ fn to_i64(value: u64, field: &str) -> Result<i64, StorageError> {
         .map_err(|_| StorageError::Query(format!("{field} exceeds PostgreSQL BIGINT range")))
 }
 
+pub(super) async fn delete_receipts_for_blocks_on(
+    conn: &mut sqlx::PgConnection,
+    tenant_id: &TenantId,
+    instance_id: InstanceId,
+    block_ids: &[orch8_types::ids::BlockId],
+) -> Result<u64, StorageError> {
+    if block_ids.is_empty() {
+        return Ok(0);
+    }
+    let mut qb = sqlx::QueryBuilder::new("DELETE FROM effect_receipts WHERE tenant_id=");
+    qb.push_bind(tenant_id.as_str());
+    qb.push(" AND instance_id=");
+    qb.push_bind(instance_id.into_uuid());
+    qb.push(" AND record->>'block_id' IN (");
+    let mut sep = qb.separated(", ");
+    for block_id in block_ids {
+        sep.push_bind(block_id.as_str());
+    }
+    sep.push_unseparated(")");
+    let result = qb.build().execute(&mut *conn).await?;
+    Ok(result.rows_affected())
+}
+
 #[async_trait]
 impl crate::ContinuityStore for PostgresStorage {
     async fn create_continuity_execution(
@@ -919,25 +942,19 @@ impl crate::ContinuityStore for PostgresStorage {
         instance_id: InstanceId,
         block_ids: &[orch8_types::ids::BlockId],
     ) -> Result<u64, StorageError> {
-        if block_ids.is_empty() {
-            return Ok(0);
-        }
-        let mut qb = sqlx::QueryBuilder::new("DELETE FROM effect_receipts WHERE tenant_id=");
-        qb.push_bind(tenant_id.as_str());
-        qb.push(" AND instance_id=");
-        qb.push_bind(instance_id.into_uuid());
-        qb.push(" AND record->>'block_id' IN (");
-        let mut sep = qb.separated(", ");
-        for block_id in block_ids {
-            sep.push_bind(block_id.as_str());
-        }
-        sep.push_unseparated(")");
-        let result = qb
-            .build()
-            .execute(&self.pool)
+        let mut conn = self.pool.acquire().await?;
+        delete_receipts_for_blocks_on(&mut conn, tenant_id, instance_id, block_ids).await
+    }
+
+    async fn delete_effect_receipts_for_blocks_claimed(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[orch8_types::ids::BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError> {
+        super::claimed_writes::delete_receipts(self, tenant_id, instance_id, block_ids, claim_token)
             .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
-        Ok(result.rows_affected())
     }
 
     async fn get_effect_receipt(

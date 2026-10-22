@@ -191,3 +191,188 @@ async fn router_output_read_failure_is_transient_and_does_not_persist_a_default_
     );
     assert_eq!(inner.get_all_outputs(instance.id).await.unwrap().len(), 1);
 }
+
+struct LoopReplacement {
+    marker: BlockOutput,
+    sentinel: BlockOutput,
+    tree: serde_json::Value,
+}
+
+async fn replace_loop_owner(
+    inner: &dyn StorageBackend,
+    first: &orch8_types::instance::TaskInstance,
+    work: orch8_types::ids::ExecutionNodeId,
+    at: chrono::DateTime<Utc>,
+    token: chrono::DateTime<Utc>,
+    read_number: u64,
+) -> LoopReplacement {
+    let next = at + chrono::Duration::seconds(1);
+    assert!(
+        inner
+            .conditional_update_claimed_instance_state(
+                first.id,
+                token,
+                InstanceState::Running,
+                InstanceState::Scheduled,
+                Some(next)
+            )
+            .await
+            .unwrap()
+    );
+    let replacement = inner
+        .claim_due_instances(next, 1, 0)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let current = replacement.claimed_at.unwrap();
+    let iteration = if read_number == 2 { 1 } else { 4 };
+    let marker = BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id: first.id,
+        block_id: BlockId::new("loop"),
+        output: json!({"_iterations": iteration}),
+        output_ref: None,
+        output_size: 17,
+        attempt: 0,
+        created_at: Utc::now(),
+    };
+    assert!(
+        inner
+            .save_block_output_claimed(&marker, current)
+            .await
+            .unwrap()
+    );
+    assert!(
+        inner
+            .update_node_state_claimed(first.id, work, NodeState::Running, current)
+            .await
+            .unwrap()
+    );
+    let sentinel = BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id: first.id,
+        block_id: BlockId::new("work"),
+        output: json!({}),
+        output_ref: Some("__in_progress__".into()),
+        output_size: 0,
+        attempt: 0,
+        created_at: Utc::now(),
+    };
+    assert!(
+        inner
+            .save_block_output_claimed(&sentinel, current)
+            .await
+            .unwrap()
+    );
+    let before = serde_json::to_value(inner.get_execution_tree(first.id).await.unwrap()).unwrap();
+    LoopReplacement {
+        marker,
+        sentinel,
+        tree: before,
+    }
+}
+
+async fn loop_handoff_during_read(read_number: u64) {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let block: BlockDefinition = serde_json::from_value(json!({
+        "type": "loop", "id": "loop", "condition": "true", "max_iterations": 10,
+        "body": [{"type": "step", "id": "work", "handler": "noop"}]
+    }))
+    .unwrap();
+    let sequence = SequenceBuilder::new("loop-handoff").block(block).build();
+    inner.create_sequence(&sequence).await.unwrap();
+    let instance = InstanceBuilder::for_sequence(&sequence).due_now().build();
+    inner.create_instance(&instance).await.unwrap();
+    let at = Utc::now() + chrono::Duration::seconds(1);
+    let first = inner
+        .claim_due_instances(at, 1, 0)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let token = first.claimed_at.unwrap();
+    let tree =
+        orch8_engine::evaluator::ensure_execution_tree(inner.as_ref(), &first, &sequence.blocks)
+            .await
+            .unwrap();
+    let work = tree
+        .iter()
+        .find(|node| node.block_id == BlockId::new("work"))
+        .unwrap()
+        .id;
+    inner
+        .update_node_state(work, NodeState::Completed)
+        .await
+        .unwrap();
+    let (storage, faults) = FaultStorage::wrap(Arc::clone(&inner));
+    // Read 1 is the loop counter; read 2 is the body bookkeeping lookup
+    // after the old owner's advanced counter and node reset were committed.
+    let pause = faults.on("get_block_output").nth(read_number).pause();
+    let registry = HandlerRegistry::new();
+    let clock = SharedClock::default();
+    let stop = AtomicBool::new(false);
+    let mut evaluation = Box::pin(evaluate_with_claim_token(
+        &storage, &registry, &first, &sequence, &clock, token, &stop,
+    ));
+    tokio::select! {
+        () = pause.entered() => {},
+        result = &mut evaluation => panic!("loop finished before handoff: {result:?}"),
+        () = tokio::time::sleep(Duration::from_secs(10)) => panic!("loop did not reach the read rendezvous"),
+    }
+    if read_number == 2 {
+        let advanced = inner
+            .get_block_output(first.id, &BlockId::new("loop"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(advanced.output["_iterations"], 1);
+        assert_eq!(advanced.output["_reset_pending"], true);
+    }
+    let replacement =
+        replace_loop_owner(inner.as_ref(), &first, work, at, token, read_number).await;
+    stop.store(true, Ordering::Release);
+    pause.release();
+    let result = evaluation.await;
+    let actual = inner
+        .get_block_output(first.id, &BlockId::new("loop"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        actual.id, replacement.marker.id,
+        "a stale loop advanced the new owner's iteration"
+    );
+    assert_eq!(
+        inner
+            .get_block_output(first.id, &BlockId::new("work"))
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        replacement.sentinel.id,
+        "a stale reset erased the new owner's in-flight evidence"
+    );
+    assert_eq!(
+        serde_json::to_value(inner.get_execution_tree(first.id).await.unwrap()).unwrap(),
+        replacement.tree,
+        "a stale loop rewound the replacement's nodes"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(EngineError::ClaimLost { .. }) | Ok(EvalOutcome::MoreWork { .. })
+        ),
+        "unexpected ownership outcome: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn stale_loop_cannot_advance_a_replacement_iteration() {
+    loop_handoff_during_read(1).await;
+}
+
+#[tokio::test]
+async fn stale_loop_reset_cannot_erase_replacement_bookkeeping() {
+    loop_handoff_during_read(2).await;
+}

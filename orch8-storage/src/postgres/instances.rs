@@ -1122,6 +1122,15 @@ pub(super) async fn merge_metadata(
     id: InstanceId,
     patch: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    merge_metadata_on(&mut conn, id, patch).await
+}
+
+pub(super) async fn merge_metadata_on(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+    patch: &serde_json::Value,
+) -> Result<(), StorageError> {
     sqlx::query(
         r"UPDATE task_instances
           SET metadata = COALESCE(metadata, '{}'::jsonb) || $2,
@@ -1130,7 +1139,7 @@ pub(super) async fn merge_metadata(
     )
     .bind(id.into_uuid())
     .bind(patch)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

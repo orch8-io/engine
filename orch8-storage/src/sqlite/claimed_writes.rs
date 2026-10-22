@@ -231,3 +231,58 @@ pub(super) async fn merge_context(
     tx.commit().await?;
     Ok(true)
 }
+
+pub(super) async fn delete_outputs(
+    store: &SqliteStorage,
+    id: InstanceId,
+    blocks: &[orch8_types::ids::BlockId],
+    token: DateTime<Utc>,
+) -> Result<Option<u64>, StorageError> {
+    let Some(mut tx) = begin(store, id, token).await? else {
+        return Ok(None);
+    };
+    let count = super::outputs::delete_for_blocks_on(&mut tx, id, blocks).await?;
+    tx.commit().await?;
+    Ok(Some(count))
+}
+pub(super) async fn delete_output(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+    id: uuid::Uuid,
+    token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, instance_id, token).await? else {
+        return Ok(false);
+    };
+    super::outputs::delete_owned_by_id_on(&mut tx, instance_id, id).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+pub(super) async fn merge_metadata(
+    store: &SqliteStorage,
+    id: InstanceId,
+    patch: &serde_json::Value,
+    token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, id, token).await? else {
+        return Ok(false);
+    };
+    super::instances::merge_metadata_on(&mut tx, id, patch).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+pub(super) async fn delete_receipts(
+    store: &SqliteStorage,
+    tenant: &orch8_types::ids::TenantId,
+    id: InstanceId,
+    blocks: &[orch8_types::ids::BlockId],
+    token: DateTime<Utc>,
+) -> Result<Option<u64>, StorageError> {
+    let Some(mut tx) = begin(store, id, token).await? else {
+        return Ok(None);
+    };
+    let count =
+        super::continuity::delete_receipts_for_blocks_on(&mut tx, tenant, id, blocks).await?;
+    tx.commit().await?;
+    Ok(Some(count))
+}

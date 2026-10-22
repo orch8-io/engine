@@ -289,7 +289,7 @@ pub(super) async fn dispatch_block(
         }
         BlockDefinition::Loop(loop_def) => {
             crate::handlers::loop_block::execute_loop_with_clock(
-                storage.as_ref(),
+                &control,
                 instance,
                 node,
                 loop_def,
@@ -301,13 +301,7 @@ pub(super) async fn dispatch_block(
         }
         BlockDefinition::ForEach(fe_def) => {
             crate::handlers::for_each::execute_for_each(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                fe_def,
-                tree,
-                outputs,
+                &control, handlers, instance, node, fe_def, tree, outputs,
             )
             .await
         }

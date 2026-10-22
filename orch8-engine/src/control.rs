@@ -7,7 +7,8 @@ use crate::error::EngineError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use orch8_storage::{
-    ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore, StorageBackend, WorkerStore,
+    ContinuityStore, ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore, StorageBackend,
+    WorkerStore,
 };
 use orch8_types::{
     error::StorageError,
@@ -186,6 +187,126 @@ pub trait ExecutionControl: Send + Sync {
             WorkerStore::cancel_worker_tasks_for_block(self.backend(), id, block)
                 .await
                 .map_err(EngineError::Storage)
+        }
+    }
+
+    async fn get_all_outputs(&self, id: InstanceId) -> Result<Vec<BlockOutput>, StorageError> {
+        OutputStore::get_all_outputs(self.backend(), id).await
+    }
+    async fn merge_instance_metadata(
+        &self,
+        id: InstanceId,
+        patch: &serde_json::Value,
+    ) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, id)?;
+            held(
+                claim,
+                InstanceStore::merge_instance_metadata_claimed(
+                    self.backend(),
+                    id,
+                    patch,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            InstanceStore::merge_instance_metadata(self.backend(), id, patch)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+    async fn delete_block_outputs_batch(
+        &self,
+        id: InstanceId,
+        blocks: &[BlockId],
+    ) -> Result<u64, EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, id)?;
+            OutputStore::delete_block_outputs_batch_claimed(self.backend(), id, blocks, claim.token)
+                .await?
+                .ok_or(EngineError::ClaimLost { instance_id: id })
+        } else {
+            OutputStore::delete_block_outputs_batch(self.backend(), id, blocks)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+    async fn delete_block_output_by_id(&self, id: uuid::Uuid) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            held(
+                claim,
+                OutputStore::delete_block_output_by_id_claimed(
+                    self.backend(),
+                    claim.instance_id,
+                    id,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            OutputStore::delete_block_output_by_id(self.backend(), id)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+    async fn delete_effect_receipts_for_blocks(
+        &self,
+        tenant: &orch8_types::ids::TenantId,
+        id: InstanceId,
+        blocks: &[BlockId],
+    ) -> Result<u64, EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, id)?;
+            ContinuityStore::delete_effect_receipts_for_blocks_claimed(
+                self.backend(),
+                tenant,
+                id,
+                blocks,
+                claim.token,
+            )
+            .await?
+            .ok_or(EngineError::ClaimLost { instance_id: id })
+        } else {
+            ContinuityStore::delete_effect_receipts_for_blocks(self.backend(), tenant, id, blocks)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+    async fn conditional_update_claimed_instance_state(
+        &self,
+        id: InstanceId,
+        token: DateTime<Utc>,
+        from: orch8_types::instance::InstanceState,
+        to: orch8_types::instance::InstanceState,
+        next: Option<DateTime<Utc>>,
+    ) -> Result<bool, EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, id)?;
+            // The capability retains authority; refreshed snapshot timestamps
+            // and legacy helper arguments cannot replace its original token.
+            let changed = InstanceStore::conditional_update_claimed_instance_state(
+                self.backend(),
+                id,
+                claim.token,
+                from,
+                to,
+                next,
+            )
+            .await?;
+            held(claim, changed)?;
+            Ok(changed)
+        } else {
+            InstanceStore::conditional_update_claimed_instance_state(
+                self.backend(),
+                id,
+                token,
+                from,
+                to,
+                next,
+            )
+            .await
+            .map_err(EngineError::Storage)
         }
     }
 

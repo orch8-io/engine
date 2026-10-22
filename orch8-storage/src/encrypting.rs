@@ -799,6 +799,8 @@ passthrough_impl! {
         async fn create_effect_receipt(&self, receipt: &orch8_types::continuity::EffectReceipt) -> Result<(), StorageError>;
         async fn ensure_effect_receipt(&self, receipt: &orch8_types::continuity::EffectReceipt) -> Result<orch8_types::continuity::EffectReceipt, StorageError>;
         async fn find_unresolved_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, instance_id: orch8_types::ids::InstanceId, block_id: &orch8_types::ids::BlockId, attempt: u32) -> Result<Option<orch8_types::continuity::EffectReceipt>, StorageError>;
+    async fn delete_effect_receipts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+
         async fn delete_effect_receipts_for_blocks(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
         async fn get_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::EffectId) -> Result<Option<orch8_types::continuity::EffectReceipt>, StorageError>;
         async fn cas_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::EffectId, expected_state: orch8_types::continuity::EffectState, next: &orch8_types::continuity::EffectReceipt) -> Result<bool, StorageError>;
@@ -1293,6 +1295,8 @@ passthrough_impl! {
     ) -> Result<(), StorageError> { self.merge_context_with_claim(id, key, value, None).await.map(|_| ()) }
 
     // Metadata is never encrypted (only `context.data` is) — pure pass-through.
+    async fn merge_instance_metadata_claimed(&self, id: InstanceId, patch: &serde_json::Value, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
     async fn merge_instance_metadata(&self, id: InstanceId, patch: &serde_json::Value) -> Result<(), StorageError>;
 
     async fn list_instances(
@@ -1719,6 +1723,9 @@ passthrough_impl! {
             .await
     }
     async fn delete_block_outputs(&self, instance_id: InstanceId, block_id: &orch8_types::ids::BlockId) -> Result<u64, StorageError>;
+    async fn delete_block_outputs_batch_claimed(&self, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+    async fn delete_block_output_by_id_claimed(&self, instance_id: InstanceId, id: Uuid, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
     async fn delete_block_outputs_batch(&self, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
     async fn delete_all_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
     async fn delete_sentinel_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;

@@ -245,6 +245,18 @@ pub(super) async fn delete_for_blocks(
     if block_ids.is_empty() {
         return Ok(0);
     }
+    let mut conn = storage.pool.acquire().await?;
+    delete_for_blocks_on(&mut conn, instance_id, block_ids).await
+}
+
+pub(super) async fn delete_for_blocks_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    block_ids: &[BlockId],
+) -> Result<u64, StorageError> {
+    if block_ids.is_empty() {
+        return Ok(0);
+    }
     let mut qb = sqlx::QueryBuilder::new("DELETE FROM block_outputs WHERE instance_id=");
     qb.push_bind(instance_id.into_uuid().to_string());
     qb.push(" AND block_id IN (");
@@ -253,7 +265,7 @@ pub(super) async fn delete_for_blocks(
         sep.push_bind(bid.as_str());
     }
     sep.push_unseparated(")");
-    let result = qb.build().execute(&storage.pool).await?;
+    let result = qb.build().execute(&mut *conn).await?;
     Ok(result.rows_affected())
 }
 
@@ -603,6 +615,19 @@ pub(super) async fn delete_by_id(
     sqlx::query("DELETE FROM block_outputs WHERE id=?1")
         .bind(id.to_string())
         .execute(&storage.pool)
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn delete_owned_by_id_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    id: uuid::Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query("DELETE FROM block_outputs WHERE id=?1 AND instance_id=?2")
+        .bind(id.to_string())
+        .bind(instance_id.to_string())
+        .execute(conn)
         .await?;
     Ok(())
 }

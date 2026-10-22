@@ -843,6 +843,14 @@ pub trait InstanceStore: Send + Sync + 'static {
         patch: &serde_json::Value,
     ) -> Result<(), StorageError>;
 
+    /// Merge metadata only while this exact running claim is held.
+    async fn merge_instance_metadata_claimed(
+        &self,
+        id: InstanceId,
+        patch: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     async fn list_instances(
         &self,
         filter: &InstanceFilter,
@@ -1403,6 +1411,23 @@ pub trait OutputStore: Send + Sync + 'static {
         instance_id: InstanceId,
         block_ids: &[BlockId],
     ) -> Result<u64, StorageError>;
+
+    /// Delete owned block outputs only under this original running claim.
+    /// None means ownership was lost; Some(0) is a successful empty delete.
+    async fn delete_block_outputs_batch_claimed(
+        &self,
+        instance_id: InstanceId,
+        block_ids: &[BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError>;
+    /// Delete one owned output under the original running claim. Foreign ids
+    /// are never deleted. Returns false only when the claim was lost.
+    async fn delete_block_output_by_id_claimed(
+        &self,
+        instance_id: InstanceId,
+        id: Uuid,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     /// Delete ALL `block_outputs` for an instance.
     async fn delete_all_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
@@ -3889,6 +3914,16 @@ pub trait ContinuityStore: Send + Sync + 'static {
         instance_id: InstanceId,
         block_ids: &[orch8_types::ids::BlockId],
     ) -> Result<u64, StorageError>;
+
+    /// Remove iteration receipts only under this original running claim.
+    /// None means ownership was lost and no receipt was changed.
+    async fn delete_effect_receipts_for_blocks_claimed(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError>;
 
     async fn get_effect_receipt(
         &self,

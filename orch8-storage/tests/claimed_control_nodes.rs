@@ -209,3 +209,142 @@ backend_test!(async fn worker_cleanup_and_its_events_follow_the_current_claim(b)
     assert_eq!(b.storage.cancel_worker_tasks_for_blocks_claimed(id, &blocks, current).await.unwrap(), Some(1));
     assert_eq!(b.storage.list_worker_task_attempt_events(fresh.id, 10).await.unwrap().len(), 1);
 });
+
+async fn effect_receipt(
+    store: &dyn StorageBackend,
+    tenant: &orch8_types::ids::TenantId,
+    instance: InstanceId,
+) -> orch8_types::continuity::EffectReceipt {
+    use orch8_types::continuity::{
+        ContinuityExecution, ContinuityId, EffectId, EffectKind, EffectReceipt, EffectState,
+        ExecutionEpoch, OwnershipState, RuntimeId,
+    };
+    let now = Utc::now();
+    let continuity_id = match store
+        .get_continuity_execution_by_instance(tenant, instance)
+        .await
+        .unwrap()
+    {
+        Some(execution) => execution.continuity_id,
+        None => {
+            let continuity_id = ContinuityId::new();
+            store
+                .create_continuity_execution(&ContinuityExecution {
+                    continuity_id,
+                    tenant_id: tenant.clone(),
+                    current_instance_id: instance,
+                    owner_runtime_id: RuntimeId::new(),
+                    epoch: ExecutionEpoch::initial(),
+                    state: OwnershipState::Owned,
+                    updated_at: now,
+                })
+                .await
+                .unwrap();
+            continuity_id
+        }
+    };
+    let receipt = EffectReceipt {
+        id: EffectId::new(),
+        tenant_id: tenant.clone(),
+        continuity_id,
+        epoch: ExecutionEpoch::initial(),
+        instance_id: instance,
+        block_id: BlockId::new("work"),
+        kind: EffectKind::Worker,
+        state: EffectState::Prepared,
+        destination_fingerprint: "worker:test".into(),
+        idempotency_key: None,
+        request_sha256: "a".repeat(64),
+        provider_receipt_id: None,
+        attempt: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    store.create_effect_receipt(&receipt).await.unwrap();
+    receipt
+}
+
+fn reset_output(id: InstanceId) -> orch8_types::output::BlockOutput {
+    orch8_types::output::BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id: id,
+        block_id: BlockId::new("work"),
+        output: serde_json::json!({}),
+        output_ref: Some("__in_progress__".into()),
+        output_size: 0,
+        attempt: 0,
+        created_at: Utc::now(),
+    }
+}
+
+backend_test!(async fn reset_deletes_and_metadata_never_touch_a_replacement_or_foreign_owner(b) {
+    let (sequence, id, token, _) = claimed(b.storage.as_ref()).await;
+    let other = InstanceBuilder::for_sequence(&sequence).state(InstanceState::Completed).build();
+    b.storage.create_instance(&other).await.unwrap();
+    let foreign = reset_output(other.id);
+    b.storage.save_block_output(&foreign).await.unwrap();
+    let first = reset_output(id);
+    b.storage.save_block_output(&first).await.unwrap();
+    let own_receipt = effect_receipt(b.storage.as_ref(), &sequence.tenant_id, id).await;
+    let foreign_receipt = effect_receipt(b.storage.as_ref(), &sequence.tenant_id, other.id).await;
+    let blocks = [BlockId::new("work")];
+    assert!(b.storage.delete_block_output_by_id_claimed(id, foreign.id, token).await.unwrap());
+    assert_eq!(b.storage.get_all_outputs(other.id).await.unwrap().len(), 1);
+    assert_eq!(b.storage.delete_block_outputs_batch_claimed(id, &blocks, token).await.unwrap(), Some(1));
+    assert_eq!(b.storage.delete_effect_receipts_for_blocks_claimed(&sequence.tenant_id, id, &blocks, token).await.unwrap(), Some(1));
+    assert!(b.storage.get_effect_receipt(&sequence.tenant_id, own_receipt.id).await.unwrap().is_none());
+    assert!(b.storage.get_effect_receipt(&sequence.tenant_id, foreign_receipt.id).await.unwrap().is_some());
+    let now = Utc::now() + chrono::Duration::seconds(1);
+    assert!(b.storage.conditional_update_claimed_instance_state(id, token, InstanceState::Running, InstanceState::Scheduled, Some(now)).await.unwrap());
+    let replacement = b.storage.claim_due_instances(now, 1, 0).await.unwrap().pop().unwrap();
+    let current = replacement.claimed_at.unwrap();
+    let output = reset_output(id);
+    b.storage.save_block_output_claimed(&output, current).await.unwrap();
+    let receipt = effect_receipt(b.storage.as_ref(), &sequence.tenant_id, id).await;
+    let patch = serde_json::json!({"owner":"replacement", "nested":{"retained":true}, "nullable":null});
+    assert!(b.storage.merge_instance_metadata_claimed(id, &patch, current).await.unwrap());
+    let before = b.storage.get_instance(id).await.unwrap().unwrap();
+    assert_eq!(b.storage.delete_block_outputs_batch_claimed(id, &blocks, token).await.unwrap(), None);
+    assert!(!b.storage.delete_block_output_by_id_claimed(id, output.id, token).await.unwrap());
+    assert_eq!(b.storage.delete_effect_receipts_for_blocks_claimed(&sequence.tenant_id, id, &blocks, token).await.unwrap(), None);
+    assert!(!b.storage.merge_instance_metadata_claimed(id, &serde_json::json!({"owner":"stale"}), token).await.unwrap());
+    let after = b.storage.get_instance(id).await.unwrap().unwrap();
+    assert_eq!(after.metadata, before.metadata);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert_eq!(after.metadata["nullable"], serde_json::Value::Null);
+    assert_eq!(b.storage.get_all_outputs(id).await.unwrap()[0].id, output.id);
+    assert!(b.storage.get_effect_receipt(&sequence.tenant_id, receipt.id).await.unwrap().is_some());
+    assert!(b.storage.get_effect_receipt(&sequence.tenant_id, foreign_receipt.id).await.unwrap().is_some());
+    assert!(b.storage.delete_block_output_by_id_claimed(id, output.id, current).await.unwrap());
+    assert!(b.storage.get_all_outputs(id).await.unwrap().is_empty());
+    assert_eq!(b.storage.delete_effect_receipts_for_blocks_claimed(&sequence.tenant_id, id, &blocks, current).await.unwrap(), Some(1));
+});
+
+backend_test!(async fn receipt_cleanup_errors_preserve_evidence_and_retry_classification(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let (sequence, id, token, _) = claimed(b.storage.as_ref()).await;
+    let receipt = effect_receipt(b.storage.as_ref(), &sequence.tenant_id, id).await;
+    match &b.raw {
+        RawPool::Sqlite(pool) => {
+            sqlx::query("CREATE TRIGGER fail_receipt_delete AFTER DELETE ON effect_receipts BEGIN SELECT RAISE(ABORT,'simulated receipt delete failure'); END").execute(pool).await.unwrap();
+        }
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool) => {
+            sqlx::query("CREATE FUNCTION fail_receipt_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION USING MESSAGE='simulated receipt delete failure', ERRCODE='55P03'; END $$").execute(pool).await.unwrap();
+            sqlx::query("CREATE TRIGGER fail_receipt_delete AFTER DELETE ON effect_receipts FOR EACH ROW EXECUTE FUNCTION fail_receipt_delete()").execute(pool).await.unwrap();
+        }
+    }
+    let blocks = [BlockId::new("work")];
+    let error = b.storage.delete_effect_receipts_for_blocks_claimed(&sequence.tenant_id, id, &blocks, token).await.unwrap_err();
+    assert!(error.to_string().contains("simulated receipt delete failure"));
+    match &b.raw {
+        RawPool::Sqlite(_) => assert!(!error.is_transient()),
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(_) => assert!(error.is_transient()),
+    }
+    assert!(b.storage.get_effect_receipt(&sequence.tenant_id, receipt.id).await.unwrap().is_some());
+    let ordinary = b.storage.delete_effect_receipts_for_blocks(&sequence.tenant_id, id, &blocks).await.unwrap_err();
+    assert_eq!(ordinary.is_transient(), error.is_transient());
+    assert!(b.storage.get_effect_receipt(&sequence.tenant_id, receipt.id).await.unwrap().is_some());
+    assert_eq!(b.storage.get_instance(id).await.unwrap().unwrap().claimed_at, Some(token));
+});

@@ -388,7 +388,7 @@ fn collect_body_block_ids<'a>(blocks: &'a [BlockDefinition], out: &mut Vec<&'a B
 /// Returns the number of rows deleted. `retain == 0` is a no-op (treated as
 /// "retain everything", matching an unset policy).
 pub(crate) async fn compact_iteration_outputs(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance_id: InstanceId,
     body: &[BlockDefinition],
     retain: u32,
@@ -1752,7 +1752,7 @@ pub async fn cancel_subtree(
 /// Idempotent: re-running it on an already-reset subtree is a no-op apart
 /// from repeating the deletes.
 pub async fn reset_subtree_to_pending(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     tree: &[ExecutionNode],
     tenant_id: &orch8_types::ids::TenantId,
     instance_id: InstanceId,

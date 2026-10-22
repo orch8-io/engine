@@ -964,6 +964,15 @@ impl crate::InstanceStore for SqliteStorage {
         instances::merge_context_data(self, id, key, value).await
     }
 
+    async fn merge_instance_metadata_claimed(
+        &self,
+        id: InstanceId,
+        patch: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::merge_metadata(self, id, patch, claim_token).await
+    }
+
     async fn merge_instance_metadata(
         &self,
         id: InstanceId,
@@ -1401,6 +1410,23 @@ impl crate::OutputStore for SqliteStorage {
         block_id: &BlockId,
     ) -> Result<u64, StorageError> {
         outputs::delete_for_block(self, instance_id, block_id).await
+    }
+
+    async fn delete_block_outputs_batch_claimed(
+        &self,
+        instance_id: InstanceId,
+        block_ids: &[BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError> {
+        claimed_writes::delete_outputs(self, instance_id, block_ids, claim_token).await
+    }
+    async fn delete_block_output_by_id_claimed(
+        &self,
+        instance_id: InstanceId,
+        id: Uuid,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::delete_output(self, instance_id, id, claim_token).await
     }
 
     async fn delete_block_outputs_batch(

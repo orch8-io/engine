@@ -1,6 +1,5 @@
 use tracing::{debug, warn};
 
-use orch8_storage::StorageBackend;
 #[cfg(test)]
 use orch8_types::execution::BlockType;
 use orch8_types::execution::{ExecutionNode, NodeState};
@@ -60,7 +59,7 @@ const RESET_PENDING_KEY: &str = "_reset_pending";
 /// Returns `Ok(true)` to indicate more work; the scheduler will re-dispatch.
 #[allow(clippy::too_many_lines)]
 pub async fn execute_for_each(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,
@@ -373,7 +372,7 @@ pub async fn execute_for_each(
 /// binding and the body would otherwise fail to read `item_var` via the
 /// usual dotted-path lookup.
 async fn bind_item_var(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     item_var: &str,
     item: serde_json::Value,
@@ -401,7 +400,7 @@ fn shadowed_item_var_key(instance_id: InstanceId, block_id: &orch8_types::ids::B
 /// `item_var` shadowed when the loop started, or remove the key when it had
 /// none. Best-effort, like [`cleanup_item_var`].
 async fn release_item_var(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance_id: InstanceId,
     fe_def: &ForEachDef,
 ) {
@@ -435,7 +434,11 @@ async fn release_item_var(
 /// This prevents the last iteration's item value from leaking into
 /// subsequent steps. The cleanup is best-effort: if the instance was
 /// concurrently deleted or the context is not an object, we silently skip.
-async fn cleanup_item_var(storage: &dyn StorageBackend, instance_id: InstanceId, item_var: &str) {
+async fn cleanup_item_var(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    instance_id: InstanceId,
+    item_var: &str,
+) {
     let Ok(Some(mut inst)) = storage.get_instance(instance_id).await else {
         return;
     };
@@ -498,13 +501,13 @@ async fn cleanup_item_var(storage: &dyn StorageBackend, instance_id: InstanceId,
 async fn resolve_collection(
     path: &str,
     context: &orch8_types::context::ExecutionContext,
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     outputs: &OutputsSnapshot,
 ) -> Option<Vec<serde_json::Value>> {
     if crate::template::contains_template(&serde_json::Value::String(path.to_string())) {
         let wrapped = serde_json::Value::String(path.to_string());
-        let out_snap = match outputs.get(storage, instance.id).await {
+        let out_snap = match outputs.get(storage.backend(), instance.id).await {
             Ok(snap) => snap,
             Err(e) => {
                 warn!(
