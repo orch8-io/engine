@@ -279,7 +279,7 @@ async fn rate_limit_retry_at(
 ///
 /// Pure with respect to instance state: callers own the Running → Scheduled
 /// transition (the flat path via `transition_instance`, the tree path via
-/// [`park_tree_instance_until`], after a parallel batch has settled).
+/// [`park_tree_instance_until`], after runnable work in the evaluation settles).
 pub(crate) async fn step_preamble_deferral(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
