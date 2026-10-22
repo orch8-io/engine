@@ -157,6 +157,41 @@ struct Pending {
     reply: oneshot::Sender<LeaseResponse>,
 }
 
+/// Retire the whole acknowledgement namespace when a mutation is abandoned.
+/// Acks carry only (operation, `task_id`), so removing one timed-out entry could
+/// let its late ack incorrectly settle a subsequent mutation for that task.
+struct SessionGuard {
+    generation: u64,
+    live_generation: Arc<AtomicU64>,
+    pending: Arc<StdMutex<VecDeque<Pending>>>,
+    closed: CancellationToken,
+    armed: bool,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.closed.cancel();
+        let _ = self.live_generation.compare_exchange(
+            self.generation,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let drained: Vec<_> = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect();
+        for entry in drained {
+            let _ = entry.reply.send(LeaseResponse::Retry);
+        }
+    }
+}
+
 struct Session {
     generation: u64,
     /// Heartbeat cadence the engine asked for in its hello.
@@ -373,29 +408,55 @@ impl GrpcLeaseTransport {
         if task.session == 0 || task.session != self.live_generation.load(Ordering::Acquire) {
             return None;
         }
-        let (sender, pending) = {
-            let guard = self.session.lock().await;
+        let deadline = tokio::time::Instant::now() + ACK_TIMEOUT;
+        let (sender, pending, closed) = {
+            let guard = tokio::time::timeout_at(deadline, self.session.lock())
+                .await
+                .ok()?;
             let session = guard.as_ref()?;
             if session.generation != task.session || session.closed.is_cancelled() {
                 return None;
             }
-            (session.sender.clone(), Arc::clone(&session.pending))
+            (
+                session.sender.clone(),
+                Arc::clone(&session.pending),
+                session.closed.clone(),
+            )
+        };
+        let mut cleanup = SessionGuard {
+            generation: task.session,
+            live_generation: Arc::clone(&self.live_generation),
+            pending: Arc::clone(&pending),
+            closed: closed.clone(),
+            armed: true,
         };
         let (reply, response) = oneshot::channel();
-        pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(Pending {
+        {
+            let mut queue = pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Another mutation may have retired this session after we
+            // released the session mutex. Check under the queue lock so no
+            // entry can be inserted after the retirement drain.
+            if closed.is_cancelled() {
+                return None;
+            }
+            queue.push_back(Pending {
                 operation,
                 task_id: task.task.id.to_string(),
                 reply,
             });
-        if sender.send(frame(payload)).await.is_err() {
-            return None;
         }
-        match tokio::time::timeout(ACK_TIMEOUT, response).await {
-            Ok(Ok(LeaseResponse::Retry) | Err(_)) | Err(_) => None,
-            Ok(Ok(answer)) => Some(answer),
+        let mutation = async {
+            sender.send(frame(payload)).await.ok()?;
+            response.await.ok()
+        };
+        match tokio::time::timeout_at(deadline, mutation).await {
+            Ok(Some(LeaseResponse::Retry) | None) | Err(_) => None,
+            Ok(Some(answer)) => {
+                cleanup.armed = false;
+                Some(answer)
+            }
         }
     }
 
@@ -425,6 +486,13 @@ async fn read_session(
     live_generation: Arc<AtomicU64>,
     generation: u64,
 ) {
+    let _cleanup = SessionGuard {
+        generation,
+        live_generation,
+        pending: Arc::clone(&pending),
+        closed: closed.clone(),
+        armed: true,
+    };
     let resolve = |operation: &str, task_id: &str, answer: LeaseResponse| {
         let mut queue = pending
             .lock()
@@ -437,74 +505,70 @@ async fn read_session(
             let _ = entry.reply.send(answer);
         }
     };
-    loop {
-        let message = match inbound.message().await {
-            Ok(Some(message)) => message,
-            Ok(None) => {
-                debug!(generation, "worker stream closed by the engine");
-                break;
-            }
-            Err(status) => {
-                warn!(generation, %status, "worker stream ended");
-                break;
-            }
-        };
-        match message.payload {
-            Some(ServerPayload::Task(task)) => {
-                match serde_json::from_str::<RemoteTask>(&task.task_json) {
-                    Ok(task) => {
-                        if tasks.send(task).await.is_err() {
-                            break;
+    let read = async {
+        loop {
+            let message = match inbound.message().await {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    debug!(generation, "worker stream closed by the engine");
+                    break;
+                }
+                Err(status) => {
+                    warn!(generation, %status, "worker stream ended");
+                    break;
+                }
+            };
+            match message.payload {
+                Some(ServerPayload::Task(task)) => {
+                    match serde_json::from_str::<RemoteTask>(&task.task_json) {
+                        Ok(task) => {
+                            if tasks.send(task).await.is_err() {
+                                break;
+                            }
                         }
+                        Err(error) => warn!(%error, "undecodable task on the worker stream"),
                     }
-                    Err(error) => warn!(%error, "undecodable task on the worker stream"),
                 }
-            }
-            Some(ServerPayload::Ack(ack)) => match ack.operation.as_str() {
-                "complete" => resolve("complete", &ack.task_id, LeaseResponse::Accepted),
-                "fail" => resolve("fail", &ack.task_id, LeaseResponse::Accepted),
-                "heartbeat" => resolve("heartbeat", &ack.task_id, LeaseResponse::Accepted),
-                _ => {}
-            },
-            Some(ServerPayload::Cancellation(cancellation)) => {
-                resolve(
-                    "heartbeat",
-                    &cancellation.task_id,
-                    LeaseResponse::LostOwnership,
-                );
-            }
-            Some(ServerPayload::Command(command)) => {
-                let Ok(command) = serde_json::from_str::<WorkerCommand>(&command.command_json)
-                else {
-                    continue;
-                };
-                if command.command == WorkerCommandKind::Place {
-                    continue;
+                Some(ServerPayload::Ack(ack)) => match ack.operation.as_str() {
+                    "complete" => resolve("complete", &ack.task_id, LeaseResponse::Accepted),
+                    "fail" => resolve("fail", &ack.task_id, LeaseResponse::Accepted),
+                    "heartbeat" => resolve("heartbeat", &ack.task_id, LeaseResponse::Accepted),
+                    _ => {}
+                },
+                Some(ServerPayload::Cancellation(cancellation)) => {
+                    resolve(
+                        "heartbeat",
+                        &cancellation.task_id,
+                        LeaseResponse::LostOwnership,
+                    );
                 }
-                let _ = sender
-                    .send(frame(ClientPayload::CommandAck(proto::WorkerCommandAck {
-                        command_id: command.id.to_string(),
-                    })))
-                    .await;
-                if command.command == WorkerCommandKind::Drain {
-                    info!("drain command received on the worker stream");
-                    drain.cancel();
+                Some(ServerPayload::Command(command)) => {
+                    let Ok(command) = serde_json::from_str::<WorkerCommand>(&command.command_json)
+                    else {
+                        continue;
+                    };
+                    if command.command == WorkerCommandKind::Place {
+                        continue;
+                    }
+                    let _ = sender
+                        .send(frame(ClientPayload::CommandAck(proto::WorkerCommandAck {
+                            command_id: command.id.to_string(),
+                        })))
+                        .await;
+                    if command.command == WorkerCommandKind::Drain {
+                        info!("drain command received on the worker stream");
+                        drain.cancel();
+                    }
                 }
+                Some(ServerPayload::Hello(_)) | None => {}
             }
-            Some(ServerPayload::Hello(_)) | None => {}
         }
-    }
-    closed.cancel();
-    let _ = live_generation.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
-    // Pending stream mutations get `Retry`: the caller re-sends them over
-    // the unary RPCs, which report the precise outcome.
-    let drained: Vec<Pending> = pending
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .drain(..)
-        .collect();
-    for entry in drained {
-        let _ = entry.reply.send(LeaseResponse::Retry);
+    };
+    // Retirement must also interrupt backpressure on task/command delivery,
+    // not only an idle inbound read. Dropping `read` drops the old stream.
+    tokio::select! {
+        () = closed.cancelled() => {}
+        () = read => {}
     }
 }
 
@@ -661,6 +725,10 @@ impl LeaseTransport for GrpcLeaseTransport {
             .await
     }
 }
+
+#[cfg(test)]
+#[path = "worker_client_session_tests.rs"]
+mod session_tests;
 
 #[cfg(test)]
 mod tests {
