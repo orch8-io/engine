@@ -1579,6 +1579,136 @@ async fn deadline_breach_lost_cas_skips_escalation_side_effects() {
     );
 }
 
+// An escalation can be slow or fail. Its handler must see the durable
+// breach marker as soon as the terminal state is observable.
+#[tokio::test]
+async fn deadline_breach_is_durable_before_escalation_runs() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), id, None, InstanceState::Waiting).await;
+    let mut instance = storage.get_instance(id).await.unwrap().unwrap();
+    instance.context.runtime.started_at = Some(Utc::now() - chrono::Duration::hours(1));
+    let observed = Arc::new(AtomicBool::new(false));
+    let observed_in = Arc::clone(&observed);
+    let mut registry = HandlerRegistry::new();
+    registry.register("escalate", move |ctx| {
+        let observed = Arc::clone(&observed_in);
+        async move {
+            let state = ctx
+                .storage
+                .get_instance(ctx.instance_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state;
+            let output = ctx
+                .storage
+                .get_block_output(ctx.instance_id, &ctx.block_id)
+                .await
+                .unwrap();
+            observed.store(
+                state == InstanceState::Failed
+                    && output.is_some_and(|o| o.output["_error"] == "sla_deadline_breached"),
+                Ordering::SeqCst,
+            );
+            Ok(serde_json::json!({}))
+        }
+    });
+    let mut step = mk_step_def("s", "noop", serde_json::json!({}));
+    step.deadline = Some(Duration::from_secs(1));
+    step.on_deadline_breach = Some(orch8_types::sequence::EscalationDef {
+        handler: "escalate".into(),
+        params: serde_json::json!({}),
+    });
+    assert!(
+        handle_deadline_breach(
+            &storage,
+            &registry,
+            &instance,
+            &step,
+            None,
+            InstanceState::Waiting,
+            &SharedClock::default(),
+            None
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "terminal state must have a durable breach marker before escalation starts"
+    );
+}
+
+#[tokio::test]
+async fn deadline_breach_persistence_error_prevents_escalation() {
+    use orch8_storage::testing::faulty::FaultStorage;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (storage, faults) = FaultStorage::wrap(Arc::new(SqliteStorage::in_memory().await.unwrap()));
+    let id = InstanceId::new();
+    seed_instance_in_state(storage.as_ref(), id, None, InstanceState::Waiting).await;
+    let mut instance = storage.get_instance(id).await.unwrap().unwrap();
+    instance.context.runtime.started_at = Some(Utc::now() - chrono::Duration::hours(1));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in = Arc::clone(&calls);
+    let mut registry = HandlerRegistry::new();
+    registry.register("escalate", move |_ctx| {
+        let calls = Arc::clone(&calls_in);
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({}))
+        }
+    });
+    let mut step = mk_step_def("s", "noop", serde_json::json!({}));
+    step.deadline = Some(Duration::from_secs(1));
+    step.on_deadline_breach = Some(orch8_types::sequence::EscalationDef {
+        handler: "escalate".into(),
+        params: serde_json::json!({}),
+    });
+    faults
+        .on("save_output_and_conditional_transition")
+        .times(1)
+        .fail_transient();
+    assert!(
+        handle_deadline_breach(
+            &storage,
+            &registry,
+            &instance,
+            &step,
+            None,
+            InstanceState::Waiting,
+            &SharedClock::default(),
+            None
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        storage.get_instance(id).await.unwrap().unwrap().state,
+        InstanceState::Waiting
+    );
+    assert!(storage.get_all_outputs(id).await.unwrap().is_empty());
+    // The next sweep may retry the same observation after a transient failure.
+    assert!(
+        handle_deadline_breach(
+            &storage,
+            &registry,
+            &instance,
+            &step,
+            None,
+            InstanceState::Waiting,
+            &SharedClock::default(),
+            None
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(storage.get_all_outputs(id).await.unwrap().len(), 1);
+}
+
 /// ENG-R-N8: once the heartbeat has flagged the lease as lost, the flat
 /// step loop must not start another step; it hands the instance back.
 #[tokio::test]

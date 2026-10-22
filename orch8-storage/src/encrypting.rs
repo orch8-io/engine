@@ -1648,6 +1648,16 @@ passthrough_impl! {
     async fn get_completed_block_ids(&self, instance_id: InstanceId) -> Result<Vec<orch8_types::ids::BlockId>, StorageError>;
     async fn get_completed_block_ids_batch(&self, instance_ids: &[InstanceId]) -> Result<std::collections::HashMap<InstanceId, Vec<orch8_types::ids::BlockId>>, StorageError>;
 
+    async fn save_output_and_conditional_transition(
+        &self,
+        output: &orch8_types::output::BlockOutput,
+        expected_state: orch8_types::instance::InstanceState,
+        new_state: orch8_types::instance::InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_block_output(output)?;
+        self.inner.save_output_and_conditional_transition(encrypted.as_ref(), expected_state, new_state, next_fire_at).await
+    }
     async fn save_output_and_transition(
         &self,
         output: &orch8_types::output::BlockOutput,
