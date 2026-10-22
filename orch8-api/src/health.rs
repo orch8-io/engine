@@ -54,7 +54,7 @@ pub(crate) async fn readiness(State(state): State<AppState>) -> impl IntoRespons
     if state
         .engine_liveness
         .as_ref()
-        .is_some_and(|l| l.is_ready_stale())
+        .is_some_and(|l| !l.is_ready())
     {
         return StatusCode::SERVICE_UNAVAILABLE;
     }
@@ -138,6 +138,50 @@ mod tests {
         assert_eq!(status(liveness(State(no_engine)).await), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn readiness_waits_for_scheduler_progress_and_resets_on_restart() {
+        let heartbeat = Arc::new(EngineLiveness::new(
+            Duration::from_millis(100),
+            Duration::from_secs(300),
+        ));
+        let st = state(Some(Arc::clone(&heartbeat))).await;
+        assert_eq!(status(liveness(State(st.clone())).await), StatusCode::OK);
+        assert_eq!(
+            status(readiness(State(st.clone())).await),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an engine role must not accept work before startup begins"
+        );
+        heartbeat.arm();
+        assert_eq!(
+            status(liveness(State(st.clone())).await),
+            StatusCode::OK,
+            "startup retains its liveness grace window"
+        );
+        assert_eq!(
+            status(readiness(State(st.clone())).await),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "arming a startup timer is not scheduler progress"
+        );
+        heartbeat.record_tick();
+        assert_eq!(status(readiness(State(st.clone())).await), StatusCode::OK);
+        heartbeat.disarm();
+        assert_eq!(
+            status(readiness(State(st.clone())).await),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        heartbeat.arm();
+        assert_eq!(
+            status(readiness(State(st)).await),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a restarted engine must earn readiness again"
+        );
+        assert_eq!(
+            status(readiness(State(state(None).await)).await),
+            StatusCode::OK,
+            "API-only roles do not wait for a local scheduler"
+        );
+    }
+
     /// Readiness is 200 for a ticking engine and 503 once the engine flag
     /// is cleared (engine exited or panicked).
     #[tokio::test]
@@ -147,6 +191,7 @@ mod tests {
             Duration::from_secs(300),
         ));
         l.arm();
+        l.record_tick();
         let st = state(Some(l)).await;
         assert_eq!(status(readiness(State(st.clone())).await), StatusCode::OK);
         st.engine_ready
