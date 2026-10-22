@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Composite write ownership
+
+- Execution-tree creation, bulk node transitions, worker cancellation and core
+  composite decisions can retain the evaluator's original claim through nested
+  persistence helpers. A late router cannot append its stale branch decision
+  or settle a replacement execution's node after ownership changes.
+- Router output-read failures remain retryable instead of being converted into
+  an empty input map and permanently memoizing the default branch.
+- Custom storage backends implement claim-aware node batches, context CAS/merge,
+  and worker cancellation. Context CAS distinguishes claim loss (`None`) from
+  ordinary contention (`Some(false)`); cancellation keeps its audit events in
+  the same transaction. Native and encrypted backends implement these contracts.
+
 ### PostgreSQL backup consistency
 
 - Logical PostgreSQL backups keep one read-only repeatable-read view across all

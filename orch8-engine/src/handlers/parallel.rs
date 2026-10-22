@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use tracing::debug;
 
-use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::ParallelDef;
@@ -39,7 +38,7 @@ use crate::handlers::HandlerRegistry;
 /// rather than "N concurrent sequences". That broke nested composites,
 /// per-branch cancellation, and concurrency guards.
 pub async fn execute_parallel(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,

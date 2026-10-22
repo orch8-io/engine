@@ -696,6 +696,25 @@ pub trait InstanceStore: Send + Sync + 'static {
         Ok(true)
     }
 
+    /// Context CAS under the original running claim. None means ownership
+    /// was lost; Some(false) is ordinary context contention and may be retried.
+    async fn update_instance_context_cas_claimed(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        expected_updated_at: DateTime<Utc>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<bool>, StorageError>;
+
+    /// Merge context data only while the original running claim is held.
+    async fn merge_context_data_claimed(
+        &self,
+        id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Ensure `runtime.run_id` and `runtime.started_at` are set, keeping
     /// whichever value is already stored for each (first writer wins per
     /// field). Stamps a fresh run identity on the first execution of a run
@@ -1102,6 +1121,35 @@ pub trait ExecutionTreeStore: Send + Sync + 'static {
         &self,
         nodes: &[ExecutionNode],
     ) -> Result<(), StorageError>;
+
+    /// Create nodes only while this exact running claim owns the instance.
+    /// Nodes naming another instance or parents outside this instance return
+    /// false without writing any row. Existing identities remain constraint errors.
+    async fn create_execution_nodes_batch_claimed(
+        &self,
+        instance_id: InstanceId,
+        nodes: &[ExecutionNode],
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    /// Transition one owned batch atomically with the claim check. Missing or
+    /// foreign node ids return false without changing any node or timestamp.
+    async fn update_nodes_state_claimed(
+        &self,
+        instance_id: InstanceId,
+        node_ids: &[ExecutionNodeId],
+        state: NodeState,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    /// Activate pending owned nodes atomically with the claim check. Already
+    /// running nodes remain unchanged; a lost claim or foreign id returns false.
+    async fn batch_activate_nodes_claimed(
+        &self,
+        instance_id: InstanceId,
+        node_ids: &[ExecutionNodeId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     async fn get_execution_tree(
         &self,
@@ -1771,6 +1819,16 @@ pub trait WorkerStore: Send + Sync + 'static {
         instance_id: Uuid,
         block_ids: &[String],
     ) -> Result<u64, StorageError>;
+
+    /// Cancel task rows and record their cancellation events only under the
+    /// original running claim. None means ownership was lost; Some(0) means
+    /// the claim was held but there were no matching tasks.
+    async fn cancel_worker_tasks_for_blocks_claimed(
+        &self,
+        instance_id: InstanceId,
+        block_ids: &[String],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError>;
 
     /// List worker tasks with optional filtering and pagination.
     async fn list_worker_tasks(

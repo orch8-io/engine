@@ -1,6 +1,5 @@
 use tracing::debug;
 
-use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::ids::{BlockId, ExecutionNodeId};
 use orch8_types::instance::TaskInstance;
@@ -24,7 +23,7 @@ use crate::handlers::HandlerRegistry;
 /// exactly as the previous per-node loop: a failure partway through leaves
 /// the earlier steps applied and the later ones skipped.
 async fn cancel_non_terminal_nodes(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     race_block_id: &BlockId,
     tree: &[ExecutionNode],
@@ -151,7 +150,7 @@ pub(crate) fn race_outcome(semantics: &RaceSemantics, children: &[&ExecutionNode
 ///      (`FirstToSucceed`); every live branch gets its cursor (first
 ///      non-terminal node) activated if Pending.
 pub async fn execute_race(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,

@@ -1265,6 +1265,14 @@ passthrough_impl! {
             .await
     }
 
+    async fn update_instance_context_cas_claimed(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext, expected_updated_at: DateTime<Utc>, claim_token: DateTime<Utc>) -> Result<Option<bool>, StorageError> {
+        let encrypted = self.encrypt_context(id, context)?;
+        self.inner.update_instance_context_cas_claimed(id, encrypted.as_ref(), expected_updated_at, claim_token).await
+    }
+    async fn merge_context_data_claimed(&self, id: InstanceId, key: &str, value: &serde_json::Value, claim_token: DateTime<Utc>) -> Result<bool, StorageError> {
+        self.merge_context_with_claim(id, key, value, Some(claim_token)).await
+    }
+
     async fn update_instance_context_cas(
         &self,
         id: InstanceId,
@@ -1282,63 +1290,7 @@ passthrough_impl! {
         id: InstanceId,
         key: &str,
         value: &serde_json::Value,
-    ) -> Result<(), StorageError> {
-        const MAX_ATTEMPTS: u32 = 20;
-        const BASE_BACKOFF_MS: u64 = 5;
-        const MAX_BACKOFF_MS: u64 = 200;
-
-        // Pre-allocate the key string outside the CAS loop to avoid
-        // redundant heap allocations on each retry.
-        let key_owned = key.to_string();
-
-        // Encrypted context is a single blob -- read -> decrypt -> merge ->
-        // encrypt -> CAS write. Retry on contention (another writer
-        // updated `updated_at` between our read and write). Each retry
-        // re-decrypts/re-encrypts the whole blob, so under sustained
-        // concurrent writers to the same instance this is markedly more
-        // contention-prone than the plaintext path's single atomic
-        // `jsonb_set`; jittered backoff plus a generous retry bound keeps a
-        // burst of concurrent branch/signal writers from hard-failing the
-        // step instead of just taking a little longer.
-        //
-        // MAX_ATTEMPTS=20 is an intentional fan-in ceiling, not a bug to be
-        // "fixed" into an unbounded loop: it bounds worst-case latency for a
-        // single `merge_context_data` call under contention. If a workload
-        // regularly needs more than ~20 concurrent writers merging into the
-        // same instance's context, that's a signal to raise the bound (and
-        // re-check `MAX_BACKOFF_MS`) rather than remove it.
-        for attempt in 0..MAX_ATTEMPTS {
-            let Some(mut instance) = self.inner.get_instance(id).await? else {
-                return Ok(());
-            };
-            let snapshot_ts = instance.updated_at;
-            self.decrypt_instance(&mut instance)?;
-
-            if !instance.context.data.is_object() {
-                instance.context.data = serde_json::Value::Object(serde_json::Map::new());
-            }
-            if let Some(map) = instance.context.data.as_object_mut() {
-                map.insert(key_owned.clone(), value.clone());
-            }
-
-            self.encrypt_context_mut(id, &mut instance.context)?;
-            if self
-                .inner
-                .update_instance_context_cas(id, &instance.context, snapshot_ts)
-                .await?
-            {
-                return Ok(());
-            }
-
-            let backoff_ms =
-                (BASE_BACKOFF_MS.saturating_mul(1u64 << attempt.min(6))).min(MAX_BACKOFF_MS);
-            let jittered_ms = rand::random_range(backoff_ms / 2..=backoff_ms.max(1));
-            tokio::time::sleep(std::time::Duration::from_millis(jittered_ms)).await;
-        }
-        Err(StorageError::Query(format!(
-            "merge_context_data: CAS contention exceeded retries ({MAX_ATTEMPTS}) for instance {id}"
-        )))
-    }
+    ) -> Result<(), StorageError> { self.merge_context_with_claim(id, key, value, None).await.map(|_| ()) }
 
     // Metadata is never encrypted (only `context.data` is) — pure pass-through.
     async fn merge_instance_metadata(&self, id: InstanceId, patch: &serde_json::Value) -> Result<(), StorageError>;
@@ -1587,6 +1539,12 @@ passthrough_impl! {
     impl crate::ExecutionTreeStore for EncryptingStorage {
         async fn create_execution_node(&self, node: &orch8_types::execution::ExecutionNode) -> Result<(), StorageError>;
         async fn create_execution_nodes_batch(&self, nodes: &[orch8_types::execution::ExecutionNode]) -> Result<(), StorageError>;
+    async fn create_execution_nodes_batch_claimed(&self, instance_id: InstanceId, nodes: &[orch8_types::execution::ExecutionNode], claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
+    async fn update_nodes_state_claimed(&self, instance_id: InstanceId, node_ids: &[orch8_types::ids::ExecutionNodeId], state: orch8_types::execution::NodeState, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
+    async fn batch_activate_nodes_claimed(&self, instance_id: InstanceId, node_ids: &[orch8_types::ids::ExecutionNodeId], claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
         async fn get_execution_tree(&self, instance_id: InstanceId) -> Result<Vec<orch8_types::execution::ExecutionNode>, StorageError>;
         async fn update_node_state(&self, node_id: orch8_types::ids::ExecutionNodeId, state: orch8_types::execution::NodeState) -> Result<(), StorageError>;
     async fn update_node_state_claimed(&self, instance_id: InstanceId, node_id: orch8_types::ids::ExecutionNodeId,
@@ -2052,6 +2010,8 @@ passthrough_impl! {
         }
         self.inner.resolve_worker_task(resolution).await
     }
+    async fn cancel_worker_tasks_for_blocks_claimed(&self, instance_id: InstanceId, block_ids: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+
     async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
     async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
 
@@ -2994,6 +2954,82 @@ impl orch8_push::PushOutboxStore for EncryptingStorage {
         created_before: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64, String> {
         self.inner.prune_wakes(created_before).await
+    }
+}
+
+impl EncryptingStorage {
+    async fn merge_context_with_claim(
+        &self,
+        id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+        claim_token: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        const MAX_ATTEMPTS: u32 = 20;
+        const BASE_BACKOFF_MS: u64 = 5;
+        const MAX_BACKOFF_MS: u64 = 200;
+
+        // Pre-allocate the key string outside the CAS loop to avoid
+        // redundant heap allocations on each retry.
+        let key_owned = key.to_string();
+
+        // Encrypted context is a single blob -- read -> decrypt -> merge ->
+        // encrypt -> CAS write. Retry on contention (another writer
+        // updated `updated_at` between our read and write). Each retry
+        // re-decrypts/re-encrypts the whole blob, so under sustained
+        // concurrent writers to the same instance this is markedly more
+        // contention-prone than the plaintext path's single atomic
+        // `jsonb_set`; jittered backoff plus a generous retry bound keeps a
+        // burst of concurrent branch/signal writers from hard-failing the
+        // step instead of just taking a little longer.
+        //
+        // MAX_ATTEMPTS=20 is an intentional fan-in ceiling, not a bug to be
+        // "fixed" into an unbounded loop: it bounds worst-case latency for a
+        // single `merge_context_data` call under contention. If a workload
+        // regularly needs more than ~20 concurrent writers merging into the
+        // same instance's context, that's a signal to raise the bound (and
+        // re-check `MAX_BACKOFF_MS`) rather than remove it.
+        for attempt in 0..MAX_ATTEMPTS {
+            let Some(mut instance) = self.inner.get_instance(id).await? else {
+                return Ok(claim_token.is_none());
+            };
+            let snapshot_ts = instance.updated_at;
+            self.decrypt_instance(&mut instance)?;
+
+            if !instance.context.data.is_object() {
+                instance.context.data = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if let Some(map) = instance.context.data.as_object_mut() {
+                map.insert(key_owned.clone(), value.clone());
+            }
+
+            self.encrypt_context_mut(id, &mut instance.context)?;
+            let landed = if let Some(token) = claim_token {
+                match self
+                    .inner
+                    .update_instance_context_cas_claimed(id, &instance.context, snapshot_ts, token)
+                    .await?
+                {
+                    Some(landed) => landed,
+                    None => return Ok(false),
+                }
+            } else {
+                self.inner
+                    .update_instance_context_cas(id, &instance.context, snapshot_ts)
+                    .await?
+            };
+            if landed {
+                return Ok(true);
+            }
+
+            let backoff_ms =
+                (BASE_BACKOFF_MS.saturating_mul(1u64 << attempt.min(6))).min(MAX_BACKOFF_MS);
+            let jittered_ms = rand::random_range(backoff_ms / 2..=backoff_ms.max(1));
+            tokio::time::sleep(std::time::Duration::from_millis(jittered_ms)).await;
+        }
+        Err(StorageError::Query(format!(
+            "merge_context_data: CAS contention exceeded retries ({MAX_ATTEMPTS}) for instance {id}"
+        )))
     }
 }
 

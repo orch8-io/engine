@@ -221,10 +221,10 @@ pub(super) async fn dispatch_block(
     claim_token: chrono::DateTime<chrono::Utc>,
     pending_deferrals: Option<&crate::handlers::step_deferral::PendingStepDeferrals>,
 ) -> Result<bool, EngineError> {
-    // Mark node as running.
+    let control = crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
+    // Mark node as running under the original claim as well.
     if node.state == NodeState::Pending {
-        storage
-            .update_node_state(node.id, NodeState::Running)
+        crate::control::ExecutionControl::update_node_state(&control, node.id, NodeState::Running)
             .await?;
     }
 
@@ -279,25 +279,13 @@ pub(super) async fn dispatch_block(
         }
         BlockDefinition::Parallel(par_def) => {
             crate::handlers::parallel::execute_parallel(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                par_def,
-                tree,
+                &control, handlers, instance, node, par_def, tree,
             )
             .await
         }
         BlockDefinition::Race(race_def) => {
-            crate::handlers::race::execute_race(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                race_def,
-                tree,
-            )
-            .await
+            crate::handlers::race::execute_race(&control, handlers, instance, node, race_def, tree)
+                .await
         }
         BlockDefinition::Loop(loop_def) => {
             crate::handlers::loop_block::execute_loop_with_clock(
@@ -325,46 +313,25 @@ pub(super) async fn dispatch_block(
         }
         BlockDefinition::Router(router_def) => {
             crate::handlers::router::execute_router(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                router_def,
-                tree,
-                outputs,
+                &control, handlers, instance, node, router_def, tree, outputs,
             )
             .await
         }
         BlockDefinition::TryCatch(tc_def) => {
             crate::handlers::try_catch::execute_try_catch(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                tc_def,
-                tree,
+                &control, handlers, instance, node, tc_def, tree,
             )
             .await
         }
         BlockDefinition::ABSplit(ab_def) => {
             crate::handlers::ab_split::execute_ab_split(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                ab_def,
-                tree,
+                &control, handlers, instance, node, ab_def, tree,
             )
             .await
         }
         BlockDefinition::CancellationScope(cs_def) => {
             crate::handlers::cancellation_scope::execute_cancellation_scope(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                cs_def,
-                tree,
+                &control, handlers, instance, node, cs_def, tree,
             )
             .await
         }

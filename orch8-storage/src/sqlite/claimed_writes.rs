@@ -100,3 +100,134 @@ pub(super) async fn node(
     tx.commit().await?;
     Ok(changed)
 }
+
+pub(super) async fn create_nodes(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+    nodes: &[orch8_types::execution::ExecutionNode],
+    claim_token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, instance_id, claim_token).await? else {
+        return Ok(false);
+    };
+    let ids: std::collections::HashSet<_> = nodes.iter().map(|node| node.id).collect();
+    let parents: Vec<_> = nodes
+        .iter()
+        .filter_map(|node| node.parent_id)
+        .filter(|id| !ids.contains(id))
+        .collect();
+    if nodes.iter().any(|node| node.instance_id != instance_id)
+        || !owns_nodes(&mut tx, instance_id, &parents).await?
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    super::execution_tree::create_batch_on(&mut tx, nodes).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub(super) async fn nodes_state(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+    node_ids: &[orch8_types::ids::ExecutionNodeId],
+    state: orch8_types::execution::NodeState,
+    claim_token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, instance_id, claim_token).await? else {
+        return Ok(false);
+    };
+    if !owns_nodes(&mut tx, instance_id, node_ids).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    super::execution_tree::update_nodes_state_on(&mut tx, node_ids, state).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub(super) async fn activate_nodes(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+    node_ids: &[orch8_types::ids::ExecutionNodeId],
+    claim_token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, instance_id, claim_token).await? else {
+        return Ok(false);
+    };
+    if !owns_nodes(&mut tx, instance_id, node_ids).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    super::execution_tree::batch_activate_nodes_on(&mut tx, node_ids).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+async fn owns_nodes(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    node_ids: &[orch8_types::ids::ExecutionNodeId],
+) -> Result<bool, StorageError> {
+    if node_ids.is_empty() {
+        return Ok(true);
+    }
+    let ids: std::collections::HashSet<_> = node_ids.iter().map(ToString::to_string).collect();
+    let expected = ids.len();
+    let mut query =
+        sqlx::QueryBuilder::new("SELECT COUNT(*) FROM execution_tree WHERE instance_id=");
+    query
+        .push_bind(instance_id.to_string())
+        .push(" AND id IN (");
+    let mut values = query.separated(",");
+    for id in ids {
+        values.push_bind(id);
+    }
+    values.push_unseparated(")");
+    let count: i64 = query.build_query_scalar().fetch_one(conn).await?;
+    Ok(usize::try_from(count).ok() == Some(expected))
+}
+
+pub(super) async fn cancel_worker_blocks(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+    block_ids: &[String],
+    claim_token: DateTime<Utc>,
+) -> Result<Option<u64>, StorageError> {
+    let Some(mut tx) = begin(store, instance_id, claim_token).await? else {
+        return Ok(None);
+    };
+    let changed =
+        super::workers::cancel_for_blocks_on(&mut tx, instance_id.into_uuid(), block_ids).await?;
+    tx.commit().await?;
+    Ok(Some(changed))
+}
+
+pub(super) async fn context_cas(
+    store: &SqliteStorage,
+    id: InstanceId,
+    context: &orch8_types::context::ExecutionContext,
+    expected: DateTime<Utc>,
+    claim_token: DateTime<Utc>,
+) -> Result<Option<bool>, StorageError> {
+    let Some(mut tx) = begin(store, id, claim_token).await? else {
+        return Ok(None);
+    };
+    let changed = super::instances::update_context_cas_on(&mut tx, id, context, expected).await?;
+    tx.commit().await?;
+    Ok(Some(changed))
+}
+pub(super) async fn merge_context(
+    store: &SqliteStorage,
+    id: InstanceId,
+    key: &str,
+    value: &serde_json::Value,
+    claim_token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, id, claim_token).await? else {
+        return Ok(false);
+    };
+    super::instances::merge_context_data_on(&mut tx, id, key, value).await?;
+    tx.commit().await?;
+    Ok(true)
+}

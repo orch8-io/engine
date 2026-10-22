@@ -79,11 +79,10 @@ pub(crate) async fn build_outputs_shape(
 /// per iteration collapses those to a single fetch.
 ///
 /// Coherence: a fresh snapshot is created at the top of each iteration
-/// (see `evaluator::evaluate`). Within an iteration, the only handler that
-/// *writes* an output is the step handler, and it writes after reading —
-/// any new output is unobserved in the current iteration but visible in
-/// the next via a fresh snapshot. Composite handlers (router, loop, …)
-/// never save outputs, so they cannot invalidate the snapshot.
+/// (see `evaluator::evaluate`). Conditions and params in that iteration see
+/// the outputs available at the first read. Later step outputs and composite
+/// decision/iteration markers do not invalidate it; the next iteration uses
+/// a fresh snapshot. Concurrently dispatched leaves share the same prior view.
 #[derive(Default)]
 pub struct OutputsSnapshot {
     cell: OnceCell<serde_json::Value>,

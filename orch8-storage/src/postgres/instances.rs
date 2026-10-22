@@ -703,6 +703,16 @@ pub(super) async fn update_context_cas(
     context: &orch8_types::context::ExecutionContext,
     expected_updated_at: DateTime<Utc>,
 ) -> Result<bool, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    update_context_cas_on(&mut conn, id, context, expected_updated_at).await
+}
+
+pub(super) async fn update_context_cas_on(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+    context: &orch8_types::context::ExecutionContext,
+    expected_updated_at: DateTime<Utc>,
+) -> Result<bool, StorageError> {
     let ctx_json = serde_json::to_value(context)?;
     let result = sqlx::query(
         "UPDATE task_instances SET context = $2, updated_at = NOW() WHERE id = $1 AND updated_at = $3",
@@ -710,7 +720,7 @@ pub(super) async fn update_context_cas(
     .bind(id.into_uuid())
     .bind(&ctx_json)
     .bind(expected_updated_at)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected() > 0)
 }
@@ -1067,6 +1077,16 @@ pub(super) async fn merge_context_data(
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    merge_context_data_on(&mut conn, id, key, value).await
+}
+
+pub(super) async fn merge_context_data_on(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), StorageError> {
     // `jsonb_set` with `create_missing=true` creates a missing *leaf* key but
     // cannot descend into a null/non-object parent. Instances are created
     // with `context.data = null` by default, so calling `jsonb_set(ctx,
@@ -1089,7 +1109,7 @@ pub(super) async fn merge_context_data(
     .bind(id.into_uuid())
     .bind(key)
     .bind(value)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

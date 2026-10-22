@@ -959,6 +959,19 @@ pub(super) async fn cancel_for_blocks(
         return Ok(0);
     }
     let mut tx = storage.pool.begin().await?;
+    let changed = cancel_for_blocks_on(&mut tx, instance_id, block_ids).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+pub(super) async fn cancel_for_blocks_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: Uuid,
+    block_ids: &[String],
+) -> Result<u64, StorageError> {
+    if block_ids.is_empty() {
+        return Ok(0);
+    }
     let mut qb = sqlx::QueryBuilder::new("DELETE FROM worker_tasks WHERE instance_id=");
     qb.push_bind(instance_id.to_string());
     qb.push(" AND block_id IN (");
@@ -967,7 +980,8 @@ pub(super) async fn cancel_for_blocks(
         sep.push_bind(bid);
     }
     sep.push_unseparated(") RETURNING id,claim_epoch,worker_id");
-    let rows: Vec<(String, i64, Option<String>)> = qb.build_query_as().fetch_all(&mut *tx).await?;
+    let rows: Vec<(String, i64, Option<String>)> =
+        qb.build_query_as().fetch_all(&mut *conn).await?;
     let events: Vec<_> = rows
         .iter()
         .filter_map(|(id, epoch, worker)| {
@@ -980,8 +994,7 @@ pub(super) async fn cancel_for_blocks(
             ))
         })
         .collect();
-    insert_attempt_events(&mut tx, &events).await?;
-    tx.commit().await?;
+    insert_attempt_events(&mut *conn, &events).await?;
     Ok(rows.len() as u64)
 }
 

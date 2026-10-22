@@ -1,0 +1,342 @@
+//! Persistence capability for an evaluation's original instance claim.
+//!
+//! Generic composite helpers keep this capability when calling one another.
+//! A plain backend preserves explicit direct/unclaimed helper calls; scheduler
+//! dispatch supplies `ClaimedControl`, whose token never follows refreshed data.
+use crate::error::EngineError;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use orch8_storage::{
+    ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore, StorageBackend, WorkerStore,
+};
+use orch8_types::{
+    error::StorageError,
+    execution::{ExecutionNode, NodeState},
+    ids::{BlockId, ExecutionNodeId, InstanceId},
+    output::BlockOutput,
+};
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutionClaim {
+    pub instance_id: InstanceId,
+    pub token: DateTime<Utc>,
+}
+
+/// A backend viewed through the immutable claim that started this evaluation.
+pub struct ClaimedControl<'a> {
+    backend: &'a dyn StorageBackend,
+    claim: ExecutionClaim,
+}
+
+impl<'a> ClaimedControl<'a> {
+    #[must_use]
+    pub const fn new(
+        backend: &'a dyn StorageBackend,
+        instance_id: InstanceId,
+        token: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            backend,
+            claim: ExecutionClaim { instance_id, token },
+        }
+    }
+}
+
+fn held(claim: ExecutionClaim, held: bool) -> Result<(), EngineError> {
+    if held {
+        Ok(())
+    } else {
+        Err(EngineError::ClaimLost {
+            instance_id: claim.instance_id,
+        })
+    }
+}
+
+fn same_instance(claim: ExecutionClaim, id: InstanceId) -> Result<(), EngineError> {
+    if claim.instance_id == id {
+        Ok(())
+    } else {
+        Err(EngineError::InvalidConfig(
+            "control write targets another instance".into(),
+        ))
+    }
+}
+
+/// Composite persistence operations. Claimed callers must retain this type
+/// through nested helpers rather than coercing it to a plain backend.
+#[async_trait]
+pub trait ExecutionControl: Send + Sync {
+    /// Underlying backend for read-only utilities; do not bypass control writes.
+    fn backend(&self) -> &dyn StorageBackend;
+    fn execution_claim(&self) -> Option<ExecutionClaim> {
+        None
+    }
+
+    async fn get_block_output(
+        &self,
+        id: InstanceId,
+        block: &BlockId,
+    ) -> Result<Option<BlockOutput>, StorageError> {
+        OutputStore::get_block_output(self.backend(), id, block).await
+    }
+
+    async fn get_execution_tree(&self, id: InstanceId) -> Result<Vec<ExecutionNode>, StorageError> {
+        ExecutionTreeStore::get_execution_tree(self.backend(), id).await
+    }
+    async fn get_instance(
+        &self,
+        id: InstanceId,
+    ) -> Result<Option<orch8_types::instance::TaskInstance>, StorageError> {
+        InstanceStore::get_instance(self.backend(), id).await
+    }
+    async fn get_completed_block_ids(&self, id: InstanceId) -> Result<Vec<BlockId>, StorageError> {
+        OutputStore::get_completed_block_ids(self.backend(), id).await
+    }
+    async fn get_externalized_state(
+        &self,
+        id: InstanceId,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        ResourceStore::get_externalized_state(self.backend(), id, key).await
+    }
+    async fn merge_context_data(
+        &self,
+        id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, id)?;
+            held(
+                claim,
+                InstanceStore::merge_context_data_claimed(
+                    self.backend(),
+                    id,
+                    key,
+                    value,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            InstanceStore::merge_context_data(self.backend(), id, key, value)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+    async fn update_instance_context_cas(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        expected: DateTime<Utc>,
+    ) -> Result<bool, EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, id)?;
+            InstanceStore::update_instance_context_cas_claimed(
+                self.backend(),
+                id,
+                context,
+                expected,
+                claim.token,
+            )
+            .await?
+            .ok_or(EngineError::ClaimLost {
+                instance_id: claim.instance_id,
+            })
+        } else {
+            InstanceStore::update_instance_context_cas(self.backend(), id, context, expected)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+    async fn save_externalized_state(
+        &self,
+        id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, id)?;
+            held(
+                claim,
+                ResourceStore::save_externalized_state_claimed(
+                    self.backend(),
+                    id,
+                    key,
+                    value,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            ResourceStore::save_externalized_state(self.backend(), id, key, value)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+    async fn cancel_worker_tasks_for_block(
+        &self,
+        id: uuid::Uuid,
+        block: &str,
+    ) -> Result<u64, EngineError> {
+        if self.execution_claim().is_some() {
+            self.cancel_worker_tasks_for_blocks(id, &[block.to_string()])
+                .await
+        } else {
+            WorkerStore::cancel_worker_tasks_for_block(self.backend(), id, block)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+
+    async fn save_block_output(&self, output: &BlockOutput) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, output.instance_id)?;
+            held(
+                claim,
+                OutputStore::save_block_output_claimed(self.backend(), output, claim.token).await?,
+            )
+        } else {
+            OutputStore::save_block_output(self.backend(), output)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+
+    async fn create_execution_nodes_batch(
+        &self,
+        nodes: &[ExecutionNode],
+    ) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            held(
+                claim,
+                ExecutionTreeStore::create_execution_nodes_batch_claimed(
+                    self.backend(),
+                    claim.instance_id,
+                    nodes,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            ExecutionTreeStore::create_execution_nodes_batch(self.backend(), nodes)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+
+    async fn update_node_state(
+        &self,
+        id: ExecutionNodeId,
+        state: NodeState,
+    ) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            held(
+                claim,
+                ExecutionTreeStore::update_node_state_claimed(
+                    self.backend(),
+                    claim.instance_id,
+                    id,
+                    state,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            ExecutionTreeStore::update_node_state(self.backend(), id, state)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+
+    async fn update_nodes_state(
+        &self,
+        ids: &[ExecutionNodeId],
+        state: NodeState,
+    ) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            held(
+                claim,
+                ExecutionTreeStore::update_nodes_state_claimed(
+                    self.backend(),
+                    claim.instance_id,
+                    ids,
+                    state,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            ExecutionTreeStore::update_nodes_state(self.backend(), ids, state)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+
+    async fn batch_activate_nodes(&self, ids: &[ExecutionNodeId]) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            held(
+                claim,
+                ExecutionTreeStore::batch_activate_nodes_claimed(
+                    self.backend(),
+                    claim.instance_id,
+                    ids,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            ExecutionTreeStore::batch_activate_nodes(self.backend(), ids)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+
+    async fn cancel_worker_tasks_for_blocks(
+        &self,
+        id: uuid::Uuid,
+        blocks: &[String],
+    ) -> Result<u64, EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, InstanceId::from_uuid(id))?;
+            WorkerStore::cancel_worker_tasks_for_blocks_claimed(
+                self.backend(),
+                claim.instance_id,
+                blocks,
+                claim.token,
+            )
+            .await?
+            .ok_or(EngineError::ClaimLost {
+                instance_id: claim.instance_id,
+            })
+        } else {
+            WorkerStore::cancel_worker_tasks_for_blocks(self.backend(), id, blocks)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+}
+
+#[async_trait]
+impl<T: StorageBackend> ExecutionControl for T {
+    fn backend(&self) -> &dyn StorageBackend {
+        self
+    }
+}
+
+#[async_trait]
+impl ExecutionControl for dyn StorageBackend {
+    fn backend(&self) -> &dyn StorageBackend {
+        self
+    }
+}
+
+#[async_trait]
+impl ExecutionControl for ClaimedControl<'_> {
+    fn backend(&self) -> &dyn StorageBackend {
+        self.backend
+    }
+    fn execution_claim(&self) -> Option<ExecutionClaim> {
+        Some(self.claim)
+    }
+}

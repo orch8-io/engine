@@ -1,7 +1,6 @@
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
-use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::ids::BlockId;
 use orch8_types::instance::TaskInstance;
@@ -23,7 +22,7 @@ use crate::handlers::HandlerRegistry;
 /// The chosen variant's blocks run as an ordered sequence (one at a time,
 /// fail-fast); the other variants' subtrees are skipped on the first tick.
 pub async fn execute_ab_split(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,

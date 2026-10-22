@@ -47,6 +47,17 @@ pub(super) async fn create_batch(
     if nodes.is_empty() {
         return Ok(());
     }
+    let mut conn = store.pool.acquire().await?;
+    create_batch_on(&mut conn, nodes).await
+}
+
+pub(super) async fn create_batch_on(
+    conn: &mut sqlx::PgConnection,
+    nodes: &[ExecutionNode],
+) -> Result<(), StorageError> {
+    if nodes.is_empty() {
+        return Ok(());
+    }
     let mut qb = sqlx::QueryBuilder::new(
         "INSERT INTO execution_tree (id, instance_id, block_id, parent_id, block_type, branch_index, state, started_at, completed_at) ",
     );
@@ -61,7 +72,7 @@ pub(super) async fn create_batch(
             .push_bind(node.started_at)
             .push_bind(node.completed_at);
     });
-    qb.build().execute(&store.pool).await?;
+    qb.build().execute(&mut *conn).await?;
     Ok(())
 }
 
@@ -131,6 +142,17 @@ pub(super) async fn batch_activate_nodes(
     if node_ids.is_empty() {
         return Ok(());
     }
+    let mut conn = store.pool.acquire().await?;
+    batch_activate_nodes_on(&mut conn, node_ids).await
+}
+
+pub(super) async fn batch_activate_nodes_on(
+    conn: &mut sqlx::PgConnection,
+    node_ids: &[ExecutionNodeId],
+) -> Result<(), StorageError> {
+    if node_ids.is_empty() {
+        return Ok(());
+    }
     let now = Utc::now();
     let mut qb = sqlx::QueryBuilder::new(
         "UPDATE execution_tree SET state = 'running', started_at = COALESCE(started_at, ",
@@ -142,7 +164,7 @@ pub(super) async fn batch_activate_nodes(
         sep.push_bind(id.into_uuid());
     }
     sep.push_unseparated(")");
-    qb.build().execute(&store.pool).await?;
+    qb.build().execute(&mut *conn).await?;
     Ok(())
 }
 
@@ -150,6 +172,18 @@ pub(super) async fn batch_activate_nodes(
 /// the timestamp rules of [`update_node_state`].
 pub(super) async fn update_nodes_state(
     store: &PostgresStorage,
+    node_ids: &[ExecutionNodeId],
+    state: NodeState,
+) -> Result<(), StorageError> {
+    if node_ids.is_empty() {
+        return Ok(());
+    }
+    let mut conn = store.pool.acquire().await?;
+    update_nodes_state_on(&mut conn, node_ids, state).await
+}
+
+pub(super) async fn update_nodes_state_on(
+    conn: &mut sqlx::PgConnection,
     node_ids: &[ExecutionNodeId],
     state: NodeState,
 ) -> Result<(), StorageError> {
@@ -182,7 +216,7 @@ pub(super) async fn update_nodes_state(
     .bind(completed_at)
     .bind(started_at)
     .bind(&ids)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

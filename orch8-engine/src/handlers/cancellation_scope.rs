@@ -1,4 +1,3 @@
-use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::CancellationScopeDef;
@@ -14,7 +13,7 @@ use crate::handlers::HandlerRegistry;
 /// receives a cancel request.
 /// Returns `true` if more work remains.
 pub async fn execute_cancellation_scope(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,

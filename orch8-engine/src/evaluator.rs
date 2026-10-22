@@ -175,7 +175,7 @@ pub async fn merged_blocks<'s>(
 /// Build the execution tree from a sequence definition if it doesn't exist yet.
 /// Returns the root-level nodes for the instance.
 pub async fn ensure_execution_tree(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     blocks: &[BlockDefinition],
 ) -> Result<Vec<ExecutionNode>, EngineError> {
@@ -608,7 +608,8 @@ pub async fn evaluate_with_claim_token(
     let block_map = flatten_blocks(&blocks);
 
     // Ensure the execution tree exists (creates on first call, adds new injected nodes).
-    let initial_tree = ensure_execution_tree(storage.as_ref(), instance, &blocks).await?;
+    let control = crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
+    let initial_tree = ensure_execution_tree(&control, instance, &blocks).await?;
 
     // Pre-load instance and tree into in-memory context to reduce DB round-trips.
     // The context tracks staleness: after a storage write that may have mutated
@@ -703,9 +704,12 @@ pub async fn evaluate_with_claim_token(
                         count = non_terminal_ids.len(),
                         "evaluate: batch-cancelling non-terminal nodes after root failure/cancellation"
                     );
-                    storage
-                        .update_nodes_state(&non_terminal_ids, NodeState::Cancelled)
-                        .await?;
+                    crate::control::ExecutionControl::update_nodes_state(
+                        &control,
+                        &non_terminal_ids,
+                        NodeState::Cancelled,
+                    )
+                    .await?;
                     // Their external-worker tasks must not stay claimable
                     // for an instance that is about to go terminal.
                     let step_block_ids: Vec<String> = ctx
@@ -721,13 +725,17 @@ pub async fn evaluate_with_claim_token(
                         .map(|n| n.block_id.as_str().to_owned())
                         .collect();
                     if !step_block_ids.is_empty()
-                        && let Err(e) = storage
-                            .cancel_worker_tasks_for_blocks(
+                        && let Err(e) =
+                            crate::control::ExecutionControl::cancel_worker_tasks_for_blocks(
+                                &control,
                                 instance_id.into_uuid(),
                                 &step_block_ids,
                             )
                             .await
                     {
+                        if matches!(e, EngineError::ClaimLost { .. }) {
+                            return Err(e);
+                        }
                         warn!(
                             instance_id = %instance_id,
                             error = %e,
@@ -1571,7 +1579,7 @@ pub(crate) async fn persist_node_state(
 
 /// Mark a node as completed.
 pub async fn complete_node(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     node_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
     debug!(node_id = %node_id, "node → Completed");
@@ -1583,7 +1591,7 @@ pub async fn complete_node(
 
 /// Mark a node as failed.
 pub async fn fail_node(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     node_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
     debug!(node_id = %node_id, "node → Failed");
@@ -1679,7 +1687,7 @@ pub fn has_waiting_nodes(tree: &[ExecutionNode]) -> bool {
 /// The nodes are updated bottom-up so parent state changes don't interfere
 /// with descendant lookups.
 pub async fn cancel_subtree(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance_id: InstanceId,
     tree: &[ExecutionNode],
     parent_id: ExecutionNodeId,
@@ -1861,7 +1869,7 @@ pub async fn reset_subtree_to_pending(
 /// preserved, but their non-terminal descendants are still skipped to repair
 /// any already-inconsistent subtree.
 pub async fn skip_subtrees(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance_id: InstanceId,
     tree: &[ExecutionNode],
     root_ids: &[ExecutionNodeId],
@@ -1935,7 +1943,7 @@ pub async fn skip_subtrees(
 /// the cursor block runs and subsequent blocks remain Pending until their
 /// predecessor finishes.
 pub async fn activate_pending_children(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     children: &[&ExecutionNode],
 ) -> Result<(), EngineError> {
     let pending_ids: Vec<ExecutionNodeId> = children
@@ -2010,7 +2018,7 @@ pub fn sequence_cursor<'a>(
 /// `Pending` and the owning composite decides what happens next (fail,
 /// go to `catch`, advance the loop under `continue_on_error`, ...).
 pub async fn advance_sequence(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     children: &[&ExecutionNode],
 ) -> Result<SeqProgress, EngineError> {
     let (progress, cursor) = sequence_cursor(children);
@@ -2026,7 +2034,7 @@ pub async fn advance_sequence(
 ///
 /// Alias of [`advance_sequence`], kept for existing callers.
 pub async fn activate_first_pending_child(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     children: &[&ExecutionNode],
 ) -> Result<SeqProgress, EngineError> {
     advance_sequence(storage, children).await
@@ -2040,7 +2048,7 @@ pub async fn activate_first_pending_child(
 /// Called whenever a composite reaches a terminal state so no orphaned live
 /// node (and no external worker task) outlives its parent.
 pub async fn settle_live_descendants(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance_id: InstanceId,
     tree: &[ExecutionNode],
     root_id: ExecutionNodeId,
@@ -2093,7 +2101,7 @@ pub async fn settle_live_descendants(
 /// Transition a composite to its terminal `state` (`Completed`/`Failed`)
 /// after settling its live descendants (see [`settle_live_descendants`]).
 pub async fn settle_composite(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance_id: InstanceId,
     tree: &[ExecutionNode],
     node_id: ExecutionNodeId,

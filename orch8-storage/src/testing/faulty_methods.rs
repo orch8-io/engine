@@ -48,6 +48,10 @@ fault_impl! {
         async fn conditional_update_claimed_instance_state_with_outbox(&self, id: InstanceId, claimed_at: DateTime<Utc>, expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
         async fn reset_instance_run(&self, id: InstanceId, run_id: &str) -> Result<(), StorageError>;
         async fn update_instance_context(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext) -> Result<(), StorageError>;
+    async fn update_instance_context_cas_claimed(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext, expected_updated_at: DateTime<Utc>, claim_token: DateTime<Utc>) -> Result<Option<bool>, StorageError>;
+
+    async fn merge_context_data_claimed(&self, id: InstanceId, key: &str, value: &serde_json::Value, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
         async fn update_instance_context_cas(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext, _expected_updated_at: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn ensure_instance_run_started(&self, id: InstanceId, run_id: &str, started_at: DateTime<Utc>) -> Result<(), StorageError>;
         async fn update_instance_current_step_started_at(&self, id: InstanceId, ts: DateTime<Utc>) -> Result<(), StorageError>;
@@ -85,6 +89,12 @@ fault_impl! {
     [EXECUTION_TREE_STORE_METHODS] impl ExecutionTreeStore {
         async fn create_execution_node(&self, node: &ExecutionNode) -> Result<(), StorageError>;
         async fn create_execution_nodes_batch(&self, nodes: &[ExecutionNode]) -> Result<(), StorageError>;
+    async fn create_execution_nodes_batch_claimed(&self, instance_id: InstanceId, nodes: &[orch8_types::execution::ExecutionNode], claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
+    async fn update_nodes_state_claimed(&self, instance_id: InstanceId, node_ids: &[orch8_types::ids::ExecutionNodeId], state: orch8_types::execution::NodeState, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
+    async fn batch_activate_nodes_claimed(&self, instance_id: InstanceId, node_ids: &[orch8_types::ids::ExecutionNodeId], claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+
         async fn get_execution_tree(&self, instance_id: InstanceId) -> Result<Vec<ExecutionNode>, StorageError>;
         async fn update_node_state(&self, node_id: ExecutionNodeId, state: NodeState) -> Result<(), StorageError>;
     async fn update_node_state_claimed(&self, instance_id: InstanceId, node_id: orch8_types::ids::ExecutionNodeId,
@@ -169,6 +179,8 @@ fault_impl! {
         async fn finalize_stranded_worker_dispatch(&self, task_id: Uuid, attempt: u16, effect_id: Option<orch8_types::continuity::EffectId>, continuity_epoch: Option<u64>) -> Result<bool, StorageError>;
         async fn resolve_worker_task(&self, resolution: &orch8_types::worker::WorkerTaskResolution) -> Result<bool, StorageError>;
         async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
+    async fn cancel_worker_tasks_for_blocks_claimed(&self, instance_id: InstanceId, block_ids: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+
         async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
         async fn list_worker_tasks(&self, filter: &orch8_types::worker_filter::WorkerTaskFilter, pagination: &orch8_types::filter::Pagination) -> Result<Vec<WorkerTask>, StorageError>;
         async fn worker_task_stats(&self, tenant_id: Option<&orch8_types::ids::TenantId>, window_secs: Option<u32>) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;

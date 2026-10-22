@@ -6,6 +6,7 @@ pub mod cloud_observability;
 pub mod compensation;
 pub mod continuity;
 pub mod continuity_advanced;
+pub mod control;
 pub mod credentials;
 pub mod cron;
 pub mod dataflow;

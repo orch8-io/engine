@@ -654,6 +654,16 @@ pub(super) async fn update_context_cas(
     context: &ExecutionContext,
     expected_updated_at: DateTime<Utc>,
 ) -> Result<bool, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    update_context_cas_on(&mut conn, id, context, expected_updated_at).await
+}
+
+pub(super) async fn update_context_cas_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+    context: &ExecutionContext,
+    expected_updated_at: DateTime<Utc>,
+) -> Result<bool, StorageError> {
     let result = sqlx::query(
         "UPDATE task_instances SET context=?2, updated_at=?3 WHERE id=?1 AND updated_at=?4",
     )
@@ -661,7 +671,7 @@ pub(super) async fn update_context_cas(
     .bind(serde_json::to_string(context)?)
     .bind(ts(Utc::now()))
     .bind(ts(expected_updated_at))
-    .execute(&storage.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected() > 0)
 }
@@ -951,28 +961,14 @@ pub(super) async fn merge_context_data(
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    // Read-modify-write for SQLite (no JSONB). `BEGIN IMMEDIATE` (not sqlx's
-    // default DEFERRED) — under DEFERRED two concurrent merges for the same
-    // instance can both read the same context snapshot before either commits,
-    // and the second writer silently drops the first writer's key. IMMEDIATE
-    // serialises the whole read-modify-write, matching the atomicity of the
-    // Postgres `jsonb_set` single-statement path.
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
-    let result = merge_context_data_inner(&mut conn, id, key, value).await;
-    match result {
-        Ok(()) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            Err(e)
-        }
-    }
+    // RAII rollback also covers cancellation between the read and write.
+    let mut tx = super::helpers::begin_immediate(&storage.pool).await?;
+    merge_context_data_on(&mut tx, id, key, value).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
-async fn merge_context_data_inner(
+pub(super) async fn merge_context_data_on(
     conn: &mut sqlx::SqliteConnection,
     id: InstanceId,
     key: &str,
