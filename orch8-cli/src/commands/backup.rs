@@ -10,8 +10,9 @@
 //! writing anything.
 //!
 //! Backups read the storage layer directly (the API has no complete list
-//! endpoints for every kind). A `SQLite` source is copied to a temporary
-//! directory first, so the live database is never touched. Credentials are
+//! endpoints for every kind). A `SQLite` source is read through a read-only
+//! connection into a consistent temporary snapshot; only the snapshot is
+//! opened for schema reconciliation. Credentials are
 //! exported exactly as stored: encrypted with the server's
 //! `ORCH8_ENCRYPTION_KEY` when it has one — the target server needs the same
 //! key — and plaintext if the source ran without a key.
@@ -30,6 +31,7 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+use sqlx::Connection as _;
 
 use orch8_storage::StorageBackend;
 use orch8_types::credential::CredentialDef;
@@ -171,8 +173,10 @@ fn trigger_json(trigger: &TriggerDef) -> Result<Value> {
 // Storage access
 // ---------------------------------------------------------------------------
 
-/// Open the source for reading. `SQLite` databases are copied (with their WAL)
-/// into a temp dir first so the live file is never opened or reconciled.
+/// Open the source for reading. A read-only `SQLite` connection makes a
+/// transactionally consistent snapshot, including committed WAL frames.
+/// Independent file copies can lose commits when a live writer checkpoints.
+/// Schema reconciliation is confined to the temporary snapshot.
 async fn open_source(
     target: &DbTarget,
 ) -> Result<(Arc<dyn StorageBackend>, Option<tempfile::TempDir>)> {
@@ -191,13 +195,18 @@ async fn open_source(
             }
             let dir = tempfile::tempdir().context("create snapshot directory")?;
             let copy = dir.path().join("snapshot.db");
-            std::fs::copy(path, &copy).with_context(|| format!("snapshot {}", path.display()))?;
-            for suffix in ["-wal", "-shm"] {
-                let side = PathBuf::from(format!("{}{suffix}", path.display()));
-                if side.is_file() {
-                    std::fs::copy(&side, format!("{}{suffix}", copy.display()))?;
-                }
-            }
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(path)
+                .read_only(true);
+            let mut source = sqlx::SqliteConnection::connect_with(&options)
+                .await
+                .with_context(|| format!("open {} read-only for backup", path.display()))?;
+            sqlx::query("VACUUM main INTO ?1")
+                .bind(copy.to_str().context("non-UTF-8 snapshot path")?)
+                .execute(&mut source)
+                .await
+                .with_context(|| format!("snapshot {} consistently", path.display()))?;
+            source.close().await.context("close SQLite backup source")?;
             let storage = orch8_storage::sqlite::SqliteStorage::file(
                 copy.to_str().context("non-UTF-8 temp path")?,
             )
@@ -759,8 +768,8 @@ pub async fn run_backup(cmd: BackupCmd, format: OutputFormat) -> Result<()> {
     let (storage, _snapshot_dir) = open_source(&target).await?;
     let snap = snapshot(storage.as_ref(), cmd.include_instances).await?;
     let bytes = write_archive(&snap, backend)?;
-    crate::atomic_write_private(&cmd.out, &bytes)?;
     let archive = read_archive(&bytes)?;
+    crate::atomic_write_private(&cmd.out, &bytes)?;
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&archive.manifest)?),
         OutputFormat::Table => {

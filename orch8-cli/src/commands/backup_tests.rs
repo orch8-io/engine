@@ -381,3 +381,137 @@ fn tampered_or_foreign_archives_are_rejected() {
 
     assert!(read_archive(b"not a tarball").is_err());
 }
+
+struct StopSnapshotWriter(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for StopSnapshotWriter {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// A backup must contain every transaction committed before it started, and
+/// must not combine half of two transactions while the live WAL checkpoints.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_sqlite_snapshot_preserves_atomic_commits_during_checkpoints() {
+    use sqlx::Connection as _;
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (path, sequence_id, _) = seeded_source(dir.path()).await;
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_millis(200));
+    let mut writer = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA wal_autocheckpoint=0")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE credentials SET description='1' WHERE id='stripe'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_on_drop = StopSnapshotWriter(Arc::clone(&stop));
+    let committed = Arc::new(AtomicI32::new(1));
+    let actor_committed = Arc::clone(&committed);
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let actor = tokio::spawn(async move {
+        let mut epoch = 2i32;
+        let mut started = Some(started_tx);
+        while !stop.load(Ordering::Acquire) {
+            let mut tx = writer.begin().await?;
+            sqlx::query("UPDATE sequences SET version=? WHERE id=?")
+                .bind(epoch)
+                .bind(sequence_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE credentials SET description=? WHERE id='stripe'")
+                .bind(epoch.to_string())
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            actor_committed.store(epoch, Ordering::Release);
+            if let Some(started) = started.take() {
+                let _ = started.send(());
+            }
+            let _: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+                .fetch_one(&mut writer)
+                .await?;
+            epoch = epoch.saturating_add(1);
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, sqlx::Error>(())
+    });
+    started_rx.await.unwrap();
+    let tenant = TenantId::unchecked("acme");
+    for _ in 0..12 {
+        let floor = committed.load(Ordering::Acquire);
+        let (snapshot, _guard) = open_source(&DbTarget::Sqlite(path.clone())).await.unwrap();
+        let sequence = snapshot.get_sequence(sequence_id).await.unwrap().unwrap();
+        let credential = snapshot
+            .get_credential(Some(&tenant), "stripe")
+            .await
+            .unwrap()
+            .unwrap();
+        let credential_epoch: i32 = credential.description.unwrap().parse().unwrap();
+        assert_eq!(
+            sequence.version, credential_epoch,
+            "a snapshot must not tear a transaction"
+        );
+        assert!(
+            sequence.version >= floor,
+            "a snapshot lost a transaction committed before backup began"
+        );
+    }
+    drop(stop_on_drop);
+    actor.await.unwrap().unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sqlite_snapshot_can_read_a_readonly_source_without_changing_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::Builder::new()
+        .prefix("backup's-")
+        .tempdir()
+        .unwrap();
+    let (path, sequence_id, _) = seeded_source(dir.path()).await;
+    // Wait for the source pool's asynchronous close and checkpoint before
+    // recording the original bytes; this raw connection performs no migrations.
+    let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&path);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let (snapshot, _guard) = open_source(&DbTarget::Sqlite(path.clone())).await.unwrap();
+    assert_eq!(
+        snapshot
+            .get_sequence(sequence_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .name,
+        "billing"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "backup must not reconcile or rewrite the source"
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+}
