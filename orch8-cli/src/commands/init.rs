@@ -562,7 +562,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG: init regenerates keys, so a compose file written next to an existing orch8.toml gets mismatched keys — fixed on test/bugs"]
     fn compose_written_next_to_an_existing_config_reuses_its_keys() {
         let dir = tempfile::tempdir().unwrap();
         scaffold(dir.path());
