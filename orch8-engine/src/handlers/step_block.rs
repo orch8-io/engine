@@ -411,8 +411,8 @@ pub(crate) async fn execute_step_node_with_clock(
     // checks the flat path runs in `scheduler::step_exec`. Previously the
     // tree path skipped them entirely, so one composite anywhere in a
     // sequence silently disabled every step's delay/window/rate limit. On
-    // deferral the node stays Running and the instance is parked; the
-    // evaluator's top-of-loop state guard ends this tick.
+    // deferral the node stays Running. Evaluation skips it while other
+    // branches progress, then parks the instance at the earliest deadline.
     if let Some(fire_at) =
         crate::scheduler::step_preamble_deferral(storage.as_ref(), instance, step_def, clock)
             .await?
@@ -420,6 +420,7 @@ pub(crate) async fn execute_step_node_with_clock(
         super::step_deferral::defer_step(
             storage.as_ref(),
             instance,
+            node.id,
             claim_token,
             super::step_deferral::StepDeferral::WakeAt(fire_at),
             pending_deferrals,
@@ -603,6 +604,7 @@ pub(crate) async fn execute_step_node_with_clock(
             super::step_deferral::defer_step(
                 storage.as_ref(),
                 instance,
+                node.id,
                 claim_token,
                 super::step_deferral::StepDeferral::WakeAt(fire_at),
                 pending_deferrals,
@@ -1006,14 +1008,14 @@ pub(crate) async fn execute_step_node_with_clock(
                 super::step_deferral::defer_step(
                     storage.as_ref(),
                     instance,
+                    node.id,
                     claim_token,
                     super::step_deferral::StepDeferral::RetryAt(fire_at),
                     pending_deferrals,
                 )
                 .await?;
-                // The evaluator's top-of-loop instance-state guard will
-                // see the new `Scheduled` state and exit the tick. The
-                // scheduler then re-dispatches once `fire_at` elapses.
+                // Other runnable branches may still proceed in this
+                // evaluation; this leaf resumes no earlier than `fire_at`.
                 return Ok(false);
             }
 

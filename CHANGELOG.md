@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Evaluation progress and deferrals
+
+- Delayed or retrying leaves no longer postpone ready parallel branches or a
+  sibling's next step. Park only after runnable work settles, at the earliest
+  remaining leaf deadline; cancelled race losers cannot schedule stale wakes.
+- Reaching the evaluation work budget leaves runnable instances scheduled for
+  another tick. Passes that only discover deferred leaves do not repeatedly
+  consume the budget and starve ready work in wide nested trees.
+
 ### Parallel step deferrals
 
 - Parallel leaves retain their execution claim until both results are durable.
