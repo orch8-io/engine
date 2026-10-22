@@ -923,3 +923,53 @@ async fn repeated_payload_restore_preserves_existing_target_values_and_metadata(
         vec![replacement]
     );
 }
+
+#[tokio::test]
+async fn retry_after_payload_write_failure_completes_the_instance_restore() {
+    use sqlx::Connection as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _, id) = seeded_source(dir.path()).await;
+    let raw = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
+    for key in ["payload-a", "payload-b"] {
+        raw.save_externalized_state(id, key, &serde_json::json!({"key": key}))
+            .await
+            .unwrap();
+    }
+    let archive =
+        read_archive(&write_archive(&snapshot(&raw, true).await.unwrap(), "sqlite").unwrap())
+            .unwrap();
+    let target_path = dir.path().join("retry-restore.db");
+    let target = open_target(&DbTarget::Sqlite(target_path.clone()))
+        .await
+        .unwrap();
+    let mut writer = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&target_path)
+            .busy_timeout(std::time::Duration::from_secs(5)),
+    )
+    .await
+    .unwrap();
+    sqlx::query("CREATE TRIGGER fail_payload_import BEFORE INSERT ON externalized_state WHEN NEW.ref_key='payload-b' BEGIN SELECT RAISE(ABORT, 'simulated payload write failure'); END")
+        .execute(&mut writer).await.unwrap();
+    let error = restore(&archive, target.as_ref(), false, true)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("simulated payload write failure"));
+    sqlx::query("DROP TRIGGER fail_payload_import")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    restore(&archive, target.as_ref(), false, true)
+        .await
+        .unwrap();
+    let payloads = target
+        .list_externalized_entries(id, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        payloads.len(),
+        2,
+        "a successful retry must finish the partially imported instance"
+    );
+    assert_eq!(target.get_all_outputs(id).await.unwrap().len(), 1);
+}
