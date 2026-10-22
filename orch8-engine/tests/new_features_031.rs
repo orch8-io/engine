@@ -337,6 +337,7 @@ async fn cache_key_serves_from_cache_on_second_instance() {
 
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: instance_id,
         sequence_id: seq_id,

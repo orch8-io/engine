@@ -121,6 +121,7 @@ fn mk_cron_schedule(expr: &str, tz: &str) -> CronSchedule {
 async fn seed_instance(storage: &dyn StorageBackend, id: InstanceId) {
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),
@@ -147,6 +148,7 @@ async fn seed_instance(storage: &dyn StorageBackend, id: InstanceId) {
 fn mk_handler_instance(tenant: &str, state: InstanceState) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
@@ -1520,6 +1522,7 @@ async fn recovery_83_stale_instance_recovered() {
     storage.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq.id,
@@ -1555,6 +1558,7 @@ async fn recovery_84_fresh_instance_untouched() {
     storage.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq.id,
@@ -1591,6 +1595,7 @@ async fn recovery_85_multiple_stale() {
     let now = Utc::now();
     for _ in 0..3 {
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,

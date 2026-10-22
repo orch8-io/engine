@@ -65,6 +65,7 @@ async fn sequence(s: &dyn StorageBackend) -> SequenceId {
 fn instance(sequence_id: SequenceId, tenant: &str, state: InstanceState) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id,

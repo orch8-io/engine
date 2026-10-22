@@ -27,6 +27,7 @@ pub mod self_modify;
 pub mod send_signal;
 pub mod step;
 pub mod step_block;
+pub(crate) mod step_deferral;
 pub mod step_dispatch;
 pub mod tool_call;
 pub mod try_catch;

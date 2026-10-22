@@ -3799,6 +3799,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
@@ -3830,6 +3831,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let mut inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
@@ -3889,6 +3891,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
@@ -3922,6 +3925,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let mut inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),
@@ -4146,6 +4150,7 @@ mod tests {
     fn mk_inst_for_dedupe(id: InstanceId) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
@@ -4589,6 +4594,7 @@ mod tests {
         storage.create_sequence(&seq).await.unwrap();
 
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
@@ -5358,6 +5364,7 @@ mod tests {
         let mut ids = Vec::with_capacity(n);
         for _ in 0..n {
             let inst = TaskInstance {
+                claimed_at: None,
                 sub_tenant: None,
                 id: InstanceId::new(),
                 sequence_id: seq.id,

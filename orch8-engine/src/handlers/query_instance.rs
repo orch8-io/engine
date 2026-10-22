@@ -115,6 +115,7 @@ mod tests {
     fn mk_instance(tenant: &str) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),

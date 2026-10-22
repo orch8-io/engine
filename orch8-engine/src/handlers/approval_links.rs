@@ -617,6 +617,7 @@ mod tests {
         storage.create_sequence(&seq).await.unwrap();
         let now = Utc::now();
         let instance = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,

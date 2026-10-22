@@ -76,6 +76,7 @@ fn make_sequence() -> SequenceDefinition {
 fn make_instance(seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
@@ -295,6 +296,7 @@ fn bench_expression_throughput(c: &mut Criterion) {
 fn mk_instance(data: serde_json::Value) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),

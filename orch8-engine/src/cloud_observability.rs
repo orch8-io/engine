@@ -685,6 +685,7 @@ mod tests {
         storage.create_sequence(&sequence).await.unwrap();
         let now = Utc::now();
         let instance = orch8_types::instance::TaskInstance {
+            claimed_at: None,
             id: InstanceId::new(),
             sequence_id: sequence.id,
             tenant_id: tenant,

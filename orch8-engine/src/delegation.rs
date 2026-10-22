@@ -118,6 +118,7 @@ pub async fn ensure_delegation_proxy(
         .and_then(|parent| parent.sub_tenant);
     let now = Utc::now();
     let proxy = TaskInstance {
+        claimed_at: None,
         id,
         sub_tenant,
         sequence_id: sub_sequence.id,

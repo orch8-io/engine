@@ -476,6 +476,7 @@ pub(crate) fn build_trigger_instance(
 ) -> TaskInstance {
     let now = chrono::Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: id.unwrap_or_default(),
         sequence_id,

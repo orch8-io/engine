@@ -35,6 +35,15 @@ backend_test!(async fn step_writes_follow_the_running_claim(b) {
     let now = Utc::now() + chrono::Duration::seconds(1);
     let first = b.storage.claim_due_instances(now, 1, 0).await.unwrap().pop().unwrap();
     let old = first.updated_at;
+    assert_eq!(first.claimed_at, Some(old));
+    let mut context = first.context.clone();
+    context.data = json!({"refreshed": true});
+    b.storage.update_instance_context(instance.id, &context).await.unwrap();
+    let refreshed = b.storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(refreshed.claimed_at, Some(old));
+    assert_eq!(refreshed.context.data, context.data);
+    assert!(serde_json::to_value(&refreshed).unwrap().get("claimed_at").is_none());
+
     assert!(b.storage.update_node_state_claimed(instance.id, node.id, NodeState::Running, old).await.unwrap());
     let first_output = output(instance.id, "first");
     assert!(b.storage.save_block_output_claimed(&first_output, old).await.unwrap());

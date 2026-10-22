@@ -215,6 +215,7 @@ pub fn build_job_instance(job: NewJob, sequence_id: SequenceId) -> TaskInstance 
     marker["run_at"] = serde_json::Value::String(job.run_at.to_rfc3339());
     metadata.insert(JOB_METADATA_KEY.into(), marker);
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id,

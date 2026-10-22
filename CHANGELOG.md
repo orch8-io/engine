@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same protection. Storage backends implement `delete_instance_kv_claimed`.
   Handle `StepError::ClaimLost` as ownership loss, without failure or fallback.
 
+### Parallel step deferrals
+
+- Parallel leaves retain their execution claim until both results are durable.
+  Delay, circuit-breaker, and retry deferrals schedule the instance after the
+  batch settles. Per-step retry deadlines preserve backoff when a sibling
+  needs an earlier wake-up.
+
+### Runtime claim metadata
+
+- Storage reads and claims retain `TaskInstance::claimed_at` separately from
+  context/heartbeat timestamps. Repeated public evaluator calls, loops and
+  self-modification no longer mistake a context update for claim loss.
+- Rust `TaskInstance` literals now initialize `claimed_at: None`; native storage
+  supplies the actual timestamp. This runtime field is excluded from JSON, so
+  API and backup documents retain their existing shape. Explicit drivers can
+  use the public `evaluate_with_claim_token` API with their original token.
+
 ### Step results after claim recovery
 
 - Late handlers cannot replace a newer execution's outputs, cached results,
@@ -28,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom Rust storage backends must implement the four atomic claimed-write
   methods. `StepExecParams` now carries `claim_token`: use the original lease
   for scheduler dispatch and `None` for explicitly unclaimed step execution.
+
+### Webhook redelivery
+
+- Reject manual redelivery of pending or in-flight outbox rows with HTTP 409.
+  These rows remain owned by the scheduler; the API cannot send a duplicate
+  and delete an active claim. Parked deliveries remain eligible for redelivery.
 
 ### Webhook ownership
 

@@ -963,6 +963,7 @@ mod tests {
     fn old_terminal_instance() -> orch8_types::instance::TaskInstance {
         let now = chrono::Utc::now();
         orch8_types::instance::TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: orch8_types::ids::InstanceId::new(),
             sequence_id: orch8_types::ids::SequenceId::new(),
@@ -1178,6 +1179,7 @@ mod tests {
         use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
         use orch8_types::instance::{InstanceState, Priority, TaskInstance};
         TaskInstance {
+            claimed_at: None,
             id: InstanceId::new(),
             sub_tenant: None,
             sequence_id: SequenceId::new(),

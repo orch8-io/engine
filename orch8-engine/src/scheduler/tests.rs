@@ -89,6 +89,7 @@ async fn cooperative_preemption_reschedules_lower_priority_instance() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let now = Utc::now();
     let make = |priority, state, fire_at| TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: SequenceId::new(),
@@ -155,6 +156,7 @@ async fn seed_instance_with_context(
 ) {
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),
@@ -589,6 +591,7 @@ async fn seed_instance_in_state(
 ) {
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),
@@ -870,6 +873,7 @@ async fn seed_instance_with_concurrency(
 ) {
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),
@@ -1317,6 +1321,7 @@ fn mk_waiting_instance(
     updated_at: chrono::DateTime<Utc>,
 ) -> TaskInstance {
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
@@ -2265,6 +2270,7 @@ async fn jev_step_output_drives_router_and_when_guard() {
     storage.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
     let instance = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq.id,
@@ -2414,6 +2420,7 @@ async fn seed_fenced_instance(
     let now = Utc::now();
     storage
         .create_instance(&TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: instance_id,
             sequence_id: sequence.id,

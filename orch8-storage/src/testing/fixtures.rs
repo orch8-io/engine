@@ -162,6 +162,7 @@ impl InstanceBuilder {
         let now = Utc::now();
         Self {
             inst: TaskInstance {
+                claimed_at: None,
                 id: InstanceId::new(),
                 sub_tenant: None,
                 sequence_id,
