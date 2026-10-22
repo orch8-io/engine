@@ -11,6 +11,19 @@ historical block output, and the instance's externalized payload catalog.
 Payload ownership, reference keys, creation times, and expiration times survive
 the round trip. Restoring again preserves instances already present in the target.
 
+## Failed writes and retries
+
+Each new instance, its execution tree, outputs, and payloads commit together.
+A failed write rolls back that entire instance. Retry the same archive after
+correcting the failure: completed instance imports are skipped and the failed
+instance can be imported in full. Concurrent imports of one instance id publish
+one complete copy.
+
+Existing target instances remain unchanged. Partial instances left by older
+binaries are also existing instances; use a verified clean target when recovering
+from those older failed imports. This operation does not infer which existing
+rows an operator intended to replace.
+
 ## Format compatibility
 
 New archives use format 2 and include `externalized_state.jsonl` when instances
@@ -38,3 +51,9 @@ for the continuity migration workflow.
 and returns up to 1,000 records per page. `restore_externalized_entry` preserves
 metadata atomically and rejects reference keys owned by another instance without
 changing their payloads. Native and encrypted backends implement both operations.
+
+`InstanceStore::restore_instance_snapshot` atomically publishes a validated
+`InstanceSnapshot`. It returns `false` for an existing id and must leave the
+entire instance absent after any failed write. Node ownership, duplicate
+identities, missing parents, and cycles are validated before import; native
+backends insert parents before children, including archives with UUIDv4 node ids.

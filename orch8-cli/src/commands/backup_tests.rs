@@ -973,3 +973,75 @@ async fn retry_after_payload_write_failure_completes_the_instance_restore() {
     );
     assert_eq!(target.get_all_outputs(id).await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn malformed_instance_snapshots_fail_preflight_without_catalog_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, sequence_id, id) = seeded_source(dir.path()).await;
+    let raw = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
+    for kind in [
+        "cycle",
+        "orphan_node",
+        "orphan_output",
+        "duplicate_instance",
+        "duplicate_output",
+        "orphan_payload",
+    ] {
+        let mut snap = snapshot(&raw, true).await.unwrap();
+        match kind {
+            "cycle" => {
+                let nodes = snap.execution_tree.as_mut().unwrap();
+                nodes[0]["parent_id"] = nodes[0]["id"].clone();
+            }
+            "orphan_node" => {
+                snap.execution_tree.as_mut().unwrap()[0]["instance_id"] =
+                    serde_json::json!(InstanceId::new());
+            }
+            "orphan_output" => {
+                snap.block_outputs.as_mut().unwrap()[0]["instance_id"] =
+                    serde_json::json!(InstanceId::new());
+            }
+            "duplicate_instance" => {
+                let instances = snap.instances.as_mut().unwrap();
+                instances.push(instances[0].clone());
+            }
+            "duplicate_output" => {
+                let outputs = snap.block_outputs.as_mut().unwrap();
+                outputs.push(outputs[0].clone());
+            }
+            "orphan_payload" => snap.externalized_state.push(
+                serde_json::to_value(orch8_storage::externalizing::ExternalizedEntry {
+                    instance_id: InstanceId::new(),
+                    ref_key: "orphan".into(),
+                    payload: serde_json::json!(true),
+                    created_at: Utc::now(),
+                    expires_at: None,
+                })
+                .unwrap(),
+            ),
+            _ => unreachable!(),
+        }
+        let archive = read_archive(&write_archive(&snap, "sqlite").unwrap()).unwrap();
+        for dry_run in [true, false] {
+            let target = open_target(&DbTarget::Sqlite(
+                dir.path().join(format!("{kind}-{dry_run}.db")),
+            ))
+            .await
+            .unwrap();
+            assert!(
+                restore(&archive, target.as_ref(), dry_run, true)
+                    .await
+                    .is_err(),
+                "{kind}"
+            );
+            assert!(
+                target.get_sequence(sequence_id).await.unwrap().is_none(),
+                "{kind} mutated configuration"
+            );
+            assert!(
+                target.get_instance(id).await.unwrap().is_none(),
+                "{kind} created an instance"
+            );
+        }
+    }
+}

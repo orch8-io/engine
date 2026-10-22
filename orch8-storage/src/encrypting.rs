@@ -1120,6 +1120,22 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::InstanceStore for EncryptingStorage {
+    async fn restore_instance_snapshot(&self, snapshot: &crate::restore::InstanceSnapshot) -> Result<bool, StorageError> {
+        snapshot.checked_nodes()?;
+        let instance = self.encrypt_instance(&snapshot.instance)?.into_owned();
+        let outputs = snapshot.outputs.iter().map(|output| self.encrypt_block_output(output).map(std::borrow::Cow::into_owned)).collect::<Result<Vec<_>, _>>()?;
+        let mut payloads = Vec::with_capacity(snapshot.payloads.len());
+        for entry in &snapshot.payloads {
+            payloads.push(crate::externalizing::ExternalizedEntry {
+                instance_id: entry.instance_id, ref_key: entry.ref_key.clone(),
+                payload: self.seal_externalized(entry.instance_id, &entry.ref_key, &entry.payload).await?,
+                created_at: entry.created_at, expires_at: entry.expires_at,
+            });
+        }
+        self.inner.restore_instance_snapshot(&crate::restore::InstanceSnapshot {
+            instance, nodes: snapshot.nodes.clone(), outputs, payloads,
+        }).await
+    }
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         let encrypted = self.encrypt_instance(instance)?;
         self.inner.create_instance(encrypted.as_ref()).await

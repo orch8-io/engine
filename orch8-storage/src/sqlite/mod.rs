@@ -59,6 +59,7 @@ mod queue_dispatch;
 mod queue_routing;
 mod rate_limits;
 mod releases;
+mod restore;
 mod rollback;
 mod schema;
 mod sequences;
@@ -720,6 +721,12 @@ impl crate::SequenceStore for SqliteStorage {
 impl crate::InstanceStore for SqliteStorage {
     // === Task Instances ===
 
+    async fn restore_instance_snapshot(
+        &self,
+        snapshot: &crate::restore::InstanceSnapshot,
+    ) -> Result<bool, StorageError> {
+        restore::restore(self, snapshot).await
+    }
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         instances::create(self, instance).await
     }

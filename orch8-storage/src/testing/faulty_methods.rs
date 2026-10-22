@@ -31,6 +31,7 @@ fault_impl! {
 fault_impl! {
     [INSTANCE_STORE_METHODS] impl InstanceStore {
         async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError>;
+        async fn restore_instance_snapshot(&self, snapshot: &crate::restore::InstanceSnapshot) -> Result<bool, StorageError>;
         async fn create_instance_admitted(&self, instance: &TaskInstance, max_active_instances: u64) -> Result<(), StorageError>;
         async fn create_instances_batch(&self, instances: &[TaskInstance]) -> Result<u64, StorageError>;
         async fn create_instances_batch_admitted(&self, instances: &[TaskInstance], limits: &std::collections::HashMap<TenantId, u64>) -> Result<u64, StorageError>;

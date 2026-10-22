@@ -13,6 +13,7 @@ pub mod lifecycle;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 mod push_outbox_state;
+pub mod restore;
 pub mod sqlite;
 pub mod telemetry_validation;
 pub mod tenancy;
@@ -426,6 +427,15 @@ impl Drop for ManifestLockGuard {
 #[async_trait]
 pub trait InstanceStore: Send + Sync + 'static {
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError>;
+
+    /// Atomically insert an instance and its tree, outputs and payloads.
+    /// True means every row committed. False means this instance id already
+    /// exists and no row was changed. Any error leaves no partial instance.
+    /// Implementations must serialize concurrent imports of the same id.
+    async fn restore_instance_snapshot(
+        &self,
+        snapshot: &crate::restore::InstanceSnapshot,
+    ) -> Result<bool, StorageError>;
 
     /// Atomically enforce a tenant active-instance ceiling and insert one row.
     /// Production backends override this with a transaction/tenant lock.

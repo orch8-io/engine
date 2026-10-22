@@ -889,6 +889,14 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
 - Custom Rust storage backends now implement paginated payload catalog reads and
   atomic, owner-safe payload restoration.
 
+### Atomic instance restore
+
+- Instance restore commits the instance, tree, outputs, and payloads together.
+  A failed write no longer causes a retry to skip a partially restored instance.
+- Concurrent imports preserve one complete copy and leave existing data intact.
+  Dry-run and restore reject malformed instance snapshots before catalog writes.
+- Custom Rust backends now implement `InstanceStore::restore_instance_snapshot`.
+
 ## [0.7.1] — 2026-07-30
 
 ### Fixed

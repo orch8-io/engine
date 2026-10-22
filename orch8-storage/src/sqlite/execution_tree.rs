@@ -9,6 +9,14 @@ pub(super) async fn create_node(
     storage: &SqliteStorage,
     node: &ExecutionNode,
 ) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    create_node_on(&mut conn, node).await
+}
+
+pub(super) async fn create_node_on(
+    conn: &mut sqlx::SqliteConnection,
+    node: &ExecutionNode,
+) -> Result<(), StorageError> {
     sqlx::query(
         "INSERT INTO execution_tree (id,instance_id,block_id,parent_id,block_type,branch_index,state,started_at,completed_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
     )
@@ -21,7 +29,7 @@ pub(super) async fn create_node(
     .bind(node.state.to_string())
     .bind(node.started_at.map(ts))
     .bind(node.completed_at.map(ts))
-    .execute(&storage.pool).await?;
+    .execute(&mut *conn).await?;
     Ok(())
 }
 

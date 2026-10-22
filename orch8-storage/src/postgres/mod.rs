@@ -34,6 +34,7 @@ mod queue_dispatch;
 mod queue_routing;
 mod rate_limits;
 mod releases;
+mod restore;
 mod rollback;
 mod rows;
 mod sequences;
@@ -506,6 +507,12 @@ impl crate::SequenceStore for PostgresStorage {
 
 #[async_trait]
 impl crate::InstanceStore for PostgresStorage {
+    async fn restore_instance_snapshot(
+        &self,
+        snapshot: &crate::restore::InstanceSnapshot,
+    ) -> Result<bool, StorageError> {
+        restore::restore(self, snapshot).await
+    }
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         instances::create(self, instance).await
     }

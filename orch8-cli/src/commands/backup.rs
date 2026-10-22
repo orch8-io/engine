@@ -21,7 +21,7 @@
 //! and skipped when it already exists. `--dry-run` reports what would be
 //! created without writing.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -617,6 +617,11 @@ pub async fn restore(
     dry_run: bool,
     include_instances: bool,
 ) -> Result<RestoreReport> {
+    let snapshots = if include_instances && archive.members.contains_key("instances.jsonl") {
+        instance_snapshots(archive)?
+    } else {
+        Vec::new()
+    };
     let mut report = RestoreReport {
         dry_run,
         warnings: archive.manifest.warnings.clone(),
@@ -688,66 +693,71 @@ pub async fn restore(
         );
     }
     if has_instances && include_instances {
-        let mut restored = BTreeSet::new();
-        for instance in archive.records::<TaskInstance>("instances.jsonl")? {
-            let exists = storage.get_instance(instance.id).await?.is_some();
-            if !exists {
-                if !dry_run {
-                    storage
-                        .create_instance(&instance)
-                        .await
-                        .with_context(|| format!("restore instance {}", instance.id))?;
-                }
-                restored.insert(instance.id);
-            }
-            report.tally("instances", exists);
-        }
-        if archive.members.contains_key("externalized_state.jsonl") {
-            for entry in archive.records::<orch8_storage::externalizing::ExternalizedEntry>(
-                "externalized_state.jsonl",
-            )? {
-                let fresh = restored.contains(&entry.instance_id);
-                if fresh && !dry_run {
-                    storage.restore_externalized_entry(&entry).await?;
-                }
-                report.tally("externalized_state", !fresh);
-            }
-        } else {
+        if !archive.members.contains_key("externalized_state.jsonl") {
             report.warnings.push("version 1 backups omit externalized payloads; referenced context or outputs may be incomplete".into());
         }
-        let mut nodes_by_instance: BTreeMap<String, Vec<ExecutionNode>> = BTreeMap::new();
-        for node in archive.records::<ExecutionNode>("execution_tree.jsonl")? {
-            nodes_by_instance
-                .entry(node.instance_id.to_string())
-                .or_default()
-                .push(node);
-        }
-        for nodes in nodes_by_instance.into_values() {
-            let fresh = nodes
-                .first()
-                .is_some_and(|n| restored.contains(&n.instance_id));
-            for _ in &nodes {
-                report.tally("execution_tree", !fresh);
-            }
-            if fresh && !dry_run {
-                storage
-                    .create_execution_nodes_batch(&nodes)
+        for snapshot in snapshots {
+            let exists = if dry_run {
+                storage.get_instance(snapshot.instance.id).await?.is_some()
+            } else {
+                !storage
+                    .restore_instance_snapshot(&snapshot)
                     .await
-                    .context("restore execution tree")?;
+                    .with_context(|| format!("restore instance {}", snapshot.instance.id))?
+            };
+            report.tally("instances", exists);
+            for _ in &snapshot.nodes {
+                report.tally("execution_tree", exists);
             }
-        }
-        for output in archive.records::<BlockOutput>("block_outputs.jsonl")? {
-            let fresh = restored.contains(&output.instance_id);
-            if fresh && !dry_run {
-                storage
-                    .save_block_output(&output)
-                    .await
-                    .context("restore block output")?;
+            for _ in &snapshot.outputs {
+                report.tally("block_outputs", exists);
             }
-            report.tally("block_outputs", !fresh);
+            for _ in &snapshot.payloads {
+                report.tally("externalized_state", exists);
+            }
         }
     }
     Ok(report)
+}
+
+fn instance_snapshots(archive: &Archive) -> Result<Vec<orch8_storage::restore::InstanceSnapshot>> {
+    let mut snapshots = Vec::new();
+    let mut positions = BTreeMap::new();
+    for instance in archive.records::<TaskInstance>("instances.jsonl")? {
+        if positions.insert(instance.id, snapshots.len()).is_some() {
+            bail!("archive contains duplicate instance ids");
+        }
+        snapshots.push(orch8_storage::restore::InstanceSnapshot {
+            instance,
+            nodes: Vec::new(),
+            outputs: Vec::new(),
+            payloads: Vec::new(),
+        });
+    }
+    for node in archive.records::<ExecutionNode>("execution_tree.jsonl")? {
+        let i = positions
+            .get(&node.instance_id)
+            .context("execution node has no archived instance")?;
+        snapshots[*i].nodes.push(node);
+    }
+    for output in archive.records::<BlockOutput>("block_outputs.jsonl")? {
+        let i = positions
+            .get(&output.instance_id)
+            .context("output has no archived instance")?;
+        snapshots[*i].outputs.push(output);
+    }
+    for entry in archive
+        .records::<orch8_storage::externalizing::ExternalizedEntry>("externalized_state.jsonl")?
+    {
+        let i = positions
+            .get(&entry.instance_id)
+            .context("payload has no archived instance")?;
+        snapshots[*i].payloads.push(entry);
+    }
+    for snapshot in &snapshots {
+        snapshot.validate()?;
+    }
+    Ok(snapshots)
 }
 
 fn render_restore(report: &RestoreReport) -> String {

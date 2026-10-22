@@ -33,17 +33,32 @@ pub(super) async fn restore(
     entry: &ExternalizedEntry,
 ) -> Result<(), StorageError> {
     let mut tx = store.pool.begin().await?;
-    super::externalized::save_on(&mut tx, entry.instance_id, &entry.ref_key, &entry.payload)
-        .await?;
+    if let Err(error) = restore_on(&mut tx, entry).await {
+        tx.rollback().await?;
+        return Err(error);
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn restore_on(
+    conn: &mut sqlx::PgConnection,
+    entry: &ExternalizedEntry,
+) -> Result<(), StorageError> {
+    super::externalized::save_on(
+        &mut *conn,
+        entry.instance_id,
+        &entry.ref_key,
+        &entry.payload,
+    )
+    .await?;
     let changed = sqlx::query("UPDATE externalized_state SET created_at=$1, expires_at=$2 WHERE ref_key=$3 AND instance_id=$4")
         .bind(entry.created_at).bind(entry.expires_at).bind(&entry.ref_key).bind(entry.instance_id.into_uuid())
-        .execute(&mut *tx).await?.rows_affected();
+        .execute(&mut *conn).await?.rows_affected();
     if changed != 1 {
-        tx.rollback().await?;
         return Err(StorageError::Query(
             "externalized reference belongs to another instance".into(),
         ));
     }
-    tx.commit().await?;
     Ok(())
 }
