@@ -114,7 +114,12 @@ impl SequencePublisher {
             .map_err(PublishError::Cdn)?;
 
         let mut required_handlers: Vec<String> = Vec::new();
-        collect_required_handlers(&seq.blocks, &mut required_handlers);
+        for blocks in std::iter::once(seq.blocks.as_slice())
+            .chain(seq.on_failure.as_deref())
+            .chain(seq.on_cancel.as_deref())
+        {
+            collect_required_handlers(blocks, &mut required_handlers);
+        }
         required_handlers.sort_unstable();
         required_handlers.dedup();
 
@@ -562,6 +567,30 @@ mod tests {
 
         let entry = publisher.publish_sequence(&seq, &key).await.unwrap();
         assert_eq!(entry.required_handlers, vec!["echo"]);
+    }
+
+    #[tokio::test]
+    async fn publish_sequence_includes_lifecycle_hook_handlers() {
+        let (publisher, key) = setup();
+        let mut seq = make_seq("hook-handlers", 1, "tenant1");
+        seq.on_failure = Some(serde_json::from_value(serde_json::json!([
+            {"type": "step", "id": "recover", "handler": "failure_handler", "fallback_handler": "backup"}
+        ])).unwrap());
+        seq.on_cancel = Some(
+            serde_json::from_value(serde_json::json!([
+                {"type": "parallel", "id": "cleanup", "branches": [
+                    [{"type": "step", "id": "cancel", "handler": "cancel_handler"}],
+                    [{"type": "step", "id": "log_cancel", "handler": "echo"}]
+                ]}
+            ]))
+            .unwrap(),
+        );
+
+        let entry = publisher.publish_sequence(&seq, &key).await.unwrap();
+        assert_eq!(
+            entry.required_handlers,
+            ["backup", "cancel_handler", "echo", "failure_handler"]
+        );
     }
 
     fn make_seq(name: &str, version: i32, tenant_id: &str) -> SequenceDefinition {
