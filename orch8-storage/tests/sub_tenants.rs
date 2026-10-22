@@ -64,6 +64,7 @@ async fn sequence(
 fn instance(seq: &SequenceDefinition, sub: Option<&str>) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         id: InstanceId::new(),
         sub_tenant: sub.map(ToString::to_string),
         sequence_id: seq.id,

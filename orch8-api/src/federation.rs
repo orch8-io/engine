@@ -601,6 +601,7 @@ async fn start_instance(
     let federation_meta = federation_metadata(peer, request);
     let now = Utc::now();
     let instance = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: sequence.id,

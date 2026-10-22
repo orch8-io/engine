@@ -386,6 +386,7 @@ mod tests {
     fn mk_scheduled_instance() -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),

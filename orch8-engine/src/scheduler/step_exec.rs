@@ -270,7 +270,8 @@ async fn rate_limit_retry_at(
     Ok(None)
 }
 
-/// Shared step preamble for the flat and tree dispatch paths: `delay`, then
+/// Shared step preamble for the flat and tree dispatch paths: saved retry
+/// deadline, `delay`, then
 /// `send_window`, then `rate_limit_key`, then the global `rate_budget` (in
 /// that order — a token is only consumed once the step is otherwise allowed
 /// to run). Returns the
@@ -278,14 +279,30 @@ async fn rate_limit_retry_at(
 ///
 /// Pure with respect to instance state: callers own the Running → Scheduled
 /// transition (the flat path via `transition_instance`, the tree path via
-/// [`park_tree_instance_until`], which tolerates a parallel sibling having
-/// already parked the instance).
+/// [`park_tree_instance_until`], after a parallel batch has settled).
 pub(crate) async fn step_preamble_deferral(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
+    if step_def.retry.is_some()
+        && let Some(previous) = storage.get_block_output(instance.id, &step_def.id).await?
+        && previous.output_ref.as_deref() == Some("__retry__")
+        && let Some(value) = previous
+            .output
+            .get("_retry_fire_at")
+            .filter(|v| !v.is_null())
+    {
+        let retry_at: DateTime<Utc> = serde_json::from_value(value.clone()).map_err(|error| {
+            orch8_types::error::StorageError::Query(format!(
+                "invalid persisted retry deadline: {error}"
+            ))
+        })?;
+        if retry_at > clock.now() {
+            return Ok(Some(retry_at));
+        }
+    }
     if let Some(fire_at) = step_delay_until(storage, instance, step_def, clock).await? {
         debug!(
             instance_id = %instance.id,
@@ -922,7 +939,8 @@ pub(crate) async fn check_human_input_at_with_claim(
                         attempt: 0,
                         created_at: chrono::Utc::now(),
                     };
-                    storage.save_block_output(&output).await?;
+                    crate::handlers::step::persist_output(storage, &output, Some(claim_token))
+                        .await?;
                     // Re-schedule immediately so the next tick sees the block
                     // output in completed_blocks and skips this step.
                     crate::lifecycle::transition_claimed_instance(
@@ -1431,9 +1449,11 @@ pub(super) async fn execute_step_block(
         attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
         created_at: chrono::Utc::now(),
     };
-    storage.save_block_output(&sentinel).await?;
+    crate::handlers::step::persist_output(storage.as_ref(), &sentinel, Some(instance.updated_at))
+        .await?;
 
     let exec_params = crate::handlers::step::StepExecParams {
+        claim_token: Some(instance.updated_at),
         instance_id,
         tenant_id: instance.tenant_id.clone(),
         block_id: step_def.id.clone(),
@@ -1453,8 +1473,15 @@ pub(super) async fn execute_step_block(
         .map_err(|e| e.normalize_timeout_as_retryable(instance_id));
 
     match result {
+        Err(e @ EngineError::ClaimLost { .. }) => Err(e),
+        Err(e) if e.is_transient_storage() => Err(e),
         Ok(block_output) => {
-            storage.save_block_output(&block_output).await?;
+            crate::handlers::step::persist_output(
+                storage.as_ref(),
+                &block_output,
+                Some(instance.updated_at),
+            )
+            .await?;
 
             // Handler succeeded — reset the (tenant, handler) breaker. A
             // successful call is the probe that closes a half-open breaker
@@ -1577,7 +1604,16 @@ pub(super) async fn execute_step_block(
                 attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
                 created_at: chrono::Utc::now(),
             };
-            if let Err(err) = storage.save_block_output(&retry_marker).await {
+            if let Err(err) = crate::handlers::step::persist_output(
+                storage.as_ref(),
+                &retry_marker,
+                Some(instance.updated_at),
+            )
+            .await
+            {
+                if matches!(err, EngineError::ClaimLost { .. }) {
+                    return Err(err);
+                }
                 tracing::warn!(
                     instance_id = %instance_id,
                     block_id = %step_def.id,
@@ -1618,7 +1654,15 @@ pub(super) async fn execute_step_block(
             // Permanent failures do not trip the breaker: the dependency
             // answered and the request itself was wrong (a 400/404/410 from
             // one sequence must not black out healthy calls of the tenant).
-            persist_permanent_error(storage.as_ref(), instance_id, &step_def.id, attempt, &e).await;
+            persist_permanent_error(
+                storage.as_ref(),
+                instance_id,
+                &step_def.id,
+                attempt,
+                &e,
+                instance.updated_at,
+            )
+            .await?;
             // Keep the sentinel on permanent failure: the handler already ran
             // (side effects may have occurred), and the row is useful
             // forensic evidence next to the `__error__` marker. Note it no
@@ -1663,7 +1707,8 @@ async fn persist_permanent_error(
     block_id: &orch8_types::ids::BlockId,
     attempt: u32,
     error: &EngineError,
-) {
+    claim_token: chrono::DateTime<chrono::Utc>,
+) -> Result<(), EngineError> {
     let output = serde_json::json!({
         "__error__": true,
         "retryable": false,
@@ -1681,7 +1726,12 @@ async fn persist_permanent_error(
         attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
         created_at: chrono::Utc::now(),
     };
-    if let Err(persist_error) = storage.save_block_output(&marker).await {
+    if let Err(persist_error) =
+        crate::handlers::step::persist_output(storage, &marker, Some(claim_token)).await
+    {
+        if matches!(persist_error, EngineError::ClaimLost { .. }) {
+            return Err(persist_error);
+        }
         tracing::warn!(
             %instance_id,
             %block_id,
@@ -1689,6 +1739,7 @@ async fn persist_permanent_error(
             "failed to persist permanent step error evidence"
         );
     }
+    Ok(())
 }
 
 /// Transition the instance to `Failed`, emit the standard `instance.failed`

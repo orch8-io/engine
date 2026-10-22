@@ -1104,6 +1104,17 @@ pub trait ExecutionTreeStore: Send + Sync + 'static {
         state: NodeState,
     ) -> Result<(), StorageError>;
 
+    /// Change a node only while its instance is Running under this claim.
+    /// Serializes with instance recovery; a lost claim or mismatched node
+    /// returns false without changing the node or its timestamps.
+    async fn update_node_state_claimed(
+        &self,
+        instance_id: InstanceId,
+        node_id: ExecutionNodeId,
+        state: orch8_types::execution::NodeState,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Batch-activate multiple nodes from Pending to Running in a single
     /// round-trip. Only nodes that are currently Pending are updated.
     async fn batch_activate_nodes(&self, node_ids: &[ExecutionNodeId]) -> Result<(), StorageError>;
@@ -1139,6 +1150,15 @@ pub trait ExecutionTreeStore: Send + Sync + 'static {
 #[async_trait]
 pub trait OutputStore: Send + Sync + 'static {
     async fn save_block_output(&self, output: &BlockOutput) -> Result<(), StorageError>;
+
+    /// Write only while the instance is Running under `claim_token`.
+    /// The ownership check and write share a transaction/row lock, so recovery
+    /// cannot replace the claim between them. False means no result record was written.
+    async fn save_block_output_claimed(
+        &self,
+        output: &BlockOutput,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     async fn get_block_output(
         &self,
@@ -2855,6 +2875,17 @@ pub trait ResourceStore: Send + Sync + 'static {
         value: &serde_json::Value,
     ) -> Result<(), StorageError>;
 
+    /// Write only while the instance is Running under `claim_token`.
+    /// The ownership check and write share a transaction/row lock, so recovery
+    /// cannot replace the claim between them. False means no result record was written.
+    async fn set_instance_kv_claimed(
+        &self,
+        instance_id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     async fn get_instance_kv(
         &self,
         instance_id: InstanceId,
@@ -3124,6 +3155,17 @@ pub trait ResourceStore: Send + Sync + 'static {
         ref_key: &str,
         payload: &serde_json::Value,
     ) -> Result<(), StorageError>;
+
+    /// Write only while the instance is Running under `claim_token`.
+    /// The ownership check and write share a transaction/row lock, so recovery
+    /// cannot replace the claim between them. False means no result record was written.
+    async fn save_externalized_state_claimed(
+        &self,
+        instance_id: InstanceId,
+        ref_key: &str,
+        payload: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     /// Persist multiple externalized payloads atomically in one call.
     ///

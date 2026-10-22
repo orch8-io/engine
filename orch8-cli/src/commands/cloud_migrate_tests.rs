@@ -28,6 +28,7 @@ fn sequence(tenant: &str) -> SequenceDefinition {
 fn instance(seq: &SequenceDefinition, state: InstanceState) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         id: InstanceId::new(),
         sequence_id: seq.id,
         tenant_id: seq.tenant_id.clone(),

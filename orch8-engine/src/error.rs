@@ -16,6 +16,9 @@ pub enum EngineError {
         to: InstanceState,
     },
 
+    #[error("execution claim lost for instance {instance_id}")]
+    ClaimLost { instance_id: InstanceId },
+
     #[error("handler not found: {0}")]
     HandlerNotFound(String),
 

@@ -480,6 +480,7 @@ mod tests {
     fn make_instance(sequence_id: SequenceId) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id,

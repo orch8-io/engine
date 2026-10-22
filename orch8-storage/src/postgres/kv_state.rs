@@ -90,18 +90,8 @@ impl PostgresStorage {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
-        sqlx::query(
-            "INSERT INTO instance_kv_state (instance_id, key, value, updated_at)
-             VALUES ($1, $2, $3, NOW())
-             ON CONFLICT (instance_id, key) DO UPDATE SET value = $3, updated_at = NOW()",
-        )
-        .bind(instance_id.into_uuid())
-        .bind(key)
-        .bind(value)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        set_instance_kv_on(&mut conn, instance_id, key, value).await
     }
 
     pub(crate) async fn get_instance_kv_impl(
@@ -187,4 +177,24 @@ impl PostgresStorage {
         .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(())
     }
+}
+
+pub(super) async fn set_instance_kv_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO instance_kv_state (instance_id, key, value, updated_at)
+             VALUES ($1, $2, $3, NOW())
+             ON CONFLICT (instance_id, key) DO UPDATE SET value = $3, updated_at = NOW()",
+    )
+    .bind(instance_id.into_uuid())
+    .bind(key)
+    .bind(value)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
 }

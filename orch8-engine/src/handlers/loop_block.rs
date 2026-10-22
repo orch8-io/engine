@@ -80,7 +80,7 @@ pub async fn execute_loop(
         loop_def,
         tree,
         &clock,
-        instance.updated_at,
+        instance.claimed_at.unwrap_or(instance.updated_at),
     )
     .await
 }
@@ -513,6 +513,7 @@ mod tests {
         };
         s.create_sequence(&seq).await.unwrap();
         let inst_row = orch8_types::instance::TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: inst,
             sequence_id: seq.id,
@@ -849,6 +850,7 @@ mod tests {
     fn mk_instance_for(inst_id: InstanceId, ctx: serde_json::Value) -> TaskInstance {
         let now = chrono::Utc::now();
         TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: inst_id,
             sequence_id: SequenceId::new(),

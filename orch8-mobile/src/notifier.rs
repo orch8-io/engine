@@ -287,6 +287,7 @@ mod tests {
 
         let now = chrono::Utc::now();
         let instance = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,
@@ -606,6 +607,7 @@ mod tests {
         let mut context = ExecutionContext::default();
         context.runtime.current_step = Some(BlockId::new("review"));
         let instance = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: sequence.id,

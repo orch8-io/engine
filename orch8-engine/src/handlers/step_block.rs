@@ -345,7 +345,8 @@ pub async fn execute_step_node(
         step_def,
         outputs,
         &clock,
-        instance.updated_at,
+        instance.claimed_at.unwrap_or(instance.updated_at),
+        None,
     )
     .await
 }
@@ -360,6 +361,7 @@ pub(crate) async fn execute_step_node_with_clock(
     outputs: &OutputsSnapshot,
     clock: &orch8_types::clock::SharedClock,
     claim_token: chrono::DateTime<chrono::Utc>,
+    pending_deferrals: Option<&super::step_deferral::PendingStepDeferrals>,
 ) -> Result<bool, EngineError> {
     // Conditional guard: if `when` is set, evaluate the expression against
     // the current context + outputs. Skip the step entirely if falsy. Strict
@@ -376,9 +378,13 @@ pub(crate) async fn execute_step_node_with_clock(
         ) {
             Ok(true) => {}
             Ok(false) => {
-                storage
-                    .update_node_state(node.id, orch8_types::execution::NodeState::Skipped)
-                    .await?;
+                evaluator::persist_node_state(
+                    storage.as_ref(),
+                    node,
+                    orch8_types::execution::NodeState::Skipped,
+                    Some(claim_token),
+                )
+                .await?;
                 return Ok(true);
             }
             Err(e) => {
@@ -389,7 +395,13 @@ pub(crate) async fn execute_step_node_with_clock(
                     error = %e,
                     "when guard failed to parse, failing node"
                 );
-                evaluator::fail_node(storage.as_ref(), node.id).await?;
+                evaluator::persist_node_state(
+                    storage.as_ref(),
+                    node,
+                    orch8_types::execution::NodeState::Failed,
+                    Some(claim_token),
+                )
+                .await?;
                 return Ok(false);
             }
         }
@@ -405,11 +417,12 @@ pub(crate) async fn execute_step_node_with_clock(
         crate::scheduler::step_preamble_deferral(storage.as_ref(), instance, step_def, clock)
             .await?
     {
-        crate::scheduler::park_tree_instance_until(
+        super::step_deferral::defer_step(
             storage.as_ref(),
-            instance.id,
+            instance,
             claim_token,
-            fire_at,
+            super::step_deferral::StepDeferral::WakeAt(fire_at),
+            pending_deferrals,
         )
         .await?;
         return Ok(false);
@@ -434,7 +447,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 .started_at
                 .is_none_or(|started| latest.created_at >= started)
         {
-            evaluator::complete_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Completed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(true);
         }
         // Evaluate the gate against this node's own start time. The shared
@@ -514,9 +533,13 @@ pub(crate) async fn execute_step_node_with_clock(
             }
             // No signal yet — set node to Waiting so the instance transitions
             // to Waiting state and process_signalled_instances can wake it.
-            storage
-                .update_node_state(node.id, orch8_types::execution::NodeState::Waiting)
-                .await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Waiting,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(true);
         }
         // Signal accepted — fall through to run the handler.
@@ -547,7 +570,13 @@ pub(crate) async fn execute_step_node_with_clock(
         Ok(prepared) => prepared,
         Err(PrepareError::Infra(e)) => return Err(e),
         Err(_) => {
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(false);
         }
     };
@@ -571,15 +600,14 @@ pub(crate) async fn execute_step_node_with_clock(
     ) {
         BreakerDecision::Proceed(cow) => cow,
         BreakerDecision::Defer { fire_at } => {
-            storage
-                .conditional_update_claimed_instance_state(
-                    instance.id,
-                    claim_token,
-                    orch8_types::instance::InstanceState::Running,
-                    orch8_types::instance::InstanceState::Scheduled,
-                    Some(fire_at),
-                )
-                .await?;
+            super::step_deferral::defer_step(
+                storage.as_ref(),
+                instance,
+                claim_token,
+                super::step_deferral::StepDeferral::WakeAt(fire_at),
+                pending_deferrals,
+            )
+            .await?;
             return Ok(false);
         }
     };
@@ -596,7 +624,13 @@ pub(crate) async fn execute_step_node_with_clock(
             .await
             .is_err()
     {
-        evaluator::fail_node(storage.as_ref(), node.id).await?;
+        evaluator::persist_node_state(
+            storage.as_ref(),
+            node,
+            orch8_types::execution::NodeState::Failed,
+            Some(claim_token),
+        )
+        .await?;
         return Ok(false);
     }
     let PreparedStep {
@@ -621,6 +655,7 @@ pub(crate) async fn execute_step_node_with_clock(
             resolved_params,
             step_context,
             attempt,
+            claim_token,
             move |ctx| async move { super::activepieces::handle_ap(ctx, &handler_name).await },
         )
         .await;
@@ -641,7 +676,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 handler = %step_def.handler,
                 "gRPC plugin not registered; failing node (raw-endpoint fallback is disabled)"
             );
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(false);
         };
         // Inject the resolved endpoint into params BEFORE dispatch so both
@@ -658,6 +699,7 @@ pub(crate) async fn execute_step_node_with_clock(
             params,
             step_context,
             attempt,
+            claim_token,
             super::grpc_plugin::handle_grpc_plugin,
         )
         .await;
@@ -689,7 +731,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 plugin = %plugin_name,
                 "wasm plugin not registered; failing node (raw-path fallback is disabled)"
             );
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(false);
         };
         return dispatch_plugin(
@@ -700,6 +748,7 @@ pub(crate) async fn execute_step_node_with_clock(
             resolved_params,
             step_context,
             attempt,
+            claim_token,
             move |ctx| async move { super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path).await },
         )
         .await;
@@ -732,7 +781,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 &message,
             )
             .await;
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(false);
         }
     };
@@ -754,6 +809,7 @@ pub(crate) async fn execute_step_node_with_clock(
     }
 
     let exec_params = StepExecParams {
+        claim_token: Some(claim_token),
         instance_id: instance.id,
         tenant_id: instance.tenant_id.clone(),
         block_id: step_def.id.clone(),
@@ -772,6 +828,8 @@ pub(crate) async fn execute_step_node_with_clock(
         .await
         .map_err(|e| e.normalize_timeout_as_retryable(instance.id));
     match result {
+        Err(e @ EngineError::ClaimLost { .. }) => Err(e),
+        Err(e) if e.is_transient_storage() => Err(e),
         Ok(output) => {
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
                 cb.record_success(
@@ -787,11 +845,23 @@ pub(crate) async fn execute_step_node_with_clock(
             {
                 super::param_resolve::SelfModifyResult::Applied
                 | super::param_resolve::SelfModifyResult::NotApplicable => {
-                    evaluator::complete_node(storage.as_ref(), node.id).await?;
+                    evaluator::persist_node_state(
+                        storage.as_ref(),
+                        node,
+                        orch8_types::execution::NodeState::Completed,
+                        Some(claim_token),
+                    )
+                    .await?;
                     Ok(true)
                 }
                 super::param_resolve::SelfModifyResult::Failed => {
-                    evaluator::fail_node(storage.as_ref(), node.id).await?;
+                    evaluator::persist_node_state(
+                        storage.as_ref(),
+                        node,
+                        orch8_types::execution::NodeState::Failed,
+                        Some(claim_token),
+                    )
+                    .await?;
                     Ok(false)
                 }
             }
@@ -823,7 +893,37 @@ pub(crate) async fn execute_step_node_with_clock(
             // a marker the count would reset to 0 each tick. The marker
             // carries the numeric attempt of the *just-failed* try; the
             // next `compute_attempt` call returns `attempt + 1`.
-            let marker = orch8_types::output::BlockOutput {
+            // A sibling may wake the instance before this retry is due.
+            // Persist this step's deadline with its retry evidence.
+            let retry_schedule = step_def
+                .retry
+                .as_ref()
+                .filter(|retry| attempt < retry.max_attempts)
+                .filter(|retry| {
+                    crate::handlers::step::should_retry(
+                        retry,
+                        message,
+                        details.as_ref(),
+                        &instance.context,
+                        &serde_json::Value::Null,
+                    )
+                })
+                .map(|retry| {
+                    let backoff = crate::handlers::step::honor_retry_after(
+                        crate::handlers::step::calculate_backoff_with_jitter(
+                            attempt,
+                            retry.initial_backoff,
+                            retry.max_backoff,
+                            retry.backoff_multiplier,
+                        ),
+                        details.as_ref(),
+                    );
+                    (
+                        backoff,
+                        crate::scheduler::clamped_fire_at(clock.now(), backoff),
+                    )
+                });
+            let mut marker = orch8_types::output::BlockOutput {
                 id: uuid::Uuid::now_v7(),
                 instance_id: instance.id,
                 block_id: step_def.id.clone(),
@@ -836,12 +936,20 @@ pub(crate) async fn execute_step_node_with_clock(
                 attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
                 created_at: chrono::Utc::now(),
             };
+            if let Some((_, fire_at)) = retry_schedule {
+                marker.output["_retry_fire_at"] = serde_json::json!(fire_at);
+            }
             // Marker-save failures are non-fatal — worst case the attempt
             // counter stalls and the handler retries more times than
             // `max_attempts` allows. Prefer logging over surfacing an error
             // that would abort the whole tick and leave the instance in
             // Running with a half-applied retry decision.
-            if let Err(e) = storage.save_block_output(&marker).await {
+            if let Err(e) =
+                super::step::persist_output(storage.as_ref(), &marker, Some(claim_token)).await
+            {
+                if matches!(e, EngineError::ClaimLost { .. }) {
+                    return Err(e);
+                }
                 tracing::warn!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,
@@ -860,16 +968,16 @@ pub(crate) async fn execute_step_node_with_clock(
                         message = %message,
                         "tree path: max retry attempts exhausted, failing node"
                     );
-                    evaluator::fail_node(storage.as_ref(), node.id).await?;
+                    evaluator::persist_node_state(
+                        storage.as_ref(),
+                        node,
+                        orch8_types::execution::NodeState::Failed,
+                        Some(claim_token),
+                    )
+                    .await?;
                     return Ok(false);
                 }
-                if !crate::handlers::step::should_retry(
-                    retry,
-                    message,
-                    details.as_ref(),
-                    &instance.context,
-                    &serde_json::Value::Null,
-                ) {
+                let Some((backoff, fire_at)) = retry_schedule else {
                     tracing::warn!(
                         instance_id = %instance.id,
                         block_id = %step_def.id,
@@ -877,21 +985,15 @@ pub(crate) async fn execute_step_node_with_clock(
                         message = %message,
                         "tree path: retry_if / non_retryable_codes denied retry, failing node"
                     );
-                    evaluator::fail_node(storage.as_ref(), node.id).await?;
+                    evaluator::persist_node_state(
+                        storage.as_ref(),
+                        node,
+                        orch8_types::execution::NodeState::Failed,
+                        Some(claim_token),
+                    )
+                    .await?;
                     return Ok(false);
-                }
-                let backoff = crate::handlers::step::honor_retry_after(
-                    crate::handlers::step::calculate_backoff_with_jitter(
-                        attempt,
-                        retry.initial_backoff,
-                        retry.max_backoff,
-                        retry.backoff_multiplier,
-                    ),
-                    details.as_ref(),
-                );
-                // Shared with the fast path: clamp a pathological backoff
-                // instead of collapsing it to zero (immediate hot retry).
-                let fire_at = crate::scheduler::clamped_fire_at(clock.now(), backoff);
+                };
                 tracing::warn!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,
@@ -901,14 +1003,12 @@ pub(crate) async fn execute_step_node_with_clock(
                     message = %message,
                     "tree path: retryable failure, re-scheduling instance with backoff"
                 );
-                crate::lifecycle::transition_claimed_instance(
+                super::step_deferral::defer_step(
                     storage.as_ref(),
-                    instance.id,
-                    Some(&instance.tenant_id),
+                    instance,
                     claim_token,
-                    orch8_types::instance::InstanceState::Running,
-                    orch8_types::instance::InstanceState::Scheduled,
-                    Some(fire_at),
+                    super::step_deferral::StepDeferral::RetryAt(fire_at),
+                    pending_deferrals,
                 )
                 .await?;
                 // The evaluator's top-of-loop instance-state guard will
@@ -928,7 +1028,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 message = %message,
                 "tree path: retryable failure with no retry policy, failing node"
             );
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             Ok(false)
         }
         Err(EngineError::StepFailed {
@@ -936,11 +1042,23 @@ pub(crate) async fn execute_step_node_with_clock(
         }) => {
             // Permanent failure - mark node as failed. Not a breaker
             // failure: the dependency answered; the request was wrong.
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             Ok(false)
         }
         Err(e) => {
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             Err(e)
         }
     }
@@ -968,6 +1086,7 @@ async fn dispatch_plugin<F, Fut>(
     params: serde_json::Value,
     step_context: ExecutionContext,
     attempt: u32,
+    claim_token: chrono::DateTime<chrono::Utc>,
     handler_fn: F,
 ) -> Result<bool, EngineError>
 where
@@ -1000,6 +1119,7 @@ where
         move || handler_fn(ctx),
         step_def.output_schema.as_ref(),
         effect_guard,
+        Some(claim_token),
     )
     .await
 }
@@ -1040,6 +1160,7 @@ mod tests {
     async fn seed_instance(storage: &SqliteStorage, id: InstanceId) {
         let now = Utc::now();
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
@@ -1135,6 +1256,7 @@ mod tests {
     ) {
         let now = Utc::now();
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),

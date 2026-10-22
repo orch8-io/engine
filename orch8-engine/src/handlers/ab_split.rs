@@ -144,6 +144,7 @@ mod tests {
     fn make_instance() -> TaskInstance {
         let now = chrono::Utc::now();
         TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: SequenceId::new(),

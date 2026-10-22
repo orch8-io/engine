@@ -65,42 +65,29 @@ pub(super) async fn update_node_state(
     node_id: ExecutionNodeId,
     state: NodeState,
 ) -> Result<(), StorageError> {
-    let now = ts(chrono::Utc::now());
-    let (started, completed) = match state {
-        NodeState::Running => (Some(now.clone()), None),
-        NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped => {
-            (None, Some(now.clone()))
-        }
-        _ => (None, None),
-    };
-    if let Some(ref s) = started {
-        // COALESCE keeps the first Running transition's timestamp so a
-        // re-dispatch (e.g. worker retry, Waiting→Running) doesn't overwrite
-        // it — parity with the Postgres impl and the wait_for_input timeout
-        // baseline, which is measured from the node's original start.
-        sqlx::query(
-            "UPDATE execution_tree SET state=?2, started_at=COALESCE(started_at, ?3) WHERE id=?1",
-        )
-        .bind(node_id.into_uuid().to_string())
-        .bind(state.to_string())
-        .bind(s)
-        .execute(&storage.pool)
-        .await?;
-    } else if let Some(ref c) = completed {
-        sqlx::query("UPDATE execution_tree SET state=?2, completed_at=?3 WHERE id=?1")
-            .bind(node_id.into_uuid().to_string())
-            .bind(state.to_string())
-            .bind(c)
-            .execute(&storage.pool)
-            .await?;
-    } else {
-        sqlx::query("UPDATE execution_tree SET state=?2 WHERE id=?1")
-            .bind(node_id.into_uuid().to_string())
-            .bind(state.to_string())
-            .execute(&storage.pool)
-            .await?;
-    }
+    let mut conn = storage.pool.acquire().await?;
+    update_node_state_on(&mut conn, node_id, state, None).await?;
     Ok(())
+}
+
+pub(super) async fn update_node_state_on(
+    conn: &mut sqlx::SqliteConnection,
+    node_id: ExecutionNodeId,
+    state: NodeState,
+    instance_id: Option<InstanceId>,
+) -> Result<bool, StorageError> {
+    let now = super::helpers::ts(chrono::Utc::now());
+    let started = (state == NodeState::Running).then_some(&now);
+    let completed = matches!(
+        state,
+        NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped
+    )
+    .then_some(&now);
+    let changed = sqlx::query(
+        "UPDATE execution_tree SET state=?2, started_at=COALESCE(started_at, ?3), completed_at=COALESCE(?4, completed_at) WHERE id=?1 AND (?5 IS NULL OR instance_id=?5)",
+    ).bind(node_id.to_string()).bind(state.to_string()).bind(started).bind(completed)
+     .bind(instance_id.map(|id| id.to_string())).execute(&mut *conn).await?;
+    Ok(changed.rows_affected() > 0)
 }
 
 /// Batch transition `node_ids` to `state` in a single round-trip.

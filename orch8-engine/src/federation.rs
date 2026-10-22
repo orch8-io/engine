@@ -980,6 +980,7 @@ mod tests {
         if with_parent {
             storage
                 .create_instance(&TaskInstance {
+                    claimed_at: None,
                     sub_tenant: None,
                     id: instance_id,
                     sequence_id: orch8_types::ids::SequenceId::new(),

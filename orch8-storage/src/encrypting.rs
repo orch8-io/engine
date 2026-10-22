@@ -1573,6 +1573,10 @@ passthrough_impl! {
         async fn create_execution_nodes_batch(&self, nodes: &[orch8_types::execution::ExecutionNode]) -> Result<(), StorageError>;
         async fn get_execution_tree(&self, instance_id: InstanceId) -> Result<Vec<orch8_types::execution::ExecutionNode>, StorageError>;
         async fn update_node_state(&self, node_id: orch8_types::ids::ExecutionNodeId, state: orch8_types::execution::NodeState) -> Result<(), StorageError>;
+    async fn update_node_state_claimed(&self, instance_id: InstanceId, node_id: orch8_types::ids::ExecutionNodeId,
+        state: orch8_types::execution::NodeState, claim_token: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError>;
+
         async fn batch_activate_nodes(&self, node_ids: &[orch8_types::ids::ExecutionNodeId]) -> Result<(), StorageError>;
         async fn update_nodes_state(&self, node_ids: &[orch8_types::ids::ExecutionNodeId], state: orch8_types::execution::NodeState) -> Result<(), StorageError>;
         async fn get_children(&self, parent_id: orch8_types::ids::ExecutionNodeId) -> Result<Vec<orch8_types::execution::ExecutionNode>, StorageError>;
@@ -1593,6 +1597,10 @@ passthrough_impl! {
     ) -> Result<(), StorageError> {
         let encrypted = self.encrypt_block_output(output)?;
         self.inner.save_block_output(encrypted.as_ref()).await
+    }
+    async fn save_block_output_claimed(&self, output: &orch8_types::output::BlockOutput, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_block_output(output)?;
+        self.inner.save_block_output_claimed(encrypted.as_ref(), claim_token).await
     }
     async fn get_block_output(
         &self,
@@ -2619,6 +2627,10 @@ passthrough_impl! {
             .set_instance_kv(instance_id, key, &encrypted)
             .await
     }
+    async fn set_instance_kv_claimed(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_json_value(value)?;
+        self.inner.set_instance_kv_claimed(instance_id, key, &encrypted, claim_token).await
+    }
     async fn get_instance_kv(
         &self,
         instance_id: InstanceId,
@@ -2710,6 +2722,10 @@ passthrough_impl! {
         self.inner
             .save_externalized_state(instance_id, ref_key, &encrypted)
             .await
+    }
+    async fn save_externalized_state_claimed(&self, instance_id: InstanceId, ref_key: &str, payload: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError> {
+        let encrypted = self.seal_externalized(instance_id, ref_key, payload).await?;
+        self.inner.save_externalized_state_claimed(instance_id, ref_key, &encrypted, claim_token).await
     }
     async fn get_externalized_state(
         &self,

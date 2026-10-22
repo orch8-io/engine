@@ -75,6 +75,7 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
 fn mk_instance(ctx_data: serde_json::Value, seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
@@ -1398,6 +1399,7 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
     storage.create_sequence(&seq).await.unwrap();
     let inst = mk_instance(json!({}), seq.id);
     let inst = TaskInstance {
+        claimed_at: None,
         id: inst_id,
         ..inst
     };
@@ -2287,6 +2289,7 @@ async fn a15_workers_receive_fair_share_under_load() {
 
     for i in 0..20 {
         let inst = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq.id,

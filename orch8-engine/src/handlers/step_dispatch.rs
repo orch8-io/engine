@@ -31,7 +31,16 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
 {
-    dispatch_plugin_with_effect(storage, node, attempt, handler_fn, output_schema, None).await
+    dispatch_plugin_with_effect(
+        storage,
+        node,
+        attempt,
+        handler_fn,
+        output_schema,
+        None,
+        None,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines)] // one linear branch keeps effect and node transitions auditable
@@ -42,6 +51,7 @@ pub(crate) async fn dispatch_plugin_with_effect<F, Fut>(
     handler_fn: F,
     output_schema: Option<&serde_json::Value>,
     mut effect_guard: Option<crate::effect_guard::EffectGuard<'_>>,
+    claim_token: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<bool, EngineError>
 where
     F: FnOnce() -> Fut,
@@ -74,7 +84,8 @@ where
                         errors = %errors.join("; "),
                         "plugin output failed output_schema validation — failing node"
                     );
-                    evaluator::fail_node(storage, node.id).await?;
+                    evaluator::persist_node_state(storage, node, NodeState::Failed, claim_token)
+                        .await?;
                     return Ok(false);
                 }
             }
@@ -97,17 +108,21 @@ where
             // references then evaluated against a blank value while the
             // workflow advanced as if the step succeeded. Fail the node
             // instead so templating sees a consistent world.
-            if let Err(e) = storage.save_block_output(&bo).await {
+            if let Err(e) = super::step::persist_output(storage, &bo, claim_token).await {
+                if matches!(e, EngineError::ClaimLost { .. }) || e.is_transient_storage() {
+                    return Err(e);
+                }
                 tracing::error!(
                     instance_id = %node.instance_id,
                     block_id = %node.block_id,
                     error = %e,
                     "plugin handler: save_block_output failed — failing node to avoid stale-output downstream"
                 );
-                evaluator::fail_node(storage, node.id).await?;
+                evaluator::persist_node_state(storage, node, NodeState::Failed, claim_token)
+                    .await?;
                 return Ok(false);
             }
-            evaluator::complete_node(storage, node.id).await?;
+            evaluator::persist_node_state(storage, node, NodeState::Completed, claim_token).await?;
             Ok(true)
         }
         Err(step_err) => {
@@ -159,7 +174,12 @@ where
                 attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
                 created_at: chrono::Utc::now(),
             };
-            if let Err(persist_err) = storage.save_block_output(&bo).await {
+            if let Err(persist_err) = super::step::persist_output(storage, &bo, claim_token).await {
+                if matches!(persist_err, EngineError::ClaimLost { .. })
+                    || persist_err.is_transient_storage()
+                {
+                    return Err(persist_err);
+                }
                 // Non-fatal: still fail the node. A missing error-marker is
                 // strictly worse UX than a missing success-output, but not
                 // load-bearing for correctness.
@@ -175,7 +195,7 @@ where
             // re-schedule via the same backoff path as the in-process
             // handler — that requires threading `instance` + `step_def.retry`
             // into this helper. Tracked as follow-up to Issue 3's fix.
-            evaluator::fail_node(storage, node.id).await?;
+            evaluator::persist_node_state(storage, node, NodeState::Failed, claim_token).await?;
             Ok(false)
         }
     }
@@ -606,6 +626,7 @@ mod tests {
     fn mk_instance(id: InstanceId) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Parallel step deferrals
+
+- Parallel leaves retain their execution claim until both results are durable.
+  Delay, circuit-breaker, and retry deferrals schedule the instance after the
+  batch settles. Per-step retry deadlines preserve backoff when a sibling
+  needs an earlier wake-up.
+
+### Runtime claim metadata
+
+- Storage reads and claims retain `TaskInstance::claimed_at` separately from
+  context/heartbeat timestamps. Repeated public evaluator calls, loops and
+  self-modification no longer mistake a context update for claim loss.
+- Rust `TaskInstance` literals now initialize `claimed_at: None`; native storage
+  supplies the actual timestamp. This runtime field is excluded from JSON, so
+  API and backup documents retain their existing shape. Explicit drivers can
+  use the public `evaluate_with_claim_token` API with their original token.
+
+### Step results after claim recovery
+
+- Late handlers cannot replace a newer execution's outputs, cached results,
+  externalized payloads, or step-node state/timestamps. Ownership is checked
+  in the write transaction, including a PostgreSQL instance-row lock.
+- Claim loss stops the stale run before failure, retry-marker, or node-failure
+  fallback. Transient storage failures remain eligible for retry.
+- Custom Rust storage backends must implement the four atomic claimed-write
+  methods. `StepExecParams` now carries `claim_token`: use the original lease
+  for scheduler dispatch and `None` for explicitly unclaimed step execution.
+
 ### Webhook redelivery
 
 - Reject manual redelivery of pending or in-flight outbox rows with HTTP 409.

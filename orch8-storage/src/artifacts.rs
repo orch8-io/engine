@@ -531,6 +531,7 @@ mod tests {
         let mk = |state: InstanceState| {
             let now = chrono::Utc::now();
             TaskInstance {
+                claimed_at: None,
                 sub_tenant: None,
                 id: InstanceId::new(),
                 sequence_id: SequenceId::new(),

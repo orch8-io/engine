@@ -207,6 +207,7 @@ impl From<EngineError> for ApiError {
             EngineError::Storage(error) => Self::from(error),
             EngineError::InvalidTransition { .. } => Self::InvalidArgument(err.to_string()),
             EngineError::HandlerNotFound(h) => Self::NotFound(format!("handler: {h}")),
+            EngineError::ClaimLost { .. } => Self::Conflict(err.to_string()),
             EngineError::ShuttingDown => Self::Unavailable("shutdown in progress".into()),
             other => Self::Internal(other.to_string()),
         }

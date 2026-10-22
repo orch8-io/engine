@@ -572,7 +572,7 @@ pub async fn evaluate_fenced(
         instance,
         sequence,
         clock,
-        instance.updated_at,
+        instance.claimed_at.unwrap_or(instance.updated_at),
         stop,
     )
     .await
@@ -580,7 +580,9 @@ pub async fn evaluate_fenced(
 
 /// Evaluate work claimed by the scheduler using its immutable lease token.
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn evaluate_with_claim_token(
+/// Evaluate using the caller's original claim explicitly, even when its
+/// instance context/heartbeat timestamps have since changed.
+pub async fn evaluate_with_claim_token(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
@@ -933,6 +935,7 @@ async fn phase_root_activation(
             outputs_snapshot,
             &ctx.clock,
             ctx.claim_token,
+            None,
         )
         .await?;
         ctx.tree_stale = true;
@@ -983,6 +986,7 @@ async fn phase_running_steps(
         // Wait for both futures even if one fails. Dropping the sibling on the
         // first error could interrupt a handler after it has committed an
         // external side effect but before its durable completion is recorded.
+        let pending_deferrals = crate::handlers::step_deferral::PendingStepDeferrals::default();
         let (left_result, right_result) = Box::pin(async {
             tokio::join!(
                 dispatch_block(
@@ -996,6 +1000,7 @@ async fn phase_running_steps(
                     outputs_snapshot,
                     &ctx.clock,
                     ctx.claim_token,
+                    Some(&pending_deferrals),
                 ),
                 dispatch_block(
                     storage,
@@ -1008,12 +1013,16 @@ async fn phase_running_steps(
                     outputs_snapshot,
                     &ctx.clock,
                     ctx.claim_token,
+                    Some(&pending_deferrals),
                 ),
             )
         })
         .await;
         left_result?;
         right_result?;
+        pending_deferrals
+            .apply(storage.as_ref(), &ctx.instance, ctx.claim_token)
+            .await?;
         ctx.tree_stale = true;
         ctx.instance_stale = true;
         return Ok(IterAction::Continue);
@@ -1044,6 +1053,7 @@ async fn phase_running_steps(
         outputs_snapshot,
         &ctx.clock,
         ctx.claim_token,
+        None,
     )
     .await?;
     ctx.tree_stale = true;
@@ -1167,6 +1177,7 @@ async fn phase_composite_reevaluation(
             outputs_snapshot,
             &ctx.clock,
             ctx.claim_token,
+            None,
         )
         .await?;
         if may_mutate_instance(block) {
@@ -1469,6 +1480,29 @@ pub fn find_block<'a>(
         }
     }
     None
+}
+
+/// Persist a step-node result under its original claim. Explicit unclaimed
+/// helpers may omit the token; production dispatch always supplies it.
+pub(crate) async fn persist_node_state(
+    storage: &dyn StorageBackend,
+    node: &ExecutionNode,
+    state: NodeState,
+    claim_token: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), EngineError> {
+    if let Some(token) = claim_token {
+        if !storage
+            .update_node_state_claimed(node.instance_id, node.id, state, token)
+            .await?
+        {
+            return Err(EngineError::ClaimLost {
+                instance_id: node.instance_id,
+            });
+        }
+    } else {
+        storage.update_node_state(node.id, state).await?;
+    }
+    Ok(())
 }
 
 /// Mark a node as completed.

@@ -371,3 +371,9 @@ where
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod claim_write_tests;
+
+#[cfg(test)]
+mod parallel_deferral_tests;

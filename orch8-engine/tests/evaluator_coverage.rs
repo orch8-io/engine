@@ -2085,14 +2085,11 @@ async fn dispatch_sub_sequence_child_completed_completes_node() {
     let children = storage.get_child_instances(inst.id).await.unwrap();
     assert_eq!(children.len(), 1);
     let child = &children[0];
-    storage
-        .update_instance_state(child.id, InstanceState::Running, None)
-        .await
-        .unwrap();
+    // The child is Scheduled; drive acquires its real execution claim.
     drive(&storage, &reg, child.id, &child_seq).await;
 
     storage
-        .update_instance_state(inst.id, InstanceState::Running, None)
+        .update_instance_state(inst.id, InstanceState::Scheduled, Some(Utc::now()))
         .await
         .unwrap();
     drive(&storage, &reg, inst.id, &parent_seq).await;
@@ -2164,14 +2161,11 @@ async fn dispatch_sub_sequence_child_failed_fails_node() {
     let children = storage.get_child_instances(inst.id).await.unwrap();
     assert_eq!(children.len(), 1);
     let child = &children[0];
-    storage
-        .update_instance_state(child.id, InstanceState::Running, None)
-        .await
-        .unwrap();
+    // The child is Scheduled; drive acquires its real execution claim.
     drive(&storage, &reg, child.id, &child_seq).await;
 
     storage
-        .update_instance_state(inst.id, InstanceState::Running, None)
+        .update_instance_state(inst.id, InstanceState::Scheduled, Some(Utc::now()))
         .await
         .unwrap();
     drive(&storage, &reg, inst.id, &parent_seq).await;

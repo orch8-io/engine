@@ -4035,6 +4035,7 @@ async fn sequence_config_accessible_in_steps() {
     storage.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq.id,
@@ -4130,6 +4131,7 @@ async fn sequence_priority_ordering() {
     let now = Utc::now();
     // High priority.
     let high = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq.id,

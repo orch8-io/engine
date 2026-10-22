@@ -69,6 +69,7 @@ fn instance(
     parent: Option<InstanceId>,
 ) -> TaskInstance {
     TaskInstance {
+        claimed_at: None,
         id: InstanceId::new(),
         sub_tenant: None,
         sequence_id: seq,
