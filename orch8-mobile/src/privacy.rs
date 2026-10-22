@@ -30,7 +30,10 @@ impl ProtectedFieldBoundary {
         encryptor: FieldEncryptor,
         protected_fields: impl IntoIterator<Item = String>,
     ) -> Result<Self, PrivacyError> {
-        let protected_fields = protected_fields.into_iter().collect::<BTreeSet<_>>();
+        let protected_fields = protected_fields
+            .into_iter()
+            .map(|field| field.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>();
         if protected_fields.is_empty() || protected_fields.iter().any(String::is_empty) {
             return Err(PrivacyError::InvalidPolicy);
         }
@@ -68,7 +71,8 @@ impl ProtectedFieldBoundary {
     }
 
     /// Recursively redact policy-labelled keys before a value crosses logs,
-    /// traces, artifacts, or sync. Encrypted strings remain opaque.
+    /// traces, artifacts, or sync. Field names match without ASCII case sensitivity;
+    /// prefixes and suffixes remain distinct. Encrypted strings remain opaque.
     #[must_use]
     pub fn sanitize(
         &self,
@@ -102,7 +106,7 @@ fn sanitize_value(value: &serde_json::Value, protected: &BTreeSet<String>) -> se
         serde_json::Value::Object(map) => serde_json::Value::Object(
             map.iter()
                 .map(|(key, value)| {
-                    let value = if protected.contains(key) {
+                    let value = if protected.contains(&key.to_ascii_lowercase()) {
                         serde_json::Value::String(REDACTED.into())
                     } else {
                         sanitize_value(value, protected)
@@ -308,11 +312,39 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG: protected-field redaction is case-sensitive, so {\"SSN\": ..} leaks (T4 #12c) — fixed on test/bugs"]
     fn sanitizer_matches_protected_keys_case_insensitively() {
         let sanitized = sanitize_value(&serde_json::json!({"SSN": "123"}), &policy());
 
         assert_eq!(sanitized, serde_json::json!({"SSN": "[PROTECTED]"}));
+    }
+
+    #[test]
+    fn mixed_case_policy_redacts_nested_values_on_every_disclosure_surface() {
+        let boundary = ProtectedFieldBoundary::new(
+            FieldEncryptor::from_bytes(&[1; 32]),
+            ["SSN".into(), "SeCrEt".into()],
+        )
+        .unwrap();
+        let value = serde_json::json!({
+            "items": [{"ssn": "identity-marker", "nested": {"SECRET": {"raw": "secret-marker"}}}],
+            "SSN": ["array-marker"], "user_ssn": "public-label", "secret_value": 3
+        });
+        let expected = serde_json::json!({
+            "items": [{"ssn": "[PROTECTED]", "nested": {"SECRET": "[PROTECTED]"}}],
+            "SSN": "[PROTECTED]", "user_ssn": "public-label", "secret_value": 3
+        });
+        for surface in [
+            DisclosureSurface::Log,
+            DisclosureSurface::Trace,
+            DisclosureSurface::Artifact,
+            DisclosureSurface::Sync,
+        ] {
+            assert_eq!(
+                boundary.sanitize(surface, &value),
+                expected,
+                "surface {surface:?}"
+            );
+        }
     }
 
     #[test]

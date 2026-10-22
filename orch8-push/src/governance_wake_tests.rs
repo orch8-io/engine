@@ -388,7 +388,7 @@ fn malformed_shapes() -> Vec<(&'static str, Result<(), PushGovernanceError>)> {
 
 #[test]
 fn wake_with_a_malformed_shape_is_never_accepted() {
-    // The exact error variant is asserted by the ignored test below.
+    // The exact error variant is asserted by the regression below.
     for (case, result) in malformed_shapes() {
         assert!(result.is_err(), "{case} must be rejected");
     }
@@ -405,7 +405,6 @@ fn wake_with_a_malformed_shape_is_never_accepted() {
 }
 
 #[test]
-#[ignore = "BUG: validate_shape reports a malformed id/schema as InvalidExpiry — fixed on test/bugs"]
 fn wake_with_a_malformed_shape_is_reported_as_invalid_not_expired() {
     for (case, result) in malformed_shapes() {
         assert!(

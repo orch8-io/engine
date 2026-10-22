@@ -191,18 +191,25 @@ impl SignedWakeMetadata {
     }
 
     fn validate_shape(&self) -> Result<(), PushGovernanceError> {
-        if self.schema_version != 1
-            || [
-                self.tenant_id.as_str(),
-                self.device_id.as_str(),
-                self.command_id.as_str(),
-                self.key_id.as_str(),
-            ]
-            .iter()
-            .any(|value| value.is_empty() || value.len() > 256)
-            || self.expires_at <= self.issued_at
-            || self.expires_at - self.issued_at > MAX_WAKE_TTL
+        if self.schema_version != 1 {
+            return Err(PushGovernanceError::Invalid(
+                "unsupported wake schema version".into(),
+            ));
+        }
+        if [
+            self.tenant_id.as_str(),
+            self.device_id.as_str(),
+            self.command_id.as_str(),
+            self.key_id.as_str(),
+        ]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > 256)
         {
+            return Err(PushGovernanceError::Invalid(
+                "wake identifiers must contain 1 to 256 bytes".into(),
+            ));
+        }
+        if self.expires_at <= self.issued_at || self.expires_at - self.issued_at > MAX_WAKE_TTL {
             return Err(PushGovernanceError::InvalidExpiry);
         }
         Ok(())
