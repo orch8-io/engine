@@ -169,3 +169,13 @@ export interface WaitOptions {
   timeoutMs?: number;
   intervalMs?: number;
 }
+
+/** Cluster registry fields exercised by membership and drain tests. */
+export interface ClusterNode {
+  id: string;
+  name: string;
+  status: "active" | "draining" | "stopped";
+  drain: boolean;
+  registered_at: string;
+  last_heartbeat_at: string;
+}

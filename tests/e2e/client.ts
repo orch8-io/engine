@@ -7,8 +7,11 @@
  * until the OpenAPI-generated types land.
  */
 
+import { setTimeout as delay } from "node:timers/promises";
+
 import type {
   BlockOutput,
+  ClusterNode,
   Block,
   CreateInstanceRequest,
   CreateInstanceResponse,
@@ -1108,8 +1111,29 @@ export class Orch8Client {
 
   // --- Cluster ---
 
-  async listClusterNodes(): Promise<ApiResponse[]> {
-    return this.#get<ApiResponse[]>("/cluster/nodes");
+  async listClusterNodes(signal?: AbortSignal): Promise<ClusterNode[]> {
+    return this.#get<ClusterNode[]>("/cluster/nodes", signal);
+  }
+
+  /** Liveness can precede registration; wait for an eligible node explicitly. */
+  async waitForActiveClusterNode({
+    timeoutMs = 10_000,
+    intervalMs = 25,
+  }: WaitOptions = {}): Promise<ClusterNode> {
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      for (;;) {
+        const node = (await this.listClusterNodes(signal))
+          .find(node => node.status === "active" && !node.drain);
+        if (node) return node;
+        await delay(intervalMs, undefined, { signal });
+      }
+    } catch (error) {
+      if (signal.aborted) {
+        throw new Error("Timeout waiting for an active cluster node to register", { cause: error });
+      }
+      throw error;
+    }
   }
 
   async drainClusterNode(id: string): Promise<ApiResponse> {
@@ -1314,9 +1338,10 @@ export class Orch8Client {
 
   // --- Internal ---
 
-  async #get<T = ApiResponse>(path: string): Promise<T> {
+  async #get<T = ApiResponse>(path: string, signal?: AbortSignal): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       headers: { ...this.#defaultHeaders },
+      ...(signal ? { signal } : {}),
     });
     if (!res.ok) throw new ApiError(res.status, await res.text(), path);
     return (await res.json()) as T;
