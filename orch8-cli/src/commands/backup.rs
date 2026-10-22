@@ -50,7 +50,6 @@ use crate::OutputFormat;
 pub const FORMAT: &str = "orch8-backup";
 pub const FORMAT_VERSION: u32 = 1;
 /// Storage list calls without offsets cap at this many rows.
-const LIST_CAP: u32 = 1000;
 const PAGE: u32 = 500;
 /// Restore verifies archives in memory, so bound both the compressed input and
 /// the total expanded data before allocating attacker-controlled sizes.
@@ -251,16 +250,6 @@ async fn open_target(target: &DbTarget) -> Result<Arc<dyn StorageBackend>> {
     }
 }
 
-fn check_cap(kind: &str, len: usize, scope: &str) -> Result<()> {
-    if len >= LIST_CAP as usize {
-        bail!(
-            "{kind} listing for {scope} returned the storage cap of {LIST_CAP} rows; the backup \
-             cannot prove completeness — split tenants or raise the cap before backing up"
-        );
-    }
-    Ok(())
-}
-
 /// Read everything to back up.
 #[allow(clippy::too_many_lines)]
 pub async fn snapshot(storage: &dyn StorageBackend, include_instances: bool) -> Result<Snapshot> {
@@ -280,77 +269,25 @@ pub async fn snapshot(storage: &dyn StorageBackend, include_instances: bool) -> 
         }
         offset += PAGE;
     }
-    let tenants: BTreeSet<String> = sequences
-        .iter()
-        .map(|s| s.tenant_id.as_str().to_string())
-        .collect();
     for seq in &sequences {
         snap.sequences.push(serde_json::to_value(seq)?);
     }
 
-    // Triggers / cron / credentials have no offset; fall back to per-tenant
-    // listings when the global one hits the cap.
-    let triggers = storage.list_triggers(None, LIST_CAP).await?;
-    let triggers = if triggers.len() >= LIST_CAP as usize {
-        let mut all = Vec::new();
-        for tenant in &tenants {
-            let t = orch8_types::ids::TenantId::unchecked(tenant.clone());
-            let page = storage.list_triggers(Some(&t), LIST_CAP).await?;
-            check_cap("trigger", page.len(), tenant)?;
-            all.extend(page);
-        }
-        all
-    } else {
-        triggers
-    };
-    for trigger in &triggers {
-        snap.triggers.push(trigger_json(trigger)?);
+    // Catalog reads are complete independently of sequence ownership and
+    // public API pagination caps (disabled/preprovisioned rows count too).
+    for trigger in storage.list_all_triggers(None).await? {
+        snap.triggers.push(trigger_json(&trigger)?);
     }
-
-    let cron = storage.list_cron_schedules(None, LIST_CAP).await?;
-    let cron: Vec<CronSchedule> = if cron.len() >= LIST_CAP as usize {
-        let mut all = Vec::new();
-        for tenant in &tenants {
-            let t = orch8_types::ids::TenantId::unchecked(tenant.clone());
-            let page = storage.list_cron_schedules(Some(&t), LIST_CAP).await?;
-            check_cap("cron", page.len(), tenant)?;
-            all.extend(page);
-        }
-        all
-    } else {
-        cron
-    };
-    for schedule in &cron {
-        snap.cron.push(serde_json::to_value(schedule)?);
+    for schedule in storage.list_all_cron_schedules(None).await? {
+        snap.cron.push(serde_json::to_value(&schedule)?);
     }
 
     for rule in storage.list_queue_routing_rules(None, None).await? {
         snap.queue_routing.push(serde_json::to_value(&rule)?);
     }
 
-    let credentials = storage.list_credentials(None, LIST_CAP).await?;
-    let credentials = if credentials.len() >= LIST_CAP as usize {
-        let mut by_id: BTreeMap<(String, String), CredentialDef> = BTreeMap::new();
-        for tenant in &tenants {
-            let t = orch8_types::ids::TenantId::unchecked(tenant.clone());
-            let page = storage.list_credentials(Some(&t), LIST_CAP).await?;
-            check_cap("credential", page.len(), tenant)?;
-            for c in page {
-                by_id.insert((c.tenant_id.clone(), c.id.clone()), c);
-            }
-        }
-        by_id.into_values().collect()
-    } else {
-        credentials
-    };
-    // Listings may omit secret material; re-read each credential by id.
-    for listed in &credentials {
-        let tenant = orch8_types::ids::TenantId::unchecked(listed.tenant_id.clone());
-        let full = storage
-            .get_credential(Some(&tenant), &listed.id)
-            .await?
-            .unwrap_or_else(|| listed.clone());
-        snap.credentials.push(credential_json(&full)?);
+    for credential in storage.list_all_credentials(None).await? {
+        snap.credentials.push(credential_json(&credential)?);
     }
     if !snap.credentials.is_empty() {
         snap.warnings.push(CREDENTIAL_WARNING.into());

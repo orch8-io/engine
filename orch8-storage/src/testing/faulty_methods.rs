@@ -213,6 +213,7 @@ fault_impl! {
         async fn create_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
         async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<CronSchedule>, StorageError>;
         async fn list_cron_schedules(&self, tenant_id: Option<&TenantId>, limit: u32) -> Result<Vec<CronSchedule>, StorageError>;
+        async fn list_all_cron_schedules(&self, tenant_id: Option<&TenantId>) -> Result<Vec<CronSchedule>, StorageError>;
         async fn update_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
         async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
         async fn claim_due_cron_schedules(&self, now: DateTime<Utc>) -> Result<Vec<CronSchedule>, StorageError>;
@@ -273,6 +274,7 @@ fault_impl! {
         async fn create_credential(&self, credential: &orch8_types::credential::CredentialDef) -> Result<(), StorageError>;
         async fn get_credential(&self, tenant_id: Option<&TenantId>, id: &str) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError>;
         async fn list_credentials(&self, tenant_id: Option<&TenantId>, limit: u32) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
+        async fn list_all_credentials(&self, tenant_id: Option<&TenantId>) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
         async fn update_credential(&self, credential: &orch8_types::credential::CredentialDef) -> Result<(), StorageError>;
         async fn update_credential_cas(&self, credential: &orch8_types::credential::CredentialDef, expected_updated_at: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn claim_credential_refresh(&self, id: &str, now: chrono::DateTime<chrono::Utc>, lease_until: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;

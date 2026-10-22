@@ -2052,6 +2052,13 @@ impl crate::SchedulingStore for SqliteStorage {
         cron::get(self, id).await
     }
 
+    async fn list_all_cron_schedules(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<CronSchedule>, StorageError> {
+        cron::list_all(self, tenant_id).await
+    }
+
     async fn list_cron_schedules(
         &self,
         tenant_id: Option<&TenantId>,
@@ -2473,6 +2480,13 @@ impl crate::AdminStore for SqliteStorage {
         id: &str,
     ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError> {
         credentials::get(self, tenant_id, id).await
+    }
+
+    async fn list_all_credentials(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
+        credentials::list_all(self, tenant_id).await
     }
 
     async fn list_credentials(

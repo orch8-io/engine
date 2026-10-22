@@ -515,3 +515,107 @@ async fn sqlite_snapshot_can_read_a_readonly_source_without_changing_it() {
         0o444
     );
 }
+
+#[tokio::test]
+async fn backup_catalog_keeps_credentials_for_tenants_without_sequences() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let now = Utc::now();
+    for index in 0..1001 {
+        storage
+            .create_credential(&CredentialDef {
+                id: format!("credential-{index:04}"),
+                tenant_id: format!("tenant-{}", index % 2),
+                name: format!("Credential {index}"),
+                kind: orch8_types::credential::CredentialKind::default(),
+                value: SecretString::from(format!("secret-{index}")),
+                expires_at: None,
+                refresh_url: None,
+                refresh_token: Some(SecretString::from(format!("refresh-{index}"))),
+                enabled: index % 2 == 0,
+                description: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+    }
+    let snap = snapshot(&storage, false).await.unwrap();
+    assert!(snap.sequences.is_empty());
+    assert_eq!(
+        snap.credentials.len(),
+        1001,
+        "a public listing cap must not omit credentials from a successful backup"
+    );
+    let archive = read_archive(&write_archive(&snap, "sqlite").unwrap()).unwrap();
+    let restored = SqliteStorage::in_memory().await.unwrap();
+    restore(&archive, &restored, false, false).await.unwrap();
+    let credential = restored
+        .get_credential(Some(&TenantId::unchecked("tenant-0")), "credential-1000")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(credential.value.expose(), "secret-1000");
+    assert_eq!(credential.refresh_token.unwrap().expose(), "refresh-1000");
+}
+
+#[tokio::test]
+async fn backup_catalog_keeps_triggers_for_tenants_without_sequences() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let now = Utc::now();
+    for index in 0..1001 {
+        storage
+            .create_trigger(&TriggerDef {
+                slug: format!("trigger-{index:04}"),
+                sequence_name: "future-sequence".into(),
+                version: None,
+                tenant_id: TenantId::unchecked(format!("tenant-{}", index % 2)),
+                namespace: "default".into(),
+                enabled: false,
+                secret: Some(SecretString::from(format!("hmac-{index}"))),
+                trigger_type: orch8_types::trigger::TriggerType::default(),
+                config: serde_json::json!({}),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+    }
+    let snap = snapshot(&storage, false).await.unwrap();
+    assert!(snap.sequences.is_empty());
+    assert_eq!(
+        snap.triggers.len(),
+        1001,
+        "disabled/preprovisioned triggers must survive a backup without their sequence"
+    );
+    let archive = read_archive(&write_archive(&snap, "sqlite").unwrap()).unwrap();
+    let restored = SqliteStorage::in_memory().await.unwrap();
+    restore(&archive, &restored, false, false).await.unwrap();
+    let trigger = restored
+        .get_trigger(Some(&TenantId::unchecked("tenant-0")), "trigger-1000")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(trigger.secret.unwrap().expose(), "hmac-1000");
+}
+
+#[tokio::test]
+async fn backup_catalog_keeps_more_than_one_page_of_cron_in_one_tenant() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _, _) = seeded_source(dir.path()).await;
+    let storage = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
+    let template = storage
+        .list_cron_schedules(None, 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    for _ in 0..1000 {
+        let mut schedule = template.clone();
+        schedule.id = uuid::Uuid::now_v7();
+        storage.create_cron_schedule(&schedule).await.unwrap();
+    }
+    let snap = snapshot(&storage, false)
+        .await
+        .expect("a valid catalog larger than the API cap must remain exportable");
+    assert_eq!(snap.cron.len(), 1001);
+}

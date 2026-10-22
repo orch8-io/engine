@@ -62,6 +62,34 @@ pub(super) async fn get(
     row.map(CredentialRow::into_credential).transpose()
 }
 
+pub(super) async fn list_all(
+    store: &PostgresStorage,
+    tenant_id: Option<&TenantId>,
+) -> Result<Vec<CredentialDef>, StorageError> {
+    let rows = match tenant_id {
+        Some(tid) => {
+            sqlx::query_as::<_, CredentialRow>(
+                r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
+                  FROM credentials WHERE tenant_id = $1 OR tenant_id = '' ORDER BY id",
+            )
+            .bind(tid.as_str())
+            .fetch_all(&store.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, CredentialRow>(
+                r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
+                  FROM credentials ORDER BY id",
+            )
+            .fetch_all(&store.pool)
+            .await?
+        }
+    };
+    rows.into_iter()
+        .map(CredentialRow::into_credential)
+        .collect::<Result<Vec<_>, _>>()
+}
+
 pub(super) async fn list(
     store: &PostgresStorage,
     tenant_id: Option<&TenantId>,
