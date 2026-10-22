@@ -71,6 +71,7 @@ pub(super) async fn check_step_deadline(
 pub(super) async fn check_budget(
     storage: &Arc<dyn StorageBackend>,
     instance: &orch8_types::instance::TaskInstance,
+    claim_token: DateTime<Utc>,
 ) -> Result<bool, EngineError> {
     let Some(budget) = &instance.budget else {
         return Ok(false);
@@ -96,27 +97,28 @@ pub(super) async fn check_budget(
         "instance exceeded budget, pausing"
     );
 
+    let control = crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
     // Record the machine-readable reason BEFORE the state flip so an observer
     // who sees Paused is guaranteed to also see the breach metadata.
-    storage
-        .merge_instance_metadata(
-            instance.id,
-            &serde_json::json!({
-                "paused_reason": "budget_exceeded",
-                "budget_breach": {
-                    "limit": breach.limit,
-                    "limit_value": breach.limit_value,
-                    "actual": breach.actual,
-                },
-            }),
-        )
-        .await?;
+    crate::control::ExecutionControl::merge_instance_metadata(
+        &control,
+        instance.id,
+        &serde_json::json!({
+            "paused_reason": "budget_exceeded",
+            "budget_breach": {
+                "limit": breach.limit,
+                "limit_value": breach.limit_value,
+                "actual": breach.actual,
+            },
+        }),
+    )
+    .await?;
 
     crate::lifecycle::transition_claimed_instance(
         storage.as_ref(),
         instance.id,
         Some(&instance.tenant_id),
-        instance.updated_at,
+        claim_token,
         InstanceState::Running,
         InstanceState::Paused,
         None,
@@ -167,7 +169,7 @@ fn delay_fire_at_storage_precision(fire_at: DateTime<Utc>) -> DateTime<Utc> {
 /// clock reaches the recorded instant the delay is served and stays served,
 /// so retries of the step do not re-delay.
 async fn step_delay_until(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
@@ -196,7 +198,7 @@ async fn step_delay_until(
     };
     let mut until = recorded(&instance.metadata);
     if until.is_none()
-        && let Some(fresh) = storage.get_instance(instance.id).await?
+        && let Some(fresh) = storage.backend().get_instance(instance.id).await?
     {
         until = recorded(&fresh.metadata);
     }
@@ -281,13 +283,16 @@ async fn rate_limit_retry_at(
 /// transition (the flat path via `transition_instance`, the tree path via
 /// [`park_tree_instance_until`], after runnable work in the evaluation settles).
 pub(crate) async fn step_preamble_deferral(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
     if step_def.retry.is_some()
-        && let Some(previous) = storage.get_block_output(instance.id, &step_def.id).await?
+        && let Some(previous) = storage
+            .backend()
+            .get_block_output(instance.id, &step_def.id)
+            .await?
         && previous.output_ref.as_deref() == Some("__retry__")
         && let Some(value) = previous
             .output
@@ -321,11 +326,13 @@ pub(crate) async fn step_preamble_deferral(
         );
         return Ok(Some(next_open));
     }
-    if let Some(retry_after) = rate_limit_retry_at(storage, instance, step_def, clock).await? {
+    if let Some(retry_after) =
+        rate_limit_retry_at(storage.backend(), instance, step_def, clock).await?
+    {
         return Ok(Some(retry_after));
     }
     Box::pin(crate::step_placement::rate_budget_retry_at(
-        storage,
+        storage.backend(),
         instance,
         step_def,
         clock.now(),
@@ -1163,9 +1170,7 @@ pub(super) async fn execute_step_block(
 
     // Shared preamble (delay → send_window → rate limit), also run by the
     // tree path in `step_block::execute_step_node_with_clock`.
-    if let Some(fire_at) =
-        step_preamble_deferral(storage.as_ref(), instance, step_def, clock).await?
-    {
+    if let Some(fire_at) = step_preamble_deferral(&control, instance, step_def, clock).await? {
         defer_flat_instance(storage.as_ref(), instance, fire_at).await?;
         return Ok(StepOutcome::Deferred);
     }

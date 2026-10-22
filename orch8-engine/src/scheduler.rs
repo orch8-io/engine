@@ -2793,7 +2793,7 @@ async fn process_instance(
     // Budget enforcement: if the instance carries a budget and any configured
     // limit is already exceeded, pause it (pre-flight — before any step work
     // this tick). Instances without a budget take zero extra queries here.
-    if step_exec::check_budget(storage, &instance).await? {
+    if step_exec::check_budget(storage, &instance, ctx.claim_token).await? {
         return Ok(());
     }
 
