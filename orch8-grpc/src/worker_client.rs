@@ -62,7 +62,7 @@ const MAX_IN_FLIGHT: u32 = 256;
 const FIRST_TASK_WAIT: Duration = Duration::from_millis(300);
 /// Gap after which a claim round stops collecting a burst of tasks.
 const BURST_GAP: Duration = Duration::from_millis(25);
-/// Bound on waiting for a stream acknowledgement.
+/// Bound on lease-operation state, queue, and acknowledgement waits.
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound on the open/hello handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -168,6 +168,18 @@ struct SessionGuard {
     armed: bool,
 }
 
+impl SessionGuard {
+    fn for_session(session: &Session, live_generation: &Arc<AtomicU64>) -> Self {
+        Self {
+            generation: session.generation,
+            live_generation: Arc::clone(live_generation),
+            pending: Arc::clone(&session.pending),
+            closed: session.closed.clone(),
+            armed: true,
+        }
+    }
+}
+
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         if !self.armed {
@@ -200,6 +212,14 @@ struct Session {
     tasks: mpsc::Receiver<RemoteTask>,
     pending: Arc<StdMutex<VecDeque<Pending>>>,
     closed: CancellationToken,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // The reader owns channel clones and an idle network stream. Dropping
+        // the transport's sender alone cannot stop that background task.
+        self.closed.cancel();
+    }
 }
 
 /// [`LeaseTransport`] over the negotiated gRPC worker stream.
@@ -284,6 +304,29 @@ impl GrpcLeaseTransport {
             .max_encoding_message_size(4 * 1024 * 1024)
     }
 
+    async fn lock_session(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Session>>, String> {
+        tokio::time::timeout(ACK_TIMEOUT, self.session.lock())
+            .await
+            .map_err(|_| "worker stream session lock timed out".to_string())
+    }
+
+    async fn send_on_session(
+        &self,
+        session: &Session,
+        payload: ClientPayload,
+    ) -> Result<(), String> {
+        let mut cleanup = SessionGuard::for_session(session, &self.live_generation);
+        tokio::select! {
+            () = session.closed.cancelled() => Err("worker stream closed".to_string()),
+            sent = tokio::time::timeout(ACK_TIMEOUT, session.sender.send(frame(payload))) => {
+                sent.map_err(|_| "worker stream send timed out".to_string())?
+                    .map_err(|_| "worker stream closed".to_string())?;
+                cleanup.armed = false;
+                Ok(())
+            }
+        }
+    }
+
     /// Open (or confirm) a live session; used by `auto` mode to decide
     /// between gRPC and HTTP.
     ///
@@ -294,7 +337,7 @@ impl GrpcLeaseTransport {
         handlers: &[String],
         capabilities: &RuntimeCapabilities,
     ) -> Result<(), OpenError> {
-        let mut guard = self.session.lock().await;
+        let mut guard = self.lock_session().await.map_err(OpenError::Failed)?;
         self.ensure_session(&mut guard, handlers, capabilities)
             .await
             .map(|_| ())
@@ -409,7 +452,7 @@ impl GrpcLeaseTransport {
             return None;
         }
         let deadline = tokio::time::Instant::now() + ACK_TIMEOUT;
-        let (sender, pending, closed) = {
+        let (sender, mut cleanup) = {
             let guard = tokio::time::timeout_at(deadline, self.session.lock())
                 .await
                 .ok()?;
@@ -419,26 +462,19 @@ impl GrpcLeaseTransport {
             }
             (
                 session.sender.clone(),
-                Arc::clone(&session.pending),
-                session.closed.clone(),
+                SessionGuard::for_session(session, &self.live_generation),
             )
-        };
-        let mut cleanup = SessionGuard {
-            generation: task.session,
-            live_generation: Arc::clone(&self.live_generation),
-            pending: Arc::clone(&pending),
-            closed: closed.clone(),
-            armed: true,
         };
         let (reply, response) = oneshot::channel();
         {
-            let mut queue = pending
+            let mut queue = cleanup
+                .pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             // Another mutation may have retired this session after we
             // released the session mutex. Check under the queue lock so no
             // entry can be inserted after the retirement drain.
-            if closed.is_cancelled() {
+            if cleanup.closed.is_cancelled() {
                 return None;
             }
             queue.push_back(Pending {
@@ -465,11 +501,15 @@ impl GrpcLeaseTransport {
         F: FnOnce(Orch8ServiceClient<Channel>) -> Fut,
         Fut: std::future::Future<Output = Result<tonic::Response<proto::Empty>, Status>>,
     {
-        match call(self.client()).await {
-            Ok(_) => LeaseResponse::Accepted,
-            Err(status) => {
+        match tokio::time::timeout(ACK_TIMEOUT, call(self.client())).await {
+            Ok(Ok(_)) => LeaseResponse::Accepted,
+            Ok(Err(status)) => {
                 debug!(%status, "unary lease call failed");
                 classify_status(&status)
+            }
+            Err(_) => {
+                debug!("unary lease call timed out");
+                LeaseResponse::Retry
             }
         }
     }
@@ -580,17 +620,17 @@ impl LeaseTransport for GrpcLeaseTransport {
 
     async fn advertise(&self, capabilities: &RuntimeCapabilities) -> Result<(), String> {
         let json = serde_json::to_string(capabilities).map_err(|e| e.to_string())?;
-        let guard = self.session.lock().await;
+        let guard = self.lock_session().await?;
         match guard.as_ref() {
-            Some(session) if !session.closed.is_cancelled() => session
-                .sender
-                .send(frame(ClientPayload::RuntimeHeartbeat(
-                    proto::RuntimeHeartbeat {
+            Some(session) if !session.closed.is_cancelled() => {
+                self.send_on_session(
+                    session,
+                    ClientPayload::RuntimeHeartbeat(proto::RuntimeHeartbeat {
                         runtime_capabilities_json: json,
-                    },
-                )))
+                    }),
+                )
                 .await
-                .map_err(|_| "worker stream closed".to_string()),
+            }
             // The next session's open frame carries a fresh advertisement.
             _ => Ok(()),
         }
@@ -602,7 +642,7 @@ impl LeaseTransport for GrpcLeaseTransport {
         capacity: u32,
         capabilities: &RuntimeCapabilities,
     ) -> Result<Claimed, String> {
-        let mut guard = self.session.lock().await;
+        let mut guard = self.lock_session().await?;
         let session = self
             .ensure_session(&mut guard, handlers, capabilities)
             .await
@@ -621,13 +661,11 @@ impl LeaseTransport for GrpcLeaseTransport {
             }
         }
         if tasks.is_empty() && capacity > 0 {
-            session
-                .sender
-                .send(frame(ClientPayload::Demand(proto::WorkerStreamDemand {
-                    capacity,
-                })))
-                .await
-                .map_err(|_| "worker stream closed".to_string())?;
+            self.send_on_session(
+                session,
+                ClientPayload::Demand(proto::WorkerStreamDemand { capacity }),
+            )
+            .await?;
             let mut wait = FIRST_TASK_WAIT;
             while tasks.len() < capacity as usize {
                 match tokio::time::timeout(wait, session.tasks.recv()).await {

@@ -66,6 +66,28 @@ impl TestSession {
         assert_eq!(self.transport.live_generation.load(Ordering::Acquire), 0);
         assert!(self.pending.lock().unwrap().is_empty());
     }
+
+    fn capabilities() -> RuntimeCapabilities {
+        serde_json::from_value(serde_json::json!({
+            "runtime_id": uuid::Uuid::now_v7(),
+            "kind": "desktop", "trust": "registered",
+            "observed_at": chrono::Utc::now(),
+            "expires_at": chrono::Utc::now() + chrono::Duration::minutes(1)
+        }))
+        .unwrap()
+    }
+
+    async fn block_sends(&self) {
+        self.transport
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .sender
+            .try_send(frame(self.heartbeat()))
+            .unwrap();
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -228,4 +250,70 @@ async fn retiring_an_old_session_preserves_a_new_generation() {
     assert!(session.closed.is_cancelled());
     assert!(session.pending.lock().unwrap().is_empty());
     assert_eq!(session.transport.live_generation.load(Ordering::Acquire), 8);
+}
+
+#[tokio::test(start_paused = true)]
+async fn advertisement_backpressure_retires_the_session() {
+    let session = TestSession::new().await;
+    session.block_sends().await;
+    let answer = tokio::time::timeout(
+        ACK_TIMEOUT + Duration::from_secs(1),
+        session.transport.advertise(&TestSession::capabilities()),
+    )
+    .await
+    .expect("a full queue must not hang capability refresh forever");
+    assert!(answer.is_err());
+    session.assert_retired();
+}
+
+#[tokio::test(start_paused = true)]
+async fn demand_backpressure_retires_the_session() {
+    let session = TestSession::new().await;
+    session.block_sends().await;
+    let answer = tokio::time::timeout(
+        ACK_TIMEOUT + Duration::from_secs(1),
+        session
+            .transport
+            .claim(&["noop".into()], 1, &TestSession::capabilities()),
+    )
+    .await
+    .expect("a full queue must not hang task demand forever");
+    assert!(answer.is_err());
+    session.assert_retired();
+}
+
+#[tokio::test(start_paused = true)]
+async fn unary_response_wait_is_bounded() {
+    let session = TestSession::new().await;
+    let answer = tokio::time::timeout(
+        ACK_TIMEOUT + Duration::from_secs(1),
+        session.transport.unary(|_| std::future::pending()),
+    )
+    .await
+    .expect("a stalled unary RPC must not hang a lease operation forever");
+    assert_eq!(answer, LeaseResponse::Retry);
+}
+
+#[tokio::test(start_paused = true)]
+async fn probing_a_busy_session_has_a_deadline() {
+    let session = TestSession::new().await;
+    let _locked = session.transport.session.lock().await;
+    let answer = tokio::time::timeout(
+        ACK_TIMEOUT + Duration::from_secs(1),
+        session.transport.probe(&[], &TestSession::capabilities()),
+    )
+    .await
+    .expect("probing must not wait on session state forever");
+    assert!(matches!(answer, Err(OpenError::Failed(_))));
+}
+
+#[tokio::test]
+async fn dropping_transport_cancels_its_reader_session() {
+    let session = TestSession::new().await;
+    let closed = session.closed.clone();
+    drop(session.transport);
+    assert!(
+        closed.is_cancelled(),
+        "an idle reader must not outlive its transport"
+    );
 }
