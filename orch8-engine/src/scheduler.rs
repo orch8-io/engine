@@ -701,7 +701,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                 Ok(Ok(())) => transient_retries::clear(instance_id),
                 Ok(Err(EngineError::ClaimLost { .. })) => {
                     transient_retries::clear(instance_id);
-                    tracing::debug!(%instance_id, "stopped work after execution claim was replaced");
+                    tracing::debug!(%instance_id, "stopped processing after claimed write was refused");
                     if let Err(error) = storage
                         .conditional_update_claimed_instance_state(
                             instance_id,

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Step results after claim recovery
+
+- Late handlers cannot replace a newer execution's outputs, cached results,
+  externalized payloads, or step-node state/timestamps. Ownership is checked
+  in the write transaction, including a PostgreSQL instance-row lock.
+- Claim loss stops the stale run before failure, retry-marker, or node-failure
+  fallback. Transient storage failures remain eligible for retry.
+- Custom Rust storage backends must implement the four atomic claimed-write
+  methods. `StepExecParams` now carries `claim_token`: use the original lease
+  for scheduler dispatch and `None` for explicitly unclaimed step execution.
+
 ### Webhook ownership
 
 - Durable delivery history and API redelivery use the owning backend and

@@ -36,24 +36,18 @@ enum OutputMode {
     CachedExternalized,
 }
 
-async fn preserves_replacement(path: DispatchPath, mode: OutputMode, late: LateResult) {
-    let tree = matches!(path, DispatchPath::Tree);
-    let cache = matches!(mode, OutputMode::Cached | OutputMode::CachedExternalized);
-    let externalize = matches!(
-        mode,
-        OutputMode::Externalized | OutputMode::CachedExternalized
-    );
-    let entered = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let calls = Arc::new(AtomicUsize::new(0));
-    let handler_entered = Arc::clone(&entered);
-    let handler_release = Arc::clone(&release);
-    let handler_calls = Arc::clone(&calls);
-    let engine = Arc::new(
+async fn barrier_engine(
+    externalize: bool,
+    late: LateResult,
+    handler_entered: Arc<Notify>,
+    handler_release: Arc<Notify>,
+    handler_calls: Arc<AtomicUsize>,
+) -> Arc<TestEngine> {
+    Arc::new(
         TestEngine::builder()
             .config(|config| {
                 config.max_concurrent_steps = 2;
-                config.externalize_output_threshold = if externalize { 1 } else { 0 };
+                config.externalize_output_threshold = u32::from(externalize);
             })
             // A pure builtin avoids effect-receipt ambiguity: the test concerns
             // engine-owned writes after genuine recovery and a new handler run.
@@ -83,7 +77,27 @@ async fn preserves_replacement(path: DispatchPath, mode: OutputMode, late: LateR
             })
             .build()
             .await,
+    )
+}
+
+async fn preserves_replacement(path: DispatchPath, mode: OutputMode, late: LateResult) {
+    let tree = matches!(path, DispatchPath::Tree);
+    let cache = matches!(mode, OutputMode::Cached | OutputMode::CachedExternalized);
+    let externalize = matches!(
+        mode,
+        OutputMode::Externalized | OutputMode::CachedExternalized
     );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let engine = barrier_engine(
+        externalize,
+        late,
+        Arc::clone(&entered),
+        Arc::clone(&release),
+        Arc::clone(&calls),
+    )
+    .await;
     let mut work = step("work", "noop");
     work.cache_key = cache.then(|| "result".to_owned());
     let block = BlockDefinition::Step(Box::new(work));

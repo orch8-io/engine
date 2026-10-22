@@ -389,13 +389,19 @@ async fn run_step_core(
             let output_size =
                 u32::try_from(json_byte_size(&output).unwrap_or(0)).unwrap_or(u32::MAX);
 
-            let block_output = maybe_externalize(
-                storage.as_ref(),
+            let block_output = BlockOutput {
+                id: Uuid::now_v7(),
                 instance_id,
                 block_id,
                 output,
+                output_ref: None,
                 output_size,
-                u16::try_from(attempt).unwrap_or(u16::MAX),
+                attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
+                created_at: Utc::now(),
+            };
+            let block_output = maybe_externalize(
+                storage.as_ref(),
+                block_output,
                 exec.externalize_threshold,
                 claim_token,
             )
@@ -435,52 +441,31 @@ async fn run_step_core(
 /// `externalized_state` and replace the output with a reference marker.
 async fn maybe_externalize(
     storage: &dyn StorageBackend,
-    instance_id: InstanceId,
-    block_id: BlockId,
-    output: serde_json::Value,
-    output_size: u32,
-    attempt: u16,
+    mut row: BlockOutput,
     threshold: u32,
     claim_token: Option<chrono::DateTime<Utc>>,
 ) -> Result<BlockOutput, EngineError> {
-    let should_externalize = threshold > 0 && output_size > threshold;
-
-    if should_externalize {
-        let ref_key = format!("{}:{}", instance_id, block_id.as_str());
+    if threshold > 0 && row.output_size > threshold {
+        let ref_key = format!("{}:{}", row.instance_id, row.block_id.as_str());
         if let Some(token) = claim_token {
             if !storage
-                .save_externalized_state_claimed(instance_id, &ref_key, &output, token)
+                .save_externalized_state_claimed(row.instance_id, &ref_key, &row.output, token)
                 .await?
             {
-                return Err(EngineError::ClaimLost { instance_id });
+                return Err(EngineError::ClaimLost {
+                    instance_id: row.instance_id,
+                });
             }
         } else {
             storage
-                .save_externalized_state(instance_id, &ref_key, &output)
+                .save_externalized_state(row.instance_id, &ref_key, &row.output)
                 .await?;
         }
-        Ok(BlockOutput {
-            id: Uuid::now_v7(),
-            instance_id,
-            block_id,
-            output: serde_json::json!({"_externalized": true, "_ref": ref_key}),
-            output_ref: Some(ref_key),
-            output_size,
-            attempt,
-            created_at: Utc::now(),
-        })
-    } else {
-        Ok(BlockOutput {
-            id: Uuid::now_v7(),
-            instance_id,
-            block_id,
-            output,
-            output_ref: None,
-            output_size,
-            attempt,
-            created_at: Utc::now(),
-        })
+        row.output = serde_json::json!({"_externalized": true, "_ref": ref_key});
+        row.output_ref = Some(ref_key);
+        row.created_at = Utc::now();
     }
+    Ok(row)
 }
 
 fn map_step_error(err: StepError, instance_id: InstanceId, block_id: &BlockId) -> EngineError {

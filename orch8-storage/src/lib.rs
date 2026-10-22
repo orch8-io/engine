@@ -1153,7 +1153,7 @@ pub trait OutputStore: Send + Sync + 'static {
 
     /// Write only while the instance is Running under `claim_token`.
     /// The ownership check and write share a transaction/row lock, so recovery
-    /// cannot replace the claim between them. False means no data was written.
+    /// cannot replace the claim between them. False means no result record was written.
     async fn save_block_output_claimed(
         &self,
         output: &BlockOutput,
@@ -2877,7 +2877,7 @@ pub trait ResourceStore: Send + Sync + 'static {
 
     /// Write only while the instance is Running under `claim_token`.
     /// The ownership check and write share a transaction/row lock, so recovery
-    /// cannot replace the claim between them. False means no data was written.
+    /// cannot replace the claim between them. False means no result record was written.
     async fn set_instance_kv_claimed(
         &self,
         instance_id: InstanceId,
@@ -3158,7 +3158,7 @@ pub trait ResourceStore: Send + Sync + 'static {
 
     /// Write only while the instance is Running under `claim_token`.
     /// The ownership check and write share a transaction/row lock, so recovery
-    /// cannot replace the claim between them. False means no data was written.
+    /// cannot replace the claim between them. False means no result record was written.
     async fn save_externalized_state_claimed(
         &self,
         instance_id: InstanceId,
