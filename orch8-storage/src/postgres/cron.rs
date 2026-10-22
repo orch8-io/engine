@@ -52,6 +52,33 @@ pub(super) async fn get(
     Ok(row.map(CronRow::into_schedule))
 }
 
+pub(super) async fn list_all(
+    store: &PostgresStorage,
+    tenant_id: Option<&TenantId>,
+) -> Result<Vec<CronSchedule>, StorageError> {
+    let rows = if let Some(tid) = tenant_id {
+        sqlx::query_as::<_, CronRow>(
+            r"SELECT id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
+                     metadata, overlap_policy, skipped_fires, last_skipped_at,
+                 last_triggered_at, next_fire_at, created_at, updated_at
+              FROM cron_schedules WHERE tenant_id = $1 ORDER BY created_at",
+        )
+        .bind(tid.as_str())
+        .fetch_all(&store.pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, CronRow>(
+            r"SELECT id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
+                     metadata, overlap_policy, skipped_fires, last_skipped_at,
+                 last_triggered_at, next_fire_at, created_at, updated_at
+              FROM cron_schedules ORDER BY created_at",
+        )
+        .fetch_all(&store.pool)
+        .await?
+    };
+    Ok(rows.into_iter().map(CronRow::into_schedule).collect())
+}
+
 pub(super) async fn list(
     store: &PostgresStorage,
     tenant_id: Option<&TenantId>,

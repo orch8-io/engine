@@ -42,6 +42,23 @@ pub(super) async fn get(
     row.as_ref().map(row_to_cron).transpose()
 }
 
+pub(super) async fn list_all(
+    storage: &SqliteStorage,
+    tenant_id: Option<&TenantId>,
+) -> Result<Vec<CronSchedule>, StorageError> {
+    let rows = if let Some(tid) = tenant_id {
+        sqlx::query("SELECT * FROM cron_schedules WHERE tenant_id=?1 ORDER BY created_at")
+            .bind(tid.as_str())
+            .fetch_all(&storage.pool)
+            .await
+    } else {
+        sqlx::query("SELECT * FROM cron_schedules ORDER BY created_at")
+            .fetch_all(&storage.pool)
+            .await
+    }?;
+    rows.iter().map(row_to_cron).collect()
+}
+
 pub(super) async fn list(
     storage: &SqliteStorage,
     tenant_id: Option<&TenantId>,
