@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Composite write ownership
 
+- Loop and for-each iteration resets retain the original claim through output,
+  effect-receipt and worker cleanup, metadata changes, and context updates.
+  Saga rollback also rejects stale context and execution-tree writes.
+- For-each collection and persisted-snapshot read failures preserve their
+  original retry classification instead of completing an unprocessed loop or
+  turning a transient storage outage into a permanent failure.
 - Execution-tree creation, bulk node transitions, worker cancellation and core
   composite decisions can retain the evaluator's original claim through nested
   persistence helpers. A late router cannot append its stale branch decision
@@ -16,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Router output-read failures remain retryable instead of being converted into
   an empty input map and permanently memoizing the default branch.
 - Custom storage backends implement claim-aware node batches, context CAS/merge,
-  and worker cancellation. Context CAS distinguishes claim loss (`None`) from
+  output and effect-receipt cleanup, metadata merges, and worker cancellation. Context CAS distinguishes claim loss (`None`) from
   ordinary contention (`Some(false)`); cancellation keeps its audit events in
   the same transaction. Native and encrypted backends implement these contracts.
 

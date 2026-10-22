@@ -220,28 +220,27 @@ async fn effect_receipt(
         ExecutionEpoch, OwnershipState, RuntimeId,
     };
     let now = Utc::now();
-    let continuity_id = match store
+    let continuity_id = if let Some(execution) = store
         .get_continuity_execution_by_instance(tenant, instance)
         .await
         .unwrap()
     {
-        Some(execution) => execution.continuity_id,
-        None => {
-            let continuity_id = ContinuityId::new();
-            store
-                .create_continuity_execution(&ContinuityExecution {
-                    continuity_id,
-                    tenant_id: tenant.clone(),
-                    current_instance_id: instance,
-                    owner_runtime_id: RuntimeId::new(),
-                    epoch: ExecutionEpoch::initial(),
-                    state: OwnershipState::Owned,
-                    updated_at: now,
-                })
-                .await
-                .unwrap();
-            continuity_id
-        }
+        execution.continuity_id
+    } else {
+        let continuity_id = ContinuityId::new();
+        store
+            .create_continuity_execution(&ContinuityExecution {
+                continuity_id,
+                tenant_id: tenant.clone(),
+                current_instance_id: instance,
+                owner_runtime_id: RuntimeId::new(),
+                epoch: ExecutionEpoch::initial(),
+                state: OwnershipState::Owned,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        continuity_id
     };
     let receipt = EffectReceipt {
         id: EffectId::new(),
