@@ -29,6 +29,9 @@ pub struct EngineLiveness {
     /// (API-only roles, an active-passive standby that never started the
     /// scheduler, a cleanly stopped engine) never fails a probe.
     armed: AtomicBool,
+    /// Startup grace is not evidence that the scheduler has made progress.
+    /// Reset on every arm so a restarted engine must earn readiness again.
+    tick_observed: AtomicBool,
     ready_stale_after: Duration,
     live_stale_after: Duration,
 }
@@ -43,6 +46,7 @@ impl EngineLiveness {
             epoch: Instant::now(),
             last_tick_ms: AtomicU64::new(0),
             armed: AtomicBool::new(false),
+            tick_observed: AtomicBool::new(false),
             ready_stale_after: tick_interval.saturating_mul(10).max(MIN_READY_STALE),
             live_stale_after,
         }
@@ -56,7 +60,8 @@ impl EngineLiveness {
     /// when `Engine::run` starts, before the startup steps, so a startup that
     /// keeps retrying eventually fails liveness and gets restarted.
     pub fn arm(&self) {
-        self.record_tick();
+        self.tick_observed.store(false, Ordering::Release);
+        self.last_tick_ms.store(self.now_ms(), Ordering::Release);
         self.armed.store(true, Ordering::Release);
     }
 
@@ -68,6 +73,16 @@ impl EngineLiveness {
     /// Stamp a completed tick-loop iteration.
     pub fn record_tick(&self) {
         self.last_tick_ms.store(self.now_ms(), Ordering::Release);
+        self.tick_observed.store(true, Ordering::Release);
+    }
+
+    /// Whether an armed engine has reported scheduler progress and remains
+    /// within the readiness window. Starting and stopped engines are not ready.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.armed.load(Ordering::Acquire)
+            && self.tick_observed.load(Ordering::Acquire)
+            && !self.is_ready_stale()
     }
 
     /// Age of the last tick stamp, or `None` when no engine is armed.
