@@ -215,11 +215,9 @@ impl Engine {
         // a stuck task blocking deregistration.
         Self::drain_background(&mut background).await;
 
-        // M-7: wait for in-flight webhook deliveries to finish or observe
-        // `self.cancel` (already fired by this point, via the same token
-        // threaded through every `webhooks::emit` call) rather than letting
-        // the process tear down mid-request underneath them.
-        webhooks::wait_for_webhook_tasks(BACKGROUND_SHUTDOWN_TIMEOUT).await;
+        // Engine-owned durable webhooks drain with their outbox task above.
+        // Legacy free-function emitters have an explicit process-wide tracker;
+        // shutting down this engine must not wait for unrelated emitters.
         // Push wake-ups are best-effort hints: stop the in-flight ones.
         push::shutdown();
 

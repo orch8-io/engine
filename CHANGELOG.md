@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Webhook ownership
+
+- Durable delivery history and API redelivery use the owning backend and
+  webhook configuration. API-only servers can sign redeliveries before any
+  scheduler starts; previews follow the payload's actual signing policy.
+- Rust integrations constructing `orch8_api::AppState` must provide
+  `webhook_config`. Use `redeliver_with_config` for scoped manual delivery.
+  The legacy process-wide `emit` / `redeliver` functions require explicit
+  `init_outbox` setup. Their caller cancels and drains legacy tasks with
+  `wait_for_webhook_tasks`; engine shutdown drains its own durable outbox.
+
 ### Security: embed sequence sandbox (EM-01)
 
 - **Sequences authored through the embedded builder are now sandboxed.** An

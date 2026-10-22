@@ -19,9 +19,9 @@ use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
 
 use crate::metrics;
 
-/// Process-global outbox sink + config, set once at engine startup. When set,
-/// a delivery that exhausts its retries is parked here instead of dropped, and
-/// the config is used to sign redeliveries.
+/// Explicit legacy process defaults for the free-function emitter/redelivery
+/// API. Engine-managed deliveries carry their backend/configuration directly;
+/// starting an engine must not retain its database in this default.
 static OUTBOX_STORAGE: OnceLock<Arc<dyn StorageBackend>> = OnceLock::new();
 static OUTBOX_CONFIG: OnceLock<WebhookConfig> = OnceLock::new();
 
@@ -51,9 +51,9 @@ fn webhook_tasks() -> &'static TaskTracker {
 }
 
 /// Wait (up to `timeout`) for every webhook delivery task spawned via
-/// [`emit`] to finish. Called during engine shutdown, after firing the
-/// `cancel` token so in-flight retries observe it, and returns once every
-/// task has completed or `timeout` elapses (whichever comes first) so a
+/// [`emit`] to finish. Legacy emitters call this after cancelling their
+/// token; engine-owned durable deliveries drain with their outbox task.
+/// Returns once every task has completed or `timeout` elapses (whichever comes first) so a
 /// single hung dispatch can't stall shutdown forever.
 pub async fn wait_for_webhook_tasks(timeout: Duration) {
     let tracker = webhook_tasks();
@@ -69,8 +69,9 @@ pub async fn wait_for_webhook_tasks(timeout: Duration) {
     }
 }
 
-/// Wire the webhook outbox. Exhausted deliveries park via `storage`; `config`
-/// signs redeliveries. Idempotent — only the first call takes effect.
+/// Set the legacy process-wide default used by [`emit`] and [`redeliver`].
+/// Only the first explicit call takes effect. Engine-managed deliveries do
+/// not use this default; multi-engine callers use [`redeliver_with_config`].
 pub fn init_outbox(storage: Arc<dyn StorageBackend>, config: WebhookConfig) {
     let _ = OUTBOX_STORAGE.set(storage);
     let _ = OUTBOX_CONFIG.set(config);
@@ -108,7 +109,10 @@ pub struct WebhookEvent {
     pub data: serde_json::Value,
 }
 
-/// Send a webhook event to all configured URLs.
+/// Send a webhook event through the legacy process-wide emitter.
+/// Call [`init_outbox`] explicitly to retain exhausted deliveries and
+/// [`wait_for_webhook_tasks`] to drain these tasks. Engine-owned deliveries
+/// use their durable outbox and never select this process default.
 /// Non-blocking: spawns a background task for each URL, tracked via an
 /// internal `TaskTracker` (M-7) so [`wait_for_webhook_tasks`] can await them
 /// at shutdown instead of the runtime abruptly killing an in-flight delivery.
@@ -312,7 +316,10 @@ async fn deliver_claimed_at(
         send_once(
             delivery_id,
             &entry.url,
-            &event,
+            &DeliveryContext {
+                storage: Some(storage),
+                event: &event,
+            },
             &body,
             Duration::from_secs(config.timeout_secs),
             secret.as_deref(),
@@ -499,26 +506,33 @@ fn claim_lease(config: &WebhookConfig) -> Duration {
     Duration::from_secs(config.timeout_secs).saturating_add(Duration::from_secs(300))
 }
 
+/// The backend and event belonging to one delivery. A missing backend is
+/// supported only by the legacy emitter before explicit default setup.
+struct DeliveryContext<'a> {
+    storage: Option<&'a dyn StorageBackend>,
+    event: &'a WebhookEvent,
+}
+
 /// Record one delivery attempt (best-effort — inspector data must never
 /// block or fail a delivery).
 async fn record_attempt(
     delivery_id: uuid::Uuid,
     url: &str,
-    event: &WebhookEvent,
+    context: &DeliveryContext<'_>,
     attempt_number: i32,
     started: std::time::Instant,
     outcome: Result<u16, &str>,
     signed: bool,
 ) {
-    let Some(storage) = OUTBOX_STORAGE.get() else {
+    let Some(storage) = context.storage else {
         return;
     };
     let mut row = orch8_types::webhook_delivery::WebhookDeliveryAttempt {
         id: uuid::Uuid::now_v7(),
         delivery_id,
         url: url.to_string(),
-        event_type: event.event_type.clone(),
-        instance_id: event.instance_id.map(InstanceId::into_uuid),
+        event_type: context.event.event_type.clone(),
+        instance_id: context.event.instance_id.map(InstanceId::into_uuid),
         attempt_number,
         attempted_at: Utc::now(),
         duration_ms: i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
@@ -575,7 +589,7 @@ enum SendOutcome {
 async fn send_once(
     delivery_id: uuid::Uuid,
     url: &str,
-    event: &WebhookEvent,
+    context: &DeliveryContext<'_>,
     body: &[u8],
     timeout: Duration,
     secret: Option<&str>,
@@ -589,7 +603,7 @@ async fn send_once(
             record_attempt(
                 delivery_id,
                 url,
-                event,
+                context,
                 attempt_number,
                 started,
                 Ok(status),
@@ -597,14 +611,14 @@ async fn send_once(
             )
             .await;
             metrics::inc(metrics::WEBHOOKS_SENT);
-            debug!(url = %log_url, event_type = %event.event_type, "webhook delivered");
+            debug!(url = %log_url, event_type = %context.event.event_type, "webhook delivered");
             SendOutcome::Delivered
         }
         Ok(status) => {
             record_attempt(
                 delivery_id,
                 url,
-                event,
+                context,
                 attempt_number,
                 started,
                 Ok(status),
@@ -626,7 +640,7 @@ async fn send_once(
             record_attempt(
                 delivery_id,
                 url,
-                event,
+                context,
                 attempt_number,
                 started,
                 Err(e.as_str()),
@@ -655,7 +669,10 @@ async fn send_alert_once(
     record_attempt(
         delivery_id,
         url,
-        event,
+        &DeliveryContext {
+            storage: Some(storage),
+            event,
+        },
         attempt_number,
         started,
         result.as_ref().map(|s| *s).map_err(String::as_str),
@@ -688,13 +705,13 @@ async fn send_alert_once(
 async fn try_send(
     delivery_id: uuid::Uuid,
     url: &str,
-    event: &WebhookEvent,
+    context: &DeliveryContext<'_>,
     timeout: Duration,
     max_retries: u32,
     secret: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
-    let body = serde_json::to_vec(event).map_err(|e| format!("serialize: {e}"))?;
+    let body = serde_json::to_vec(context.event).map_err(|e| format!("serialize: {e}"))?;
 
     let mut last_error = String::from("no attempts made");
     for attempt in 0..=max_retries {
@@ -702,7 +719,7 @@ async fn try_send(
         match send_once(
             delivery_id,
             url,
-            event,
+            context,
             &body,
             timeout,
             secret,
@@ -736,11 +753,15 @@ async fn send_with_retry(
     secret: Option<&str>,
     cancel: &CancellationToken,
 ) {
+    let context = DeliveryContext {
+        storage: OUTBOX_STORAGE.get().map(AsRef::as_ref),
+        event,
+    };
     let delivery_id = uuid::Uuid::now_v7();
     let last_error = match try_send(
         delivery_id,
         url,
-        event,
+        &context,
         timeout,
         max_retries,
         secret,
@@ -760,7 +781,7 @@ async fn send_with_retry(
     );
 
     // Park the exhausted delivery so it isn't silently lost.
-    if let Some(storage) = OUTBOX_STORAGE.get() {
+    if let Some(storage) = context.storage {
         let entry = WebhookOutboxEntry {
             id: uuid::Uuid::now_v7(),
             url: url.to_string(),
@@ -785,36 +806,97 @@ async fn send_with_retry(
 }
 
 /// Whether a redelivery would be HMAC-signed (the wired outbox config has
-/// a secret). Used by the redelivery *preview* endpoint — the secret
-/// itself never leaves the engine.
+/// a secret). This inspects the explicit legacy process default; server
+/// previews use [`redelivery_will_sign_with_config`]. The secret never leaves
+/// the engine.
 #[must_use]
 pub fn redelivery_will_sign() -> bool {
     OUTBOX_CONFIG.get().is_some_and(|c| c.secret.is_some())
 }
 
-/// Redeliver a parked webhook to its original URL — one fresh retry pass using
-/// the engine's webhook config for signing. On success (`Ok(delivery_id)`)
-/// the caller should delete the outbox row; `Err(reason)` means it should
-/// stay parked. The returned id names the new attempt group recorded for
-/// the delivery inspector.
+/// Whether this row would be signed using the supplied webhook config or
+/// its alert destination. Malformed payloads cannot be delivered or signed.
+#[must_use]
+pub fn redelivery_will_sign_with_config(
+    config: &WebhookConfig,
+    entry: &WebhookOutboxEntry,
+) -> bool {
+    let Ok(event) = serde_json::from_value::<WebhookEvent>(entry.payload.clone()) else {
+        return false;
+    };
+    crate::alerts::AlertDelivery::from_event(&event)
+        .map_or_else(|| config.secret.is_some(), |alert| alert.signed())
+}
+
+/// Redeliver a parked webhook using its owning backend and configuration.
+/// Successful calls return the new attempt-group ID; callers remove the
+/// parked row after success. Alert credentials resolve only in `storage`.
+pub async fn redeliver_with_config(
+    storage: &dyn StorageBackend,
+    config: &WebhookConfig,
+    entry: &WebhookOutboxEntry,
+    cancel: &CancellationToken,
+) -> Result<uuid::Uuid, String> {
+    let event =
+        serde_json::from_value(entry.payload.clone()).map_err(|e| format!("bad payload: {e}"))?;
+    redeliver_event(
+        &DeliveryContext {
+            storage: Some(storage),
+            event: &event,
+        },
+        config,
+        entry,
+        cancel,
+    )
+    .await
+}
+
+/// Redeliver using the explicit legacy process default from [`init_outbox`].
+/// Engine/API integrations should use [`redeliver_with_config`] so another
+/// engine's signing key, credentials, or attempt history cannot be selected.
 pub async fn redeliver(
     entry: &WebhookOutboxEntry,
     cancel: &CancellationToken,
 ) -> Result<uuid::Uuid, String> {
-    let event: WebhookEvent =
+    let event =
         serde_json::from_value(entry.payload.clone()).map_err(|e| format!("bad payload: {e}"))?;
-    if let Some(alert) = crate::alerts::AlertDelivery::from_event(&event) {
-        let storage = OUTBOX_STORAGE
-            .get()
+    let fallback = WebhookConfig {
+        timeout_secs: 10,
+        max_retries: 3,
+        ..WebhookConfig::default()
+    };
+    let config = OUTBOX_CONFIG.get().unwrap_or(&fallback);
+    redeliver_event(
+        &DeliveryContext {
+            storage: OUTBOX_STORAGE.get().map(AsRef::as_ref),
+            event: &event,
+        },
+        config,
+        entry,
+        cancel,
+    )
+    .await
+}
+
+async fn redeliver_event(
+    context: &DeliveryContext<'_>,
+    config: &WebhookConfig,
+    entry: &WebhookOutboxEntry,
+    cancel: &CancellationToken,
+) -> Result<uuid::Uuid, String> {
+    let delivery_id = uuid::Uuid::now_v7();
+    let timeout = Duration::from_secs(config.timeout_secs);
+    if let Some(alert) = crate::alerts::AlertDelivery::from_event(context.event) {
+        let storage = context
+            .storage
             .ok_or_else(|| "outbox storage not initialised".to_string())?;
-        let delivery_id = uuid::Uuid::now_v7();
         return match send_alert_once(
-            storage.as_ref(),
+            storage,
             delivery_id,
             &entry.url,
-            &event,
+            context.event,
             &alert,
-            Duration::from_secs(10),
+            timeout,
             1,
         )
         .await
@@ -823,23 +905,16 @@ pub async fn redeliver(
             SendOutcome::Terminal(e) | SendOutcome::Transient(e) => Err(e),
         };
     }
-    let (timeout, max_retries, secret) = match OUTBOX_CONFIG.get() {
-        Some(c) => (
-            Duration::from_secs(c.timeout_secs),
-            c.max_retries,
-            c.secret.as_ref().map(|s| s.expose().to_string()),
-        ),
-        None => (Duration::from_secs(10), 3, None),
-    };
-    // A redelivery is its own attempt group.
-    let delivery_id = uuid::Uuid::now_v7();
     try_send(
         delivery_id,
         &entry.url,
-        &event,
+        context,
         timeout,
-        max_retries,
-        secret.as_deref(),
+        config.max_retries,
+        config
+            .secret
+            .as_ref()
+            .map(orch8_types::config::SecretString::expose),
         cancel,
     )
     .await

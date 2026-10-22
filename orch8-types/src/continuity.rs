@@ -712,6 +712,7 @@ pub struct PlacementEvidence {
 /// ranked only against the bounded candidate set, avoiding arbitrary unit
 /// conversion constants while keeping selection deterministic.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
 pub struct PlacementScoreFactors {
     pub trust: i64,
     pub current_runtime: i64,
@@ -1252,7 +1253,37 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG: PlacementScoreFactors has no per-field #[serde(default)], so adding a factor breaks every stored decision — fixed on test/bugs"]
+    fn each_missing_score_factor_defaults_without_erasing_present_factors() {
+        let original = serde_json::to_value(scored_evidence()).unwrap();
+        let factors = original["score_factors"].as_object().unwrap();
+        for missing in factors.keys() {
+            let mut old_record = original.clone();
+            old_record["score_factors"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            let decoded: PlacementEvidence = serde_json::from_value(old_record).unwrap();
+            let restored = serde_json::to_value(decoded).unwrap();
+            for (name, value) in factors {
+                let expected = if name == missing {
+                    serde_json::json!(0)
+                } else {
+                    value.clone()
+                };
+                assert_eq!(
+                    restored["score_factors"][name], expected,
+                    "missing {missing}, checking {name}"
+                );
+            }
+            assert_eq!(restored["score"], original["score"]);
+        }
+        let mut empty = original;
+        empty["score_factors"] = serde_json::json!({});
+        let decoded: PlacementEvidence = serde_json::from_value(empty).unwrap();
+        assert_eq!(decoded.score_factors, PlacementScoreFactors::default());
+    }
+
+    #[test]
     fn evidence_stored_before_a_new_score_factor_existed_still_loads() {
         let mut value = serde_json::to_value(scored_evidence()).unwrap();
         value["score_factors"]
