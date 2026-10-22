@@ -15,6 +15,14 @@ pub(super) async fn save(
     storage: &SqliteStorage,
     output: &BlockOutput,
 ) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    save_on(&mut conn, output).await
+}
+
+pub(super) async fn save_on(
+    conn: &mut sqlx::SqliteConnection,
+    output: &BlockOutput,
+) -> Result<(), StorageError> {
     sqlx::query(
         "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"
     )
@@ -26,7 +34,7 @@ pub(super) async fn save(
     .bind(output.output_size as i64)
     .bind(output.attempt as i64)
     .bind(ts(output.created_at))
-    .execute(&storage.pool).await?;
+    .execute(&mut *conn).await?;
     Ok(())
 }
 

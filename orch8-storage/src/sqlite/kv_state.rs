@@ -103,21 +103,8 @@ impl SqliteStorage {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
-        let id_str = instance_id.into_uuid().to_string();
-        let val_str =
-            serde_json::to_string(value).map_err(|e| StorageError::Query(e.to_string()))?;
-        sqlx::query(
-            "INSERT INTO instance_kv_state (instance_id, key, value, updated_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
-             ON CONFLICT (instance_id, key) DO UPDATE SET value = ?3, updated_at = datetime('now')",
-        )
-        .bind(&id_str)
-        .bind(key)
-        .bind(&val_str)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        set_instance_kv_on(&mut conn, instance_id, key, value).await
     }
 
     pub(crate) async fn get_instance_kv_impl(
@@ -369,4 +356,26 @@ mod tests {
             Some(json!(true))
         );
     }
+}
+
+pub(super) async fn set_instance_kv_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), StorageError> {
+    let id_str = instance_id.into_uuid().to_string();
+    let val_str = serde_json::to_string(value).map_err(|e| StorageError::Query(e.to_string()))?;
+    sqlx::query(
+        "INSERT INTO instance_kv_state (instance_id, key, value, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT (instance_id, key) DO UPDATE SET value = ?3, updated_at = datetime('now')",
+    )
+    .bind(&id_str)
+    .bind(key)
+    .bind(&val_str)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
 }

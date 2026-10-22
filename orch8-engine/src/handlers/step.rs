@@ -17,6 +17,9 @@ use crate::handlers::{HandlerRegistry, StepContext};
 
 /// Parameters for step execution, bundled to avoid too many function arguments.
 pub struct StepExecParams {
+    /// Original scheduler lease, independent of context/heartbeat timestamps.
+    /// None is reserved for explicit unclaimed uses of the public step helpers.
+    pub claim_token: Option<chrono::DateTime<Utc>>,
     pub instance_id: InstanceId,
     pub tenant_id: TenantId,
     pub block_id: BlockId,
@@ -162,6 +165,24 @@ enum StepMode {
     Live,
 }
 
+/// Append an output only for its original running owner, when claimed.
+pub(crate) async fn persist_output(
+    storage: &dyn StorageBackend,
+    output: &BlockOutput,
+    claim_token: Option<chrono::DateTime<Utc>>,
+) -> Result<(), EngineError> {
+    if let Some(token) = claim_token {
+        if !storage.save_block_output_claimed(output, token).await? {
+            return Err(EngineError::ClaimLost {
+                instance_id: output.instance_id,
+            });
+        }
+    } else {
+        storage.save_block_output(output).await?;
+    }
+    Ok(())
+}
+
 /// Execute a step without persisting the output — returns the `BlockOutput` for
 /// the caller to save (typically combined with a state transition in one transaction).
 pub async fn execute_step_dry(
@@ -195,6 +216,7 @@ async fn run_step_core(
     exec: StepExecParams,
     mode: StepMode,
 ) -> Result<BlockOutput, EngineError> {
+    let claim_token = exec.claim_token;
     // Memoization: if output already exists for this block+attempt, return it.
     // Skip the lookup on attempt 0 — no prior output can exist for a fresh block.
     if exec.attempt > 0
@@ -252,7 +274,7 @@ async fn run_step_core(
             // Mode branch: live persists the synthesized output row so a cache
             // hit still records the attempt; dry leaves saving to the caller.
             if mode == StepMode::Live {
-                storage.save_block_output(&block_output).await?;
+                persist_output(storage.as_ref(), &block_output, claim_token).await?;
             }
             return Ok(block_output);
         }
@@ -341,10 +363,20 @@ async fn run_step_core(
             // Save to cache if cache_key is set.
             if let Some(ref ck) = cache_key {
                 let prefixed_key = format!("_cache:{ck}");
-                if let Err(e) = storage
-                    .set_instance_kv(instance_id, &prefixed_key, &output)
-                    .await
-                {
+                let saved = if let Some(token) = claim_token {
+                    storage
+                        .set_instance_kv_claimed(instance_id, &prefixed_key, &output, token)
+                        .await
+                } else {
+                    storage
+                        .set_instance_kv(instance_id, &prefixed_key, &output)
+                        .await
+                        .map(|()| true)
+                };
+                if matches!(saved, Ok(false)) {
+                    return Err(EngineError::ClaimLost { instance_id });
+                }
+                if let Err(e) = saved {
                     warn!(
                         instance_id = %instance_id,
                         cache_key = %ck,
@@ -365,13 +397,14 @@ async fn run_step_core(
                 output_size,
                 u16::try_from(attempt).unwrap_or(u16::MAX),
                 exec.externalize_threshold,
+                claim_token,
             )
             .await?;
 
             // Mode branch: live persists the output row here; dry returns it
             // for the caller to save atomically with its state transition.
             if mode == StepMode::Live {
-                storage.save_block_output(&block_output).await?;
+                persist_output(storage.as_ref(), &block_output, claim_token).await?;
             }
 
             info!(
@@ -408,14 +441,24 @@ async fn maybe_externalize(
     output_size: u32,
     attempt: u16,
     threshold: u32,
+    claim_token: Option<chrono::DateTime<Utc>>,
 ) -> Result<BlockOutput, EngineError> {
     let should_externalize = threshold > 0 && output_size > threshold;
 
     if should_externalize {
         let ref_key = format!("{}:{}", instance_id, block_id.as_str());
-        storage
-            .save_externalized_state(instance_id, &ref_key, &output)
-            .await?;
+        if let Some(token) = claim_token {
+            if !storage
+                .save_externalized_state_claimed(instance_id, &ref_key, &output, token)
+                .await?
+            {
+                return Err(EngineError::ClaimLost { instance_id });
+            }
+        } else {
+            storage
+                .save_externalized_state(instance_id, &ref_key, &output)
+                .await?;
+        }
         Ok(BlockOutput {
             id: Uuid::now_v7(),
             instance_id,
@@ -915,6 +958,7 @@ mod tests {
 
         let instance_id = InstanceId::new();
         let exec = || StepExecParams {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("tenant-a"),
             block_id: BlockId::new("step-1"),

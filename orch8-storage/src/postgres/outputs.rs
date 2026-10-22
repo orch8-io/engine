@@ -32,6 +32,14 @@ pub(super) async fn save(
     store: &PostgresStorage,
     output: &BlockOutput,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    save_on(&mut conn, output).await
+}
+
+pub(super) async fn save_on(
+    conn: &mut sqlx::PgConnection,
+    output: &BlockOutput,
+) -> Result<(), StorageError> {
     sqlx::query(
         r"
         INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
@@ -46,7 +54,7 @@ pub(super) async fn save(
     .bind(pg_output_size(output.output_size)?)
     .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

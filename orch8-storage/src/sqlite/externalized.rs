@@ -18,6 +18,16 @@ pub(super) async fn save(
     ref_key: &str,
     payload: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    save_on(&mut conn, instance_id, ref_key, payload).await
+}
+
+pub(super) async fn save_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    ref_key: &str,
+    payload: &serde_json::Value,
+) -> Result<(), StorageError> {
     let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
     validate_payload_size(raw.len())?;
     let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
@@ -39,7 +49,7 @@ pub(super) async fn save(
         .bind(compressed)
         .bind(raw_size)
         .bind(ts(Utc::now()))
-        .execute(&storage.pool)
+        .execute(&mut *conn)
         .await?;
     } else {
         sqlx::query(
@@ -57,7 +67,7 @@ pub(super) async fn save(
         .bind(serde_json::to_string(payload).map_err(StorageError::Serialization)?)
         .bind(raw_size)
         .bind(ts(Utc::now()))
-        .execute(&storage.pool)
+        .execute(&mut *conn)
         .await?;
     }
     Ok(())

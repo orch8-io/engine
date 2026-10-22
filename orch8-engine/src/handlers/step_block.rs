@@ -376,9 +376,13 @@ pub(crate) async fn execute_step_node_with_clock(
         ) {
             Ok(true) => {}
             Ok(false) => {
-                storage
-                    .update_node_state(node.id, orch8_types::execution::NodeState::Skipped)
-                    .await?;
+                evaluator::persist_node_state(
+                    storage.as_ref(),
+                    node,
+                    orch8_types::execution::NodeState::Skipped,
+                    Some(claim_token),
+                )
+                .await?;
                 return Ok(true);
             }
             Err(e) => {
@@ -389,7 +393,13 @@ pub(crate) async fn execute_step_node_with_clock(
                     error = %e,
                     "when guard failed to parse, failing node"
                 );
-                evaluator::fail_node(storage.as_ref(), node.id).await?;
+                evaluator::persist_node_state(
+                    storage.as_ref(),
+                    node,
+                    orch8_types::execution::NodeState::Failed,
+                    Some(claim_token),
+                )
+                .await?;
                 return Ok(false);
             }
         }
@@ -434,7 +444,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 .started_at
                 .is_none_or(|started| latest.created_at >= started)
         {
-            evaluator::complete_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Completed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(true);
         }
         // Evaluate the gate against this node's own start time. The shared
@@ -514,9 +530,13 @@ pub(crate) async fn execute_step_node_with_clock(
             }
             // No signal yet — set node to Waiting so the instance transitions
             // to Waiting state and process_signalled_instances can wake it.
-            storage
-                .update_node_state(node.id, orch8_types::execution::NodeState::Waiting)
-                .await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Waiting,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(true);
         }
         // Signal accepted — fall through to run the handler.
@@ -547,7 +567,13 @@ pub(crate) async fn execute_step_node_with_clock(
         Ok(prepared) => prepared,
         Err(PrepareError::Infra(e)) => return Err(e),
         Err(_) => {
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(false);
         }
     };
@@ -596,7 +622,13 @@ pub(crate) async fn execute_step_node_with_clock(
             .await
             .is_err()
     {
-        evaluator::fail_node(storage.as_ref(), node.id).await?;
+        evaluator::persist_node_state(
+            storage.as_ref(),
+            node,
+            orch8_types::execution::NodeState::Failed,
+            Some(claim_token),
+        )
+        .await?;
         return Ok(false);
     }
     let PreparedStep {
@@ -621,6 +653,7 @@ pub(crate) async fn execute_step_node_with_clock(
             resolved_params,
             step_context,
             attempt,
+            claim_token,
             move |ctx| async move { super::activepieces::handle_ap(ctx, &handler_name).await },
         )
         .await;
@@ -641,7 +674,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 handler = %step_def.handler,
                 "gRPC plugin not registered; failing node (raw-endpoint fallback is disabled)"
             );
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(false);
         };
         // Inject the resolved endpoint into params BEFORE dispatch so both
@@ -658,6 +697,7 @@ pub(crate) async fn execute_step_node_with_clock(
             params,
             step_context,
             attempt,
+            claim_token,
             super::grpc_plugin::handle_grpc_plugin,
         )
         .await;
@@ -689,7 +729,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 plugin = %plugin_name,
                 "wasm plugin not registered; failing node (raw-path fallback is disabled)"
             );
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(false);
         };
         return dispatch_plugin(
@@ -700,6 +746,7 @@ pub(crate) async fn execute_step_node_with_clock(
             resolved_params,
             step_context,
             attempt,
+            claim_token,
             move |ctx| async move { super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path).await },
         )
         .await;
@@ -732,7 +779,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 &message,
             )
             .await;
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             return Ok(false);
         }
     };
@@ -754,6 +807,7 @@ pub(crate) async fn execute_step_node_with_clock(
     }
 
     let exec_params = StepExecParams {
+        claim_token: Some(claim_token),
         instance_id: instance.id,
         tenant_id: instance.tenant_id.clone(),
         block_id: step_def.id.clone(),
@@ -772,6 +826,8 @@ pub(crate) async fn execute_step_node_with_clock(
         .await
         .map_err(|e| e.normalize_timeout_as_retryable(instance.id));
     match result {
+        Err(e @ EngineError::ClaimLost { .. }) => Err(e),
+        Err(e) if e.is_transient_storage() => Err(e),
         Ok(output) => {
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
                 cb.record_success(
@@ -787,11 +843,23 @@ pub(crate) async fn execute_step_node_with_clock(
             {
                 super::param_resolve::SelfModifyResult::Applied
                 | super::param_resolve::SelfModifyResult::NotApplicable => {
-                    evaluator::complete_node(storage.as_ref(), node.id).await?;
+                    evaluator::persist_node_state(
+                        storage.as_ref(),
+                        node,
+                        orch8_types::execution::NodeState::Completed,
+                        Some(claim_token),
+                    )
+                    .await?;
                     Ok(true)
                 }
                 super::param_resolve::SelfModifyResult::Failed => {
-                    evaluator::fail_node(storage.as_ref(), node.id).await?;
+                    evaluator::persist_node_state(
+                        storage.as_ref(),
+                        node,
+                        orch8_types::execution::NodeState::Failed,
+                        Some(claim_token),
+                    )
+                    .await?;
                     Ok(false)
                 }
             }
@@ -841,7 +909,12 @@ pub(crate) async fn execute_step_node_with_clock(
             // `max_attempts` allows. Prefer logging over surfacing an error
             // that would abort the whole tick and leave the instance in
             // Running with a half-applied retry decision.
-            if let Err(e) = storage.save_block_output(&marker).await {
+            if let Err(e) =
+                super::step::persist_output(storage.as_ref(), &marker, Some(claim_token)).await
+            {
+                if matches!(e, EngineError::ClaimLost { .. }) {
+                    return Err(e);
+                }
                 tracing::warn!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,
@@ -860,7 +933,13 @@ pub(crate) async fn execute_step_node_with_clock(
                         message = %message,
                         "tree path: max retry attempts exhausted, failing node"
                     );
-                    evaluator::fail_node(storage.as_ref(), node.id).await?;
+                    evaluator::persist_node_state(
+                        storage.as_ref(),
+                        node,
+                        orch8_types::execution::NodeState::Failed,
+                        Some(claim_token),
+                    )
+                    .await?;
                     return Ok(false);
                 }
                 if !crate::handlers::step::should_retry(
@@ -877,7 +956,13 @@ pub(crate) async fn execute_step_node_with_clock(
                         message = %message,
                         "tree path: retry_if / non_retryable_codes denied retry, failing node"
                     );
-                    evaluator::fail_node(storage.as_ref(), node.id).await?;
+                    evaluator::persist_node_state(
+                        storage.as_ref(),
+                        node,
+                        orch8_types::execution::NodeState::Failed,
+                        Some(claim_token),
+                    )
+                    .await?;
                     return Ok(false);
                 }
                 let backoff = crate::handlers::step::honor_retry_after(
@@ -928,7 +1013,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 message = %message,
                 "tree path: retryable failure with no retry policy, failing node"
             );
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             Ok(false)
         }
         Err(EngineError::StepFailed {
@@ -936,11 +1027,23 @@ pub(crate) async fn execute_step_node_with_clock(
         }) => {
             // Permanent failure - mark node as failed. Not a breaker
             // failure: the dependency answered; the request was wrong.
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             Ok(false)
         }
         Err(e) => {
-            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            evaluator::persist_node_state(
+                storage.as_ref(),
+                node,
+                orch8_types::execution::NodeState::Failed,
+                Some(claim_token),
+            )
+            .await?;
             Err(e)
         }
     }
@@ -968,6 +1071,7 @@ async fn dispatch_plugin<F, Fut>(
     params: serde_json::Value,
     step_context: ExecutionContext,
     attempt: u32,
+    claim_token: chrono::DateTime<chrono::Utc>,
     handler_fn: F,
 ) -> Result<bool, EngineError>
 where
@@ -1000,6 +1104,7 @@ where
         move || handler_fn(ctx),
         step_def.output_schema.as_ref(),
         effect_guard,
+        Some(claim_token),
     )
     .await
 }

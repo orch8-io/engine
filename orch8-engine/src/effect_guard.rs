@@ -989,6 +989,7 @@ mod tests {
             }
         });
         let make_exec = || StepExecParams {
+            claim_token: None,
             instance_id: instance.id,
             tenant_id: instance.tenant_id.clone(),
             block_id: BlockId::new("charge"),

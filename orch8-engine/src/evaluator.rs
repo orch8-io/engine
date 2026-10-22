@@ -1471,6 +1471,29 @@ pub fn find_block<'a>(
     None
 }
 
+/// Persist a step-node result under its original claim. Explicit unclaimed
+/// helpers may omit the token; production dispatch always supplies it.
+pub(crate) async fn persist_node_state(
+    storage: &dyn StorageBackend,
+    node: &ExecutionNode,
+    state: NodeState,
+    claim_token: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), EngineError> {
+    if let Some(token) = claim_token {
+        if !storage
+            .update_node_state_claimed(node.instance_id, node.id, state, token)
+            .await?
+        {
+            return Err(EngineError::ClaimLost {
+                instance_id: node.instance_id,
+            });
+        }
+    } else {
+        storage.update_node_state(node.id, state).await?;
+    }
+    Ok(())
+}
+
 /// Mark a node as completed.
 pub async fn complete_node(
     storage: &dyn StorageBackend,

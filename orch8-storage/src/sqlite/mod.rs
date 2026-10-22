@@ -33,6 +33,7 @@ mod approval_tokens;
 mod audit;
 mod checkpoints;
 mod circuit_breakers;
+mod claimed_writes;
 mod cluster;
 mod continuity;
 mod credentials;
@@ -1158,6 +1159,15 @@ impl crate::ExecutionTreeStore for SqliteStorage {
     ) -> Result<(), StorageError> {
         execution_tree::update_node_state(self, node_id, state).await
     }
+    async fn update_node_state_claimed(
+        &self,
+        instance_id: InstanceId,
+        node_id: ExecutionNodeId,
+        state: orch8_types::execution::NodeState,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::node(self, instance_id, node_id, state, claim_token).await
+    }
 
     async fn batch_activate_nodes(&self, node_ids: &[ExecutionNodeId]) -> Result<(), StorageError> {
         execution_tree::batch_activate_nodes(self, node_ids).await
@@ -1191,6 +1201,14 @@ impl crate::ExecutionTreeStore for SqliteStorage {
 impl crate::OutputStore for SqliteStorage {
     async fn save_block_output(&self, output: &BlockOutput) -> Result<(), StorageError> {
         outputs::save(self, output).await
+    }
+
+    async fn save_block_output_claimed(
+        &self,
+        output: &BlockOutput,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::output(self, output, claim_token).await
     }
 
     async fn get_block_output(
@@ -3009,6 +3027,16 @@ impl crate::ResourceStore for SqliteStorage {
         self.set_instance_kv_impl(instance_id, key, value).await
     }
 
+    async fn set_instance_kv_claimed(
+        &self,
+        instance_id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::cache(self, instance_id, key, value, claim_token).await
+    }
+
     async fn get_instance_kv(
         &self,
         instance_id: InstanceId,
@@ -3100,6 +3128,16 @@ impl crate::ResourceStore for SqliteStorage {
         payload: &serde_json::Value,
     ) -> Result<(), StorageError> {
         externalized::save(self, instance_id, ref_key, payload).await
+    }
+
+    async fn save_externalized_state_claimed(
+        &self,
+        instance_id: InstanceId,
+        ref_key: &str,
+        payload: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::externalized(self, instance_id, ref_key, payload, claim_token).await
     }
 
     async fn batch_save_externalized_state(

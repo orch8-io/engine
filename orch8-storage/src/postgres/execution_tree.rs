@@ -76,6 +76,17 @@ pub(super) async fn update_node_state(
     node_id: ExecutionNodeId,
     state: NodeState,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    update_node_state_on(&mut conn, node_id, state, None).await?;
+    Ok(())
+}
+
+pub(super) async fn update_node_state_on(
+    conn: &mut sqlx::PgConnection,
+    node_id: ExecutionNodeId,
+    state: NodeState,
+    instance_id: Option<InstanceId>,
+) -> Result<bool, StorageError> {
     let now = Utc::now();
     let completed_at = if matches!(
         state,
@@ -92,16 +103,17 @@ pub(super) async fn update_node_state(
     } else {
         None
     };
-    sqlx::query(
-        "UPDATE execution_tree SET state = $2, completed_at = COALESCE($3, completed_at), started_at = COALESCE(started_at, $4) WHERE id = $1",
+    let changed = sqlx::query(
+        "UPDATE execution_tree SET state = $2, completed_at = COALESCE($3, completed_at), started_at = COALESCE(started_at, $4) WHERE id = $1 AND ($5::uuid IS NULL OR instance_id = $5)",
     )
     .bind(node_id.into_uuid())
     .bind(state.to_string())
     .bind(completed_at)
     .bind(started_at)
-    .execute(&store.pool)
+    .bind(instance_id.map(InstanceId::into_uuid))
+    .execute(&mut *conn)
     .await?;
-    Ok(())
+    Ok(changed.rows_affected() > 0)
 }
 
 pub(super) async fn batch_activate_nodes(

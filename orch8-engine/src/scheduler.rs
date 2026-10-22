@@ -703,6 +703,22 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
 
             match result {
                 Ok(Ok(())) => transient_retries::clear(instance_id),
+                Ok(Err(EngineError::ClaimLost { .. })) => {
+                    transient_retries::clear(instance_id);
+                    tracing::debug!(%instance_id, "stopped work after execution claim was replaced");
+                    if let Err(error) = storage
+                        .conditional_update_claimed_instance_state(
+                            instance_id,
+                            claim_token,
+                            InstanceState::Running,
+                            InstanceState::Scheduled,
+                            Some(clock_outer.now()),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%instance_id, %error, "failed to hand back stopped claim");
+                    }
+                }
                 Ok(Err(e)) if e.is_transient_storage() => {
                     // A transient storage failure (connection loss, pool
                     // exhaustion, DB failover) is NOT a processing failure —
@@ -3726,6 +3742,7 @@ async fn process_instance_tree(
         // error (connection reset, failover, pool timeout) mid-evaluate must
         // reach `process_tick`'s transient arm and be rescheduled with
         // backoff, not fail the instance permanently.
+        Err(e @ EngineError::ClaimLost { .. }) => return Err(e),
         Err(e) if e.is_transient_storage() => return Err(e),
         Err(e) => {
             handle_tree_eval_error(ctx, instance, sequence, &e).await?;
