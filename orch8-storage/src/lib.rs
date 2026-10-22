@@ -1209,6 +1209,19 @@ pub trait OutputStore: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
+    /// Atomically append an output and transition its instance only if its
+    /// state still equals `expected_state`. Returns false and writes nothing
+    /// when another writer moved the instance. A persistence error rolls back
+    /// both writes, so observers cannot see the new state without its output.
+    /// Callers validate the lifecycle transition before invoking this method.
+    async fn save_output_and_conditional_transition(
+        &self,
+        output: &BlockOutput,
+        expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError>;
+
     /// Atomic: save block output + overwrite instance context + update state
     /// in a single transaction.
     ///

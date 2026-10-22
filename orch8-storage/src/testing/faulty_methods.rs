@@ -102,6 +102,7 @@ fault_impl! {
         async fn get_outputs_after_created_at(&self, instance_id: InstanceId, after: Option<DateTime<Utc>>) -> Result<Vec<BlockOutput>, StorageError>;
         async fn get_completed_block_ids(&self, instance_id: InstanceId) -> Result<Vec<BlockId>, StorageError>;
         async fn get_completed_block_ids_batch(&self, instance_ids: &[InstanceId]) -> Result<std::collections::HashMap<InstanceId, Vec<BlockId>>, StorageError>;
+        async fn save_output_and_conditional_transition(&self, output: &BlockOutput, expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
         async fn save_output_and_transition(&self, output: &BlockOutput, instance_id: InstanceId, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
         async fn save_output_merge_context_and_transition(&self, output: &BlockOutput, instance_id: InstanceId, context: &orch8_types::context::ExecutionContext, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
         async fn save_output_complete_node_and_transition(&self, output: &BlockOutput, node_id: orch8_types::ids::ExecutionNodeId, instance_id: InstanceId, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;

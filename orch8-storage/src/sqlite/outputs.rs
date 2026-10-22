@@ -325,6 +325,42 @@ pub(super) async fn delete_all_for_instance(
     Ok(result.rows_affected())
 }
 
+pub(super) async fn save_output_and_conditional_transition(
+    storage: &SqliteStorage,
+    output: &BlockOutput,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<bool, StorageError> {
+    let mut tx = storage.pool.begin().await?;
+    let updated = sqlx::query("UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1 AND state=?5")
+        .bind(output.instance_id.into_uuid().to_string())
+        .bind(new_state.to_string())
+        .bind(next_fire_at.map(ts))
+        .bind(ts(Utc::now()))
+        .bind(expected_state.to_string())
+        .execute(&mut *tx).await?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    sqlx::query(
+        "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"
+    )
+    .bind(output.id.to_string())
+    .bind(output.instance_id.into_uuid().to_string())
+    .bind(output.block_id.as_str())
+    .bind(serde_json::to_string(&output.output)?)
+    .bind(&output.output_ref)
+    .bind(output.output_size as i64)
+    .bind(output.attempt as i64)
+    .bind(ts(output.created_at))
+    .execute(&mut *tx).await?;
+
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub(super) async fn save_output_and_transition(
     storage: &SqliteStorage,
     output: &BlockOutput,

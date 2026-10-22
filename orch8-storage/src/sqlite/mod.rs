@@ -1237,6 +1237,23 @@ impl crate::OutputStore for SqliteStorage {
         outputs::get_completed_ids_batch(self, instance_ids).await
     }
 
+    async fn save_output_and_conditional_transition(
+        &self,
+        output: &BlockOutput,
+        expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        outputs::save_output_and_conditional_transition(
+            self,
+            output,
+            expected_state,
+            new_state,
+            next_fire_at,
+        )
+        .await
+    }
+
     async fn save_output_and_transition(
         &self,
         output: &BlockOutput,
