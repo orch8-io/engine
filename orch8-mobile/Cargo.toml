@@ -32,9 +32,6 @@ rand = { workspace = true }
 zeroize = { workspace = true }
 hex = "0.4"
 
-[build-dependencies]
-uniffi = { version = "0.32", features = ["build"] }
-
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 orch8-storage = { path = "../orch8-storage", default-features = false, features = ["artifacts"] }
