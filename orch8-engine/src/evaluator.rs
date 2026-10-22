@@ -935,6 +935,7 @@ async fn phase_root_activation(
             outputs_snapshot,
             &ctx.clock,
             ctx.claim_token,
+            None,
         )
         .await?;
         ctx.tree_stale = true;
@@ -985,6 +986,7 @@ async fn phase_running_steps(
         // Wait for both futures even if one fails. Dropping the sibling on the
         // first error could interrupt a handler after it has committed an
         // external side effect but before its durable completion is recorded.
+        let pending_deferrals = crate::handlers::step_deferral::PendingStepDeferrals::default();
         let (left_result, right_result) = Box::pin(async {
             tokio::join!(
                 dispatch_block(
@@ -998,6 +1000,7 @@ async fn phase_running_steps(
                     outputs_snapshot,
                     &ctx.clock,
                     ctx.claim_token,
+                    Some(&pending_deferrals),
                 ),
                 dispatch_block(
                     storage,
@@ -1010,12 +1013,16 @@ async fn phase_running_steps(
                     outputs_snapshot,
                     &ctx.clock,
                     ctx.claim_token,
+                    Some(&pending_deferrals),
                 ),
             )
         })
         .await;
         left_result?;
         right_result?;
+        pending_deferrals
+            .apply(storage.as_ref(), &ctx.instance, ctx.claim_token)
+            .await?;
         ctx.tree_stale = true;
         ctx.instance_stale = true;
         return Ok(IterAction::Continue);
@@ -1046,6 +1053,7 @@ async fn phase_running_steps(
         outputs_snapshot,
         &ctx.clock,
         ctx.claim_token,
+        None,
     )
     .await?;
     ctx.tree_stale = true;
@@ -1169,6 +1177,7 @@ async fn phase_composite_reevaluation(
             outputs_snapshot,
             &ctx.clock,
             ctx.claim_token,
+            None,
         )
         .await?;
         if may_mutate_instance(block) {

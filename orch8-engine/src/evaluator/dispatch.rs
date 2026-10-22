@@ -219,6 +219,7 @@ pub(super) async fn dispatch_block(
     outputs: &OutputsSnapshot,
     clock: &orch8_types::clock::SharedClock,
     claim_token: chrono::DateTime<chrono::Utc>,
+    pending_deferrals: Option<&crate::handlers::step_deferral::PendingStepDeferrals>,
 ) -> Result<bool, EngineError> {
     // Mark node as running.
     if node.state == NodeState::Pending {
@@ -250,6 +251,7 @@ pub(super) async fn dispatch_block(
                 outputs,
                 clock,
                 claim_token,
+                pending_deferrals,
             ))
             .await;
             // Interceptor: after_step

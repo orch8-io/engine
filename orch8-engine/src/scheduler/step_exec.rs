@@ -270,7 +270,8 @@ async fn rate_limit_retry_at(
     Ok(None)
 }
 
-/// Shared step preamble for the flat and tree dispatch paths: `delay`, then
+/// Shared step preamble for the flat and tree dispatch paths: saved retry
+/// deadline, `delay`, then
 /// `send_window`, then `rate_limit_key`, then the global `rate_budget` (in
 /// that order — a token is only consumed once the step is otherwise allowed
 /// to run). Returns the
@@ -278,14 +279,30 @@ async fn rate_limit_retry_at(
 ///
 /// Pure with respect to instance state: callers own the Running → Scheduled
 /// transition (the flat path via `transition_instance`, the tree path via
-/// [`park_tree_instance_until`], which tolerates a parallel sibling having
-/// already parked the instance).
+/// [`park_tree_instance_until`], after a parallel batch has settled).
 pub(crate) async fn step_preamble_deferral(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
+    if step_def.retry.is_some()
+        && let Some(previous) = storage.get_block_output(instance.id, &step_def.id).await?
+        && previous.output_ref.as_deref() == Some("__retry__")
+        && let Some(value) = previous
+            .output
+            .get("_retry_fire_at")
+            .filter(|v| !v.is_null())
+    {
+        let retry_at: DateTime<Utc> = serde_json::from_value(value.clone()).map_err(|error| {
+            orch8_types::error::StorageError::Query(format!(
+                "invalid persisted retry deadline: {error}"
+            ))
+        })?;
+        if retry_at > clock.now() {
+            return Ok(Some(retry_at));
+        }
+    }
     if let Some(fire_at) = step_delay_until(storage, instance, step_def, clock).await? {
         debug!(
             instance_id = %instance.id,

@@ -346,6 +346,7 @@ pub async fn execute_step_node(
         outputs,
         &clock,
         instance.claimed_at.unwrap_or(instance.updated_at),
+        None,
     )
     .await
 }
@@ -360,6 +361,7 @@ pub(crate) async fn execute_step_node_with_clock(
     outputs: &OutputsSnapshot,
     clock: &orch8_types::clock::SharedClock,
     claim_token: chrono::DateTime<chrono::Utc>,
+    pending_deferrals: Option<&super::step_deferral::PendingStepDeferrals>,
 ) -> Result<bool, EngineError> {
     // Conditional guard: if `when` is set, evaluate the expression against
     // the current context + outputs. Skip the step entirely if falsy. Strict
@@ -415,11 +417,12 @@ pub(crate) async fn execute_step_node_with_clock(
         crate::scheduler::step_preamble_deferral(storage.as_ref(), instance, step_def, clock)
             .await?
     {
-        crate::scheduler::park_tree_instance_until(
+        super::step_deferral::defer_step(
             storage.as_ref(),
-            instance.id,
+            instance,
             claim_token,
-            fire_at,
+            super::step_deferral::StepDeferral::WakeAt(fire_at),
+            pending_deferrals,
         )
         .await?;
         return Ok(false);
@@ -597,15 +600,14 @@ pub(crate) async fn execute_step_node_with_clock(
     ) {
         BreakerDecision::Proceed(cow) => cow,
         BreakerDecision::Defer { fire_at } => {
-            storage
-                .conditional_update_claimed_instance_state(
-                    instance.id,
-                    claim_token,
-                    orch8_types::instance::InstanceState::Running,
-                    orch8_types::instance::InstanceState::Scheduled,
-                    Some(fire_at),
-                )
-                .await?;
+            super::step_deferral::defer_step(
+                storage.as_ref(),
+                instance,
+                claim_token,
+                super::step_deferral::StepDeferral::WakeAt(fire_at),
+                pending_deferrals,
+            )
+            .await?;
             return Ok(false);
         }
     };
@@ -891,7 +893,37 @@ pub(crate) async fn execute_step_node_with_clock(
             // a marker the count would reset to 0 each tick. The marker
             // carries the numeric attempt of the *just-failed* try; the
             // next `compute_attempt` call returns `attempt + 1`.
-            let marker = orch8_types::output::BlockOutput {
+            // A sibling may wake the instance before this retry is due.
+            // Persist this step's deadline with its retry evidence.
+            let retry_schedule = step_def
+                .retry
+                .as_ref()
+                .filter(|retry| attempt < retry.max_attempts)
+                .filter(|retry| {
+                    crate::handlers::step::should_retry(
+                        retry,
+                        message,
+                        details.as_ref(),
+                        &instance.context,
+                        &serde_json::Value::Null,
+                    )
+                })
+                .map(|retry| {
+                    let backoff = crate::handlers::step::honor_retry_after(
+                        crate::handlers::step::calculate_backoff_with_jitter(
+                            attempt,
+                            retry.initial_backoff,
+                            retry.max_backoff,
+                            retry.backoff_multiplier,
+                        ),
+                        details.as_ref(),
+                    );
+                    (
+                        backoff,
+                        crate::scheduler::clamped_fire_at(clock.now(), backoff),
+                    )
+                });
+            let mut marker = orch8_types::output::BlockOutput {
                 id: uuid::Uuid::now_v7(),
                 instance_id: instance.id,
                 block_id: step_def.id.clone(),
@@ -904,6 +936,9 @@ pub(crate) async fn execute_step_node_with_clock(
                 attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
                 created_at: chrono::Utc::now(),
             };
+            if let Some((_, fire_at)) = retry_schedule {
+                marker.output["_retry_fire_at"] = serde_json::json!(fire_at);
+            }
             // Marker-save failures are non-fatal — worst case the attempt
             // counter stalls and the handler retries more times than
             // `max_attempts` allows. Prefer logging over surfacing an error
@@ -942,13 +977,7 @@ pub(crate) async fn execute_step_node_with_clock(
                     .await?;
                     return Ok(false);
                 }
-                if !crate::handlers::step::should_retry(
-                    retry,
-                    message,
-                    details.as_ref(),
-                    &instance.context,
-                    &serde_json::Value::Null,
-                ) {
+                let Some((backoff, fire_at)) = retry_schedule else {
                     tracing::warn!(
                         instance_id = %instance.id,
                         block_id = %step_def.id,
@@ -964,19 +993,7 @@ pub(crate) async fn execute_step_node_with_clock(
                     )
                     .await?;
                     return Ok(false);
-                }
-                let backoff = crate::handlers::step::honor_retry_after(
-                    crate::handlers::step::calculate_backoff_with_jitter(
-                        attempt,
-                        retry.initial_backoff,
-                        retry.max_backoff,
-                        retry.backoff_multiplier,
-                    ),
-                    details.as_ref(),
-                );
-                // Shared with the fast path: clamp a pathological backoff
-                // instead of collapsing it to zero (immediate hot retry).
-                let fire_at = crate::scheduler::clamped_fire_at(clock.now(), backoff);
+                };
                 tracing::warn!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,
@@ -986,14 +1003,12 @@ pub(crate) async fn execute_step_node_with_clock(
                     message = %message,
                     "tree path: retryable failure, re-scheduling instance with backoff"
                 );
-                crate::lifecycle::transition_claimed_instance(
+                super::step_deferral::defer_step(
                     storage.as_ref(),
-                    instance.id,
-                    Some(&instance.tenant_id),
+                    instance,
                     claim_token,
-                    orch8_types::instance::InstanceState::Running,
-                    orch8_types::instance::InstanceState::Scheduled,
-                    Some(fire_at),
+                    super::step_deferral::StepDeferral::RetryAt(fire_at),
+                    pending_deferrals,
                 )
                 .await?;
                 // The evaluator's top-of-loop instance-state guard will

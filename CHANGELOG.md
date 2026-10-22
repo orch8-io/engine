@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Parallel step deferrals
+
+- Parallel leaves retain their execution claim until both results are durable.
+  Delay, circuit-breaker, and retry deferrals schedule the instance after the
+  batch settles. Per-step retry deadlines preserve backoff when a sibling
+  needs an earlier wake-up.
+
 ### Runtime claim metadata
 
 - Storage reads and claims retain `TaskInstance::claimed_at` separately from
