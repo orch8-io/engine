@@ -385,16 +385,20 @@ pub(super) async fn dispatch_block(
                         attempt: 0,
                         created_at: chrono::Utc::now(),
                     };
-                    storage.save_block_output(&block_output).await?;
-                    complete_node(storage.as_ref(), node.id).await?;
+                    crate::control::ExecutionControl::save_block_output(&control, &block_output)
+                        .await?;
+                    complete_node(&control, node.id).await?;
                 } else if child.state.is_terminal() {
                     // Child failed or cancelled.
-                    fail_node(storage.as_ref(), node.id).await?;
+                    fail_node(&control, node.id).await?;
                 } else {
                     // Still running — wait.
-                    storage
-                        .update_node_state(node.id, NodeState::Waiting)
-                        .await?;
+                    crate::control::ExecutionControl::update_node_state(
+                        &control,
+                        node.id,
+                        NodeState::Waiting,
+                    )
+                    .await?;
                 }
             } else {
                 // Depth guard: an A→A (or A→B→A) sub-sequence spawn has no
@@ -473,7 +477,7 @@ pub(super) async fn dispatch_block(
                             error = %e,
                             "failed to resolve sub-sequence input templates"
                         );
-                        fail_node(storage.as_ref(), node.id).await?;
+                        fail_node(&control, node.id).await?;
                         return Ok(true);
                     }
                 };
@@ -511,10 +515,13 @@ pub(super) async fn dispatch_block(
                     created_at: now,
                     updated_at: now,
                 };
-                storage.create_instance(&child).await?;
-                storage
-                    .update_node_state(node.id, NodeState::Waiting)
-                    .await?;
+                crate::control::ExecutionControl::create_child_instance(&control, &child).await?;
+                crate::control::ExecutionControl::update_node_state(
+                    &control,
+                    node.id,
+                    NodeState::Waiting,
+                )
+                .await?;
             }
             Ok(true) // Re-schedule to check child status later
         }

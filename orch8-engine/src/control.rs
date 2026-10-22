@@ -73,6 +73,29 @@ pub trait ExecutionControl: Send + Sync {
         None
     }
 
+    /// Create a child under this evaluation's parent claim, never the child's.
+    async fn create_child_instance(
+        &self,
+        child: &orch8_types::instance::TaskInstance,
+    ) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            held(
+                claim,
+                InstanceStore::create_child_instance_claimed(
+                    self.backend(),
+                    claim.instance_id,
+                    child,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            InstanceStore::create_instance(self.backend(), child)
+                .await
+                .map_err(EngineError::Storage)
+        }
+    }
+
     async fn get_block_output(
         &self,
         id: InstanceId,

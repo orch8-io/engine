@@ -347,3 +347,41 @@ backend_test!(async fn receipt_cleanup_errors_preserve_evidence_and_retry_classi
     assert!(b.storage.get_effect_receipt(&sequence.tenant_id, receipt.id).await.unwrap().is_some());
     assert_eq!(b.storage.get_instance(id).await.unwrap().unwrap().claimed_at, Some(token));
 });
+
+backend_test!(async fn child_creation_uses_the_parents_original_claim_and_owner_scope(b) {
+    let (sequence, id, token, _) = claimed(b.storage.as_ref()).await;
+    let mut child = InstanceBuilder::for_sequence(&sequence).due_now().build();
+    child.parent_instance_id = Some(id);
+    child.next_fire_at = Some(Utc::now() + chrono::Duration::days(1));
+    child.context.data = serde_json::json!({"private_child_input":{"retained":true}});
+    let mut missing_parent = child.clone(); missing_parent.parent_instance_id = None;
+    let mut foreign_parent = child.clone(); foreign_parent.parent_instance_id = Some(InstanceId::new());
+    let mut foreign_tenant = child.clone(); foreign_tenant.tenant_id = orch8_types::ids::TenantId::unchecked("other");
+    let mut foreign_namespace = child.clone(); foreign_namespace.namespace = orch8_types::ids::Namespace::new("other");
+    let mut foreign_sub_tenant = child.clone(); foreign_sub_tenant.sub_tenant = Some("other".into());
+    for mut invalid in [missing_parent, foreign_parent, foreign_tenant, foreign_namespace, foreign_sub_tenant] {
+        invalid.id = InstanceId::new();
+        assert!(!b.storage.create_child_instance_claimed(id, &invalid, token).await.unwrap());
+        assert!(b.storage.get_instance(invalid.id).await.unwrap().is_none());
+    }
+    assert!(b.storage.create_child_instance_claimed(id, &child, token).await.unwrap());
+    assert_eq!(b.storage.get_instance(child.id).await.unwrap().unwrap().context.data, child.context.data);
+    // Duplicate primary keys fail on every backend; SQLite does
+    // not require a sequence row, so an unknown sequence is not a portable error.
+    assert!(b.storage.create_child_instance_claimed(id, &child, token).await.is_err());
+    assert_eq!(b.storage.get_child_instances(id).await.unwrap().len(), 1);
+    assert_eq!(b.storage.get_instance(child.id).await.unwrap().unwrap().context.data, child.context.data);
+    assert_eq!(b.storage.get_instance(id).await.unwrap().unwrap().claimed_at, Some(token));
+    let next = Utc::now() + chrono::Duration::seconds(2);
+    assert!(b.storage.conditional_update_claimed_instance_state(id, token, InstanceState::Running, InstanceState::Scheduled, Some(next)).await.unwrap());
+    let replacement = b.storage.claim_due_instances(next, 1, 0).await.unwrap().pop().unwrap();
+    assert_eq!(replacement.id, id);
+    let current = replacement.claimed_at.unwrap();
+    assert_ne!(token, current);
+    let mut late = child.clone(); late.id = InstanceId::new();
+    assert!(!b.storage.create_child_instance_claimed(id, &late, token).await.unwrap());
+    assert!(b.storage.get_instance(late.id).await.unwrap().is_none());
+    assert!(b.storage.create_child_instance_claimed(id, &late, current).await.unwrap());
+    assert_eq!(b.storage.get_child_instances(id).await.unwrap().len(), 2);
+    assert_eq!(b.storage.get_instance(late.id).await.unwrap().unwrap().context.data, child.context.data);
+});

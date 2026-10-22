@@ -286,3 +286,36 @@ pub(super) async fn delete_receipts(
     tx.commit().await?;
     Ok(Some(count))
 }
+
+/// The parent row stays locked until the new child has committed.
+pub(super) async fn create_child(
+    store: &SqliteStorage,
+    parent_id: InstanceId,
+    child: &orch8_types::instance::TaskInstance,
+    token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    if child.parent_instance_id != Some(parent_id) || child.id == parent_id {
+        return Ok(false);
+    }
+    let Some(mut tx) = begin(store, parent_id, token).await? else {
+        return Ok(false);
+    };
+    let same_owner: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE id=?1 AND tenant_id=?2 AND namespace=?3 AND sub_tenant IS ?4")
+        .bind(parent_id.to_string())
+        .bind(child.tenant_id.as_str())
+        .bind(child.namespace.as_str())
+        .bind(child.sub_tenant.as_deref())
+        .fetch_one(&mut *tx).await?;
+    if same_owner != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    super::instances::bind_instance_insert(
+        sqlx::query(super::instances::INSTANCE_INSERT_SQL),
+        child,
+    )?
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}

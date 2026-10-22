@@ -86,3 +86,60 @@ backend_test!(kinds = [postgres, encrypted_postgres], async fn replacement_seria
     assert!(tokio::time::timeout(Duration::from_secs(5), replacement).await.unwrap().unwrap().unwrap());
     assert!(waits_for_writer, "claim replacement passed an unfinished result write: ownership check and insert were not atomic");
 });
+
+async fn hold_child_insert(pool: &sqlx::PgPool) -> (HeldConnection, i32) {
+    let key = i64::from_be_bytes(uuid::Uuid::now_v7().as_bytes()[8..].try_into().unwrap());
+    sqlx::query("CREATE TABLE child_write_gate (lock_key BIGINT NOT NULL)")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO child_write_gate VALUES ($1)")
+        .bind(key)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE FUNCTION hold_claimed_child() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock((SELECT lock_key FROM child_write_gate)); RETURN NEW; END $$")
+        .execute(pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER hold_claimed_child BEFORE INSERT ON task_instances FOR EACH ROW WHEN (NEW.parent_instance_id IS NOT NULL) EXECUTE FUNCTION hold_claimed_child()")
+        .execute(pool).await.unwrap();
+    let mut gate = HeldConnection(Some(pool.acquire().await.unwrap()));
+    let conn = gate.0.as_mut().unwrap();
+    let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut **conn)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(key)
+        .execute(&mut **conn)
+        .await
+        .unwrap();
+    (gate, pid)
+}
+
+backend_test!(kinds = [postgres, encrypted_postgres], async fn replacement_serializes_with_child_creation(b) {
+    let sequence = SequenceBuilder::new("child-claim-lock").step("work", "noop").build();
+    b.storage.create_sequence(&sequence).await.unwrap();
+    let parent = InstanceBuilder::for_sequence(&sequence).due_now().build();
+    b.storage.create_instance(&parent).await.unwrap();
+    let first = b.storage.claim_due_instances(Utc::now(), 1, 0).await.unwrap().pop().unwrap();
+    let token = first.claimed_at.unwrap();
+    let mut child = InstanceBuilder::for_sequence(&sequence).due_now().build();
+    child.parent_instance_id = Some(parent.id);
+    let child_id = child.id;
+    let (gate, gate_pid) = hold_child_insert(b.pg_pool()).await;
+    let store = Arc::clone(&b.storage);
+    let writer = tokio::spawn(async move { store.create_child_instance_claimed(parent.id, &child, token).await });
+    let writer_pid = blocked_by(b.pg_pool(), gate_pid, &writer).await
+        .expect("child insert must reach the controlled transaction gate");
+    let store = Arc::clone(&b.storage);
+    let replacement = tokio::spawn(async move {
+        store.conditional_update_claimed_instance_state(parent.id, token,
+            InstanceState::Running, InstanceState::Scheduled, Some(Utc::now())).await
+    });
+    let waits_for_writer = blocked_by(b.pg_pool(), writer_pid, &replacement).await.is_some();
+    drop(gate);
+    assert!(tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap().unwrap());
+    assert!(tokio::time::timeout(Duration::from_secs(5), replacement).await.unwrap().unwrap().unwrap());
+    assert!(waits_for_writer, "replacement passed an unfinished child insert; parent guard and child insertion were not atomic");
+    assert_eq!(b.storage.get_child_instances(parent.id).await.unwrap()[0].id, child_id);
+});

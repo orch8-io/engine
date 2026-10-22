@@ -428,6 +428,17 @@ impl Drop for ManifestLockGuard {
 pub trait InstanceStore: Send + Sync + 'static {
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError>;
 
+    /// Insert a child while atomically holding its parent's original running claim.
+    /// False means the claim is lost or the child does not reference this parent
+    /// with the same tenant, namespace and sub-tenant. No child is inserted then.
+    /// Errors roll back the insert; implementations must serialize with recovery.
+    async fn create_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child: &TaskInstance,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Atomically insert an instance and its tree, outputs and payloads.
     /// True means every row committed. False means this instance id already
     /// exists and no row was changed. Any error leaves no partial instance.

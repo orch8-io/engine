@@ -1143,6 +1143,16 @@ passthrough_impl! {
         self.inner.create_instance(encrypted.as_ref()).await
     }
 
+    async fn create_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child: &TaskInstance,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_instance(child)?;
+        self.inner.create_child_instance_claimed(parent_id, encrypted.as_ref(), claim_token).await
+    }
+
     async fn create_instances_batch(
         &self,
         instances: &[TaskInstance],

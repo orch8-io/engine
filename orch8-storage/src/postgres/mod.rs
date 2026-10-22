@@ -605,6 +605,15 @@ impl crate::InstanceStore for PostgresStorage {
         instances::create(self, instance).await
     }
 
+    async fn create_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child: &TaskInstance,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::create_child(self, parent_id, child, claim_token).await
+    }
+
     async fn create_instance_admitted(
         &self,
         instance: &TaskInstance,
