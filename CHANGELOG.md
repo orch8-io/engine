@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Externalized output history
+
+- Each step execution stores its externalized payload under a distinct output
+  reference. Repeated blocks and retries no longer overwrite the payload of
+  earlier output rows. Existing references remain readable.
+
 ### Step results after claim recovery
 
 - Late handlers cannot replace a newer execution's outputs, cached results,
