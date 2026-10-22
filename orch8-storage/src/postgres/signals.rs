@@ -188,3 +188,15 @@ pub(super) async fn get_signalled_instance_ids(
         })
         .collect()
 }
+
+/// First delivery wins; a different instance's signal is never consumed.
+pub(super) async fn mark_owned_delivered_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: orch8_types::ids::InstanceId,
+    signal_id: Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query("UPDATE signal_inbox SET delivered=TRUE, delivered_at=NOW() WHERE id=$1 AND instance_id=$2 AND delivered=FALSE")
+        .bind(signal_id).bind(instance_id.into_uuid())
+        .execute(conn).await?;
+    Ok(())
+}

@@ -159,6 +159,7 @@ fault_impl! {
         async fn expire_events_before(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<u64, StorageError>;
         async fn get_pending_signals_batch(&self, instance_ids: &[InstanceId]) -> Result<std::collections::HashMap<InstanceId, Vec<Signal>>, StorageError>;
         async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
+        async fn mark_signal_delivered_claimed(&self, instance_id: InstanceId, signal_id: Uuid, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
         async fn get_signalled_instance_ids(&self, limit: u32) -> Result<Vec<(InstanceId, InstanceState)>, StorageError>;
     }

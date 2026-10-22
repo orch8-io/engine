@@ -1667,6 +1667,17 @@ pub trait SignalStore: Send + Sync + 'static {
 
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
 
+    /// Deliver a pending signal belonging to this instance under its original
+    /// running claim. False means claim loss with no changes. A held claim
+    /// returns true even for missing, foreign or already-delivered signals;
+    /// those rows stay untouched, including their original delivery timestamp.
+    async fn mark_signal_delivered_claimed(
+        &self,
+        instance_id: InstanceId,
+        signal_id: Uuid,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Batch variant: mark multiple signals delivered in one query.
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
 

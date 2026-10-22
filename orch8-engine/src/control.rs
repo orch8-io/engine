@@ -7,8 +7,8 @@ use crate::error::EngineError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use orch8_storage::{
-    ContinuityStore, ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore, StorageBackend,
-    WorkerStore,
+    ContinuityStore, ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore, SignalStore,
+    StorageBackend, WorkerStore,
 };
 use orch8_types::{
     error::StorageError,
@@ -141,6 +141,30 @@ pub trait ExecutionControl: Send + Sync {
                 return Ok(InstanceStore::get_instance(self.backend(), previous.id).await?);
             }
             Ok(Some(previous.clone()))
+        }
+    }
+
+    async fn mark_signal_delivered(
+        &self,
+        instance_id: InstanceId,
+        signal_id: uuid::Uuid,
+    ) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, instance_id)?;
+            held(
+                claim,
+                SignalStore::mark_signal_delivered_claimed(
+                    self.backend(),
+                    instance_id,
+                    signal_id,
+                    claim.token,
+                )
+                .await?,
+            )
+        } else {
+            SignalStore::mark_signal_delivered(self.backend(), signal_id)
+                .await
+                .map_err(EngineError::Storage)
         }
     }
 

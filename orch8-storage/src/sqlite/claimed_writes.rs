@@ -419,3 +419,17 @@ pub(super) async fn ensure_run_started(
     tx.commit().await?;
     Ok(true)
 }
+
+pub(super) async fn deliver_signal(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+    signal_id: uuid::Uuid,
+    token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, instance_id, token).await? else {
+        return Ok(false);
+    };
+    super::signals::mark_owned_delivered_on(&mut tx, instance_id, signal_id).await?;
+    tx.commit().await?;
+    Ok(true)
+}

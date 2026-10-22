@@ -1631,6 +1631,15 @@ impl crate::SignalStore for SqliteStorage {
         signals::mark_delivered(self, signal_id).await
     }
 
+    async fn mark_signal_delivered_claimed(
+        &self,
+        instance_id: InstanceId,
+        signal_id: Uuid,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::deliver_signal(self, instance_id, signal_id, claim_token).await
+    }
+
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError> {
         signals::mark_delivered_batch(self, signal_ids).await
     }
