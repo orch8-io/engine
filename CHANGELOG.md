@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Composite write ownership
 
+- Run initialization and flat/tree waiting-step timestamps retain the original
+  execution claim. A stale scheduler cannot install a replacement's run identity
+  or change its current step and timeout baseline. Flat-step execution receives
+  the captured scheduler context through its nested write paths.
 - Adopting an earlier sub-sequence child retains the original parent claim.
   Failed-child metadata, tree and sentinel cleanup, run reset and rescheduling
   commit together, including rollback on cancellation. Replayed bindings reuse
@@ -29,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Router output-read failures remain retryable instead of being converted into
   an empty input map and permanently memoizing the default branch.
 - Custom storage backends implement claim-aware node batches, context CAS/merge,
-  output and effect-receipt cleanup, child creation and adoption, metadata merges, and worker cancellation. Context CAS distinguishes claim loss (`None`) from
+  output and effect-receipt cleanup, child creation and adoption, run initialization, metadata merges, and worker cancellation. Context CAS distinguishes claim loss (`None`) from
   ordinary contention (`Some(false)`); cancellation keeps its audit events in
   the same transaction. Native and encrypted backends implement these contracts.
 

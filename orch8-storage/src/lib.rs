@@ -768,6 +768,17 @@ pub trait InstanceStore: Send + Sync + 'static {
         self.update_instance_context(id, &inst.context).await
     }
 
+    /// Initialize run identity only while the original running claim is held.
+    /// False means ownership loss, with no context or timestamp changes.
+    /// Existing run fields keep their first-writer-wins semantics.
+    async fn ensure_instance_run_started_claimed(
+        &self,
+        id: InstanceId,
+        run_id: &str,
+        started_at: DateTime<Utc>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Update only the `runtime.current_step_started_at` field for an instance.
     /// Used to record when the current step began so per-step deadlines and
     /// `wait_for_input` timeouts are measured from step start rather than

@@ -1530,6 +1530,7 @@ passthrough_impl! {
     async fn bulk_update_state(&self, filter: &orch8_types::filter::InstanceFilter, new_state: orch8_types::instance::InstanceState) -> Result<u64, StorageError>;
     async fn bulk_reschedule(&self, filter: &orch8_types::filter::InstanceFilter, offset_secs: i64) -> Result<u64, StorageError>;
     async fn ensure_instance_run_started(&self, id: InstanceId, run_id: &str, started_at: DateTime<Utc>) -> Result<(), StorageError>;
+    async fn ensure_instance_run_started_claimed(&self, id: InstanceId, run_id: &str, started_at: DateTime<Utc>, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
     async fn reset_instance_run(&self, id: InstanceId, run_id: &str) -> Result<(), StorageError>;
     // Pass-through: the counter lives in `context.runtime`, which is never
     // encrypted (only `context.data` is), so the inner backend's atomic

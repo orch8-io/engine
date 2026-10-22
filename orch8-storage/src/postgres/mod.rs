@@ -824,6 +824,16 @@ impl crate::InstanceStore for PostgresStorage {
         instances::ensure_run_started(self, id, run_id, started_at).await
     }
 
+    async fn ensure_instance_run_started_claimed(
+        &self,
+        id: InstanceId,
+        run_id: &str,
+        started_at: DateTime<Utc>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::ensure_run_started(self, id, run_id, started_at, claim_token).await
+    }
+
     async fn reset_instance_run(&self, id: InstanceId, run_id: &str) -> Result<(), StorageError> {
         instances::reset_run(self, id, run_id).await
     }

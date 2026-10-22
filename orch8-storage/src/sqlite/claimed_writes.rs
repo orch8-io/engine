@@ -404,3 +404,18 @@ pub(super) async fn adopt_child(
     tx.commit().await?;
     Ok(Some(crate::ChildAdoption::Adopted(Box::new(adopted))))
 }
+
+pub(super) async fn ensure_run_started(
+    store: &SqliteStorage,
+    id: InstanceId,
+    run_id: &str,
+    started_at: DateTime<Utc>,
+    token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, id, token).await? else {
+        return Ok(false);
+    };
+    super::instances::ensure_instance_run_started_on(&mut tx, id, run_id, started_at).await?;
+    tx.commit().await?;
+    Ok(true)
+}

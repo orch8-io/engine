@@ -56,6 +56,7 @@ fault_impl! {
 
         async fn update_instance_context_cas(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext, _expected_updated_at: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn ensure_instance_run_started(&self, id: InstanceId, run_id: &str, started_at: DateTime<Utc>) -> Result<(), StorageError>;
+        async fn ensure_instance_run_started_claimed(&self, id: InstanceId, run_id: &str, started_at: DateTime<Utc>, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn update_instance_current_step_started_at(&self, id: InstanceId, ts: DateTime<Utc>) -> Result<(), StorageError>;
         async fn increment_total_steps(&self, id: InstanceId) -> Result<u32, StorageError>;
         async fn update_instance_context_externalized(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext, threshold_bytes: u32) -> Result<(), StorageError>;

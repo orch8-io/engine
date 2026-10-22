@@ -704,6 +704,16 @@ pub(super) async fn ensure_instance_run_started(
     run_id: &str,
     started_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    ensure_instance_run_started_on(&mut conn, id, run_id, started_at).await
+}
+
+pub(super) async fn ensure_instance_run_started_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+    run_id: &str,
+    started_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
     // Bind raw strings (not JSON-encoded Values) so json_set wraps them in
     // quotes once. COALESCE keeps an already-stored run_id (a retry/resume
     // regenerates it before the next claim) and an existing started_at.
@@ -719,7 +729,7 @@ pub(super) async fn ensure_instance_run_started(
     .bind(run_id)
     .bind(started_at.to_rfc3339())
     .bind(ts(Utc::now()))
-    .execute(&storage.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

@@ -1035,17 +1035,20 @@ pub(super) async fn gated_step_incomplete(
 /// Returns `StepOutcome` wrapped in `Result` — the outcome tells the caller
 /// whether to continue executing more blocks or stop.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_step_block(
-    storage: &Arc<dyn StorageBackend>,
-    handlers: &HandlerRegistry,
-    webhook_config: &WebhookConfig,
-    externalize_threshold: u32,
+    ctx: &super::InstanceRunCtx<'_>,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
-    cancel: &CancellationToken,
-    clock: &SharedClock,
 ) -> Result<StepOutcome, EngineError> {
+    let storage = ctx.storage;
+    let handlers = ctx.handlers;
+    let webhook_config = ctx.webhook_config;
+    let externalize_threshold = ctx.externalize_threshold;
+    let cancel = ctx.cancel;
+    let clock = ctx.clock;
+    let claim_token = ctx.claim_token;
+    let control = crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
+
     let instance_id = instance.id;
 
     // Debug mode: if instance has breakpoints set and this step is in the list, pause.
@@ -1062,7 +1065,7 @@ pub(super) async fn execute_step_block(
             storage.as_ref(),
             instance_id,
             Some(&instance.tenant_id),
-            instance.updated_at,
+            claim_token,
             InstanceState::Running,
             InstanceState::Paused,
             None,
@@ -1162,9 +1165,13 @@ pub(super) async fn execute_step_block(
             // `current_step` pointing at the previous step — the approvals
             // API and wait_for_input timeouts then keyed off the wrong step.
             // Retry once against a fresh read, mirroring the tree path.
-            if !storage
-                .update_instance_context_cas(instance_id, &inst.context, expected_updated_at)
-                .await?
+            if !crate::control::ExecutionControl::update_instance_context_cas(
+                &control,
+                instance_id,
+                &inst.context,
+                expected_updated_at,
+            )
+            .await?
             {
                 let landed = match storage.get_instance(instance_id).await? {
                     Some(mut fresh)
@@ -1173,13 +1180,13 @@ pub(super) async fn execute_step_block(
                         let expected_updated_at = fresh.updated_at;
                         fresh.context.runtime.current_step = Some(step_def.id.clone());
                         fresh.context.runtime.current_step_started_at = Some(step_started);
-                        storage
-                            .update_instance_context_cas(
-                                instance_id,
-                                &fresh.context,
-                                expected_updated_at,
-                            )
-                            .await?
+                        crate::control::ExecutionControl::update_instance_context_cas(
+                            &control,
+                            instance_id,
+                            &fresh.context,
+                            expected_updated_at,
+                        )
+                        .await?
                     }
                     Some(fresh) => {
                         // A concurrent writer already stamped this step:
@@ -1215,12 +1222,13 @@ pub(super) async fn execute_step_block(
         gate_instance.context.runtime.current_step = Some(step_def.id.clone());
         gate_instance.context.runtime.current_step_started_at = Some(step_started);
         let gate_instance = &gate_instance;
-        if check_human_input_at(
+        if check_human_input_at_with_claim(
             storage.as_ref(),
             gate_instance,
             step_def,
             human_def,
             clock.now(),
+            claim_token,
         )
         .await?
         {
@@ -1233,7 +1241,7 @@ pub(super) async fn execute_step_block(
                 storage.as_ref(),
                 instance_id,
                 Some(&instance.tenant_id),
-                instance.updated_at,
+                claim_token,
                 InstanceState::Running,
                 InstanceState::Waiting,
                 None,
@@ -1302,7 +1310,7 @@ pub(super) async fn execute_step_block(
                     storage.as_ref(),
                     instance_id,
                     Some(&instance.tenant_id),
-                    instance.updated_at,
+                    claim_token,
                     InstanceState::Running,
                     InstanceState::Scheduled,
                     Some(fire_at),
@@ -1449,11 +1457,10 @@ pub(super) async fn execute_step_block(
         attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
         created_at: chrono::Utc::now(),
     };
-    crate::handlers::step::persist_output(storage.as_ref(), &sentinel, Some(instance.updated_at))
-        .await?;
+    crate::handlers::step::persist_output(storage.as_ref(), &sentinel, Some(claim_token)).await?;
 
     let exec_params = crate::handlers::step::StepExecParams {
-        claim_token: Some(instance.updated_at),
+        claim_token: Some(claim_token),
         instance_id,
         tenant_id: instance.tenant_id.clone(),
         block_id: step_def.id.clone(),
@@ -1479,7 +1486,7 @@ pub(super) async fn execute_step_block(
             crate::handlers::step::persist_output(
                 storage.as_ref(),
                 &block_output,
-                Some(instance.updated_at),
+                Some(claim_token),
             )
             .await?;
 
@@ -1531,7 +1538,7 @@ pub(super) async fn execute_step_block(
                         storage.as_ref(),
                         instance_id,
                         Some(&instance.tenant_id),
-                        instance.updated_at,
+                        claim_token,
                         InstanceState::Running,
                         InstanceState::Scheduled,
                         Some(clock.now()),
@@ -1607,7 +1614,7 @@ pub(super) async fn execute_step_block(
             if let Err(err) = crate::handlers::step::persist_output(
                 storage.as_ref(),
                 &retry_marker,
-                Some(instance.updated_at),
+                Some(claim_token),
             )
             .await
             {
@@ -1660,7 +1667,7 @@ pub(super) async fn execute_step_block(
                 &step_def.id,
                 attempt,
                 &e,
-                instance.updated_at,
+                claim_token,
             )
             .await?;
             // Keep the sentinel on permanent failure: the handler already ran
@@ -1681,7 +1688,7 @@ pub(super) async fn execute_step_block(
                 storage.as_ref(),
                 instance_id,
                 Some(&instance.tenant_id),
-                instance.updated_at,
+                claim_token,
                 InstanceState::Running,
                 InstanceState::Failed,
                 None,

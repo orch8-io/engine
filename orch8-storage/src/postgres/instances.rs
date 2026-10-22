@@ -753,6 +753,16 @@ pub(super) async fn ensure_run_started(
     run_id: &str,
     started_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    ensure_run_started_on(&mut conn, id, run_id, started_at).await
+}
+
+pub(super) async fn ensure_run_started_on(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+    run_id: &str,
+    started_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
     let started_at_json = serde_json::to_value(started_at)?;
     // `#>` on an existing-but-JSON-null field returns the jsonb `null`
     // literal, not SQL NULL — COALESCE only skips SQL NULL, so without
@@ -772,7 +782,7 @@ pub(super) async fn ensure_run_started(
     .bind(id.into_uuid())
     .bind(run_id)
     .bind(started_at_json)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
