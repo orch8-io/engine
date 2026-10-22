@@ -31,6 +31,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
 import { ApiError, Orch8Client, step, testSequence, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
+import { federationSigningBytes } from "../federation-signing.ts";
 import type { ServerHandle } from "../harness.ts";
 import type { Block, SequenceDef, WorkerTask } from "../types.ts";
 
@@ -395,7 +396,7 @@ const federationPeer = {
 };
 
 function signEnvelope(unsigned: Record<string, unknown>): string {
-  return sign(null, Buffer.from(JSON.stringify(unsigned)), fedPriv).toString("base64");
+  return sign(null, federationSigningBytes(unsigned), fedPriv).toString("base64");
 }
 
 describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
