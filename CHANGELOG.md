@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Embedded engine shutdown
+### Builtin state ownership
 
-- Concurrent `Engine::shutdown` callers wait for the same scheduler drain.
-  Cancelling one shutdown caller preserves the join handle so a later caller
-  can still wait for graceful completion.
+- Ordinary claimed `set_state`, `merge_state`, and `delete_state` steps check
+  their original execution claim atomically with each state mutation. A late
+  builtin cannot overwrite or delete a replacement execution's KV values.
+- Rust `StepContext` constructors now supply `claim_token`; independent
+  lifecycle hooks, direct calls, and remote scratch stores use `None`.
+  Custom handlers can use `StepContext::set_state` and `delete_state` for
+  the same protection. Storage backends implement `delete_instance_kv_claimed`.
+  Handle `StepError::ClaimLost` as ownership loss, without failure or fallback.
 
 ### Parallel step deferrals
 
@@ -40,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom Rust storage backends must implement the four atomic claimed-write
   methods. `StepExecParams` now carries `claim_token`: use the original lease
   for scheduler dispatch and `None` for explicitly unclaimed step execution.
+
+### Embedded engine shutdown
+
+- Concurrent `Engine::shutdown` callers wait for the same scheduler drain.
+  Cancelling one shutdown caller preserves the join handle so a later caller
+  can still wait for graceful completion.
 
 ### Webhook redelivery
 

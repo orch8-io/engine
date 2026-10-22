@@ -431,7 +431,10 @@ pub(crate) async fn send_interactive_approvals(
                 // the API/dashboard. The tokens stay live, so a retry does not
                 // spam the channel.
                 let (StepError::Permanent { message, .. } | StepError::Retryable { message, .. }) =
-                    e;
+                    e
+                else {
+                    return Err(StepError::ClaimLost);
+                };
                 warn!(instance_id = %ctx.instance_id, gate = %gate, channel = channel.as_str(), "human_review: approval message failed");
                 summary.insert(
                     channel.as_str().into(),
@@ -656,6 +659,7 @@ mod tests {
             .await
             .unwrap();
         let ctx = StepContext {
+            claim_token: None,
             instance_id: instance.id,
             tenant_id: tenant,
             block_id: BlockId::new("ask"),

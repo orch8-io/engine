@@ -898,14 +898,22 @@ impl RemoteExecutor {
             self.release(claimed, true).await;
             return;
         };
-        let outcome = self.outcome(task, result).await;
+        let Some(outcome) = self.outcome(task, result).await else {
+            self.counters.lost.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
         self.settle(claimed, outcome, heartbeat).await;
     }
 
     /// The report for a handler result: output (sealed into the vault when
     /// one is configured) or failure.
-    async fn outcome(&self, task: &RemoteTask, result: Result<Value, StepError>) -> Outcome {
-        match result {
+    async fn outcome(
+        &self,
+        task: &RemoteTask,
+        result: Result<Value, StepError>,
+    ) -> Option<Outcome> {
+        Some(match result {
+            Err(StepError::ClaimLost) => return None,
             Ok(output) => match &self.vault {
                 Some(vault) => match seal_output(
                     vault.as_ref(),
@@ -933,7 +941,7 @@ impl RemoteExecutor {
                 message,
                 retryable: false,
             },
-        }
+        })
     }
 
     /// Report the outcome, retrying with a jittered, capped back-off until

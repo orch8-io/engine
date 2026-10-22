@@ -885,6 +885,7 @@ mod tests {
                 )),
         );
         StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("mail"),

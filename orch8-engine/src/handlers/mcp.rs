@@ -619,6 +619,7 @@ mod tests {
             br#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}"#;
         let err = parse_jsonrpc_response(200, "application/json", body, 2).unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, details } => {
                 assert!(message.contains("Method not found"));
                 assert_eq!(details.unwrap()["code"], -32601);
@@ -631,6 +632,7 @@ mod tests {
     fn http_5xx_is_retryable() {
         let err = parse_jsonrpc_response(503, "application/json", b"down", 2).unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Retryable { details, .. } => {
                 assert_eq!(details.unwrap()["status"], 503);
             }
@@ -643,6 +645,7 @@ mod tests {
         let err = parse_jsonrpc_response(401, "application/json", br#"{"e":"unauthorized"}"#, 2)
             .unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { details, .. } => {
                 assert_eq!(details.unwrap()["body"]["e"], "unauthorized");
             }
@@ -661,6 +664,7 @@ mod tests {
     fn non_json_body_is_permanent() {
         let err = parse_jsonrpc_response(200, "application/json", b"<html>", 2).unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => assert!(message.contains("not valid JSON")),
             other @ StepError::Retryable { .. } => panic!("expected Permanent, got {other:?}"),
         }
@@ -721,6 +725,7 @@ mod tests {
         let err = resolve_endpoint(&json!({ "server": "nope" }), &json!({ "mcp_servers": {} }))
             .unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => assert!(message.contains("unknown server")),
             other @ StepError::Retryable { .. } => panic!("expected Permanent, got {other:?}"),
         }
@@ -857,6 +862,7 @@ mod net_tests {
         }
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
         StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
@@ -973,6 +979,7 @@ mod net_tests {
         // action defaults to "call"; tool_name is required and absent.
         let err = handle_mcp_call(ctx).await.unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => assert!(message.contains("tool_name")),
             other @ StepError::Retryable { .. } => panic!("expected Permanent, got {other:?}"),
         }
@@ -1006,6 +1013,7 @@ mod net_tests {
         let ctx = mk_ctx(json!({ "url": url, "tool_name": "echo" })).await;
         let err = handle_mcp_call(ctx).await.unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => assert!(message.contains("Invalid params")),
             other @ StepError::Retryable { .. } => panic!("expected Permanent, got {other:?}"),
         }

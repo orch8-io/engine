@@ -155,6 +155,7 @@ mod tests {
     fn permanent_creates_permanent_error_with_no_details() {
         let err = permanent("something broke");
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, details } => {
                 assert_eq!(message, "something broke");
                 assert!(details.is_none());
@@ -184,6 +185,7 @@ mod tests {
         let params = json!({"other": "value"});
         let err = parse_instance_id(&params, "instance_id").unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(message.contains("missing 'instance_id' string param"));
             }
@@ -196,6 +198,7 @@ mod tests {
         let params = json!({"instance_id": 42});
         let err = parse_instance_id(&params, "instance_id").unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(message.contains("missing 'instance_id' string param"));
             }
@@ -208,6 +211,7 @@ mod tests {
         let params = json!({"instance_id": "not-a-uuid"});
         let err = parse_instance_id(&params, "instance_id").unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(message.contains("invalid 'instance_id' uuid"));
             }
@@ -236,6 +240,7 @@ mod tests {
         let params = json!({"other": 1});
         let err = require_str(&params, "name").unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(message.contains("missing 'name' string param"));
             }
@@ -328,6 +333,7 @@ mod tests {
         let target = TenantId::unchecked("t2");
         let err = check_same_tenant(&caller, &target, "send_signal").unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, details } => {
                 assert!(message.contains("cross-tenant send_signal denied"));
                 let d = details.unwrap();

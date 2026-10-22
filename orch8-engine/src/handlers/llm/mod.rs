@@ -1033,25 +1033,35 @@ async fn failover_inner(
                 return Ok(output);
             }
             Err(e) => {
+                if matches!(e, StepError::ClaimLost) {
+                    return Err(e);
+                }
                 warn!(provider = %provider_name, error = %e, "llm_call failover: provider failed, trying next");
                 last_error = Some(e);
             }
         }
     }
 
+    Err(aggregate_failover_error(last_error))
+}
+
+fn aggregate_failover_error(last_error: Option<StepError>) -> StepError {
     // Aggregate into a permanent error, carrying forward the last error's
     // details (e.g. schema validation_errors / last_response) so they aren't
     // lost when all providers fail.
     let (message, details) = match last_error {
         Some(e) => {
             let message = format!("all providers failed, last error: {e}");
-            let (StepError::Retryable { details, .. } | StepError::Permanent { details, .. }) = e;
+            let (StepError::Retryable { details, .. } | StepError::Permanent { details, .. }) = e
+            else {
+                return StepError::ClaimLost;
+            };
             (message, details)
         }
         None => ("all providers failed".to_string(), None),
     };
 
-    Err(StepError::Permanent { message, details })
+    StepError::Permanent { message, details }
 }
 
 fn merge_provider_params(base_params: &Value, provider_config: &Value) -> Value {
@@ -1156,6 +1166,7 @@ mod tests {
                 .unwrap(),
         );
         let mut ctx = StepContext {
+            claim_token: None,
             instance_id: orch8_types::ids::InstanceId::new(),
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
             block_id: orch8_types::ids::BlockId::new("b"),
@@ -1183,6 +1194,7 @@ mod tests {
                 .unwrap(),
         );
         let ctx = StepContext {
+            claim_token: None,
             instance_id: orch8_types::ids::InstanceId::new(),
             tenant_id: orch8_types::ids::TenantId::unchecked("t1"),
             block_id: orch8_types::ids::BlockId::new("b"),
@@ -1396,6 +1408,7 @@ mod tests {
                 .unwrap(),
         );
         StepContext {
+            claim_token: None,
             instance_id: orch8_types::ids::InstanceId::new(),
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
             block_id: orch8_types::ids::BlockId::new("b"),
@@ -1501,6 +1514,7 @@ mod tests {
             .await
             .expect_err("must exhaust repairs");
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, details } => {
                 assert!(
                     message.contains("response_schema validation after 1 repair attempt"),
@@ -1562,6 +1576,7 @@ mod tests {
             .await
             .expect_err("all providers invalid");
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, details } => {
                 assert!(message.contains("all providers failed"), "{message}");
                 let details = details.expect("last validation details carried forward");
@@ -1614,6 +1629,7 @@ mod tests {
         params: Value,
     ) -> StepContext {
         StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
             block_id: orch8_types::ids::BlockId::new("b"),
@@ -2133,6 +2149,7 @@ mod tests {
             .await
             .expect_err("incomplete stream must fail");
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Retryable { message, .. } => {
                 assert!(message.contains("[DONE]"), "{message}");
             }
@@ -2155,6 +2172,7 @@ mod tests {
             .await
             .expect_err("stalled stream must fail");
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Retryable { message, .. } => {
                 assert!(message.contains("stalled"), "{message}");
             }
@@ -2313,6 +2331,7 @@ mod tests {
             .await
             .expect_err("error event must fail the call");
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Retryable { message, .. } => {
                 assert!(message.contains("overloaded_error"), "{message}");
             }
@@ -2340,6 +2359,7 @@ mod tests {
             .await
             .expect_err("incomplete stream must fail");
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Retryable { message, .. } => {
                 assert!(message.contains("message_stop"), "{message}");
             }
@@ -2421,6 +2441,7 @@ mod tests {
         params: Value,
     ) -> StepContext {
         StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: orch8_types::ids::TenantId::unchecked(tenant),
             block_id: orch8_types::ids::BlockId::new("llm"),

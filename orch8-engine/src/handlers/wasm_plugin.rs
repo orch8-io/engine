@@ -248,20 +248,10 @@ pub(crate) mod cache {
     static MODULES: OnceLock<RwLock<HashMap<PathBuf, (Stamp, Module)>>> = OnceLock::new();
 
     pub fn engine() -> Result<&'static Engine, StepError> {
-        ENGINE.get_or_init(init_engine).as_ref().map_err(|e| {
-            // Clone the error so callers get an owned value; engine-init failures
-            // are rare and fatal, so the extra allocation is acceptable.
-            match e {
-                StepError::Permanent { message, details } => StepError::Permanent {
-                    message: message.clone(),
-                    details: details.clone(),
-                },
-                StepError::Retryable { message, details } => StepError::Retryable {
-                    message: message.clone(),
-                    details: details.clone(),
-                },
-            }
-        })
+        ENGINE
+            .get_or_init(init_engine)
+            .as_ref()
+            .map_err(Clone::clone)
     }
 
     /// Generic load failure. Deliberately carries no path, OS error, or parser

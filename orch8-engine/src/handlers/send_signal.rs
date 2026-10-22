@@ -144,6 +144,7 @@ mod tests {
         params: Value,
     ) -> StepContext {
         StepContext {
+            claim_token: None,
             instance_id: caller.id,
             tenant_id: caller.tenant_id.clone(),
             block_id: BlockId::new("s"),
@@ -376,6 +377,7 @@ mod tests {
         );
         let err = handle_send_signal(ctx).await.unwrap_err();
         match &err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(
                     message.contains("terminal"),

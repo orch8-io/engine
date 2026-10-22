@@ -338,6 +338,7 @@ fault_impl! {
         async fn set_instance_kv_claimed(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn get_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<Option<serde_json::Value>, StorageError>;
         async fn get_all_instance_kv(&self, instance_id: InstanceId) -> Result<HashMap<String, serde_json::Value>, StorageError>;
+        async fn delete_instance_kv_claimed(&self, instance_id: InstanceId, key: &str, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn delete_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<(), StorageError>;
         async fn delete_instance_kv_batch(&self, instance_id: InstanceId, keys: &[String]) -> Result<(), StorageError>;
         async fn set_shared_knowledge(&self, tenant_id: &str, namespace: &str, key: &str, value: &serde_json::Value) -> Result<(), StorageError>;
