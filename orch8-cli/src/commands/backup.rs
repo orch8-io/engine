@@ -1,11 +1,11 @@
 //! `orch8 backup` / `orch8 restore` — logical export/import of engine
 //! configuration (and optionally instances) for `SQLite` and `PostgreSQL`.
 //!
-//! Archive format (`format_version` 1): a `.tar.gz` containing
+//! Archive format (`format_version` 2; version 1 remains readable): a `.tar.gz` containing
 //! `manifest.json` plus one JSON-lines file per kind (`sequences.jsonl`,
 //! `triggers.jsonl`, `cron.jsonl`, `queue_routing.jsonl`,
 //! `credentials.jsonl`, and with `--include-instances` `instances.jsonl`,
-//! `execution_tree.jsonl`, `block_outputs.jsonl`). The manifest records the
+//! `execution_tree.jsonl`, `block_outputs.jsonl`, `externalized_state.jsonl`). The manifest records the
 //! record count and SHA-256 of every file; restore verifies them before
 //! writing anything.
 //!
@@ -465,6 +465,42 @@ impl Archive {
     }
 }
 
+fn validate_manifest_layout(
+    manifest: &Manifest,
+    members: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    if manifest.format != FORMAT {
+        bail!("not an orch8 backup (format '{}')", manifest.format);
+    }
+    if manifest.format_version > FORMAT_VERSION {
+        bail!(
+            "archive format version {} is newer than this binary supports ({FORMAT_VERSION}); \
+             upgrade orch8",
+            manifest.format_version
+        );
+    }
+    if manifest.format_version == 0 {
+        bail!("unsupported archive format version 0");
+    }
+    if manifest.format_version >= 2 {
+        let instance_members = [
+            "instances.jsonl",
+            "execution_tree.jsonl",
+            "block_outputs.jsonl",
+            "externalized_state.jsonl",
+        ];
+        for name in instance_members {
+            if manifest.include_instances && !members.contains_key(name) {
+                bail!("archive is missing {name}");
+            }
+            if !manifest.include_instances && members.contains_key(name) {
+                bail!("archive contains {name} without include_instances");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Read and verify an archive: known format/version, only expected regular
 /// files, sizes bounded, every checksum and record count matching.
 pub fn read_archive(bytes: &[u8]) -> Result<Archive> {
@@ -515,35 +551,7 @@ pub fn read_archive(bytes: &[u8]) -> Result<Archive> {
         .context("archive has no manifest.json")?;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("manifest.json is invalid")?;
-    if manifest.format != FORMAT {
-        bail!("not an orch8 backup (format '{}')", manifest.format);
-    }
-    if manifest.format_version > FORMAT_VERSION {
-        bail!(
-            "archive format version {} is newer than this binary supports ({FORMAT_VERSION}); \
-             upgrade orch8",
-            manifest.format_version
-        );
-    }
-    if manifest.format_version == 0 {
-        bail!("unsupported archive format version 0");
-    }
-    if manifest.format_version >= 2 {
-        let instance_members = [
-            "instances.jsonl",
-            "execution_tree.jsonl",
-            "block_outputs.jsonl",
-            "externalized_state.jsonl",
-        ];
-        for name in instance_members {
-            if manifest.include_instances && !members.contains_key(name) {
-                bail!("archive is missing {name}");
-            }
-            if !manifest.include_instances && members.contains_key(name) {
-                bail!("archive contains {name} without include_instances");
-            }
-        }
-    }
+    validate_manifest_layout(&manifest, &members)?;
     for file in &manifest.files {
         let body = members
             .get(&file.name)
