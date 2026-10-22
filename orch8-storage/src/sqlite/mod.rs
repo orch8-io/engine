@@ -42,6 +42,7 @@ mod events;
 mod evidence;
 mod execution_tree;
 mod externalized;
+mod externalized_snapshot;
 mod federation;
 mod helpers;
 mod instances;
@@ -3148,6 +3149,20 @@ impl crate::ResourceStore for SqliteStorage {
         externalized::batch_save(self, instance_id, entries).await
     }
 
+    async fn list_externalized_entries(
+        &self,
+        instance_id: InstanceId,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::externalizing::ExternalizedEntry>, StorageError> {
+        externalized_snapshot::list(self, instance_id, after, limit).await
+    }
+    async fn restore_externalized_entry(
+        &self,
+        entry: &crate::externalizing::ExternalizedEntry,
+    ) -> Result<(), StorageError> {
+        externalized_snapshot::restore(self, entry).await
+    }
     async fn get_externalized_state(
         &self,
         instance_id: InstanceId,

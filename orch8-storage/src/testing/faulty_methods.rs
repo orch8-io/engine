@@ -362,6 +362,8 @@ fault_impl! {
         async fn save_externalized_state(&self, instance_id: InstanceId, ref_key: &str, payload: &serde_json::Value) -> Result<(), StorageError>;
         async fn save_externalized_state_claimed(&self, instance_id: InstanceId, ref_key: &str, payload: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn batch_save_externalized_state(&self, instance_id: InstanceId, entries: &[(String, serde_json::Value)]) -> Result<(), StorageError>;
+        async fn list_externalized_entries(&self, instance_id: InstanceId, after: Option<&str>, limit: u32) -> Result<Vec<crate::externalizing::ExternalizedEntry>, StorageError>;
+        async fn restore_externalized_entry(&self, entry: &crate::externalizing::ExternalizedEntry) -> Result<(), StorageError>;
         async fn get_externalized_state(&self, instance_id: InstanceId, ref_key: &str) -> Result<Option<serde_json::Value>, StorageError>;
         async fn batch_get_externalized_state(&self, refs: &[(InstanceId, String)]) -> Result<HashMap<(InstanceId, String), serde_json::Value>, StorageError>;
         async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError>;

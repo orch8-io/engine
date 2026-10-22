@@ -48,7 +48,7 @@ use super::upgrade::{DbTarget, parse_target};
 use crate::OutputFormat;
 
 pub const FORMAT: &str = "orch8-backup";
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 /// Storage list calls without offsets cap at this many rows.
 const PAGE: u32 = 500;
 /// Restore verifies archives in memory, so bound both the compressed input and
@@ -66,6 +66,7 @@ const KNOWN_ARCHIVE_MEMBERS: &[&str] = &[
     "instances.jsonl",
     "execution_tree.jsonl",
     "block_outputs.jsonl",
+    "externalized_state.jsonl",
 ];
 
 const CREDENTIAL_WARNING: &str = "credential values are exported exactly as stored: encrypted \
@@ -137,6 +138,7 @@ pub struct Snapshot {
     pub instances: Option<Vec<Value>>,
     pub execution_tree: Option<Vec<Value>>,
     pub block_outputs: Option<Vec<Value>>,
+    pub externalized_state: Vec<Value>,
     pub warnings: Vec<String>,
 }
 
@@ -250,8 +252,29 @@ async fn open_target(target: &DbTarget) -> Result<Arc<dyn StorageBackend>> {
     }
 }
 
+/// Read the complete payload catalog for one instance using bounded pages.
+async fn snapshot_payloads(
+    storage: &dyn StorageBackend,
+    id: orch8_types::ids::InstanceId,
+) -> Result<Vec<Value>> {
+    let mut values = Vec::new();
+    let mut after = None;
+    loop {
+        let page = storage
+            .list_externalized_entries(id, after.as_deref(), PAGE)
+            .await?;
+        let count = page.len();
+        after = page.last().map(|entry| entry.ref_key.clone());
+        for entry in page {
+            values.push(serde_json::to_value(entry)?);
+        }
+        if count < PAGE as usize {
+            return Ok(values);
+        }
+    }
+}
+
 /// Read everything to back up.
-#[allow(clippy::too_many_lines)]
 pub async fn snapshot(storage: &dyn StorageBackend, include_instances: bool) -> Result<Snapshot> {
     let mut snap = Snapshot::default();
 
@@ -318,6 +341,8 @@ pub async fn snapshot(storage: &dyn StorageBackend, include_instances: bool) -> 
                 for output in storage.get_all_outputs(instance.id).await? {
                     outputs.push(serde_json::to_value(&output)?);
                 }
+                snap.externalized_state
+                    .extend(snapshot_payloads(storage, instance.id).await?);
                 instances.push(serde_json::to_value(&instance)?);
             }
             if n < PAGE as usize {
@@ -348,6 +373,15 @@ fn jsonl(records: &[Value]) -> Result<Vec<u8>> {
 
 /// Build the archive bytes for a snapshot.
 pub fn write_archive(snap: &Snapshot, source_backend: &str) -> Result<Vec<u8>> {
+    let includes_instances = snap.instances.is_some();
+    if snap.execution_tree.is_some() != includes_instances
+        || snap.block_outputs.is_some() != includes_instances
+        || (!includes_instances && !snap.externalized_state.is_empty())
+    {
+        bail!(
+            "instance snapshots require instances, execution trees, outputs and payloads together"
+        );
+    }
     let mut members: Vec<(String, &[Value])> = vec![
         ("sequences.jsonl".into(), &snap.sequences),
         ("triggers.jsonl".into(), &snap.triggers),
@@ -361,6 +395,7 @@ pub fn write_archive(snap: &Snapshot, source_backend: &str) -> Result<Vec<u8>> {
         members.push(("instances.jsonl".into(), i));
         members.push(("execution_tree.jsonl".into(), t));
         members.push(("block_outputs.jsonl".into(), o));
+        members.push(("externalized_state.jsonl".into(), &snap.externalized_state));
     }
     let mut files = Vec::new();
     let mut bodies = Vec::new();
@@ -489,6 +524,25 @@ pub fn read_archive(bytes: &[u8]) -> Result<Archive> {
              upgrade orch8",
             manifest.format_version
         );
+    }
+    if manifest.format_version == 0 {
+        bail!("unsupported archive format version 0");
+    }
+    if manifest.format_version >= 2 {
+        let instance_members = [
+            "instances.jsonl",
+            "execution_tree.jsonl",
+            "block_outputs.jsonl",
+            "externalized_state.jsonl",
+        ];
+        for name in instance_members {
+            if manifest.include_instances && !members.contains_key(name) {
+                bail!("archive is missing {name}");
+            }
+            if !manifest.include_instances && members.contains_key(name) {
+                bail!("archive contains {name} without include_instances");
+            }
+        }
     }
     for file in &manifest.files {
         let body = members
@@ -639,6 +693,19 @@ pub async fn restore(
                 restored.insert(instance.id);
             }
             report.tally("instances", exists);
+        }
+        if archive.members.contains_key("externalized_state.jsonl") {
+            for entry in archive.records::<orch8_storage::externalizing::ExternalizedEntry>(
+                "externalized_state.jsonl",
+            )? {
+                let fresh = restored.contains(&entry.instance_id);
+                if fresh && !dry_run {
+                    storage.restore_externalized_entry(&entry).await?;
+                }
+                report.tally("externalized_state", !fresh);
+            }
+        } else {
+            report.warnings.push("version 1 backups omit externalized payloads; referenced context or outputs may be incomplete".into());
         }
         let mut nodes_by_instance: BTreeMap<String, Vec<ExecutionNode>> = BTreeMap::new();
         for node in archive.records::<ExecutionNode>("execution_tree.jsonl")? {

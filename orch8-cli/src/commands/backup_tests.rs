@@ -7,7 +7,7 @@ use chrono::Utc;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::{
     AdminStore as _, ExecutionTreeStore as _, InstanceStore as _, OutputStore as _,
-    SchedulingStore as _, SequenceStore as _, WorkerStore as _,
+    ResourceStore as _, SchedulingStore as _, SequenceStore as _, WorkerStore as _,
 };
 use orch8_types::config::SecretString;
 use orch8_types::context::ExecutionContext;
@@ -324,6 +324,22 @@ async fn instances_are_opt_in_on_both_sides() {
     assert!(target.get_instance(instance_id).await.unwrap().is_none());
 }
 
+fn repack_archive_members(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    for (name, data) in members {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o600);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, name, data.as_slice())
+            .unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap()
+}
+
 #[test]
 fn tampered_or_foreign_archives_are_rejected() {
     let snap = Snapshot {
@@ -335,21 +351,7 @@ fn tampered_or_foreign_archives_are_rejected() {
 
     // Re-pack with a modified member but the original manifest.
     let archive = read_archive(&good).unwrap();
-    let rebuild = |members: &[(&str, Vec<u8>)]| {
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let mut builder = tar::Builder::new(encoder);
-        for (name, data) in members {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(data.len() as u64);
-            header.set_mode(0o600);
-            header.set_entry_type(tar::EntryType::Regular);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, name, data.as_slice())
-                .unwrap();
-        }
-        builder.into_inner().unwrap().finish().unwrap()
-    };
+    let rebuild = repack_archive_members;
     let manifest = serde_json::to_vec(&archive.manifest).unwrap();
     let mut members: Vec<(&str, Vec<u8>)> = vec![("manifest.json", manifest.clone())];
     for (name, body) in &archive.members {
@@ -619,4 +621,305 @@ async fn backup_catalog_keeps_more_than_one_page_of_cron_in_one_tenant() {
         .await
         .expect("a valid catalog larger than the API cap must remain exportable");
     assert_eq!(snap.cron.len(), 1001);
+}
+
+async fn restore_including_payloads(
+    source: &Path,
+    target: &Path,
+) -> std::sync::Arc<dyn StorageBackend> {
+    let archive_path = source.with_extension("tar.gz");
+    run_backup(
+        BackupCmd {
+            database_url: format!("sqlite:{}", source.display()),
+            out: archive_path.clone(),
+            include_instances: true,
+        },
+        OutputFormat::Json,
+    )
+    .await
+    .unwrap();
+    let archive = read_archive(&std::fs::read(archive_path).unwrap()).unwrap();
+    let storage = open_target(&DbTarget::Sqlite(target.to_owned()))
+        .await
+        .unwrap();
+    restore(&archive, storage.as_ref(), false, true)
+        .await
+        .unwrap();
+    storage
+}
+
+#[tokio::test]
+async fn backup_restore_preserves_externalized_context_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _, id) = seeded_source(dir.path()).await;
+    let storage = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
+    let payload = serde_json::json!({"invoice": "archived content", "items": [1,2,3]});
+    let context = ExecutionContext {
+        data: serde_json::json!({"payload": payload}),
+        ..ExecutionContext::default()
+    };
+    storage
+        .update_instance_context_externalized(id, &context, 1)
+        .await
+        .unwrap();
+    assert!(orch8_engine::externalized::is_ref_marker(
+        &storage
+            .get_instance(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .context
+            .data["payload"]
+    ));
+    let target = restore_including_payloads(&source, &dir.path().join("restored.db")).await;
+    let restored = target.get_instance(id).await.unwrap().unwrap();
+    let hydrated =
+        orch8_engine::externalized::resolve_context_markers(target.as_ref(), id, restored.context)
+            .await
+            .unwrap();
+    assert_eq!(
+        hydrated.data["payload"], payload,
+        "restored context must retain its payload, not a dangling marker"
+    );
+}
+
+#[tokio::test]
+async fn backup_restore_preserves_every_externalized_output_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _, id) = seeded_source(dir.path()).await;
+    let storage = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
+    let mut history = Vec::new();
+    for value in ["first historical payload", "second historical payload"] {
+        let output_id = uuid::Uuid::now_v7();
+        let reference = format!("{id}:charge:{output_id}");
+        let payload = serde_json::json!({"value": value});
+        storage
+            .save_externalized_state(id, &reference, &payload)
+            .await
+            .unwrap();
+        storage
+            .save_block_output(&BlockOutput {
+                id: output_id,
+                instance_id: id,
+                block_id: BlockId::new("charge"),
+                output: orch8_storage::externalizing::marker(&reference),
+                output_ref: Some(reference),
+                output_size: u32::try_from(serde_json::to_vec(&payload).unwrap().len()).unwrap(),
+                attempt: 0,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        history.push((output_id, payload));
+    }
+    let target = restore_including_payloads(&source, &dir.path().join("restored.db")).await;
+    let outputs = target.get_all_outputs(id).await.unwrap();
+    for (output_id, expected) in history {
+        let output = outputs
+            .iter()
+            .find(|output| output.id == output_id)
+            .unwrap();
+        let actual = if let Some(reference) = &output.output_ref {
+            target
+                .get_externalized_state(id, reference)
+                .await
+                .unwrap()
+                .expect("restored historical output must not refer to a missing payload")
+        } else {
+            output.output.clone()
+        };
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn encrypted_payload_archive_preserves_ciphertexts_and_same_key_restore() {
+    use orch8_storage::encrypting::EncryptingStorage;
+    use orch8_types::encryption::FieldEncryptor;
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _, initial) = seeded_source(dir.path()).await;
+    let raw: Arc<dyn StorageBackend> =
+        Arc::new(SqliteStorage::file(source.to_str().unwrap()).await.unwrap());
+    let key = "ab".repeat(32);
+    let sealed = EncryptingStorage::new(
+        Arc::clone(&raw),
+        FieldEncryptor::from_hex_key(&key).unwrap(),
+    );
+    let mut instance = raw.get_instance(initial).await.unwrap().unwrap();
+    instance.id = InstanceId::new();
+    let secret = "private-context-that-must-stay-encrypted";
+    instance.context.data = serde_json::json!({"payload": secret});
+    sealed
+        .create_instance_externalized(&instance, 1)
+        .await
+        .unwrap();
+    let reference = format!("{}:charge:encrypted", instance.id);
+    let output_secret = serde_json::json!({"value": "private-output-that-must-stay-encrypted"});
+    sealed
+        .save_externalized_state(instance.id, &reference, &output_secret)
+        .await
+        .unwrap();
+    sealed
+        .save_block_output(&BlockOutput {
+            id: uuid::Uuid::now_v7(),
+            instance_id: instance.id,
+            block_id: BlockId::new("charge"),
+            output: orch8_storage::externalizing::marker(&reference),
+            output_ref: Some(reference),
+            output_size: 100,
+            attempt: 0,
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let snap = snapshot(raw.as_ref(), true).await.unwrap();
+    let serialized = serde_json::to_string(&snap.externalized_state).unwrap();
+    assert!(!serialized.contains(secret));
+    assert!(!serialized.contains("private-output-that-must-stay-encrypted"));
+    let target =
+        restore_including_payloads(&source, &dir.path().join("encrypted-restore.db")).await;
+    let restored = EncryptingStorage::new(target, FieldEncryptor::from_hex_key(&key).unwrap());
+    let current = restored.get_instance(instance.id).await.unwrap().unwrap();
+    let context = orch8_engine::externalized::resolve_context_markers(
+        &restored,
+        instance.id,
+        current.context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(context.data["payload"], secret);
+    let output = restored
+        .get_block_output(instance.id, &BlockId::new("charge"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        restored
+            .get_externalized_state(instance.id, output.output_ref.as_deref().unwrap())
+            .await
+            .unwrap(),
+        Some(output_secret)
+    );
+}
+
+#[tokio::test]
+async fn legacy_archives_remain_readable_and_v2_requires_payload_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _, id) = seeded_source(dir.path()).await;
+    let raw = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
+    let mut archive =
+        read_archive(&write_archive(&snapshot(&raw, true).await.unwrap(), "sqlite").unwrap())
+            .unwrap();
+    archive.members.remove("externalized_state.jsonl");
+    archive
+        .manifest
+        .files
+        .retain(|file| file.name != "externalized_state.jsonl");
+    let encode = |archive: &Archive| {
+        let mut members = vec![(
+            "manifest.json",
+            serde_json::to_vec(&archive.manifest).unwrap(),
+        )];
+        for (name, body) in &archive.members {
+            members.push((name.as_str(), body.clone()));
+        }
+        repack_archive_members(&members)
+    };
+    assert!(
+        read_archive(&encode(&archive))
+            .unwrap_err()
+            .to_string()
+            .contains("missing externalized_state")
+    );
+    archive.manifest.format_version = 1;
+    let legacy = read_archive(&encode(&archive)).unwrap();
+    let target = open_target(&DbTarget::Sqlite(dir.path().join("legacy.db")))
+        .await
+        .unwrap();
+    let report = restore(&legacy, target.as_ref(), false, true)
+        .await
+        .unwrap();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("version 1 backups omit"))
+    );
+    assert_eq!(
+        target
+            .get_block_output(id, &BlockId::new("charge"))
+            .await
+            .unwrap()
+            .unwrap()
+            .output,
+        serde_json::json!({"charged": true})
+    );
+    archive.manifest.format_version = 0;
+    assert!(read_archive(&encode(&archive)).is_err());
+}
+
+#[test]
+fn partial_instance_snapshots_cannot_produce_unreadable_archives() {
+    let partial = Snapshot {
+        instances: Some(Vec::new()),
+        ..Snapshot::default()
+    };
+    assert!(write_archive(&partial, "sqlite").is_err());
+}
+
+#[tokio::test]
+async fn repeated_payload_restore_preserves_existing_target_values_and_metadata() {
+    use chrono::Timelike as _;
+    use orch8_storage::externalizing::ExternalizedEntry;
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _, id) = seeded_source(dir.path()).await;
+    let raw = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
+    let entry = ExternalizedEntry {
+        instance_id: id,
+        ref_key: format!("{id}:payload"),
+        payload: serde_json::json!({"source": true}),
+        created_at: Utc::now().with_nanosecond(123_456_000).unwrap(),
+        expires_at: Some(Utc::now() + chrono::Duration::days(7)),
+    };
+    raw.restore_externalized_entry(&entry).await.unwrap();
+    let archive =
+        read_archive(&write_archive(&snapshot(&raw, true).await.unwrap(), "sqlite").unwrap())
+            .unwrap();
+    let target = open_target(&DbTarget::Sqlite(dir.path().join("idempotent.db")))
+        .await
+        .unwrap();
+    let dry = restore(&archive, target.as_ref(), true, true)
+        .await
+        .unwrap();
+    assert_eq!(dry.counts["externalized_state"].created, 1);
+    assert!(target.get_instance(id).await.unwrap().is_none());
+    restore(&archive, target.as_ref(), false, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        target
+            .list_externalized_entries(id, None, 10)
+            .await
+            .unwrap(),
+        vec![entry.clone()]
+    );
+    let mut replacement = entry;
+    replacement.payload = serde_json::json!({"target": "preserve this"});
+    replacement.expires_at = None;
+    target
+        .restore_externalized_entry(&replacement)
+        .await
+        .unwrap();
+    let again = restore(&archive, target.as_ref(), false, true)
+        .await
+        .unwrap();
+    assert_eq!(again.counts["externalized_state"].existing, 1);
+    assert_eq!(
+        target
+            .list_externalized_entries(id, None, 10)
+            .await
+            .unwrap(),
+        vec![replacement]
+    );
 }

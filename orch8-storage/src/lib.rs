@@ -3200,6 +3200,23 @@ pub trait ResourceStore: Send + Sync + 'static {
         ref_key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError>;
 
+    /// Read a complete instance payload catalog using an exclusive ref-key cursor.
+    /// Returns at most min(limit, 1000) records in ref-key order, including
+    /// encrypted/opaque payloads and expiry metadata. No sequence/tenant census.
+    async fn list_externalized_entries(
+        &self,
+        instance_id: InstanceId,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::externalizing::ExternalizedEntry>, StorageError>;
+
+    /// Restore a logical payload and its timestamps atomically. A ref key
+    /// owned by another instance must return an error without changing it.
+    async fn restore_externalized_entry(
+        &self,
+        entry: &crate::externalizing::ExternalizedEntry,
+    ) -> Result<(), StorageError>;
+
     /// Retrieve multiple externalized payloads in one round-trip.
     ///
     /// Each request is an `(owner instance, ref_key)` pair; the result is

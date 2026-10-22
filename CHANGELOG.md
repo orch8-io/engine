@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Logical backup payloads
+
+- Backup format 2 includes externalized context and historical output payloads
+  with their ownership and expiry timestamps. Stored ciphertexts remain sealed.
+- Restore continues to read format 1 archives and reports their omitted payloads.
+  Version 2 archives with instances must contain the payload member.
+- Custom Rust storage backends now implement paginated payload catalog reads and
+  atomic, owner-safe payload restoration.
+
 ### Parallel step deferrals
 
 - Parallel leaves retain their execution claim until both results are durable.

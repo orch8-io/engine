@@ -2727,6 +2727,19 @@ passthrough_impl! {
         let encrypted = self.seal_externalized(instance_id, ref_key, payload).await?;
         self.inner.save_externalized_state_claimed(instance_id, ref_key, &encrypted, claim_token).await
     }
+    async fn list_externalized_entries(&self, instance_id: InstanceId, after: Option<&str>, limit: u32)
+        -> Result<Vec<crate::externalizing::ExternalizedEntry>, StorageError> {
+        let mut entries = self.inner.list_externalized_entries(instance_id, after, limit).await?;
+        for entry in &mut entries {
+            entry.payload = self.open_externalized(instance_id, &entry.ref_key, &entry.payload).await?;
+        }
+        Ok(entries)
+    }
+    async fn restore_externalized_entry(&self, entry: &crate::externalizing::ExternalizedEntry) -> Result<(), StorageError> {
+        let mut sealed = entry.clone();
+        sealed.payload = self.seal_externalized(entry.instance_id, &entry.ref_key, &entry.payload).await?;
+        self.inner.restore_externalized_entry(&sealed).await
+    }
     async fn get_externalized_state(
         &self,
         instance_id: InstanceId,
