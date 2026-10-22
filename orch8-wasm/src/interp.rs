@@ -37,6 +37,11 @@ pub const LOCAL_HANDLERS: &[&str] = &[
     "merge_state",
 ];
 
+// A separate hard ceiling bounds work that consumes no step ticks (skipped
+// guards, empty routes, composite blocks) and retries with large tick budgets.
+// This limits interpreter dispatches, not bytes or expression complexity.
+const MAX_OPERATIONS: u32 = 10_000;
+
 /// Default instance id used for `ab_split` selection when none is given.
 const DEFAULT_INSTANCE_ID: &str = "00000000-0000-7000-8000-000000000001";
 
@@ -108,6 +113,7 @@ impl Default for RunOptions {
 enum Halt {
     Failed { block_id: String, message: String },
     TickLimit,
+    OperationLimit,
 }
 
 type Flow = Result<(), Halt>;
@@ -115,6 +121,7 @@ type Flow = Result<(), Halt>;
 struct Interp<'a> {
     now: u64,
     ticks: u32,
+    operations: u32,
     options: &'a RunOptions,
     instance_uuid: [u8; 16],
     context: ExecutionContext,
@@ -135,6 +142,7 @@ pub fn run(sequence: &SequenceDefinition, options: &RunOptions) -> Value {
     let mut interp = Interp {
         now: 0,
         ticks: 0,
+        operations: 0,
         options,
         instance_uuid,
         context: ExecutionContext {
@@ -160,6 +168,10 @@ pub fn run(sequence: &SequenceDefinition, options: &RunOptions) -> Value {
             "tick_limit",
             json!({ "message": format!("stopped after {} step attempts (max_ticks)", options.max_ticks) }),
         ),
+        Err(Halt::OperationLimit) => (
+            "operation_limit",
+            json!({ "message": format!("stopped after {MAX_OPERATIONS} interpreter operations") }),
+        ),
         Err(Halt::Failed { block_id, message }) => {
             if let Some(cleanup) = &sequence.on_failure {
                 // Best-effort, like the engine: cleanup errors are swallowed.
@@ -176,6 +188,7 @@ pub fn run(sequence: &SequenceDefinition, options: &RunOptions) -> Value {
         "error": error,
         "virtual_duration_ms": interp.now,
         "ticks": interp.ticks,
+        "operations": interp.operations,
         "timeline": interp.timeline,
         "outputs": interp.outputs,
         "context": { "data": interp.context.data, "config": interp.context.config },
@@ -314,6 +327,7 @@ impl Interp<'_> {
 
     #[allow(clippy::too_many_lines)]
     fn run_block(&mut self, block: &BlockDefinition, parent: &str) -> Flow {
+        self.operation()?;
         let id = block_id(block).to_string();
         let path = join_path(parent, &id);
         match block {
@@ -340,7 +354,7 @@ impl Interp<'_> {
             }
             BlockDefinition::TryCatch(def) => {
                 let outcome = match self.run_blocks(&def.try_block, &format!("{path}/try")) {
-                    Err(Halt::TickLimit) => return Err(Halt::TickLimit),
+                    Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) => return Err(halt),
                     Err(Halt::Failed { block_id, message }) => {
                         self.decision(
                             &id,
@@ -393,7 +407,7 @@ impl Interp<'_> {
                 for saga_step in &def.steps {
                     match self.run_block(&saga_step.action, &path) {
                         Ok(()) => completed.push(saga_step),
-                        Err(Halt::TickLimit) => return Err(Halt::TickLimit),
+                        Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) => return Err(halt),
                         Err(Halt::Failed { block_id, message }) => {
                             self.decision(
                                 &id,
@@ -403,10 +417,10 @@ impl Interp<'_> {
                             );
                             for done in completed.iter().rev() {
                                 if let Some(compensation) = &done.compensation
-                                    && let Err(Halt::TickLimit) =
+                                    && let Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) =
                                         self.run_block(compensation, &format!("{path}/compensate"))
                                 {
-                                    return Err(Halt::TickLimit);
+                                    return Err(halt);
                                 }
                             }
                             return Err(Halt::Failed { block_id, message });
@@ -427,7 +441,7 @@ impl Interp<'_> {
             let result = self.run_blocks(branch, &format!("{path}[{index}]"));
             end = end.max(self.now);
             match result {
-                Err(Halt::TickLimit) => return Err(Halt::TickLimit),
+                Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) => return Err(halt),
                 Err(failure) if first_failure.is_none() => first_failure = Some(failure),
                 _ => {}
             }
@@ -455,8 +469,8 @@ impl Interp<'_> {
             self.now = start;
             let first_entry = self.timeline.len();
             let result = self.run_blocks(branch, &format!("{path}[{index}]"));
-            if matches!(result, Err(Halt::TickLimit)) {
-                return Err(Halt::TickLimit);
+            if let Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) = result {
+                return Err(halt);
             }
             runs.push(BranchRun {
                 index,
@@ -500,12 +514,13 @@ impl Interp<'_> {
         let poll_ms = def.poll_interval.unwrap_or(0).saturating_mul(1000);
         let mut iterations = 0u32;
         while iterations < def.max_iterations && self.truthy(&def.condition) {
+            self.operation()?;
             if iterations > 0 {
                 self.now = self.now.saturating_add(poll_ms);
             }
             self.decision(id, path, "loop", json!({ "iteration": iterations }));
             match self.run_blocks(&def.body, &format!("{path}#{iterations}")) {
-                Err(Halt::TickLimit) => return Err(Halt::TickLimit),
+                Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) => return Err(halt),
                 Err(failure) if !def.continue_on_error => return Err(failure),
                 _ => {}
             }
@@ -540,6 +555,7 @@ impl Interp<'_> {
         let items = collection.as_array().cloned().unwrap_or_default();
         let limit = usize::try_from(def.max_iterations).unwrap_or(usize::MAX);
         for (index, item) in items.iter().take(limit).enumerate() {
+            self.operation()?;
             if let Some(data) = self.context.data.as_object_mut() {
                 data.insert(def.item_var.clone(), item.clone());
             }
@@ -561,10 +577,19 @@ impl Interp<'_> {
         Ok(())
     }
 
+    fn operation(&mut self) -> Flow {
+        if self.operations >= MAX_OPERATIONS {
+            return Err(Halt::OperationLimit);
+        }
+        self.operations += 1;
+        Ok(())
+    }
+
     fn tick(&mut self) -> Flow {
         if self.ticks >= self.options.max_ticks {
             return Err(Halt::TickLimit);
         }
+        self.operation()?;
         self.ticks += 1;
         Ok(())
     }
