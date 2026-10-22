@@ -177,14 +177,15 @@ fn trigger_json(trigger: &TriggerDef) -> Result<Value> {
 /// Open the source for reading. A read-only `SQLite` connection makes a
 /// transactionally consistent snapshot, including committed WAL frames.
 /// Independent file copies can lose commits when a live writer checkpoints.
-/// Schema reconciliation is confined to the temporary snapshot.
+/// Schema reconciliation is confined to the temporary snapshot. `PostgreSQL`
+/// reads share a dedicated read-only repeatable-read transaction.
 async fn open_source(
     target: &DbTarget,
 ) -> Result<(Arc<dyn StorageBackend>, Option<tempfile::TempDir>)> {
     match target {
         DbTarget::Postgres(url) => Ok((
             Arc::new(
-                orch8_storage::postgres::PostgresStorage::new(url, 4, None)
+                orch8_storage::postgres::PostgresStorage::read_snapshot(url, None)
                     .await
                     .context("connect to PostgreSQL")?,
             ),

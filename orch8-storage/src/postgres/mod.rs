@@ -110,6 +110,12 @@ pub(crate) async fn bulk_delete_before(
     Ok(total)
 }
 
+#[derive(Clone)]
+enum ConnectionMode {
+    Runtime,
+    ReadSnapshot(std::sync::Arc<std::sync::atomic::AtomicBool>),
+}
+
 pub struct PostgresStorage {
     pub(crate) pool: PgPool,
     /// Optional durable artifact backend (local FS / S3). `None` → artifact
@@ -143,6 +149,47 @@ impl PostgresStorage {
         min_connections: u32,
         search_path: Option<&str>,
     ) -> Result<Self, StorageError> {
+        Self::connect(
+            database_url,
+            max_connections,
+            min_connections,
+            search_path,
+            ConnectionMode::Runtime,
+        )
+        .await
+    }
+
+    /// Read a logical backup through one read-only, repeatable-read transaction.
+    ///
+    /// All reads share the initial view across pool acquisitions. Losing that
+    /// connection fails subsequent reads; replacement connections are rejected
+    /// so a backup cannot silently switch snapshots. Drop/close the storage to
+    /// release its transaction. Normal statement and idle-transaction guards
+    /// remain active. This storage is intended exclusively for backup reads.
+    pub async fn read_snapshot(
+        database_url: &str,
+        search_path: Option<&str>,
+    ) -> Result<Self, StorageError> {
+        Self::connect(
+            database_url,
+            1,
+            1,
+            search_path,
+            ConnectionMode::ReadSnapshot(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            ))),
+        )
+        .await
+    }
+
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
+    async fn connect(
+        database_url: &str,
+        max_connections: u32,
+        min_connections: u32,
+        search_path: Option<&str>,
+        mode: ConnectionMode,
+    ) -> Result<Self, StorageError> {
         // Validate the schema name up-front (before moving it into the
         // after_connect closure) so an injection attempt fails fast.
         let search_path_value = match search_path {
@@ -160,6 +207,7 @@ impl PostgresStorage {
             None => None,
         };
 
+        let read_snapshot = matches!(mode, ConnectionMode::ReadSnapshot(_));
         let pool_opts = sqlx::postgres::PgPoolOptions::new()
             .max_connections(max_connections)
             .min_connections(min_connections)
@@ -174,7 +222,16 @@ impl PostgresStorage {
             // and starve the scheduler tick loop.
             .after_connect(move |conn, _meta| {
                 let search_path_value = search_path_value.clone();
+                let mode = mode.clone();
                 Box::pin(async move {
+                    if let ConnectionMode::ReadSnapshot(used) = &mode
+                        && used.swap(true, std::sync::atomic::Ordering::AcqRel)
+                    {
+                        return Err(sqlx::Error::Protocol(
+                            "backup snapshot connection was lost; refusing a replacement view"
+                                .into(),
+                        ));
+                    }
                     sqlx::query("SET statement_timeout = '30s'")
                         .execute(&mut *conn)
                         .await?;
@@ -187,9 +244,40 @@ impl PostgresStorage {
                             .execute(&mut *conn)
                             .await?;
                     }
+                    if matches!(mode, ConnectionMode::ReadSnapshot(_)) {
+                        use sqlx::SqlSafeStr as _;
+                        use sqlx_core::transaction::TransactionManager as _;
+                        // Track the transaction in SQLx without an RAII handle
+                        // that would roll it back as this callback returns.
+                        // The dedicated pool owns it until the socket closes.
+                        sqlx::postgres::PgTransactionManager::begin(
+                            conn,
+                            Some("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY".into_sql_str()),
+                        )
+                        .await?;
+                    }
                     Ok(())
                 })
             });
+        let pool_opts = if read_snapshot {
+            pool_opts
+                // Recycling must never turn a long backup into a new view.
+                .idle_timeout(None)
+                .max_lifetime(None)
+                .before_acquire(|conn, _meta| Box::pin(async move {
+                    use sqlx::Connection as _;
+                    // A caller must not end the transaction and continue as
+                    // an ordinary autocommit reader on the same connection.
+                    if !conn.is_in_transaction() {
+                        return Ok(false);
+                    }
+                    let intact: bool = sqlx::query_scalar("SELECT current_setting('transaction_isolation') = 'repeatable read' AND current_setting('transaction_read_only') = 'on'")
+                        .fetch_one(conn).await?;
+                    Ok(intact)
+                }))
+        } else {
+            pool_opts
+        };
 
         let pool = pool_opts
             .connect(database_url)

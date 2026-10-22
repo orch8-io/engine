@@ -105,6 +105,7 @@ struct PauseState {
 }
 
 /// Deterministic rendezvous for a paused storage call. Dropping releases it.
+#[must_use = "dropping the guard immediately releases the pause"]
 pub struct PauseGuard {
     state: Arc<PauseState>,
 }

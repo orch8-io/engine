@@ -11,6 +11,19 @@ historical block output, and the instance's externalized payload catalog.
 Payload ownership, reference keys, creation times, and expiration times survive
 the round trip. Restoring again preserves instances already present in the target.
 
+## Source consistency
+
+SQLite uses a consistent temporary snapshot, including committed WAL frames.
+PostgreSQL reads every catalog, instance, tree, output, and payload through one
+read-only repeatable-read transaction. Concurrent commits cannot change the view
+partway through an archive. If the PostgreSQL session is lost or its transaction
+ends, backup fails instead of reconnecting with a different snapshot. Retry the
+backup command after correcting the connection problem.
+
+The PostgreSQL snapshot retains the normal 30-second statement and 60-second
+idle transaction guards. The dedicated backup connection is closed when the
+source is dropped; ordinary server pools retain their normal recycling behavior.
+
 ## Failed writes and retries
 
 Each new instance, its execution tree, outputs, and payloads commit together.
