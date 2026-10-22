@@ -43,8 +43,8 @@ Server-assigned fields (`id`, `tenant_id`, `namespace`, `name`, `version`,
 `defaults_applied`. Everything else goes through the server's strict decoder,
 so unknown fields and invalid blocks are rejected exactly as the API would.
 
-A run result contains `status` (`completed` | `failed` | `tick_limit`),
-`error`, `virtual_duration_ms`, `ticks`, `timeline`, `outputs` (by block id),
+A run result contains `status` (`completed` | `failed` | `tick_limit` | `operation_limit`),
+`error`, `virtual_duration_ms`, `ticks`, `operations`, `timeline`, `outputs` (by block id),
 `context`, `state` (instance KV), `would_call`, and `notes`. Each timeline
 entry is `{step_id, path, kind, handler, started_at_virtual_ms,
 finished_at_virtual_ms, status, attempt, output, error}`, where `status` is
@@ -95,6 +95,14 @@ policy and backoff are exercised in virtual time.
 - **Tick budget.** Each step attempt costs one tick; `max_ticks` stops runaway
   loops (loops whose exit depends on real handler output never exit in a dry
   run) with `status: "tick_limit"`.
+- **Operation budget.** Every block visit, loop/for-each iteration and step
+  attempt also consumes an interpreter operation. A fixed 10,000-operation
+  ceiling returns `status: "operation_limit"`, including for loops whose steps
+  are all skipped or whose routes select no steps. This ceiling also applies
+  when `max_ticks` is very large. Error handlers and compensation cannot catch
+  either execution limit. Best-effort `on_failure` cleanup shares the ceiling
+  and preserves the original failure status. `operations` reports the amount consumed. This is a
+  dispatch limit; it does not bound the byte size of supplied input or outputs.
 
 ## Limits
 

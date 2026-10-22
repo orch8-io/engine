@@ -48,6 +48,7 @@ jobs:
         with:
           toolchain: "1.97.0"
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -65,6 +66,8 @@ jobs:
         run: ./scripts/check-sdk-packaging.sh
       - name: Check
         run: cargo check --locked --workspace
+      - name: Browser WASM target
+        run: cargo check --locked -p orch8-wasm --target wasm32-unknown-unknown
       - name: Native Node and Python bindings
         run: |
           cargo check --locked --manifest-path packages/node-native/Cargo.toml
