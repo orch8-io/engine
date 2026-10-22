@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   methods. `StepExecParams` now carries `claim_token`: use the original lease
   for scheduler dispatch and `None` for explicitly unclaimed step execution.
 
+### Webhook redelivery
+
+- Reject manual redelivery of pending or in-flight outbox rows with HTTP 409.
+  These rows remain owned by the scheduler; the API cannot send a duplicate
+  and delete an active claim. Parked deliveries remain eligible for redelivery.
+
 ### Webhook ownership
 
 - Durable delivery history and API redelivery use the owning backend and
