@@ -448,7 +448,9 @@ async fn maybe_externalize(
     claim_token: Option<chrono::DateTime<Utc>>,
 ) -> Result<BlockOutput, EngineError> {
     if threshold > 0 && row.output_size > threshold {
-        let ref_key = format!("{}:{}", row.instance_id, row.block_id.as_str());
+        // Outputs are append-only history. A block can run repeatedly with the
+        // same retry number (for example in a loop), so key by output identity.
+        let ref_key = format!("{}:{}:{}", row.instance_id, row.block_id.as_str(), row.id);
         if let Some(token) = claim_token {
             if !storage
                 .save_externalized_state_claimed(row.instance_id, &ref_key, &row.output, token)
@@ -604,6 +606,65 @@ pub fn honor_retry_after(backoff: Duration, details: Option<&serde_json::Value>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn externalized_output_history_preserves_each_execution_payload() {
+        use orch8_storage::testing::fixtures::SequenceBuilder;
+
+        let engine = crate::testing::TestEngine::builder().build().await;
+        let sequence = SequenceBuilder::new("output-history")
+            .step("work", "noop")
+            .build();
+        let instance_id = engine.start(&sequence).await;
+        let mut handlers = HandlerRegistry::new();
+        handlers.register("noop", |ctx| async move { Ok(ctx.params) });
+        let payloads = [
+            serde_json::json!({"iteration": "first"}),
+            serde_json::json!({"iteration": "second"}),
+            serde_json::json!({"iteration": "third"}),
+        ];
+        for (index, payload) in payloads.iter().enumerate() {
+            let output = execute_step_dry(
+                &engine.storage,
+                &handlers,
+                StepExecParams {
+                    claim_token: None,
+                    instance_id,
+                    tenant_id: TenantId::unchecked("default"),
+                    block_id: BlockId::new("work"),
+                    handler_name: "noop".into(),
+                    params: payload.clone(),
+                    context: orch8_types::context::ExecutionContext::default(),
+                    // Repeated loop iterations can have the same attempt.
+                    attempt: u32::from(index == 1),
+                    timeout: None,
+                    externalize_threshold: 1,
+                    wait_for_input: None,
+                    cache_key: None,
+                    output_schema: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(output.output_ref.is_some());
+            engine.storage.save_block_output(&output).await.unwrap();
+        }
+        let history = engine.storage.get_all_outputs(instance_id).await.unwrap();
+        assert_eq!(history.len(), payloads.len());
+        for (output, payload) in history.iter().zip(&payloads) {
+            let reference = output.output_ref.as_deref().unwrap();
+            assert_eq!(output.output["_ref"], reference);
+            assert_eq!(
+                engine
+                    .storage
+                    .get_externalized_state(instance_id, reference)
+                    .await
+                    .unwrap(),
+                Some(payload.clone()),
+                "later executions must not overwrite the payload of an older output"
+            );
+        }
+    }
 
     #[test]
     fn retry_after_hint_floors_the_backoff() {
