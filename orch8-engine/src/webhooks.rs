@@ -911,7 +911,10 @@ async fn redeliver_event(
         context,
         timeout,
         config.max_retries,
-        config.secret.as_ref().map(|s| s.expose()),
+        config
+            .secret
+            .as_ref()
+            .map(orch8_types::config::SecretString::expose),
         cancel,
     )
     .await
