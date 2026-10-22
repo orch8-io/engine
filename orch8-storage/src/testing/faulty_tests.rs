@@ -310,3 +310,44 @@ fn every_storage_trait_method_is_intercepted() {
     assert!(expected.len() > 400, "parser found only {}", expected.len());
     assert!(is_known_method("claim_due_instances"));
 }
+
+#[tokio::test]
+async fn pause_rendezvous_is_released_by_guard_drop() {
+    let (storage, faults, _) = wrapped().await;
+    let pause = faults.on("list_sequences").times(1).pause();
+    let pending = tokio::spawn(async move { storage.list_sequences(None, None, 10, 0).await });
+    tokio::time::timeout(Duration::from_secs(10), pause.entered())
+        .await
+        .unwrap();
+    assert!(!pending.is_finished());
+    assert_eq!(faults.injected("list_sequences"), 0);
+    drop(pause);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn pause_release_before_entry_is_retained() {
+    let (storage, faults, _) = wrapped().await;
+    let pause = faults.on("list_sequences").times(1).pause();
+    pause.release();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            storage.list_sequences(None, None, 10, 0)
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .is_empty()
+    );
+    tokio::time::timeout(Duration::from_secs(10), pause.entered())
+        .await
+        .unwrap();
+}

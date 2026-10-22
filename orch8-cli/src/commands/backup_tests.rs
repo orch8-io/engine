@@ -1045,3 +1045,58 @@ async fn malformed_instance_snapshots_fail_preflight_without_catalog_writes() {
         }
     }
 }
+
+#[tokio::test]
+async fn postgres_backup_snapshot_does_not_mix_commits() {
+    use orch8_storage::testing::{
+        backends::{TestPostgres, postgres_url},
+        faulty::FaultStorage,
+        fixtures::SequenceBuilder,
+    };
+    let Some(pg) = TestPostgres::fresh().await else {
+        return;
+    };
+    let sequence = SequenceBuilder::new("consistent-backup")
+        .step("work", "noop")
+        .build();
+    pg.create_sequence(&sequence).await.unwrap();
+    let now = Utc::now();
+    let credential: CredentialDef = serde_json::from_value(serde_json::json!({
+        "id": "snapshot-secret", "tenant_id": "acme", "name": "snapshot", "kind": "api_key",
+        "value": "secret", "enabled": true, "description": "old", "created_at": now, "updated_at": now
+    })).unwrap();
+    pg.create_credential(&credential).await.unwrap();
+    let mut url = reqwest::Url::parse(&postgres_url().unwrap()).unwrap();
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-c search_path={}", pg.schema()));
+    let (source, _guard) = open_source(&DbTarget::Postgres(url.to_string()))
+        .await
+        .unwrap();
+    let (source, faults) = FaultStorage::wrap(source);
+    let pause = faults.on("list_all_credentials").times(1).pause();
+    let mut backup = Box::pin(snapshot(source.as_ref(), false));
+    tokio::select! {
+        () = pause.entered() => {},
+        result = &mut backup => panic!("backup completed before the write rendezvous: {result:?}"),
+        () = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("backup did not reach credential reads"),
+    }
+    let mut tx = pg.pool().begin().await.unwrap();
+    sqlx::query("UPDATE sequences SET version=2 WHERE id=$1")
+        .bind(sequence.id.into_uuid())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE credentials SET description='new' WHERE id=$1")
+        .bind(&credential.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    pause.release();
+    let snap = backup.await.unwrap();
+    assert_eq!(snap.sequences[0]["version"], 1);
+    assert_eq!(
+        snap.credentials[0]["description"], "old",
+        "one backup must not mix rows from before and after a single writer commit"
+    );
+}
