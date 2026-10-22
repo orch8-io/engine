@@ -2180,6 +2180,7 @@ passthrough_impl! {
         async fn create_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule) -> Result<(), StorageError>;
         async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<orch8_types::cron::CronSchedule>, StorageError>;
         async fn list_cron_schedules(&self, tenant_id: Option<&orch8_types::ids::TenantId>, limit: u32) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
+        async fn list_all_cron_schedules(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
         async fn update_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule) -> Result<(), StorageError>;
         async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
         async fn claim_due_cron_schedules(&self, now: DateTime<Utc>) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
@@ -2331,6 +2332,17 @@ passthrough_impl! {
             self.decrypt_credential(c)?;
         }
         Ok(cred)
+    }
+
+    async fn list_all_credentials(
+        &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
+    ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
+        let mut creds = self.inner.list_all_credentials(tenant_id).await?;
+        for c in &mut creds {
+            self.decrypt_credential(c)?;
+        }
+        Ok(creds)
     }
 
     async fn list_credentials(

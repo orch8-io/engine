@@ -2093,6 +2093,14 @@ pub trait SchedulingStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<CronSchedule>, StorageError>;
 
+    /// Complete catalog enumeration for operator backups. Unlike the public
+    /// list operation, this must not cap results or infer tenants from sequences.
+    /// The tenant filter follows the same visibility rules as the public list.
+    async fn list_all_cron_schedules(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<CronSchedule>, StorageError>;
+
     async fn update_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
 
     async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
@@ -2477,6 +2485,16 @@ pub trait AdminStore: Send + Sync + 'static {
         &self,
         tenant_id: Option<&TenantId>,
         limit: u32,
+    ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
+
+    /// Complete catalog enumeration for operator backups. Unlike the public
+    /// list operation, this must not cap results or infer tenants from sequences.
+    /// The tenant filter follows the same visibility rules as the public list.
+    /// Include stored values and refresh tokens; metadata-only records are
+    /// insufficient for restoring credentials from a backup.
+    async fn list_all_credentials(
+        &self,
+        tenant_id: Option<&TenantId>,
     ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
 
     async fn update_credential(
