@@ -1,4 +1,4 @@
-//! Handler invocations that outlived their device-side timeout.
+//! Handler invocations that outlived their device-side timeout or async caller.
 //!
 //! A timeout on the device cannot stop an app-native handler: the foreign
 //! `StepHandler::execute` call runs on a blocking thread and keeps going
@@ -33,7 +33,7 @@ struct Straggling {
 }
 
 impl Stragglers {
-    /// An invocation of `handler` timed out but is still running.
+    /// An invocation of `handler` lost its caller but is still running.
     pub(crate) fn begin(&self, handler: &str) {
         let mut running = self.lock();
         let entry = running.entry(handler.to_string()).or_insert(Straggling {

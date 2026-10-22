@@ -10,6 +10,9 @@ use orch8_types::error::StepError;
 use crate::error::HandlerError;
 use crate::stragglers::{Stragglers, device_timeout_error};
 
+mod invocation;
+use invocation::NativeInvocation;
+
 /// Callback interface for host-registered step handlers.
 /// Implementations live in Swift/Kotlin and are called by the engine during tick execution.
 #[uniffi::export(with_foreign)]
@@ -31,7 +34,8 @@ pub trait EngineListener: Send + Sync {
 /// If the handler does not respond within `timeout`, the step returns a retryable
 /// error (which causes the engine to transition the instance to Waiting) marked
 /// as a device timeout. The native call cannot be interrupted, so it is tracked
-/// in `stragglers` until it returns (see [`crate::stragglers`]).
+/// in `stragglers` until it returns (see [`crate::stragglers`]). Outer
+/// cancellation also quarantines a live native call; queued calls are aborted.
 pub(crate) fn register_foreign_handler(
     registry: &mut HandlerRegistry,
     name: &str,
@@ -52,29 +56,21 @@ pub(crate) fn register_foreign_handler(
             if stragglers.blocks(&name) {
                 return Err(StepError::Retryable {
                     message: format!(
-                        "handler '{name}' is still running from a previous timed-out attempt"
+                        "handler '{name}' is still running from a previous unfinished attempt"
                     ),
                     details: None,
                 });
             }
             let input = serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string());
 
-            let name_for_call = name.clone();
-            let mut call =
-                tokio::task::spawn_blocking(move || handler.execute(name_for_call, input));
+            let mut call = NativeInvocation::spawn(handler, name.clone(), input, stragglers);
 
-            let result = match tokio::time::timeout(timeout, &mut call).await {
+            let result = match tokio::time::timeout(timeout, call.result()).await {
                 Ok(joined) => joined.map_err(|e| HandlerError::Permanent {
                     message: format!("handler task panicked: {e}"),
                 }),
                 Err(_elapsed) => {
-                    warn!(handler = %name, "handler timed out; the native call is still running");
-                    stragglers.begin(&name);
-                    let straggler_name = name.clone();
-                    tokio::spawn(async move {
-                        let _ = call.await;
-                        stragglers.end(&straggler_name);
-                    });
+                    warn!(handler = %name, "handler timed out; tracking any live native call");
                     return Err(device_timeout_error(format!(
                         "handler '{name}' timed out after {}ms",
                         timeout.as_millis()
@@ -242,6 +238,102 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let _ = run(c3).await;
         assert_eq!(calls.load(SeqCst), 2);
+    }
+
+    struct CancellationGate {
+        started: tokio::sync::Notify,
+        released: (Mutex<bool>, std::sync::Condvar),
+        panic_on_release: bool,
+    }
+
+    impl CancellationGate {
+        fn release(&self) {
+            *self.released.0.lock().unwrap() = true;
+            self.released.1.notify_all();
+        }
+    }
+
+    // Always unblock the native thread, including when a regression assertion
+    // panics. Runtime teardown must never hang the test process.
+    struct ReleaseOnDrop(Arc<CancellationGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    impl StepHandler for CancellationGate {
+        fn execute(&self, _name: String, _input: String) -> Result<String, HandlerError> {
+            self.started.notify_one();
+            let mut released = self.released.0.lock().unwrap();
+            while !*released {
+                released = self.released.1.wait(released).unwrap();
+            }
+            drop(released);
+            assert!(
+                !self.panic_on_release,
+                "native callback panic after cancellation"
+            );
+            Ok("{}".into())
+        }
+    }
+
+    async fn check_cancelled_foreign_future(panic_on_release: bool) {
+        let gate = Arc::new(CancellationGate {
+            started: tokio::sync::Notify::new(),
+            released: (Mutex::new(false), std::sync::Condvar::new()),
+            panic_on_release,
+        });
+        let _release = ReleaseOnDrop(Arc::clone(&gate));
+        let stragglers = Arc::new(Stragglers::default());
+        let mut registry = HandlerRegistry::new();
+        register_foreign_handler(
+            &mut registry,
+            "foreign",
+            gate.clone(),
+            Duration::from_secs(60),
+            Arc::clone(&stragglers),
+        );
+        let handler = registry.get("foreign").unwrap();
+        let first = tokio::spawn(handler(context(serde_json::json!({})).await));
+        tokio::time::timeout(Duration::from_secs(2), gate.started.notified())
+            .await
+            .unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert!(
+            stragglers.blocks("foreign"),
+            "outer cancellation must quarantine the live native call"
+        );
+        let retry = handler(context(serde_json::json!({})).await)
+            .await
+            .unwrap_err();
+        assert!(matches!(retry, StepError::Retryable { .. }));
+        assert!(!crate::stragglers::is_device_timeout(&retry));
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while stragglers.blocks("foreign") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let next = handler(context(serde_json::json!({})).await).await;
+        if panic_on_release {
+            assert!(matches!(next, Err(StepError::Permanent { .. })));
+        } else {
+            assert!(next.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_foreign_future_tracks_native_call_until_it_returns() {
+        check_cancelled_foreign_future(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_native_call_clears_quarantine_even_if_it_panics() {
+        check_cancelled_foreign_future(true).await;
     }
 
     #[tokio::test]
