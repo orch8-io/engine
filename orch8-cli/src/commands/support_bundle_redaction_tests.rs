@@ -26,6 +26,9 @@ fn keys_carrying_secrets_or_execution_data_are_redacted_and_metadata_survives() 
         "db_database_url",
         "encryption_key",
         "private_key",
+        "X-API-Key",
+        "apiKey",
+        "DATABASE-URL",
     ];
     let survives = [
         "id",
@@ -46,7 +49,6 @@ fn keys_carrying_secrets_or_execution_data_are_redacted_and_metadata_survives() 
 }
 
 #[test]
-#[ignore = "BUG: `parameters` holds the same execution data as `params` but is not redacted — fixed on test/bugs"]
 fn parameters_key_is_redacted_like_params() {
     assert!(sensitive_key("parameters"));
 }
@@ -323,7 +325,10 @@ async fn local_config_is_included_with_every_secret_masked() {
         format!(
             "[api]\napi_key = \"{api_key}\"\n\n[engine]\nencryption_key = \"{encryption_key}\"\n\n\
              [database]\nurl = \"postgres://orch8:db-password@db/orch8\"\n\n\
-             [license]\nkey = \"o8l1.license-secret\"\n"
+             [license]\nkey = \"o8l1.license-secret\"\n\n\
+             [node.managed_control_headers]\nAuthorization = \"Bearer header-auth-marker\"\n\
+             Cookie = \"session=header-cookie-marker\"\n\
+             X-API-Key = \"header-dash-key-marker\"\nxApiKey = \"header-camel-key-marker\"\nfly-force-instance-id = \"route-1\"\n"
         ),
     )
     .unwrap();
@@ -336,12 +341,43 @@ async fn local_config_is_included_with_every_secret_masked() {
 
     let (bundle, raw) = read_bundle(dir.path());
     assert!(bundle["config"].is_object(), "{}", bundle["config"]);
+    assert_eq!(
+        bundle["config"]["node"]["managed_control_headers"]["fly-force-instance-id"],
+        "route-1"
+    );
     for secret in [
         api_key.as_str(),
         encryption_key.as_str(),
         "db-password",
         "license-secret",
+        "header-auth-marker",
+        "header-cookie-marker",
+        "header-dash-key-marker",
+        "header-camel-key-marker",
     ] {
         assert!(!raw.contains(secret), "config secret leaked: {secret}");
     }
+}
+
+#[test]
+fn nested_parameter_aliases_are_removed_without_losing_operational_metadata() {
+    let sanitized = sanitize(json!({
+        "id": "instance-1",
+        "state": "failed",
+        "Parameters": {"email": "private-customer@example.invalid"},
+        "steps": [
+            {"id": "step-1", "tool_parameters": {"card": "private-card-value"}},
+            {"id": "step-2", "PARAMETER": ["private-prompt", {"text": "private-text"}]}
+        ]
+    }));
+    assert_eq!(
+        sanitized,
+        json!({
+            "id": "instance-1", "state": "failed", "Parameters": "[REDACTED]",
+            "steps": [
+                {"id": "step-1", "tool_parameters": "[REDACTED]"},
+                {"id": "step-2", "PARAMETER": "[REDACTED]"}
+            ]
+        })
+    );
 }
