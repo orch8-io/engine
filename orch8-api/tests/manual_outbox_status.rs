@@ -23,7 +23,7 @@ async fn manual_redelivery_preserves_pending_and_claimed_rows() {
     let url = format!("http://{}/hook", listener.local_addr().unwrap());
     let shutdown = CancellationToken::new();
     let stop = shutdown.clone();
-    let receiver = tokio::spawn(async move {
+    let server_task = tokio::spawn(async move {
         let router = Router::new().route(
             "/hook",
             post(move || {
@@ -91,7 +91,7 @@ async fn manual_redelivery_preserves_pending_and_claimed_rows() {
         ));
     }
     shutdown.cancel();
-    receiver.await.unwrap();
+    server_task.await.unwrap();
     assert_eq!(
         results,
         vec![
