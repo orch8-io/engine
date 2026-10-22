@@ -62,7 +62,7 @@ const MAX_IN_FLIGHT: u32 = 256;
 const FIRST_TASK_WAIT: Duration = Duration::from_millis(300);
 /// Gap after which a claim round stops collecting a burst of tasks.
 const BURST_GAP: Duration = Duration::from_millis(25);
-/// Bound on waiting for a stream acknowledgement.
+/// Bound on lease-operation state, queue, and acknowledgement waits.
 const ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound on the open/hello handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -157,6 +157,53 @@ struct Pending {
     reply: oneshot::Sender<LeaseResponse>,
 }
 
+/// Retire the whole acknowledgement namespace when a mutation is abandoned.
+/// Acks carry only (operation, `task_id`), so removing one timed-out entry could
+/// let its late ack incorrectly settle a subsequent mutation for that task.
+struct SessionGuard {
+    generation: u64,
+    live_generation: Arc<AtomicU64>,
+    pending: Arc<StdMutex<VecDeque<Pending>>>,
+    closed: CancellationToken,
+    armed: bool,
+}
+
+impl SessionGuard {
+    fn for_session(session: &Session, live_generation: &Arc<AtomicU64>) -> Self {
+        Self {
+            generation: session.generation,
+            live_generation: Arc::clone(live_generation),
+            pending: Arc::clone(&session.pending),
+            closed: session.closed.clone(),
+            armed: true,
+        }
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.closed.cancel();
+        let _ = self.live_generation.compare_exchange(
+            self.generation,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let drained: Vec<_> = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect();
+        for entry in drained {
+            let _ = entry.reply.send(LeaseResponse::Retry);
+        }
+    }
+}
+
 struct Session {
     generation: u64,
     /// Heartbeat cadence the engine asked for in its hello.
@@ -165,6 +212,14 @@ struct Session {
     tasks: mpsc::Receiver<RemoteTask>,
     pending: Arc<StdMutex<VecDeque<Pending>>>,
     closed: CancellationToken,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // The reader owns channel clones and an idle network stream. Dropping
+        // the transport's sender alone cannot stop that background task.
+        self.closed.cancel();
+    }
 }
 
 /// [`LeaseTransport`] over the negotiated gRPC worker stream.
@@ -249,6 +304,29 @@ impl GrpcLeaseTransport {
             .max_encoding_message_size(4 * 1024 * 1024)
     }
 
+    async fn lock_session(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Session>>, String> {
+        tokio::time::timeout(ACK_TIMEOUT, self.session.lock())
+            .await
+            .map_err(|_| "worker stream session lock timed out".to_string())
+    }
+
+    async fn send_on_session(
+        &self,
+        session: &Session,
+        payload: ClientPayload,
+    ) -> Result<(), String> {
+        let mut cleanup = SessionGuard::for_session(session, &self.live_generation);
+        tokio::select! {
+            () = session.closed.cancelled() => Err("worker stream closed".to_string()),
+            sent = tokio::time::timeout(ACK_TIMEOUT, session.sender.send(frame(payload))) => {
+                sent.map_err(|_| "worker stream send timed out".to_string())?
+                    .map_err(|_| "worker stream closed".to_string())?;
+                cleanup.armed = false;
+                Ok(())
+            }
+        }
+    }
+
     /// Open (or confirm) a live session; used by `auto` mode to decide
     /// between gRPC and HTTP.
     ///
@@ -259,7 +337,7 @@ impl GrpcLeaseTransport {
         handlers: &[String],
         capabilities: &RuntimeCapabilities,
     ) -> Result<(), OpenError> {
-        let mut guard = self.session.lock().await;
+        let mut guard = self.lock_session().await.map_err(OpenError::Failed)?;
         self.ensure_session(&mut guard, handlers, capabilities)
             .await
             .map(|_| ())
@@ -373,29 +451,48 @@ impl GrpcLeaseTransport {
         if task.session == 0 || task.session != self.live_generation.load(Ordering::Acquire) {
             return None;
         }
-        let (sender, pending) = {
-            let guard = self.session.lock().await;
+        let deadline = tokio::time::Instant::now() + ACK_TIMEOUT;
+        let (sender, mut cleanup) = {
+            let guard = tokio::time::timeout_at(deadline, self.session.lock())
+                .await
+                .ok()?;
             let session = guard.as_ref()?;
             if session.generation != task.session || session.closed.is_cancelled() {
                 return None;
             }
-            (session.sender.clone(), Arc::clone(&session.pending))
+            (
+                session.sender.clone(),
+                SessionGuard::for_session(session, &self.live_generation),
+            )
         };
         let (reply, response) = oneshot::channel();
-        pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(Pending {
+        {
+            let mut queue = cleanup
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Another mutation may have retired this session after we
+            // released the session mutex. Check under the queue lock so no
+            // entry can be inserted after the retirement drain.
+            if cleanup.closed.is_cancelled() {
+                return None;
+            }
+            queue.push_back(Pending {
                 operation,
                 task_id: task.task.id.to_string(),
                 reply,
             });
-        if sender.send(frame(payload)).await.is_err() {
-            return None;
         }
-        match tokio::time::timeout(ACK_TIMEOUT, response).await {
-            Ok(Ok(LeaseResponse::Retry) | Err(_)) | Err(_) => None,
-            Ok(Ok(answer)) => Some(answer),
+        let mutation = async {
+            sender.send(frame(payload)).await.ok()?;
+            response.await.ok()
+        };
+        match tokio::time::timeout_at(deadline, mutation).await {
+            Ok(Some(LeaseResponse::Retry) | None) | Err(_) => None,
+            Ok(Some(answer)) => {
+                cleanup.armed = false;
+                Some(answer)
+            }
         }
     }
 
@@ -404,11 +501,15 @@ impl GrpcLeaseTransport {
         F: FnOnce(Orch8ServiceClient<Channel>) -> Fut,
         Fut: std::future::Future<Output = Result<tonic::Response<proto::Empty>, Status>>,
     {
-        match call(self.client()).await {
-            Ok(_) => LeaseResponse::Accepted,
-            Err(status) => {
+        match tokio::time::timeout(ACK_TIMEOUT, call(self.client())).await {
+            Ok(Ok(_)) => LeaseResponse::Accepted,
+            Ok(Err(status)) => {
                 debug!(%status, "unary lease call failed");
                 classify_status(&status)
+            }
+            Err(_) => {
+                debug!("unary lease call timed out");
+                LeaseResponse::Retry
             }
         }
     }
@@ -425,6 +526,13 @@ async fn read_session(
     live_generation: Arc<AtomicU64>,
     generation: u64,
 ) {
+    let _cleanup = SessionGuard {
+        generation,
+        live_generation,
+        pending: Arc::clone(&pending),
+        closed: closed.clone(),
+        armed: true,
+    };
     let resolve = |operation: &str, task_id: &str, answer: LeaseResponse| {
         let mut queue = pending
             .lock()
@@ -437,74 +545,70 @@ async fn read_session(
             let _ = entry.reply.send(answer);
         }
     };
-    loop {
-        let message = match inbound.message().await {
-            Ok(Some(message)) => message,
-            Ok(None) => {
-                debug!(generation, "worker stream closed by the engine");
-                break;
-            }
-            Err(status) => {
-                warn!(generation, %status, "worker stream ended");
-                break;
-            }
-        };
-        match message.payload {
-            Some(ServerPayload::Task(task)) => {
-                match serde_json::from_str::<RemoteTask>(&task.task_json) {
-                    Ok(task) => {
-                        if tasks.send(task).await.is_err() {
-                            break;
+    let read = async {
+        loop {
+            let message = match inbound.message().await {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    debug!(generation, "worker stream closed by the engine");
+                    break;
+                }
+                Err(status) => {
+                    warn!(generation, %status, "worker stream ended");
+                    break;
+                }
+            };
+            match message.payload {
+                Some(ServerPayload::Task(task)) => {
+                    match serde_json::from_str::<RemoteTask>(&task.task_json) {
+                        Ok(task) => {
+                            if tasks.send(task).await.is_err() {
+                                break;
+                            }
                         }
+                        Err(error) => warn!(%error, "undecodable task on the worker stream"),
                     }
-                    Err(error) => warn!(%error, "undecodable task on the worker stream"),
                 }
-            }
-            Some(ServerPayload::Ack(ack)) => match ack.operation.as_str() {
-                "complete" => resolve("complete", &ack.task_id, LeaseResponse::Accepted),
-                "fail" => resolve("fail", &ack.task_id, LeaseResponse::Accepted),
-                "heartbeat" => resolve("heartbeat", &ack.task_id, LeaseResponse::Accepted),
-                _ => {}
-            },
-            Some(ServerPayload::Cancellation(cancellation)) => {
-                resolve(
-                    "heartbeat",
-                    &cancellation.task_id,
-                    LeaseResponse::LostOwnership,
-                );
-            }
-            Some(ServerPayload::Command(command)) => {
-                let Ok(command) = serde_json::from_str::<WorkerCommand>(&command.command_json)
-                else {
-                    continue;
-                };
-                if command.command == WorkerCommandKind::Place {
-                    continue;
+                Some(ServerPayload::Ack(ack)) => match ack.operation.as_str() {
+                    "complete" => resolve("complete", &ack.task_id, LeaseResponse::Accepted),
+                    "fail" => resolve("fail", &ack.task_id, LeaseResponse::Accepted),
+                    "heartbeat" => resolve("heartbeat", &ack.task_id, LeaseResponse::Accepted),
+                    _ => {}
+                },
+                Some(ServerPayload::Cancellation(cancellation)) => {
+                    resolve(
+                        "heartbeat",
+                        &cancellation.task_id,
+                        LeaseResponse::LostOwnership,
+                    );
                 }
-                let _ = sender
-                    .send(frame(ClientPayload::CommandAck(proto::WorkerCommandAck {
-                        command_id: command.id.to_string(),
-                    })))
-                    .await;
-                if command.command == WorkerCommandKind::Drain {
-                    info!("drain command received on the worker stream");
-                    drain.cancel();
+                Some(ServerPayload::Command(command)) => {
+                    let Ok(command) = serde_json::from_str::<WorkerCommand>(&command.command_json)
+                    else {
+                        continue;
+                    };
+                    if command.command == WorkerCommandKind::Place {
+                        continue;
+                    }
+                    let _ = sender
+                        .send(frame(ClientPayload::CommandAck(proto::WorkerCommandAck {
+                            command_id: command.id.to_string(),
+                        })))
+                        .await;
+                    if command.command == WorkerCommandKind::Drain {
+                        info!("drain command received on the worker stream");
+                        drain.cancel();
+                    }
                 }
+                Some(ServerPayload::Hello(_)) | None => {}
             }
-            Some(ServerPayload::Hello(_)) | None => {}
         }
-    }
-    closed.cancel();
-    let _ = live_generation.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Acquire);
-    // Pending stream mutations get `Retry`: the caller re-sends them over
-    // the unary RPCs, which report the precise outcome.
-    let drained: Vec<Pending> = pending
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .drain(..)
-        .collect();
-    for entry in drained {
-        let _ = entry.reply.send(LeaseResponse::Retry);
+    };
+    // Retirement must also interrupt backpressure on task/command delivery,
+    // not only an idle inbound read. Dropping `read` drops the old stream.
+    tokio::select! {
+        () = closed.cancelled() => {}
+        () = read => {}
     }
 }
 
@@ -516,17 +620,17 @@ impl LeaseTransport for GrpcLeaseTransport {
 
     async fn advertise(&self, capabilities: &RuntimeCapabilities) -> Result<(), String> {
         let json = serde_json::to_string(capabilities).map_err(|e| e.to_string())?;
-        let guard = self.session.lock().await;
+        let guard = self.lock_session().await?;
         match guard.as_ref() {
-            Some(session) if !session.closed.is_cancelled() => session
-                .sender
-                .send(frame(ClientPayload::RuntimeHeartbeat(
-                    proto::RuntimeHeartbeat {
+            Some(session) if !session.closed.is_cancelled() => {
+                self.send_on_session(
+                    session,
+                    ClientPayload::RuntimeHeartbeat(proto::RuntimeHeartbeat {
                         runtime_capabilities_json: json,
-                    },
-                )))
+                    }),
+                )
                 .await
-                .map_err(|_| "worker stream closed".to_string()),
+            }
             // The next session's open frame carries a fresh advertisement.
             _ => Ok(()),
         }
@@ -538,7 +642,7 @@ impl LeaseTransport for GrpcLeaseTransport {
         capacity: u32,
         capabilities: &RuntimeCapabilities,
     ) -> Result<Claimed, String> {
-        let mut guard = self.session.lock().await;
+        let mut guard = self.lock_session().await?;
         let session = self
             .ensure_session(&mut guard, handlers, capabilities)
             .await
@@ -557,13 +661,11 @@ impl LeaseTransport for GrpcLeaseTransport {
             }
         }
         if tasks.is_empty() && capacity > 0 {
-            session
-                .sender
-                .send(frame(ClientPayload::Demand(proto::WorkerStreamDemand {
-                    capacity,
-                })))
-                .await
-                .map_err(|_| "worker stream closed".to_string())?;
+            self.send_on_session(
+                session,
+                ClientPayload::Demand(proto::WorkerStreamDemand { capacity }),
+            )
+            .await?;
             let mut wait = FIRST_TASK_WAIT;
             while tasks.len() < capacity as usize {
                 match tokio::time::timeout(wait, session.tasks.recv()).await {
@@ -661,6 +763,10 @@ impl LeaseTransport for GrpcLeaseTransport {
             .await
     }
 }
+
+#[cfg(test)]
+#[path = "worker_client_session_tests.rs"]
+mod session_tests;
 
 #[cfg(test)]
 mod tests {

@@ -345,6 +345,45 @@ pub(super) async fn delete_all_for_instance(
 /// Append a `block_outputs` row and transition the instance state in one
 /// transaction. Like [`save`], this is a pure INSERT under the write-append
 /// model — no ON CONFLICT clause.
+pub(super) async fn save_output_and_conditional_transition(
+    store: &PostgresStorage,
+    output: &BlockOutput,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<bool, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let updated = sqlx::query("UPDATE task_instances SET state=$2, next_fire_at=$3, updated_at=NOW() WHERE id=$1 AND state=$4")
+        .bind(output.instance_id.into_uuid())
+        .bind(new_state.to_string())
+        .bind(next_fire_at)
+        .bind(expected_state.to_string())
+        .execute(&mut *tx).await?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    sqlx::query(
+        r"
+        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ",
+    )
+    .bind(output.id)
+    .bind(output.instance_id.into_uuid())
+    .bind(output.block_id.as_str())
+    .bind(&output.output)
+    .bind(&output.output_ref)
+    .bind(pg_output_size(output.output_size)?)
+    .bind(pg_attempt(output.attempt)?)
+    .bind(output.created_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub(super) async fn save_output_and_transition(
     store: &PostgresStorage,
     output: &BlockOutput,
