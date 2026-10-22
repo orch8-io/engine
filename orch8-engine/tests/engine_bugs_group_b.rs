@@ -86,6 +86,7 @@ fn mk_step_with_retry(id: &str, handler: &str, retry: Option<RetryPolicy>) -> St
 fn mk_instance(seq_id: SequenceId) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,

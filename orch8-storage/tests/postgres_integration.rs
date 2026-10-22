@@ -364,6 +364,7 @@ fn mk_sequence(tenant: &str, seq_id: SequenceId) -> SequenceDefinition {
 fn mk_instance(tenant: &str, seq_id: SequenceId, concurrency_key: Option<&str>) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,

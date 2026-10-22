@@ -78,6 +78,7 @@ pub(crate) async fn list_outbox(
     responses(
         (status = 200, description = "Redelivered (row removed)", body = RedeliverResponse),
         (status = 404, description = "No such parked delivery"),
+        (status = 409, description = "Delivery is pending or already claimed by the scheduler"),
         (status = 502, description = "Redelivery failed (row kept)"),
     )
 )]
@@ -93,6 +94,15 @@ pub(crate) async fn redeliver_outbox(
         .await
         .map_err(|e| ApiError::from_storage(e, "webhook_outbox"))?
         .ok_or_else(|| ApiError::NotFound(format!("webhook_outbox {id}")))?;
+
+    // Pending/in-flight rows belong to the scheduler. Sending and then
+    // deleting one here would bypass its claim fence and duplicate delivery.
+    // The scheduler never claims parked rows, so only those are eligible.
+    if entry.status != orch8_types::webhook_outbox::WebhookOutboxStatus::Parked {
+        return Err(ApiError::Conflict(format!(
+            "webhook outbox {id} is not parked; active deliveries cannot be manually redelivered"
+        )));
+    }
 
     match orch8_engine::webhooks::redeliver_with_config(
         state.storage.as_ref(),

@@ -188,7 +188,6 @@ pub(super) struct InstanceRow {
     pub budget: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    #[sqlx(default)]
     pub claimed_at: Option<DateTime<Utc>>,
     pub sub_tenant: Option<String>,
 }
@@ -201,6 +200,7 @@ impl InstanceRow {
         let budget = self.budget.map(serde_json::from_value).transpose()?;
 
         Ok(TaskInstance {
+            claimed_at: self.claimed_at,
             id: InstanceId::from_uuid(self.id),
             sub_tenant: self.sub_tenant,
             sequence_id: SequenceId::from_uuid(self.sequence_id),

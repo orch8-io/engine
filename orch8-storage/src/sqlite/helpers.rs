@@ -117,6 +117,7 @@ fn parse_json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, StorageError
 
 pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInstance, StorageError> {
     Ok(TaskInstance {
+        claimed_at: parse_ts_opt(row.get::<Option<String>, _>("claimed_at"))?,
         id: InstanceId::from_uuid(parse_uuid(row.get::<&str, _>("id"))?),
         // try_get: tolerate projections that predate the sub-tenant column.
         sub_tenant: row

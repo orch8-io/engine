@@ -593,6 +593,7 @@ use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 async fn seed_instance_ev(s: &SqliteStorage, id: InstanceId) {
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id,
         sequence_id: SequenceId::new(),

@@ -182,6 +182,7 @@ impl InstanceLifecycleManager {
         };
 
         let instance = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: instance_id,
             sequence_id: seq.id,
@@ -926,6 +927,7 @@ mod tests {
 
         // Create an instance directly with an old created_at timestamp.
         let old_instance = TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: {

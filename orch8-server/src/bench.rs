@@ -86,6 +86,7 @@ fn make_instances(count: usize, seq_id: SequenceId, tenant: &str) -> Vec<TaskIns
     let now = Utc::now();
     (0..count)
         .map(|_| TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
             sequence_id: seq_id,

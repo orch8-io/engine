@@ -57,6 +57,7 @@ async fn seed_active_run(
 ) -> InstanceId {
     let now = Utc::now();
     let inst = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,
@@ -254,6 +255,7 @@ async fn crash_between_create_and_advance_does_not_duplicate_instance() {
     let idempotency_key = format!("cron:{}:{}", sched.id, fire_at.to_rfc3339());
     let now = Utc::now();
     let pre_existing = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq_id,

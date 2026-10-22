@@ -219,6 +219,7 @@ pub(super) async fn dispatch_block(
     outputs: &OutputsSnapshot,
     clock: &orch8_types::clock::SharedClock,
     claim_token: chrono::DateTime<chrono::Utc>,
+    pending_deferrals: Option<&crate::handlers::step_deferral::PendingStepDeferrals>,
 ) -> Result<bool, EngineError> {
     // Mark node as running.
     if node.state == NodeState::Pending {
@@ -250,6 +251,7 @@ pub(super) async fn dispatch_block(
                 outputs,
                 clock,
                 claim_token,
+                pending_deferrals,
             ))
             .await;
             // Interceptor: after_step
@@ -526,6 +528,7 @@ pub(super) async fn dispatch_block(
                 let child_context = child_context_from(&instance.context, input);
 
                 let child = orch8_types::instance::TaskInstance {
+                    claimed_at: None,
                     id: orch8_types::ids::InstanceId::new(),
                     // Children stay inside the parent's sub-tenant.
                     sub_tenant: instance.sub_tenant.clone(),
@@ -620,6 +623,7 @@ mod tests {
     fn instance_with_metadata(metadata: serde_json::Value) -> orch8_types::instance::TaskInstance {
         let now = chrono::Utc::now();
         orch8_types::instance::TaskInstance {
+            claimed_at: None,
             sub_tenant: None,
             id: orch8_types::ids::InstanceId::new(),
             sequence_id: orch8_types::ids::SequenceId::new(),

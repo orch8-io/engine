@@ -253,6 +253,7 @@ async fn trigger_cron_schedule(
         .next_fire_at
         .map(|fire_at| format!("cron:{}:{}", schedule.id, fire_at.to_rfc3339()));
     let instance = TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: schedule.sequence_id,

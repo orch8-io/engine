@@ -15,6 +15,7 @@ use serde_json::json;
 fn instance(tenant: &str, seq: SequenceId, meta: serde_json::Value) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
+        claimed_at: None,
         sub_tenant: None,
         id: InstanceId::new(),
         sequence_id: seq,
