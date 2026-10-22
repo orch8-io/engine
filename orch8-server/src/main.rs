@@ -721,6 +721,7 @@ fn build_app_state(
         )),
         publisher: None,
         push_provider,
+        webhook_config: Arc::new(config.engine.webhooks.clone()),
         mobile_sync_enabled,
         mobile_sync_resolve_credentials,
         entitlements: orch8_api::entitlements::unlimited_provider(),

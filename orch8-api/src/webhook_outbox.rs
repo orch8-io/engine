@@ -94,7 +94,14 @@ pub(crate) async fn redeliver_outbox(
         .map_err(|e| ApiError::from_storage(e, "webhook_outbox"))?
         .ok_or_else(|| ApiError::NotFound(format!("webhook_outbox {id}")))?;
 
-    match orch8_engine::webhooks::redeliver(&entry, &state.shutdown).await {
+    match orch8_engine::webhooks::redeliver_with_config(
+        state.storage.as_ref(),
+        &state.webhook_config,
+        &entry,
+        &state.shutdown,
+    )
+    .await
+    {
         Ok(delivery_id) => {
             // Delivered — remove the parked row.
             state
@@ -263,11 +270,13 @@ pub(crate) async fn redeliver_preview(
         .map_err(|e| ApiError::from_storage(e, "webhook_outbox"))?
         .ok_or_else(|| ApiError::NotFound(format!("webhook_outbox {id}")))?;
     let payload_bytes = serde_json::to_vec(&entry.payload).map_or(0, |v| v.len());
+    let will_be_signed =
+        orch8_engine::webhooks::redelivery_will_sign_with_config(&state.webhook_config, &entry);
     Ok(Json(RedeliverPreview {
         url: entry.url,
         event_type: entry.event_type,
         payload_bytes,
-        will_be_signed: orch8_engine::webhooks::redelivery_will_sign(),
+        will_be_signed,
         previous_delivery_id: entry.delivery_id,
         previous_attempts: entry.attempts,
         last_error: entry.last_error,

@@ -36,6 +36,7 @@ async fn state_with(provider: Arc<dyn EntitlementProvider>) -> AppState {
         stream_limiter: Arc::new(tokio::sync::Semaphore::new(1)),
         publisher: None,
         push_provider: Arc::new(orch8_push::NoopPushProvider),
+        webhook_config: Arc::default(),
         mobile_sync_enabled: false,
         mobile_sync_resolve_credentials: false,
         entitlements: provider,

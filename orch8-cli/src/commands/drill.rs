@@ -350,6 +350,7 @@ async fn start_control(db: &std::path::Path) -> Result<Control> {
         )),
         publisher: None,
         push_provider: Arc::new(orch8_push::NoopPushProvider),
+        webhook_config: Arc::default(),
         mobile_sync_enabled: false,
         mobile_sync_resolve_credentials: false,
         entitlements: orch8_api::entitlements::unlimited_provider(),
