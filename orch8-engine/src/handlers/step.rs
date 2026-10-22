@@ -1005,8 +1005,7 @@ mod tests {
             Ok(serde_json::json!({"ok": true}))
         });
 
-        let instance_id = InstanceId::new();
-        let exec = || StepExecParams {
+        let exec = |instance_id| StepExecParams {
             claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("tenant-a"),
@@ -1036,17 +1035,22 @@ mod tests {
         let mut output = None;
         for _ in 0..2 {
             capture.spans.lock().unwrap().clear();
-            let run = execute_step_dry(&storage, &handlers, exec())
+            // A subscriber-cache retry is a separate probe execution. The
+            // previous probe's effect is already committed even if tracing
+            // missed its span, so it must keep its own instance identity.
+            let instance_id = InstanceId::new();
+            let run = execute_step_dry(&storage, &handlers, exec(instance_id))
                 .with_subscriber(dispatch.clone())
                 .await
                 .unwrap();
-            output = Some(run);
+            output = Some((instance_id, run));
             if !capture.spans.lock().unwrap().is_empty() {
                 break;
             }
             tracing::dispatcher::with_default(&dispatch, tracing::callsite::rebuild_interest_cache);
         }
-        assert_eq!(output.expect("ran").output["ok"], true);
+        let (instance_id, output) = output.expect("ran");
+        assert_eq!(output.output["ok"], true);
 
         let spans = capture.spans.lock().unwrap();
         assert_eq!(spans.len(), 1, "expected exactly one orch8.step span");
