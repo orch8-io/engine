@@ -1069,7 +1069,7 @@ async fn postgres_backup_snapshot_does_not_mix_commits() {
     let mut url = reqwest::Url::parse(&postgres_url().unwrap()).unwrap();
     url.query_pairs_mut()
         .append_pair("options", &format!("-c search_path={}", pg.schema()));
-    let (source, _guard) = open_source(&DbTarget::Postgres(url.to_string()))
+    let (source, source_guard) = open_source(&DbTarget::Postgres(url.to_string()))
         .await
         .unwrap();
     let (source, faults) = FaultStorage::wrap(source);
@@ -1099,4 +1099,54 @@ async fn postgres_backup_snapshot_does_not_mix_commits() {
         snap.credentials[0]["description"], "old",
         "one backup must not mix rows from before and after a single writer commit"
     );
+    source_guard.close().await;
+}
+
+#[tokio::test]
+async fn postgres_backup_read_failure_closes_the_snapshot_before_returning() {
+    use orch8_storage::testing::backends::{TestPostgres, postgres_url};
+    let Some(pg) = TestPostgres::fresh().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("failed-backup.tar.gz");
+    sqlx::query("DROP TABLE credentials")
+        .execute(pg.pool())
+        .await
+        .unwrap();
+    let mut url = reqwest::Url::parse(&postgres_url().unwrap()).unwrap();
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-c search_path={}", pg.schema()))
+        .append_pair("application_name", pg.schema());
+    let error = run_backup(
+        BackupCmd {
+            database_url: url.to_string(),
+            out: out.clone(),
+            include_instances: false,
+        },
+        OutputFormat::Json,
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("credentials"));
+    assert!(!out.exists());
+    // Observe real backend teardown, allowing the server to process Terminate.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(10));
+        loop {
+            poll.tick().await;
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity WHERE application_name=$1",
+            )
+            .bind(pg.schema())
+            .fetch_one(pg.pool())
+            .await
+            .unwrap();
+            if count == 0 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("a failed backup must release its PostgreSQL snapshot promptly");
 }

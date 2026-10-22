@@ -174,23 +174,37 @@ fn trigger_json(trigger: &TriggerDef) -> Result<Value> {
 // Storage access
 // ---------------------------------------------------------------------------
 
+/// Keep the `SQLite` copy alive and explicitly release the `PostgreSQL` read transaction.
+struct SourceGuard {
+    _sqlite_snapshot: Option<tempfile::TempDir>,
+    postgres_pool: Option<sqlx::PgPool>,
+}
+
+impl SourceGuard {
+    async fn close(&self) {
+        if let Some(pool) = &self.postgres_pool {
+            pool.close().await;
+        }
+    }
+}
+
 /// Open the source for reading. A read-only `SQLite` connection makes a
 /// transactionally consistent snapshot, including committed WAL frames.
 /// Independent file copies can lose commits when a live writer checkpoints.
 /// Schema reconciliation is confined to the temporary snapshot. `PostgreSQL`
 /// reads share a dedicated read-only repeatable-read transaction.
-async fn open_source(
-    target: &DbTarget,
-) -> Result<(Arc<dyn StorageBackend>, Option<tempfile::TempDir>)> {
+async fn open_source(target: &DbTarget) -> Result<(Arc<dyn StorageBackend>, SourceGuard)> {
     match target {
-        DbTarget::Postgres(url) => Ok((
-            Arc::new(
-                orch8_storage::postgres::PostgresStorage::read_snapshot(url, None)
-                    .await
-                    .context("connect to PostgreSQL")?,
-            ),
-            None,
-        )),
+        DbTarget::Postgres(url) => {
+            let storage = orch8_storage::postgres::PostgresStorage::read_snapshot(url, None)
+                .await
+                .context("connect to PostgreSQL")?;
+            let guard = SourceGuard {
+                _sqlite_snapshot: None,
+                postgres_pool: Some(storage.pool().clone()),
+            };
+            Ok((Arc::new(storage), guard))
+        }
         DbTarget::Sqlite(path) => {
             if !path.is_file() {
                 bail!("SQLite database {} does not exist", path.display());
@@ -214,7 +228,13 @@ async fn open_source(
             )
             .await
             .context("open SQLite snapshot")?;
-            Ok((Arc::new(storage), Some(dir)))
+            Ok((
+                Arc::new(storage),
+                SourceGuard {
+                    _sqlite_snapshot: Some(dir),
+                    postgres_pool: None,
+                },
+            ))
         }
     }
 }
@@ -788,8 +808,11 @@ pub async fn run_backup(cmd: BackupCmd, format: OutputFormat) -> Result<()> {
         DbTarget::Postgres(_) => "postgres",
         DbTarget::Sqlite(_) => "sqlite",
     };
-    let (storage, _snapshot_dir) = open_source(&target).await?;
-    let snap = snapshot(storage.as_ref(), cmd.include_instances).await?;
+    let (storage, source_guard) = open_source(&target).await?;
+    let snap = snapshot(storage.as_ref(), cmd.include_instances).await;
+    // Release the MVCC snapshot on success AND failure, before archive encoding.
+    source_guard.close().await;
+    let snap = snap?;
     let bytes = write_archive(&snap, backend)?;
     let archive = read_archive(&bytes)?;
     crate::atomic_write_private(&cmd.out, &bytes)?;

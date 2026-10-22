@@ -21,8 +21,9 @@ ends, backup fails instead of reconnecting with a different snapshot. Retry the
 backup command after correcting the connection problem.
 
 The PostgreSQL snapshot retains the normal 30-second statement and 60-second
-idle transaction guards. The dedicated backup connection is closed when the
-source is dropped; ordinary server pools retain their normal recycling behavior.
+idle transaction guards. The CLI explicitly closes the dedicated backup source
+on read success or failure, before encoding the archive. Ordinary server pools
+retain their normal recycling behavior.
 
 ## Failed writes and retries
 
