@@ -4,6 +4,7 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { setTimeout as delay } from "node:timers/promises";
 import { Orch8Client, testSequence, step, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
 import type { ServerHandle } from "../harness.ts";
@@ -90,7 +91,21 @@ describe("Audit Log", () => {
       timeoutMs: 10_000,
     });
 
-    const audit = await client.getAuditLog(id);
-    assert.ok(audit.length >= 2, "should have at least 2 audit entries after pause/resume");
+    // Audit writes follow the state CAS. Seeing the new state does not yet
+    // prove its best-effort audit write has finished, particularly under load.
+    // Assert the actual pause/resume transitions, rather than counting unrelated
+    // creation or step events that could satisfy the old length check.
+    const deadline = Date.now() + 5_000;
+    let audit = await client.getAuditLog(id);
+    const hasPause = () => audit.some((entry) => entry.to_state === "paused");
+    const hasResume = () => audit.some((entry) =>
+      entry.from_state === "paused" && entry.to_state === "scheduled",
+    );
+    while ((!hasPause() || !hasResume()) && Date.now() < deadline) {
+      await delay(25);
+      audit = await client.getAuditLog(id);
+    }
+    assert.ok(hasPause(), `missing pause audit entry: ${JSON.stringify(audit)}`);
+    assert.ok(hasResume(), `missing resume audit entry: ${JSON.stringify(audit)}`);
   });
 });

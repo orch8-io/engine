@@ -128,6 +128,9 @@ pub struct AppState {
     /// Optional publisher for manifest/sequence publishing.
     pub publisher: Option<Arc<orch8_publisher::SequencePublisher>>,
     pub push_provider: Arc<dyn orch8_push::PushProvider>,
+    /// Signing and retry policy for this server's outbox, independent of any
+    /// scheduler or other embedded engine in the process.
+    pub webhook_config: Arc<orch8_types::config::WebhookConfig>,
     pub mobile_sync_enabled: bool,
     /// Resolve `credentials://` references for `/mobile/sync`
     /// `step_delegations` and hand the plaintext back to the device

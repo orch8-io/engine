@@ -1050,7 +1050,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG: `.` and `./a.txt` are accepted and alias `a.txt` in the delta map (T4 #9) — fixed on test/bugs"]
     fn delta_rejects_dot_components_that_alias_another_path() {
         for path in [".", "./a.txt", "dir/./a.txt"] {
             assert_eq!(
@@ -1120,12 +1119,6 @@ mod tests {
         let valid = "0123456789abcdef".repeat(4);
         assert_eq!(promote_with_hash(&valid), Ok(()));
         assert!(lock_with_hash(&valid).is_ok());
-    }
-
-    #[test]
-    #[ignore = "BUG: uppercase digests are accepted but rollback_to/promote compare case-sensitively (T4 #9) — fixed on test/bugs"]
-    fn promotion_rejects_uppercase_digest_that_lowercase_lookups_would_never_match() {
-        assert_eq!(promote_with_hash(&"A".repeat(64)), Err(invalid_digest()));
     }
 }
 

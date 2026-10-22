@@ -105,9 +105,27 @@ pub async fn spawn_test_server_on(
     storage: Arc<dyn orch8_storage::StorageBackend>,
     root_api_key: Option<&str>,
 ) -> BackendTestServer {
+    spawn_test_server_with_webhooks_on(
+        storage,
+        root_api_key,
+        orch8_types::config::WebhookConfig::default(),
+    )
+    .await
+}
+
+/// Spawn an API-only server with its own explicit webhook signing/retry policy.
+///
+/// # Panics
+/// Panics if the TCP listener cannot bind.
+pub async fn spawn_test_server_with_webhooks_on(
+    storage: Arc<dyn orch8_storage::StorageBackend>,
+    root_api_key: Option<&str>,
+    webhook_config: orch8_types::config::WebhookConfig,
+) -> BackendTestServer {
     let root_key_digest = root_api_key.map(orch8_types::auth::precompute_secret_digest);
     let shutdown = CancellationToken::new();
-    let state = test_state(storage.clone(), shutdown.clone(), false, 0, root_key_digest);
+    let mut state = test_state(storage.clone(), shutdown.clone(), false, 0, root_key_digest);
+    state.webhook_config = Arc::new(webhook_config);
     let base_url = serve(state, storage.clone(), root_key_digest, shutdown.clone()).await;
     BackendTestServer {
         base_url,
@@ -182,6 +200,7 @@ pub(crate) fn test_state(
         )),
         publisher: None,
         push_provider: Arc::new(orch8_push::NoopPushProvider),
+        webhook_config: Arc::default(),
         mobile_sync_enabled,
         mobile_sync_resolve_credentials: false,
         entitlements: crate::entitlements::unlimited_provider(),
