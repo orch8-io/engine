@@ -939,13 +939,7 @@ async fn handle_set_state(ctx: StepContext) -> Result<Value, StepError> {
             message: "set_state: `value` is required".into(),
             details: None,
         })?;
-    ctx.storage
-        .set_instance_kv(ctx.instance_id, key, value)
-        .await
-        .map_err(|e| StepError::Retryable {
-            message: format!("set_state storage error: {e}"),
-            details: None,
-        })?;
+    ctx.set_state(key, value).await?;
     Ok(json!({"key": key, "value": value}))
 }
 
@@ -989,13 +983,7 @@ async fn handle_delete_state(ctx: StepContext) -> Result<Value, StepError> {
             message: "delete_state: `key` (string) is required".into(),
             details: None,
         })?;
-    ctx.storage
-        .delete_instance_kv(ctx.instance_id, key)
-        .await
-        .map_err(|e| StepError::Retryable {
-            message: format!("delete_state storage error: {e}"),
-            details: None,
-        })?;
+    ctx.delete_state(key).await?;
     Ok(json!({"key": key, "deleted": true}))
 }
 
@@ -1071,13 +1059,7 @@ async fn handle_merge_state(ctx: StepContext) -> Result<Value, StepError> {
 
     let mut keys = Vec::with_capacity(values.len());
     for (key, value) in values {
-        ctx.storage
-            .set_instance_kv(ctx.instance_id, key, value)
-            .await
-            .map_err(|e| StepError::Retryable {
-                message: format!("merge_state storage error for key `{key}`: {e}"),
-                details: None,
-            })?;
+        ctx.set_state(key, value).await?;
         keys.push(key.clone());
     }
 
@@ -1204,6 +1186,7 @@ mod tests {
     async fn test_ctx(params: Value) -> StepContext {
         let storage: Arc<dyn StorageBackend> = mk_test_storage().await;
         StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("test"),
@@ -1349,6 +1332,7 @@ mod tests {
         let instance_id = InstanceId::new();
 
         let set_ctx = StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("s1"),
@@ -1361,6 +1345,7 @@ mod tests {
         handle_set_state(set_ctx).await.unwrap();
 
         let get_ctx = StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("s2"),
@@ -1380,6 +1365,7 @@ mod tests {
         let instance_id = InstanceId::new();
 
         let set_ctx = StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("s1"),
@@ -1392,6 +1378,7 @@ mod tests {
         handle_set_state(set_ctx).await.unwrap();
 
         let del_ctx = StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("s2"),
@@ -1405,6 +1392,7 @@ mod tests {
         assert_eq!(result["deleted"], true);
 
         let get_ctx = StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("s3"),
@@ -1524,6 +1512,7 @@ mod tests {
         let instance_id = InstanceId::new();
 
         let ctx = StepContext {
+            claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("ms"),

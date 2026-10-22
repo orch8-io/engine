@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Builtin state ownership
+
+- Ordinary claimed `set_state`, `merge_state`, and `delete_state` steps check
+  their original execution claim atomically with each state mutation. A late
+  builtin cannot overwrite or delete a replacement execution's KV values.
+- Rust `StepContext` constructors now supply `claim_token`; independent
+  lifecycle hooks, direct calls, and remote scratch stores use `None`.
+  Custom handlers can use `StepContext::set_state` and `delete_state` for
+  the same protection. Storage backends implement `delete_instance_kv_claimed`.
+  Handle `StepError::ClaimLost` as ownership loss, without failure or fallback.
+
 ### Evaluation progress and deferrals
 
 - Delayed or retrying leaves no longer postpone ready parallel branches or a
