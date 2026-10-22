@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Webhook redelivery
+
+- Reject manual redelivery of pending or in-flight outbox rows with HTTP 409.
+  These rows remain owned by the scheduler; the API cannot send a duplicate
+  and delete an active claim. Parked deliveries remain eligible for redelivery.
+
 ### Security: embed sequence sandbox (EM-01)
 
 - **Sequences authored through the embedded builder are now sandboxed.** An
