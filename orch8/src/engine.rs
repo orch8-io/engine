@@ -1,8 +1,8 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -145,11 +145,11 @@ impl Engine {
     /// is spawned so scheduling does not silently stop. Must be called from
     /// within a tokio runtime.
     pub fn start(&self) {
-        let mut guard = self
-            .inner
-            .tick_task
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A concurrent start already owns this short critical section, or a
+        // shutdown is draining the task and the engine is terminal.
+        let Ok(mut guard) = self.inner.tick_task.try_lock() else {
+            return;
+        };
         if self.inner.cancel.is_cancelled() {
             return;
         }
@@ -171,19 +171,19 @@ impl Engine {
 
     /// Gracefully shut down: cancel the tick loop and wait for in-flight
     /// steps to drain (bounded by the scheduler's grace period). Terminal —
-    /// the engine cannot be restarted afterwards.
+    /// the engine cannot be restarted afterwards. Concurrent callers wait for
+    /// the same drain; cancelling a caller leaves it available to later callers.
     pub async fn shutdown(&self) {
         self.inner.cancel.cancel();
-        let task = self
-            .inner
-            .tick_task
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(task) = task
-            && let Err(error) = task.await
-        {
-            tracing::error!(%error, "orch8 tick task failed during shutdown");
+        // Keep the join handle in shared state while awaiting it. Cancelling
+        // this caller releases the mutex without detaching the drain, and
+        // concurrent callers wait for the same task to finish.
+        let mut task = self.inner.tick_task.lock().await;
+        if let Some(handle) = task.as_mut() {
+            if let Err(error) = handle.await {
+                tracing::error!(%error, "orch8 tick task failed during shutdown");
+            }
+            task.take();
         }
     }
 
@@ -524,7 +524,7 @@ mod tests {
         );
         let release = Arc::new(tokio::sync::Notify::new());
         let wait = Arc::clone(&release);
-        *engine.inner.tick_task.lock().unwrap() = Some(tokio::spawn(async move {
+        *engine.inner.tick_task.lock().await = Some(tokio::spawn(async move {
             wait.notified().await;
         }));
         (engine, release)
@@ -591,7 +591,7 @@ mod tests {
             .inner
             .tick_task
             .lock()
-            .unwrap()
+            .await
             .as_ref()
             .map(JoinHandle::abort_handle)
             .unwrap();

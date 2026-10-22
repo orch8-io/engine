@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Embedded engine shutdown
+
+- Concurrent `Engine::shutdown` callers wait for the same scheduler drain.
+  Cancelling one shutdown caller preserves the join handle so a later caller
+  can still wait for graceful completion.
+
 ### Parallel step deferrals
 
 - Parallel leaves retain their execution claim until both results are durable.
