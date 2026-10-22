@@ -31,6 +31,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
 import { ApiError, Orch8Client, step, testSequence, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
+import { federationSigningBytes } from "../federation-signing.ts";
 import type { ServerHandle } from "../harness.ts";
 import type { Block, SequenceDef, WorkerTask } from "../types.ts";
 
@@ -395,7 +396,7 @@ const federationPeer = {
 };
 
 function signEnvelope(unsigned: Record<string, unknown>): string {
-  return sign(null, Buffer.from(JSON.stringify(unsigned)), fedPriv).toString("base64");
+  return sign(null, federationSigningBytes(unsigned), fedPriv).toString("base64");
 }
 
 describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
@@ -3549,6 +3550,9 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       assert.ok(runtimeId, "source runtime id retained for reference");
 
       const payload = Buffer.from(`payload-${uuid()}`);
+      // Exercise the exact whole-second boundary that previously produced
+      // different JavaScript and Chrono signing bytes.
+      const signingTime = Math.floor(Date.now() / 1_000) * 1_000;
       const staleUnsigned = {
         id: uuid(),
         peer_id: federationPeerId,
@@ -3557,8 +3561,8 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
         epoch: execution.epoch, // stale: pre-handoff epoch
         destination_runtime_id: destRuntime,
         payload_sha256: createHash("sha256").update(payload).digest("hex"),
-        issued_at: new Date(Date.now() - 100).toISOString(),
-        expires_at: new Date(Date.now() + 30_000).toISOString(),
+        issued_at: new Date(signingTime - 1_000).toISOString(),
+        expires_at: new Date(signingTime + 30_000).toISOString(),
         signature: "",
       };
       const staleSignature = signEnvelope(staleUnsigned);
