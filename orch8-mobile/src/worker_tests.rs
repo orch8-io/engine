@@ -509,3 +509,20 @@ async fn device_timeout_releases_as_started_and_quarantines_the_handler() {
     assert_eq!(h.store.count().await.unwrap(), 0);
     assert_eq!(h.worker.stats().released, 1);
 }
+
+#[tokio::test]
+async fn handler_claim_loss_clears_journal_without_reporting_an_outcome() {
+    let task_id = uuid::Uuid::new_v4();
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let mut h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let mut registry = HandlerRegistry::new();
+    registry.register("scan", |_| async { Err(StepError::ClaimLost) });
+    Arc::get_mut(&mut h.worker).unwrap().deps.registry = Arc::new(registry);
+    let task = serde_json::from_value(task_json(task_id)).unwrap();
+    h.worker.execute(task, Duration::from_secs(1)).await;
+    assert_eq!(h.worker.stats().lost, 1);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert_eq!(server.count(&format!("{task_id}/complete")), 0);
+    assert_eq!(server.count(&format!("{task_id}/fail")), 0);
+    assert_eq!(server.count(&format!("{task_id}/release")), 0);
+}

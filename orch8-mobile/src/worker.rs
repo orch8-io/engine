@@ -730,6 +730,10 @@ impl Worker {
         }
 
         let outcome = match result {
+            Err(StepError::ClaimLost) => {
+                self.counters.lost.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
             Ok(output) => Outcome::Complete { output },
             Err(StepError::Retryable { message, .. }) => Outcome::Fail {
                 message,

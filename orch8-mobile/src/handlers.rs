@@ -150,6 +150,7 @@ mod tests {
 
     async fn context(params: Value) -> StepContext {
         StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("mobile"),
             block_id: BlockId::new("foreign-step"),

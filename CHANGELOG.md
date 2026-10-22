@@ -7,14 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Logical backup payloads
+### Builtin state ownership
 
-- Backup format 2 includes externalized context and historical output payloads
-  with their ownership and expiry timestamps. Stored ciphertexts remain sealed.
-- Restore continues to read format 1 archives and reports their omitted payloads.
-  Version 2 archives with instances must contain the payload member.
-- Custom Rust storage backends now implement paginated payload catalog reads and
-  atomic, owner-safe payload restoration.
+- Ordinary claimed `set_state`, `merge_state`, and `delete_state` steps check
+  their original execution claim atomically with each state mutation. A late
+  builtin cannot overwrite or delete a replacement execution's KV values.
+- Rust `StepContext` constructors now supply `claim_token`; independent
+  lifecycle hooks, direct calls, and remote scratch stores use `None`.
+  Custom handlers can use `StepContext::set_state` and `delete_state` for
+  the same protection. Storage backends implement `delete_instance_kv_claimed`.
+  Handle `StepError::ClaimLost` as ownership loss, without failure or fallback.
 
 ### Parallel step deferrals
 
@@ -877,6 +879,15 @@ See [docs/DISTRIBUTED_RUNTIMES.md](docs/DISTRIBUTED_RUNTIMES.md).
   the mobile dependency graph drops from 438 to 284 crates.
 - `orch8-mobile` no longer carries the unused `queue_step_delegation` outbox
   path; remote steps run through the leased worker loop instead.
+
+### Logical backup payloads
+
+- Backup format 2 includes externalized context and historical output payloads
+  with their ownership and expiry timestamps. Stored ciphertexts remain sealed.
+- Restore continues to read format 1 archives and reports their omitted payloads.
+  Version 2 archives with instances must contain the payload member.
+- Custom Rust storage backends now implement paginated payload catalog reads and
+  atomic, owner-safe payload restoration.
 
 ## [0.7.1] — 2026-07-30
 

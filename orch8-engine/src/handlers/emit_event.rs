@@ -347,6 +347,7 @@ mod tests {
         params: Value,
     ) -> StepContext {
         StepContext {
+            claim_token: None,
             instance_id: caller.id,
             tenant_id: caller.tenant_id.clone(),
             block_id: BlockId::new("emit"),
@@ -556,6 +557,7 @@ mod tests {
         );
         let err = handle_emit_event(ctx).await.unwrap_err();
         match &err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             // `get_trigger` is now scoped to the caller's tenant at the
             // storage layer (see the deep storage review's tenant-isolation
             // finding), so a cross-tenant trigger slug fails closed as "not
@@ -819,6 +821,7 @@ mod tests {
         );
         let err = handle_emit_event(ctx).await.unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(
                     message.contains("byte limit"),
@@ -994,6 +997,7 @@ mod tests {
         );
         let err = handle_emit_event(ctx).await.unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(
                     message.contains("dedupe_key") && message.contains("empty"),
@@ -1024,6 +1028,7 @@ mod tests {
         );
         let err = handle_emit_event(ctx).await.unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(
                     message.contains("dedupe_key") && message.contains("string"),
@@ -1056,6 +1061,7 @@ mod tests {
         );
         let err = handle_emit_event(ctx).await.unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(
                     message.contains("invalid dedupe_scope"),
@@ -1086,6 +1092,7 @@ mod tests {
         );
         let err = handle_emit_event(ctx).await.unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(
                     message.contains("invalid dedupe_scope"),

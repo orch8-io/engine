@@ -382,6 +382,7 @@ mod tests {
     async fn missing_url_fails() {
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
         let ctx = StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("T"),
             block_id: BlockId::new("t"),
@@ -414,6 +415,7 @@ mod tests {
         )
         .unwrap_err();
         match err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, .. } => {
                 assert!(
                     message.contains("non-JSON"),
@@ -692,6 +694,7 @@ mod net_tests {
                 .with_artifact_store(Arc::new(ObjectArtifactStore::memory())),
         );
         let ctx = StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),

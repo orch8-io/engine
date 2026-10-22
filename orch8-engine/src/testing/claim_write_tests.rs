@@ -364,3 +364,114 @@ async fn transient_externalized_write_failure_reschedules_instead_of_failing() {
         InstanceState::Completed
     );
 }
+
+async fn preserves_builtin_value(handler_name: &'static str) {
+    use crate::handlers::{HandlerRegistry, builtin::register_builtins};
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut builtins = HandlerRegistry::new();
+    register_builtins(&mut builtins);
+    let builtins = Arc::new(builtins);
+    let engine = Arc::new(
+        TestEngine::builder()
+            .config(|config| config.max_concurrent_steps = 2)
+            .register(handler_name, {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                let calls = Arc::clone(&calls);
+                move |mut ctx| {
+                    let entered = Arc::clone(&entered);
+                    let release = Arc::clone(&release);
+                    let calls = Arc::clone(&calls);
+                    let builtins = Arc::clone(&builtins);
+                    async move {
+                        let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                        if first {
+                            entered.notify_one();
+                            release.notified().await;
+                        } else if handler_name == "merge_state" {
+                            ctx.params["values"] = json!({"owner": "replacement"});
+                        } else {
+                            ctx.params["value"] = json!("replacement");
+                        }
+                        let saved_ctx = ctx.clone();
+                        let result = builtins.get(handler_name).unwrap()(ctx).await?;
+                        if !first && handler_name == "delete_state" {
+                            saved_ctx.set_state("owner", &json!("replacement")).await?;
+                        }
+                        Ok(result)
+                    }
+                }
+            })
+            .build()
+            .await,
+    );
+    let mut work = step("work", handler_name);
+    work.params = if handler_name == "merge_state" {
+        json!({"values": {"owner": "stale"}})
+    } else {
+        json!({"key": "owner", "value": "stale"})
+    };
+    let sequence = SequenceBuilder::new("builtin-claim")
+        .blocks(vec![BlockDefinition::Step(Box::new(work))])
+        .build();
+    let id = engine.start(&sequence).await;
+    let old_engine = Arc::clone(&engine);
+    let old_tick = tokio::spawn(async move { old_engine.try_tick().await });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .storage
+            .recover_stale_instances(Duration::ZERO)
+            .await
+            .unwrap(),
+        1
+    );
+    engine.advance(Duration::from_secs(1));
+    engine.tick().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        engine.storage.get_instance_kv(id, "owner").await.unwrap(),
+        Some(json!("replacement"))
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), old_tick)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        engine
+            .storage
+            .get_instance(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Completed
+    );
+    assert_eq!(
+        engine.storage.get_instance_kv(id, "owner").await.unwrap(),
+        Some(json!("replacement")),
+        "a late builtin must not overwrite a replacement execution's state"
+    );
+}
+
+#[tokio::test]
+async fn late_builtin_set_state_preserves_replacement_value() {
+    preserves_builtin_value("set_state").await;
+}
+
+#[tokio::test]
+async fn late_builtin_merge_state_preserves_replacement_value() {
+    preserves_builtin_value("merge_state").await;
+}
+
+#[tokio::test]
+async fn late_builtin_delete_state_preserves_replacement_value() {
+    preserves_builtin_value("delete_state").await;
+}

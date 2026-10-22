@@ -2647,6 +2647,15 @@ impl crate::ResourceStore for PostgresStorage {
         self.get_all_instance_kv_impl(instance_id).await
     }
 
+    async fn delete_instance_kv_claimed(
+        &self,
+        instance_id: InstanceId,
+        key: &str,
+        claim_token: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::delete_kv(self, instance_id, key, claim_token).await
+    }
+
     async fn delete_instance_kv(
         &self,
         instance_id: InstanceId,

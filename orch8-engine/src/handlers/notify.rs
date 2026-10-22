@@ -451,6 +451,7 @@ mod tests {
     async fn ctx_with(params: Value) -> StepContext {
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
         StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("n"),
