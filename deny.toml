@@ -1,16 +1,12 @@
 [advisories]
 ignore = [
-    # RUSTSEC-2026-0194/0195: quadratic attribute scan and unbounded
-    # namespace-declaration allocation, both in quick-xml's low-level
-    # NsReader/Attributes API. Pulled in transitively via
-    # object_store -> quick-xml, which object_store's own Cargo.toml pins to
-    # "^0.40.1" (last fixed in 0.41.0). object_store only calls the
-    # high-level `quick_xml::de::from_reader` serde API to parse S3 XML
-    # responses (not NsReader/Attributes), so neither advisory's code path is
-    # reachable here. Remove once object_store bumps its quick-xml
-    # requirement past 0.41.
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
+    # basic-toml is unmaintained, with no patched release. It is required by
+    # askama_derive's config feature through uniffi_bindgen, enabled only by
+    # orch8-mobile/bindgen (the developer CLI that generates SDK bindings).
+    # It parses repository-local template configuration, not runtime input,
+    # and is absent from the default/mobile library graph. Remove when
+    # UniFFI/Askama replaces basic-toml. Do not suppress TLS/Wasm advisories.
+    "RUSTSEC-2026-0374",
     # RUSTSEC-2026-0367/0368/0369 affect zip's ZipArchive::extract and
     # stream extraction. zip 8.6 is only a build dependency of
     # utoipa-swagger-ui 10.0.1, whose build.rs iterates with by_index and
@@ -115,6 +111,3 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Temporary pinned upstream security fix for object_store 0.14.0's vulnerable
-# quick-xml dependency. Remove when object_store 0.14.1 is on crates.io.
-allow-git = ["https://github.com/apache/arrow-rs-object-store.git"]
