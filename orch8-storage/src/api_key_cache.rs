@@ -25,9 +25,13 @@
 //! `CACHE_TTL` (30s), not instantaneous. Treat that window as the real SLA for
 //! incident response (e.g. compromised-key revocation) until cross-node
 //! invalidation (e.g. Postgres `LISTEN`/`NOTIFY` or a shared cache) is added.
+//!
+//! Entries also bind to the exact storage backend that returned them. An
+//! embedded process may host multiple databases; a key cached for one must
+//! never authorize requests against another, or hide another database's key.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -55,8 +59,22 @@ const CACHE_CAPACITY: u64 = 50_000;
 /// newly-created keys to become valid within a few seconds.
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(5);
 
-fn cache() -> &'static Cache<String, ApiKeyRecord> {
-    static CACHE: OnceLock<Cache<String, ApiKeyRecord>> = OnceLock::new();
+#[derive(Clone)]
+struct CachedKey {
+    source: Weak<dyn StorageBackend>,
+    record: ApiKeyRecord,
+}
+
+fn same_backend(source: &Weak<dyn StorageBackend>, storage: &Arc<dyn StorageBackend>) -> bool {
+    // The weak reference keeps the allocation identity reserved after the
+    // backend drops, without retaining its database/pool. Its address cannot
+    // be reused while this entry exists. Compare only the data pointers:
+    // trait-object vtable identity is not a reliable backend identity.
+    std::ptr::addr_eq(source.as_ptr(), Arc::as_ptr(storage))
+}
+
+fn cache() -> &'static Cache<String, CachedKey> {
+    static CACHE: OnceLock<Cache<String, CachedKey>> = OnceLock::new();
     CACHE.get_or_init(|| {
         Cache::builder()
             .max_capacity(CACHE_CAPACITY)
@@ -83,8 +101,8 @@ fn invalidations(key_hash: &str) -> &'static AtomicU64 {
     &INVALIDATIONS[stripe]
 }
 
-fn negative_cache() -> &'static Cache<String, ()> {
-    static CACHE: OnceLock<Cache<String, ()>> = OnceLock::new();
+fn negative_cache() -> &'static Cache<String, Weak<dyn StorageBackend>> {
+    static CACHE: OnceLock<Cache<String, Weak<dyn StorageBackend>>> = OnceLock::new();
     CACHE.get_or_init(|| {
         Cache::builder()
             .max_capacity(CACHE_CAPACITY)
@@ -94,7 +112,7 @@ fn negative_cache() -> &'static Cache<String, ()> {
 }
 
 /// Resolve a presented secret's SHA-256 `key_hash` to its [`ApiKeyRecord`],
-/// using the process-wide cache.
+/// using the process-wide cache, isolated by storage backend identity.
 ///
 /// Returns the record exactly as `StorageBackend::lookup_api_key_by_hash`
 /// would (active *or* inactive, or `None`) — callers keep their own
@@ -106,7 +124,10 @@ pub async fn authenticate(
     storage: &Arc<dyn StorageBackend>,
     key_hash: &str,
 ) -> Result<Option<ApiKeyRecord>, StorageError> {
-    if let Some(record) = cache().get(key_hash).await {
+    if let Some(entry) = cache().get(key_hash).await
+        && same_backend(&entry.source, storage)
+    {
+        let record = entry.record;
         // The cache holds only records that were active at insertion time, but
         // a cached entry can still stale-expire between nodes or exceed its
         // `expires_at`. Re-check activity before returning it so revocation and
@@ -120,7 +141,11 @@ pub async fn authenticate(
 
     // Negative cache: a recently-observed invalid/absent key is still invalid
     // for a short window, protecting the DB from a flood of bogus attempts.
-    if negative_cache().get(key_hash).await.is_some() {
+    if negative_cache()
+        .get(key_hash)
+        .await
+        .is_some_and(|source| same_backend(&source, storage))
+    {
         return Ok(None);
     }
 
@@ -140,12 +165,16 @@ pub async fn authenticate(
     if let Some(ref record) = fetched {
         if record.is_active(now) {
             touch(storage, record, now);
-            insert_unless_invalidated(key_hash, record, epoch).await;
+            insert_unless_invalidated(storage, key_hash, record, epoch).await;
         } else {
-            negative_cache().insert(key_hash.to_string(), ()).await;
+            negative_cache()
+                .insert(key_hash.to_string(), Arc::downgrade(storage))
+                .await;
         }
     } else {
-        negative_cache().insert(key_hash.to_string(), ()).await;
+        negative_cache()
+            .insert(key_hash.to_string(), Arc::downgrade(storage))
+            .await;
     }
     Ok(fetched)
 }
@@ -156,8 +185,21 @@ pub async fn authenticate(
 /// after the snapshot, its eviction may have run before this insert, so evict
 /// again here; a bump after this check is followed by its own eviction,
 /// which runs after the insert.
-async fn insert_unless_invalidated(key_hash: &str, record: &ApiKeyRecord, epoch: u64) {
-    cache().insert(key_hash.to_string(), record.clone()).await;
+async fn insert_unless_invalidated(
+    storage: &Arc<dyn StorageBackend>,
+    key_hash: &str,
+    record: &ApiKeyRecord,
+    epoch: u64,
+) {
+    cache()
+        .insert(
+            key_hash.to_string(),
+            CachedKey {
+                source: Arc::downgrade(storage),
+                record: record.clone(),
+            },
+        )
+        .await;
     if invalidations(key_hash).load(Ordering::SeqCst) != epoch {
         cache().invalidate(key_hash).await;
     }
@@ -200,17 +242,18 @@ mod tests {
     /// the stale active record after the revoke's eviction.
     #[tokio::test(flavor = "multi_thread")]
     async fn stale_lookup_is_not_cached_after_concurrent_revoke() {
+        let storage = sqlite().await;
         let minted = orch8_types::api_key::mint("acme", "race", None);
         let hash = minted.record.key_hash.clone();
         let epoch = invalidations(&hash).load(Ordering::SeqCst);
         // Revoke's invalidation runs between our DB read and our insert.
         invalidate(&hash).await;
-        insert_unless_invalidated(&hash, &minted.record, epoch).await;
+        insert_unless_invalidated(&storage, &hash, &minted.record, epoch).await;
         assert!(cache().get(&hash).await.is_none());
 
         // Without an intervening invalidation the record is cached.
         let epoch = invalidations(&hash).load(Ordering::SeqCst);
-        insert_unless_invalidated(&hash, &minted.record, epoch).await;
+        insert_unless_invalidated(&storage, &hash, &minted.record, epoch).await;
         assert!(cache().get(&hash).await.is_some());
     }
 
@@ -302,6 +345,54 @@ mod tests {
         assert!(
             cache().get(hash).await.is_none(),
             "inactive key must not cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_key_from_one_backend_cannot_authenticate_against_another() {
+        let first = sqlite().await;
+        let second = sqlite().await;
+        let minted = orch8_types::api_key::mint("acme", "first-backend", None);
+        first.create_api_key(&minted.record).await.unwrap();
+        let hash = &minted.record.key_hash;
+        assert!(authenticate(&first, hash).await.unwrap().is_some());
+        assert!(
+            authenticate(&second, hash).await.unwrap().is_none(),
+            "a cached credential must not cross storage authorization boundaries"
+        );
+    }
+
+    #[tokio::test]
+    async fn negative_cache_from_one_backend_does_not_hide_another_backends_key() {
+        let first = sqlite().await;
+        let second = sqlite().await;
+        let minted = orch8_types::api_key::mint("acme", "second-backend", None);
+        second.create_api_key(&minted.record).await.unwrap();
+        let hash = &minted.record.key_hash;
+        assert!(authenticate(&first, hash).await.unwrap().is_none());
+        assert!(
+            authenticate(&second, hash)
+                .await
+                .unwrap()
+                .is_some_and(|key| key.is_active(Utc::now())),
+            "a miss in one database must not reject a valid key in another"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_backends_active_cache_does_not_override_local_revocation() {
+        let first = sqlite().await;
+        let second = sqlite().await;
+        let minted = orch8_types::api_key::mint("acme", "shared-secret", None);
+        first.create_api_key(&minted.record).await.unwrap();
+        second.create_api_key(&minted.record).await.unwrap();
+        second.revoke_api_key(&minted.record.id).await.unwrap();
+        let hash = &minted.record.key_hash;
+        assert!(authenticate(&first, hash).await.unwrap().is_some());
+        let local = authenticate(&second, hash).await.unwrap().unwrap();
+        assert!(
+            !local.is_active(Utc::now()),
+            "the second backend revoked this key"
         );
     }
 }

@@ -131,3 +131,31 @@ async fn tenant_queries_cannot_override_key_identity_and_root_can_filter_tenants
         }
     }
 }
+
+#[tokio::test]
+async fn a_key_authenticated_by_one_server_is_rejected_by_an_independent_server() {
+    let (first, key) = setup().await;
+    let second = spawn_test_server_on(
+        Arc::new(SqliteStorage::in_memory().await.unwrap()),
+        Some(ROOT_KEY),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let first_status = client
+        .get(format!("{}/triggers", first.v1_url()))
+        .header("x-api-key", &key)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(first_status, StatusCode::OK);
+
+    let second_status = client
+        .get(format!("{}/triggers?tenant_id=acme", second.v1_url()))
+        .header("x-api-key", &key)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(second_status, StatusCode::UNAUTHORIZED);
+}
