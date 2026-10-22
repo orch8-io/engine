@@ -126,6 +126,19 @@ where
             Ok(true)
         }
         Err(step_err) => {
+            let (msg, is_retryable, details) = match &step_err {
+                orch8_types::error::StepError::ClaimLost => {
+                    return Err(EngineError::ClaimLost {
+                        instance_id: node.instance_id,
+                    });
+                }
+                orch8_types::error::StepError::Permanent { message, details } => {
+                    (message.clone(), false, details.clone())
+                }
+                orch8_types::error::StepError::Retryable { message, details } => {
+                    (message.clone(), true, details.clone())
+                }
+            };
             if let Some(guard) = effect_guard.take() {
                 guard.mark_unknown().await?;
             }
@@ -140,14 +153,6 @@ where
             // log-based alerting can pick it up. Persist an error-tagged
             // `BlockOutput` so downstream templating / the UI can distinguish
             // "step never ran" from "step ran and blew up".
-            let (msg, is_retryable, details) = match &step_err {
-                orch8_types::error::StepError::Permanent { message, details } => {
-                    (message.clone(), false, details.clone())
-                }
-                orch8_types::error::StepError::Retryable { message, details } => {
-                    (message.clone(), true, details.clone())
-                }
-            };
             tracing::error!(
                 instance_id = %node.instance_id,
                 block_id = %node.block_id,

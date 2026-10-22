@@ -93,6 +93,7 @@ mod tests {
         storage: Arc<dyn orch8_storage::StorageBackend>,
     ) -> StepContext {
         StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("self_mod"),
@@ -166,6 +167,7 @@ mod tests {
         let ctx = mk_ctx(json!({"blocks": [{"not": "a block"}]}), s);
         let err = handle_self_modify(ctx).await.unwrap_err();
         match &err {
+            StepError::ClaimLost => panic!("unexpected claim loss"),
             StepError::Permanent { message, details } => {
                 assert!(message.contains("invalid blocks"));
                 assert!(details.is_some());

@@ -495,6 +495,7 @@ pub fn step_context(
     let context: ExecutionContext =
         serde_json::from_value(task.context.clone()).unwrap_or_default();
     StepContext {
+        claim_token: None,
         instance_id: InstanceId::from_uuid(task.instance_id),
         tenant_id,
         block_id: BlockId::new(task.block_id.clone()),

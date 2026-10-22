@@ -81,6 +81,7 @@ impl Stragglers {
 /// Whether a step error came from a device-side timeout.
 pub(crate) fn is_device_timeout(error: &orch8_types::error::StepError) -> bool {
     let details = match error {
+        orch8_types::error::StepError::ClaimLost => return false,
         orch8_types::error::StepError::Retryable { details, .. }
         | orch8_types::error::StepError::Permanent { details, .. } => details,
     };

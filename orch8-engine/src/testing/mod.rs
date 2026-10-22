@@ -318,6 +318,7 @@ impl RunningEngine {
 /// context. Mutate the returned value for anything else.
 pub async fn step_context(params: serde_json::Value) -> StepContext {
     StepContext {
+        claim_token: None,
         instance_id: InstanceId::new(),
         tenant_id: orch8_types::ids::TenantId::unchecked("t"),
         block_id: orch8_types::ids::BlockId::new("step"),

@@ -2650,6 +2650,7 @@ passthrough_impl! {
             .map(|(k, v)| self.decrypt_json_value(&v).map(|dv| (k, dv)))
             .collect()
     }
+    async fn delete_instance_kv_claimed(&self, instance_id: InstanceId, key: &str, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
     async fn delete_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<(), StorageError>;
     async fn delete_instance_kv_batch(&self, instance_id: InstanceId, keys: &[String]) -> Result<(), StorageError>;
 

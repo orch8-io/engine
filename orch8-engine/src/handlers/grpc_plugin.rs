@@ -232,6 +232,7 @@ mod tests {
         let mut execution_context = ExecutionContext::default();
         execution_context.runtime.dry_run = dry_run;
         StepContext {
+            claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("tenant-a"),
             block_id: BlockId::new("grpc-step"),
