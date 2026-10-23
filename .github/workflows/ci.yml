@@ -81,12 +81,14 @@ jobs:
       - name: Supply chain (licenses + advisories)
         run: |
           cargo install --locked "cargo-deny@^0.19"
-          cargo deny check
+          cargo deny --locked check
           # The default workspace graph omits optional features and the
-          # standalone Node/Python workspaces have independent lockfiles.
-          cargo deny --all-features check advisories
-          cargo deny --manifest-path packages/node-native/Cargo.toml check advisories
-          cargo deny --manifest-path packages/python-native/Cargo.toml check advisories
+          # standalone Node/Python/fuzz workspaces have independent lockfiles.
+          # Reject lockfile drift rather than resolving it only on the runner.
+          cargo deny --locked --all-features check advisories
+          cargo deny --locked --manifest-path packages/node-native/Cargo.toml check advisories
+          cargo deny --locked --manifest-path packages/python-native/Cargo.toml check advisories
+          cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories
 
   test:
     name: Unit Tests
@@ -156,6 +158,13 @@ jobs:
         run: cargo build --locked -p orch8-server --bin orch8-server
       - name: Test
         run: cargo test --locked --workspace
+      # Criterion's test mode exercises each workload without collecting
+      # measurements. Keep fixtures and completion assertions covered when
+      # evaluator contracts change; the scheduled workflow measures timings.
+      - name: Benchmark smoke
+        run: |
+          cargo bench --locked -p orch8-engine --bench engine_bench --profile test -- --test
+          cargo bench --locked -p orch8-storage --bench storage_bench --profile test -- --test
 
   dashboard:
     name: Dashboard

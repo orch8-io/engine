@@ -10,6 +10,7 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
+use orch8_engine::evaluator::{EvalOutcome, TerminalReason};
 use orch8_engine::handlers::StepContext;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::{
@@ -25,6 +26,19 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus,
 // Blocking that runtime directly panics; move setup onto its blocking thread.
 fn block_on_in_place<F: Future>(future: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+}
+
+fn completed_evaluation(outcome: EvalOutcome) -> EvalOutcome {
+    assert!(
+        matches!(
+            outcome,
+            EvalOutcome::Done {
+                reason: TerminalReason::Succeeded
+            }
+        ),
+        "benchmark must execute its workflow successfully: {outcome:?}"
+    );
+    outcome
 }
 
 fn make_sequence() -> SequenceDefinition {
@@ -71,6 +85,27 @@ fn make_sequence() -> SequenceDefinition {
         placement: None,
         created_at: Utc::now(),
     }
+}
+
+fn make_flat_sequence(count: usize) -> SequenceDefinition {
+    let mut sequence = make_sequence();
+    let BlockDefinition::Step(template) = sequence.blocks.pop().unwrap() else {
+        unreachable!("base benchmark sequence contains one step")
+    };
+    sequence.blocks = (0..count)
+        .map(|index| {
+            let mut step = template.clone();
+            step.id = BlockId::new(format!("s1_{index}"));
+            BlockDefinition::Step(step)
+        })
+        .collect();
+    sequence
+}
+
+fn noop_handlers() -> orch8_engine::handlers::HandlerRegistry {
+    let mut handlers = orch8_engine::handlers::HandlerRegistry::new();
+    handlers.register("noop", |_ctx| async { Ok(json!({})) });
+    handlers
 }
 
 fn make_instance(seq_id: SequenceId) -> TaskInstance {
@@ -421,12 +456,12 @@ fn make_nested_blocks(depth: usize, breadth: usize) -> Vec<orch8_types::sequence
     use orch8_types::ids::BlockId;
     use orch8_types::sequence::{BlockDefinition, StepDef};
 
-    fn build_level(level: usize, breadth: usize) -> Vec<BlockDefinition> {
+    fn build_level(level: usize, breadth: usize, path: &str) -> Vec<BlockDefinition> {
         if level == 0 {
             return (0..breadth)
                 .map(|i| {
                     BlockDefinition::Step(Box::new(StepDef {
-                        id: BlockId::new(format!("s_{level}_{i}")),
+                        id: BlockId::new(format!("s_{path}{i}")),
                         handler: "noop".into(),
                         params: serde_json::json!({}),
                         delay: None,
@@ -453,32 +488,39 @@ fn make_nested_blocks(depth: usize, breadth: usize) -> Vec<orch8_types::sequence
         }
         vec![BlockDefinition::Parallel(Box::new(
             orch8_types::sequence::ParallelDef {
-                id: BlockId::new(format!("p_{level}")),
+                id: BlockId::new(format!("p_{path}")),
                 branches: (0..breadth)
-                    .map(|_| build_level(level - 1, breadth))
+                    .map(|branch| build_level(level - 1, breadth, &format!("{path}{branch}_")))
                     .collect(),
             },
         ))]
     }
 
-    build_level(depth, breadth)
+    build_level(depth, breadth, "")
 }
 
 fn bench_flatten_blocks(c: &mut Criterion) {
-    c.bench_function("flatten_blocks_50_flat", |b| {
-        let blocks = make_nested_blocks(0, 50);
-        b.iter(|| orch8_engine::evaluator::flatten_blocks(black_box(&blocks)));
-    });
-
-    c.bench_function("flatten_blocks_100_nested", |b| {
-        let blocks = make_nested_blocks(2, 3);
-        b.iter(|| orch8_engine::evaluator::flatten_blocks(black_box(&blocks)));
-    });
-
-    c.bench_function("flatten_blocks_500_deep", |b| {
-        let blocks = make_nested_blocks(3, 2);
-        b.iter(|| orch8_engine::evaluator::flatten_blocks(black_box(&blocks)));
-    });
+    for (name, depth, breadth, count) in [
+        ("flatten_blocks_50_flat", 0, 50, 50),
+        ("flatten_blocks_31_nested", 2, 3, 31),
+        ("flatten_blocks_23_deep", 3, 2, 23),
+    ] {
+        let blocks = make_nested_blocks(depth, breadth);
+        let flattened = orch8_engine::evaluator::flatten_blocks(&blocks);
+        assert_eq!(flattened.len(), count, "benchmark name must match its size");
+        assert_eq!(
+            flattened
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            count,
+            "benchmark block IDs must be unique"
+        );
+        c.bench_function(name, |b| {
+            b.iter(|| orch8_engine::evaluator::flatten_blocks(black_box(&blocks)));
+        });
+    }
 }
 
 // ---- evaluate() tree benchmark ---------------------------------------------
@@ -491,18 +533,26 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
         b.to_async(&rt).iter_batched(
             || {
                 let s = block_on_in_place(SqliteStorage::in_memory()).unwrap();
-                let seq = make_sequence();
+                let seq = make_flat_sequence(10);
+                assert_eq!(
+                    seq.blocks.len(),
+                    10,
+                    "flat benchmark must contain ten steps"
+                );
                 block_on_in_place(s.create_sequence(&seq)).unwrap();
                 let mut inst = make_instance(seq.id);
                 inst.state = InstanceState::Running;
                 block_on_in_place(s.create_instance(&inst)).unwrap();
 
                 let mut nodes = Vec::new();
-                for i in 0..10 {
+                for block in &seq.blocks {
+                    let BlockDefinition::Step(step) = block else {
+                        unreachable!("flat benchmark contains only steps")
+                    };
                     nodes.push(ExecutionNode {
                         id: ExecutionNodeId::new(),
                         instance_id: inst.id,
-                        block_id: BlockId::new(format!("s1_{i}")),
+                        block_id: step.id.clone(),
                         parent_id: None,
                         block_type: BlockType::Step,
                         branch_index: None,
@@ -512,12 +562,15 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
                     });
                 }
                 block_on_in_place(s.create_execution_nodes_batch(&nodes)).unwrap();
-                (s, inst, seq)
-            },
-            |(s, inst, seq)| async move {
-                let handlers = orch8_engine::handlers::HandlerRegistry::new();
                 let storage: Arc<dyn StorageBackend> = Arc::new(s);
-                let _ = orch8_engine::evaluator::evaluate(&storage, &handlers, &inst, &seq).await;
+                (storage, noop_handlers(), inst, seq)
+            },
+            |(storage, handlers, inst, seq)| async move {
+                completed_evaluation(
+                    orch8_engine::evaluator::evaluate(&storage, &handlers, &inst, &seq)
+                        .await
+                        .unwrap(),
+                );
             },
             BatchSize::SmallInput,
         );
@@ -583,12 +636,15 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
                 let mut inst = make_instance(seq.id);
                 inst.state = InstanceState::Running;
                 block_on_in_place(s.create_instance(&inst)).unwrap();
-                (s, inst, seq)
-            },
-            |(s, inst, seq)| async move {
-                let handlers = orch8_engine::handlers::HandlerRegistry::new();
                 let storage: Arc<dyn StorageBackend> = Arc::new(s);
-                let _ = orch8_engine::evaluator::evaluate(&storage, &handlers, &inst, &seq).await;
+                (storage, noop_handlers(), inst, seq)
+            },
+            |(storage, handlers, inst, seq)| async move {
+                completed_evaluation(
+                    orch8_engine::evaluator::evaluate(&storage, &handlers, &inst, &seq)
+                        .await
+                        .unwrap(),
+                );
             },
             BatchSize::SmallInput,
         );
@@ -679,14 +735,16 @@ fn bench_parallel_in_process_latency(c: &mut Criterion) {
             },
             |(storage, instance, sequence, handlers)| async move {
                 let storage: Arc<dyn StorageBackend> = Arc::new(storage);
-                orch8_engine::evaluator::evaluate(
-                    black_box(&storage),
-                    black_box(&handlers),
-                    black_box(&instance),
-                    black_box(&sequence),
+                completed_evaluation(
+                    orch8_engine::evaluator::evaluate(
+                        black_box(&storage),
+                        black_box(&handlers),
+                        black_box(&instance),
+                        black_box(&sequence),
+                    )
+                    .await
+                    .unwrap(),
                 )
-                .await
-                .unwrap()
             },
             BatchSize::SmallInput,
         );
@@ -730,7 +788,7 @@ fn bench_tick_once(c: &mut Criterion) {
                         externalize_output_threshold: 0,
                         ..orch8_types::config::SchedulerConfig::default()
                     };
-                    let handlers = orch8_engine::handlers::HandlerRegistry::new();
+                    let handlers = noop_handlers();
                     let cache = orch8_engine::sequence_cache::SequenceCache::new(
                         64,
                         std::time::Duration::from_secs(60),
@@ -745,10 +803,14 @@ fn bench_tick_once(c: &mut Criterion) {
                         config.max_concurrent_steps as usize,
                     ));
                     let cache = Arc::new(cache);
-                    let _ = orch8_engine::scheduler::tick_once(
+                    let result = orch8_engine::scheduler::tick_once(
                         &storage, &handlers, &semaphore, &config, &cache, &cancel,
                     )
-                    .await;
+                    .await
+                    .unwrap();
+                    assert_eq!(result.instances_advanced, count);
+                    assert_eq!(result.steps_executed, count);
+                    assert!(!result.has_pending_work);
                 },
                 BatchSize::SmallInput,
             );

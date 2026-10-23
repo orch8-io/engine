@@ -187,9 +187,12 @@ fn bench_block_outputs(c: &mut Criterion) {
                         created_at: Utc::now(),
                     };
                     s.save_block_output(&out).await.unwrap();
-                    s.get_block_output(inst_id, &BlockId::new("step_1"))
+                    let stored = s
+                        .get_block_output(inst_id, &BlockId::new("step_1"))
                         .await
-                        .unwrap();
+                        .unwrap()
+                        .expect("benchmark must retrieve its saved output");
+                    assert_eq!(stored.output, out.output);
                 });
             },
             BatchSize::SmallInput,
