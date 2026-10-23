@@ -11,29 +11,14 @@ use orch8_types::sequence::StepDef;
 use crate::error::EngineError;
 use crate::evaluator;
 
-/// Dispatch a plugin handler and map the `StepError` result to node state transitions.
+/// Dispatch a plugin handler and map the `StepError` result to node state
+/// transitions, settling the optional effect receipt along the way.
 ///
 /// On success the output is persisted as a `BlockOutput` for the node's
 /// `(instance_id, block_id)` so downstream steps can reference
 /// `{{outputs.<block_id>.*}}` — matching how the in-process registry path
 /// saves step outputs. Previously the output was discarded, leaving plugin
 /// steps invisible to templating and causing `getOutputs` to miss them.
-#[allow(clippy::too_many_lines)]
-#[cfg(test)]
-async fn dispatch_plugin<F, Fut>(
-    storage: &dyn StorageBackend,
-    node: &ExecutionNode,
-    attempt: u32,
-    handler_fn: F,
-    output_schema: Option<&serde_json::Value>,
-) -> Result<bool, EngineError>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
-{
-    dispatch_plugin_with_effect(storage, node, attempt, handler_fn, output_schema, None).await
-}
-
 #[allow(clippy::too_many_lines)] // one linear branch keeps effect and node transitions auditable
 pub(crate) async fn dispatch_plugin_with_effect<F, Fut>(
     storage: &dyn StorageBackend,
@@ -394,6 +379,21 @@ mod tests {
             started_at: None,
             completed_at: None,
         }
+    }
+
+    /// Test-only shim: [`dispatch_plugin_with_effect`] without an effect guard.
+    async fn dispatch_plugin<F, Fut>(
+        storage: &dyn StorageBackend,
+        node: &ExecutionNode,
+        attempt: u32,
+        handler_fn: F,
+        output_schema: Option<&serde_json::Value>,
+    ) -> Result<bool, EngineError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
+    {
+        dispatch_plugin_with_effect(storage, node, attempt, handler_fn, output_schema, None).await
     }
 
     // ------------------------------------------------------------------

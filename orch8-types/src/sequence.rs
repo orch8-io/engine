@@ -1,12 +1,15 @@
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use utoipa::ToSchema;
 
+use crate::finding::{Confidence, Evidence, Finding, FindingSeverity, ResourceRef};
 use crate::ids::{BlockId, Namespace, SequenceId, TenantId};
+use std::collections::HashSet;
 
 /// Lifecycle status for sequences: Draft → Staging → Production → Unpublished.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SequenceStatus {
     Draft,
@@ -55,8 +58,22 @@ impl SequenceStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+/// A versioned workflow definition — the root of the sequence JSON document.
+///
+/// `id` and `created_at` are optional on input: a missing `id` gets a fresh
+/// UUID v7 and a missing `created_at` is stamped with the server clock, so
+/// authors (human or LLM) never have to invent either. Both are always
+/// present on output, so stored rows round-trip unchanged.
+///
+/// The document may also carry a top-level `schema_version` (see
+/// [`crate::sequence_parse::SEQUENCE_SCHEMA_VERSION`]); it is checked and
+/// consumed by [`crate::sequence_parse::parse_sequence_value`] and is not a
+/// field of this struct.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct SequenceDefinition {
+    /// Unique id of this sequence *version*. Defaults to a new UUID v7 when
+    /// omitted on input.
+    #[serde(default = "SequenceId::new")]
     pub id: SequenceId,
     pub tenant_id: TenantId,
     pub namespace: Namespace,
@@ -94,13 +111,15 @@ pub struct SequenceDefinition {
     /// `Cancelled`. Same semantics as `on_failure`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_cancel: Option<Vec<BlockDefinition>>,
+    /// Creation timestamp. Defaults to "now" when omitted on input.
+    #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
 }
 
 /// Alert-only service-level-agreement policy for a sequence. A breach is a
 /// signal, not a state change: it fires one webhook + metric per breach kind
 /// and leaves the instance running. Both bounds are optional.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct SlaPolicy {
     /// Maximum wall-clock lifetime of an instance, measured from `created_at`.
     /// One `max_runtime` alert per instance.
@@ -110,6 +129,7 @@ pub struct SlaPolicy {
         with = "crate::serde_duration_opt"
     )]
     #[schema(value_type = Option<u64>)]
+    #[schemars(with = "Option<u64>")]
     pub max_runtime: Option<Duration>,
     /// Maximum wall-clock time the current step may stay running/waiting,
     /// measured from when it started. One alert per breaching step.
@@ -119,6 +139,7 @@ pub struct SlaPolicy {
         with = "crate::serde_duration_opt"
     )]
     #[schema(value_type = Option<u64>)]
+    #[schemars(with = "Option<u64>")]
     pub max_step_runtime: Option<Duration>,
 }
 
@@ -132,7 +153,7 @@ pub struct SlaPolicy {
 /// impl delegates to the inner type so wire format is unchanged) and `utoipa`
 /// (which forwards `ToSchema` through `Box<T>`), so this is an internal
 /// representation change only.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 #[schema(no_recursion)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BlockDefinition {
@@ -146,6 +167,11 @@ pub enum BlockDefinition {
     /// Invoke another sequence as a sub-workflow.
     SubSequence(Box<SubSequenceDef>),
     /// A/B split: route traffic to one of several variants by weight.
+    ///
+    /// Wire tag is `ab_split` (what the docs, dashboard and `BlockType`
+    /// always used); `a_b_split` — the tag `rename_all = "snake_case"` used
+    /// to derive — is still accepted so previously stored rows load.
+    #[serde(rename = "ab_split", alias = "a_b_split")]
     ABSplit(Box<ABSplitDef>),
     /// Cancellation scope: child blocks cannot be cancelled by external cancel signals.
     /// Provides subtree-level non-cancellability (Temporal-style structured concurrency).
@@ -155,13 +181,15 @@ pub enum BlockDefinition {
     Saga(Box<SagaDef>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct StepDef {
     pub id: BlockId,
     pub handler: String,
     #[serde(default)]
     pub params: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay: Option<DelaySpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryPolicy>,
     #[serde(
         default,
@@ -169,6 +197,7 @@ pub struct StepDef {
         with = "crate::serde_duration_opt"
     )]
     #[schema(value_type = Option<u64>)]
+    #[schemars(with = "Option<u64>")]
     pub timeout: Option<Duration>,
     /// If set, this step consumes a rate limit token for the given resource key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +228,7 @@ pub struct StepDef {
         with = "crate::serde_duration_opt"
     )]
     #[schema(value_type = Option<u64>)]
+    #[schemars(with = "Option<u64>")]
     pub deadline: Option<Duration>,
     /// Handler to invoke when the SLA deadline is breached.
     /// If omitted but deadline is set, the step simply fails on breach.
@@ -233,7 +263,7 @@ pub struct StepDef {
     pub compensation: Option<StepCompensation>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CompensationVerificationPolicy {
     /// A successful handler response is evidence of the compensation attempt,
@@ -246,7 +276,7 @@ pub enum CompensationVerificationPolicy {
     Manual,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct StepCompensation {
     pub handler: String,
     #[serde(default)]
@@ -259,10 +289,11 @@ pub struct StepCompensation {
     pub verification: CompensationVerificationPolicy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct DelaySpec {
     #[serde(with = "crate::serde_duration")]
     #[schema(value_type = u64)]
+    #[schemars(with = "u64")]
     pub duration: Duration,
     #[serde(default)]
     pub business_days_only: bool,
@@ -272,6 +303,7 @@ pub struct DelaySpec {
         with = "crate::serde_duration_opt"
     )]
     #[schema(value_type = Option<u64>)]
+    #[schemars(with = "Option<u64>")]
     pub jitter: Option<Duration>,
     /// Holiday dates (YYYY-MM-DD) to skip when `business_days_only` is true.
     /// Merged with `context.config.holidays` at runtime for tenant-level calendars.
@@ -292,7 +324,7 @@ pub struct DelaySpec {
 
 /// Time window during which a step is allowed to execute.
 /// Hours are in 24h format relative to the instance's timezone.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct SendWindow {
     /// Start hour (0-23). Defaults to 9.
     #[serde(default = "default_window_start")]
@@ -319,7 +351,7 @@ const fn default_window_end() -> u8 {
 /// `data` supports field-level granularity via [`FieldAccess`]; other sections
 /// are all-or-nothing because they are small by design (`config`, `runtime`)
 /// or append-only streams (`audit`).
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ContextAccess {
     /// Controls read access to `context.data`. Accepts legacy `true`/`false`,
     /// the keywords `"all"`/`"none"`, or an explicit `{"fields": [..]}` list.
@@ -348,7 +380,11 @@ const fn default_true_seq() -> bool {
 /// can opt into selective fetch with `{"data": {"fields": ["user_id"]}}`,
 /// which lets the scheduler preload only the required fields and skip the
 /// rest when hydrating externalized context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Deserialization is hand-written (see the `Deserialize` impl below) so a
+/// malformed value produces one error that lists every accepted form instead
+/// of serde's opaque "data did not match any variant of untagged enum".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum FieldAccess {
     /// Legacy boolean: `true` = all fields, `false` = no fields.
@@ -361,11 +397,85 @@ pub enum FieldAccess {
 }
 
 /// String form of [`FieldAccess`] for human-authored YAML/JSON.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AccessKeyword {
     All,
     None,
+}
+
+/// The accepted spellings of a [`FieldAccess`] value, quoted in error
+/// messages and in the JSON Schema description.
+pub const FIELD_ACCESS_ACCEPTED_FORMS: &str =
+    r#"true, false, "all", "none", or {"fields": ["key", ...]}"#;
+
+impl<'de> Deserialize<'de> for FieldAccess {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(d)?;
+        let invalid = |got: &str| {
+            D::Error::custom(format!(
+                "invalid field access {got}: expected {FIELD_ACCESS_ACCEPTED_FORMS}"
+            ))
+        };
+        match value {
+            serde_json::Value::Bool(b) => Ok(Self::Bool(b)),
+            serde_json::Value::String(s) => match s.as_str() {
+                "all" => Ok(Self::Keyword(AccessKeyword::All)),
+                "none" => Ok(Self::Keyword(AccessKeyword::None)),
+                other => Err(invalid(&format!("\"{other}\""))),
+            },
+            serde_json::Value::Object(map) => {
+                let mut fields = None;
+                for (key, val) in map {
+                    if key != "fields" {
+                        return Err(invalid(&format!("with unknown key \"{key}\"")));
+                    }
+                    let list = val
+                        .as_array()
+                        .ok_or_else(|| invalid("(\"fields\" must be an array of strings)"))?;
+                    let mut out = Vec::with_capacity(list.len());
+                    for item in list {
+                        match item.as_str() {
+                            Some(s) => out.push(s.to_owned()),
+                            None => {
+                                return Err(invalid(
+                                    "(\"fields\" must be an array of strings)",
+                                ));
+                            }
+                        }
+                    }
+                    fields = Some(out);
+                }
+                fields
+                    .map(|fields| Self::Fields { fields })
+                    .ok_or_else(|| invalid("{} (missing \"fields\")"))
+            }
+            other => Err(invalid(&other.to_string())),
+        }
+    }
+}
+
+impl JsonSchema for FieldAccess {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "FieldAccess".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": format!("Field-level access to a context section: {FIELD_ACCESS_ACCEPTED_FORMS}"),
+            "oneOf": [
+                { "type": "boolean" },
+                { "type": "string", "enum": ["all", "none"] },
+                {
+                    "type": "object",
+                    "properties": { "fields": { "type": "array", "items": { "type": "string" } } },
+                    "required": ["fields"],
+                    "additionalProperties": false
+                }
+            ]
+        })
+    }
 }
 
 impl Default for FieldAccess {
@@ -416,7 +526,7 @@ impl FieldAccess {
 }
 
 /// One option presented to the human reviewer in advanced mode.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema, PartialEq, Eq)]
 pub struct HumanChoice {
     /// Display text shown in the UI.
     pub label: String,
@@ -425,12 +535,13 @@ pub struct HumanChoice {
 }
 
 /// Configuration for human-in-the-loop steps.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct HumanInputDef {
     /// Prompt or instructions for the human reviewer.
     #[serde(default)]
     pub prompt: String,
-    /// Timeout in seconds before the step fails or escalates.
+    /// Timeout in **milliseconds** before the step fails or escalates
+    /// (same integer-millisecond encoding as every other duration).
     /// If omitted, waits indefinitely.
     #[serde(
         default,
@@ -438,6 +549,7 @@ pub struct HumanInputDef {
         with = "crate::serde_duration_opt"
     )]
     #[schema(value_type = Option<u64>)]
+    #[schemars(with = "Option<u64>")]
     pub timeout: Option<Duration>,
     /// If set and timeout expires, send a signal to this escalation target
     /// instead of failing the step.
@@ -510,7 +622,7 @@ impl HumanInputDef {
 }
 
 /// Action to take when an SLA deadline is breached.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct EscalationDef {
     /// Handler name to invoke on breach (e.g. `"notify_slack"`, `"send_alert"`).
     pub handler: String,
@@ -519,17 +631,28 @@ pub struct EscalationDef {
     pub params: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+/// Automatic retry/backoff policy for a step. Only `max_attempts` is
+/// required: `{"max_attempts": 3}` retries with the documented defaults
+/// (1 s initial backoff, 60 s cap, ×2 multiplier, jitter on).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
-    #[serde(with = "crate::serde_duration")]
+    /// Backoff before the second attempt, in milliseconds. Default 1000.
+    #[serde(default = "default_initial_backoff", with = "crate::serde_duration")]
     #[schema(value_type = u64)]
+    #[schemars(with = "u64")]
     pub initial_backoff: Duration,
-    #[serde(with = "crate::serde_duration")]
+    /// Upper bound on the backoff, in milliseconds. Default 60000.
+    #[serde(default = "default_max_backoff", with = "crate::serde_duration")]
     #[schema(value_type = u64)]
+    #[schemars(with = "u64")]
     pub max_backoff: Duration,
     #[serde(default = "default_backoff_multiplier")]
     pub backoff_multiplier: f64,
+    /// Randomise each backoff by up to ±25% so retries from many instances
+    /// do not synchronise. Default `true` when omitted (`None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_if: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -540,13 +663,34 @@ const fn default_backoff_multiplier() -> f64 {
     2.0
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+/// Default `RetryPolicy::initial_backoff`: 1 second.
+pub const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(1000);
+/// Default `RetryPolicy::max_backoff`: 60 seconds.
+pub const DEFAULT_MAX_BACKOFF: Duration = Duration::from_millis(60_000);
+
+const fn default_initial_backoff() -> Duration {
+    DEFAULT_INITIAL_BACKOFF
+}
+
+const fn default_max_backoff() -> Duration {
+    DEFAULT_MAX_BACKOFF
+}
+
+impl RetryPolicy {
+    /// Effective jitter setting (`jitter` defaults to `true` when omitted).
+    #[must_use]
+    pub fn jitter_enabled(&self) -> bool {
+        self.jitter.unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ParallelDef {
     pub id: BlockId,
     pub branches: Vec<Vec<BlockDefinition>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct RaceDef {
     pub id: BlockId,
     pub branches: Vec<Vec<BlockDefinition>>,
@@ -554,7 +698,7 @@ pub struct RaceDef {
     pub semantics: RaceSemantics,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RaceSemantics {
     #[default]
@@ -562,16 +706,16 @@ pub enum RaceSemantics {
     FirstToSucceed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct TryCatchDef {
     pub id: BlockId,
     pub try_block: Vec<BlockDefinition>,
     pub catch_block: Vec<BlockDefinition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finally_block: Option<Vec<BlockDefinition>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct LoopDef {
     pub id: BlockId,
     pub condition: String,
@@ -582,6 +726,11 @@ pub struct LoopDef {
     pub break_on: Option<String>,
     #[serde(default)]
     pub continue_on_error: bool,
+    /// Wait this many **seconds** between iterations: after each iteration
+    /// the instance is rescheduled to `now + poll_interval` instead of
+    /// re-evaluating the condition immediately. Note the unit — this is the
+    /// one sequence field expressed in seconds rather than milliseconds
+    /// (kept for wire compatibility with existing definitions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll_interval: Option<u64>,
     /// Keep only the most recent N iterations' body-step outputs; older outputs
@@ -605,13 +754,13 @@ const fn default_max_iterations() -> u32 {
 /// saga node itself always fails once compensation finishes (whether or
 /// not every compensation succeeded) — the original action failure is
 /// never silently absorbed.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct SagaDef {
     pub id: BlockId,
     pub steps: Vec<SagaStep>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct SagaStep {
     pub id: BlockId,
     /// The forward action for this saga step.
@@ -623,7 +772,7 @@ pub struct SagaStep {
     pub compensation: Option<Box<BlockDefinition>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ForEachDef {
     pub id: BlockId,
     pub collection: String,
@@ -642,15 +791,15 @@ fn default_item_var() -> String {
     "item".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct RouterDef {
     pub id: BlockId,
     pub routes: Vec<Route>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Vec<BlockDefinition>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct Route {
     pub condition: String,
     pub blocks: Vec<BlockDefinition>,
@@ -658,7 +807,7 @@ pub struct Route {
 
 /// Invoke another sequence as a child workflow.
 /// The child instance is created and linked; the parent waits for completion.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct SubSequenceDef {
     pub id: BlockId,
     /// Name of the sequence to invoke (resolved by tenant + namespace + name).
@@ -674,7 +823,7 @@ pub struct SubSequenceDef {
 /// A/B split: deterministically route each instance to one of several
 /// weighted variants. The chosen variant is persisted in the block output
 /// so re-executions always follow the same path.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ABSplitDef {
     pub id: BlockId,
     /// Weighted variants. Weights are relative (e.g. 70 + 30 = 100%).
@@ -686,7 +835,7 @@ pub struct ABSplitDef {
 /// When a cancel signal is received, blocks inside a `CancellationScope`
 /// continue executing until completion. The cancel takes effect only after
 /// all scoped blocks finish.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct CancellationScopeDef {
     pub id: BlockId,
     /// Child blocks protected from cancellation.
@@ -694,7 +843,7 @@ pub struct CancellationScopeDef {
 }
 
 /// One arm of an A/B split.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct ABVariant {
     /// Human-readable label (e.g. "control", `"variant_a"`).
     pub name: String,
@@ -713,6 +862,129 @@ pub enum SequenceValidationError {
     InvalidHumanInput { block_id: String, message: String },
     #[error("block `{block_id}`: {message}")]
     InvalidBlock { block_id: String, message: String },
+}
+
+/// Stable machine codes carried by the [`Finding`]s that
+/// [`SequenceDefinition::validate_all`] produces. Clients may switch on
+/// these; the human-readable summaries may change, the codes will not.
+pub mod validation_codes {
+    /// `blocks` is empty.
+    pub const SEQ_NO_BLOCKS: &str = "SEQ_NO_BLOCKS";
+    /// Total block count (root + nested + cleanup trees) exceeds the cap.
+    pub const SEQ_TOO_MANY_BLOCKS: &str = "SEQ_TOO_MANY_BLOCKS";
+    /// The same block id appears twice within one block tree.
+    pub const SEQ_DUPLICATE_BLOCK_ID: &str = "SEQ_DUPLICATE_BLOCK_ID";
+    /// A block id is the empty string.
+    pub const SEQ_EMPTY_BLOCK_ID: &str = "SEQ_EMPTY_BLOCK_ID";
+    /// Block nesting exceeds the maximum depth.
+    pub const SEQ_NESTING_TOO_DEEP: &str = "SEQ_NESTING_TOO_DEEP";
+    /// A step's `handler` is empty.
+    pub const SEQ_EMPTY_HANDLER: &str = "SEQ_EMPTY_HANDLER";
+    /// A step's `compensation` is malformed.
+    pub const SEQ_INVALID_COMPENSATION: &str = "SEQ_INVALID_COMPENSATION";
+    /// A step's `retry` policy is malformed.
+    pub const SEQ_INVALID_RETRY: &str = "SEQ_INVALID_RETRY";
+    /// A step's `send_window` is malformed.
+    pub const SEQ_INVALID_SEND_WINDOW: &str = "SEQ_INVALID_SEND_WINDOW";
+    /// A step's `wait_for_input` is malformed.
+    pub const SEQ_INVALID_HUMAN_INPUT: &str = "SEQ_INVALID_HUMAN_INPUT";
+    /// `parallel`/`race` has no branches.
+    pub const SEQ_EMPTY_BRANCHES: &str = "SEQ_EMPTY_BRANCHES";
+    /// `parallel`/`race` has more branches than the cap.
+    pub const SEQ_TOO_MANY_BRANCHES: &str = "SEQ_TOO_MANY_BRANCHES";
+    /// A `loop` condition or router route condition is empty.
+    pub const SEQ_EMPTY_CONDITION: &str = "SEQ_EMPTY_CONDITION";
+    /// A block body that must not be empty is empty (`loop.body`,
+    /// `for_each.body`, `try_catch.try_block`, `cancellation_scope.blocks`).
+    pub const SEQ_EMPTY_BODY: &str = "SEQ_EMPTY_BODY";
+    /// `max_iterations` is zero or above the cap.
+    pub const SEQ_INVALID_MAX_ITERATIONS: &str = "SEQ_INVALID_MAX_ITERATIONS";
+    /// `for_each.collection` is empty.
+    pub const SEQ_EMPTY_COLLECTION: &str = "SEQ_EMPTY_COLLECTION";
+    /// `for_each.item_var` is empty.
+    pub const SEQ_EMPTY_ITEM_VAR: &str = "SEQ_EMPTY_ITEM_VAR";
+    /// A router has neither routes nor a default.
+    pub const SEQ_ROUTER_NO_ROUTES: &str = "SEQ_ROUTER_NO_ROUTES";
+    /// `sub_sequence.sequence_name` is empty.
+    pub const SEQ_EMPTY_SEQUENCE_NAME: &str = "SEQ_EMPTY_SEQUENCE_NAME";
+    /// An `ab_split` has too few variants, zero total weight, or bad names.
+    pub const SEQ_INVALID_AB_SPLIT: &str = "SEQ_INVALID_AB_SPLIT";
+    /// The document's `schema_version` is newer than this build supports
+    /// (raised by `sequence_parse`, listed here so all codes live together).
+    pub const SEQ_SCHEMA_VERSION_UNSUPPORTED: &str = "SEQ_SCHEMA_VERSION_UNSUPPORTED";
+}
+
+use validation_codes as codes;
+
+/// Which `SequenceValidationError` variant an issue maps to when reported
+/// through the fail-fast [`SequenceDefinition::validate`] API.
+#[derive(Debug, Clone, Copy)]
+enum IssueKind {
+    DuplicateBlockId,
+    HumanInput,
+    Block,
+}
+
+/// One structural problem, collected by the validator walk.
+#[derive(Debug, Clone)]
+struct Issue {
+    code: &'static str,
+    /// Location in the JSON document, e.g. `blocks[2].retry.max_attempts`.
+    path: String,
+    block_id: String,
+    message: String,
+    kind: IssueKind,
+}
+
+impl Issue {
+    fn to_error(&self) -> SequenceValidationError {
+        match self.kind {
+            IssueKind::DuplicateBlockId => {
+                SequenceValidationError::DuplicateBlockId(self.block_id.clone())
+            }
+            IssueKind::HumanInput => SequenceValidationError::InvalidHumanInput {
+                block_id: self.block_id.clone(),
+                message: self.message.clone(),
+            },
+            IssueKind::Block => SequenceValidationError::InvalidBlock {
+                block_id: self.block_id.clone(),
+                message: self.message.clone(),
+            },
+        }
+    }
+
+    fn into_finding(self, now: DateTime<Utc>) -> Finding {
+        let summary = self.to_error().to_string();
+        Finding::new(
+            self.code,
+            FindingSeverity::Error,
+            summary,
+            Confidence::Certain,
+            now,
+        )
+        .with_resource(ResourceRef::new("block", self.block_id))
+        .with_evidence(Evidence::new("path", self.path))
+    }
+}
+
+struct Issues(Vec<Issue>);
+
+impl Issues {
+    fn block(
+        &mut self,
+        code: &'static str,
+        path: impl Into<String>,
+        block_id: &str,
+        message: impl Into<String>,
+    ) {
+        self.0.push(Issue {
+            code,
+            path: path.into(),
+            block_id: block_id.to_owned(),
+            message: message.into(),
+            kind: IssueKind::Block,
+        });
+    }
 }
 
 /// Known built-in handler names shipped with the engine. Used for
@@ -750,20 +1022,45 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
 
 impl SequenceDefinition {
     /// Structural validation performed at submit time (before the sequence
-    /// reaches storage).
+    /// reaches storage). Fail-fast: returns the first problem found, in
+    /// document order. Use [`Self::validate_all`] to get every problem.
     pub fn validate(&self) -> Result<(), SequenceValidationError> {
-        if self.blocks.is_empty() {
-            return Err(SequenceValidationError::InvalidBlock {
-                block_id: "(root)".into(),
-                message: "sequence has no blocks".into(),
-            });
+        match self.collect_issues().first() {
+            None => Ok(()),
+            Some(issue) => Err(issue.to_error()),
         }
-        let mut seen = std::collections::HashSet::new();
-        for block in &self.blocks {
-            validate_block(block, &mut seen, 0)?;
+    }
+
+    /// Collect **every** structural problem instead of stopping at the
+    /// first. Each finding carries a stable `code` (see
+    /// [`validation_codes`]), a `path` evidence entry locating the problem in
+    /// the JSON document (e.g. `blocks[2].retry.max_attempts`), and the
+    /// offending block as `affected_resource`. An empty vector means the
+    /// definition is valid. `now` stamps `observed_at` so callers on a
+    /// virtual clock stay deterministic.
+    pub fn validate_all_at(&self, now: DateTime<Utc>) -> Vec<Finding> {
+        self.collect_issues()
+            .into_iter()
+            .map(|issue| issue.into_finding(now))
+            .collect()
+    }
+
+    /// [`Self::validate_all_at`] stamped with the wall clock.
+    pub fn validate_all(&self) -> Vec<Finding> {
+        self.validate_all_at(Utc::now())
+    }
+
+    fn collect_issues(&self) -> Vec<Issue> {
+        let mut issues = Issues(Vec::new());
+        if self.blocks.is_empty() {
+            issues.block(codes::SEQ_NO_BLOCKS, "blocks", "(root)", "sequence has no blocks");
+        }
+        let mut seen = HashSet::new();
+        for (i, block) in self.blocks.iter().enumerate() {
+            validate_block(block, &format!("blocks[{i}]"), &mut seen, &mut issues, 0);
         }
         // `seen` gained exactly one entry per unique block id visited above
-        // (duplicates are rejected by `check_id`), so its size is the total
+        // (duplicates are reported by `check_id`), so its size is the total
         // block count across the whole tree.
         let mut total_blocks = seen.len();
         // The cleanup trees (`on_failure` / `on_cancel`) are dispatched
@@ -772,22 +1069,34 @@ impl SequenceDefinition {
         // need the same per-block checks (nesting depth, branch/iteration
         // caps, handler sanity) and still count toward the total-block cap,
         // or the DoS bounds are trivially bypassed via these fields.
-        for cleanup_tree in [&self.on_failure, &self.on_cancel].into_iter().flatten() {
-            let mut cleanup_seen = std::collections::HashSet::new();
-            for block in cleanup_tree {
-                validate_block(block, &mut cleanup_seen, 0)?;
+        for (field, cleanup_tree) in [("on_failure", &self.on_failure), ("on_cancel", &self.on_cancel)]
+        {
+            let Some(cleanup_tree) = cleanup_tree else {
+                continue;
+            };
+            let mut cleanup_seen = HashSet::new();
+            for (i, block) in cleanup_tree.iter().enumerate() {
+                validate_block(
+                    block,
+                    &format!("{field}[{i}]"),
+                    &mut cleanup_seen,
+                    &mut issues,
+                    0,
+                );
             }
             total_blocks += cleanup_seen.len();
         }
         if total_blocks > MAX_TOTAL_BLOCKS {
-            return Err(SequenceValidationError::InvalidBlock {
-                block_id: "(root)".into(),
-                message: format!(
+            issues.block(
+                codes::SEQ_TOO_MANY_BLOCKS,
+                "blocks",
+                "(root)",
+                format!(
                     "sequence has {total_blocks} blocks, exceeding the maximum of {MAX_TOTAL_BLOCKS}",
                 ),
-            });
+            );
         }
-        Ok(())
+        issues.0
     }
 
     /// Collect all handler names referenced by Step blocks in the sequence.
@@ -903,126 +1212,178 @@ fn collect_handler_names(block: &BlockDefinition, names: &mut Vec<String>) {
     }
 }
 
-fn block_err(id: &str, msg: impl Into<String>) -> SequenceValidationError {
-    SequenceValidationError::InvalidBlock {
-        block_id: id.into(),
-        message: msg.into(),
-    }
-}
-
-fn check_id(
-    id: &BlockId,
-    seen: &mut std::collections::HashSet<String>,
-) -> Result<(), SequenceValidationError> {
+/// Register a block id. Reports an empty or duplicate id; returns whether
+/// the id was fresh. Validation of the block's contents continues either
+/// way so one bad id does not hide the rest of the report.
+fn check_id(id: &BlockId, path: &str, seen: &mut HashSet<String>, issues: &mut Issues) -> bool {
     if id.as_str().is_empty() {
-        return Err(block_err("(empty)", "block id must not be empty"));
+        issues.block(
+            codes::SEQ_EMPTY_BLOCK_ID,
+            format!("{path}.id"),
+            "(empty)",
+            "block id must not be empty",
+        );
+        return false;
     }
     if !seen.insert(id.as_str().to_owned()) {
-        return Err(SequenceValidationError::DuplicateBlockId(
-            id.as_str().to_owned(),
-        ));
+        issues.0.push(Issue {
+            code: codes::SEQ_DUPLICATE_BLOCK_ID,
+            path: format!("{path}.id"),
+            block_id: id.as_str().to_owned(),
+            message: format!("duplicate block id: {id}"),
+            kind: IssueKind::DuplicateBlockId,
+        });
+        return false;
     }
-    Ok(())
+    true
 }
 
-fn validate_step(
-    s: &StepDef,
-    seen: &mut std::collections::HashSet<String>,
-) -> Result<(), SequenceValidationError> {
-    check_id(&s.id, seen)?;
+#[allow(clippy::too_many_lines)] // one linear pass over every StepDef field; splitting it hides the field order.
+fn validate_step(s: &StepDef, path: &str, seen: &mut HashSet<String>, issues: &mut Issues) {
+    check_id(&s.id, path, seen, issues);
     let id = s.id.as_str();
 
     if s.handler.is_empty() {
-        return Err(block_err(id, "handler name must not be empty"));
+        issues.block(
+            codes::SEQ_EMPTY_HANDLER,
+            format!("{path}.handler"),
+            id,
+            "handler name must not be empty",
+        );
     }
     if let Some(compensation) = &s.compensation {
         if compensation.handler.trim().is_empty() {
-            return Err(block_err(id, "compensation.handler must not be empty"));
+            issues.block(
+                codes::SEQ_INVALID_COMPENSATION,
+                format!("{path}.compensation.handler"),
+                id,
+                "compensation.handler must not be empty",
+            );
         }
         if compensation.depends_on.len() > 256 {
-            return Err(block_err(
+            issues.block(
+                codes::SEQ_INVALID_COMPENSATION,
+                format!("{path}.compensation.depends_on"),
                 id,
                 "compensation.depends_on must not exceed 256 entries",
-            ));
+            );
         }
-        let mut dependencies = std::collections::HashSet::new();
-        for dependency in &compensation.depends_on {
+        let mut dependencies = HashSet::new();
+        for (i, dependency) in compensation.depends_on.iter().enumerate() {
             if dependency == &s.id {
-                return Err(block_err(
+                issues.block(
+                    codes::SEQ_INVALID_COMPENSATION,
+                    format!("{path}.compensation.depends_on[{i}]"),
                     id,
                     "compensation cannot depend on its own effect",
-                ));
+                );
             }
             if !dependencies.insert(dependency) {
-                return Err(block_err(
+                issues.block(
+                    codes::SEQ_INVALID_COMPENSATION,
+                    format!("{path}.compensation.depends_on[{i}]"),
                     id,
                     "compensation.depends_on must not contain duplicates",
-                ));
+                );
             }
         }
     }
 
     if let Some(retry) = &s.retry {
         if retry.max_attempts == 0 {
-            return Err(block_err(id, "retry.max_attempts must be > 0"));
+            issues.block(
+                codes::SEQ_INVALID_RETRY,
+                format!("{path}.retry.max_attempts"),
+                id,
+                "retry.max_attempts must be > 0",
+            );
         }
         if retry.backoff_multiplier <= 0.0 {
-            return Err(block_err(id, "retry.backoff_multiplier must be > 0"));
+            issues.block(
+                codes::SEQ_INVALID_RETRY,
+                format!("{path}.retry.backoff_multiplier"),
+                id,
+                "retry.backoff_multiplier must be > 0",
+            );
         }
         if retry.initial_backoff > retry.max_backoff {
-            return Err(block_err(
+            issues.block(
+                codes::SEQ_INVALID_RETRY,
+                format!("{path}.retry.initial_backoff"),
                 id,
                 "retry.initial_backoff must be <= retry.max_backoff",
-            ));
+            );
         }
         if let Some(expr) = &retry.retry_if
             && expr.trim().is_empty()
         {
-            return Err(block_err(id, "retry.retry_if must not be empty"));
+            issues.block(
+                codes::SEQ_INVALID_RETRY,
+                format!("{path}.retry.retry_if"),
+                id,
+                "retry.retry_if must not be empty",
+            );
         }
-        if let Some(codes) = &retry.non_retryable_codes
-            && codes.iter().any(|c| c.trim().is_empty())
+        if let Some(codes_list) = &retry.non_retryable_codes
+            && codes_list.iter().any(|c| c.trim().is_empty())
         {
-            return Err(block_err(
+            issues.block(
+                codes::SEQ_INVALID_RETRY,
+                format!("{path}.retry.non_retryable_codes"),
                 id,
                 "retry.non_retryable_codes must not contain empty strings",
-            ));
+            );
         }
     }
 
     if let Some(sw) = &s.send_window {
         if sw.start_hour > 23 {
-            return Err(block_err(id, "send_window.start_hour must be 0-23"));
+            issues.block(
+                codes::SEQ_INVALID_SEND_WINDOW,
+                format!("{path}.send_window.start_hour"),
+                id,
+                "send_window.start_hour must be 0-23",
+            );
         }
         if sw.end_hour > 23 {
-            return Err(block_err(id, "send_window.end_hour must be 0-23"));
+            issues.block(
+                codes::SEQ_INVALID_SEND_WINDOW,
+                format!("{path}.send_window.end_hour"),
+                id,
+                "send_window.end_hour must be 0-23",
+            );
         }
         if sw.start_hour == sw.end_hour {
-            return Err(block_err(
+            issues.block(
+                codes::SEQ_INVALID_SEND_WINDOW,
+                format!("{path}.send_window.end_hour"),
                 id,
                 "send_window.start_hour must differ from end_hour",
-            ));
+            );
         }
-        for &d in &sw.days {
+        for (i, &d) in sw.days.iter().enumerate() {
             if d > 6 {
-                return Err(block_err(
+                issues.block(
+                    codes::SEQ_INVALID_SEND_WINDOW,
+                    format!("{path}.send_window.days[{i}]"),
                     id,
                     format!("send_window.days value {d} out of range 0-6"),
-                ));
+                );
             }
         }
     }
 
-    if let Some(human) = &s.wait_for_input {
-        human
-            .validate()
-            .map_err(|message| SequenceValidationError::InvalidHumanInput {
-                block_id: id.to_string(),
-                message,
-            })?;
+    if let Some(human) = &s.wait_for_input
+        && let Err(message) = human.validate()
+    {
+        issues.0.push(Issue {
+            code: codes::SEQ_INVALID_HUMAN_INPUT,
+            path: format!("{path}.wait_for_input"),
+            block_id: id.to_owned(),
+            message,
+            kind: IssueKind::HumanInput,
+        });
     }
-
-    Ok(())
 }
 
 /// Maximum block-tree nesting depth accepted by validation. Legitimate
@@ -1046,249 +1407,338 @@ const MAX_ITERATIONS: u32 = 100_000;
 /// block id it visits, so its final size is exactly the block count.
 const MAX_TOTAL_BLOCKS: usize = 5_000;
 
-fn depth_err() -> SequenceValidationError {
-    block_err(
-        "(nested)",
-        format!("block nesting exceeds the maximum depth of {MAX_NESTING_DEPTH}"),
-    )
-}
-
-fn iterations_err(id: &BlockId, kind: &str) -> SequenceValidationError {
-    block_err(
-        id.as_str(),
-        format!("{kind} max_iterations must not exceed {MAX_ITERATIONS}"),
-    )
+fn check_max_iterations(
+    id: &BlockId,
+    kind: &str,
+    max_iterations: u32,
+    path: &str,
+    issues: &mut Issues,
+) {
+    if max_iterations == 0 {
+        issues.block(
+            codes::SEQ_INVALID_MAX_ITERATIONS,
+            format!("{path}.max_iterations"),
+            id.as_str(),
+            format!("{kind} max_iterations must be > 0"),
+        );
+    } else if max_iterations > MAX_ITERATIONS {
+        issues.block(
+            codes::SEQ_INVALID_MAX_ITERATIONS,
+            format!("{path}.max_iterations"),
+            id.as_str(),
+            format!("{kind} max_iterations must not exceed {MAX_ITERATIONS}"),
+        );
+    }
 }
 
 fn validate_branches(
     id: &BlockId,
     label: &str,
     branches: &[Vec<BlockDefinition>],
-    seen: &mut std::collections::HashSet<String>,
+    path: &str,
+    seen: &mut HashSet<String>,
+    issues: &mut Issues,
     depth: usize,
-) -> Result<(), SequenceValidationError> {
-    check_id(id, seen)?;
+) {
+    check_id(id, path, seen, issues);
     if branches.is_empty() {
-        return Err(block_err(
+        issues.block(
+            codes::SEQ_EMPTY_BRANCHES,
+            format!("{path}.branches"),
             id.as_str(),
             format!("{label} must have at least one branch"),
-        ));
+        );
     }
     if branches.len() > MAX_BRANCHES {
-        return Err(block_err(
+        issues.block(
+            codes::SEQ_TOO_MANY_BRANCHES,
+            format!("{path}.branches"),
             id.as_str(),
             format!("{label} must not have more than {MAX_BRANCHES} branches"),
-        ));
+        );
     }
-    for branch in branches {
-        for b in branch {
-            validate_block(b, seen, depth)?;
-        }
+    for (i, branch) in branches.iter().enumerate() {
+        validate_children(branch, &format!("{path}.branches[{i}]"), seen, issues, depth);
     }
-    Ok(())
 }
 
 fn validate_ab_split(
     ab: &ABSplitDef,
-    seen: &mut std::collections::HashSet<String>,
+    path: &str,
+    seen: &mut HashSet<String>,
+    issues: &mut Issues,
     depth: usize,
-) -> Result<(), SequenceValidationError> {
-    check_id(&ab.id, seen)?;
+) {
+    check_id(&ab.id, path, seen, issues);
+    let id = ab.id.as_str();
     if ab.variants.len() < 2 {
-        return Err(block_err(
-            ab.id.as_str(),
+        issues.block(
+            codes::SEQ_INVALID_AB_SPLIT,
+            format!("{path}.variants"),
+            id,
             "ab_split must have at least 2 variants",
-        ));
+        );
     }
     let total_weight: u32 = ab
         .variants
         .iter()
         .fold(0u32, |acc, v| acc.saturating_add(v.weight));
     if total_weight == 0 {
-        return Err(block_err(
-            ab.id.as_str(),
+        issues.block(
+            codes::SEQ_INVALID_AB_SPLIT,
+            format!("{path}.variants"),
+            id,
             "ab_split total weight must be > 0",
-        ));
+        );
     }
-    let mut names_seen = std::collections::HashSet::new();
-    for v in &ab.variants {
+    let mut names_seen = HashSet::new();
+    for (i, v) in ab.variants.iter().enumerate() {
         if v.name.trim().is_empty() {
-            return Err(block_err(
-                ab.id.as_str(),
+            issues.block(
+                codes::SEQ_INVALID_AB_SPLIT,
+                format!("{path}.variants[{i}].name"),
+                id,
                 "ab_split variant name must not be empty",
-            ));
-        }
-        if !names_seen.insert(&v.name) {
-            return Err(block_err(
-                ab.id.as_str(),
+            );
+        } else if !names_seen.insert(&v.name) {
+            issues.block(
+                codes::SEQ_INVALID_AB_SPLIT,
+                format!("{path}.variants[{i}].name"),
+                id,
                 format!("ab_split duplicate variant name `{}`", v.name),
-            ));
+            );
         }
-        for b in &v.blocks {
-            validate_block(b, seen, depth)?;
-        }
+        validate_children(
+            &v.blocks,
+            &format!("{path}.variants[{i}].blocks"),
+            seen,
+            issues,
+            depth,
+        );
     }
-    Ok(())
 }
 
+/// Validate every block of a child slice; `path` is the slice's own path
+/// (e.g. `blocks[0].body`), each child gets `path[i]`.
 fn validate_children(
     blocks: &[BlockDefinition],
-    seen: &mut std::collections::HashSet<String>,
+    path: &str,
+    seen: &mut HashSet<String>,
+    issues: &mut Issues,
     depth: usize,
-) -> Result<(), SequenceValidationError> {
-    for b in blocks {
-        validate_block(b, seen, depth)?;
+) {
+    for (i, b) in blocks.iter().enumerate() {
+        validate_block(b, &format!("{path}[{i}]"), seen, issues, depth);
     }
-    Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // one arm per block variant; the match is the readable shape.
 fn validate_block(
     block: &BlockDefinition,
-    seen: &mut std::collections::HashSet<String>,
+    path: &str,
+    seen: &mut HashSet<String>,
+    issues: &mut Issues,
     depth: usize,
-) -> Result<(), SequenceValidationError> {
+) {
     // Bound recursion before descending — `depth` is the level of `block`
-    // itself; children are validated at `depth + 1`.
+    // itself; children are validated at `depth + 1`. An over-deep subtree is
+    // reported once and not descended into.
     if depth > MAX_NESTING_DEPTH {
-        return Err(depth_err());
+        issues.block(
+            codes::SEQ_NESTING_TOO_DEEP,
+            path,
+            "(nested)",
+            format!("block nesting exceeds the maximum depth of {MAX_NESTING_DEPTH}"),
+        );
+        return;
     }
     let child_depth = depth + 1;
     match block {
-        BlockDefinition::Step(s) => validate_step(s, seen),
-        BlockDefinition::Parallel(p) => {
-            validate_branches(&p.id, "parallel", &p.branches, seen, child_depth)
-        }
+        BlockDefinition::Step(s) => validate_step(s, path, seen, issues),
+        BlockDefinition::Parallel(p) => validate_branches(
+            &p.id,
+            "parallel",
+            &p.branches,
+            path,
+            seen,
+            issues,
+            child_depth,
+        ),
         BlockDefinition::Race(r) => {
-            validate_branches(&r.id, "race", &r.branches, seen, child_depth)
+            validate_branches(&r.id, "race", &r.branches, path, seen, issues, child_depth);
         }
 
         BlockDefinition::Loop(l) => {
-            check_id(&l.id, seen)?;
+            check_id(&l.id, path, seen, issues);
             if l.condition.trim().is_empty() {
-                return Err(block_err(l.id.as_str(), "loop condition must not be empty"));
+                issues.block(
+                    codes::SEQ_EMPTY_CONDITION,
+                    format!("{path}.condition"),
+                    l.id.as_str(),
+                    "loop condition must not be empty",
+                );
             }
             if l.body.is_empty() {
-                return Err(block_err(l.id.as_str(), "loop body must not be empty"));
+                issues.block(
+                    codes::SEQ_EMPTY_BODY,
+                    format!("{path}.body"),
+                    l.id.as_str(),
+                    "loop body must not be empty",
+                );
             }
-            if l.max_iterations == 0 {
-                return Err(block_err(l.id.as_str(), "loop max_iterations must be > 0"));
-            }
-            if l.max_iterations > MAX_ITERATIONS {
-                return Err(iterations_err(&l.id, "loop"));
-            }
-            validate_children(&l.body, seen, child_depth)
+            check_max_iterations(&l.id, "loop", l.max_iterations, path, issues);
+            validate_children(&l.body, &format!("{path}.body"), seen, issues, child_depth);
         }
 
         BlockDefinition::ForEach(fe) => {
-            check_id(&fe.id, seen)?;
+            check_id(&fe.id, path, seen, issues);
             if fe.collection.trim().is_empty() {
-                return Err(block_err(
+                issues.block(
+                    codes::SEQ_EMPTY_COLLECTION,
+                    format!("{path}.collection"),
                     fe.id.as_str(),
                     "for_each collection must not be empty",
-                ));
+                );
             }
             if fe.body.is_empty() {
-                return Err(block_err(fe.id.as_str(), "for_each body must not be empty"));
+                issues.block(
+                    codes::SEQ_EMPTY_BODY,
+                    format!("{path}.body"),
+                    fe.id.as_str(),
+                    "for_each body must not be empty",
+                );
             }
             if fe.item_var.trim().is_empty() {
-                return Err(block_err(
+                issues.block(
+                    codes::SEQ_EMPTY_ITEM_VAR,
+                    format!("{path}.item_var"),
                     fe.id.as_str(),
                     "for_each item_var must not be empty",
-                ));
+                );
             }
-            if fe.max_iterations == 0 {
-                return Err(block_err(
-                    fe.id.as_str(),
-                    "for_each max_iterations must be > 0",
-                ));
-            }
-            if fe.max_iterations > MAX_ITERATIONS {
-                return Err(iterations_err(&fe.id, "for_each"));
-            }
-            validate_children(&fe.body, seen, child_depth)
+            check_max_iterations(&fe.id, "for_each", fe.max_iterations, path, issues);
+            validate_children(&fe.body, &format!("{path}.body"), seen, issues, child_depth);
         }
 
         BlockDefinition::Router(r) => {
-            check_id(&r.id, seen)?;
+            check_id(&r.id, path, seen, issues);
             if r.routes.is_empty() && r.default.is_none() {
-                return Err(block_err(
+                issues.block(
+                    codes::SEQ_ROUTER_NO_ROUTES,
+                    format!("{path}.routes"),
                     r.id.as_str(),
                     "router must have at least one route or a default",
-                ));
+                );
             }
-            for route in &r.routes {
+            for (i, route) in r.routes.iter().enumerate() {
                 if route.condition.trim().is_empty() {
-                    return Err(block_err(
+                    issues.block(
+                        codes::SEQ_EMPTY_CONDITION,
+                        format!("{path}.routes[{i}].condition"),
                         r.id.as_str(),
                         "router route condition must not be empty",
-                    ));
+                    );
                 }
-                validate_children(&route.blocks, seen, child_depth)?;
+                validate_children(
+                    &route.blocks,
+                    &format!("{path}.routes[{i}].blocks"),
+                    seen,
+                    issues,
+                    child_depth,
+                );
             }
             if let Some(default) = &r.default {
-                validate_children(default, seen, child_depth)?;
+                validate_children(default, &format!("{path}.default"), seen, issues, child_depth);
             }
-            Ok(())
         }
 
         BlockDefinition::TryCatch(tc) => {
-            check_id(&tc.id, seen)?;
+            check_id(&tc.id, path, seen, issues);
             if tc.try_block.is_empty() {
-                return Err(block_err(
+                issues.block(
+                    codes::SEQ_EMPTY_BODY,
+                    format!("{path}.try_block"),
                     tc.id.as_str(),
                     "try_catch try_block must not be empty",
-                ));
+                );
             }
-            validate_children(&tc.try_block, seen, child_depth)?;
-            validate_children(&tc.catch_block, seen, child_depth)?;
+            validate_children(
+                &tc.try_block,
+                &format!("{path}.try_block"),
+                seen,
+                issues,
+                child_depth,
+            );
+            validate_children(
+                &tc.catch_block,
+                &format!("{path}.catch_block"),
+                seen,
+                issues,
+                child_depth,
+            );
             if let Some(finally) = &tc.finally_block {
-                validate_children(finally, seen, child_depth)?;
+                validate_children(
+                    finally,
+                    &format!("{path}.finally_block"),
+                    seen,
+                    issues,
+                    child_depth,
+                );
             }
-            Ok(())
         }
 
         BlockDefinition::SubSequence(s) => {
-            check_id(&s.id, seen)?;
+            check_id(&s.id, path, seen, issues);
             if s.sequence_name.trim().is_empty() {
-                return Err(block_err(
+                issues.block(
+                    codes::SEQ_EMPTY_SEQUENCE_NAME,
+                    format!("{path}.sequence_name"),
                     s.id.as_str(),
                     "sub_sequence sequence_name must not be empty",
-                ));
+                );
             }
-            Ok(())
         }
 
-        BlockDefinition::ABSplit(ab) => validate_ab_split(ab, seen, child_depth),
+        BlockDefinition::ABSplit(ab) => validate_ab_split(ab, path, seen, issues, child_depth),
 
         BlockDefinition::CancellationScope(cs) => {
-            check_id(&cs.id, seen)?;
+            check_id(&cs.id, path, seen, issues);
             if cs.blocks.is_empty() {
-                return Err(block_err(
+                issues.block(
+                    codes::SEQ_EMPTY_BODY,
+                    format!("{path}.blocks"),
                     cs.id.as_str(),
                     "cancellation_scope must have at least one block",
-                ));
+                );
             }
-            validate_children(&cs.blocks, seen, child_depth)
+            validate_children(&cs.blocks, &format!("{path}.blocks"), seen, issues, child_depth);
         }
 
         BlockDefinition::Saga(saga) => {
-            check_id(&saga.id, seen)?;
+            check_id(&saga.id, path, seen, issues);
             // An empty saga is a valid no-op (flagged by lint, not rejected
             // here) — consistent with the e2e/unit-test contract that it
             // completes immediately rather than failing sequence creation.
-            for step in &saga.steps {
-                check_id(&step.id, seen)?;
-                validate_children(
-                    std::slice::from_ref(step.action.as_ref()),
+            for (i, step) in saga.steps.iter().enumerate() {
+                let step_path = format!("{path}.steps[{i}]");
+                check_id(&step.id, &step_path, seen, issues);
+                validate_block(
+                    step.action.as_ref(),
+                    &format!("{step_path}.action"),
                     seen,
+                    issues,
                     child_depth,
-                )?;
+                );
                 if let Some(comp) = &step.compensation {
-                    validate_children(std::slice::from_ref(comp.as_ref()), seen, child_depth)?;
+                    validate_block(
+                        comp.as_ref(),
+                        &format!("{step_path}.compensation"),
+                        seen,
+                        issues,
+                        child_depth,
+                    );
                 }
             }
-            Ok(())
         }
     }
 }

@@ -20,7 +20,7 @@ use crate::handlers::HandlerRegistry;
 /// The storage writes are batched across all victims — one
 /// `cancel_worker_tasks_for_blocks` plus one `update_nodes_state` — instead
 /// of 3+ round-trips per node, mirroring
-/// `for_each::reset_subtree_to_pending`. The writes remain non-transactional,
+/// `evaluator::reset_subtree_to_pending`. The writes remain non-transactional,
 /// exactly as the previous per-node loop: a failure partway through leaves
 /// the earlier steps applied and the later ones skipped.
 async fn cancel_non_terminal_nodes(
@@ -122,21 +122,9 @@ pub async fn execute_race(
         return Ok(true);
     }
 
-    // Group by branch_index (BTreeMap: deterministic branch order). Within a
-    // group, `children_of` preserves source order — see execute_parallel.
-    let mut branches: std::collections::BTreeMap<i16, Vec<&ExecutionNode>> =
-        std::collections::BTreeMap::new();
-    for c in &children {
-        let idx = c.branch_index.unwrap_or(0);
-        branches.entry(idx).or_default().push(*c);
-    }
-
-    let is_terminal = |n: &ExecutionNode| {
-        matches!(
-            n.state,
-            NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped
-        )
-    };
+    // Group by branch_index (declaration order, source order within a
+    // branch — see `evaluator::group_by_branch`).
+    let branches = evaluator::group_by_branch(&children);
 
     let mut any_branch_won = false;
     let mut any_branch_failed = false;
@@ -155,7 +143,7 @@ pub async fn execute_race(
             continue;
         }
 
-        if branch_nodes.iter().all(|n| is_terminal(n)) {
+        if branch_nodes.iter().all(|n| n.state.is_terminal()) {
             // Fully drained with no failure (Completed/Skipped only) — winner.
             any_branch_won = true;
             continue;
@@ -163,7 +151,7 @@ pub async fn execute_race(
 
         // Cursor = first non-terminal node; activate it if still Pending so
         // the branch advances one block at a time.
-        if let Some(cursor) = branch_nodes.iter().find(|n| !is_terminal(n))
+        if let Some(cursor) = branch_nodes.iter().find(|n| !n.state.is_terminal())
             && cursor.state == NodeState::Pending
         {
             storage

@@ -99,6 +99,8 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool, artifacts_enabled: b
         )),
         federation_peers: Arc::new(Vec::new()),
         continuity_lab_enabled: false,
+        continuity_trusted_signing_keys: Arc::new(Default::default()),
+        worker_protocol: orch8_types::worker::WorkerProtocolHints::default(),
     };
 
     // Attach auth + tenant middleware. API-key auth is disabled for the

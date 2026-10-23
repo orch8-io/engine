@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use tracing::debug;
 
 use orch8_storage::StorageBackend;
@@ -51,34 +49,16 @@ pub async fn execute_parallel(
         return Ok(true);
     }
 
-    // Group by branch_index. BTreeMap keeps branches in declaration order,
-    // which makes log output deterministic. Within each group, children
-    // are preserved in the insertion order from `children_of` — which
-    // mirrors source order because `build_nodes` appends in
-    // block-sequence order.
-    let mut branches: BTreeMap<i16, Vec<&ExecutionNode>> = BTreeMap::new();
-    for c in &children {
-        // Direct children of a parallel should always be tagged by
-        // build_nodes. Any stray untagged child is treated as
-        // branch 0 defensively.
-        let idx = c.branch_index.unwrap_or(0);
-        branches.entry(idx).or_default().push(*c);
-    }
+    // Group by branch_index (declaration order, source order within a
+    // branch — see `evaluator::group_by_branch`).
+    let branches = evaluator::group_by_branch(&children);
 
     let mut all_branches_done = true;
     let mut any_branch_failed = false;
 
     for (branch_idx, branch_nodes) in &branches {
         // Cursor = first non-terminal node in this branch.
-        let cursor = branch_nodes.iter().find(|n| {
-            !matches!(
-                n.state,
-                NodeState::Completed
-                    | NodeState::Failed
-                    | NodeState::Cancelled
-                    | NodeState::Skipped
-            )
-        });
+        let cursor = branch_nodes.iter().find(|n| !n.state.is_terminal());
 
         match cursor {
             Some(n) if n.state == NodeState::Pending => {

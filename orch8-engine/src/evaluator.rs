@@ -1213,12 +1213,28 @@ pub fn children_of(
 
 /// Check if all nodes in a set are in a terminal state.
 pub fn all_terminal(nodes: &[&ExecutionNode]) -> bool {
-    nodes.iter().all(|n| {
-        matches!(
-            n.state,
-            NodeState::Completed | NodeState::Failed | NodeState::Skipped | NodeState::Cancelled
-        )
-    })
+    nodes.iter().all(|n| n.state.is_terminal())
+}
+
+/// Group a composite's direct children by `branch_index`, preserving the
+/// order of `children` within each group (which mirrors source order because
+/// `build_nodes` appends in block-sequence order). The `BTreeMap` keeps
+/// branches in declaration order so iteration — and log output — is
+/// deterministic. Untagged children (no `branch_index`) are treated as
+/// branch 0 defensively; `build_nodes` always tags direct children of
+/// `parallel` / `race`.
+pub fn group_by_branch<'a>(
+    children: &[&'a ExecutionNode],
+) -> std::collections::BTreeMap<i16, Vec<&'a ExecutionNode>> {
+    let mut branches: std::collections::BTreeMap<i16, Vec<&'a ExecutionNode>> =
+        std::collections::BTreeMap::new();
+    for c in children {
+        branches
+            .entry(c.branch_index.unwrap_or(0))
+            .or_default()
+            .push(*c);
+    }
+    branches
 }
 
 /// Check if any node in a set has completed.
@@ -1341,16 +1357,7 @@ pub async fn skip_subtrees(
 
     let nodes_to_skip: Vec<&ExecutionNode> = tree
         .iter()
-        .filter(|node| {
-            subtree_ids.binary_search(&node.id).is_ok()
-                && !matches!(
-                    node.state,
-                    NodeState::Skipped
-                        | NodeState::Cancelled
-                        | NodeState::Completed
-                        | NodeState::Failed
-                )
-        })
+        .filter(|node| subtree_ids.binary_search(&node.id).is_ok() && !node.state.is_terminal())
         .collect();
     let node_ids: Vec<ExecutionNodeId> = nodes_to_skip.iter().map(|node| node.id).collect();
 
@@ -1373,6 +1380,95 @@ pub async fn skip_subtrees(
             .await?;
     }
 
+    Ok(())
+}
+
+/// Walk the subtree rooted at `root_id` (exclusive) and transition every
+/// descendant back to [`NodeState::Pending`]. Additionally purge composite
+/// iteration-counter markers from descendant `Loop` / `ForEach` blocks via
+/// `StorageBackend::delete_block_outputs_batch`, clear effect receipts for
+/// `Step` descendants, and cancel any stale `worker_tasks` rows.
+///
+/// Called at `loop` / `for_each` iteration boundaries so the body can run
+/// again without stale terminal state from the previous iteration. Step body
+/// outputs are left in place — under the write-append storage model each
+/// iteration appends its own row per step, preserving iteration history.
+/// Composite markers are internal iteration state, not user-observable
+/// outputs, so they MUST be purged or the descendant's top-of-handler cap
+/// guard would observe the previous iteration's counter on the next tick and
+/// complete the descendant immediately without ever running its body.
+///
+/// The root node's own marker is intentionally NOT purged: the caller is the
+/// composite that owns it and persists the advanced counter itself, outside
+/// this walk (which only touches strict descendants).
+///
+/// Effect receipts: `compute_attempt` derives the next attempt purely from
+/// `block_outputs`, which this reset intentionally leaves untouched — so a
+/// step that permanently failed last iteration re-enters at the SAME attempt
+/// number. Without clearing receipts, `EffectGuard::begin`'s per-attempt
+/// lookup would find the prior iteration's still-`unknown` receipt for that
+/// exact (block, attempt) pair and wrongly block the fresh re-run.
+///
+/// The writes are non-transactional but idempotent, so a crash mid-way is
+/// repaired by the next tick re-entering the same branch.
+pub async fn reset_subtree_to_pending(
+    storage: &dyn StorageBackend,
+    tree: &[ExecutionNode],
+    tenant_id: &orch8_types::ids::TenantId,
+    instance_id: InstanceId,
+    root_id: ExecutionNodeId,
+) -> Result<(), EngineError> {
+    // BFS over the parent_id graph to collect every descendant of root_id
+    // along with the data we need to purge composite markers.
+    let mut frontier: Vec<ExecutionNodeId> = vec![root_id];
+    let mut descendants: Vec<(ExecutionNodeId, BlockType, BlockId)> = Vec::new();
+    while let Some(parent) = frontier.pop() {
+        for node in tree.iter().filter(|n| n.parent_id == Some(parent)) {
+            descendants.push((node.id, node.block_type, node.block_id.clone()));
+            frontier.push(node.id);
+        }
+    }
+    if descendants.is_empty() {
+        return Ok(());
+    }
+
+    // Batched round-trips instead of O(descendants × 3) per-node calls.
+    let node_ids: Vec<ExecutionNodeId> = descendants.iter().map(|(id, _, _)| *id).collect();
+    storage
+        .update_nodes_state(&node_ids, NodeState::Pending)
+        .await?;
+
+    let composite_block_ids: Vec<BlockId> = descendants
+        .iter()
+        .filter(|(_, bt, _)| matches!(bt, BlockType::Loop | BlockType::ForEach))
+        .map(|(_, _, bid)| bid.clone())
+        .collect();
+    if !composite_block_ids.is_empty() {
+        storage
+            .delete_block_outputs_batch(instance_id, &composite_block_ids)
+            .await?;
+    }
+
+    let step_block_ids: Vec<BlockId> = descendants
+        .iter()
+        .filter(|(_, bt, _)| matches!(bt, BlockType::Step))
+        .map(|(_, _, bid)| bid.clone())
+        .collect();
+    if !step_block_ids.is_empty() {
+        storage
+            .delete_effect_receipts_for_blocks(tenant_id, instance_id, &step_block_ids)
+            .await?;
+    }
+
+    // Purge any stale worker_tasks row for every descendant. Composite
+    // descendants have no worker_tasks row, so this is a no-op for them.
+    let all_block_ids: Vec<String> = descendants
+        .iter()
+        .map(|(_, _, bid)| bid.as_str().to_owned())
+        .collect();
+    storage
+        .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &all_block_ids)
+        .await?;
     Ok(())
 }
 

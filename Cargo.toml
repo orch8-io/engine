@@ -118,6 +118,12 @@ wasmtime = "46"
 dashmap = "6"
 tempfile = "3"
 serial_test = "3"
+# Sequence-definition parsing diagnostics (orch8-types::sequence_parse):
+# field paths on deserialize errors + unknown-field detection.
+serde_path_to_error = "0.1"
+serde_ignored = "0.1"
+# JSON Schema generation for the sequence AST (schemas/sequence.schema.json).
+schemars = { version = "1", features = ["chrono04", "uuid1"] }
 
 # Speed up debug builds: keep our own crates cheap to compile (opt-level 0)
 # but build 3rd-party deps at opt-level 1. Big win for sqlx, tokio, axum

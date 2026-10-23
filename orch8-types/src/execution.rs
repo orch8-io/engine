@@ -21,6 +21,22 @@ pub enum NodeState {
     Skipped,
 }
 
+impl NodeState {
+    /// `true` once the node can never change state again: `Completed`,
+    /// `Failed`, `Cancelled`, or `Skipped`. `Pending`, `Running`, and
+    /// `Waiting` nodes are still live. Mirrors
+    /// [`crate::instance::InstanceState::is_terminal`] at node granularity so
+    /// composite handlers (`parallel`, `race`, `loop`, …) share one definition
+    /// instead of each spelling out the four-variant match.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Skipped
+        )
+    }
+}
+
 impl FromStr for NodeState {
     type Err = String;
 
@@ -137,6 +153,21 @@ mod tests {
         assert_eq!(NodeState::Failed.to_string(), "failed");
         assert_eq!(NodeState::Cancelled.to_string(), "cancelled");
         assert_eq!(NodeState::Skipped.to_string(), "skipped");
+    }
+
+    #[test]
+    fn node_state_is_terminal_partitions_live_and_settled_states() {
+        for live in [NodeState::Pending, NodeState::Running, NodeState::Waiting] {
+            assert!(!live.is_terminal(), "{live} must be live");
+        }
+        for settled in [
+            NodeState::Completed,
+            NodeState::Failed,
+            NodeState::Cancelled,
+            NodeState::Skipped,
+        ] {
+            assert!(settled.is_terminal(), "{settled} must be terminal");
+        }
     }
 
     #[test]

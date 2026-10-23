@@ -34,15 +34,15 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskState};
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn store() -> SqliteStorage {
-    SqliteStorage::in_memory().await.unwrap()
-}
+#[macro_use]
+mod common;
+use common::TestStore;
 
 /// Create the parent `task_instances` row so the `externalized_state.instance_id`
 /// FK (`ON DELETE CASCADE`) is satisfied. Tests that exercise `externalized_state`
 /// directly (without going through `create_instance`) must seed the parent first
 /// now that `SQLite` has FK enforcement enabled.
-async fn seed_instance(s: &SqliteStorage, inst_id: InstanceId) {
+async fn seed_instance(s: &TestStore, inst_id: InstanceId) {
     let mut inst = make_instance("test", SequenceId::new());
     inst.id = inst_id;
     s.create_instance(&inst).await.unwrap();
@@ -121,9 +121,7 @@ fn make_instance_in_state(tenant: &str, state: InstanceState) -> TaskInstance {
 // Execution Tree
 // ===========================================================================
 
-#[tokio::test]
-async fn execution_tree_crud() {
-    let s = store().await;
+async fn execution_tree_crud(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
     let root_id = ExecutionNodeId::new();
@@ -173,9 +171,7 @@ async fn execution_tree_crud() {
     assert_eq!(updated_child.state, NodeState::Running);
 }
 
-#[tokio::test]
-async fn execution_tree_batch_create() {
-    let s = store().await;
+async fn execution_tree_batch_create(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -202,9 +198,7 @@ async fn execution_tree_batch_create() {
 // Signals
 // ===========================================================================
 
-#[tokio::test]
-async fn signal_lifecycle() {
-    let s = store().await;
+async fn signal_lifecycle(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -230,9 +224,7 @@ async fn signal_lifecycle() {
     assert_eq!(pending2.len(), 0);
 }
 
-#[tokio::test]
-async fn signal_batch_operations() {
-    let s = store().await;
+async fn signal_batch_operations(s: TestStore) {
     let inst1 = InstanceId::new();
     let inst2 = InstanceId::new();
     seed_instance(&s, inst1).await;
@@ -284,9 +276,7 @@ async fn signal_batch_operations() {
 
 // Fix #8: mark_signals_delivered uses a single batched query, not N individual ones.
 // This test verifies the batch path works correctly for various sizes.
-#[tokio::test]
-async fn mark_signals_delivered_batch_various_sizes() {
-    let s = store().await;
+async fn mark_signals_delivered_batch_various_sizes(s: TestStore) {
     let inst = InstanceId::new();
     seed_instance(&s, inst).await;
 
@@ -329,9 +319,7 @@ async fn mark_signals_delivered_batch_various_sizes() {
 
 // Fix #3: idempotency_key should be unique per-tenant, not globally.
 // Two different tenants can use the same idempotency key.
-#[tokio::test]
-async fn idempotency_key_unique_per_tenant_not_global() {
-    let s = store().await;
+async fn idempotency_key_unique_per_tenant_not_global(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
     let seq2 = make_sequence("t2");
@@ -357,9 +345,7 @@ async fn idempotency_key_unique_per_tenant_not_global() {
 // Worker Tasks
 // ===========================================================================
 
-#[tokio::test]
-async fn worker_task_full_lifecycle() {
-    let s = store().await;
+async fn worker_task_full_lifecycle(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -446,9 +432,7 @@ async fn worker_task_full_lifecycle() {
     );
 }
 
-#[tokio::test]
-async fn worker_activity_checkpoint_survives_lease_recovery() {
-    let s = store().await;
+async fn worker_activity_checkpoint_survives_lease_recovery(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
     let task = WorkerTask {
@@ -539,9 +523,7 @@ async fn worker_activity_checkpoint_survives_lease_recovery() {
     );
 }
 
-#[tokio::test]
-async fn worker_task_fail_and_cancel() {
-    let s = store().await;
+async fn worker_task_fail_and_cancel(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -639,9 +621,7 @@ async fn worker_task_fail_and_cancel() {
 /// Prior behavior filtered `state IN ('pending', 'claimed')`, which left
 /// `completed` rows in place and caused `ForEach` iterations past the first to
 /// never dispatch to external workers.
-#[tokio::test]
-async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
-    let s = store().await;
+async fn cancel_worker_tasks_for_block_deletes_completed_rows(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -727,9 +707,7 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
 /// Regression: `cancel_worker_tasks_for_block` must also delete rows in
 /// `failed` state. Race cancellation and `ForEach` reset both rely on a clean
 /// slate regardless of terminal state.
-#[tokio::test]
-async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
-    let s = store().await;
+async fn cancel_worker_tasks_for_block_deletes_failed_rows(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -811,9 +789,7 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
 /// return 0 without error. The `ForEach` / `Loop` reset path calls this for
 /// every descendant, including composite descendants that never had
 /// `worker_tasks` rows — those calls must be no-ops.
-#[tokio::test]
-async fn cancel_worker_tasks_for_block_noop_on_missing() {
-    let s = store().await;
+async fn cancel_worker_tasks_for_block_noop_on_missing(s: TestStore) {
     let inst_id = InstanceId::new();
 
     let deleted = s
@@ -823,9 +799,7 @@ async fn cancel_worker_tasks_for_block_noop_on_missing() {
     assert_eq!(deleted, 0);
 }
 
-#[tokio::test]
-async fn worker_task_queue_routing() {
-    let s = store().await;
+async fn worker_task_queue_routing(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -881,9 +855,7 @@ async fn worker_task_queue_routing() {
 // Cron Schedules
 // ===========================================================================
 
-#[tokio::test]
-async fn cron_schedule_lifecycle() {
-    let s = store().await;
+async fn cron_schedule_lifecycle(s: TestStore) {
     let now = Utc::now();
 
     let schedule = CronSchedule {
@@ -939,9 +911,7 @@ async fn cron_schedule_lifecycle() {
 // Sessions
 // ===========================================================================
 
-#[tokio::test]
-async fn session_lifecycle() {
-    let s = store().await;
+async fn session_lifecycle(s: TestStore) {
     let now = Utc::now();
 
     let session = Session {
@@ -983,9 +953,7 @@ async fn session_lifecycle() {
     assert_eq!(completed.state, SessionState::Completed);
 }
 
-#[tokio::test]
-async fn session_instances_link() {
-    let s = store().await;
+async fn session_instances_link(s: TestStore) {
     let now = Utc::now();
     let session_id = Uuid::now_v7();
 
@@ -1020,9 +988,7 @@ async fn session_instances_link() {
 // Checkpoints
 // ===========================================================================
 
-#[tokio::test]
-async fn checkpoint_save_and_prune() {
-    let s = store().await;
+async fn checkpoint_save_and_prune(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -1056,9 +1022,7 @@ async fn checkpoint_save_and_prune() {
 // Audit Log
 // ===========================================================================
 
-#[tokio::test]
-async fn audit_log_append_and_query() {
-    let s = store().await;
+async fn audit_log_append_and_query(s: TestStore) {
     let inst_id = InstanceId::new();
     let tenant = TenantId::unchecked("t_audit");
 
@@ -1088,9 +1052,7 @@ async fn audit_log_append_and_query() {
 // Resource Pools
 // ===========================================================================
 
-#[tokio::test]
-async fn resource_pool_lifecycle() {
-    let s = store().await;
+async fn resource_pool_lifecycle(s: TestStore) {
     let now = Utc::now();
     let tenant = TenantId::unchecked("t_pool");
 
@@ -1170,9 +1132,7 @@ async fn resource_pool_lifecycle() {
 // Externalized State
 // ===========================================================================
 
-#[tokio::test]
-async fn externalized_state_crud() {
-    let s = store().await;
+async fn externalized_state_crud(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
     let ref_key = format!("ext_{inst_id}");
@@ -1189,9 +1149,7 @@ async fn externalized_state_crud() {
     assert!(s.get_externalized_state(&ref_key).await.unwrap().is_none());
 }
 
-#[tokio::test]
-async fn batch_get_externalized_state_fetches_multiple_keys() {
-    let s = store().await;
+async fn batch_get_externalized_state_fetches_multiple_keys(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -1220,16 +1178,12 @@ async fn batch_get_externalized_state_fetches_multiple_keys() {
     assert!(!map.contains_key("batch_missing"));
 }
 
-#[tokio::test]
-async fn batch_get_externalized_state_empty_input_returns_empty_map() {
-    let s = store().await;
+async fn batch_get_externalized_state_empty_input_returns_empty_map(s: TestStore) {
     let map = s.batch_get_externalized_state(&[]).await.unwrap();
     assert!(map.is_empty());
 }
 
-#[tokio::test]
-async fn batch_save_externalized_state_persists_all_entries() {
-    let s = store().await;
+async fn batch_save_externalized_state_persists_all_entries(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
     let entries = vec![
@@ -1238,7 +1192,7 @@ async fn batch_save_externalized_state_persists_all_entries() {
         ("bs_c".to_string(), json!([1, 2, 3])),
     ];
 
-    InstanceStore::batch_save_externalized_state(&s, inst_id, &entries)
+    InstanceStore::batch_save_externalized_state(&*s, inst_id, &entries)
         .await
         .unwrap();
 
@@ -1250,23 +1204,19 @@ async fn batch_save_externalized_state_persists_all_entries() {
     }
 }
 
-#[tokio::test]
-async fn batch_save_externalized_state_empty_input_is_noop() {
-    let s = store().await;
-    InstanceStore::batch_save_externalized_state(&s, InstanceId::new(), &[])
+async fn batch_save_externalized_state_empty_input_is_noop(s: TestStore) {
+    InstanceStore::batch_save_externalized_state(&*s, InstanceId::new(), &[])
         .await
         .unwrap();
 }
 
-#[tokio::test]
-async fn batch_save_externalized_state_upserts_existing_keys() {
-    let s = store().await;
+async fn batch_save_externalized_state_upserts_existing_keys(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
     // Seed.
     InstanceStore::batch_save_externalized_state(
-        &s,
+        &*s,
         inst_id,
         &[("bs_up".to_string(), json!({"v": 1}))],
     )
@@ -1275,7 +1225,7 @@ async fn batch_save_externalized_state_upserts_existing_keys() {
 
     // Re-save with a different value — ON CONFLICT DO UPDATE path.
     InstanceStore::batch_save_externalized_state(
-        &s,
+        &*s,
         inst_id,
         &[("bs_up".to_string(), json!({"v": 2}))],
     )
@@ -1288,9 +1238,7 @@ async fn batch_save_externalized_state_upserts_existing_keys() {
     );
 }
 
-#[tokio::test]
-async fn externalized_state_roundtrip_across_compression_threshold() {
-    let s = store().await;
+async fn externalized_state_roundtrip_across_compression_threshold(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -1319,9 +1267,7 @@ async fn externalized_state_roundtrip_across_compression_threshold() {
 // Cluster Nodes
 // ===========================================================================
 
-#[tokio::test]
-async fn cluster_node_lifecycle() {
-    let s = store().await;
+async fn cluster_node_lifecycle(s: TestStore) {
     let now = Utc::now();
 
     let node = ClusterNode {
@@ -1372,9 +1318,7 @@ async fn cluster_node_lifecycle() {
 // Rate Limits
 // ===========================================================================
 
-#[tokio::test]
-async fn rate_limit_check_and_exceed() {
-    let s = store().await;
+async fn rate_limit_check_and_exceed(s: TestStore) {
     let now = Utc::now();
     let tenant = TenantId::unchecked("t_rl");
     let key = ResourceKey::new("api:endpoint");
@@ -1411,9 +1355,10 @@ async fn rate_limit_check_and_exceed() {
 /// unparseable timestamp so the fallback `SELECT` + `parse_ts` path fails
 /// after the `UPDATE` has already run (i.e. the exact point that used to
 /// leak an open transaction).
+// SQLite-only: reaches into the pool with raw `?n` SQL to corrupt/seed rows.
 #[tokio::test]
 async fn check_rate_limit_rolls_back_on_error_instead_of_wedging_pool() {
-    let s = store().await;
+    let s = common::sqlite_storage().await;
     let now = Utc::now();
     let tenant = TenantId::unchecked("t_rl_err");
     let key = ResourceKey::new("api:endpoint");
@@ -1481,9 +1426,7 @@ async fn check_rate_limit_rolls_back_on_error_instead_of_wedging_pool() {
 // Block Outputs
 // ===========================================================================
 
-#[tokio::test]
-async fn block_output_crud() {
-    let s = store().await;
+async fn block_output_crud(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -1514,9 +1457,7 @@ async fn block_output_crud() {
     assert_eq!(ids[0].as_str(), "step_1");
 }
 
-#[tokio::test]
-async fn outputs_with_equal_timestamps_use_id_as_deterministic_tiebreaker() {
-    let s = store().await;
+async fn outputs_with_equal_timestamps_use_id_as_deterministic_tiebreaker(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
     let timestamp = Utc::now();
@@ -1547,9 +1488,7 @@ async fn outputs_with_equal_timestamps_use_id_as_deterministic_tiebreaker() {
     );
 }
 
-#[tokio::test]
-async fn save_output_and_transition_atomic() {
-    let s = store().await;
+async fn save_output_and_transition_atomic(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
     let mut inst = make_instance("t1", seq.id);
@@ -1585,9 +1524,7 @@ async fn save_output_and_transition_atomic() {
 /// `save_output_and_transition`. A crash in between could leave an instance
 /// with merged context but an unchanged state (Running), stranding it.
 /// This test proves the three writes commit together.
-#[tokio::test]
-async fn save_output_merge_context_and_transition_atomic() {
-    let s = store().await;
+async fn save_output_merge_context_and_transition_atomic(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
     let mut inst = make_instance("t1", seq.id);
@@ -1637,9 +1574,7 @@ async fn save_output_merge_context_and_transition_atomic() {
     assert_eq!(outputs[0].block_id.as_str(), "s1");
 }
 
-#[tokio::test]
-async fn completed_block_ids_batch() {
-    let s = store().await;
+async fn completed_block_ids_batch(s: TestStore) {
     let inst1 = InstanceId::new();
     let inst2 = InstanceId::new();
     seed_instance(&s, inst1).await;
@@ -1673,9 +1608,7 @@ async fn completed_block_ids_batch() {
 /// so the block must stay eligible for re-execution (at-least-once). The
 /// sentinel previously counted as completed, which let the fast path skip a
 /// crashed step and complete the instance without its effect ever running.
-#[tokio::test]
-async fn completed_block_ids_exclude_internal_markers() {
-    let s = store().await;
+async fn completed_block_ids_exclude_internal_markers(s: TestStore) {
     let inst = InstanceId::new();
     seed_instance(&s, inst).await;
 
@@ -1737,9 +1670,7 @@ fn mk_output(inst_id: InstanceId, block: &str, attempt: u16) -> BlockOutput {
     }
 }
 
-#[tokio::test]
-async fn delete_block_outputs_removes_all_rows_for_block() {
-    let s = store().await;
+async fn delete_block_outputs_removes_all_rows_for_block(s: TestStore) {
     let inst = InstanceId::new();
     seed_instance(&s, inst).await;
     let block = BlockId::new("loop_marker");
@@ -1754,9 +1685,7 @@ async fn delete_block_outputs_removes_all_rows_for_block() {
     assert!(s.get_block_output(inst, &block).await.unwrap().is_none());
 }
 
-#[tokio::test]
-async fn delete_block_outputs_leaves_other_blocks_untouched() {
-    let s = store().await;
+async fn delete_block_outputs_leaves_other_blocks_untouched(s: TestStore) {
     let inst = InstanceId::new();
     seed_instance(&s, inst).await;
     let block_a = BlockId::new("block_a");
@@ -1779,9 +1708,7 @@ async fn delete_block_outputs_leaves_other_blocks_untouched() {
     assert!(remaining.iter().all(|o| o.block_id == block_b));
 }
 
-#[tokio::test]
-async fn delete_block_outputs_leaves_other_instances_untouched() {
-    let s = store().await;
+async fn delete_block_outputs_leaves_other_instances_untouched(s: TestStore) {
     let inst1 = InstanceId::new();
     let inst2 = InstanceId::new();
     seed_instance(&s, inst1).await;
@@ -1801,9 +1728,7 @@ async fn delete_block_outputs_leaves_other_instances_untouched() {
     assert!(s.get_block_output(inst2, &block).await.unwrap().is_some());
 }
 
-#[tokio::test]
-async fn delete_block_outputs_on_empty_is_noop() {
-    let s = store().await;
+async fn delete_block_outputs_on_empty_is_noop(s: TestStore) {
     let inst = InstanceId::new();
     let removed = s
         .delete_block_outputs(inst, &BlockId::new("nope"))
@@ -1812,9 +1737,7 @@ async fn delete_block_outputs_on_empty_is_noop() {
     assert_eq!(removed, 0);
 }
 
-#[tokio::test]
-async fn delete_block_outputs_no_effect_on_different_block_ids_at_same_instance() {
-    let s = store().await;
+async fn delete_block_outputs_no_effect_on_different_block_ids_at_same_instance(s: TestStore) {
     let inst = InstanceId::new();
     seed_instance(&s, inst).await;
     let loop_id = BlockId::new("loop_1");
@@ -1853,9 +1776,7 @@ async fn delete_block_outputs_no_effect_on_different_block_ids_at_same_instance(
 // wipe the target block and everything after it.
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn delete_block_outputs_batch_removes_only_listed_blocks() {
-    let s = store().await;
+async fn delete_block_outputs_batch_removes_only_listed_blocks(s: TestStore) {
     let inst = InstanceId::new();
     seed_instance(&s, inst).await;
 
@@ -1880,9 +1801,7 @@ async fn delete_block_outputs_batch_removes_only_listed_blocks() {
     assert_eq!(remaining[0].block_id.as_str(), "s1");
 }
 
-#[tokio::test]
-async fn delete_block_outputs_batch_removes_retry_and_sentinel_markers() {
-    let s = store().await;
+async fn delete_block_outputs_batch_removes_retry_and_sentinel_markers(s: TestStore) {
     let inst = InstanceId::new();
     seed_instance(&s, inst).await;
 
@@ -1906,9 +1825,7 @@ async fn delete_block_outputs_batch_removes_retry_and_sentinel_markers() {
     );
 }
 
-#[tokio::test]
-async fn delete_block_outputs_batch_empty_list_is_noop() {
-    let s = store().await;
+async fn delete_block_outputs_batch_empty_list_is_noop(s: TestStore) {
     let inst = InstanceId::new();
     seed_instance(&s, inst).await;
     s.save_block_output(&mk_output(inst, "s1", 0))
@@ -1920,9 +1837,7 @@ async fn delete_block_outputs_batch_empty_list_is_noop() {
     assert_eq!(s.get_all_outputs(inst).await.unwrap().len(), 1);
 }
 
-#[tokio::test]
-async fn delete_block_outputs_batch_scoped_to_instance() {
-    let s = store().await;
+async fn delete_block_outputs_batch_scoped_to_instance(s: TestStore) {
     let inst1 = InstanceId::new();
     let inst2 = InstanceId::new();
     seed_instance(&s, inst1).await;
@@ -1952,9 +1867,7 @@ async fn delete_block_outputs_batch_scoped_to_instance() {
 // Complex Scenarios
 // ===========================================================================
 
-#[tokio::test]
-async fn multi_tenant_isolation() {
-    let s = store().await;
+async fn multi_tenant_isolation(s: TestStore) {
 
     let seq_t1 = make_sequence("tenant_1");
     let seq_t2 = make_sequence("tenant_2");
@@ -2004,9 +1917,7 @@ async fn multi_tenant_isolation() {
     }
 }
 
-#[tokio::test]
-async fn instance_state_lifecycle() {
-    let s = store().await;
+async fn instance_state_lifecycle(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t1", seq.id);
@@ -2040,9 +1951,7 @@ async fn instance_state_lifecycle() {
     assert_eq!(completed.state, InstanceState::Completed);
 }
 
-#[tokio::test]
-async fn idempotency_dedup() {
-    let s = store().await;
+async fn idempotency_dedup(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2066,9 +1975,7 @@ async fn idempotency_dedup() {
     assert!(missing.is_none());
 }
 
-#[tokio::test]
-async fn concurrency_control() {
-    let s = store().await;
+async fn concurrency_control(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2086,9 +1993,7 @@ async fn concurrency_control() {
     assert_eq!(count, 3);
 }
 
-#[tokio::test]
-async fn claim_respects_priority_ordering() {
-    let s = store().await;
+async fn claim_respects_priority_ordering(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
@@ -2116,9 +2021,7 @@ async fn claim_respects_priority_ordering() {
     assert_eq!(claimed[3].priority, Priority::Low);
 }
 
-#[tokio::test]
-async fn claim_returns_all_due_when_no_per_tenant_cap() {
-    let s = store().await;
+async fn claim_returns_all_due_when_no_per_tenant_cap(s: TestStore) {
     let now = Utc::now();
 
     let seq = make_sequence("noisy");
@@ -2143,7 +2046,7 @@ async fn claim_returns_all_due_when_no_per_tenant_cap() {
 
     // Claim with limit less than total.
     // (Re-create since previous claim transitioned them to running.)
-    let s2 = store().await;
+    let s2 = s.fresh().await;
     let seq3 = make_sequence("t");
     s2.create_sequence(&seq3).await.unwrap();
     for _ in 0..10 {
@@ -2157,9 +2060,7 @@ async fn claim_returns_all_due_when_no_per_tenant_cap() {
     assert_eq!(claimed3.len(), 5);
 }
 
-#[tokio::test]
-async fn bulk_reschedule() {
-    let s = store().await;
+async fn bulk_reschedule(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
@@ -2179,9 +2080,7 @@ async fn bulk_reschedule() {
     assert_eq!(shifted, 5);
 }
 
-#[tokio::test]
-async fn instance_batch_create() {
-    let s = store().await;
+async fn instance_batch_create(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2197,9 +2096,7 @@ async fn instance_batch_create() {
     assert_eq!(count, 50);
 }
 
-#[tokio::test]
-async fn merge_context_data() {
-    let s = store().await;
+async fn merge_context_data(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2216,9 +2113,7 @@ async fn merge_context_data() {
     assert_eq!(fetched.context.data["new_key"], "new_value");
 }
 
-#[tokio::test]
-async fn update_instance_sequence_hot_migration() {
-    let s = store().await;
+async fn update_instance_sequence_hot_migration(s: TestStore) {
     let seq_v1 = make_sequence("t1");
     let mut seq_v2 = make_sequence("t1");
     seq_v2.version = 2;
@@ -2236,9 +2131,7 @@ async fn update_instance_sequence_hot_migration() {
     assert_eq!(fetched.sequence_id, seq_v2.id);
 }
 
-#[tokio::test]
-async fn dynamic_step_injection() {
-    let s = store().await;
+async fn dynamic_step_injection(s: TestStore) {
     let inst_id = InstanceId::new();
     let blocks = json!([{"type": "step", "id": "injected_1", "handler": "noop"}]);
 
@@ -2253,9 +2146,7 @@ async fn dynamic_step_injection() {
 /// would clobber the first's additions. `inject_blocks_at_position` performs
 /// the read + merge + write inside a single transaction so interleaved calls
 /// cannot lose writes.
-#[tokio::test]
-async fn inject_blocks_at_position_preserves_sequential_writes() {
-    let s = store().await;
+async fn inject_blocks_at_position_preserves_sequential_writes(s: TestStore) {
     let inst_id = InstanceId::new();
 
     // First call: append block `a` at position 0 into an empty array.
@@ -2300,9 +2191,7 @@ async fn inject_blocks_at_position_preserves_sequential_writes() {
     assert_eq!(arr[0]["id"], "z");
 }
 
-#[tokio::test]
-async fn sequence_versioning_and_deprecation() {
-    let s = store().await;
+async fn sequence_versioning_and_deprecation(s: TestStore) {
     let tenant = TenantId::unchecked("t1");
     let ns = Namespace::new("default");
 
@@ -2345,9 +2234,7 @@ async fn sequence_versioning_and_deprecation() {
     assert!(deprecated.deprecated);
 }
 
-#[tokio::test]
-async fn instance_filtering_by_state_and_pagination() {
-    let s = store().await;
+async fn instance_filtering_by_state_and_pagination(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2401,9 +2288,7 @@ async fn instance_filtering_by_state_and_pagination() {
     assert_eq!(page2.len(), 2);
 }
 
-#[tokio::test]
-async fn sub_sequence_parent_child() {
-    let s = store().await;
+async fn sub_sequence_parent_child(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2424,9 +2309,7 @@ async fn sub_sequence_parent_child() {
     }
 }
 
-#[tokio::test]
-async fn worker_task_list_and_stats() {
-    let s = store().await;
+async fn worker_task_list_and_stats(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -2481,9 +2364,7 @@ async fn worker_task_list_and_stats() {
 // Performance: throughput measurements
 // ===========================================================================
 
-#[tokio::test]
-async fn perf_bulk_instance_creation_1000() {
-    let s = store().await;
+async fn perf_bulk_instance_creation_1000(s: TestStore) {
     let seq = make_sequence("perf");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2502,9 +2383,7 @@ async fn perf_bulk_instance_creation_1000() {
     eprintln!("perf_bulk_instance_creation_1000: {elapsed:?}");
 }
 
-#[tokio::test]
-async fn perf_claim_due_under_load() {
-    let s = store().await;
+async fn perf_claim_due_under_load(s: TestStore) {
     let seq = make_sequence("perf");
     s.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
@@ -2531,9 +2410,7 @@ async fn perf_claim_due_under_load() {
     eprintln!("perf_claim_due_under_load (100/500): {elapsed:?}");
 }
 
-#[tokio::test]
-async fn perf_signal_batch_throughput() {
-    let s = store().await;
+async fn perf_signal_batch_throughput(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -2568,9 +2445,7 @@ async fn perf_signal_batch_throughput() {
     eprintln!("perf_signal_batch: fetch={fetch_elapsed:?}, deliver={deliver_elapsed:?}");
 }
 
-#[tokio::test]
-async fn perf_execution_tree_deep() {
-    let s = store().await;
+async fn perf_execution_tree_deep(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -2620,9 +2495,7 @@ async fn perf_execution_tree_deep() {
     eprintln!("perf_get_children (50 children): {elapsed2:?}");
 }
 
-#[tokio::test]
-async fn perf_concurrent_worker_claims() {
-    let s = store().await;
+async fn perf_concurrent_worker_claims(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -2686,12 +2559,10 @@ async fn perf_concurrent_worker_claims() {
 // validated separately by e2e tests; the backend-agnostic invariants above
 // are what the tests here target.
 
-#[tokio::test]
-async fn context_round_trip_all_sections() {
+async fn context_round_trip_all_sections(s: TestStore) {
     // Writing every section at create-time and reading it back must preserve
     // each section byte-for-byte. This guards against silent column truncation
     // or default-serialization skipping non-empty fields.
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2728,12 +2599,10 @@ async fn context_round_trip_all_sections() {
     assert_eq!(back.context.runtime.current_step, Some(BlockId::new("s1")));
 }
 
-#[tokio::test]
-async fn update_instance_context_is_full_replacement() {
+async fn update_instance_context_is_full_replacement(s: TestStore) {
     // Per `docs/CONTEXT_MANAGEMENT.md` §5.2, `update_instance_context`
     // overwrites the entire column. Fields present before but absent in the
     // new value must not survive.
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2759,11 +2628,9 @@ async fn update_instance_context_is_full_replacement() {
     assert!(back.context.config.get("env").is_none());
 }
 
-#[tokio::test]
-async fn update_instance_context_externalized_swaps_markers_and_persists_refs() {
+async fn update_instance_context_externalized_swaps_markers_and_persists_refs(s: TestStore) {
     use orch8_storage::externalizing::{REF_KEY, is_marker};
 
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2800,12 +2667,10 @@ async fn update_instance_context_externalized_swaps_markers_and_persists_refs() 
     assert_eq!(fetched, Some(big_payload));
 }
 
-#[tokio::test]
-async fn update_instance_context_externalized_threshold_zero_is_passthrough() {
+async fn update_instance_context_externalized_threshold_zero_is_passthrough(s: TestStore) {
     // threshold_bytes == 0 short-circuits — no field is ever large enough
     // to externalize, so the call must behave identically to
     // update_instance_context (full inline replace, no externalized_state rows).
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2826,11 +2691,9 @@ async fn update_instance_context_externalized_threshold_zero_is_passthrough() {
     assert_eq!(back.context.data["inline"], json!("y".repeat(5_000)));
 }
 
-#[tokio::test]
-async fn create_instance_externalized_swaps_markers_and_persists_refs() {
+async fn create_instance_externalized_swaps_markers_and_persists_refs(s: TestStore) {
     use orch8_storage::externalizing::{REF_KEY, is_marker};
 
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2857,11 +2720,9 @@ async fn create_instance_externalized_swaps_markers_and_persists_refs() {
     assert_eq!(fetched, Some(big_payload));
 }
 
-#[tokio::test]
-async fn create_instance_externalized_threshold_zero_is_passthrough() {
+async fn create_instance_externalized_threshold_zero_is_passthrough(s: TestStore) {
     // threshold_bytes == 0 means nothing is externalized; the row lands
     // inline and no `externalized_state` records are produced.
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2874,11 +2735,9 @@ async fn create_instance_externalized_threshold_zero_is_passthrough() {
     assert_eq!(back.context.data["inline"], json!("y".repeat(5_000)));
 }
 
-#[tokio::test]
-async fn create_instances_batch_externalized_externalizes_each_instance_independently() {
+async fn create_instances_batch_externalized_externalizes_each_instance_independently(s: TestStore) {
     use orch8_storage::externalizing::{REF_KEY, is_marker};
 
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2917,9 +2776,7 @@ async fn create_instances_batch_externalized_externalizes_each_instance_independ
     }
 }
 
-#[tokio::test]
-async fn create_instances_batch_externalized_empty_input_is_noop() {
-    let s = store().await;
+async fn create_instances_batch_externalized_empty_input_is_noop(s: TestStore) {
     let inserted = s
         .create_instances_batch_externalized(&[], 1024)
         .await
@@ -2927,11 +2784,9 @@ async fn create_instances_batch_externalized_empty_input_is_noop() {
     assert_eq!(inserted, 0);
 }
 
-#[tokio::test]
-async fn merge_context_data_preserves_other_sections() {
+async fn merge_context_data_preserves_other_sections(s: TestStore) {
     // `merge_context_data` updates only a key under `context.data`. It must
     // NOT touch `context.config`, `context.audit`, or `context.runtime`.
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2972,10 +2827,8 @@ async fn merge_context_data_preserves_other_sections() {
     assert_eq!(back.context.runtime.attempt, 2);
 }
 
-#[tokio::test]
-async fn merge_context_data_overwrites_same_key() {
+async fn merge_context_data_overwrites_same_key(s: TestStore) {
     // Repeated merges of the same key must overwrite, not accumulate or nest.
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2997,10 +2850,8 @@ async fn merge_context_data_overwrites_same_key() {
     assert_eq!(back.context.data["k"], json!({"nested": true}));
 }
 
-#[tokio::test]
-async fn merge_context_data_accepts_complex_values() {
+async fn merge_context_data_accepts_complex_values(s: TestStore) {
     // Values can be arbitrary JSON — objects, arrays, null, numbers.
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3024,14 +2875,12 @@ async fn merge_context_data_accepts_complex_values() {
     assert!(back.context.data["nil"].is_null());
 }
 
-#[tokio::test]
-async fn merge_context_data_serialized_disjoint_keys() {
+async fn merge_context_data_serialized_disjoint_keys(s: TestStore) {
     // Sequentially merging many disjoint keys must produce a context that
     // contains all of them. (Intra-process concurrent writes would need a
     // multi-thread runtime; SQLite serializes writers at the file level, so
     // this sequential form is the portable correctness check — the same
     // property that a concurrent stream would assert.)
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3053,12 +2902,10 @@ async fn merge_context_data_serialized_disjoint_keys() {
     assert_eq!(obj.len(), 25);
 }
 
-#[tokio::test]
-async fn merge_context_data_on_missing_instance_is_noop() {
+async fn merge_context_data_on_missing_instance_is_noop(s: TestStore) {
     // Merging into a non-existent instance must not error or create a row.
     // The SQLite RMW path short-circuits on the initial SELECT; Postgres'
     // UPDATE naturally affects 0 rows.
-    let s = store().await;
     let missing = InstanceId::new();
     let res = s.merge_context_data(missing, "k", &json!("v")).await;
     assert!(res.is_ok(), "missing instance must be a silent noop");
@@ -3112,13 +2959,11 @@ async fn context_filtered_helper_is_used_correctly() {
     assert_eq!(f.runtime.attempt, 0);
 }
 
-#[tokio::test]
-async fn merge_context_data_does_not_clobber_nested_object() {
+async fn merge_context_data_does_not_clobber_nested_object(s: TestStore) {
     // When `context.data.user` is `{"name": "a"}`, merging key "user" with
     // `{"email": "x"}` replaces the whole value. The merge is key-level,
     // not deep. This test pins the documented semantics so future changes
     // that switch to a deep-merge have to update the docs intentionally.
-    let s = store().await;
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3171,9 +3016,7 @@ async fn context_access_filter_enforced_on_tree_path() {
 // Rate Limiting (TEST_PLAN 263-265)
 // ===========================================================================
 
-#[tokio::test]
-async fn rate_limit_under_threshold_returns_allowed() {
-    let s = store().await;
+async fn rate_limit_under_threshold_returns_allowed(s: TestStore) {
     let now = Utc::now();
     let tenant = TenantId::unchecked("rl_under");
     let key = ResourceKey::new("endpoint:a");
@@ -3195,9 +3038,7 @@ async fn rate_limit_under_threshold_returns_allowed() {
     assert!(matches!(check, RateLimitCheck::Allowed));
 }
 
-#[tokio::test]
-async fn rate_limit_at_threshold_returns_exceeded_with_retry_after() {
-    let s = store().await;
+async fn rate_limit_at_threshold_returns_exceeded_with_retry_after(s: TestStore) {
     let now = Utc::now();
     let tenant = TenantId::unchecked("rl_at");
     let key = ResourceKey::new("endpoint:b");
@@ -3232,9 +3073,7 @@ async fn rate_limit_at_threshold_returns_exceeded_with_retry_after() {
     }
 }
 
-#[tokio::test]
-async fn upsert_rate_limit_updates_window_on_conflict() {
-    let s = store().await;
+async fn upsert_rate_limit_updates_window_on_conflict(s: TestStore) {
     let now = Utc::now();
     let tenant = TenantId::unchecked("rl_up");
     let key = ResourceKey::new("endpoint:c");
@@ -3280,9 +3119,7 @@ async fn upsert_rate_limit_updates_window_on_conflict() {
 // Concurrency (TEST_PLAN 266-270)
 // ===========================================================================
 
-#[tokio::test]
-async fn count_running_by_concurrency_key_accurate() {
-    let s = store().await;
+async fn count_running_by_concurrency_key_accurate(s: TestStore) {
     let seq = make_sequence("t_cc");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3313,9 +3150,7 @@ async fn count_running_by_concurrency_key_accurate() {
     );
 }
 
-#[tokio::test]
-async fn concurrency_position_returns_queue_position() {
-    let s = store().await;
+async fn concurrency_position_returns_queue_position(s: TestStore) {
     let seq = make_sequence("t_pos");
     s.create_sequence(&seq).await.unwrap();
     let key = "q:shared";
@@ -3348,11 +3183,9 @@ async fn concurrency_position_returns_queue_position() {
     assert_eq!(s.concurrency_position(foreign.id, key).await.unwrap(), 0);
 }
 
-#[tokio::test]
-async fn concurrency_count_empty_for_unused_key() {
+async fn concurrency_count_empty_for_unused_key(s: TestStore) {
     // Item 268: instances without a concurrency_key must not be counted
     // against any key, so there's no implicit limit applied.
-    let s = store().await;
     let seq = make_sequence("t_nokey");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3372,12 +3205,10 @@ async fn concurrency_count_empty_for_unused_key() {
     );
 }
 
-#[tokio::test]
-async fn max_concurrency_zero_blocks_all_positions() {
+async fn max_concurrency_zero_blocks_all_positions(s: TestStore) {
     // Item 269: when max_concurrency=0, every candidate's position > max,
     // meaning it must defer. Storage reports the true queue position; the
     // scheduler's comparison `position > max` enforces "blocks all".
-    let s = store().await;
     let seq = make_sequence("t_zero");
     s.create_sequence(&seq).await.unwrap();
     let key = "q:zero";
@@ -3395,13 +3226,12 @@ async fn max_concurrency_zero_blocks_all_positions() {
     assert!(i64::from(inst.max_concurrency.unwrap()) < pos);
 }
 
-#[tokio::test]
-async fn concurrent_claims_with_same_key_are_serialized() {
+async fn concurrent_claims_with_same_key_are_serialized(s: TestStore) {
     // Item 270: two tasks race to claim/update on the same concurrency key;
     // the storage layer must not double-count. We verify that after parallel
     // writes land, the count matches the number of rows written — i.e. no
     // lost updates.
-    let s = std::sync::Arc::new(store().await);
+    let s = std::sync::Arc::new(s);
     let seq = make_sequence("t_race");
     s.create_sequence(&seq).await.unwrap();
     let key = "q:race";
@@ -3430,9 +3260,7 @@ async fn concurrent_claims_with_same_key_are_serialized() {
 // Cron storage (TEST_PLAN 260-261)
 // ===========================================================================
 
-#[tokio::test]
-async fn cron_claim_due_and_update_fire_times() {
-    let s = store().await;
+async fn cron_claim_due_and_update_fire_times(s: TestStore) {
     let seq = make_sequence("t_cron");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3481,9 +3309,7 @@ async fn cron_claim_due_and_update_fire_times() {
     assert!(!due2.iter().any(|c| c.id == schedule.id));
 }
 
-#[tokio::test]
-async fn cron_disabled_is_not_claimed() {
-    let s = store().await;
+async fn cron_disabled_is_not_claimed(s: TestStore) {
     let seq = make_sequence("t_dis");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3567,9 +3393,7 @@ async fn list_waiting_with_trees_returns_only_waiting_instances() {
 // Batch Reschedule Instances
 // ===========================================================================
 
-#[tokio::test]
-async fn batch_reschedule_transitions_multiple_instances_to_scheduled() {
-    let s = store().await;
+async fn batch_reschedule_transitions_multiple_instances_to_scheduled(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3595,16 +3419,12 @@ async fn batch_reschedule_transitions_multiple_instances_to_scheduled() {
     assert!(got_b.next_fire_at.is_some());
 }
 
-#[tokio::test]
-async fn batch_reschedule_empty_slice_is_noop() {
-    let s = store().await;
+async fn batch_reschedule_empty_slice_is_noop(s: TestStore) {
     let fire_at = Utc::now() + Duration::seconds(60);
     s.batch_reschedule_instances(&[], fire_at).await.unwrap();
 }
 
-#[tokio::test]
-async fn batch_reschedule_single_instance() {
-    let s = store().await;
+async fn batch_reschedule_single_instance(s: TestStore) {
     let seq = make_sequence("t1");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3626,9 +3446,7 @@ async fn batch_reschedule_single_instance() {
 // H4 — Pagination limit enforcement
 // ===========================================================================
 
-#[tokio::test]
-async fn list_cron_schedules_respects_limit() {
-    let s = store().await;
+async fn list_cron_schedules_respects_limit(s: TestStore) {
     let seq = make_sequence("t_lim");
     s.create_sequence(&seq).await.unwrap();
     let now = Utc::now();
@@ -3667,9 +3485,7 @@ async fn list_cron_schedules_respects_limit() {
     assert_eq!(limited.len(), 3, "limit must cap result count");
 }
 
-#[tokio::test]
-async fn list_checkpoints_respects_limit() {
-    let s = store().await;
+async fn list_checkpoints_respects_limit(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -3690,9 +3506,7 @@ async fn list_checkpoints_respects_limit() {
     assert_eq!(limited.len(), 2, "limit must cap checkpoint count");
 }
 
-#[tokio::test]
-async fn list_triggers_respects_limit() {
-    let s = store().await;
+async fn list_triggers_respects_limit(s: TestStore) {
     let now = Utc::now();
 
     for i in 0..5 {
@@ -3725,9 +3539,7 @@ async fn list_triggers_respects_limit() {
     assert_eq!(limited.len(), 2, "limit must cap trigger count");
 }
 
-#[tokio::test]
-async fn list_credentials_respects_limit() {
-    let s = store().await;
+async fn list_credentials_respects_limit(s: TestStore) {
     let now = Utc::now();
 
     for i in 0..5 {
@@ -3765,9 +3577,7 @@ async fn list_credentials_respects_limit() {
 // H6 — Atomic worker retry
 // ===========================================================================
 
-#[tokio::test]
-async fn retry_worker_task_atomically_replaces_task() {
-    let s = store().await;
+async fn retry_worker_task_atomically_replaces_task(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -3862,9 +3672,7 @@ async fn retry_worker_task_atomically_replaces_task() {
 // M8 — save_output_and_transition sets completed_at
 // ===========================================================================
 
-#[tokio::test]
-async fn save_output_and_transition_sets_completed_at() {
-    let s = store().await;
+async fn save_output_and_transition_sets_completed_at(s: TestStore) {
     let seq = make_sequence("t_m8");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3922,9 +3730,7 @@ async fn save_output_and_transition_sets_completed_at() {
 // H2 — Cron claim_due idempotency (double-claim returns empty)
 // ===========================================================================
 
-#[tokio::test]
-async fn cron_claim_due_is_idempotent() {
-    let s = store().await;
+async fn cron_claim_due_is_idempotent(s: TestStore) {
     let seq = make_sequence("t_idemp");
     s.create_sequence(&seq).await.unwrap();
 
@@ -3966,9 +3772,7 @@ async fn cron_claim_due_is_idempotent() {
 // update_instance_context_cas
 // ===========================================================================
 
-#[tokio::test]
-async fn update_instance_context_cas_succeeds_with_matching_timestamp() {
-    let s = store().await;
+async fn update_instance_context_cas_succeeds_with_matching_timestamp(s: TestStore) {
     let seq = make_sequence("t_cas");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t_cas", seq.id);
@@ -3988,9 +3792,7 @@ async fn update_instance_context_cas_succeeds_with_matching_timestamp() {
     assert_eq!(after.context.data, json!({"new_key": "value"}));
 }
 
-#[tokio::test]
-async fn update_instance_context_cas_fails_on_stale_timestamp() {
-    let s = store().await;
+async fn update_instance_context_cas_fails_on_stale_timestamp(s: TestStore) {
     let seq = make_sequence("t_cas2");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t_cas2", seq.id);
@@ -4019,9 +3821,7 @@ async fn update_instance_context_cas_fails_on_stale_timestamp() {
     assert_eq!(after.context.data, json!({"first": true}));
 }
 
-#[tokio::test]
-async fn increment_total_steps_bumps_counter_and_preserves_data() {
-    let s = store().await;
+async fn increment_total_steps_bumps_counter_and_preserves_data(s: TestStore) {
     let mut inst = make_instance("t1", SequenceId::new());
     inst.context.data = json!({"keep": "me"});
     inst.context.runtime.total_steps_executed = 0;
@@ -4039,9 +3839,7 @@ async fn increment_total_steps_bumps_counter_and_preserves_data() {
     assert_eq!(after.context.data, json!({"keep": "me"}));
 }
 
-#[tokio::test]
-async fn increment_total_steps_returns_zero_for_missing_instance() {
-    let s = store().await;
+async fn increment_total_steps_returns_zero_for_missing_instance(s: TestStore) {
     let missing = InstanceId::new();
     assert_eq!(s.increment_total_steps(missing).await.unwrap(), 0);
 }
@@ -4050,11 +3848,9 @@ async fn increment_total_steps_returns_zero_for_missing_instance() {
 // Trigger poll state (activepieces_poll)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn trigger_poll_state_upsert_get_round_trip() {
+async fn trigger_poll_state_upsert_get_round_trip(s: TestStore) {
     use orch8_types::trigger::TriggerPollState;
 
-    let s = store().await;
 
     // Unknown slug → None.
     assert!(s.get_trigger_poll_state("nope").await.unwrap().is_none());
@@ -4098,11 +3894,9 @@ async fn trigger_poll_state_upsert_get_round_trip() {
     assert_eq!(got.consecutive_failures, 2);
 }
 
-#[tokio::test]
-async fn delete_trigger_removes_poll_state() {
+async fn delete_trigger_removes_poll_state(s: TestStore) {
     use orch8_types::trigger::{TriggerDef, TriggerPollState, TriggerType};
 
-    let s = store().await;
     let now = Utc::now();
 
     s.create_trigger(&TriggerDef {
@@ -4143,11 +3937,9 @@ async fn delete_trigger_removes_poll_state() {
     );
 }
 
-#[tokio::test]
-async fn trigger_round_trips_activepieces_poll_type() {
+async fn trigger_round_trips_activepieces_poll_type(s: TestStore) {
     use orch8_types::trigger::{TriggerDef, TriggerType};
 
-    let s = store().await;
     let now = Utc::now();
     s.create_trigger(&TriggerDef {
         slug: "ap-type".into(),
@@ -4175,11 +3967,9 @@ async fn trigger_round_trips_activepieces_poll_type() {
 /// by slug, even though `slug` is a globally unique primary key. Unlike
 /// credentials/plugins, triggers have no "global" sentinel -- scoping is
 /// strict.
-#[tokio::test]
-async fn get_trigger_is_tenant_scoped() {
+async fn get_trigger_is_tenant_scoped(s: TestStore) {
     use orch8_types::trigger::{TriggerDef, TriggerType};
 
-    let s = store().await;
     let now = Utc::now();
     s.create_trigger(&TriggerDef {
         slug: "shared-slug".into(),
@@ -4224,11 +4014,9 @@ async fn get_trigger_is_tenant_scoped() {
 /// `get_plugin` scoped to a tenant must not return another tenant's plugin
 /// by name, but a plugin explicitly marked global (empty `tenant_id`) must
 /// remain visible to every tenant's scoped lookup.
-#[tokio::test]
-async fn get_plugin_is_tenant_scoped() {
+async fn get_plugin_is_tenant_scoped(s: TestStore) {
     use orch8_types::plugin::{PluginDef, PluginType};
 
-    let s = store().await;
     let now = Utc::now();
     s.create_plugin(&PluginDef {
         name: "tenant-a-plugin".into(),
@@ -4290,9 +4078,10 @@ async fn get_plugin_is_tenant_scoped() {
 
 /// A `manifest_locks` row abandoned by a crashed holder (no release ever ran)
 /// must be reclaimed by the next acquire instead of wedging the tenant.
+// SQLite-only: reaches into the pool with raw `?n` SQL to corrupt/seed rows.
 #[tokio::test]
 async fn manifest_lock_reclaims_stale_row() {
-    let s = store().await;
+    let s = common::sqlite_storage().await;
 
     // Simulate a crashed holder: a lock row far older than the staleness
     // threshold, with no guard that will ever release it.
@@ -4327,9 +4116,7 @@ async fn manifest_lock_reclaims_stale_row() {
 
 /// A lock row that is still fresh (held by a live holder) must NOT be
 /// reclaimed by another acquirer.
-#[tokio::test]
-async fn manifest_lock_does_not_reclaim_fresh_row() {
-    let s = store().await;
+async fn manifest_lock_does_not_reclaim_fresh_row(s: TestStore) {
 
     let _guard = s.acquire_manifest_lock("tenant_live").await.unwrap();
 
@@ -4348,9 +4135,7 @@ async fn manifest_lock_does_not_reclaim_fresh_row() {
 /// Regression: a rate limit with `max_count = 0` must deny every request,
 /// including the first request of a freshly-reset window (the reset branch
 /// used to set `current_count = 1` unconditionally, allowing one through).
-#[tokio::test]
-async fn rate_limit_max_count_zero_denies_even_after_window_reset() {
-    let s = store().await;
+async fn rate_limit_max_count_zero_denies_even_after_window_reset(s: TestStore) {
     let now = Utc::now();
     let tenant = TenantId::unchecked("t_rl_zero");
     let key = ResourceKey::new("api:blocked");
@@ -4380,9 +4165,7 @@ async fn rate_limit_max_count_zero_denies_even_after_window_reset() {
 /// `(instance_id, block_id)` can share a `created_at` (e.g. copied by
 /// fork-from). `get_block_output` must deterministically return the row with
 /// the largest (`UUIDv7`) id, not a planner-dependent pick.
-#[tokio::test]
-async fn get_block_output_tiebreaks_same_timestamp_by_id() {
-    let s = store().await;
+async fn get_block_output_tiebreaks_same_timestamp_by_id(s: TestStore) {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
@@ -4428,9 +4211,7 @@ async fn get_block_output_tiebreaks_same_timestamp_by_id() {
 
 /// Regression: terminal-instance retention GC must also clear
 /// `instance_kv_state` (no FK/cascade on `SQLite`) instead of leaking it.
-#[tokio::test]
-async fn delete_terminal_instances_clears_kv_state() {
-    let s = store().await;
+async fn delete_terminal_instances_clears_kv_state(s: TestStore) {
     let now = Utc::now();
 
     let mut inst = make_instance_in_state("t_kv_gc", InstanceState::Completed);
@@ -4458,9 +4239,7 @@ async fn delete_terminal_instances_clears_kv_state() {
 
 /// Regression: one cron claim tick must not burst-claim an unbounded backlog
 /// after an outage — it is capped, with stragglers left for later ticks.
-#[tokio::test]
-async fn claim_due_cron_schedules_is_capped_per_tick() {
-    let s = store().await;
+async fn claim_due_cron_schedules_is_capped_per_tick(s: TestStore) {
     let now = Utc::now();
 
     for _ in 0..105 {
@@ -4494,3 +4273,119 @@ async fn claim_due_cron_schedules_is_capped_per_tick() {
     let second = s.claim_due_cron_schedules(now).await.unwrap();
     assert_eq!(second.len(), 5, "stragglers are claimed on the next tick");
 }
+
+// Expand every shared test into a per-backend `#[tokio::test]` (see `common`).
+for_each_backend!(
+    execution_tree_crud,
+    execution_tree_batch_create,
+    signal_lifecycle,
+    signal_batch_operations,
+    mark_signals_delivered_batch_various_sizes,
+    idempotency_key_unique_per_tenant_not_global,
+    worker_task_full_lifecycle,
+    worker_activity_checkpoint_survives_lease_recovery,
+    worker_task_fail_and_cancel,
+    cancel_worker_tasks_for_block_deletes_completed_rows,
+    cancel_worker_tasks_for_block_deletes_failed_rows,
+    cancel_worker_tasks_for_block_noop_on_missing,
+    worker_task_queue_routing,
+    cron_schedule_lifecycle,
+    session_lifecycle,
+    session_instances_link,
+    checkpoint_save_and_prune,
+    audit_log_append_and_query,
+    resource_pool_lifecycle,
+    externalized_state_crud,
+    batch_get_externalized_state_fetches_multiple_keys,
+    batch_get_externalized_state_empty_input_returns_empty_map,
+    batch_save_externalized_state_persists_all_entries,
+    batch_save_externalized_state_empty_input_is_noop,
+    batch_save_externalized_state_upserts_existing_keys,
+    externalized_state_roundtrip_across_compression_threshold,
+    cluster_node_lifecycle,
+    rate_limit_check_and_exceed,
+    block_output_crud,
+    outputs_with_equal_timestamps_use_id_as_deterministic_tiebreaker,
+    save_output_and_transition_atomic,
+    save_output_merge_context_and_transition_atomic,
+    completed_block_ids_batch,
+    completed_block_ids_exclude_internal_markers,
+    delete_block_outputs_removes_all_rows_for_block,
+    delete_block_outputs_leaves_other_blocks_untouched,
+    delete_block_outputs_leaves_other_instances_untouched,
+    delete_block_outputs_on_empty_is_noop,
+    delete_block_outputs_no_effect_on_different_block_ids_at_same_instance,
+    delete_block_outputs_batch_removes_only_listed_blocks,
+    delete_block_outputs_batch_removes_retry_and_sentinel_markers,
+    delete_block_outputs_batch_empty_list_is_noop,
+    delete_block_outputs_batch_scoped_to_instance,
+    multi_tenant_isolation,
+    instance_state_lifecycle,
+    idempotency_dedup,
+    concurrency_control,
+    claim_respects_priority_ordering,
+    claim_returns_all_due_when_no_per_tenant_cap,
+    bulk_reschedule,
+    instance_batch_create,
+    merge_context_data,
+    update_instance_sequence_hot_migration,
+    dynamic_step_injection,
+    inject_blocks_at_position_preserves_sequential_writes,
+    sequence_versioning_and_deprecation,
+    instance_filtering_by_state_and_pagination,
+    sub_sequence_parent_child,
+    worker_task_list_and_stats,
+    perf_bulk_instance_creation_1000,
+    perf_claim_due_under_load,
+    perf_signal_batch_throughput,
+    perf_execution_tree_deep,
+    perf_concurrent_worker_claims,
+    context_round_trip_all_sections,
+    update_instance_context_is_full_replacement,
+    update_instance_context_externalized_swaps_markers_and_persists_refs,
+    update_instance_context_externalized_threshold_zero_is_passthrough,
+    create_instance_externalized_swaps_markers_and_persists_refs,
+    create_instance_externalized_threshold_zero_is_passthrough,
+    create_instances_batch_externalized_externalizes_each_instance_independently,
+    create_instances_batch_externalized_empty_input_is_noop,
+    merge_context_data_preserves_other_sections,
+    merge_context_data_overwrites_same_key,
+    merge_context_data_accepts_complex_values,
+    merge_context_data_serialized_disjoint_keys,
+    merge_context_data_on_missing_instance_is_noop,
+    merge_context_data_does_not_clobber_nested_object,
+    rate_limit_under_threshold_returns_allowed,
+    rate_limit_at_threshold_returns_exceeded_with_retry_after,
+    upsert_rate_limit_updates_window_on_conflict,
+    count_running_by_concurrency_key_accurate,
+    concurrency_position_returns_queue_position,
+    concurrency_count_empty_for_unused_key,
+    max_concurrency_zero_blocks_all_positions,
+    concurrent_claims_with_same_key_are_serialized,
+    cron_claim_due_and_update_fire_times,
+    cron_disabled_is_not_claimed,
+    batch_reschedule_transitions_multiple_instances_to_scheduled,
+    batch_reschedule_empty_slice_is_noop,
+    batch_reschedule_single_instance,
+    list_cron_schedules_respects_limit,
+    list_checkpoints_respects_limit,
+    list_triggers_respects_limit,
+    list_credentials_respects_limit,
+    retry_worker_task_atomically_replaces_task,
+    save_output_and_transition_sets_completed_at,
+    cron_claim_due_is_idempotent,
+    update_instance_context_cas_succeeds_with_matching_timestamp,
+    update_instance_context_cas_fails_on_stale_timestamp,
+    increment_total_steps_bumps_counter_and_preserves_data,
+    increment_total_steps_returns_zero_for_missing_instance,
+    trigger_poll_state_upsert_get_round_trip,
+    delete_trigger_removes_poll_state,
+    trigger_round_trips_activepieces_poll_type,
+    get_trigger_is_tenant_scoped,
+    get_plugin_is_tenant_scoped,
+    manifest_lock_does_not_reclaim_fresh_row,
+    rate_limit_max_count_zero_denies_even_after_window_reset,
+    get_block_output_tiebreaks_same_timestamp_by_id,
+    delete_terminal_instances_clears_kv_state,
+    claim_due_cron_schedules_is_capped_per_tick,
+);

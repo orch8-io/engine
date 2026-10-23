@@ -41,6 +41,8 @@ async fn state_with(provider: Arc<dyn EntitlementProvider>) -> AppState {
         continuity_crypto: None,
         federation_peers: Arc::new(Vec::new()),
         continuity_lab_enabled: false,
+        continuity_trusted_signing_keys: Arc::new(Default::default()),
+        worker_protocol: orch8_types::worker::WorkerProtocolHints::default(),
     }
 }
 

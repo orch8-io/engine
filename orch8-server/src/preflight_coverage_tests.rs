@@ -72,7 +72,7 @@ fn valid_config() -> EngineConfig {
 }
 
 fn preflight(config: &EngineConfig, role: NodeRole) -> anyhow::Result<()> {
-    automatic_startup_preflight(config, NodeAssembly::for_role(role))
+    automatic_startup_preflight(config, NodeAssembly::for_role(role)).map(|_| ())
 }
 
 macro_rules! preflight_err_case {

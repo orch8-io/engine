@@ -42,6 +42,45 @@ use orch8_types::sequence::HumanInputDef;
 
 use crate::circuit_breaker::CircuitBreakerRegistry;
 
+/// The out-of-process plugin family a step handler name belongs to, decided
+/// purely from its URI-style prefix. This is the single source of truth for
+/// "is this a plugin handler?" — the scheduler's fast-path/tree-path routing,
+/// the optimizer's `top_level_has_plugin_handler`, the cleanup-hook dispatcher
+/// and the tree evaluator's dispatch fork all consult it, so the three prefix
+/// predicates can no longer drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PluginKind {
+    /// `ap://piece.action` — the `ActivePieces` sidecar.
+    Ap,
+    /// `grpc://` / `grpcs://` — a gRPC plugin resolved via the plugin registry.
+    Grpc,
+    /// `wasm://plugin-name` — a WASM module resolved via the plugin registry.
+    Wasm,
+}
+
+impl PluginKind {
+    /// Classify `handler`; `None` for in-process (registry) and
+    /// external-worker handler names.
+    #[must_use]
+    pub fn detect(handler: &str) -> Option<Self> {
+        if activepieces::is_ap_handler(handler) {
+            Some(Self::Ap)
+        } else if grpc_plugin::is_grpc_handler(handler) {
+            Some(Self::Grpc)
+        } else if wasm_plugin::is_wasm_handler(handler) {
+            Some(Self::Wasm)
+        } else {
+            None
+        }
+    }
+
+    /// `true` when `handler` names any plugin family.
+    #[must_use]
+    pub fn is_plugin(handler: &str) -> bool {
+        Self::detect(handler).is_some()
+    }
+}
+
 /// Step handlers are plain async functions. No activity ceremony.
 pub type StepHandler = Box<
     dyn Fn(
@@ -265,6 +304,23 @@ mod tests {
         let ctx = mk_ctx(mk_test_storage().await);
         let result = handler(ctx).await.unwrap();
         assert_eq!(result, serde_json::json!({"result": "ok"}));
+    }
+
+    #[test]
+    fn plugin_kind_detects_every_prefix_family() {
+        assert_eq!(PluginKind::detect("ap://slack.send_message"), Some(PluginKind::Ap));
+        assert_eq!(PluginKind::detect("grpc://billing"), Some(PluginKind::Grpc));
+        assert_eq!(PluginKind::detect("grpcs://billing"), Some(PluginKind::Grpc));
+        assert_eq!(PluginKind::detect("wasm://scorer"), Some(PluginKind::Wasm));
+        assert!(PluginKind::is_plugin("wasm://scorer"));
+    }
+
+    #[test]
+    fn plugin_kind_ignores_registry_and_external_handlers() {
+        for name in ["http_request", "noop", "my_worker_handler", "", "ap", "grpc:/x"] {
+            assert_eq!(PluginKind::detect(name), None, "{name:?}");
+            assert!(!PluginKind::is_plugin(name), "{name:?}");
+        }
     }
 
     #[test]

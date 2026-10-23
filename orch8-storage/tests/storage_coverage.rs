@@ -13,7 +13,6 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
-use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::{
     AdminStore, ExecutionTreeStore, InstanceStore, OutputStore, SequenceStore, SignalStore,
 };
@@ -34,9 +33,9 @@ use orch8_types::signal::{Signal, SignalType};
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn store() -> SqliteStorage {
-    SqliteStorage::in_memory().await.unwrap()
-}
+#[macro_use]
+mod common;
+use common::TestStore;
 
 fn make_sequence(tenant: &str) -> SequenceDefinition {
     SequenceDefinition {
@@ -186,9 +185,7 @@ fn make_session(tenant: &str, key: &str) -> Session {
 // Instance CRUD (tests 1-20)
 // ===========================================================================
 
-#[tokio::test]
-async fn t01_create_instance_and_get_by_id() {
-    let s = store().await;
+async fn t01_create_instance_and_get_by_id(s: TestStore) {
     let seq = make_sequence("tenant_a");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("tenant_a", seq.id);
@@ -200,9 +197,7 @@ async fn t01_create_instance_and_get_by_id() {
     assert_eq!(fetched.state, InstanceState::Scheduled);
 }
 
-#[tokio::test]
-async fn t02_create_instance_duplicate_id_fails() {
-    let s = store().await;
+async fn t02_create_instance_duplicate_id_fails(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -212,16 +207,12 @@ async fn t02_create_instance_duplicate_id_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
-async fn t03_get_instance_nonexistent_returns_none() {
-    let s = store().await;
+async fn t03_get_instance_nonexistent_returns_none(s: TestStore) {
     let result = s.get_instance(InstanceId::new()).await.unwrap();
     assert!(result.is_none());
 }
 
-#[tokio::test]
-async fn t04_update_instance_state_from_scheduled_to_running() {
-    let s = store().await;
+async fn t04_update_instance_state_from_scheduled_to_running(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -235,9 +226,7 @@ async fn t04_update_instance_state_from_scheduled_to_running() {
     assert_eq!(fetched.state, InstanceState::Running);
 }
 
-#[tokio::test]
-async fn t05_update_instance_state_sets_updated_at() {
-    let s = store().await;
+async fn t05_update_instance_state_sets_updated_at(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -255,9 +244,7 @@ async fn t05_update_instance_state_sets_updated_at() {
     assert!(fetched.updated_at >= original_updated);
 }
 
-#[tokio::test]
-async fn t06_list_instances_by_tenant() {
-    let s = store().await;
+async fn t06_list_instances_by_tenant(s: TestStore) {
     let seq = make_sequence("tenant_x");
     s.create_sequence(&seq).await.unwrap();
 
@@ -279,9 +266,7 @@ async fn t06_list_instances_by_tenant() {
     assert_eq!(results.len(), 3);
 }
 
-#[tokio::test]
-async fn t07_list_instances_by_state() {
-    let s = store().await;
+async fn t07_list_instances_by_state(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -306,9 +291,7 @@ async fn t07_list_instances_by_state() {
     assert_eq!(results[0].id, inst1.id);
 }
 
-#[tokio::test]
-async fn t08_list_instances_by_namespace() {
-    let s = store().await;
+async fn t08_list_instances_by_namespace(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -332,9 +315,7 @@ async fn t08_list_instances_by_namespace() {
     assert_eq!(results[0].namespace.as_str(), "prod");
 }
 
-#[tokio::test]
-async fn t09_list_instances_pagination() {
-    let s = store().await;
+async fn t09_list_instances_pagination(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -383,9 +364,7 @@ async fn t09_list_instances_pagination() {
     assert_eq!(page3.len(), 1);
 }
 
-#[tokio::test]
-async fn t10_count_instances_with_state_filter() {
-    let s = store().await;
+async fn t10_count_instances_with_state_filter(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -413,9 +392,7 @@ async fn t10_count_instances_with_state_filter() {
     assert_eq!(count, 1);
 }
 
-#[tokio::test]
-async fn t11_conditional_update_state_succeeds_when_current_matches() {
-    let s = store().await;
+async fn t11_conditional_update_state_succeeds_when_current_matches(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -436,9 +413,7 @@ async fn t11_conditional_update_state_succeeds_when_current_matches() {
     assert_eq!(fetched.state, InstanceState::Running);
 }
 
-#[tokio::test]
-async fn t12_conditional_update_state_fails_when_current_differs() {
-    let s = store().await;
+async fn t12_conditional_update_state_fails_when_current_differs(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -460,9 +435,7 @@ async fn t12_conditional_update_state_fails_when_current_differs() {
     assert_eq!(fetched.state, InstanceState::Scheduled);
 }
 
-#[tokio::test]
-async fn t13_get_instances_ready_to_run() {
-    let s = store().await;
+async fn t13_get_instances_ready_to_run(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -481,9 +454,7 @@ async fn t13_get_instances_ready_to_run() {
     assert_eq!(claimed[0].id, inst1.id);
 }
 
-#[tokio::test]
-async fn t14_update_instance_context_persists() {
-    let s = store().await;
+async fn t14_update_instance_context_persists(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -502,9 +473,7 @@ async fn t14_update_instance_context_persists() {
     assert_eq!(fetched.context.config["timeout"], 30);
 }
 
-#[tokio::test]
-async fn t15_create_instance_with_priority_high() {
-    let s = store().await;
+async fn t15_create_instance_with_priority_high(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let mut inst = make_instance("t", seq.id);
@@ -515,9 +484,7 @@ async fn t15_create_instance_with_priority_high() {
     assert_eq!(fetched.priority, Priority::High);
 }
 
-#[tokio::test]
-async fn t16_list_instances_ordered_by_priority() {
-    let s = store().await;
+async fn t16_list_instances_ordered_by_priority(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -541,9 +508,7 @@ async fn t16_list_instances_ordered_by_priority() {
     assert_eq!(results[0].priority, Priority::High);
 }
 
-#[tokio::test]
-async fn t17_list_instances_by_sequence_id() {
-    let s = store().await;
+async fn t17_list_instances_by_sequence_id(s: TestStore) {
     let seq1 = make_sequence("t");
     let seq2 = make_sequence("t");
     s.create_sequence(&seq1).await.unwrap();
@@ -566,9 +531,7 @@ async fn t17_list_instances_by_sequence_id() {
     assert_eq!(results[0].sequence_id, seq1.id);
 }
 
-#[tokio::test]
-async fn t18_count_instances_by_state() {
-    let s = store().await;
+async fn t18_count_instances_by_state(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -585,9 +548,7 @@ async fn t18_count_instances_by_state() {
     assert_eq!(count, 3);
 }
 
-#[tokio::test]
-async fn t19_create_instance_with_concurrency_key() {
-    let s = store().await;
+async fn t19_create_instance_with_concurrency_key(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let mut inst = make_instance("t", seq.id);
@@ -603,9 +564,7 @@ async fn t19_create_instance_with_concurrency_key() {
     assert_eq!(fetched.max_concurrency, Some(5));
 }
 
-#[tokio::test]
-async fn t20_create_instance_with_metadata() {
-    let s = store().await;
+async fn t20_create_instance_with_metadata(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let mut inst = make_instance("t", seq.id);
@@ -622,9 +581,7 @@ async fn t20_create_instance_with_metadata() {
 // Sequence CRUD (tests 21-35)
 // ===========================================================================
 
-#[tokio::test]
-async fn t21_create_sequence_and_get() {
-    let s = store().await;
+async fn t21_create_sequence_and_get(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -633,9 +590,7 @@ async fn t21_create_sequence_and_get() {
     assert_eq!(fetched.version, 1);
 }
 
-#[tokio::test]
-async fn t22_create_sequence_duplicate_id_error() {
-    let s = store().await;
+async fn t22_create_sequence_duplicate_id_error(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -643,16 +598,12 @@ async fn t22_create_sequence_duplicate_id_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
-async fn t23_get_sequence_nonexistent_returns_none() {
-    let s = store().await;
+async fn t23_get_sequence_nonexistent_returns_none(s: TestStore) {
     let result = s.get_sequence(SequenceId::new()).await.unwrap();
     assert!(result.is_none());
 }
 
-#[tokio::test]
-async fn t23b_get_sequences_returns_matches_and_omits_missing_ids() {
-    let s = store().await;
+async fn t23b_get_sequences_returns_matches_and_omits_missing_ids(s: TestStore) {
     let first = make_sequence_named("t", "first", "default");
     let second = make_sequence_named("t", "second", "default");
     s.create_sequence(&first).await.unwrap();
@@ -668,9 +619,7 @@ async fn t23b_get_sequences_returns_matches_and_omits_missing_ids() {
     assert!(ids.contains(&second.id));
 }
 
-#[tokio::test]
-async fn t24_list_sequences_by_tenant() {
-    let s = store().await;
+async fn t24_list_sequences_by_tenant(s: TestStore) {
     let seq1 = make_sequence("tenant_a");
     let seq2 = make_sequence("tenant_b");
     s.create_sequence(&seq1).await.unwrap();
@@ -684,9 +633,7 @@ async fn t24_list_sequences_by_tenant() {
     assert_eq!(results[0].tenant_id.as_str(), "tenant_a");
 }
 
-#[tokio::test]
-async fn t25_list_sequences_by_namespace() {
-    let s = store().await;
+async fn t25_list_sequences_by_namespace(s: TestStore) {
     let seq1 = make_sequence_named("t", "seq_a", "prod");
     let seq2 = make_sequence_named("t", "seq_b", "staging");
     s.create_sequence(&seq1).await.unwrap();
@@ -705,9 +652,7 @@ async fn t25_list_sequences_by_namespace() {
     assert_eq!(results[0].name, "seq_a");
 }
 
-#[tokio::test]
-async fn t26_update_sequence_version() {
-    let s = store().await;
+async fn t26_update_sequence_version(s: TestStore) {
     let mut seq_v1 = make_sequence("t");
     seq_v1.name = "versioned".into();
     seq_v1.version = 1;
@@ -729,9 +674,7 @@ async fn t26_update_sequence_version() {
     assert_eq!(versions.len(), 2);
 }
 
-#[tokio::test]
-async fn t27_delete_sequence() {
-    let s = store().await;
+async fn t27_delete_sequence(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -741,9 +684,7 @@ async fn t27_delete_sequence() {
     assert!(fetched.is_none());
 }
 
-#[tokio::test]
-async fn t28_get_sequence_by_name_and_namespace() {
-    let s = store().await;
+async fn t28_get_sequence_by_name_and_namespace(s: TestStore) {
     let seq = make_sequence_named("t", "my_flow", "production");
     s.create_sequence(&seq).await.unwrap();
 
@@ -761,9 +702,7 @@ async fn t28_get_sequence_by_name_and_namespace() {
     assert_eq!(fetched.namespace.as_str(), "production");
 }
 
-#[tokio::test]
-async fn t29_list_sequences_pagination() {
-    let s = store().await;
+async fn t29_list_sequences_pagination(s: TestStore) {
     for i in 0..5 {
         let mut seq = make_sequence("t");
         seq.name = format!("seq_{i}");
@@ -789,9 +728,7 @@ async fn t29_list_sequences_pagination() {
     assert_eq!(page3.len(), 1);
 }
 
-#[tokio::test]
-async fn t30_create_sequence_with_interceptors() {
-    let s = store().await;
+async fn t30_create_sequence_with_interceptors(s: TestStore) {
     let mut seq = make_sequence("t");
     seq.interceptors = Some(orch8_types::interceptor::InterceptorDef {
         before_step: Some(InterceptorAction {
@@ -820,9 +757,7 @@ async fn t30_create_sequence_with_interceptors() {
     );
 }
 
-#[tokio::test]
-async fn t31_sequence_deprecated_flag() {
-    let s = store().await;
+async fn t31_sequence_deprecated_flag(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -832,9 +767,7 @@ async fn t31_sequence_deprecated_flag() {
     assert!(fetched.deprecated);
 }
 
-#[tokio::test]
-async fn t32_list_sequences_filtered_by_status() {
-    let s = store().await;
+async fn t32_list_sequences_filtered_by_status(s: TestStore) {
     let mut seq1 = make_sequence("t");
     seq1.name = "draft_seq".into();
     seq1.status = SequenceStatus::Draft;
@@ -851,9 +784,7 @@ async fn t32_list_sequences_filtered_by_status() {
     assert_eq!(fetched.status, SequenceStatus::Staging);
 }
 
-#[tokio::test]
-async fn t33_sequence_blocks_json_roundtrip() {
-    let s = store().await;
+async fn t33_sequence_blocks_json_roundtrip(s: TestStore) {
     let mut seq = make_sequence("t");
     seq.blocks = vec![
         BlockDefinition::Step(Box::new(StepDef {
@@ -910,9 +841,7 @@ async fn t33_sequence_blocks_json_roundtrip() {
     }
 }
 
-#[tokio::test]
-async fn t34_create_multiple_sequences_same_tenant() {
-    let s = store().await;
+async fn t34_create_multiple_sequences_same_tenant(s: TestStore) {
     for i in 0..10 {
         let mut seq = make_sequence("multi_t");
         seq.name = format!("flow_{i}");
@@ -926,9 +855,7 @@ async fn t34_create_multiple_sequences_same_tenant() {
     assert_eq!(results.len(), 10);
 }
 
-#[tokio::test]
-async fn t35_sequence_with_complex_nested_blocks() {
-    let s = store().await;
+async fn t35_sequence_with_complex_nested_blocks(s: TestStore) {
     let mut seq = make_sequence("t");
     seq.blocks = vec![BlockDefinition::Parallel(Box::new(
         orch8_types::sequence::ParallelDef {
@@ -993,9 +920,7 @@ async fn t35_sequence_with_complex_nested_blocks() {
 // Execution Tree (tests 36-50)
 // ===========================================================================
 
-#[tokio::test]
-async fn t36_execution_tree_initially_empty() {
-    let s = store().await;
+async fn t36_execution_tree_initially_empty(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1005,9 +930,7 @@ async fn t36_execution_tree_initially_empty() {
     assert!(tree.is_empty());
 }
 
-#[tokio::test]
-async fn t37_append_execution_node_and_retrieve() {
-    let s = store().await;
+async fn t37_append_execution_node_and_retrieve(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1022,9 +945,7 @@ async fn t37_append_execution_node_and_retrieve() {
     assert_eq!(tree[0].state, NodeState::Pending);
 }
 
-#[tokio::test]
-async fn t38_update_node_state_to_completed() {
-    let s = store().await;
+async fn t38_update_node_state_to_completed(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1041,9 +962,7 @@ async fn t38_update_node_state_to_completed() {
     assert_eq!(tree[0].state, NodeState::Completed);
 }
 
-#[tokio::test]
-async fn t39_update_node_state_to_failed() {
-    let s = store().await;
+async fn t39_update_node_state_to_failed(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1060,9 +979,7 @@ async fn t39_update_node_state_to_failed() {
     assert_eq!(tree[0].state, NodeState::Failed);
 }
 
-#[tokio::test]
-async fn t40_get_execution_tree_ordered() {
-    let s = store().await;
+async fn t40_get_execution_tree_ordered(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1077,9 +994,7 @@ async fn t40_get_execution_tree_ordered() {
     assert_eq!(tree.len(), 5);
 }
 
-#[tokio::test]
-async fn t41_get_node_by_block_id() {
-    let s = store().await;
+async fn t41_get_node_by_block_id(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1094,9 +1009,7 @@ async fn t41_get_node_by_block_id() {
     assert_eq!(found.unwrap().id, node.id);
 }
 
-#[tokio::test]
-async fn t42_multiple_nodes_same_instance() {
-    let s = store().await;
+async fn t42_multiple_nodes_same_instance(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1113,9 +1026,7 @@ async fn t42_multiple_nodes_same_instance() {
     assert_eq!(tree.len(), 3);
 }
 
-#[tokio::test]
-async fn t43_execution_tree_with_parallel_nodes() {
-    let s = store().await;
+async fn t43_execution_tree_with_parallel_nodes(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1164,9 +1075,7 @@ async fn t43_execution_tree_with_parallel_nodes() {
     assert_eq!(children.len(), 2);
 }
 
-#[tokio::test]
-async fn t44_execution_tree_node_output_stored() {
-    let s = store().await;
+async fn t44_execution_tree_node_output_stored(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1196,9 +1105,7 @@ async fn t44_execution_tree_node_output_stored() {
     assert_eq!(fetched.output["result"], "success");
 }
 
-#[tokio::test]
-async fn t45_execution_tree_node_error_stored() {
-    let s = store().await;
+async fn t45_execution_tree_node_error_stored(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1231,9 +1138,7 @@ async fn t45_execution_tree_node_error_stored() {
     assert_eq!(fetched.output["error"], "timeout exceeded");
 }
 
-#[tokio::test]
-async fn t46_execution_node_duration_tracking() {
-    let s = store().await;
+async fn t46_execution_node_duration_tracking(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1257,9 +1162,7 @@ async fn t46_execution_node_duration_tracking() {
     assert!(n.completed_at.is_some());
 }
 
-#[tokio::test]
-async fn t47_execution_tree_after_retry() {
-    let s = store().await;
+async fn t47_execution_tree_after_retry(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1282,9 +1185,7 @@ async fn t47_execution_tree_after_retry() {
     assert_eq!(tree[0].state, NodeState::Pending);
 }
 
-#[tokio::test]
-async fn t48_clear_execution_tree() {
-    let s = store().await;
+async fn t48_clear_execution_tree(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1301,9 +1202,7 @@ async fn t48_clear_execution_tree() {
     assert!(tree.is_empty());
 }
 
-#[tokio::test]
-async fn t49_execution_tree_large_sequence() {
-    let s = store().await;
+async fn t49_execution_tree_large_sequence(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1318,9 +1217,7 @@ async fn t49_execution_tree_large_sequence() {
     assert_eq!(tree.len(), 50);
 }
 
-#[tokio::test]
-async fn t50_execution_node_attempt_counter() {
-    let s = store().await;
+async fn t50_execution_node_attempt_counter(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1352,9 +1249,7 @@ async fn t50_execution_node_attempt_counter() {
 // Signal Storage (tests 51-65)
 // ===========================================================================
 
-#[tokio::test]
-async fn t51_create_signal_and_retrieve() {
-    let s = store().await;
+async fn t51_create_signal_and_retrieve(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1368,9 +1263,7 @@ async fn t51_create_signal_and_retrieve() {
     assert_eq!(pending[0].signal_type, SignalType::Pause);
 }
 
-#[tokio::test]
-async fn t52_get_pending_signals_only_undelivered() {
-    let s = store().await;
+async fn t52_get_pending_signals_only_undelivered(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1388,9 +1281,7 @@ async fn t52_get_pending_signals_only_undelivered() {
     assert_eq!(pending[0].signal_type, SignalType::Resume);
 }
 
-#[tokio::test]
-async fn t53_mark_signal_delivered() {
-    let s = store().await;
+async fn t53_mark_signal_delivered(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1405,9 +1296,7 @@ async fn t53_mark_signal_delivered() {
     assert!(pending.is_empty());
 }
 
-#[tokio::test]
-async fn t54_multiple_signals_same_instance() {
-    let s = store().await;
+async fn t54_multiple_signals_same_instance(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1422,9 +1311,7 @@ async fn t54_multiple_signals_same_instance() {
     assert_eq!(pending.len(), 5);
 }
 
-#[tokio::test]
-async fn t55_signals_ordered_by_created_at() {
-    let s = store().await;
+async fn t55_signals_ordered_by_created_at(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1443,9 +1330,7 @@ async fn t55_signals_ordered_by_created_at() {
     assert!(pending[1].created_at <= pending[2].created_at);
 }
 
-#[tokio::test]
-async fn t56_all_signal_types_persist_correctly() {
-    let s = store().await;
+async fn t56_all_signal_types_persist_correctly(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1502,9 +1387,7 @@ async fn t56_all_signal_types_persist_correctly() {
     assert_eq!(update_fetched.payload["data"]["new_key"], "new_value");
 }
 
-#[tokio::test]
-async fn t61_get_pending_signals_empty_when_all_delivered() {
-    let s = store().await;
+async fn t61_get_pending_signals_empty_when_all_delivered(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1522,9 +1405,7 @@ async fn t61_get_pending_signals_empty_when_all_delivered() {
     assert!(pending.is_empty());
 }
 
-#[tokio::test]
-async fn t62_signal_belongs_to_correct_instance() {
-    let s = store().await;
+async fn t62_signal_belongs_to_correct_instance(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -1542,9 +1423,7 @@ async fn t62_signal_belongs_to_correct_instance() {
     assert!(pending2.is_empty());
 }
 
-#[tokio::test]
-async fn t63_bulk_signal_creation() {
-    let s = store().await;
+async fn t63_bulk_signal_creation(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1559,9 +1438,7 @@ async fn t63_bulk_signal_creation() {
     assert_eq!(pending.len(), 20);
 }
 
-#[tokio::test]
-async fn t64_signal_payload_json_roundtrip() {
-    let s = store().await;
+async fn t64_signal_payload_json_roundtrip(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1584,9 +1461,7 @@ async fn t64_signal_payload_json_roundtrip() {
     assert_eq!(pending[0].payload, complex_payload);
 }
 
-#[tokio::test]
-async fn t65_mark_signal_delivered_sets_timestamp() {
-    let s = store().await;
+async fn t65_mark_signal_delivered_sets_timestamp(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1610,9 +1485,7 @@ async fn t65_mark_signal_delivered_sets_timestamp() {
 // Audit Log (tests 66-75)
 // ===========================================================================
 
-#[tokio::test]
-async fn t66_append_audit_log_entry() {
-    let s = store().await;
+async fn t66_append_audit_log_entry(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1626,9 +1499,7 @@ async fn t66_append_audit_log_entry() {
     assert_eq!(logs[0].event_type, "instance_created");
 }
 
-#[tokio::test]
-async fn t67_list_audit_log_by_instance() {
-    let s = store().await;
+async fn t67_list_audit_log_by_instance(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst1 = make_instance("t", seq.id);
@@ -1646,9 +1517,7 @@ async fn t67_list_audit_log_by_instance() {
     assert_eq!(logs[0].event_type, "created");
 }
 
-#[tokio::test]
-async fn t68_audit_log_limit_parameter() {
-    let s = store().await;
+async fn t68_audit_log_limit_parameter(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1663,9 +1532,7 @@ async fn t68_audit_log_limit_parameter() {
     assert_eq!(logs.len(), 3);
 }
 
-#[tokio::test]
-async fn t69_audit_log_ordered_by_time() {
-    let s = store().await;
+async fn t69_audit_log_ordered_by_time(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1683,9 +1550,7 @@ async fn t69_audit_log_ordered_by_time() {
     assert!(logs[0].created_at >= logs[1].created_at);
 }
 
-#[tokio::test]
-async fn t70_audit_log_with_details_json() {
-    let s = store().await;
+async fn t70_audit_log_with_details_json(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1705,9 +1570,7 @@ async fn t70_audit_log_with_details_json() {
     assert_eq!(logs[0].details["attempt"], 3);
 }
 
-#[tokio::test]
-async fn t71_audit_log_state_transition_entry() {
-    let s = store().await;
+async fn t71_audit_log_state_transition_entry(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1723,9 +1586,7 @@ async fn t71_audit_log_state_transition_entry() {
     assert_eq!(logs[0].to_state.as_deref(), Some("running"));
 }
 
-#[tokio::test]
-async fn t72_audit_log_custom_event_entry() {
-    let s = store().await;
+async fn t72_audit_log_custom_event_entry(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1738,9 +1599,7 @@ async fn t72_audit_log_custom_event_entry() {
     assert_eq!(logs[0].event_type, "custom:user_action");
 }
 
-#[tokio::test]
-async fn t73_audit_log_empty_for_new_instance() {
-    let s = store().await;
+async fn t73_audit_log_empty_for_new_instance(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1750,9 +1609,7 @@ async fn t73_audit_log_empty_for_new_instance() {
     assert!(logs.is_empty());
 }
 
-#[tokio::test]
-async fn t74_multiple_audit_entries() {
-    let s = store().await;
+async fn t74_multiple_audit_entries(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1774,9 +1631,7 @@ async fn t74_multiple_audit_entries() {
     assert_eq!(logs.len(), 5);
 }
 
-#[tokio::test]
-async fn t75_audit_log_with_block_id() {
-    let s = store().await;
+async fn t75_audit_log_with_block_id(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -1795,9 +1650,7 @@ async fn t75_audit_log_with_block_id() {
 // Credential Storage (tests 76-80)
 // ===========================================================================
 
-#[tokio::test]
-async fn t76_store_credential_and_retrieve() {
-    let s = store().await;
+async fn t76_store_credential_and_retrieve(s: TestStore) {
     let cred = make_credential("stripe-prod", "t1");
     s.create_credential(&cred).await.unwrap();
 
@@ -1810,9 +1663,7 @@ async fn t76_store_credential_and_retrieve() {
     assert_eq!(fetched.name, "Credential stripe-prod");
 }
 
-#[tokio::test]
-async fn t77_credential_by_tenant_and_key() {
-    let s = store().await;
+async fn t77_credential_by_tenant_and_key(s: TestStore) {
     let cred1 = make_credential("cred-a", "tenant_1");
     let cred2 = make_credential("cred-b", "tenant_2");
     s.create_credential(&cred1).await.unwrap();
@@ -1826,9 +1677,7 @@ async fn t77_credential_by_tenant_and_key() {
     assert_eq!(results[0].id, "cred-a");
 }
 
-#[tokio::test]
-async fn t78_update_credential_value() {
-    let s = store().await;
+async fn t78_update_credential_value(s: TestStore) {
     let mut cred = make_credential("updatable", "t");
     s.create_credential(&cred).await.unwrap();
 
@@ -1842,9 +1691,7 @@ async fn t78_update_credential_value() {
     assert_eq!(fetched.name, "Updated Credential");
 }
 
-#[tokio::test]
-async fn t79_delete_credential() {
-    let s = store().await;
+async fn t79_delete_credential(s: TestStore) {
     let cred = make_credential("deletable", "t");
     s.create_credential(&cred).await.unwrap();
 
@@ -1854,9 +1701,7 @@ async fn t79_delete_credential() {
     assert!(fetched.is_none());
 }
 
-#[tokio::test]
-async fn t80_list_credentials_by_tenant() {
-    let s = store().await;
+async fn t80_list_credentials_by_tenant(s: TestStore) {
     for i in 0..3 {
         let cred = make_credential(&format!("cred_{i}"), "multi_cred_tenant");
         s.create_credential(&cred).await.unwrap();
@@ -1874,9 +1719,7 @@ async fn t80_list_credentials_by_tenant() {
 /// Regression test for the deep storage review's tenant-isolation finding:
 /// `get_credential` scoped to a tenant must not return another tenant's
 /// credential by ID, even though `id` is a globally unique primary key.
-#[tokio::test]
-async fn t80b_get_credential_is_tenant_scoped() {
-    let s = store().await;
+async fn t80b_get_credential_is_tenant_scoped(s: TestStore) {
     let cred = make_credential("shared-id", "tenant_a");
     s.create_credential(&cred).await.unwrap();
 
@@ -1915,9 +1758,7 @@ async fn t80b_get_credential_is_tenant_scoped() {
 // Session Storage (tests 81-85)
 // ===========================================================================
 
-#[tokio::test]
-async fn t81_create_session_state() {
-    let s = store().await;
+async fn t81_create_session_state(s: TestStore) {
     let session = make_session("t1", "user:123:onboarding");
     s.create_session(&session).await.unwrap();
 
@@ -1926,9 +1767,7 @@ async fn t81_create_session_state() {
     assert_eq!(fetched.state, SessionState::Active);
 }
 
-#[tokio::test]
-async fn t82_get_session_state() {
-    let s = store().await;
+async fn t82_get_session_state(s: TestStore) {
     let session = make_session("t1", "user:456:checkout");
     s.create_session(&session).await.unwrap();
 
@@ -1941,9 +1780,7 @@ async fn t82_get_session_state() {
     assert_eq!(fetched.data["step"], 1);
 }
 
-#[tokio::test]
-async fn t83_update_session_state() {
-    let s = store().await;
+async fn t83_update_session_state(s: TestStore) {
     let session = make_session("t1", "user:789:flow");
     s.create_session(&session).await.unwrap();
 
@@ -1955,9 +1792,7 @@ async fn t83_update_session_state() {
     assert_eq!(fetched.state, SessionState::Completed);
 }
 
-#[tokio::test]
-async fn t84_delete_session_state() {
-    let s = store().await;
+async fn t84_delete_session_state(s: TestStore) {
     let session = make_session("t1", "user:del:flow");
     s.create_session(&session).await.unwrap();
 
@@ -1970,9 +1805,7 @@ async fn t84_delete_session_state() {
     assert_eq!(fetched.data["step"], 99);
 }
 
-#[tokio::test]
-async fn t85_session_state_isolation_between_instances() {
-    let s = store().await;
+async fn t85_session_state_isolation_between_instances(s: TestStore) {
     let session1 = make_session("t1", "session_1");
     let session2 = make_session("t1", "session_2");
     s.create_session(&session1).await.unwrap();
@@ -1992,9 +1825,7 @@ async fn t85_session_state_isolation_between_instances() {
 // Misc Operations (tests 86-90)
 // ===========================================================================
 
-#[tokio::test]
-async fn t86_storage_sequential_writes_persist_correctly() {
-    let s = store().await;
+async fn t86_storage_sequential_writes_persist_correctly(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2016,9 +1847,7 @@ async fn t86_storage_sequential_writes_persist_correctly() {
     assert_eq!(count, 10);
 }
 
-#[tokio::test]
-async fn t87_large_json_payload_stored_correctly() {
-    let s = store().await;
+async fn t87_large_json_payload_stored_correctly(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let mut inst = make_instance("t", seq.id);
@@ -2036,9 +1865,7 @@ async fn t87_large_json_payload_stored_correctly() {
     assert_eq!(items[999]["index"], 999);
 }
 
-#[tokio::test]
-async fn t88_unicode_in_metadata_preserved() {
-    let s = store().await;
+async fn t88_unicode_in_metadata_preserved(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let mut inst = make_instance("t", seq.id);
@@ -2058,9 +1885,7 @@ async fn t88_unicode_in_metadata_preserved() {
     assert_eq!(fetched.metadata["special"], "line1\nline2\ttab");
 }
 
-#[tokio::test]
-async fn t89_null_optional_fields_handled() {
-    let s = store().await;
+async fn t89_null_optional_fields_handled(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let mut inst = make_instance("t", seq.id);
@@ -2081,9 +1906,7 @@ async fn t89_null_optional_fields_handled() {
     assert!(fetched.parent_instance_id.is_none());
 }
 
-#[tokio::test]
-async fn t90_storage_handles_empty_string_fields() {
-    let s = store().await;
+async fn t90_storage_handles_empty_string_fields(s: TestStore) {
     let mut seq = make_sequence("t");
     seq.name = "empty_test".into();
     s.create_sequence(&seq).await.unwrap();
@@ -2104,9 +1927,7 @@ async fn t90_storage_handles_empty_string_fields() {
 // Budget-governed instances (feature: instance budgets)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn t91_budget_column_round_trips() {
-    let s = store().await;
+async fn t91_budget_column_round_trips(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2128,9 +1949,7 @@ async fn t91_budget_column_round_trips() {
     assert_eq!(budget.max_steps, Some(7));
 }
 
-#[tokio::test]
-async fn t92_budget_absent_reads_back_as_none() {
-    let s = store().await;
+async fn t92_budget_absent_reads_back_as_none(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2141,9 +1960,7 @@ async fn t92_budget_absent_reads_back_as_none() {
     assert!(fetched.budget.is_none());
 }
 
-#[tokio::test]
-async fn t93_budget_round_trips_through_batch_create_and_list() {
-    let s = store().await;
+async fn t93_budget_round_trips_through_batch_create_and_list(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2163,9 +1980,7 @@ async fn t93_budget_round_trips_through_batch_create_and_list() {
     assert!(fetched.budget.is_none());
 }
 
-#[tokio::test]
-async fn t94_merge_instance_metadata_preserves_existing_keys() {
-    let s = store().await;
+async fn t94_merge_instance_metadata_preserves_existing_keys(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
 
@@ -2191,11 +2006,9 @@ async fn t94_merge_instance_metadata_preserves_existing_keys() {
     assert_eq!(fetched.metadata["budget_breach"]["actual"], 4);
 }
 
-#[tokio::test]
-async fn t95_query_instance_usage_totals_sums_per_instance() {
+async fn t95_query_instance_usage_totals_sums_per_instance(s: TestStore) {
     use orch8_storage::TelemetryStore;
 
-    let s = store().await;
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -2243,9 +2056,7 @@ async fn t95_query_instance_usage_totals_sums_per_instance() {
 /// row survived, the fast path's memoization treated it as "already has
 /// output" and skipped the handler entirely, and the instance flipped
 /// straight to `completed` without the step ever re-running.
-#[tokio::test]
-async fn t96_delete_sentinel_block_outputs_clears_error_and_in_progress_markers() {
-    let s = store().await;
+async fn t96_delete_sentinel_block_outputs_clears_error_and_in_progress_markers(s: TestStore) {
     let seq = make_sequence("t");
     s.create_sequence(&seq).await.unwrap();
     let inst = make_instance("t", seq.id);
@@ -2313,4 +2124,120 @@ async fn t96_delete_sentinel_block_outputs_clears_error_and_in_progress_markers(
         preserved.output["result"], "ok",
         "a real completed output must survive sentinel cleanup"
     );
+}
+
+// Expand every shared test into a per-backend `#[tokio::test]` (see `common`).
+for_each_backend!(
+    t01_create_instance_and_get_by_id,
+    t02_create_instance_duplicate_id_fails,
+    t03_get_instance_nonexistent_returns_none,
+    t04_update_instance_state_from_scheduled_to_running,
+    t05_update_instance_state_sets_updated_at,
+    t06_list_instances_by_tenant,
+    t07_list_instances_by_state,
+    t08_list_instances_by_namespace,
+    t09_list_instances_pagination,
+    t10_count_instances_with_state_filter,
+    t11_conditional_update_state_succeeds_when_current_matches,
+    t12_conditional_update_state_fails_when_current_differs,
+    t13_get_instances_ready_to_run,
+    t14_update_instance_context_persists,
+    t15_create_instance_with_priority_high,
+    t16_list_instances_ordered_by_priority,
+    t17_list_instances_by_sequence_id,
+    t18_count_instances_by_state,
+    t19_create_instance_with_concurrency_key,
+    t20_create_instance_with_metadata,
+    t21_create_sequence_and_get,
+    t22_create_sequence_duplicate_id_error,
+    t23_get_sequence_nonexistent_returns_none,
+    t23b_get_sequences_returns_matches_and_omits_missing_ids,
+    t24_list_sequences_by_tenant,
+    t25_list_sequences_by_namespace,
+    t26_update_sequence_version,
+    t27_delete_sequence,
+    t28_get_sequence_by_name_and_namespace,
+    t29_list_sequences_pagination,
+    t30_create_sequence_with_interceptors,
+    t31_sequence_deprecated_flag,
+    t32_list_sequences_filtered_by_status,
+    t33_sequence_blocks_json_roundtrip,
+    t34_create_multiple_sequences_same_tenant,
+    t35_sequence_with_complex_nested_blocks,
+    t36_execution_tree_initially_empty,
+    t37_append_execution_node_and_retrieve,
+    t38_update_node_state_to_completed,
+    t39_update_node_state_to_failed,
+    t40_get_execution_tree_ordered,
+    t41_get_node_by_block_id,
+    t42_multiple_nodes_same_instance,
+    t43_execution_tree_with_parallel_nodes,
+    t44_execution_tree_node_output_stored,
+    t45_execution_tree_node_error_stored,
+    t46_execution_node_duration_tracking,
+    t47_execution_tree_after_retry,
+    t48_clear_execution_tree,
+    t49_execution_tree_large_sequence,
+    t50_execution_node_attempt_counter,
+    t51_create_signal_and_retrieve,
+    t52_get_pending_signals_only_undelivered,
+    t53_mark_signal_delivered,
+    t54_multiple_signals_same_instance,
+    t55_signals_ordered_by_created_at,
+    t56_all_signal_types_persist_correctly,
+    t61_get_pending_signals_empty_when_all_delivered,
+    t62_signal_belongs_to_correct_instance,
+    t63_bulk_signal_creation,
+    t64_signal_payload_json_roundtrip,
+    t65_mark_signal_delivered_sets_timestamp,
+    t66_append_audit_log_entry,
+    t67_list_audit_log_by_instance,
+    t68_audit_log_limit_parameter,
+    t69_audit_log_ordered_by_time,
+    t70_audit_log_with_details_json,
+    t71_audit_log_state_transition_entry,
+    t72_audit_log_custom_event_entry,
+    t73_audit_log_empty_for_new_instance,
+    t74_multiple_audit_entries,
+    t75_audit_log_with_block_id,
+    t76_store_credential_and_retrieve,
+    t77_credential_by_tenant_and_key,
+    t78_update_credential_value,
+    t79_delete_credential,
+    t80_list_credentials_by_tenant,
+    t80b_get_credential_is_tenant_scoped,
+    t81_create_session_state,
+    t82_get_session_state,
+    t83_update_session_state,
+    t84_delete_session_state,
+    t85_session_state_isolation_between_instances,
+    t86_storage_sequential_writes_persist_correctly,
+    t87_large_json_payload_stored_correctly,
+    t88_unicode_in_metadata_preserved,
+    t89_null_optional_fields_handled,
+    t90_storage_handles_empty_string_fields,
+    t91_budget_column_round_trips,
+    t92_budget_absent_reads_back_as_none,
+    t93_budget_round_trips_through_batch_create_and_list,
+    t94_merge_instance_metadata_preserves_existing_keys,
+    t95_query_instance_usage_totals_sums_per_instance,
+    t96_delete_sentinel_block_outputs_clears_error_and_in_progress_markers,
+    core_conformance_suite_passes,
+);
+
+// ---------------------------------------------------------------------------
+// Public core conformance suite
+// ---------------------------------------------------------------------------
+
+/// The public `run_core_conformance` contract must hold on every shipped
+/// backend, not only the SQLite unit test inside `conformance.rs`.
+async fn core_conformance_suite_passes(s: TestStore) {
+    let report = orch8_storage::conformance::run_core_conformance(&*s)
+        .await
+        .unwrap_or_else(|e| panic!("{} backend failed conformance: {e}", s.kind().name()));
+    assert_eq!(report.checks.len(), 9);
+    let inst = s.get_instance(report.instance_id).await.unwrap().unwrap();
+    assert_eq!(inst.state, InstanceState::Cancelled);
+    let seq = s.get_sequence(report.sequence_id).await.unwrap().unwrap();
+    assert!(seq.deprecated);
 }

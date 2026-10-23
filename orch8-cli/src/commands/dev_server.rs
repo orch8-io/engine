@@ -75,6 +75,8 @@ impl DevServer {
             continuity_crypto: None,
             federation_peers: Arc::new(Vec::new()),
             continuity_lab_enabled: false,
+            continuity_trusted_signing_keys: Arc::new(Default::default()),
+            worker_protocol: orch8_types::worker::WorkerProtocolHints::default(),
         };
 
         let cb_routes = orch8_api::circuit_breakers::routes().with_state(app_state.clone());

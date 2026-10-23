@@ -149,6 +149,91 @@ pub struct WorkerTask {
     pub created_at: DateTime<Utc>,
 }
 
+/// Lease/heartbeat cadence the server advertises to external workers so they
+/// never have to learn the reaper interval from prose. Every value is in
+/// seconds/milliseconds and is populated from `[engine]` config at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WorkerProtocolHints {
+    /// How long a claim stays valid without a heartbeat before the reaper
+    /// returns the task to the queue (`engine.worker_reaper_stale_secs`).
+    pub lease_secs: u64,
+    /// Recommended heartbeat cadence — a fraction of `lease_secs` so a single
+    /// missed beat does not lose the lease.
+    pub heartbeat_interval_secs: u64,
+    /// Suggested delay before the next poll when a poll returned no tasks.
+    pub empty_poll_after_ms: u64,
+}
+
+impl WorkerProtocolHints {
+    /// Derive hints from the reaper stale threshold: heartbeat at one third
+    /// of the lease (minimum 1s) and a 1s empty-poll backoff.
+    #[must_use]
+    pub const fn from_lease_secs(lease_secs: u64) -> Self {
+        let lease_secs = if lease_secs == 0 { 1 } else { lease_secs };
+        let heartbeat_interval_secs = {
+            let third = lease_secs / 3;
+            if third == 0 { 1 } else { third }
+        };
+        Self {
+            lease_secs,
+            heartbeat_interval_secs,
+            empty_poll_after_ms: 1000,
+        }
+    }
+}
+
+impl Default for WorkerProtocolHints {
+    fn default() -> Self {
+        Self::from_lease_secs(60)
+    }
+}
+
+/// A claimed [`WorkerTask`] plus the lease hints a worker needs to keep it.
+/// Serializes as the task object with three additional fields, so existing
+/// clients that parse `WorkerTask` keep working unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LeasedWorkerTask {
+    #[serde(flatten)]
+    pub task: WorkerTask,
+    /// Instant at which the reaper may reclaim the task if no heartbeat has
+    /// arrived. `None` when the task carries no claim timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Lease length in seconds (see [`WorkerProtocolHints::lease_secs`]).
+    #[serde(default)]
+    pub lease_secs: u64,
+    /// Recommended heartbeat cadence in seconds.
+    #[serde(default)]
+    pub heartbeat_interval_secs: u64,
+}
+
+impl LeasedWorkerTask {
+    /// Attach lease hints to a freshly claimed task. The expiry is computed
+    /// from the claim time (falling back to the heartbeat, then `now`).
+    #[must_use]
+    pub fn new(task: WorkerTask, hints: &WorkerProtocolHints) -> Self {
+        let anchor = task
+            .heartbeat_at
+            .or(task.claimed_at)
+            .unwrap_or_else(Utc::now);
+        let lease_expires_at = i64::try_from(hints.lease_secs)
+            .ok()
+            .and_then(|secs| anchor.checked_add_signed(chrono::Duration::seconds(secs)));
+        Self {
+            task,
+            lease_expires_at,
+            lease_secs: hints.lease_secs,
+            heartbeat_interval_secs: hints.heartbeat_interval_secs,
+        }
+    }
+
+    /// Wrap a batch of claimed tasks.
+    #[must_use]
+    pub fn wrap_all(tasks: Vec<WorkerTask>, hints: &WorkerProtocolHints) -> Vec<Self> {
+        tasks.into_iter().map(|task| Self::new(task, hints)).collect()
+    }
+}
+
 /// Proof that a caller owns one specific claim generation of a worker task.
 /// A stable worker identifier alone is insufficient because a restarted
 /// process may reuse it while an older process is still running.

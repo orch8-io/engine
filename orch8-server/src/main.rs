@@ -115,10 +115,28 @@ impl NodeAssembly {
     }
 }
 
+/// Historical capsule signing keys trusted by provenance verification,
+/// parsed once at startup. A malformed value is a startup error (surfaced by
+/// the preflight) rather than a per-request 500.
+fn configured_trusted_signing_keys() -> Result<std::collections::BTreeMap<String, String>, String> {
+    match std::env::var(orch8_api::CONTINUITY_TRUSTED_SIGNING_KEYS_ENV) {
+        Ok(encoded) if !encoded.trim().is_empty() => orch8_api::parse_trusted_signing_keys(&encoded)
+            .map_err(|error| {
+                format!(
+                    "{} is invalid: {error}",
+                    orch8_api::CONTINUITY_TRUSTED_SIGNING_KEYS_ENV
+                )
+            }),
+        _ => Ok(std::collections::BTreeMap::new()),
+    }
+}
+
+/// Validate config + environment before any listener binds. On success returns
+/// the parsed trusted-signing-key map so it is not parsed twice.
 fn automatic_startup_preflight(
     config: &EngineConfig,
     assembly: NodeAssembly,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
     let mut errors = config.validate().err().unwrap_or_default();
     if config.database.url.is_empty() {
         errors.push("database.url must be configured for startup".into());
@@ -194,9 +212,16 @@ fn automatic_startup_preflight(
     if mobile_sync_enabled && !assembly.full_api {
         errors.push("ORCH8_MOBILE_SYNC_ENABLED requires an all_in_one or control node".into());
     }
+    let continuity_trusted_signing_keys = match configured_trusted_signing_keys() {
+        Ok(keys) => keys,
+        Err(error) => {
+            errors.push(error);
+            std::collections::BTreeMap::new()
+        }
+    };
 
     if errors.is_empty() {
-        Ok(())
+        Ok(continuity_trusted_signing_keys)
     } else {
         anyhow::bail!(
             "automatic startup preflight failed:\n  - {}",
@@ -252,7 +277,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("config loader panicked")??;
     let assembly = NodeAssembly::for_role(config.node.role);
-    automatic_startup_preflight(&config, assembly)?;
+    let continuity_trusted_signing_keys = automatic_startup_preflight(&config, assembly)?;
     let managed_control = if config.node.managed_control_endpoint.is_empty() {
         None
     } else {
@@ -318,6 +343,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_token.clone(),
         cb_registry.clone(),
         engine_ready.clone(),
+        continuity_trusted_signing_keys,
     );
     let push_outbox_handle = assembly.push_outbox.then(|| {
         spawn_push_outbox_worker(
@@ -479,6 +505,7 @@ fn build_app_state(
     shutdown: CancellationToken,
     cb_registry: Arc<CircuitBreakerRegistry>,
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
+    continuity_trusted_signing_keys: std::collections::BTreeMap<String, String>,
 ) -> AppState {
     let mobile_sync_enabled =
         std::env::var("ORCH8_MOBILE_SYNC_ENABLED").is_ok_and(|v| v == "true" || v == "1");
@@ -531,6 +558,10 @@ fn build_app_state(
         federation_peers: Arc::new(federation_peers),
         continuity_lab_enabled: std::env::var("ORCH8_CONTINUITY_LAB_ENABLED")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
+        continuity_trusted_signing_keys: Arc::new(continuity_trusted_signing_keys),
+        worker_protocol: orch8_types::worker::WorkerProtocolHints::from_lease_secs(
+            config.engine.worker_reaper_stale_secs,
+        ),
     }
 }
 

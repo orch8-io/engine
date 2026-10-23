@@ -1,9 +1,10 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// Defines lifecycle hooks attached to a sequence.
 /// Interceptors are evaluated at defined points in the instance lifecycle.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct InterceptorDef {
     /// Called before each step executes. Can modify context or skip the step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -23,7 +24,7 @@ pub struct InterceptorDef {
 }
 
 /// An interceptor action that fires at a lifecycle point.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct InterceptorAction {
     /// Handler name to invoke (must be registered or dispatched to external worker).
     pub handler: String,

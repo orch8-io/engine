@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -9,7 +10,9 @@ use uuid::Uuid;
 #[sqlx(transparent)]
 pub struct InstanceId(Uuid);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema, JsonSchema,
+)]
 #[sqlx(transparent)]
 pub struct SequenceId(Uuid);
 
@@ -30,10 +33,12 @@ pub struct SequenceId(Uuid);
 #[sqlx(transparent)]
 pub struct ExecutionNodeId(Uuid);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema, JsonSchema,
+)]
 pub struct BlockId(String);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, ToSchema, JsonSchema)]
 pub struct TenantId(String);
 
 struct TenantIdVisitor;
@@ -69,7 +74,7 @@ impl<'de> serde::Deserialize<'de> for TenantId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema, JsonSchema)]
 pub struct Namespace(String);
 
 /// Resource key for rate limiting, e.g. "mailbox:john@acme.com"

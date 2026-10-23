@@ -14,6 +14,7 @@ pub mod dlq_groups;
 pub mod entitlements;
 pub mod error;
 pub mod events;
+pub mod extract;
 pub mod health;
 pub mod input_schema;
 pub mod inspect;
@@ -24,6 +25,7 @@ pub mod mobile_sync;
 pub mod model_pricing;
 #[allow(clippy::needless_for_each)]
 pub mod openapi;
+pub mod pagination;
 pub mod plugins;
 pub mod pools;
 pub mod preflight;
@@ -117,6 +119,57 @@ pub struct AppState {
     /// Enables bounded fault/state-space lab endpoints. Kept off in
     /// production unless an operator explicitly opts in.
     pub continuity_lab_enabled: bool,
+    /// Historical capsule signing keys (`key_id -> base64 public key`) that
+    /// provenance verification still trusts. Parsed once at startup from
+    /// `ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON`; a malformed value fails
+    /// startup instead of surfacing as a per-request 500.
+    pub continuity_trusted_signing_keys: Arc<std::collections::BTreeMap<String, String>>,
+    /// Lease/heartbeat cadence advertised to external workers.
+    pub worker_protocol: orch8_types::worker::WorkerProtocolHints,
+}
+
+impl AppState {
+    /// Fetch an instance, mapping storage errors, turning a missing row into
+    /// `404 not_found`, and enforcing tenant isolation (a foreign-tenant row is
+    /// also reported as `404` so existence is never leaked). This is the
+    /// canonical "load then check tenant" shape that handlers previously
+    /// hand-rolled at every call site.
+    pub async fn load_instance(
+        &self,
+        tenant: &auth::OptionalTenant,
+        id: orch8_types::ids::InstanceId,
+    ) -> Result<orch8_types::instance::TaskInstance, error::ApiError> {
+        let label = format!("instance {}", id.into_uuid());
+        let instance = self
+            .storage
+            .get_instance(id)
+            .await
+            .map_err(|e| error::ApiError::from_storage(e, "instance"))?
+            .ok_or_else(|| error::ApiError::NotFound(label.clone()))?;
+        auth::enforce_tenant_access(tenant, &instance.tenant_id, &label)?;
+        Ok(instance)
+    }
+}
+
+/// Environment variable holding the historical trusted capsule signing keys.
+pub const CONTINUITY_TRUSTED_SIGNING_KEYS_ENV: &str = "ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON";
+
+/// Parse the historical trusted signing key map used by provenance
+/// verification. Accepts a JSON object of `key_id -> base64 public key`.
+pub fn parse_trusted_signing_keys(
+    encoded: &str,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let keys: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(encoded).map_err(|error| error.to_string())?;
+    for (key_id, public_key) in &keys {
+        if key_id.trim().is_empty() {
+            return Err("trusted signing key ids must be non-empty".into());
+        }
+        if public_key.trim().is_empty() {
+            return Err(format!("trusted signing key {key_id} has an empty public key"));
+        }
+    }
+    Ok(keys)
 }
 
 #[derive(Clone)]

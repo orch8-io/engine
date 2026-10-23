@@ -6,3 +6,7 @@ rustflags = ["-C", "link-arg=-mios-simulator-version-min=16.0"]
 
 [target.x86_64-apple-ios]
 rustflags = ["-C", "link-arg=-mios-simulator-version-min=16.0"]
+
+# TEMP(review-fixes): share the main tree build cache; removed before merge.
+[build]
+target-dir = "../../target"
