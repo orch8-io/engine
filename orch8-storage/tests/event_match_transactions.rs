@@ -1,5 +1,5 @@
 //! Consumption, join progress and a sealed notification form one durable write.
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use orch8_storage::{
     backend_test,
     testing::{
@@ -36,7 +36,8 @@ async fn fixture(b: &TestBackend) -> (EventWait, EventEnvelope) {
         status: WaitStatus::Waiting,
         matched_names: vec![],
         matched_event_ids: vec![],
-        created_at: Utc::now(),
+        // Always exercise sub-microsecond input, independently of the host clock.
+        created_at: Utc::now().with_nanosecond(123_456_789).unwrap(),
     };
     let wait = b.storage.register_event_wait(&wait).await.unwrap();
     let event = EventEnvelope {
@@ -48,7 +49,7 @@ async fn fixture(b: &TestBackend) -> (EventWait, EventEnvelope) {
         payload: json!({"fact":true}),
         status: EventStatus::Pending,
         consumed_by: None,
-        received_at: Utc::now(),
+        received_at: Utc::now().with_nanosecond(987_654_321).unwrap(),
     };
     b.storage.ingest_event(&event).await.unwrap();
     let event = b.storage.get_event(event.id).await.unwrap().unwrap();

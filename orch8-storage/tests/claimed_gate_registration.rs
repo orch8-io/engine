@@ -1,5 +1,5 @@
 //! Gate registrations serialize with recovery under the original parent claim.
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use orch8_storage::{
     StorageBackend, backend_test,
     testing::fixtures::{InstanceBuilder, SequenceBuilder},
@@ -107,7 +107,11 @@ backend_test!(async fn registration_cannot_cross_the_parent_tenant(b) {
 backend_test!(async fn reset_deletes_only_requested_blocks_and_requires_the_original_claim(b) {
     let p = parent(b.storage.as_ref()).await; let token = p.claimed_at.unwrap();
     let mut keep = registration(&p); keep.block_id = "keep".into();
+    // Exercise precision that a microsecond-resolution host clock cannot generate.
+    keep.created_at = keep.created_at.with_nanosecond(123_456_789).unwrap();
     b.storage.upsert_event_wait_claimed(&keep, token).await.unwrap();
+    // Compare persisted snapshots, including each backend's timestamp precision.
+    let keep_before = b.storage.get_event_wait(p.id, "keep").await.unwrap().unwrap();
     let mut blocks = Vec::new();
     for i in 0..405 {
         let mut wait = registration(&p); wait.block_id = format!("step-{i}");
@@ -122,5 +126,5 @@ backend_test!(async fn reset_deletes_only_requested_blocks_and_requires_the_orig
     assert!(b.storage.get_event_wait(p.id, &blocks[0]).await.unwrap().is_some());
     assert_eq!(b.storage.delete_event_waits_for_blocks_claimed(p.id, &blocks, replacement.claimed_at.unwrap()).await.unwrap(), Some(405));
     for block in &blocks { assert!(b.storage.get_event_wait(p.id, block).await.unwrap().is_none()); }
-    assert_eq!(b.storage.get_event_wait(p.id, "keep").await.unwrap().unwrap(), keep);
+    assert_eq!(b.storage.get_event_wait(p.id, "keep").await.unwrap().unwrap(), keep_before);
 });
