@@ -139,11 +139,11 @@ still shows the earlier failure path; recovery does not erase the incident.
 
 Use this decision rule in real systems:
 
-| Situation | Correct action |
-|---|---|
-| Transient dependency failure and attempts remain | Let the sequence retry automatically |
-| Attempts exhausted but the dependency is now healthy | Manually retry the failed instance or a controlled batch |
-| Workflow logic or handler contract changed | Publish a new immutable sequence version, validate it, then decide how to migrate or replay affected work |
+| Situation                                            | Correct action                                                                                            |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Transient dependency failure and attempts remain     | Let the sequence retry automatically                                                                      |
+| Attempts exhausted but the dependency is now healthy | Manually retry the failed instance or a controlled batch                                                  |
+| Workflow logic or handler contract changed           | Publish a new immutable sequence version, validate it, then decide how to migrate or replay affected work |
 
 A retry is not a release. A retry re-executes failed work under the instance's
 existing definition. A release changes routing for newly created instances.
@@ -196,11 +196,10 @@ Next: [Ship a guarded release](06-production-release.md).
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Instance completes instead of failing | The failure switch was not added or exported | Confirm `WORKER_FAILURE_MODE=always` in the worker process |
-| Instance waits forever | No worker is polling | Start the worker and compare the handler name |
-| Retry immediately fails again | The failing worker is still running, or another failing replica exists | Stop all failing replicas before starting the healthy worker |
-| `instance retry` is rejected | The instance is not terminal `failed` | Wait for attempts to exhaust and inspect its current state |
-| More than one worker processes attempts | Multiple worker processes are running | This is supported; stop extras to make the tutorial log easier to follow |
-
+| Symptom                                 | Likely cause                                                           | Fix                                                                      |
+| --------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Instance completes instead of failing   | The failure switch was not added or exported                           | Confirm `WORKER_FAILURE_MODE=always` in the worker process               |
+| Instance waits forever                  | No worker is polling                                                   | Start the worker and compare the handler name                            |
+| Retry immediately fails again           | The failing worker is still running, or another failing replica exists | Stop all failing replicas before starting the healthy worker             |
+| `instance retry` is rejected            | The instance is not terminal `failed`                                  | Wait for attempts to exhaust and inspect its current state               |
+| More than one worker processes attempts | Multiple worker processes are running                                  | This is supported; stop extras to make the tutorial log easier to follow |

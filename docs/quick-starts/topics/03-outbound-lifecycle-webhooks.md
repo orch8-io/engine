@@ -37,7 +37,8 @@ createServer((req, res) => {
       .update(body)
       .digest("hex")}`;
 
-    const valid = supplied.length === expected.length &&
+    const valid =
+      supplied.length === expected.length &&
       timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
     if (!valid) {
       res.writeHead(401).end("invalid signature");
@@ -146,8 +147,8 @@ For retry timing, redelivery endpoints, and subscriber rules, use the
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Receiver reports invalid signature | Receiver and engine secrets differ | Export the same secret in both processes and restart Orch8 |
-| No event arrives | Server was not restarted with webhook variables | Inspect the startup environment and trigger a new instance |
-| Duplicate event appears | At-least-once retry occurred | Persist the composite deduplication key instead of using memory in production |
+| Symptom                            | Likely cause                                    | Fix                                                                           |
+| ---------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------- |
+| Receiver reports invalid signature | Receiver and engine secrets differ              | Export the same secret in both processes and restart Orch8                    |
+| No event arrives                   | Server was not restarted with webhook variables | Inspect the startup environment and trigger a new instance                    |
+| Duplicate event appears            | At-least-once retry occurred                    | Persist the composite deduplication key instead of using memory in production |

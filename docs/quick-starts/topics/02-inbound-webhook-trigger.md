@@ -131,10 +131,9 @@ Activepieces polling triggers. Do not confuse this inbound endpoint with
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `401` on the first delivery | Signed bytes differ from sent bytes | Use `--data-binary "$BODY"` and do not reformat after signing |
-| `401` after a long pause | Timestamp is outside the replay window | Create a fresh timestamp, nonce, and signature |
-| `404` | Slug is wrong, disabled, or not a webhook trigger | Inspect it through the authenticated management endpoint |
-| `400 invalid webhook JSON` | The signed body is not valid JSON | Validate with `printf '%s' "$BODY" | jq` before signing |
-
+| Symptom                     | Likely cause                                      | Fix                                                           |
+| --------------------------- | ------------------------------------------------- | ------------------------------------------------------------- | ------------------ |
+| `401` on the first delivery | Signed bytes differ from sent bytes               | Use `--data-binary "$BODY"` and do not reformat after signing |
+| `401` after a long pause    | Timestamp is outside the replay window            | Create a fresh timestamp, nonce, and signature                |
+| `404`                       | Slug is wrong, disabled, or not a webhook trigger | Inspect it through the authenticated management endpoint      |
+| `400 invalid webhook JSON`  | The signed body is not valid JSON                 | Validate with `printf '%s' "$BODY"                            | jq` before signing |

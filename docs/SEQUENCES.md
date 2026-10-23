@@ -19,15 +19,15 @@ export ORCH8_TENANT_ID=demo
 
 Use these building blocks:
 
-| Concept | What it is | Example |
-|---|---|---|
-| Sequence | Versioned JSON workflow definition | `customer-onboarding` v3 |
-| Block | One unit of workflow structure | `step`, `router`, `parallel`, `try_catch` |
-| Step | Calls a handler | `send_email`, `llm_call`, `wasm://normalize` |
-| Handler | Built-in, worker, plugin, or integration | `http_request`, `order_charge`, `grpc://risk-score` |
-| Instance | One running execution of a sequence | onboarding for `user_123` |
-| Trigger | Named entry point that creates instances | `POST /triggers/signup/fire` |
-| Plugin | Packaged handler code | WASM module or gRPC sidecar |
+| Concept  | What it is                               | Example                                             |
+| -------- | ---------------------------------------- | --------------------------------------------------- |
+| Sequence | Versioned JSON workflow definition       | `customer-onboarding` v3                            |
+| Block    | One unit of workflow structure           | `step`, `router`, `parallel`, `try_catch`           |
+| Step     | Calls a handler                          | `send_email`, `llm_call`, `wasm://normalize`        |
+| Handler  | Built-in, worker, plugin, or integration | `http_request`, `order_charge`, `grpc://risk-score` |
+| Instance | One running execution of a sequence      | onboarding for `user_123`                           |
+| Trigger  | Named entry point that creates instances | `POST /triggers/signup/fire`                        |
+| Plugin   | Packaged handler code                    | WASM module or gRPC sidecar                         |
 
 Choose the simplest execution path that works:
 
@@ -96,25 +96,25 @@ When generating a sequence, emit one complete JSON object.
 
 Required top-level fields:
 
-| Field | Rule |
-|---|---|
-| `id` | UUID string. Use a new ID for each published version. |
-| `tenant_id` | Tenant that owns this sequence. |
-| `namespace` | Usually `default`; use namespaces for app domains or environments. |
-| `name` | Stable workflow name, e.g. `invoice-collection`. |
-| `version` | Integer. Increment when workflow behavior changes. |
-| `deprecated` | Boolean. Use `false` for active versions. |
-| `blocks` | Non-empty array of blocks. Every block ID must be globally unique inside the sequence. |
-| `created_at` | RFC 3339 timestamp string. |
+| Field        | Rule                                                                                   |
+| ------------ | -------------------------------------------------------------------------------------- |
+| `id`         | UUID string. Use a new ID for each published version.                                  |
+| `tenant_id`  | Tenant that owns this sequence.                                                        |
+| `namespace`  | Usually `default`; use namespaces for app domains or environments.                     |
+| `name`       | Stable workflow name, e.g. `invoice-collection`.                                       |
+| `version`    | Integer. Increment when workflow behavior changes.                                     |
+| `deprecated` | Boolean. Use `false` for active versions.                                              |
+| `blocks`     | Non-empty array of blocks. Every block ID must be globally unique inside the sequence. |
+| `created_at` | RFC 3339 timestamp string.                                                             |
 
 Optional top-level fields:
 
-| Field | Use |
-|---|---|
+| Field          | Use                                                                                                                                                                    |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `input_schema` | JSON Schema validated against `context.data` at instance create. A create whose data fails validation is rejected with HTTP 422. Also drives the dashboard's run form. |
-| `sla` | Alert-only SLA policy: `{ "max_runtime": ms, "max_step_runtime": ms }`. A breach fires an `instance.sla_breached` webhook and a metric; the instance keeps running. |
-| `on_failure` | Best-effort cleanup blocks run when the instance reaches terminal `Failed`. Errors are swallowed. |
-| `on_cancel` | Same as `on_failure`, for terminal `Cancelled`. |
+| `sla`          | Alert-only SLA policy: `{ "max_runtime": ms, "max_step_runtime": ms }`. A breach fires an `instance.sla_breached` webhook and a metric; the instance keeps running.    |
+| `on_failure`   | Best-effort cleanup blocks run when the instance reaches terminal `Failed`. Errors are swallowed.                                                                      |
+| `on_cancel`    | Same as `on_failure`, for terminal `Cancelled`.                                                                                                                        |
 
 Validation limits (enforced at publish time):
 
@@ -178,23 +178,23 @@ Runs one handler.
 
 Common step fields:
 
-| Field | Use |
-|---|---|
-| `handler` | Built-in, external worker name, plugin handler, or integration handler. |
-| `params` | Static JSON config passed to the handler. |
-| `retry` | Automatic retry/backoff for failures. |
-| `timeout` | Max runtime in milliseconds. A timed-out attempt is a retryable failure: `retry` applies, and a surrounding `try_catch` can catch it. |
-| `delay` | Durable wait before running the step. |
-| `rate_limit_key` | Throttle this step using a named rate limit. |
-| `send_window` | Run only during specific local hours/days. |
-| `wait_for_input` | Pause for human input. |
-| `queue_name` | Route external worker work to a named queue. |
-| `deadline` | SLA duration in milliseconds. |
-| `on_deadline_breach` | Handler to run when the SLA is breached. |
-| `fallback_handler` | Alternate handler when circuit breaker is open. |
-| `cache_key` | Cache step output by template-resolved key. |
-| `context_access` | Restrict which context sections/fields this step can read, e.g. `{ "data": { "fields": ["user_id"] } }`. |
-| `cancellable` | Set `false` to let this step finish even if the instance is cancelled. Default `true`. |
+| Field                | Use                                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `handler`            | Built-in, external worker name, plugin handler, or integration handler.                                                               |
+| `params`             | Static JSON config passed to the handler.                                                                                             |
+| `retry`              | Automatic retry/backoff for failures.                                                                                                 |
+| `timeout`            | Max runtime in milliseconds. A timed-out attempt is a retryable failure: `retry` applies, and a surrounding `try_catch` can catch it. |
+| `delay`              | Durable wait before running the step.                                                                                                 |
+| `rate_limit_key`     | Throttle this step using a named rate limit.                                                                                          |
+| `send_window`        | Run only during specific local hours/days.                                                                                            |
+| `wait_for_input`     | Pause for human input.                                                                                                                |
+| `queue_name`         | Route external worker work to a named queue.                                                                                          |
+| `deadline`           | SLA duration in milliseconds.                                                                                                         |
+| `on_deadline_breach` | Handler to run when the SLA is breached.                                                                                              |
+| `fallback_handler`   | Alternate handler when circuit breaker is open.                                                                                       |
+| `cache_key`          | Cache step output by template-resolved key.                                                                                           |
+| `context_access`     | Restrict which context sections/fields this step can read, e.g. `{ "data": { "fields": ["user_id"] } }`.                              |
+| `cancellable`        | Set `false` to let this step finish even if the instance is cancelled. Default `true`.                                                |
 
 ### Parallel
 
@@ -206,13 +206,28 @@ Run independent branches and continue when all complete.
   "id": "order_preflight",
   "branches": [
     [
-      { "type": "step", "id": "validate_order", "handler": "order_validate", "params": {} }
+      {
+        "type": "step",
+        "id": "validate_order",
+        "handler": "order_validate",
+        "params": {}
+      }
     ],
     [
-      { "type": "step", "id": "charge_card", "handler": "order_charge", "params": {} }
+      {
+        "type": "step",
+        "id": "charge_card",
+        "handler": "order_charge",
+        "params": {}
+      }
     ],
     [
-      { "type": "step", "id": "reserve_inventory", "handler": "order_reserve", "params": {} }
+      {
+        "type": "step",
+        "id": "reserve_inventory",
+        "handler": "order_reserve",
+        "params": {}
+      }
     ]
   ]
 }
@@ -233,10 +248,20 @@ Run competing branches and keep the first result.
   "semantics": "first_to_succeed",
   "branches": [
     [
-      { "type": "step", "id": "fetch_primary", "handler": "primary_api", "params": {} }
+      {
+        "type": "step",
+        "id": "fetch_primary",
+        "handler": "primary_api",
+        "params": {}
+      }
     ],
     [
-      { "type": "step", "id": "fetch_backup", "handler": "backup_api", "params": {} }
+      {
+        "type": "step",
+        "id": "fetch_backup",
+        "handler": "backup_api",
+        "params": {}
+      }
     ]
   ]
 }
@@ -258,18 +283,33 @@ Choose the first matching route.
     {
       "condition": "context.data.plan == \"enterprise\"",
       "blocks": [
-        { "type": "step", "id": "assign_csm", "handler": "assign_csm", "params": {} }
+        {
+          "type": "step",
+          "id": "assign_csm",
+          "handler": "assign_csm",
+          "params": {}
+        }
       ]
     },
     {
       "condition": "context.data.plan == \"trial\"",
       "blocks": [
-        { "type": "step", "id": "send_trial_tips", "handler": "send_email", "params": { "template": "trial_tips" } }
+        {
+          "type": "step",
+          "id": "send_trial_tips",
+          "handler": "send_email",
+          "params": { "template": "trial_tips" }
+        }
       ]
     }
   ],
   "default": [
-    { "type": "step", "id": "send_standard_tips", "handler": "send_email", "params": { "template": "standard_tips" } }
+    {
+      "type": "step",
+      "id": "send_standard_tips",
+      "handler": "send_email",
+      "params": { "template": "standard_tips" }
+    }
   ]
 }
 ```
@@ -285,13 +325,28 @@ Recover from failures.
   "type": "try_catch",
   "id": "charge_with_backup",
   "try_block": [
-    { "type": "step", "id": "charge_primary", "handler": "stripe_charge", "params": {} }
+    {
+      "type": "step",
+      "id": "charge_primary",
+      "handler": "stripe_charge",
+      "params": {}
+    }
   ],
   "catch_block": [
-    { "type": "step", "id": "charge_backup", "handler": "braintree_charge", "params": {} }
+    {
+      "type": "step",
+      "id": "charge_backup",
+      "handler": "braintree_charge",
+      "params": {}
+    }
   ],
   "finally_block": [
-    { "type": "step", "id": "record_payment_attempt", "handler": "log", "params": { "event": "payment_attempted" } }
+    {
+      "type": "step",
+      "id": "record_payment_attempt",
+      "handler": "log",
+      "params": { "event": "payment_attempted" }
+    }
   ]
 }
 ```
@@ -309,7 +364,12 @@ Repeat while a condition is true.
   "condition": "context.data.done != true",
   "max_iterations": 10,
   "body": [
-    { "type": "step", "id": "think", "handler": "llm_call", "params": { "provider": "openai", "model": "gpt-5.6-luna" } },
+    {
+      "type": "step",
+      "id": "think",
+      "handler": "llm_call",
+      "params": { "provider": "openai", "model": "gpt-5.6-luna" }
+    },
     { "type": "step", "id": "act", "handler": "tool_call", "params": {} }
   ]
 }
@@ -331,7 +391,12 @@ Process each item in a collection.
   "item_var": "item",
   "max_iterations": 500,
   "body": [
-    { "type": "step", "id": "process_item", "handler": "process_item", "params": { "item": "{{item}}" } }
+    {
+      "type": "step",
+      "id": "process_item",
+      "handler": "process_item",
+      "params": { "item": "{{item}}" }
+    }
   ]
 }
 ```
@@ -372,14 +437,24 @@ Send traffic to weighted variants.
       "name": "control",
       "weight": 70,
       "blocks": [
-        { "type": "step", "id": "send_control_subject", "handler": "send_email", "params": { "subject": "Welcome" } }
+        {
+          "type": "step",
+          "id": "send_control_subject",
+          "handler": "send_email",
+          "params": { "subject": "Welcome" }
+        }
       ]
     },
     {
       "name": "variant_a",
       "weight": 30,
       "blocks": [
-        { "type": "step", "id": "send_variant_subject", "handler": "send_email", "params": { "subject": "Your workspace is ready" } }
+        {
+          "type": "step",
+          "id": "send_variant_subject",
+          "handler": "send_email",
+          "params": { "subject": "Your workspace is ready" }
+        }
       ]
     }
   ]
@@ -397,8 +472,18 @@ Protect critical blocks from cancellation until they complete.
   "type": "cancellation_scope",
   "id": "commit_payment",
   "blocks": [
-    { "type": "step", "id": "capture_payment", "handler": "capture_payment", "params": {} },
-    { "type": "step", "id": "write_ledger", "handler": "write_ledger", "params": {} }
+    {
+      "type": "step",
+      "id": "capture_payment",
+      "handler": "capture_payment",
+      "params": {}
+    },
+    {
+      "type": "step",
+      "id": "write_ledger",
+      "handler": "write_ledger",
+      "params": {}
+    }
   ]
 }
 ```
@@ -425,7 +510,7 @@ Expression roots are `context.data`, `context.config`, `data`, `config`,
 `instance_id`. Example:
 
 ```json
-{"when": "data.plan == \"pro\" && len(steps.lookup.items) > 0"}
+{ "when": "data.plan == \"pro\" && len(steps.lookup.items) > 0" }
 ```
 
 Templates use `{{ path }}` and the same data/output aliases. A template that
@@ -436,7 +521,7 @@ inside a larger string produces text. Supported pipe filters are `upper`,
 available only in handlers that explicitly supply local composite state.
 
 ```json
-{"message": "Hello {{ data.user.name | default(\"friend\") | trim }}"}
+{ "message": "Hello {{ data.user.name | default(\"friend\") | trim }}" }
 ```
 
 `saga` steps use the same template rules. A `steps.<block-id>` reference and
@@ -490,7 +575,7 @@ Rules:
 
 Two side-effecting built-ins cover the most common outbound messages. Both
 run through the effect ledger (a crash after the provider may have accepted a
-message leaves an *unknown* receipt that blocks an automatic resend instead of
+message leaves an _unknown_ receipt that blocks an automatic resend instead of
 double-sending), SSRF-check every destination, and never log or echo secrets.
 Keep secrets in the credential store and reference them with
 `credentials://<id>[/<field>]` — they are resolved per tenant at dispatch.
@@ -512,23 +597,28 @@ Keep secrets in the credential store and reference them with
     "subject": "Your receipt",
     "text": "Thanks for your order.",
     "html": "<p>Thanks for your order.</p>",
-    "attachments": [{ "artifact": "{{outputs.render_pdf.artifact}}", "filename": "receipt.pdf" }],
+    "attachments": [
+      {
+        "artifact": "{{outputs.render_pdf.artifact}}",
+        "filename": "receipt.pdf"
+      }
+    ],
     "idempotency_key": "receipt-{{context.data.order_id}}"
   }
 }
 ```
 
-| Param | Notes |
-|---|---|
-| `provider` | `smtp`, `resend`, or `ses` (AWS SES v2 HTTP API, SigV4-signed). |
-| `from`, `subject` | Required. Addresses and subject are validated; CR/LF header injection is rejected. |
-| `to` / `cc` / `bcc` / `reply_to` | String or array; at least one recipient, at most 50 in total. |
-| `text` / `html` | At least one. Both produce `multipart/alternative`. |
-| `attachments` | `[{artifact, filename?, content_type?}]` — `artifact` is a `blob_put` ref owned by *this* instance; 20 files / 20 MiB max. |
-| `smtp` | `{host, port?, username?, password?, tls?}`. `tls`: `starttls` (default, 587), `implicit` (465) or `none` (credentials refused). The host is resolved once, private/internal addresses are blocked, and the connection is pinned to the vetted IP while TLS still verifies the hostname. |
-| `api_key` | Resend API key. |
-| `aws` | SES: `{access_key_id, secret_access_key, session_token?, region}`. |
-| `idempotency_key` | Forwarded to Resend's `Idempotency-Key`. |
+| Param                            | Notes                                                                                                                                                                                                                                                                                    |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider`                       | `smtp`, `resend`, or `ses` (AWS SES v2 HTTP API, SigV4-signed).                                                                                                                                                                                                                          |
+| `from`, `subject`                | Required. Addresses and subject are validated; CR/LF header injection is rejected.                                                                                                                                                                                                       |
+| `to` / `cc` / `bcc` / `reply_to` | String or array; at least one recipient, at most 50 in total.                                                                                                                                                                                                                            |
+| `text` / `html`                  | At least one. Both produce `multipart/alternative`.                                                                                                                                                                                                                                      |
+| `attachments`                    | `[{artifact, filename?, content_type?}]` — `artifact` is a `blob_put` ref owned by _this_ instance; 20 files / 20 MiB max.                                                                                                                                                               |
+| `smtp`                           | `{host, port?, username?, password?, tls?}`. `tls`: `starttls` (default, 587), `implicit` (465) or `none` (credentials refused). The host is resolved once, private/internal addresses are blocked, and the connection is pinned to the vetted IP while TLS still verifies the hostname. |
+| `api_key`                        | Resend API key.                                                                                                                                                                                                                                                                          |
+| `aws`                            | SES: `{access_key_id, secret_access_key, session_token?, region}`.                                                                                                                                                                                                                       |
+| `idempotency_key`                | Forwarded to Resend's `Idempotency-Key`.                                                                                                                                                                                                                                                 |
 
 Output: `{provider, message_id, provider_receipt_id, recipients}` (recipient count only).
 
@@ -548,7 +638,10 @@ Discord (embed, mentions disabled), or Microsoft Teams (Adaptive Card):
     "title": "Deploy finished",
     "text": "*{{context.data.service}}* is live",
     "fields": { "env": "prod", "version": "{{context.data.version}}" },
-    "link": { "url": "https://ci.example.com/runs/{{context.data.run_id}}", "label": "View run" }
+    "link": {
+      "url": "https://ci.example.com/runs/{{context.data.run_id}}",
+      "label": "View run"
+    }
   }
 }
 ```
@@ -594,12 +687,22 @@ Then route on the decision:
     {
       "condition": "context.data.discount_decision == \"approved\"",
       "blocks": [
-        { "type": "step", "id": "apply_discount", "handler": "apply_discount", "params": {} }
+        {
+          "type": "step",
+          "id": "apply_discount",
+          "handler": "apply_discount",
+          "params": {}
+        }
       ]
     }
   ],
   "default": [
-    { "type": "step", "id": "notify_rejected", "handler": "send_email", "params": { "template": "discount_rejected" } }
+    {
+      "type": "step",
+      "id": "notify_rejected",
+      "handler": "send_email",
+      "params": { "template": "discount_rejected" }
+    }
   ]
 }
 ```
@@ -608,7 +711,7 @@ Use human review for approvals, compliance gates, manual QA, escalations, and hu
 
 ### Interactive approvals (Slack, Teams, email)
 
-A step's handler runs only *after* its own `wait_for_input` is answered, so
+A step's handler runs only _after_ its own `wait_for_input` is answered, so
 approval messages are sent by a `human_review` step placed **before** the
 gate, pointing at it with `approvals.gate`:
 
@@ -623,7 +726,10 @@ gate, pointing at it with `approvals.gate`:
       "review_data": { "amount": "{{context.data.amount}}" },
       "approvals": {
         "gate": "manager_decision",
-        "slack": { "url": "credentials://ops-slack/url", "signing_secret_credential": "slack-app/signing_secret" },
+        "slack": {
+          "url": "credentials://ops-slack/url",
+          "signing_secret_credential": "slack-app/signing_secret"
+        },
         "teams": { "url": "credentials://ops-teams/url" },
         "email": {
           "provider": "resend",
@@ -641,7 +747,10 @@ gate, pointing at it with `approvals.gate`:
     "wait_for_input": {
       "prompt": "Approve the refund?",
       "timeout": 86400000,
-      "choices": [ { "label": "Approve", "value": "approve" }, { "label": "Reject", "value": "reject" } ],
+      "choices": [
+        { "label": "Approve", "value": "approve" },
+        { "label": "Reject", "value": "reject" }
+      ],
       "store_as": "refund_decision"
     }
   }
@@ -649,7 +758,7 @@ gate, pointing at it with `approvals.gate`:
 ```
 
 - **Slack** gets Block Kit buttons (one per choice). Point the Slack app's
-  *Interactivity Request URL* at `POST /approvals/slack/interactions`. Each
+  _Interactivity Request URL_ at `POST /approvals/slack/interactions`. Each
   click is verified with the app's signing secret (`v0` HMAC over the raw
   body, 5-minute timestamp tolerance) read from the credential named by
   `signing_secret_credential` — a **bare** credential id/field, not a
@@ -659,7 +768,7 @@ gate, pointing at it with `approvals.gate`:
   page (incoming webhooks cannot deliver `Action.Submit`). The same URL also
   accepts a JSON `POST`, e.g. from an `Action.Http` or Power Automate flow.
 - **Email** gets magic links (via the `email` handler params). `GET
-  /approvals/act/{token}` only renders a confirmation page — link scanners and
+/approvals/act/{token}` only renders a confirmation page — link scanners and
   prefetchers cannot approve anything; the `POST` from that page records the
   decision (with an optional comment).
 
@@ -823,17 +932,22 @@ native `x-orch8-signature` headers:
   "sequence_name": "payment-postprocess",
   "tenant_id": "acme",
   "trigger_type": "webhook",
-  "config": { "verify": { "preset": "stripe", "secret_ref": "credentials://stripe-webhook" } }
+  "config": {
+    "verify": {
+      "preset": "stripe",
+      "secret_ref": "credentials://stripe-webhook"
+    }
+  }
 }
 ```
 
-| `preset` | Header(s) | Signed bytes | Replay protection |
-|---|---|---|---|
-| `stripe` | `Stripe-Signature: t=…,v1=<hex>` | `"{t}.{raw body}"` | 300 s tolerance + each `(t, v1)` accepted once |
-| `github` | `X-Hub-Signature-256: sha256=<hex>` | raw body | `X-GitHub-Delivery` accepted once (72 h) |
-| `shopify` | `X-Shopify-Hmac-Sha256: <base64>` | raw body | `X-Shopify-Webhook-Id` accepted once (72 h) |
-| `svix` (aliases `clerk`, `resend`, `standard_webhooks`) | `svix-id`, `svix-timestamp`, `svix-signature` (or `webhook-*`) | `"{id}.{ts}.{raw body}"`; `whsec_` secrets are base64-decoded | 300 s tolerance + each id accepted once |
-| `hmac_sha256` | `header` (default `X-Signature`), `encoding` `hex`/`base64`, optional `prefix` (e.g. `sha256=`) | raw body, or `"{ts}.{raw body}"` when `timestamp_header` is set | `id_header` value (or the signature) accepted once |
+| `preset`                                                | Header(s)                                                                                       | Signed bytes                                                    | Replay protection                                  |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------- |
+| `stripe`                                                | `Stripe-Signature: t=…,v1=<hex>`                                                                | `"{t}.{raw body}"`                                              | 300 s tolerance + each `(t, v1)` accepted once     |
+| `github`                                                | `X-Hub-Signature-256: sha256=<hex>`                                                             | raw body                                                        | `X-GitHub-Delivery` accepted once (72 h)           |
+| `shopify`                                               | `X-Shopify-Hmac-Sha256: <base64>`                                                               | raw body                                                        | `X-Shopify-Webhook-Id` accepted once (72 h)        |
+| `svix` (aliases `clerk`, `resend`, `standard_webhooks`) | `svix-id`, `svix-timestamp`, `svix-signature` (or `webhook-*`)                                  | `"{id}.{ts}.{raw body}"`; `whsec_` secrets are base64-decoded   | 300 s tolerance + each id accepted once            |
+| `hmac_sha256`                                           | `header` (default `X-Signature`), `encoding` `hex`/`base64`, optional `prefix` (e.g. `sha256=`) | raw body, or `"{ts}.{raw body}"` when `timestamp_header` is set | `id_header` value (or the signature) accepted once |
 
 - Signatures are always computed over the **raw request bytes** and compared in constant time.
 - `secret_ref` is a credential id or `credentials://id[/field]` resolved in the trigger's tenant; without it the trigger's own `secret` is used. A missing/disabled credential fails closed with `401`.
@@ -933,7 +1047,7 @@ WASM plugin contract:
 - Keep WASM plugins deterministic, small, and fast.
 - Every call runs in a fresh sandbox with no host imports (modules that import anything, including WASI, are refused) and is bounded by fuel, linear memory, a wall-clock timeout, and an output-size cap. See [end-user WASM steps](WASM_USER_STEPS.md#limits-and-defaults) for the knobs and defaults.
 - `source` must be a compiled binary module (starting with the `\0asm` magic, at most 32 MiB by default, `ORCH8_WASM_MAX_MODULE_BYTES`). WAT text, directories and device files are rejected; load errors never include the path or file contents.
-- Plugin registration (`POST`/`PATCH`/`DELETE /plugins`) requires an Operator key; `publisher` keys may only read plugins.
+- Plugin registration (`POST /plugins`, `PATCH /plugins/{name}`, and `DELETE /plugins/{name}`) requires an Operator key; `publisher` keys may only read plugins.
 - Set `ORCH8_WASM_PLUGIN_DIR` to pin every WASM `source` inside one directory (checked after resolving symlinks and `..`). Recommended in multi-tenant deployments.
 - Good fits: validation, normalization, scoring, transformations, policy checks.
 - Letting your own end users upload modules? Read [Running end-user WASM steps](WASM_USER_STEPS.md) for the sandbox limits (fuel, memory, wall clock, output, no host imports), upload validation, and the threat model.
@@ -1035,13 +1149,28 @@ Sequence:
       "id": "initial_setup",
       "branches": [
         [
-          { "type": "step", "id": "create_workspace", "handler": "workspace_create", "params": {} }
+          {
+            "type": "step",
+            "id": "create_workspace",
+            "handler": "workspace_create",
+            "params": {}
+          }
         ],
         [
-          { "type": "step", "id": "send_welcome", "handler": "send_email", "params": { "template": "welcome", "to": "{{context.data.email}}" } }
+          {
+            "type": "step",
+            "id": "send_welcome",
+            "handler": "send_email",
+            "params": { "template": "welcome", "to": "{{context.data.email}}" }
+          }
         ],
         [
-          { "type": "step", "id": "score_account", "handler": "grpc://risk-score", "params": { "model": "signup-risk-v1" } }
+          {
+            "type": "step",
+            "id": "score_account",
+            "handler": "grpc://risk-score",
+            "params": { "model": "signup-risk-v1" }
+          }
         ]
       ]
     },
@@ -1063,18 +1192,33 @@ Sequence:
         {
           "condition": "context.data.activated == true",
           "blocks": [
-            { "type": "step", "id": "send_success_tips", "handler": "send_email", "params": { "template": "success_tips" } }
+            {
+              "type": "step",
+              "id": "send_success_tips",
+              "handler": "send_email",
+              "params": { "template": "success_tips" }
+            }
           ]
         },
         {
           "condition": "context.data.plan == \"enterprise\"",
           "blocks": [
-            { "type": "step", "id": "notify_sales", "handler": "send_slack", "params": { "channel": "#sales" } }
+            {
+              "type": "step",
+              "id": "notify_sales",
+              "handler": "send_slack",
+              "params": { "channel": "#sales" }
+            }
           ]
         }
       ],
       "default": [
-        { "type": "step", "id": "send_activation_nudge", "handler": "send_email", "params": { "template": "activation_nudge" } }
+        {
+          "type": "step",
+          "id": "send_activation_nudge",
+          "handler": "send_email",
+          "params": { "template": "activation_nudge" }
+        }
       ]
     }
   ],
@@ -1107,18 +1251,18 @@ Event payload:
 
 ## More Use Cases
 
-| Use case | Sequence shape |
-|---|---|
-| Order fulfillment | `parallel` validate/charge/reserve, then ship and notify |
-| Invoice collection | send invoice, delay, router on paid/unpaid, escalate |
-| AI agent with tools | `loop` with `llm_call`, `tool_call`, and stop condition |
-| Approval workflow | `human_review`, router on decision, audit final action |
-| Data enrichment | `for_each` records, call enrichment workers, merge results |
-| Provider failover | `race` providers or `try_catch` primary/backup |
-| Payment consistency | `cancellation_scope` around capture and ledger writes |
-| Marketing test | `ab_split` subject lines or onboarding paths |
-| Webhook automation | public trigger from Stripe/GitHub/Shopify payload |
-| Reusable compliance check | `sub_sequence` called from multiple workflows |
+| Use case                  | Sequence shape                                             |
+| ------------------------- | ---------------------------------------------------------- |
+| Order fulfillment         | `parallel` validate/charge/reserve, then ship and notify   |
+| Invoice collection        | send invoice, delay, router on paid/unpaid, escalate       |
+| AI agent with tools       | `loop` with `llm_call`, `tool_call`, and stop condition    |
+| Approval workflow         | `human_review`, router on decision, audit final action     |
+| Data enrichment           | `for_each` records, call enrichment workers, merge results |
+| Provider failover         | `race` providers or `try_catch` primary/backup             |
+| Payment consistency       | `cancellation_scope` around capture and ledger writes      |
+| Marketing test            | `ab_split` subject lines or onboarding paths               |
+| Webhook automation        | public trigger from Stripe/GitHub/Shopify payload          |
+| Reusable compliance check | `sub_sequence` called from multiple workflows              |
 
 ## Pre-Publish Checklist
 

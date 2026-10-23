@@ -21,18 +21,19 @@ A runnable 3-step example with a simulated crash is in
 
 ## API
 
-The API is synchronous; every call releases the GIL while the engine works.
+The API is synchronous. Blocking native engine operations release the GIL while
+the Rust runtime works; Python handlers acquire it when executing Python code.
 
-| Call | Does |
-|---|---|
-| `Engine.open(path)` | Open/create the SQLite file. The engine starts on first use. Also a context manager. |
-| `engine.handler(name, fn)` / `@engine.handler(name)` | Register a step handler. Register all handlers **before** any other call. |
-| `engine.deploy(sequence)` | Store a sequence (dict or JSON). Only `name` and `blocks` are required; `version` defaults to 1. Idempotent per name + version — call it on every startup. Changed blocks need a new `version`. |
-| `engine.start(name, input=None, *, idempotency_key=None, version=None)` | Create an instance; `input` becomes `context.data`. Returns the instance id. The same key returns the same instance. |
-| `engine.run(id, *, timeout=None)` | Drive the engine until the instance is `completed`, `failed`, `cancelled`, `paused` or `waiting`, or `timeout` seconds pass. Sleeps through delays and retry backoff. Returns the snapshot. |
-| `engine.get(id)` | Snapshot `{"id", "state", "data", "outputs"}`; `outputs` is the latest output per step id. |
-| `engine.signal(id, name, payload=None)` | `pause`, `resume`, `cancel`, `update_context`, or a custom signal. |
-| `engine.close()` | Stop the engine and release the file. |
+| Call                                                                    | Does                                                                                                                                                                                            |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Engine.open(path)`                                                     | Open/create the SQLite file. The engine starts on first use. Also a context manager.                                                                                                            |
+| `engine.handler(name, fn)` / `@engine.handler(name)`                    | Register a step handler. Register all handlers **before** any other call.                                                                                                                       |
+| `engine.deploy(sequence)`                                               | Store a sequence (dict or JSON). Only `name` and `blocks` are required; `version` defaults to 1. Idempotent per name + version — call it on every startup. Changed blocks need a new `version`. |
+| `engine.start(name, input=None, *, idempotency_key=None, version=None)` | Create an instance; `input` becomes `context.data`. Returns the instance id. The same key returns the same instance.                                                                            |
+| `engine.run(id, *, timeout=None)`                                       | Drive the engine until the instance is `completed`, `failed`, `cancelled`, `paused` or `waiting`, or `timeout` seconds pass. Sleeps through delays and retry backoff. Returns the snapshot.     |
+| `engine.get(id)`                                                        | Snapshot `{"id", "state", "data", "outputs"}`; `outputs` is the latest output per step id.                                                                                                      |
+| `engine.signal(id, name, payload=None)`                                 | `pause`, `resume`, `cancel`, `update_context`, or a custom signal.                                                                                                                              |
+| `engine.close()`                                                        | Stop the engine and release the file.                                                                                                                                                           |
 
 Handlers receive a dict `{"params", "data", "outputs", "instance_id",
 "step_id", "attempt"}` and return any JSON-serializable value. `async def`
@@ -57,7 +58,7 @@ immediately.
   process dies while a handler is in flight, Orch8 cannot know whether its
   side effect happened, so on restart the instance goes to `failed` with an
   "automatic redispatch is blocked" output on that step instead of possibly
-  doing it twice (at-most-once for interrupted dispatches). A crash *between*
+  doing it twice (at-most-once for interrupted dispatches). A crash _between_
   steps (e.g. during a `delay`) resumes normally.
 - **Recovery happens on open.** Instances left `running` by a crash are picked
   up on the first call after reopening the file; call `start()` again with the
@@ -70,9 +71,19 @@ immediately.
 
 ## Build and test
 
+Run from the repository root with Python 3.10+ and the repository's Rust
+toolchain. A virtual environment is required by `maturin develop`.
+
 ```sh
-maturin develop                      # or, without maturin (macOS):
-cargo rustc --lib -- -C link-arg=-undefined -C link-arg=dynamic_lookup
-cp "$CARGO_TARGET_DIR"/*/debug/lib_native.dylib python/orch8_engine/_native.abi3.so
-PYTHONPATH=python python -m unittest discover -s tests
+cd packages/python-native
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install 'maturin>=1.8,<2'
+maturin develop --locked
+python -m unittest discover -s tests
+cd ../..  # return to the repository root; the virtual environment stays active
 ```
+
+The `pyproject.toml` selects the `orch8_engine._native` module and abi3 Python
+3.10 compatibility. Let maturin place the platform library; manually copying a
+host library from an assumed Cargo target path is unnecessary.

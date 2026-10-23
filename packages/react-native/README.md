@@ -89,7 +89,10 @@ const runtimeId = await orch8.nodeRuntimeId();
 async function fetchDeviceSession(): Promise<string> {
   const res = await fetch("https://app.example.com/orch8/device-session", {
     method: "POST",
-    headers: { authorization: `Bearer ${userSession}`, "content-type": "application/json" },
+    headers: {
+      authorization: `Bearer ${userSession}`,
+      "content-type": "application/json",
+    },
     body: JSON.stringify({ deviceId, runtimeId }),
   });
   if (!res.ok) throw new Error(`device session: ${res.status}`);
@@ -137,10 +140,10 @@ device session reaches.
 When `dbPath` is omitted the database is created in a location that is **not
 backed up**:
 
-| Platform | Default | Notes |
-|---|---|---|
-| iOS | `<Application Support>/Orch8/orch8.db` | hidden from Files, `isExcludedFromBackup`, protection class `completeUntilFirstUserAuthentication` (readable by background tasks after the first unlock) |
-| Android | `<noBackupFilesDir>/orch8.db` | excluded from Auto Backup and device transfer |
+| Platform | Default                                | Notes                                                                                                                                                    |
+| -------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| iOS      | `<Application Support>/Orch8/orch8.db` | hidden from Files, `isExcludedFromBackup`, protection class `completeUntilFirstUserAuthentication` (readable by background tasks after the first unlock) |
+| Android  | `<noBackupFilesDir>/orch8.db`          | excluded from Auto Backup and device transfer                                                                                                            |
 
 A database that already exists at the previous default (iOS `Documents/orch8.db`,
 Android `getDatabasePath("orch8.db")`) keeps being used, so upgrades do not lose
@@ -181,10 +184,10 @@ await orch8.onPushWake(remoteMessage.data);
 // Background window (BGTask / WorkManager / headless JS).
 const { completed, budgetExhausted } = await orch8.runWorkerWindow(25_000);
 
-await orch8.workerStats();      // { running, inFlight, claimed, completed, failed, released, lost }
+await orch8.workerStats(); // { running, inFlight, claimed, completed, failed, released, lost }
 await orch8.enableBuiltin("http_request");
 await orch8.stopWorker();
-await orch8.unregisterNode();   // advertise draining
+await orch8.unregisterNode(); // advertise draining
 ```
 
 For remote tasks the handler input includes a reserved `__orch8` member;
@@ -211,18 +214,18 @@ await orch8.startDelegation({ tenantId: "acme" }); // call again after every lau
 
 // Explicit delegation from app code (no local step is parked):
 const delegationId = await orch8.delegate({
-  instanceId,                         // a local instance
+  instanceId, // a local instance
   destinationRuntimeId: desktopRuntimeId,
-  subSequenceId: classifySequenceId,  // server-side sequence
+  subSequenceId: classifySequenceId, // server-side sequence
   input: { photo: { id: photoId } },
 });
 const s = await orch8.delegationStatus(delegationId);
 // s.state: "preparing" | "delegated" | "completed" | "failed" | "abandoned"
 // s.outputJson once completed, s.error once failed
 
-await orch8.listDelegations();   // journal, oldest first
-await orch8.delegationStats();   // { running, delegated, completed, failed, abandoned, resumed }
-await orch8.stopDelegation();    // pause; journaled delegations resume on the next start
+await orch8.listDelegations(); // journal, oldest first
+await orch8.delegationStats(); // { running, delegated, completed, failed, abandoned, resumed }
+await orch8.stopDelegation(); // pause; journaled delegations resume on the next start
 ```
 
 `onPushReceived` / `onPushWake` advance pending delegations immediately. See

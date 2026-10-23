@@ -6,11 +6,11 @@ The repository root `action.yml` is a composite action with three modes. Every
 mode first installs the `orch8` CLI and validates the sequence locally with
 `orch8 dev FILE --no-server --dry-run --skip-timers --once`.
 
-| Mode | Example | What it does |
-|---|---|---|
-| `gate` (default) | [gate.yml](gate.yml) | Local validation. With `release-id`, runs `orch8 release diff`, `release validate`, and `release gate` against an existing release and posts a pass/fail comment. |
-| `diff` | [sequence-diff.yml](sequence-diff.yml) | Semantic diff of the sequence at the PR base vs the PR head, plus a preflight report, in one PR comment that is updated in place. |
-| `preview` | [preview.yml](preview.yml) | Publishes the head sequence into an ephemeral namespace, runs the server-side preflight on the stored copy, runs contract suites with `orch8 test run`, then deletes what it created. |
+| Mode             | Example                                | What it does                                                                                                                                                                          |
+| ---------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gate` (default) | [gate.yml](gate.yml)                   | Local validation. With `release-id`, runs `orch8 release diff`, `release validate`, and `release gate` against an existing release and posts a pass/fail comment.                     |
+| `diff`           | [sequence-diff.yml](sequence-diff.yml) | Semantic diff of the sequence at the PR base vs the PR head, plus a preflight report, in one PR comment that is updated in place.                                                     |
+| `preview`        | [preview.yml](preview.yml)             | Publishes the head sequence into an ephemeral namespace, runs the server-side preflight on the stored copy, runs contract suites with `orch8 test run`, then deletes what it created. |
 
 Copy an example into `.github/workflows/` and pin `orch8-io/engine@...` to a
 release tag or commit SHA.

@@ -8,10 +8,16 @@ exhausted.
 
 ```json
 {
-  "type": "step", "id": "summarize", "handler": "llm_call",
+  "type": "step",
+  "id": "summarize",
+  "handler": "llm_call",
   "params": {
-    "provider": "openai", "model": "gpt-5.6-luna", "api_key_env": "OPENAI_API_KEY",
-    "messages": [{ "role": "user", "content": "Summarize: {{ context.data.doc }}" }],
+    "provider": "openai",
+    "model": "gpt-5.6-luna",
+    "api_key_env": "OPENAI_API_KEY",
+    "messages": [
+      { "role": "user", "content": "Summarize: {{ context.data.doc }}" }
+    ],
     "cache": { "mode": "exact", "ttl": "6h" }
   }
 }
@@ -19,14 +25,14 @@ exhausted.
 
 ## Options
 
-| Field | Default | Meaning |
-|---|---|---|
-| `mode` | `"exact"` | `exact` or `semantic` (see below). |
-| `ttl` | `3600` | Seconds, or `"90s"`, `"15m"`, `"6h"`, `"7d"`. Max 30 days. |
-| `max_entry_bytes` | 256 KiB | Responses larger than this are not stored. Hard ceiling 1 MiB. |
-| `allow_tool_calls` | `false` | Also cache turns whose answer is a tool call. |
-| `similarity_threshold` | `0.95` | Semantic mode: minimum cosine similarity (0.5–1.0). |
-| `embedding` | `{}` | Semantic mode: `embed` handler config (`model`, `base_url`, `api_key` / `api_key_env`, `timeout_ms`). |
+| Field                  | Default   | Meaning                                                                                               |
+| ---------------------- | --------- | ----------------------------------------------------------------------------------------------------- |
+| `mode`                 | `"exact"` | `exact` or `semantic` (see below).                                                                    |
+| `ttl`                  | `3600`    | Seconds, or `"90s"`, `"15m"`, `"6h"`, `"7d"`. Max 30 days.                                            |
+| `max_entry_bytes`      | 256 KiB   | Responses larger than this are not stored. Hard ceiling 1 MiB.                                        |
+| `allow_tool_calls`     | `false`   | Also cache turns whose answer is a tool call.                                                         |
+| `similarity_threshold` | `0.95`    | Semantic mode: minimum cosine similarity (0.5–1.0).                                                   |
+| `embedding`            | `{}`      | Semantic mode: `embed` handler config (`model`, `base_url`, `api_key` / `api_key_env`, `timeout_ms`). |
 
 `cache: false` (or omitting it) disables the cache.
 
@@ -61,9 +67,29 @@ the prompt version, a tool definition or the schema does.
 The output records the outcome:
 
 ```json
-"cache": { "hit": false, "mode": "exact", "stored": true, "skip_reason": null }
-"cache": { "hit": true, "mode": "exact", "similarity": null,
-           "cached_at": "…", "expires_at": "…", "key": "3b1f0c9e2a7d4b61" }
+{
+  "cache": {
+    "hit": false,
+    "mode": "exact",
+    "stored": true,
+    "skip_reason": null
+  }
+}
+```
+
+A hit instead includes:
+
+```json
+{
+  "cache": {
+    "hit": true,
+    "mode": "exact",
+    "similarity": null,
+    "cached_at": "…",
+    "expires_at": "…",
+    "key": "3b1f0c9e2a7d4b61"
+  }
+}
 ```
 
 `skip_reason` is one of `tool_call_turn`, `too_large`, `empty_response`,
@@ -107,8 +133,15 @@ toward instance token budgets or tenant budgets. `GET /usage` reports them
 separately:
 
 ```json
-"cache_savings": { "hits": 42, "input_tokens": 51000, "output_tokens": 9000,
-                   "saved_usd": 0.3525, "saved_is_complete": true }
+{
+  "cache_savings": {
+    "hits": 42,
+    "input_tokens": 51000,
+    "output_tokens": 9000,
+    "saved_usd": 0.3525,
+    "saved_is_complete": true
+  }
+}
 ```
 
 Each hit also emits a `tracing` event `orch8.llm_cache.hit` (target

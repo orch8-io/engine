@@ -110,9 +110,9 @@ atomicity, encryption interactions, and production monitoring.
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `output_ref` is null | Server did not inherit the threshold override | Stop it, export the variable in the server terminal, and restart |
-| A downstream template receives `null` | Intermediate output was externalized | Raise the threshold so intermediate producer outputs remain inline |
-| Old encrypted data cannot be read after restart | Encryption key changed | Restore the same Level 3 encryption key |
-| Storage keeps growing | Externalized state follows instance retention | Configure instance retention or archive and delete old instances safely |
+| Symptom                                         | Likely cause                                  | Fix                                                                     |
+| ----------------------------------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
+| `output_ref` is null                            | Server did not inherit the threshold override | Stop it, export the variable in the server terminal, and restart        |
+| A downstream template receives `null`           | Intermediate output was externalized          | Raise the threshold so intermediate producer outputs remain inline      |
+| Old encrypted data cannot be read after restart | Encryption key changed                        | Restore the same Level 3 encryption key                                 |
+| Storage keeps growing                           | Externalized state follows instance retention | Configure instance retention or archive and delete old instances safely |

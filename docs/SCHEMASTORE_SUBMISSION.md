@@ -10,15 +10,29 @@ validation and completion for Orch8 sequence files automatically.
 Nothing here has been submitted yet. A maintainer has to open the upstream pull
 request by hand.
 
+## Publication status
+
+Checked 2026-10-23: the persisted schema at
+`https://orch8.io/contracts/sequence.schema.json` returns 200, but the authoring
+schema's `$id` URL, `https://orch8.io/contracts/sequence-file.schema.json`, returns 404. The authoring schema is available from the contract workflow's
+[GitHub Pages deployment](https://orch8-io.github.io/engine/sequence-file.schema.json)
+(200). Use that download for local validation. The `$id` is an identifier and
+does not change when downloading from the Pages URL.
+
+The prepared catalog entry below still names the unavailable `orch8.io` route.
+Before submitting it, publish that route or update the generated catalog entry
+and its generator to use a verified public download URL. Recheck both hosts;
+this publication gap is not resolved by editing the guide.
+
 ## Which schema to register
 
 `contracts/` holds two schemas. Both are generated from the OpenAPI
 `SequenceDefinition` by `scripts/export-contracts.mjs`:
 
-| File | `$id` | Use |
-|---|---|---|
-| `sequence.schema.json` | `https://orch8.io/contracts/sequence.schema.json` | A **persisted** sequence as the API stores and returns it. It requires `id`, `tenant_id`, `namespace`, `name`, `version`, `blocks`, and `created_at`. |
-| `sequence-file.schema.json` | `https://orch8.io/contracts/sequence-file.schema.json` | A **hand-written** sequence file. It has the same properties and `$defs`, but only `name` and `blocks` are required. |
+| File                        | `$id`                                                  | Use                                                                                                                                                   |
+| --------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sequence.schema.json`      | `https://orch8.io/contracts/sequence.schema.json`      | A **persisted** sequence as the API stores and returns it. It requires `id`, `tenant_id`, `namespace`, `name`, `version`, `blocks`, and `created_at`. |
+| `sequence-file.schema.json` | `https://orch8.io/contracts/sequence-file.schema.json` | A **hand-written** sequence file. It has the same properties and `$defs`, but only `name` and `blocks` are required.                                  |
 
 Register **`sequence-file.schema.json`**. The persisted schema requires fields
 that files on disk normally leave out. `orch8 dev` fills in `id`, `tenant_id`,
@@ -40,7 +54,12 @@ Draft catalog entry, kept in
 {
   "name": "Orch8 sequence",
   "description": "Orch8 durable workflow sequence definition file",
-  "fileMatch": ["*.orch8.json", "*.orch8.yaml", "*.orch8.yml", "orch8.sequence.json"],
+  "fileMatch": [
+    "*.orch8.json",
+    "*.orch8.yaml",
+    "*.orch8.yml",
+    "orch8.sequence.json"
+  ],
   "url": "https://orch8.io/contracts/sequence-file.schema.json"
 }
 ```
@@ -51,11 +70,12 @@ Files that carry an explicit `"$schema"` are validated regardless of name.
 
 ## Prerequisites before opening the PR
 
-1. **The schema must be served at its `$id` URL.** The `Publish API contracts`
+1. **The catalog URL must serve the authoring schema.** The `Publish API contracts`
    workflow (`.github/workflows/contracts.yml`) regenerates both schemas on
    every push to `main` and deploys the `contracts/` directory to GitHub Pages.
-   After the first deploy that includes `sequence-file.schema.json`, check
-   that the public URL resolves:
+   The Pages deployment already includes `sequence-file.schema.json`; the
+   `orch8.io/contracts/` alias needs separate verification. Before submission,
+   the URL in the generated catalog entry must resolve:
 
    ```bash
    curl -fsSI https://orch8.io/contracts/sequence-file.schema.json
@@ -67,6 +87,7 @@ Files that carry an explicit `"$schema"` are validated regardless of name.
    `Access-Control-Allow-Origin: *`, which browser-based editors need. If
    `orch8.io/contracts/` is served by something other than this Pages
    deployment, check that host's path mapping and CORS headers too.
+
 2. **YAML globs depend on YAML sequence files.** `*.orch8.yaml` and
    `*.orch8.yml` are useful only after YAML sequence-file support ships in the
    CLI. If it has not shipped when you submit, drop those two globs and add

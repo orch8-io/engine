@@ -149,12 +149,12 @@ Tune:
 
 ## Error handling
 
-| Situation | How to report |
-|---|---|
-| Transient network / rate limit / 5xx | `fail` with `retryable: true` |
-| Permanent business logic error (e.g. user deleted) | `fail` with `retryable: false` |
-| Handler crashes / uncaught exception | SDK convention: treat as retryable unless the exception type is explicitly non-retryable |
-| Heartbeat missed due to worker crash | Reaper reclaims after 60s; retry runs on a different worker |
+| Situation                                          | How to report                                                                            |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Transient network / rate limit / 5xx               | `fail` with `retryable: true`                                                            |
+| Permanent business logic error (e.g. user deleted) | `fail` with `retryable: false`                                                           |
+| Handler crashes / uncaught exception               | SDK convention: treat as retryable unless the exception type is explicitly non-retryable |
+| Heartbeat missed due to worker crash               | Reaper reclaims after 60s; retry runs on a different worker                              |
 
 ---
 

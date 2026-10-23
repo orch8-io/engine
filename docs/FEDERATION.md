@@ -77,26 +77,36 @@ POST /api/v1/federation/peers        (X-Tenant-Id: acme, root key)
     "peer": "globex",
     "sequence": "kyc-check",
     "version": 3,
-    "input": { "customer_id": "{{ context.data.customer_id }}", "country": "{{ context.data.country }}" },
+    "input": {
+      "customer_id": "{{ context.data.customer_id }}",
+      "country": "{{ context.data.country }}"
+    },
     "call_key": "{{ context.data.customer_id }}"
   },
   "wait_for_input": { "prompt": "waiting for globex kyc", "timeout": 86400000 }
 }
 ```
 
-| Param | Required | Meaning |
-|---|---|---|
-| `peer` | yes | Registered peer name or peer id |
-| `sequence` | yes | Sequence name at the peer (in the peer tenant's `default` namespace) |
-| `version` | no | Pin a version; default is the latest |
-| `input` | no | Object. Filtered by `disclosed_fields` |
-| `call_key` | no | Distinguishes calls from the same block, for example inside `for_each`/loops |
+| Param      | Required | Meaning                                                                      |
+| ---------- | -------- | ---------------------------------------------------------------------------- |
+| `peer`     | yes      | Registered peer name or peer id                                              |
+| `sequence` | yes      | Sequence name at the peer (in the peer tenant's `default` namespace)         |
+| `version`  | no       | Pin a version; default is the latest                                         |
+| `input`    | no       | Object. Filtered by `disclosed_fields`                                       |
+| `call_key` | no       | Distinguishes calls from the same block, for example inside `for_each`/loops |
 
 `wait_for_input` is **required** (the linter warns without it) and must not define custom `choices`. Templates resolve against context only, the same as `wait_for_event`, because the call is registered at the gate. When the run completes, the block output is:
 
 ```json
-{ "call_id": "…", "peer_id": "…", "sequence": "kyc-check", "remote_instance_id": "…",
-  "state": "completed", "withheld_fields": 1, "outputs": { "verdict": { … } } }
+{
+  "call_id": "…",
+  "peer_id": "…",
+  "sequence": "kyc-check",
+  "remote_instance_id": "…",
+  "state": "completed",
+  "withheld_fields": 1,
+  "outputs": { "verdict": { "approved": true } }
+}
 ```
 
 A remote failure or cancellation, a peer refusal (4xx), or a revoked or expired peer fails the step permanently. A `wait_for_input.timeout` uses the normal gate timeout and escalation behavior.
@@ -157,10 +167,10 @@ With a vault configured, every externalized payload goes through these steps:
 
 The DEK is wrapped by your key provider:
 
-| Provider | Configuration | Notes |
-|---|---|---|
-| AWS KMS | `ORCH8_BYOK_KMS_KEY_ARN`, optional `ORCH8_BYOK_KMS_REGION`, `ORCH8_BYOK_KMS_ENDPOINT` | `Encrypt`/`Decrypt` with encryption context `orch8=orch8-externalized-payload-v1`, SigV4-signed, no AWS SDK. Credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`. |
-| Static | `ORCH8_BYOK_STATIC_KEY` (64 hex), `ORCH8_BYOK_STATIC_KEY_ID` | Local AES-256-GCM key wrap. For tests, or for operators who inject a key from their own secret manager. |
+| Provider | Configuration                                                                         | Notes                                                                                                                                                                                                   |
+| -------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AWS KMS  | `ORCH8_BYOK_KMS_KEY_ARN`, optional `ORCH8_BYOK_KMS_REGION`, `ORCH8_BYOK_KMS_ENDPOINT` | `Encrypt`/`Decrypt` with encryption context `orch8=orch8-externalized-payload-v1`, SigV4-signed, no AWS SDK. Credentials come from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`. |
+| Static   | `ORCH8_BYOK_STATIC_KEY` (64 hex), `ORCH8_BYOK_STATIC_KEY_ID`                          | Local AES-256-GCM key wrap. For tests, or for operators who inject a key from their own secret manager.                                                                                                 |
 
 Bucket settings: `ORCH8_BYOK_BUCKET`, `ORCH8_BYOK_PREFIX` (default `orch8`), `ORCH8_BYOK_REGION`, `ORCH8_BYOK_ENDPOINT`, and `ORCH8_BYOK_ACCESS_KEY_ID`/`ORCH8_BYOK_SECRET_ACCESS_KEY`. If you leave the keys unset, the standard AWS chain is used (environment, web identity/IRSA, instance metadata). `ORCH8_BYOK_ALLOW_HTTP` allows plain HTTP. `ORCH8_BYOK_LOCAL_PATH` uses a local directory, for development only.
 
@@ -185,7 +195,7 @@ Assume a managed control plane runs **without** your bucket credentials and your
 
 ### What it does not guarantee
 
-- **Data below the externalization threshold stays in the database.** Use `bytes = 0` to externalize every *top-level context field*. Encryption at rest still protects it, but with the engine key.
+- **Data below the externalization threshold stays in the database.** Use `bytes = 0` to externalize every _top-level context field_. Encryption at rest still protects it, but with the engine key.
 - **Some data is never externalized:** sequence definitions, step `params` after template resolution (including anything interpolated into them), signal payloads, error messages, step logs, audit entries, checkpoints, instance metadata, and small outputs under `threshold`. It is also never externalized when `externalization_mode = never`. It is protected only by engine-key encryption at rest, where that applies.
 - **The node that executes a step sees plaintext.** Only nodes you operate should hold vault access.
 - **In hybrid mode** ([HYBRID.md](HYBRID.md#byok-keep-large-outputs-in-your-bucket)), remote executors configured with the vault seal large output fields themselves (`ORCH8_EXECUTOR_EXTERNALIZE_BYTES`) and report only references; the Cloud engine needs no vault or KMS access. Step params and context rendered by the engine still pass through it.

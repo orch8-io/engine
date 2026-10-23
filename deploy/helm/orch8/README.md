@@ -24,11 +24,11 @@ Helm refuses to render a chart whose declared dependencies are missing from
 
 ## Topologies
 
-| `mode` | Deployments | Notes |
-|---|---|---|
-| `allInOne` (default) | `<release>-all-in-one` running role `all_in_one` | API, metrics, public webhooks, engine, push outbox in one process. |
-| `split` | `<release>-control` (role `control`) + `<release>-executor` (role `executor`) | Control serves the full API and metrics without an engine; executors run the engine and expose only health over HTTP plus the worker-lifecycle gRPC surface. Scale them independently. |
-| `executor` | `<release>-executor` Deployment only (no Service) | Hybrid remote executor joining Orch8 Cloud: `ORCH8_JOIN_TOKEN` from `hybrid.joinToken.existingSecret`, `HOSTNAME` = pod name. No database, API key or encryption key; dials out only, HTTP health only; the chart fails if a database or ingress is configured. See [docs/HYBRID.md](../../../docs/HYBRID.md). |
+| `mode`               | Deployments                                                                   | Notes                                                                                                                                                                                                                                                                                                          |
+| -------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `allInOne` (default) | `<release>-all-in-one` running role `all_in_one`                              | API, metrics, public webhooks, engine, push outbox in one process.                                                                                                                                                                                                                                             |
+| `split`              | `<release>-control` (role `control`) + `<release>-executor` (role `executor`) | Control serves the full API and metrics without an engine; executors run the engine and expose only health over HTTP plus the worker-lifecycle gRPC surface. Scale them independently.                                                                                                                         |
+| `executor`           | `<release>-executor` Deployment only (no Service)                             | Hybrid remote executor joining Orch8 Cloud: `ORCH8_JOIN_TOKEN` from `hybrid.joinToken.existingSecret`, `HOSTNAME` = pod name. No database, API key or encryption key; dials out only, HTTP health only; the chart fails if a database or ingress is configured. See [docs/HYBRID.md](../../../docs/HYBRID.md). |
 
 `gateway.enabled=true` adds a `<release>-gateway` Deployment (role `gateway`)
 for continuity capsule/handoff traffic. The server refuses to start a gateway
@@ -67,12 +67,12 @@ existing install.
 
 ## Database
 
-| Setting | Behaviour |
-|---|---|
-| `externalDatabase.url` | Stored in the chart Secret as `database-url`. |
-| `externalDatabase.existingSecret` / `existingSecretKey` | Read from your Secret. Recommended. |
-| `postgresql.enabled=true` | Bitnami `postgresql` subchart; URL assembled from its generated password. For evaluation only; Bitnami has changed image distribution terms, so check that the images it references are pullable in your environment. |
-| `storage.backend=sqlite` | Single all-in-one replica on a PVC (`sqlite.persistence`). Rendering fails for `mode=split`, more than one replica, autoscaling, or a gateway. No PDB is created for the single pod. |
+| Setting                                                 | Behaviour                                                                                                                                                                                                             |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `externalDatabase.url`                                  | Stored in the chart Secret as `database-url`.                                                                                                                                                                         |
+| `externalDatabase.existingSecret` / `existingSecretKey` | Read from your Secret. Recommended.                                                                                                                                                                                   |
+| `postgresql.enabled=true`                               | Bitnami `postgresql` subchart; URL assembled from its generated password. For evaluation only; Bitnami has changed image distribution terms, so check that the images it references are pullable in your environment. |
+| `storage.backend=sqlite`                                | Single all-in-one replica on a PVC (`sqlite.persistence`). Rendering fails for `mode=split`, more than one replica, autoscaling, or a gateway. No PDB is created for the single pod.                                  |
 
 ## Migrations (Postgres)
 
@@ -126,35 +126,35 @@ replica. See [docs/DEPLOYMENT.md](../../../docs/DEPLOYMENT.md#high-availability)
 
 ## Values
 
-| Key | Default | Description |
-|---|---|---|
-| `image.repository` / `image.tag` | `ghcr.io/orch8-io/engine` / appVersion | Engine image. |
-| `mode` | `allInOne` | `allInOne`, `split`, or `executor` (hybrid). |
-| `hybrid.joinToken.existingSecret` / `.key` | `""` / `join-token` | Secret with the `o8x1.` join token (required for `mode=executor`). |
-| `hybrid.credentials.existingSecret` | `""` | Secret whose keys are credential ids, mounted as `ORCH8_CREDENTIALS_DIR`: placed steps' `credentials://<id>` resolve here, never in Cloud. |
-| `hybrid.caCert.existingSecret` / `.key` | `""` / `ca.crt` | PEM bundle trusted instead of the public roots for the Cloud connection. |
-| `hybrid.allowedInternalCidrs` | `""` | `ORCH8_ALLOWED_INTERNAL_CIDRS`: internal networks placed steps may call. |
-| `cloudObservability.enabled` / `.endpoint` / `.engineId` / `.existingSecret` / `.apiKeyKey` | `false` / `https://cloud.orch8.io` / release name / `""` / `api-key` | Metadata-only run export (`[cloud_observability]`). |
-| `allInOne.*`, `control.*`, `executor.*` | see values.yaml | `replicas`, `resources`, `autoscaling` (HPA, CPU), `pdb`, scheduling, `podAnnotations`, `extraEnv`. |
-| `gateway.enabled` | `false` | Continuity gateway Deployment; needs `gateway.tls.existingSecret`. |
-| `config.logLevel` / `config.logJson` | `info` / `true` | `ORCH8_LOG_LEVEL` / `ORCH8_LOG_JSON`. |
-| `config.requireTenantHeader` | `true` | `ORCH8_REQUIRE_TENANT_HEADER`. Disabling also needs `ORCH8_ALLOW_NO_TENANT_ISOLATION=1` in `extraEnv`. |
-| `config.corsOrigins` | `""` | `ORCH8_CORS_ORIGINS`; `*` is rejected (the server refuses it with auth on). |
-| `config.toml` | `""` | Optional `orch8.toml`, mounted and passed with `--config`. Env vars still win. |
-| `extraEnv` | `[]` | Extra env for every engine container. |
-| `storage.backend` | `postgres` | `postgres` or `sqlite`. |
-| `externalDatabase.*` | | See Database. |
-| `postgresql.enabled` | `false` | Bundled Bitnami subchart. |
-| `sqlite.persistence.*` | `5Gi`, RWO | PVC for SQLite (`existingClaim` supported). |
-| `secrets.*` | generated | See Secrets. |
-| `migrations.mode` | `job` | `job`, `server`, `none`. |
-| `service.type` / `httpPort` / `grpcPort` | `ClusterIP` / 8080 / 50051 | Services per component. |
-| `ingress.*` | disabled | Routes to the API Service (all-in-one or control). |
-| `metrics.*` | disabled | See Metrics and alerts. |
-| `serviceAccount.*` | created, no token | |
-| `podSecurityContext`, `securityContext` | hardened | See Security defaults. |
-| `terminationGracePeriodSeconds` | `45` | Must exceed 30 (schema-enforced minimum 31). |
-| `probes.*` | | Startup/readiness/liveness timings. Readiness uses `/health/ready` (DB reachable and engine loop alive); liveness uses `/health/live`. |
+| Key                                                                                         | Default                                                              | Description                                                                                                                                |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `image.repository` / `image.tag`                                                            | `ghcr.io/orch8-io/engine` / appVersion                               | Engine image.                                                                                                                              |
+| `mode`                                                                                      | `allInOne`                                                           | `allInOne`, `split`, or `executor` (hybrid).                                                                                               |
+| `hybrid.joinToken.existingSecret` / `.key`                                                  | `""` / `join-token`                                                  | Secret with the `o8x1.` join token (required for `mode=executor`).                                                                         |
+| `hybrid.credentials.existingSecret`                                                         | `""`                                                                 | Secret whose keys are credential ids, mounted as `ORCH8_CREDENTIALS_DIR`: placed steps' `credentials://<id>` resolve here, never in Cloud. |
+| `hybrid.caCert.existingSecret` / `.key`                                                     | `""` / `ca.crt`                                                      | PEM bundle trusted instead of the public roots for the Cloud connection.                                                                   |
+| `hybrid.allowedInternalCidrs`                                                               | `""`                                                                 | `ORCH8_ALLOWED_INTERNAL_CIDRS`: internal networks placed steps may call.                                                                   |
+| `cloudObservability.enabled` / `.endpoint` / `.engineId` / `.existingSecret` / `.apiKeyKey` | `false` / `https://cloud.orch8.io` / release name / `""` / `api-key` | Metadata-only run export (`[cloud_observability]`).                                                                                        |
+| `allInOne.*`, `control.*`, `executor.*`                                                     | see values.yaml                                                      | `replicas`, `resources`, `autoscaling` (HPA, CPU), `pdb`, scheduling, `podAnnotations`, `extraEnv`.                                        |
+| `gateway.enabled`                                                                           | `false`                                                              | Continuity gateway Deployment; needs `gateway.tls.existingSecret`.                                                                         |
+| `config.logLevel` / `config.logJson`                                                        | `info` / `true`                                                      | `ORCH8_LOG_LEVEL` / `ORCH8_LOG_JSON`.                                                                                                      |
+| `config.requireTenantHeader`                                                                | `true`                                                               | `ORCH8_REQUIRE_TENANT_HEADER`. Disabling also needs `ORCH8_ALLOW_NO_TENANT_ISOLATION=1` in `extraEnv`.                                     |
+| `config.corsOrigins`                                                                        | `""`                                                                 | `ORCH8_CORS_ORIGINS`; `*` is rejected (the server refuses it with auth on).                                                                |
+| `config.toml`                                                                               | `""`                                                                 | Optional `orch8.toml`, mounted and passed with `--config`. Env vars still win.                                                             |
+| `extraEnv`                                                                                  | `[]`                                                                 | Extra env for every engine container.                                                                                                      |
+| `storage.backend`                                                                           | `postgres`                                                           | `postgres` or `sqlite`.                                                                                                                    |
+| `externalDatabase.*`                                                                        |                                                                      | See Database.                                                                                                                              |
+| `postgresql.enabled`                                                                        | `false`                                                              | Bundled Bitnami subchart.                                                                                                                  |
+| `sqlite.persistence.*`                                                                      | `5Gi`, RWO                                                           | PVC for SQLite (`existingClaim` supported).                                                                                                |
+| `secrets.*`                                                                                 | generated                                                            | See Secrets.                                                                                                                               |
+| `migrations.mode`                                                                           | `job`                                                                | `job`, `server`, `none`.                                                                                                                   |
+| `service.type` / `httpPort` / `grpcPort`                                                    | `ClusterIP` / 8080 / 50051                                           | Services per component.                                                                                                                    |
+| `ingress.*`                                                                                 | disabled                                                             | Routes to the API Service (all-in-one or control).                                                                                         |
+| `metrics.*`                                                                                 | disabled                                                             | See Metrics and alerts.                                                                                                                    |
+| `serviceAccount.*`                                                                          | created, no token                                                    |                                                                                                                                            |
+| `podSecurityContext`, `securityContext`                                                     | hardened                                                             | See Security defaults.                                                                                                                     |
+| `terminationGracePeriodSeconds`                                                             | `45`                                                                 | Must exceed 30 (schema-enforced minimum 31).                                                                                               |
+| `probes.*`                                                                                  |                                                                      | Startup/readiness/liveness timings. Readiness uses `/health/ready` (DB reachable and engine loop alive); liveness uses `/health/live`.     |
 
 ## Testing
 

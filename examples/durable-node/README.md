@@ -8,7 +8,7 @@ process on `@orch8/engine-native`, persisted to `orders.db` (SQLite).
 Build the addon once (from the repo root):
 
 ```sh
-cd packages/node-native && pnpm --package=@napi-rs/cli@3 dlx napi build --platform --no-js --dts native.d.ts
+(cd packages/node-native && pnpm install && pnpm run build:debug)
 ```
 
 Then:

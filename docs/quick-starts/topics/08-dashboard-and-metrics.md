@@ -120,9 +120,9 @@ contracts.
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
+| Symptom                      | Likely cause                                    | Fix                                          |
+| ---------------------------- | ----------------------------------------------- | -------------------------------------------- |
 | Browser reports a CORS error | Dashboard origin differs from configured origin | Copy the exact Vite origin and restart Orch8 |
-| Dashboard returns `401` | API key in browser storage is absent or wrong | Re-enter the current Level 3 key in Settings |
-| Dashboard data is empty | Tenant is not `demo` | Set the tenant and create one known instance |
-| Metrics returns `401` | Scrape omitted management headers | Send API key and tenant headers |
+| Dashboard returns `401`      | API key in browser storage is absent or wrong   | Re-enter the current Level 3 key in Settings |
+| Dashboard data is empty      | Tenant is not `demo`                            | Set the tenant and create one known instance |
+| Metrics returns `401`        | Scrape omitted management headers               | Send API key and tenant headers              |

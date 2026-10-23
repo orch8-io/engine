@@ -43,6 +43,7 @@ sequence step  { "handler": "wasm://<name>" }  ──▶ engine loads, validates
    `wasm-tools print`: the import list must be empty. You can also skip this
    step. The engine applies the import, size and magic checks again on every
    load and fails the step with a permanent error.
+
 3. **Store content-addressed** under `ORCH8_WASM_PLUGIN_DIR`, for example
    `/var/lib/orch8/plugins/<tenant>/<sha256>.wasm`, and never overwrite a file
    in place. Set `ORCH8_WASM_PLUGIN_DIR` on every engine node. Every `source`
@@ -76,15 +77,15 @@ or between tenants. The limits are process-wide and read once at startup from
 the environment. A value that is zero or doesn't parse falls back to the
 default with a warning, so a typo can never switch a limit off.
 
-| Variable | Default | What it bounds | On breach |
-|---|---|---|---|
-| `ORCH8_WASM_FUEL` | `10000000` | Deterministic CPU budget: 1 fuel unit ≈ 1 Wasm instruction, roughly 50–200 ms of dense arithmetic | Permanent step error `fuel exhausted (cpu limit)` |
-| `ORCH8_WASM_TIMEOUT_MS` | `2000` | Wall clock per invocation (`alloc` plus `handle`), enforced by epoch interruption with a 10 ms tick. It catches work that fuel undercounts, such as one `memory.fill` over 64 MiB. | Permanent `wall-clock timeout exceeded` |
-| `ORCH8_WASM_MAX_MEMORY_BYTES` | `67108864` (64 MiB) | Linear memory, both the declared initial size and every `memory.grow` | `memory.grow` returns `-1` (spec behavior). A trap afterwards, or an oversized initial memory, is reported as permanent `memory limit exceeded` |
-| — (fixed) | `10000` | Function-table elements | Permanent `table limit exceeded` |
-| `ORCH8_WASM_MAX_MODULE_BYTES` | `33554432` (32 MiB) | Module file size, checked before the file is read or compiled | Permanent `failed to load module` (no path or contents are echoed) |
-| `ORCH8_WASM_MAX_OUTPUT_BYTES` | `4194304` (4 MiB) | Size of the returned output, checked before it is parsed | Permanent `output of N bytes exceeds the limit` |
-| `ORCH8_WASM_PLUGIN_DIR` | unset | Directory that every module `source` must resolve inside | Permanent `failed to load module` |
+| Variable                      | Default             | What it bounds                                                                                                                                                                     | On breach                                                                                                                                       |
+| ----------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ORCH8_WASM_FUEL`             | `10000000`          | Deterministic CPU budget: 1 fuel unit ≈ 1 Wasm instruction, roughly 50–200 ms of dense arithmetic                                                                                  | Permanent step error `fuel exhausted (cpu limit)`                                                                                               |
+| `ORCH8_WASM_TIMEOUT_MS`       | `2000`              | Wall clock per invocation (`alloc` plus `handle`), enforced by epoch interruption with a 10 ms tick. It catches work that fuel undercounts, such as one `memory.fill` over 64 MiB. | Permanent `wall-clock timeout exceeded`                                                                                                         |
+| `ORCH8_WASM_MAX_MEMORY_BYTES` | `67108864` (64 MiB) | Linear memory, both the declared initial size and every `memory.grow`                                                                                                              | `memory.grow` returns `-1` (spec behavior). A trap afterwards, or an oversized initial memory, is reported as permanent `memory limit exceeded` |
+| — (fixed)                     | `10000`             | Function-table elements                                                                                                                                                            | Permanent `table limit exceeded`                                                                                                                |
+| `ORCH8_WASM_MAX_MODULE_BYTES` | `33554432` (32 MiB) | Module file size, checked before the file is read or compiled                                                                                                                      | Permanent `failed to load module` (no path or contents are echoed)                                                                              |
+| `ORCH8_WASM_MAX_OUTPUT_BYTES` | `4194304` (4 MiB)   | Size of the returned output, checked before it is parsed                                                                                                                           | Permanent `output of N bytes exceeds the limit`                                                                                                 |
+| `ORCH8_WASM_PLUGIN_DIR`       | unset               | Directory that every module `source` must resolve inside                                                                                                                           | Permanent `failed to load module`                                                                                                               |
 
 Host access is not a knob. The linker is empty, and a module that declares
 **any** import is refused before instantiation, so a start function never runs.
@@ -107,20 +108,22 @@ For end-user modules we suggest lowering the defaults, for example
 
 The protocol is JSON in and JSON out over the module's linear memory.
 
-| Export | Type | Contract |
-|---|---|---|
-| `memory` | memory | The module's linear memory. |
-| `alloc` | `(i32 size) -> i32 ptr` | Return a pointer to `size` writable bytes. The host checks that `ptr >= 0` and `ptr + size <= memory size`. |
-| `handle` | `(i32 ptr, i32 len) -> i64` | Read the input JSON at `ptr..ptr+len`, and return `(out_ptr << 32) \| out_len`. The host bounds-checks the output range and caps its size. |
-| `dealloc` (optional) | `(i32 ptr, i32 len) -> ()` | Called with the output range after it has been read. A failure is logged and otherwise ignored. |
+| Export               | Type                        | Contract                                                                                                                                   |
+| -------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `memory`             | memory                      | The module's linear memory.                                                                                                                |
+| `alloc`              | `(i32 size) -> i32 ptr`     | Return a pointer to `size` writable bytes. The host checks that `ptr >= 0` and `ptr + size <= memory size`.                                |
+| `handle`             | `(i32 ptr, i32 len) -> i64` | Read the input JSON at `ptr..ptr+len`, and return `(out_ptr << 32) \| out_len`. The host bounds-checks the output range and caps its size. |
+| `dealloc` (optional) | `(i32 ptr, i32 len) -> ()`  | Called with the output range after it has been read. A failure is logged and otherwise ignored.                                            |
 
 The input JSON document is:
 
 ```json
 {
-  "instance_id": "…", "block_id": "…", "attempt": 0,
-  "params":  { "…": "step params after template resolution" },
-  "context": { "data": { }, "config": { } }
+  "instance_id": "…",
+  "block_id": "…",
+  "attempt": 0,
+  "params": { "…": "step params after template resolution" },
+  "context": { "data": {}, "config": {} }
 }
 ```
 
@@ -229,14 +232,14 @@ The limits are covered by execution tests that compile hostile modules and
 assert each limit trips (`cargo test -p orch8-engine --features wasm --lib
 wasm_plugin`):
 
-| Test | Proves |
-|---|---|
-| `infinite_loop_trips_wall_clock_timeout_when_fuel_is_ample` | An infinite loop with unlimited fuel is interrupted by the wall-clock limit |
-| `infinite_loop_trips_fuel_limit_with_configured_budget` / `fuel_exhaustion_is_permanent_error` | Fuel exhaustion traps and is permanent |
-| `memory_grow_beyond_cap_is_denied_and_reported` | `memory.grow` past the cap is denied and reported as a memory-limit error |
-| `initial_memory_beyond_cap_fails_instantiation` | An oversized declared memory never instantiates |
-| `wasi_filesystem_and_socket_imports_are_rejected_before_instantiation` | WASI fs/socket/`env` imports are refused, and the start function never runs |
-| `output_beyond_cap_is_rejected_before_parsing` | Oversized output is refused |
-| `module_file_beyond_size_cap_is_not_loaded` | The module size cap is enforced at load and in the validator |
-| `validator_accepts_abi_conformant_module_and_rejects_shape_errors` | Upload validation of the ABI and memory shape |
-| `limits_from_env_use_defaults_and_reject_zero_or_garbage` | Configuration can't disable a limit by accident |
+| Test                                                                                           | Proves                                                                      |
+| ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `infinite_loop_trips_wall_clock_timeout_when_fuel_is_ample`                                    | An infinite loop with unlimited fuel is interrupted by the wall-clock limit |
+| `infinite_loop_trips_fuel_limit_with_configured_budget` / `fuel_exhaustion_is_permanent_error` | Fuel exhaustion traps and is permanent                                      |
+| `memory_grow_beyond_cap_is_denied_and_reported`                                                | `memory.grow` past the cap is denied and reported as a memory-limit error   |
+| `initial_memory_beyond_cap_fails_instantiation`                                                | An oversized declared memory never instantiates                             |
+| `wasi_filesystem_and_socket_imports_are_rejected_before_instantiation`                         | WASI fs/socket/`env` imports are refused, and the start function never runs |
+| `output_beyond_cap_is_rejected_before_parsing`                                                 | Oversized output is refused                                                 |
+| `module_file_beyond_size_cap_is_not_loaded`                                                    | The module size cap is enforced at load and in the validator                |
+| `validator_accepts_abi_conformant_module_and_rejects_shape_errors`                             | Upload validation of the ABI and memory shape                               |
+| `limits_from_env_use_defaults_and_reject_zero_or_garbage`                                      | Configuration can't disable a limit by accident                             |

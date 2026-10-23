@@ -49,11 +49,11 @@ The CLI (`orch8-cli/src/commands/templates.rs`) accepts either of two shapes:
 
 The response may be at most 8 MiB. Each entry has:
 
-| Field | Required | Meaning |
-|---|---|---|
-| `name` | yes | Name used by `show` and `pull`. |
-| `description` | no | One line shown by `list`. |
-| `sequence` | one of these two | Inline sequence JSON. |
+| Field          | Required         | Meaning                                                                 |
+| -------------- | ---------------- | ----------------------------------------------------------------------- |
+| `name`         | yes              | Name used by `show` and `pull`.                                         |
+| `description`  | no               | One line shown by `list`.                                               |
+| `sequence`     | one of these two | Inline sequence JSON.                                                   |
 | `download_url` | one of these two | URL of the sequence JSON. The CLI fetches it with the same 8 MiB limit. |
 
 The CLI ignores any other fields. The community catalog inlines `sequence`,

@@ -39,11 +39,11 @@ them.
 
 ## Modes
 
-| Mode | Where the roles run | What it can tell you |
-|---|---|---|
-| `ssh --hosts FILE` | Each role on the host named in the file. The driver runs locally. | Real multi-host scaling, including network and database latency. **The only mode that yields a distributed result.** |
-| `compose` | Each role in its own container on one Docker host, optionally capped with `--cpus-per-node` and `--mem-per-node` | Process-level scaling and coordination overhead under CPU isolation. It's still one kernel, one disk and one network namespace. |
-| `local --server-bin --database-url` | Each role as a plain process on this machine, with no Docker | A smoke test that the split roles work end to end under load. The numbers mostly reflect contention on one machine. |
+| Mode                                | Where the roles run                                                                                              | What it can tell you                                                                                                            |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `ssh --hosts FILE`                  | Each role on the host named in the file. The driver runs locally.                                                | Real multi-host scaling, including network and database latency. **The only mode that yields a distributed result.**            |
+| `compose`                           | Each role in its own container on one Docker host, optionally capped with `--cpus-per-node` and `--mem-per-node` | Process-level scaling and coordination overhead under CPU isolation. It's still one kernel, one disk and one network namespace. |
+| `local --server-bin --database-url` | Each role as a plain process on this machine, with no Docker                                                     | A smoke test that the split roles work end to end under load. The numbers mostly reflect contention on one machine.             |
 
 Any result where every role shared one machine gets
 `topology.single_host = true`. Label such a result **"single-host smoke,
@@ -61,7 +61,7 @@ and executor hosts, Node.js 22 on worker hosts, and `psql` on the control host.
 # compose: 1 control + 3 executors + 4 workers, 2 CPUs / 2 GiB per container
 loadgen/bench/distributed/run.sh --mode compose --executors 3 --workers 4 \
   --cpus-per-node 2 --mem-per-node 2g --n 2000 --concurrency 200 --runs 3 \
-  --image ghcr.io/orch8-io/engine:<exact tag>
+  --image ghcr.io/orch8-io/engine:"<exact tag>"
 
 # ssh: roles placed by a hosts file (see loadgen/bench/distributed/hosts.example)
 loadgen/bench/distributed/run.sh --mode ssh --hosts hosts.txt --n 5000 --concurrency 500 --runs 3
@@ -88,14 +88,14 @@ you want to say which.
 
 Each run writes `loadgen/bench/results/distributed-<mode>-<UTC stamp>-run<i>/`:
 
-| File | Content |
-|---|---|
-| `result.json` | The standard result ([schema](../loadgen/bench/results.schema.json)) plus a `topology` block |
-| `topology.json` | The same block on its own |
-| `samples.jsonl` | One line per measured workflow (submit, completion, server start/close) |
-| `activity-*.jsonl` | One line per activity execution, per worker |
+| File                                                          | Content                                                                                           |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `result.json`                                                 | The standard result ([schema](../loadgen/bench/results.schema.json)) plus a `topology` block      |
+| `topology.json`                                               | The same block on its own                                                                         |
+| `samples.jsonl`                                               | One line per measured workflow (submit, completion, server start/close)                           |
+| `activity-*.jsonl`                                            | One line per activity execution, per worker                                                       |
 | `driver.out`, `control.log`, `executor-*.log`, `worker-*.log` | Raw process output (`local` mode). In `ssh` mode, logs stay in `/tmp/orch8-bench-*` on each host. |
-| `compose.yml`, `images.json` | Generated stack and resolved image digests (`compose` mode) |
+| `compose.yml`, `images.json`                                  | Generated stack and resolved image digests (`compose` mode)                                       |
 
 `topology` records `mode`, `single_host`, `executors`, `workers`,
 `worker_slots`, `engine_build` (image reference, or binary path with its
@@ -148,6 +148,6 @@ Raw files:
 [`loadgen/bench/distributed/published/20260928T191204Z-local-smoke/`](../loadgen/bench/distributed/published/20260928T191204Z-local-smoke/result.json)
 (`result.json` with its `topology` block, and gzipped `samples.jsonl`).
 
-| Mode | Executors × workers × slots | N / concurrency | Completed / failed | Throughput (wf/s) | p50 / p95 / p99 (ms) | Latency source | Engine build | Hardware |
-|---|---|---|---|---|---|---|---|---|
-| local, single host | 2 × 2 × 100 | 2000 / 200 (warm-up 100) | 2000 / 0 | 194.4 | 920 / 1152 / 1207 (max 1232) | server | `orch8-server` 0.7.1, `dev` profile built with host rustflags `-C opt-level=3 -C target-cpu=native` (not the `release` profile, no LTO), worktree at `21a4255` plus uncommitted changes | Apple M3 Max (`hw.model` Mac15,11), 14 cores, 36 GiB RAM, macOS (Darwin 25.3.0 arm64); PostgreSQL 14.23 (Homebrew) on the same host |
+| Mode               | Executors × workers × slots | N / concurrency          | Completed / failed | Throughput (wf/s) | p50 / p95 / p99 (ms)         | Latency source | Engine build                                                                                                                                                                            | Hardware                                                                                                                            |
+| ------------------ | --------------------------- | ------------------------ | ------------------ | ----------------- | ---------------------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| local, single host | 2 × 2 × 100                 | 2000 / 200 (warm-up 100) | 2000 / 0           | 194.4             | 920 / 1152 / 1207 (max 1232) | server         | `orch8-server` 0.7.1, `dev` profile built with host rustflags `-C opt-level=3 -C target-cpu=native` (not the `release` profile, no LTO), worktree at `21a4255` plus uncommitted changes | Apple M3 Max (`hw.model` Mac15,11), 14 cores, 36 GiB RAM, macOS (Darwin 25.3.0 arm64); PostgreSQL 14.23 (Homebrew) on the same host |

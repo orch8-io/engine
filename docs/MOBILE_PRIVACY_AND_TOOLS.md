@@ -21,4 +21,3 @@ been rewritten or expired.
 
 The SDK does not request OS permissions automatically, export camera/file/key
 bytes, redact unlabelled semantic secrets, or rotate host keys on its own.
-

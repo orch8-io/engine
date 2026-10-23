@@ -42,14 +42,14 @@ Every channel resolves the same native engine, pinned to the same version
 the first call. Each section ends with a check that proves the native engine
 was resolved rather than left for a runtime crash.
 
-| Platform | Package | Registry |
-|---|---|---|
-| iOS, Swift Package Manager | `Orch8Mobile` | [`orch8-io/orch8-mobile-swift`](https://github.com/orch8-io/orch8-mobile-swift) |
-| iOS, CocoaPods | `Orch8Mobile` | CocoaPods trunk |
-| Android, Gradle | `io.orch8:orch8-mobile` | `https://raw.githubusercontent.com/orch8-io/maven/main` |
-| React Native | `@orch8.io/react-native-orch8` | npm (+ the two native registries above) |
-| Expo | `@orch8.io/expo` | npm (+ the two native registries above) |
-| Kotlin Multiplatform | `io.orch8:orch8-kmp` | `https://raw.githubusercontent.com/orch8-io/maven/main` |
+| Platform                   | Package                        | Registry                                                                        |
+| -------------------------- | ------------------------------ | ------------------------------------------------------------------------------- |
+| iOS, Swift Package Manager | `Orch8Mobile`                  | [`orch8-io/orch8-mobile-swift`](https://github.com/orch8-io/orch8-mobile-swift) |
+| iOS, CocoaPods             | `Orch8Mobile`                  | CocoaPods trunk                                                                 |
+| Android, Gradle            | `io.orch8:orch8-mobile`        | `https://raw.githubusercontent.com/orch8-io/maven/main`                         |
+| React Native               | `@orch8.io/react-native-orch8` | npm (+ the two native registries above)                                         |
+| Expo                       | `@orch8.io/expo`               | npm (+ the two native registries above)                                         |
+| Kotlin Multiplatform       | `io.orch8:orch8-kmp`           | `https://raw.githubusercontent.com/orch8-io/maven/main`                         |
 
 Requirements everywhere: iOS 16.0+ with Xcode 16+, Android API 24+ with JDK 17.
 
@@ -195,21 +195,42 @@ Quick start: load a sequence, start it offline, and answer its
 import { useEffect } from "react";
 import { Button } from "react-native";
 import * as FileSystem from "expo-file-system";
-import { Orch8Provider, useOrch8, useNativeEngine, useNativeWorkflow } from "@orch8.io/expo";
+import {
+  Orch8Provider,
+  useOrch8,
+  useNativeEngine,
+  useNativeWorkflow,
+} from "@orch8.io/expo";
 import sequence from "./field-inspection-offline.json";
 
 const dbPath = `${FileSystem.documentDirectory!.replace("file://", "")}orch8.db`;
 const Ready = () => (useOrch8().engine ? <Inspect /> : null); // engine opens after first render
-export default () => <Orch8Provider nativeConfig={{ dbPath }}><Ready /></Orch8Provider>;
+export default () => (
+  <Orch8Provider nativeConfig={{ dbPath }}>
+    <Ready />
+  </Orch8Provider>
+);
 
 function Inspect() {
   const engine = useNativeEngine();
   const { start, pendingSteps, completeStep } = useNativeWorkflow();
   useEffect(() => engine.loadSequenceFromJson(sequence), [engine]);
   const step = pendingSteps[0]; // a step parked on wait_for_input
-  return step
-    ? <Button title={`Complete ${step.stepName}`} onPress={() => completeStep(step.instanceId, step.stepName, { value: "complete" })} />
-    : <Button title="Start" onPress={() => start("field-inspection-offline", { site_id: "A-12" }, "insp:A-12")} />;
+  return step ? (
+    <Button
+      title={`Complete ${step.stepName}`}
+      onPress={() =>
+        completeStep(step.instanceId, step.stepName, { value: "complete" })
+      }
+    />
+  ) : (
+    <Button
+      title="Start"
+      onPress={() =>
+        start("field-inspection-offline", { site_id: "A-12" }, "insp:A-12")
+      }
+    />
+  );
 }
 ```
 
@@ -276,20 +297,26 @@ the first engine release after `0.7.1`; for `0.7.1` itself use
    Android needs nothing else: `androidMain` depends on
    `io.orch8:orch8-mobile` at the same version.
 
-2. iOS: add the `Orch8Mobile` Swift package or pod (same version, see above),
-   then install the Swift bridge into the app target:
+2. iOS: add the matching `Orch8Mobile` Swift package or pod, then copy the
+   Swift bridge into the app target from the same source checkout as the KMP
+   library. From the engine repository root:
 
    ```bash
-   curl -fsSLO https://raw.githubusercontent.com/orch8-io/engine/v<version>/packages/kmp/ios-bridge/install-bridge.sh
-   bash install-bridge.sh iosApp/iosApp Shared <version>   # Shared = your shared framework's baseName
+   APP_IOS_SOURCES="/absolute/path/to/your/iosApp/iosApp"
+   sed 's/^import Orch8Kmp$/import Shared/' \
+     packages/kmp/ios-bridge/Orch8KmpBridge.swift \
+     > "$APP_IOS_SOURCES/Orch8KmpBridge.swift"
    ```
 
-   The script downloads `Orch8KmpBridge-v<version>.swift` from the engine
-   release, verifies its SHA-256, and rewrites `import Orch8Kmp` to your
-   framework's module name. The bridge is a source file, not a package,
-   because it implements Kotlin protocols exported by *your* shared
-   framework; a prebuilt package would carry a second Kotlin runtime whose
-   types your shared code would not recognise.
+   Replace `Shared` with your framework's `baseName` and add the copied file to
+   the iOS app target. Build matching native/KMP components when using APIs from
+   `main`. The bridge implements protocols exported by your shared framework;
+   a prebuilt package would carry incompatible copies of those types.
+
+   The release installer is available for tags that include
+   `Orch8KmpBridge-v<version>.swift` and its checksum. Checked 2026-10-23:
+   `v0.7.1` has no bridge assets, so use the source path above instead of the
+   download installer. See the [KMP package guide](../packages/kmp/README.md).
 
 3. Install the bridge once at launch, before shared code opens the engine:
 
@@ -329,6 +356,7 @@ Maintainers: how each channel is published is described in
 ### 1. Initialize the Engine
 
 **Swift:**
+
 ```swift
 import Orch8Mobile
 
@@ -363,6 +391,7 @@ let engine = try MobileEngine(
 ```
 
 **Kotlin:**
+
 ```kotlin
 import io.orch8.mobile.*
 
@@ -398,6 +427,7 @@ val engine = MobileEngine(dbPath, config)
 Step handlers are native callbacks invoked when a workflow step executes. They receive JSON input and return JSON output.
 
 **Swift:**
+
 ```swift
 class ShowScreenHandler: StepHandler {
     func execute(stepName: String, input: String) throws -> String {
@@ -411,6 +441,7 @@ try engine.registerHandler(name: "show_screen", handler: ShowScreenHandler())
 ```
 
 **Kotlin:**
+
 ```kotlin
 class ShowScreenHandler : StepHandler {
     override fun execute(stepName: String, input: String): String {
@@ -488,64 +519,64 @@ engine.setListener(listener: MyListener())
 
 ### MobileEngine
 
-| Method | Description |
-|--------|-------------|
-| `new(dbPath, config)` | Create engine with SQLite database at path |
-| `registerHandler(name, handler)` | Register a native step handler (before `resume()`) |
-| `setListener(listener)` | Set the lifecycle event listener |
-| `resume()` | Start the background tick loop |
-| `pause()` | Pause the tick loop (waits for current tick) |
-| `tickOnce()` | Execute a single tick manually |
-| `runUntilIdle(maxTicks, timeBudgetMs)` | Drain work inside a bounded OS-granted background window |
-| `start(sequenceName, input, dedupKey?)` | Start a workflow instance, returns instance ID |
-| `cancelInstance(instanceId)` | Cancel a running instance |
-| `getInstance(instanceId)` | Get instance state snapshot |
-| `activeInstances()` | List all non-terminal instances |
-| `completeStep(instanceId, stepName, output)` | Complete a step in Waiting state |
-| `loadSequenceFromJson(json)` | Load a sequence directly (bypasses sync) |
-| `loadSequencesFromUrl(url)` | Load sequences from a JSON-array endpoint (defaults to `sequencesUrl`) |
-| `loadedSequences()` | List locally stored sequences |
-| `sync(manifestUrl, tokenProvider?)` | Sync sequences from remote manifest |
-| `flushTelemetry(endpointUrl)` | Flush buffered telemetry events |
-| `setDeviceContext(ctx)` | Set device info for telemetry |
-| `reportPowerState(state)` | Report device power state to throttle background work |
-| `onPushReceived()` | Trigger an immediate sync and worker poll after a push notification |
-| `onPushWake(envelopeJson)` | Handle an id-only wake envelope (`{task_id?, runtime_id?, reason?}`); ignored when addressed to another runtime |
-| `enableBuiltin(name)` | Enable an opt-in builtin handler (`http_request`); see [Built-in handlers](#built-in-handlers) |
-| `nodeRuntimeId()` | Stable runtime UUID of this installation (lease `worker_id`); your backend binds device sessions to it |
-| `setTokenProvider(provider)` | Authenticate node, worker, delegation and sync calls with device sessions from `provider` (refreshed on `401`); call before `registerNode` |
-| `registerNode(capabilities)` | Join the runtime mesh (device + capability registration, auto re-advertise) |
-| `updateNodeStatus(connectivity, batteryPercent)` | Push fresh liveness facts |
-| `unregisterNode()` | Stop the worker, advertise `draining`, stop re-advertising |
-| `startWorker(options)` / `stopWorker()` | Run / stop the remote worker loop |
-| `runWorkerWindow(timeBudgetMs)` | Claim and run remote tasks inside a bounded background window |
-| `workerStats()` | Worker counters (claimed, completed, failed, released, lost, in flight) |
-| `shutdown()` | Shut down the engine |
+| Method                                           | Description                                                                                                                                |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `new(dbPath, config)`                            | Create engine with SQLite database at path                                                                                                 |
+| `registerHandler(name, handler)`                 | Register a native step handler (before `resume()`)                                                                                         |
+| `setListener(listener)`                          | Set the lifecycle event listener                                                                                                           |
+| `resume()`                                       | Start the background tick loop                                                                                                             |
+| `pause()`                                        | Pause the tick loop (waits for current tick)                                                                                               |
+| `tickOnce()`                                     | Execute a single tick manually                                                                                                             |
+| `runUntilIdle(maxTicks, timeBudgetMs)`           | Drain work inside a bounded OS-granted background window                                                                                   |
+| `start(sequenceName, input, dedupKey?)`          | Start a workflow instance, returns instance ID                                                                                             |
+| `cancelInstance(instanceId)`                     | Cancel a running instance                                                                                                                  |
+| `getInstance(instanceId)`                        | Get instance state snapshot                                                                                                                |
+| `activeInstances()`                              | List all non-terminal instances                                                                                                            |
+| `completeStep(instanceId, stepName, output)`     | Complete a step in Waiting state                                                                                                           |
+| `loadSequenceFromJson(json)`                     | Load a sequence directly (bypasses sync)                                                                                                   |
+| `loadSequencesFromUrl(url)`                      | Load sequences from a JSON-array endpoint (defaults to `sequencesUrl`)                                                                     |
+| `loadedSequences()`                              | List locally stored sequences                                                                                                              |
+| `sync(manifestUrl, tokenProvider?)`              | Sync sequences from remote manifest                                                                                                        |
+| `flushTelemetry(endpointUrl)`                    | Flush buffered telemetry events                                                                                                            |
+| `setDeviceContext(ctx)`                          | Set device info for telemetry                                                                                                              |
+| `reportPowerState(state)`                        | Report device power state to throttle background work                                                                                      |
+| `onPushReceived()`                               | Trigger an immediate sync and worker poll after a push notification                                                                        |
+| `onPushWake(envelopeJson)`                       | Handle an id-only wake envelope (`{task_id?, runtime_id?, reason?}`); ignored when addressed to another runtime                            |
+| `enableBuiltin(name)`                            | Enable an opt-in builtin handler (`http_request`); see [Built-in handlers](#built-in-handlers)                                             |
+| `nodeRuntimeId()`                                | Stable runtime UUID of this installation (lease `worker_id`); your backend binds device sessions to it                                     |
+| `setTokenProvider(provider)`                     | Authenticate node, worker, delegation and sync calls with device sessions from `provider` (refreshed on `401`); call before `registerNode` |
+| `registerNode(capabilities)`                     | Join the runtime mesh (device + capability registration, auto re-advertise)                                                                |
+| `updateNodeStatus(connectivity, batteryPercent)` | Push fresh liveness facts                                                                                                                  |
+| `unregisterNode()`                               | Stop the worker, advertise `draining`, stop re-advertising                                                                                 |
+| `startWorker(options)` / `stopWorker()`          | Run / stop the remote worker loop                                                                                                          |
+| `runWorkerWindow(timeBudgetMs)`                  | Claim and run remote tasks inside a bounded background window                                                                              |
+| `workerStats()`                                  | Worker counters (claimed, completed, failed, released, lost, in flight)                                                                    |
+| `shutdown()`                                     | Shut down the engine                                                                                                                       |
 
 ### MobileEngineConfig
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `tickIntervalMs` | u64 | 500 | Base tick interval; doubles at low battery and quadruples at critical battery |
-| `maxConcurrentSteps` | u32 | 4 | Parallel step executions |
-| `maxStepsPerInstance` | u32 | 1000 | Step limit per instance |
-| `maxConcurrentInstances` | u32 | 10 | Active instance limit |
-| `maxTickDurationMs` | u64 | 5000 | Tick budget |
-| `maxInstanceLifetimeSecs` | u64 | 86400 | Auto-expire after 24h |
-| `maxStoredSequences` | u32 | 50 | Local sequence limit |
-| `maxSequenceSizeBytes` | u64 | 1MB | Max JSON size per sequence |
-| `handlerTimeoutMs` | u64 | 30000 | Handler call timeout |
-| `operationTimeoutMs` | u64 | 10000 | Sync API call timeout |
-| `telemetryEnabled` | bool | true | Telemetry collection |
-| `telemetryUrl` | String | `""` | HTTPS endpoint for telemetry batch delivery (port 443, public host only). Empty = telemetry disabled |
-| `environment` | String | "production" | Target environment |
-| `rootPublicKey` | String | "" | Ed25519 key for manifest verification |
-| `sdkVersion` | String | crate version | SDK version for compatibility checks |
-| `memoryBudgetBytes` | u64 | 0 | Skip ticks while process RSS exceeds this budget (0 = unlimited) |
-| `sequencesUrl` | String | `""` | Endpoint returning a JSON array of sequences for `loadSequencesFromUrl` |
-| `syncUrl` | String | `""` | Server sync endpoint for status reporting and commands. Empty = disabled |
-| `deviceId` | String | `""` | Unique device identifier sent with each sync request |
-| `syncApiKey` | String | `""` | **Legacy — not for production apps.** A static key compiled into the app is extractable by anyone who has the app. Prefer a device session through `setTokenProvider` — see [Authenticating a phone](#authenticating-a-phone-device-sessions). Never put an operator key here |
+| Field                     | Type   | Default       | Description                                                                                                                                                                                                                                                                   |
+| ------------------------- | ------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tickIntervalMs`          | u64    | 500           | Base tick interval; doubles at low battery and quadruples at critical battery                                                                                                                                                                                                 |
+| `maxConcurrentSteps`      | u32    | 4             | Parallel step executions                                                                                                                                                                                                                                                      |
+| `maxStepsPerInstance`     | u32    | 1000          | Step limit per instance                                                                                                                                                                                                                                                       |
+| `maxConcurrentInstances`  | u32    | 10            | Active instance limit                                                                                                                                                                                                                                                         |
+| `maxTickDurationMs`       | u64    | 5000          | Tick budget                                                                                                                                                                                                                                                                   |
+| `maxInstanceLifetimeSecs` | u64    | 86400         | Auto-expire after 24h                                                                                                                                                                                                                                                         |
+| `maxStoredSequences`      | u32    | 50            | Local sequence limit                                                                                                                                                                                                                                                          |
+| `maxSequenceSizeBytes`    | u64    | 1MB           | Max JSON size per sequence                                                                                                                                                                                                                                                    |
+| `handlerTimeoutMs`        | u64    | 30000         | Handler call timeout                                                                                                                                                                                                                                                          |
+| `operationTimeoutMs`      | u64    | 10000         | Sync API call timeout                                                                                                                                                                                                                                                         |
+| `telemetryEnabled`        | bool   | true          | Telemetry collection                                                                                                                                                                                                                                                          |
+| `telemetryUrl`            | String | `""`          | HTTPS endpoint for telemetry batch delivery (port 443, public host only). Empty = telemetry disabled                                                                                                                                                                          |
+| `environment`             | String | "production"  | Target environment                                                                                                                                                                                                                                                            |
+| `rootPublicKey`           | String | ""            | Ed25519 key for manifest verification                                                                                                                                                                                                                                         |
+| `sdkVersion`              | String | crate version | SDK version for compatibility checks                                                                                                                                                                                                                                          |
+| `memoryBudgetBytes`       | u64    | 0             | Skip ticks while process RSS exceeds this budget (0 = unlimited)                                                                                                                                                                                                              |
+| `sequencesUrl`            | String | `""`          | Endpoint returning a JSON array of sequences for `loadSequencesFromUrl`                                                                                                                                                                                                       |
+| `syncUrl`                 | String | `""`          | Server sync endpoint for status reporting and commands. Empty = disabled                                                                                                                                                                                                      |
+| `deviceId`                | String | `""`          | Unique device identifier sent with each sync request                                                                                                                                                                                                                          |
+| `syncApiKey`              | String | `""`          | **Legacy — not for production apps.** A static key compiled into the app is extractable by anyone who has the app. Prefer a device session through `setTokenProvider` — see [Authenticating a phone](#authenticating-a-phone-device-sessions). Never put an operator key here |
 
 ### StepHandler Protocol
 
@@ -729,11 +760,11 @@ background execution. iOS still decides when the process may run.
 The embedded engine registers a safe subset of the server's builtins so
 server-authored sequences can use them without host code:
 
-| Set | Handlers | How |
-|-----|----------|-----|
-| Default | `noop`, `log`, `sleep`, `fail`, `transform`, `assert`, `set_state`, `get_state`, `delete_state`, `merge_state` | Always registered (pure data / control flow + instance-local state) |
-| Opt-in | `http_request` | `engine.enableBuiltin(name: "http_request")` before `resume()`; keeps the SSRF guard |
-| Server-only | `email`, `llm_call`, `tool_call`, `mcp_call`, `agent`, `embed`, `memory_*`, `human_review`, `self_modify`, `emit_event`, `send_signal`, `query_instance`, `blob_*`, `wait_for_event`, `jev`, `notify` | Not available on-device; place those steps on a server runtime |
+| Set         | Handlers                                                                                                                                                                                              | How                                                                                  |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Default     | `noop`, `log`, `sleep`, `fail`, `transform`, `assert`, `set_state`, `get_state`, `delete_state`, `merge_state`                                                                                        | Always registered (pure data / control flow + instance-local state)                  |
+| Opt-in      | `http_request`                                                                                                                                                                                        | `engine.enableBuiltin(name: "http_request")` before `resume()`; keeps the SSRF guard |
+| Server-only | `email`, `llm_call`, `tool_call`, `mcp_call`, `agent`, `embed`, `memory_*`, `human_review`, `self_modify`, `emit_event`, `send_signal`, `query_instance`, `blob_*`, `wait_for_event`, `jev`, `notify` | Not available on-device; place those steps on a server runtime                       |
 
 A handler registered with `registerHandler` under a builtin's name replaces
 the builtin. Only app-native handlers are advertised to the control plane by
@@ -779,13 +810,13 @@ The wrappers take an **async** callback that fetches a fresh session from
 your backend; they cache the token and call the callback again when the
 engine asks for a refresh:
 
-| Wrapper | Call (before `registerNode`) |
-|---------|------------------------------|
-| Swift | `try await Orch8RuntimeNode(engine:).setTokenProvider { try await backend.deviceSession() }` |
-| React Native | `await orch8.setTokenProvider(() => backend.deviceSession())` |
-| Expo | `await engine.setTokenProvider(() => backend.deviceSession())` on the `NativeEngine` (native engine after 0.7.1) |
-| KMP | `engine.setTokenProvider { backend.deviceSession() }` (suspend) |
-| Flutter | `await orch8.setTokenProvider(() => backend.deviceSession())` |
+| Wrapper      | Call (before `registerNode`)                                                                                     |
+| ------------ | ---------------------------------------------------------------------------------------------------------------- |
+| Swift        | `try await Orch8RuntimeNode(engine:).setTokenProvider { try await backend.deviceSession() }`                     |
+| React Native | `await orch8.setTokenProvider(() => backend.deviceSession())`                                                    |
+| Expo         | `await engine.setTokenProvider(() => backend.deviceSession())` on the `NativeEngine` (native engine after 0.7.1) |
+| KMP          | `engine.setTokenProvider { backend.deviceSession() }` (suspend)                                                  |
+| Flutter      | `await orch8.setTokenProvider(() => backend.deviceSession())`                                                    |
 
 Your backend keeps the operator key and mints the session, e.g. with
 `@orch8.io/sdk`:
@@ -793,8 +824,8 @@ Your backend keeps the operator key and mints the session, e.g. with
 ```ts
 // POST /device-session on your backend, after authenticating the user
 const session = await orch8.createDeviceSession({
-  deviceId,                    // the app's MobileEngineConfig.deviceId
-  runtimeId,                   // the app's engine.nodeRuntimeId()
+  deviceId, // the app's MobileEngineConfig.deviceId
+  runtimeId, // the app's engine.nodeRuntimeId()
   handlers: ["scan_document"], // what this phone may serve
   ttlSecs: 3600,
 });
@@ -811,16 +842,16 @@ Sessions last `ttl_secs` (default 3600, at most 86400).
 A device session is bound to its tenant, `device_id`, `runtime_id`, and
 handler allowlist, and reaches only:
 
-| Allowed | Object-level check |
-|---------|--------------------|
-| `POST /mobile/devices/register`, `POST /mobile/sync` | `device_id` is the session's; no credential-resolving `step_delegations` (off for stored keys too unless `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true`) |
-| `POST /mobile/devices/{device_id}/runtime` | the session's device and runtime; advertised handlers clamped to the allowlist |
-| `POST /workers/tasks/poll`, `POST /workers/tasks/{id}/complete\|fail\|heartbeat\|release` | `worker_id` is the session's runtime; polled handler is in the allowlist |
-| `POST /continuity/executions` | `hosted_by_runtime: true` for the session's own runtime only |
-| `POST /continuity/grants` | only `accept` grants, for executions the session's runtime owns |
-| `POST /continuity/delegations/claim` | the session's runtime is the delegation source (and owns the parent) |
-| `GET /continuity/delegations/{id}` | the session's runtime is the source or the destination (else 404) |
-| `GET /runtimes` | only live delegation destinations (not itself, not draining or expired, ≥ `registered`, advertising `orch8.delegation`), reduced to `runtime_id`, `kind`, `handlers`, `observed_at`, `expires_at` — what destination choice matches on; no regions, hardware, credential references, network/battery state or capsule keys |
+| Allowed                                                                                   | Object-level check                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /mobile/devices/register`, `POST /mobile/sync`                                      | `device_id` is the session's; no credential-resolving `step_delegations` (off for stored keys too unless `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true`)                                                                                                                                                                     |
+| `POST /mobile/devices/{device_id}/runtime`                                                | the session's device and runtime; advertised handlers clamped to the allowlist                                                                                                                                                                                                                                             |
+| `POST /workers/tasks/poll`, `POST /workers/tasks/{id}/complete\|fail\|heartbeat\|release` | `worker_id` is the session's runtime; polled handler is in the allowlist                                                                                                                                                                                                                                                   |
+| `POST /continuity/executions`                                                             | `hosted_by_runtime: true` for the session's own runtime only                                                                                                                                                                                                                                                               |
+| `POST /continuity/grants`                                                                 | only `accept` grants, for executions the session's runtime owns                                                                                                                                                                                                                                                            |
+| `POST /continuity/delegations/claim`                                                      | the session's runtime is the delegation source (and owns the parent)                                                                                                                                                                                                                                                       |
+| `GET /continuity/delegations/{id}`                                                        | the session's runtime is the source or the destination (else 404)                                                                                                                                                                                                                                                          |
+| `GET /runtimes`                                                                           | only live delegation destinations (not itself, not draining or expired, ≥ `registered`, advertising `orch8.delegation`), reduced to `runtime_id`, `kind`, `handlers`, `observed_at`, `expires_at` — what destination choice matches on; no regions, hardware, credential references, network/battery state or capsule keys |
 
 Everything else — task listing, worker commands, other devices, sequences,
 credentials, instances, handoffs, API keys, browser/device session minting —
@@ -878,9 +909,19 @@ when the server sends one, default 120 s for mobile), and settles with
 `__orch8` member (only when params is a JSON object):
 
 ```json
-{ "document": "passport", "__orch8": {
-    "effect_id": "…", "task_id": "…", "instance_id": "…", "block_id": "…",
-    "attempt": 1, "runtime_id": "…", "continuity_epoch": 3, "resume_checkpoint": null } }
+{
+  "document": "passport",
+  "__orch8": {
+    "effect_id": "…",
+    "task_id": "…",
+    "instance_id": "…",
+    "block_id": "…",
+    "attempt": 1,
+    "runtime_id": "…",
+    "continuity_epoch": 3,
+    "resume_checkpoint": null
+  }
+}
 ```
 
 `effect_id` is the server's deterministic idempotency key for the step's
@@ -906,11 +947,11 @@ handler runs, marked `started`, then updated with the outcome before it is
 reported. On the next launch (engine construction when `syncApiKey` is set,
 else `registerNode`, and `startWorker`) the journal is drained:
 
-| Journaled state | Action |
-|-----------------|--------|
-| claimed, not started | `release {started: false}` — back to pending |
-| started, no outcome | `release {started: true}` — server marks the effect unknown |
-| outcome recorded | re-deliver `complete` / `fail` |
+| Journaled state      | Action                                                      |
+| -------------------- | ----------------------------------------------------------- |
+| claimed, not started | `release {started: false}` — back to pending                |
+| started, no outcome  | `release {started: true}` — server marks the effect unknown |
+| outcome recorded     | re-deliver `complete` / `fail`                              |
 
 Servers without `/release` (404/405) get a retryable `fail` instead.
 
@@ -959,18 +1000,33 @@ Place a step of a local sequence with `$runtime`, as on the server:
 
 ```json
 [
-  {"type": "step", "id": "capture", "handler": "take_photo", "params": {}},
-  {"type": "step", "id": "classify", "handler": "orch8.delegation",
-   "retry": {"max_attempts": 3, "initial_backoff": 1000},
-   "params": {
-     "sequence_id": "0192…",
-     "input": {"photo": {"id": "{{outputs.capture.photo.id}}"}},
-     "$runtime": {"runtime_id": "0191…"}}},
-  {"type": "step", "id": "ocr", "handler": "gpu_ocr",
-   "params": {"photo": "{{outputs.capture.photo.id}}",
-              "$runtime": {"runtime_kinds": ["desktop"]}}},
-  {"type": "step", "id": "show", "handler": "show_labels",
-   "params": {"labels": "{{outputs.classify.outputs.classify.labels}}"}}
+  { "type": "step", "id": "capture", "handler": "take_photo", "params": {} },
+  {
+    "type": "step",
+    "id": "classify",
+    "handler": "orch8.delegation",
+    "retry": { "max_attempts": 3, "initial_backoff": 1000 },
+    "params": {
+      "sequence_id": "0192…",
+      "input": { "photo": { "id": "{{outputs.capture.photo.id}}" } },
+      "$runtime": { "runtime_id": "0191…" }
+    }
+  },
+  {
+    "type": "step",
+    "id": "ocr",
+    "handler": "gpu_ocr",
+    "params": {
+      "photo": "{{outputs.capture.photo.id}}",
+      "$runtime": { "runtime_kinds": ["desktop"] }
+    }
+  },
+  {
+    "type": "step",
+    "id": "show",
+    "handler": "show_labels",
+    "params": { "labels": "{{outputs.classify.outputs.classify.labels}}" }
+  }
 ]
 ```
 
@@ -1176,13 +1232,16 @@ opportunity, not as a reason to spin in-process.
 ## Troubleshooting
 
 ### "sync not configured"
+
 Set `rootPublicKey` in `MobileEngineConfig`. Generate a key pair with:
+
 ```bash
 openssl genpkey -algorithm ed25519 -out private.pem
 openssl pkey -in private.pem -pubout -outform DER | base64
 ```
 
 ### "handler timed out"
+
 The default handler timeout is 30 seconds. For handlers that need user interaction, the step transitions to `Waiting` state. Use `completeStep()` when the user responds.
 For remote (server-placed) tasks a device-side timeout releases the task as
 started instead of failing it, and the handler is not offered new work until
@@ -1190,28 +1249,34 @@ the timed-out native call returns — see
 [device-side timeouts](#the-phone-as-a-runtime-node).
 
 ### "max concurrent instances reached"
+
 Reduce active instances by calling `cancelInstance()` on stale ones, or increase `maxConcurrentInstances`.
 
 ### "sequence size exceeds limit"
+
 Increase `maxSequenceSizeBytes` or reduce the sequence JSON size.
 
 ### "invalid URL" on sync / telemetry
+
 All remote endpoints (`syncUrl`, `telemetryUrl`, `sequencesUrl`, telemetry flush targets)
 must be HTTPS on port 443 and resolve to a public host — loopback, private-range, and
 link-local addresses are rejected to limit SSRF risk.
 
 ### Telemetry not flushing while offline
+
 Auto-flush (triggered when the buffer passes its high-water mark) is rate-limited by a
 cooldown after a failed attempt, so an offline device does not hammer the network on every
 `record()` call. Events stay buffered; call `flushTelemetry()` or sync once connectivity
 returns.
 
 ### Database schema after SDK upgrades
+
 File-backed databases created by an older SDK are migrated forward automatically at engine
 construction — per-version schema deltas are applied based on the database's recorded
 schema version. No action needed.
 
 ### Crash recovery
+
 When iOS/Android kills the app mid-step, the next `MobileEngine` construction on
 that database reschedules every instance left `Running` (no `pause()` needed;
 the `dirty` flag from a timed-out `pause()` still triggers recovery on
@@ -1225,6 +1290,7 @@ the killed process are released as described in
 database file.
 
 ### SQLite errors
+
 The SDK uses WAL mode for concurrent reads. Ensure only one `MobileEngine` instance exists per database file.
 
 ## Building from Source

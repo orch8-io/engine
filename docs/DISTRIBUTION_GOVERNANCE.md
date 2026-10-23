@@ -27,4 +27,3 @@ attestations, and dependency locks.
 This module does not resolve arbitrary transitive ecosystems, execute install
 scripts, interpret billing policy, or make an incompatible runtime compatible.
 CDN transport and encrypted credential decryption remain host responsibilities.
-

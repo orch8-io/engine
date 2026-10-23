@@ -32,10 +32,10 @@ retryable.
 When `dbPath` is omitted the database is created in a location that is **not
 backed up**:
 
-| Platform | Default | Notes |
-|---|---|---|
-| iOS | `<Application Support>/Orch8/orch8.db` | hidden from Files, `isExcludedFromBackup`, protection class `completeUntilFirstUserAuthentication` (readable by background tasks after the first unlock) |
-| Android | `<noBackupFilesDir>/orch8.db` | excluded from Auto Backup and device transfer |
+| Platform | Default                                | Notes                                                                                                                                                    |
+| -------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| iOS      | `<Application Support>/Orch8/orch8.db` | hidden from Files, `isExcludedFromBackup`, protection class `completeUntilFirstUserAuthentication` (readable by background tasks after the first unlock) |
+| Android  | `<noBackupFilesDir>/orch8.db`          | excluded from Auto Backup and device transfer                                                                                                            |
 
 A database that already exists at the previous default (iOS `Documents/orch8.db`,
 Android `getDatabasePath("orch8.db")`) keeps being used, so upgrades do not lose
@@ -98,16 +98,19 @@ Backend (Node, [`@orch8.io/sdk`](https://github.com/orch8-io/sdk-node)):
 ```typescript
 import { Orch8Client } from "@orch8.io/sdk";
 
-const orch8 = new Orch8Client({ baseUrl: "https://api.example.com", tenantId: "acme",
-  headers: { "x-api-key": process.env.ORCH8_OPERATOR_KEY! } });
+const orch8 = new Orch8Client({
+  baseUrl: "https://api.example.com",
+  tenantId: "acme",
+  headers: { "x-api-key": process.env.ORCH8_OPERATOR_KEY! },
+});
 
 // POST /device-session  { deviceId, runtimeId }  (behind your own user auth)
 app.post("/device-session", requireUser, async (req, res) => {
   const session = await orch8.createDeviceSession({
     deviceId: req.body.deviceId,
-    runtimeId: req.body.runtimeId,          // the app's nodeRuntimeId()
-    handlers: ["scan_document"],            // handler allowlist; [] = delegation-only
-    ttlSecs: 3600,                          // default 3600, max 86400
+    runtimeId: req.body.runtimeId, // the app's nodeRuntimeId()
+    handlers: ["scan_document"], // handler allowlist; [] = delegation-only
+    ttlSecs: 3600, // default 3600, max 86400
   });
   res.json({ token: session.token, expiresAt: session.expiresAt });
 });

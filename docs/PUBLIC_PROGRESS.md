@@ -52,11 +52,11 @@ Values larger than 4 KiB are omitted from the public view.
 
 ## Public endpoints (no authentication)
 
-| Route | Returns |
-|---|---|
-| `GET /public/progress/{token}` | Redacted JSON (below) |
-| `GET /public/progress/{token}/embed` | Self-contained HTML progress bar |
-| `GET /public/progress/embed.js` | Loader for the `<script>` snippet |
+| Route                                | Returns                           |
+| ------------------------------------ | --------------------------------- |
+| `GET /public/progress/{token}`       | Redacted JSON (below)             |
+| `GET /public/progress/{token}/embed` | Self-contained HTML progress bar  |
+| `GET /public/progress/embed.js`      | Loader for the `<script>` snippet |
 
 These routes live outside the API-key/tenant middleware (like
 `/webhooks/{slug}`) and are served by nodes that expose public webhooks
@@ -69,15 +69,20 @@ These routes live outside the API-key/tenant middleware (like
   "total": 4,
   "percent": 50,
   "steps": [
-    {"label": "Charge card", "status": "completed", "started_at": "…", "completed_at": "…"},
-    {"label": "Reserve inventory", "status": "completed"},
-    {"label": "Ship order", "status": "running", "started_at": "…"},
-    {"label": "Send receipt", "status": "pending"}
+    {
+      "label": "Charge card",
+      "status": "completed",
+      "started_at": "…",
+      "completed_at": "…"
+    },
+    { "label": "Reserve inventory", "status": "completed" },
+    { "label": "Ship order", "status": "running", "started_at": "…" },
+    { "label": "Send receipt", "status": "pending" }
   ],
   "created_at": "…",
   "updated_at": "…",
   "link_expires_at": "…",
-  "data": {"order_id": "ord_42"}
+  "data": { "order_id": "ord_42" }
 }
 ```
 
@@ -105,8 +110,12 @@ only when the share has an allowlist.
 Paste the snippet where the progress bar should appear:
 
 ```html
-<script src="https://orch8.acme.com/public/progress/embed.js"
-        data-token="Qm9…" data-height="72" async></script>
+<script
+  src="https://orch8.acme.com/public/progress/embed.js"
+  data-token="Qm9…"
+  data-height="72"
+  async
+></script>
 ```
 
 The loader validates the token's shape and inserts a sandboxed iframe

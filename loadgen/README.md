@@ -32,30 +32,30 @@ prints a final counters snapshot.
 
 ## Presets
 
-| Preset  | rate (inst/s) | concurrency | workers | signal rate |
-|---------|---------------|-------------|---------|-------------|
-| light   | 1             | 20          | 2       | 1 / 30s     |
-| steady  | 5             | 200         | 8       | 0.1 / s     |
-| stress  | 50            | 2000        | 32      | 0.5 / s     |
+| Preset | rate (inst/s) | concurrency | workers | signal rate |
+| ------ | ------------- | ----------- | ------- | ----------- |
+| light  | 1             | 20          | 2       | 1 / 30s     |
+| steady | 5             | 200         | 8       | 0.1 / s     |
+| stress | 50            | 2000        | 32      | 0.5 / s     |
 
 Any preset field can be overridden via CLI flag: `--rate=10 --concurrency=500`.
 
 ## Flags & env vars
 
-| Flag              | Env var             | Default                         |
-|-------------------|---------------------|---------------------------------|
-| `--server=URL`    | `LOADGEN_SERVER`    | `http://localhost:18080`        |
-| `--preset=NAME`   | `LOADGEN_PRESET`    | `steady`                        |
-| `--rate=N`        | —                   | preset                          |
-| `--concurrency=N` | —                   | preset                          |
-| `--workers=N`     | —                   | preset                          |
-| `--signal-rate=N` | —                   | preset                          |
-| `--duration=SEC`  | `LOADGEN_DURATION`  | forever                         |
-| `--seed=N`        | `LOADGEN_SEED`      | `Date.now()`                    |
-| `--tenants=a,b`   | `LOADGEN_TENANTS`   | `loadgen-a,loadgen-b,loadgen-c` |
-| `--namespaces=…`  | `LOADGEN_NAMESPACES`| `prod,staging`                  |
-| `--enable-llm`    | `LOADGEN_ENABLE_LLM=1` | off                          |
-| `--verbose`       | `LOADGEN_VERBOSE=1` | off                             |
+| Flag              | Env var                | Default                         |
+| ----------------- | ---------------------- | ------------------------------- |
+| `--server=URL`    | `LOADGEN_SERVER`       | `http://localhost:18080`        |
+| `--preset=NAME`   | `LOADGEN_PRESET`       | `steady`                        |
+| `--rate=N`        | —                      | preset                          |
+| `--concurrency=N` | —                      | preset                          |
+| `--workers=N`     | —                      | preset                          |
+| `--signal-rate=N` | —                      | preset                          |
+| `--duration=SEC`  | `LOADGEN_DURATION`     | forever                         |
+| `--seed=N`        | `LOADGEN_SEED`         | `Date.now()`                    |
+| `--tenants=a,b`   | `LOADGEN_TENANTS`      | `loadgen-a,loadgen-b,loadgen-c` |
+| `--namespaces=…`  | `LOADGEN_NAMESPACES`   | `prod,staging`                  |
+| `--enable-llm`    | `LOADGEN_ENABLE_LLM=1` | off                             |
+| `--verbose`       | `LOADGEN_VERBOSE=1`    | off                             |
 
 ## Catalog
 
@@ -69,7 +69,7 @@ Eight always-on templates plus one gated LLM template:
 - `loop-aggregator` — loop while remaining > 0 → finalize
 - `race-fetch` — race (first-to-resolve) primary/mirror/cache → converge
 - `nested-subsequence` — prepare → sub_sequence `order-fulfillment` → finalize
-- `llm-chain` *(gated)* — two `llm_call` steps (generate → summarize)
+- `llm-chain` _(gated)_ — two `llm_call` steps (generate → summarize)
 
 ## Cleanup
 

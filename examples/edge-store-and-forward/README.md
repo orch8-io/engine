@@ -10,11 +10,11 @@ exist, this page says so instead of inventing a setting.
 
 ## Pick the right piece for each device
 
-| Device | Orch8 component | Runs offline | How data reaches HQ |
-|---|---|---|---|
-| POS terminal, handheld or tablet (Android/iOS) | Embedded engine, [Mobile SDK](../../docs/MOBILE_SDK.md) (Swift, Kotlin, Flutter, React Native, KMP), local SQLite | Everything: sequences, timers, retries, human steps | Built-in sync channel: `syncUrl` → HQ `POST /api/v1/mobile/sync` |
-| Store back-office box or van gateway (Linux, Docker) | `orch8-server` with `[node].role = "edge"`, SQLite | Scheduled and triggered workflows using built-in steps | A workflow step that retries until HQ answers, deduplicated by an idempotency key (`sequences/store-eod-forward.json`) |
-| HQ | `orch8-server` (`all_in_one`, or `control` + `executor` on PostgreSQL) with `ORCH8_MOBILE_SYNC_ENABLED=true` | n/a | Receives syncs, forwarded instances, and optionally the edge nodes' control sessions |
+| Device                                               | Orch8 component                                                                                                   | Runs offline                                           | How data reaches HQ                                                                                                    |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| POS terminal, handheld or tablet (Android/iOS)       | Embedded engine, [Mobile SDK](../../docs/MOBILE_SDK.md) (Swift, Kotlin, Flutter, React Native, KMP), local SQLite | Everything: sequences, timers, retries, human steps    | Built-in sync channel: `syncUrl` → HQ `POST /api/v1/mobile/sync`                                                       |
+| Store back-office box or van gateway (Linux, Docker) | `orch8-server` with `[node].role = "edge"`, SQLite                                                                | Scheduled and triggered workflows using built-in steps | A workflow step that retries until HQ answers, deduplicated by an idempotency key (`sequences/store-eod-forward.json`) |
+| HQ                                                   | `orch8-server` (`all_in_one`, or `control` + `executor` on PostgreSQL) with `ORCH8_MOBILE_SYNC_ENABLED=true`      | n/a                                                    | Receives syncs, forwarded instances, and optionally the edge nodes' control sessions                                   |
 
 ```
  store (LAN)                                              HQ
@@ -63,7 +63,7 @@ following each time the link is up (every 30 s by default, and immediately on
 a silent push):
 
 1. **Uploads** instance status summaries, pending approval requests, and
-   *step delegations*: steps that need a server-side secret, resolved at HQ
+   _step delegations_: steps that need a server-side secret, resolved at HQ
    through `credentials://` and executed on the device. Each array is capped at
    500 items per request. The telemetry buffer holds up to 1,000 events offline
    and trims to 900.
@@ -138,8 +138,8 @@ export STORE_ID=store-042
 export STORE_API_KEY=$(openssl rand -hex 32)          # local only
 export STORE_ENCRYPTION_KEY=$(openssl rand -hex 32)   # BACK THIS UP off the box
 export POS_EXPORT_URL=http://backoffice.store.lan/api/eod-export   # your system
-export HQ_URL=https://hq.example.com HQ_TENANT=acme HQ_SEQUENCE_ID=<uuid>
-export HQ_FORWARDER_KEY=<HQ key allowed to create instances in HQ_TENANT>
+export HQ_URL=https://hq.example.com HQ_TENANT=acme HQ_SEQUENCE_ID="<uuid>"
+export HQ_FORWARDER_KEY="<HQ key allowed to create instances in HQ_TENANT>"
 
 docker compose --profile provision up -d store-provision   # full API on 127.0.0.1:18080
 ./provision.sh                                             # credential, sequence, nightly cron
@@ -193,24 +193,24 @@ rejected at engine construction, so terminals can't sync to the store box.
 
 ## Failure modes
 
-| Failure | What happens | Operator action |
-|---|---|---|
-| WAN down | Terminals and edge keep running. Syncs and `forward` retries back off. | None. Watch the backlog after recovery. |
-| WAN down longer than the retry budget | `forward` instance fails permanently | Re-run it (retry from DLQ) once the link is back. The idempotency key prevents a double import. |
-| HQ rejects with 4xx | Permanent failure, no retry storm | Fix the key or payload, then retry the instance. |
-| Store box power loss | SQLite WAL survives. Running instances are recovered after `stale_instance_threshold_secs` (default 300 s). | None |
-| Store box disk lost | Everything not yet forwarded is lost. There is no replica. | Add [Litestream](../../docs/SQLITE_PRODUCTION.md) to a store-local or cloud bucket if the RPO matters. Keep `STORE_ENCRYPTION_KEY` off the box, or the backup is unreadable. |
-| Clock skew on the box | Cron fires at the local clock's idea of 23:30. Retry timers are relative. | Run NTP. Choose `STORE_TZ` explicitly. |
-| `store-provision` left running with `store-edge` | Two writers on one SQLite file. This is **unsupported** and can corrupt state. | Never do this. The compose profile exists to make it a deliberate step. |
-| Terminal app killed mid-sync | Command idempotency records prevent re-execution, and unsent status is retried on the next sync. | None |
-| Terminal lost or wiped | Instances that existed only on the device are gone. HQ keeps the last synced status. | Keep terminal-only workflows short. Forward business events to HQ early. |
+| Failure                                          | What happens                                                                                                | Operator action                                                                                                                                                              |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WAN down                                         | Terminals and edge keep running. Syncs and `forward` retries back off.                                      | None. Watch the backlog after recovery.                                                                                                                                      |
+| WAN down longer than the retry budget            | `forward` instance fails permanently                                                                        | Re-run it (retry from DLQ) once the link is back. The idempotency key prevents a double import.                                                                              |
+| HQ rejects with 4xx                              | Permanent failure, no retry storm                                                                           | Fix the key or payload, then retry the instance.                                                                                                                             |
+| Store box power loss                             | SQLite WAL survives. Running instances are recovered after `stale_instance_threshold_secs` (default 300 s). | None                                                                                                                                                                         |
+| Store box disk lost                              | Everything not yet forwarded is lost. There is no replica.                                                  | Add [Litestream](../../docs/SQLITE_PRODUCTION.md) to a store-local or cloud bucket if the RPO matters. Keep `STORE_ENCRYPTION_KEY` off the box, or the backup is unreadable. |
+| Clock skew on the box                            | Cron fires at the local clock's idea of 23:30. Retry timers are relative.                                   | Run NTP. Choose `STORE_TZ` explicitly.                                                                                                                                       |
+| `store-provision` left running with `store-edge` | Two writers on one SQLite file. This is **unsupported** and can corrupt state.                              | Never do this. The compose profile exists to make it a deliberate step.                                                                                                      |
+| Terminal app killed mid-sync                     | Command idempotency records prevent re-execution, and unsent status is retried on the next sync.            | None                                                                                                                                                                         |
+| Terminal lost or wiped                           | Instances that existed only on the device are gone. HQ keeps the last synced status.                        | Keep terminal-only workflows short. Forward business events to HQ early.                                                                                                     |
 
 ## Files
 
-| File | Purpose |
-|---|---|
-| `docker-compose.yml` | `store-edge` (role `edge`, SQLite), `store-provision` (temporary `all_in_one` on loopback, same volume), and the `hq` profile (Postgres + mobile sync) |
-| `provision.sh` | Loads the credential, the forward sequence (with store values substituted) and the nightly cron into the store database. Needs `curl`, `jq`, `uuidgen`. |
-| `sequences/store-eod-forward.json` | Edge workflow: LAN export, then idempotent forward to HQ with long retries |
-| `sequences/hq-store-eod-ingest.json` | HQ workflow that receives forwarded exports |
-| `sequences/pos-sale.json` | Terminal workflow shape for the embedded engine (app-native handlers) |
+| File                                 | Purpose                                                                                                                                                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker-compose.yml`                 | `store-edge` (role `edge`, SQLite), `store-provision` (temporary `all_in_one` on loopback, same volume), and the `hq` profile (Postgres + mobile sync)  |
+| `provision.sh`                       | Loads the credential, the forward sequence (with store values substituted) and the nightly cron into the store database. Needs `curl`, `jq`, `uuidgen`. |
+| `sequences/store-eod-forward.json`   | Edge workflow: LAN export, then idempotent forward to HQ with long retries                                                                              |
+| `sequences/hq-store-eod-ingest.json` | HQ workflow that receives forwarded exports                                                                                                             |
+| `sequences/pos-sale.json`            | Terminal workflow shape for the embedded engine (app-native handlers)                                                                                   |

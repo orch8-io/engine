@@ -24,23 +24,23 @@ effects stay in your network. Steps you do not place keep running in Cloud.
 Derived from the code paths (`orch8_engine::remote_executor`,
 `step_placement::defers_credentials`, the worker protocol):
 
-| Data | Seen/stored by Cloud? | Notes |
-|---|---|---|
-| Sequence definitions, instance context (`context.data`, `config`), instance metadata | **Yes** | You create them through the Cloud API. |
-| Step params **after template rendering** | **Yes** | Rendered by the Cloud engine and stored in `worker_tasks.params`; anything interpolated from context or earlier outputs is in them. Params are never externalized. |
-| Step context shipped with a task | **Yes** | The step's context snapshot (`context_access` applies), including `runtime.traceparent`. |
-| `credentials://<id>` references in a **placed** step | **Reference only** | The engine leaves them unresolved; the executor resolves them locally. Cloud stores the string `credentials://<id>/…` and the id as a task requirement. |
-| Credential **values** for placed steps | **Never** | Read on the executor from `ORCH8_CREDENTIAL_<id>` or `<ORCH8_CREDENTIALS_DIR>/<id>`. Not sent, not stored (the e2e suite scans every engine table for the value). |
-| Credentials referenced by **unplaced** steps | Yes (engine credential store) | Those steps run in Cloud and resolve from Cloud's store as before. |
-| Network access / side effects of placed steps | **Never** | Requests originate from the executor. Cloud has no inbound path to your network. |
-| Step outputs | **Yes**, unless sealed | Everything the handler returns is reported, including anything it echoes (a `transform` that echoes a resolved credential sends it). |
-| Output fields sealed with BYOK on the executor | **Reference only** | `{"_o8vault": {object, kid, dek (wrapped by your key), ref}}`; plaintext is in your bucket. |
-| Error messages of failed steps | **Yes** | Handler error text (URLs are redacted by the built-ins). |
-| Executor capability advertisement | **Yes** | Runtime id, handler names, labels (e.g. `residency`, `site`), region, `host:<worker name>`, credential **ids**, draining flag. |
-| Lease traffic | **Yes** | Claims, heartbeats (task id, claim epoch), completions, failures, releases. |
-| Managed-control session | **Yes** | Token runtime id, worker name, region, liveness, drain acks. |
-| BYOK keys, bucket credentials, KMS access | **Never** | Only the executor holds them. Cloud needs no KMS access; it stores and relays references. |
-| Handler-local scratch state (LLM cache, usage events) | **Never** | Kept in an in-memory scratch store on the executor and discarded at exit. |
+| Data                                                                                 | Seen/stored by Cloud?         | Notes                                                                                                                                                              |
+| ------------------------------------------------------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Sequence definitions, instance context (`context.data`, `config`), instance metadata | **Yes**                       | You create them through the Cloud API.                                                                                                                             |
+| Step params **after template rendering**                                             | **Yes**                       | Rendered by the Cloud engine and stored in `worker_tasks.params`; anything interpolated from context or earlier outputs is in them. Params are never externalized. |
+| Step context shipped with a task                                                     | **Yes**                       | The step's context snapshot (`context_access` applies), including `runtime.traceparent`.                                                                           |
+| `credentials://<id>` references in a **placed** step                                 | **Reference only**            | The engine leaves them unresolved; the executor resolves them locally. Cloud stores the string `credentials://<id>/…` and the id as a task requirement.            |
+| Credential **values** for placed steps                                               | **Never**                     | Read on the executor from `ORCH8_CREDENTIAL_<id>` or `<ORCH8_CREDENTIALS_DIR>/<id>`. Not sent, not stored (the e2e suite scans every engine table for the value).  |
+| Credentials referenced by **unplaced** steps                                         | Yes (engine credential store) | Those steps run in Cloud and resolve from Cloud's store as before.                                                                                                 |
+| Network access / side effects of placed steps                                        | **Never**                     | Requests originate from the executor. Cloud has no inbound path to your network.                                                                                   |
+| Step outputs                                                                         | **Yes**, unless sealed        | Everything the handler returns is reported, including anything it echoes (a `transform` that echoes a resolved credential sends it).                               |
+| Output fields sealed with BYOK on the executor                                       | **Reference only**            | `{"_o8vault": {object, kid, dek (wrapped by your key), ref}}`; plaintext is in your bucket.                                                                        |
+| Error messages of failed steps                                                       | **Yes**                       | Handler error text (URLs are redacted by the built-ins).                                                                                                           |
+| Executor capability advertisement                                                    | **Yes**                       | Runtime id, handler names, labels (e.g. `residency`, `site`), region, `host:<worker name>`, credential **ids**, draining flag.                                     |
+| Lease traffic                                                                        | **Yes**                       | Claims, heartbeats (task id, claim epoch), completions, failures, releases.                                                                                        |
+| Managed-control session                                                              | **Yes**                       | Token runtime id, worker name, region, liveness, drain acks.                                                                                                       |
+| BYOK keys, bucket credentials, KMS access                                            | **Never**                     | Only the executor holds them. Cloud needs no KMS access; it stores and relays references.                                                                          |
+| Handler-local scratch state (LLM cache, usage events)                                | **Never**                     | Kept in an in-memory scratch store on the executor and discarded at exit.                                                                                          |
 
 Not exactly-once: an executor that dies after its request reached a provider
 but before it reported produces a redelivery on retry. The effect ledger marks
@@ -51,9 +51,16 @@ that attempt `unknown`; use the provider's idempotency key.
 Orch8 Cloud issues a **join token**, `o8x1.<base64url(json)>`:
 
 ```json
-{ "v": 1, "endpoint": "https://…", "api_key": "…", "tenant_id": "acme",
-  "runtime_id": "018f…", "worker_id_prefix": "acme-dc1",
-  "labels": { "residency": "eu", "site": "vpc" }, "region": "eu-west-1" }
+{
+  "v": 1,
+  "endpoint": "https://…",
+  "api_key": "…",
+  "tenant_id": "acme",
+  "runtime_id": "018f…",
+  "worker_id_prefix": "acme-dc1",
+  "labels": { "residency": "eu", "site": "vpc" },
+  "region": "eu-west-1"
+}
 ```
 
 The token is a **secret** (it carries a dedicated API key) and is unsigned: the
@@ -73,13 +80,20 @@ Orch8 Cloud's managed engines all sit behind one shared host and are reached
 only through the proxy's instance pin, so Cloud issues:
 
 ```json
-{ …, "endpoint": "https://<cloud engine host>:50051",
-  "api_url": "https://<cloud engine host>/api/v1",
-  "headers": { "fly-force-instance-id": "<machine id>" } }
+{
+  "v": 1,
+  "api_key": "replace-with-worker-key",
+  "tenant_id": "acme",
+  "runtime_id": "01900000-0000-7000-8000-000000000001",
+  "worker_id_prefix": "acme-dc1",
+  "endpoint": "https://engine.example.com:50051",
+  "api_url": "https://engine.example.com/api/v1",
+  "headers": { "fly-force-instance-id": "<machine id>" }
+}
 ```
 
 The routing header is not a secret and not a credential: a request pinned to
-another organisation's engine is authenticated by *that* engine, which has
+another organisation's engine is authenticated by _that_ engine, which has
 never seen this key, and is refused.
 
 The token is **all an executor needs**: no database, no API key of its own, no
@@ -127,19 +141,19 @@ available; LLM usage is not reported back.
 
 ### Executor settings
 
-| Setting | Env | Default |
-|---|---|---|
-| `[executor] transport` | `ORCH8_EXECUTOR_TRANSPORT` | `auto` |
-| `[executor] api_url` | `ORCH8_EXECUTOR_API_URL` | token `api_url`, else `<endpoint>/api/v1` |
-| `[node] managed_control_headers` (routing headers, all requests) | via `ORCH8_JOIN_TOKEN` | token `headers` |
-| `[executor] ca_cert_path` (PEM trusted instead of public roots) | `ORCH8_EXECUTOR_CA_CERT` | public web PKI |
-| `[executor] handlers` | `ORCH8_EXECUTOR_HANDLERS` (comma-separated) | all remote-executable built-ins |
-| `[executor] max_concurrent_tasks` | `ORCH8_EXECUTOR_MAX_CONCURRENT_TASKS` | 16 |
-| `[executor] credentials_dir` | `ORCH8_CREDENTIALS_DIR` | none (env only) |
-| `[executor] drain_timeout_secs` | `ORCH8_EXECUTOR_DRAIN_TIMEOUT_SECS` | 25 |
-| `[executor] externalize_bytes` (BYOK threshold) | `ORCH8_EXECUTOR_EXTERNALIZE_BYTES` | 65536 |
-| `[executor] heartbeat_secs` (cap; 0 = engine hint) | `ORCH8_EXECUTOR_HEARTBEAT_SECS` | 0 |
-| Internal networks steps may call | `ORCH8_ALLOWED_INTERNAL_CIDRS` | none |
+| Setting                                                          | Env                                         | Default                                   |
+| ---------------------------------------------------------------- | ------------------------------------------- | ----------------------------------------- |
+| `[executor] transport`                                           | `ORCH8_EXECUTOR_TRANSPORT`                  | `auto`                                    |
+| `[executor] api_url`                                             | `ORCH8_EXECUTOR_API_URL`                    | token `api_url`, else `<endpoint>/api/v1` |
+| `[node] managed_control_headers` (routing headers, all requests) | via `ORCH8_JOIN_TOKEN`                      | token `headers`                           |
+| `[executor] ca_cert_path` (PEM trusted instead of public roots)  | `ORCH8_EXECUTOR_CA_CERT`                    | public web PKI                            |
+| `[executor] handlers`                                            | `ORCH8_EXECUTOR_HANDLERS` (comma-separated) | all remote-executable built-ins           |
+| `[executor] max_concurrent_tasks`                                | `ORCH8_EXECUTOR_MAX_CONCURRENT_TASKS`       | 16                                        |
+| `[executor] credentials_dir`                                     | `ORCH8_CREDENTIALS_DIR`                     | none (env only)                           |
+| `[executor] drain_timeout_secs`                                  | `ORCH8_EXECUTOR_DRAIN_TIMEOUT_SECS`         | 25                                        |
+| `[executor] externalize_bytes` (BYOK threshold)                  | `ORCH8_EXECUTOR_EXTERNALIZE_BYTES`          | 65536                                     |
+| `[executor] heartbeat_secs` (cap; 0 = engine hint)               | `ORCH8_EXECUTOR_HEARTBEAT_SECS`             | 0                                         |
+| Internal networks steps may call                                 | `ORCH8_ALLOWED_INTERNAL_CIDRS`              | none                                      |
 
 The SSRF guard still applies on the executor: `http_request`/`tool_call`
 reach only public addresses unless the network is listed in
@@ -271,15 +285,15 @@ log (`verified` if delivered, `abandoned` if not) and exports a signed
 receipt bundle. It reports measured values only and exits non-zero unless all
 of these hold:
 
-| Invariant | Meaning |
-|---|---|
-| `executor_killed_mid_flight` | the victim held at least one claimed task at `SIGKILL` |
-| `all_instances_completed` | every instance reached `completed` |
-| `recovered` | every orphaned step completed on the surviving executor |
-| `no_effect_recorded_twice` | no attempt has two receipts; no step has two `committed` receipts |
-| `no_silent_redelivery` | every provider redelivery follows an attempt the ledger marked `unknown` |
-| `each_effect_applied_once_at_provider` | distinct idempotency keys applied = steps executed |
-| `signed_receipts_verify` | the bundle verifies and has 0 unresolved receipts after reconciliation |
+| Invariant                              | Meaning                                                                  |
+| -------------------------------------- | ------------------------------------------------------------------------ |
+| `executor_killed_mid_flight`           | the victim held at least one claimed task at `SIGKILL`                   |
+| `all_instances_completed`              | every instance reached `completed`                                       |
+| `recovered`                            | every orphaned step completed on the surviving executor                  |
+| `no_effect_recorded_twice`             | no attempt has two receipts; no step has two `committed` receipts        |
+| `no_silent_redelivery`                 | every provider redelivery follows an attempt the ledger marked `unknown` |
+| `each_effect_applied_once_at_provider` | distinct idempotency keys applied = steps executed                       |
+| `signed_receipts_verify`               | the bundle verifies and has 0 unresolved receipts after reconciliation   |
 
 A real run on a laptop (24 instances, defaults):
 
@@ -298,8 +312,8 @@ Production defaults (`worker_reaper_tick_secs = 30`,
 `worker_reaper_stale_secs = 60`) recover more slowly; tune them for your
 tolerance.
 
-The drill is honest about the guarantee: an executor killed *after* the
-provider accepted a request but *before* it reported completion produces a
+The drill is honest about the guarantee: an executor killed _after_ the
+provider accepted a request but _before_ it reported completion produces a
 redelivery on retry. The ledger marks that attempt `unknown` instead of
 hiding it, and the provider's idempotency key makes the redelivery harmless.
 That is at-most-once dispatch evidence per attempt, not exactly-once
@@ -315,7 +329,7 @@ them as a signed JSON Lines bundle:
 orch8 receipts export --instance 018f… --out receipts.jsonl
 orch8 receipts export --from 2026-09-01T00:00:00Z --to 2026-10-01T00:00:00Z --out sept.jsonl
 orch8 receipts signing-key                     # pin this public key
-orch8 receipts verify receipts.jsonl --public-key <base64>
+orch8 receipts verify receipts.jsonl --public-key "<base64>"
 ```
 
 HTTP: `GET /api/v1/instances/{id}/receipts/export`,
@@ -354,10 +368,24 @@ lifecycle funnel are buffered in memory and POSTed every `interval_ms` to
 `{endpoint}/api/ingest/v1/runs` with `Authorization: Bearer <api_key>`:
 
 ```json
-{ "engine_id": "acme-dc1", "engine_version": "…", "sent_at": "…",
-  "events": [{ "instance_id": "…", "sequence_name": "billing",
-    "sequence_version": 3, "state": "completed", "at": "…", "step_id": null,
-    "duration_ms": 1840, "error_kind": null, "sub_tenant": null }] }
+{
+  "engine_id": "acme-dc1",
+  "engine_version": "…",
+  "sent_at": "…",
+  "events": [
+    {
+      "instance_id": "…",
+      "sequence_name": "billing",
+      "sequence_version": 3,
+      "state": "completed",
+      "at": "…",
+      "step_id": null,
+      "duration_ms": 1840,
+      "error_kind": null,
+      "sub_tenant": null
+    }
+  ]
+}
 ```
 
 - At most 500 events per request.

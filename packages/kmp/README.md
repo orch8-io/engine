@@ -4,11 +4,11 @@
 embedded Orch8 workflow engine on Android and iOS. It does not contain its own
 engine. It wraps the same native runtime the platform SDKs ship:
 
-| Target | What it calls | How |
-|---|---|---|
-| `androidMain` | `io.orch8:orch8-mobile` AAR ([`packages/android`](../android)), the UniFFI Kotlin bindings over the Rust engine | Direct Kotlin calls (`src/uniffiJvm`) |
-| `iosMain` | The `Orch8Mobile` Swift package ([`packages/swift`](../swift)), the UniFFI Swift bindings over the same engine | A small Swift adapter you compile into the app ([`ios-bridge/Orch8KmpBridge.swift`](ios-bridge/Orch8KmpBridge.swift)) |
-| `jvm` | The checked-in generated bindings (`orch8-mobile/bindings/kotlin`) | Used for tests and host tooling. At runtime it needs a host build of `liborch8_mobile` |
+| Target        | What it calls                                                                                                   | How                                                                                                                   |
+| ------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `androidMain` | `io.orch8:orch8-mobile` AAR ([`packages/android`](../android)), the UniFFI Kotlin bindings over the Rust engine | Direct Kotlin calls (`src/uniffiJvm`)                                                                                 |
+| `iosMain`     | The `Orch8Mobile` Swift package ([`packages/swift`](../swift)), the UniFFI Swift bindings over the same engine  | A small Swift adapter you compile into the app ([`ios-bridge/Orch8KmpBridge.swift`](ios-bridge/Orch8KmpBridge.swift)) |
+| `jvm`         | The checked-in generated bindings (`orch8-mobile/bindings/kotlin`)                                              | Used for tests and host tooling. At runtime it needs a host build of `liborch8_mobile`                                |
 
 Status: **preview**, versioned with the SDK family (`0.7.1`). The API mirrors
 the `MobileEngine` surface of the Swift and Android packages. See the
@@ -82,23 +82,30 @@ code and could drift from it. The bridge works like this instead:
    exact `0.7.1`) to the iOS app.
 2. Link the `Orch8Kmp` framework (or your shared framework that depends on
    this library). The framework is static, and its base name is `Orch8Kmp`.
-3. Install [`ios-bridge/Orch8KmpBridge.swift`](ios-bridge/Orch8KmpBridge.swift)
-   into the app target with
-   [`ios-bridge/install-bridge.sh`](ios-bridge/install-bridge.sh):
+3. Copy [`ios-bridge/Orch8KmpBridge.swift`](ios-bridge/Orch8KmpBridge.swift)
+   from the same checkout as the KMP library into the iOS app target. From the
+   engine repository root, set your app source directory and framework name:
 
    ```bash
-   bash install-bridge.sh iosApp/iosApp Shared <version>
+   APP_IOS_SOURCES="/absolute/path/to/your/iosApp/iosApp"
+   sed 's/^import Orch8Kmp$/import Shared/' \
+     packages/kmp/ios-bridge/Orch8KmpBridge.swift \
+     > "$APP_IOS_SOURCES/Orch8KmpBridge.swift"
    ```
 
-   It downloads `Orch8KmpBridge-v<version>.swift` from the engine release,
-   verifies its SHA-256 against the published `.sha256`, and rewrites
-   `import Orch8Kmp` to your shared framework's module name (`Shared` here;
-   omit it if you link `Orch8Kmp` directly). The bridge ships as a source
-   file rather than a Swift package or pod on purpose: it implements Kotlin
-   protocols (`Orch8JsonBridgeFactory`) exported by *your* framework, whose
-   module name is only known in your project. A prebuilt package would link
-   a second Kotlin/Native runtime, and its types would not be the ones your
-   shared code checks for.
+   `Shared` must match your shared framework's `baseName`; leave the import as
+   `Orch8Kmp` when linking that framework directly. Add the copied Swift file to
+   the app target. When developing against `main`, build matching KMP and native
+   components rather than mixing unreleased bridge APIs with an older binary.
+
+   The [release installer](ios-bridge/install-bridge.sh) downloads
+   `Orch8KmpBridge-v<version>.swift`, verifies its SHA-256, and rewrites the
+   framework import. Use it only for a release containing both bridge assets.
+   Checked 2026-10-23: `v0.7.1` does **not** contain these assets, so its download
+   path fails; the current release workflow will attach them to future releases.
+   The bridge is source rather than a prebuilt package because its Kotlin
+   protocols are exported by your app's shared framework.
+
 4. Install the bridge once at launch, before any Kotlin code opens the engine:
 
 ```swift
@@ -181,16 +188,19 @@ Backend (Node, [`@orch8.io/sdk`](https://github.com/orch8-io/sdk-node)):
 ```typescript
 import { Orch8Client } from "@orch8.io/sdk";
 
-const orch8 = new Orch8Client({ baseUrl: "https://api.example.com", tenantId: "acme",
-  headers: { "x-api-key": process.env.ORCH8_OPERATOR_KEY! } });
+const orch8 = new Orch8Client({
+  baseUrl: "https://api.example.com",
+  tenantId: "acme",
+  headers: { "x-api-key": process.env.ORCH8_OPERATOR_KEY! },
+});
 
 // POST /device-session  { deviceId, runtimeId }  (behind your own user auth)
 app.post("/device-session", requireUser, async (req, res) => {
   const session = await orch8.createDeviceSession({
     deviceId: req.body.deviceId,
-    runtimeId: req.body.runtimeId,          // the app's engine.nodeRuntimeId()
-    handlers: ["scan_document"],            // handler allowlist; [] = delegation-only
-    ttlSecs: 3600,                          // default 3600, max 86400
+    runtimeId: req.body.runtimeId, // the app's engine.nodeRuntimeId()
+    handlers: ["scan_document"], // handler allowlist; [] = delegation-only
+    ttlSecs: 3600, // default 3600, max 86400
   });
   res.json({ token: session.token, expiresAt: session.expiresAt });
 });
@@ -286,25 +296,25 @@ upgrades do not lose data. Pass your own path to override.
 
 ## API map
 
-| `MobileEngine` (Swift / Android) | `Orch8Engine` (KMP) |
-|---|---|
-| `init(dbPath:config:)` / `MobileEngine(dbPath, config)` | `Orch8Engine.open(dbPath, EngineConfig)` |
-| `registerHandler(name, StepHandler)` | `registerHandler(name) { stepName, inputJson -> outputJson }` (suspend) |
-| `setListener(EngineListener)` | `events: SharedFlow<EngineEvent>`, `pendingSteps: StateFlow` |
-| `resume()` / `pause()` / `shutdown()` | `resume()` / `pause()` / `close()` |
-| `tickOnce()` / `runUntilIdle(maxTicks, timeBudgetMs)` | `suspend tick()` / `suspend runUntilIdle(maxTicks, Duration)` |
-| `start` / `cancelInstance` / `getInstance` / `activeInstances` / `completeStep` | same names, `suspend`, `JsonObject` overloads, plus `answer(id, step, choice, data)` for `wait_for_input` gates |
-| `loadSequenceFromJson` / `loadSequencesFromUrl` / `loadedSequences` | `loadSequence` / `loadSequencesFromUrl` / `loadedSequences` |
-| `sync(manifestUrl, TokenProvider?)` | `sync(manifestUrl, Orch8TokenSource?)` |
-| `flushTelemetry` / `setDeviceContext` / `reportPowerState` / `onPushReceived` | same, plus `PowerState.fromBattery(level, charging)` |
-| `importContinuityCapsule` / `activateContinuityCapsule` | same |
-| `exportContinuityCapsule(..., signer)` | Not wrapped. It needs a Secure Enclave/KeyStore signer, so call it from the platform SDK (same boundary as `@orch8.io/expo`) |
-| `nodeRuntimeId` / `registerNode` / `updateNodeStatus` / `unregisterNode` | same names, `suspend`, common `NodeCapabilities` / `NodeRegistration` / `NodeConnectivity` |
-| `setTokenProvider(TokenProvider)` | `suspend setTokenProvider(refreshTimeout) { fetchToken() }` (suspend fetch of a device session) |
-| `startWorker(WorkerOptions)` / `stopWorker` / `runWorkerWindow(timeBudgetMs)` / `workerStats` | `suspend startWorker(WorkerOptions)` / `stopWorker()` / `runWorkerWindow(Duration)` / `workerStats()` |
+| `MobileEngine` (Swift / Android)                                                                                                                   | `Orch8Engine` (KMP)                                                                                                                    |
+| -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `init(dbPath:config:)` / `MobileEngine(dbPath, config)`                                                                                            | `Orch8Engine.open(dbPath, EngineConfig)`                                                                                               |
+| `registerHandler(name, StepHandler)`                                                                                                               | `registerHandler(name) { stepName, inputJson -> outputJson }` (suspend)                                                                |
+| `setListener(EngineListener)`                                                                                                                      | `events: SharedFlow<EngineEvent>`, `pendingSteps: StateFlow`                                                                           |
+| `resume()` / `pause()` / `shutdown()`                                                                                                              | `resume()` / `pause()` / `close()`                                                                                                     |
+| `tickOnce()` / `runUntilIdle(maxTicks, timeBudgetMs)`                                                                                              | `suspend tick()` / `suspend runUntilIdle(maxTicks, Duration)`                                                                          |
+| `start` / `cancelInstance` / `getInstance` / `activeInstances` / `completeStep`                                                                    | same names, `suspend`, `JsonObject` overloads, plus `answer(id, step, choice, data)` for `wait_for_input` gates                        |
+| `loadSequenceFromJson` / `loadSequencesFromUrl` / `loadedSequences`                                                                                | `loadSequence` / `loadSequencesFromUrl` / `loadedSequences`                                                                            |
+| `sync(manifestUrl, TokenProvider?)`                                                                                                                | `sync(manifestUrl, Orch8TokenSource?)`                                                                                                 |
+| `flushTelemetry` / `setDeviceContext` / `reportPowerState` / `onPushReceived`                                                                      | same, plus `PowerState.fromBattery(level, charging)`                                                                                   |
+| `importContinuityCapsule` / `activateContinuityCapsule`                                                                                            | same                                                                                                                                   |
+| `exportContinuityCapsule(..., signer)`                                                                                                             | Not wrapped. It needs a Secure Enclave/KeyStore signer, so call it from the platform SDK (same boundary as `@orch8.io/expo`)           |
+| `nodeRuntimeId` / `registerNode` / `updateNodeStatus` / `unregisterNode`                                                                           | same names, `suspend`, common `NodeCapabilities` / `NodeRegistration` / `NodeConnectivity`                                             |
+| `setTokenProvider(TokenProvider)`                                                                                                                  | `suspend setTokenProvider(refreshTimeout) { fetchToken() }` (suspend fetch of a device session)                                        |
+| `startWorker(WorkerOptions)` / `stopWorker` / `runWorkerWindow(timeBudgetMs)` / `workerStats`                                                      | `suspend startWorker(WorkerOptions)` / `stopWorker()` / `runWorkerWindow(Duration)` / `workerStats()`                                  |
 | `startDelegation(DelegationOptions)` / `stopDelegation` / `delegate(DelegateRequest)` / `delegationStatus` / `listDelegations` / `delegationStats` | same names, `suspend`, common types (`pollInterval` / `ttl` as `Duration`, `DelegationState` enum), plus `observeDelegation(id): Flow` |
-| `onPushWake(envelopeJson)` / `enableBuiltin(name)` | same, plus `onPushWake(taskId, runtimeId, reason)` |
-| Swift-only `DistributedWorkerClient`, `TrustedDeviceHandoffCoordinator` | Not wrapped. Use `packages/swift` directly |
+| `onPushWake(envelopeJson)` / `enableBuiltin(name)`                                                                                                 | same, plus `onPushWake(taskId, runtimeId, reason)`                                                                                     |
+| Swift-only `DistributedWorkerClient`, `TrustedDeviceHandoffCoordinator`                                                                            | Not wrapped. Use `packages/swift` directly                                                                                             |
 
 ## Development
 

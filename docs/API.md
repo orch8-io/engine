@@ -92,7 +92,7 @@ before/after evidence. Existing API-key and tenant authorization applies.
 For an operator-wide read-only pass, run:
 
 ```bash
-orch8 doctor --config orch8.toml --instance <uuid>
+orch8 doctor --config orch8.toml --instance "<uuid>"
 ```
 
 The command checks local configuration, readiness, CLI/server compatibility,
@@ -163,12 +163,22 @@ POST /sequences
         {
           "condition": "data.opened == true",
           "blocks": [
-            { "type": "step", "id": "send_followup", "handler": "email_send", "params": { "template": "followup" } }
+            {
+              "type": "step",
+              "id": "send_followup",
+              "handler": "email_send",
+              "params": { "template": "followup" }
+            }
           ]
         }
       ],
       "default": [
-        { "type": "step", "id": "send_reminder", "handler": "email_send", "params": { "template": "reminder" } }
+        {
+          "type": "step",
+          "id": "send_reminder",
+          "handler": "email_send",
+          "params": { "template": "reminder" }
+        }
       ]
     }
   ],
@@ -222,12 +232,12 @@ GET /sequences/{id}
 GET /sequences/by-name?tenant_id=acme&namespace=default&name=welcome-campaign&version=1
 ```
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `tenant_id` | Yes | Tenant identifier |
-| `namespace` | Yes | Namespace |
-| `name` | Yes | Sequence name |
-| `version` | No | Specific version (latest if omitted) |
+| Parameter   | Required | Description                          |
+| ----------- | -------- | ------------------------------------ |
+| `tenant_id` | Yes      | Tenant identifier                    |
+| `namespace` | Yes      | Namespace                            |
+| `name`      | Yes      | Sequence name                        |
+| `version`   | No       | Specific version (latest if omitted) |
 
 **Response:** `200 OK` — full `SequenceDefinition` object.
 
@@ -262,22 +272,22 @@ POST /instances
 }
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `sequence_id` | UUID | **required** | Sequence to execute |
-| `tenant_id` | string | **required** | Tenant identifier |
-| `namespace` | string | **required** | Namespace |
-| `priority` | string | `"normal"` | `low`, `normal`, `high`, `critical` |
-| `timezone` | string | `"UTC"` | IANA timezone |
-| `metadata` | object | `{}` | Arbitrary JSON metadata |
-| `context` | object | `{}` | Execution context (data, config sections) |
-| `next_fire_at` | datetime | now | When to start execution |
-| `concurrency_key` | string | null | Key for concurrency limiting |
-| `max_concurrency` | integer | null | Max parallel instances with same key |
-| `idempotency_key` | string | null | Deduplication key |
-| `dry_run` | boolean | `false` | Simulate the run: side-effecting steps (HTTP/LLM/MCP calls, agent loops, event/signal emission, memory writes, block injection, external plugins) skip their real effect and return a stub; control flow and templating run normally |
-| `dry_run_auto_approve` | boolean | `false` | With `dry_run`, auto-approve `human_review` gates with the default choice so the simulation flows past them. Ignored unless `dry_run` is true |
-| `budget` | object | null | Resource budget (token/step caps) enforced by the scheduler; when exceeded the instance is paused with `metadata.paused_reason = "budget_exceeded"` |
+| Field                  | Type     | Default      | Description                                                                                                                                                                                                                          |
+| ---------------------- | -------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sequence_id`          | UUID     | **required** | Sequence to execute                                                                                                                                                                                                                  |
+| `tenant_id`            | string   | **required** | Tenant identifier                                                                                                                                                                                                                    |
+| `namespace`            | string   | **required** | Namespace                                                                                                                                                                                                                            |
+| `priority`             | string   | `"normal"`   | `low`, `normal`, `high`, `critical`                                                                                                                                                                                                  |
+| `timezone`             | string   | `"UTC"`      | IANA timezone                                                                                                                                                                                                                        |
+| `metadata`             | object   | `{}`         | Arbitrary JSON metadata                                                                                                                                                                                                              |
+| `context`              | object   | `{}`         | Execution context (data, config sections)                                                                                                                                                                                            |
+| `next_fire_at`         | datetime | now          | When to start execution                                                                                                                                                                                                              |
+| `concurrency_key`      | string   | null         | Key for concurrency limiting                                                                                                                                                                                                         |
+| `max_concurrency`      | integer  | null         | Max parallel instances with same key                                                                                                                                                                                                 |
+| `idempotency_key`      | string   | null         | Deduplication key                                                                                                                                                                                                                    |
+| `dry_run`              | boolean  | `false`      | Simulate the run: side-effecting steps (HTTP/LLM/MCP calls, agent loops, event/signal emission, memory writes, block injection, external plugins) skip their real effect and return a stub; control flow and templating run normally |
+| `dry_run_auto_approve` | boolean  | `false`      | With `dry_run`, auto-approve `human_review` gates with the default choice so the simulation flows past them. Ignored unless `dry_run` is true                                                                                        |
+| `budget`               | object   | null         | Resource budget (token/step caps) enforced by the scheduler; when exceeded the instance is paused with `metadata.paused_reason = "budget_exceeded"`                                                                                  |
 
 **Response:** `201 Created`
 
@@ -367,15 +377,15 @@ GET /instances/{id}
 GET /instances?tenant_id=acme&namespace=default&state=running,scheduled&limit=50&offset=0
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `tenant_id` | string | — | Filter by tenant |
-| `namespace` | string | — | Filter by namespace |
-| `sequence_id` | UUID | — | Filter by sequence |
-| `state` | string | — | Comma-separated states to include |
-| `offset` | integer | `0` | Pagination offset |
-| `limit` | integer | `100` | Page size, clamped to 1–1000 (`0` is treated as `1`) |
-| `metadata.<key>` | string | — | Filter to instances whose `metadata.<key>` equals the value. Repeatable — multiple `metadata.*` params AND together. |
+| Parameter        | Type    | Default | Description                                                                                                          |
+| ---------------- | ------- | ------- | -------------------------------------------------------------------------------------------------------------------- |
+| `tenant_id`      | string  | —       | Filter by tenant                                                                                                     |
+| `namespace`      | string  | —       | Filter by namespace                                                                                                  |
+| `sequence_id`    | UUID    | —       | Filter by sequence                                                                                                   |
+| `state`          | string  | —       | Comma-separated states to include                                                                                    |
+| `offset`         | integer | `0`     | Pagination offset                                                                                                    |
+| `limit`          | integer | `100`   | Page size, clamped to 1–1000 (`0` is treated as `1`)                                                                 |
+| `metadata.<key>` | string  | —       | Filter to instances whose `metadata.<key>` equals the value. Repeatable — multiple `metadata.*` params AND together. |
 
 **Metadata search.** Any query parameter prefixed `metadata.` filters on the instance's `metadata` object by top-level key — e.g. `GET /instances?metadata.env=prod&metadata.team=core` returns instances whose metadata has both `env=prod` and `team=core`. Matching is string-equality on top-level keys. On Postgres this is a JSONB containment (`@>`) query served by the existing GIN index on `metadata` (no Elasticsearch required, unlike Temporal search attributes); on SQLite it falls back to `json_extract`.
 
@@ -386,10 +396,11 @@ GET /instances?metadata.env=prod&metadata.team=core
 **Response:** `200 OK` — paginated envelope:
 
 ```json
-{ "items": [ /* TaskInstance objects */ ], "has_more": true }
+{ "items": [], "has_more": false }
 ```
 
-`has_more` is true when the page is full (another page may exist at the next `offset`).
+`items` contains `TaskInstance` objects. `has_more` is true when the page is full
+(another page may exist at the next `offset`).
 
 ---
 
@@ -450,13 +461,13 @@ Apply one control action to every instance matching a filter. Always tenant-scop
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `filter` | Same shape as the list filters: `tenant_id` (required), `namespace`, `sequence_id`, `states`, and `metadata` (top-level equality map). |
-| `action` | One of `retry`, `pause`, `resume`, `cancel`, `signal`. `retry` re-runs `Failed` instances; `pause`/`resume`/`cancel` enqueue the matching control signal; `signal` enqueues a custom signal named by `signal_type` carrying `payload`. |
-| `signal_type` | Required when `action` is `signal` (the custom name, no `custom:` prefix). |
-| `dry_run` | When `true`, only count matching instances; apply nothing. |
-| `limit` | Hard cap on instances acted on. Default `1000`, max `10000`. |
+| Field         | Description                                                                                                                                                                                                                            |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `filter`      | Same shape as the list filters: `tenant_id` (required), `namespace`, `sequence_id`, `states`, and `metadata` (top-level equality map).                                                                                                 |
+| `action`      | One of `retry`, `pause`, `resume`, `cancel`, `signal`. `retry` re-runs `Failed` instances; `pause`/`resume`/`cancel` enqueue the matching control signal; `signal` enqueues a custom signal named by `signal_type` carrying `payload`. |
+| `signal_type` | Required when `action` is `signal` (the custom name, no `custom:` prefix).                                                                                                                                                             |
+| `dry_run`     | When `true`, only count matching instances; apply nothing.                                                                                                                                                                             |
+| `limit`       | Hard cap on instances acted on. Default `1000`, max `10000`.                                                                                                                                                                           |
 
 **Response:** `200 OK`
 
@@ -485,15 +496,15 @@ PATCH /instances/{id}/state
 
 **Valid state transitions:**
 
-| From | To |
-|------|----|
-| Scheduled | Running, Paused, Cancelled |
-| Running | Scheduled, Waiting, Completed, Failed, Paused, Cancelled |
-| Waiting | Running, Scheduled, Cancelled, Failed, Paused (resume re-schedules it; it re-parks on whatever it was waiting for, and answers that arrived while paused stay pending) |
-| Paused | Scheduled, Cancelled |
-| Failed | Scheduled (retry) |
-| Completed | _(terminal)_ |
-| Cancelled | _(terminal)_ |
+| From      | To                                                                                                                                                                     |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scheduled | Running, Paused, Cancelled                                                                                                                                             |
+| Running   | Scheduled, Waiting, Completed, Failed, Paused, Cancelled                                                                                                               |
+| Waiting   | Running, Scheduled, Cancelled, Failed, Paused (resume re-schedules it; it re-parks on whatever it was waiting for, and answers that arrived while paused stay pending) |
+| Paused    | Scheduled, Cancelled                                                                                                                                                   |
+| Failed    | Scheduled (retry)                                                                                                                                                      |
+| Completed | _(terminal)_                                                                                                                                                           |
+| Cancelled | _(terminal)_                                                                                                                                                           |
 
 **Response:** `200 OK`
 
@@ -570,13 +581,13 @@ POST /instances/{id}/signals
 }
 ```
 
-| Signal Type | Effect |
-|-------------|--------|
-| `pause` | Pause execution |
-| `resume` | Resume from Paused |
-| `cancel` | Cancel instance |
+| Signal Type      | Effect                          |
+| ---------------- | ------------------------------- |
+| `pause`          | Pause execution                 |
+| `resume`         | Resume from Paused              |
+| `cancel`         | Cancel instance                 |
 | `update_context` | Merge payload into context.data |
-| `custom:*` | Application-defined signal |
+| `custom:*`       | Application-defined signal      |
 
 **Response:** `201 Created`
 
@@ -598,9 +609,8 @@ GET /instances/{id}/effects?tenant_id={tenant_id}
 **Response:** `200 OK`
 
 ```json
-{
-  "tasks": [
-    {
+[
+  {
     "id": "f1e2d3c4-...",
     "instance_id": "a1b2c3d4-...",
     "block_id": "send_welcome",
@@ -698,16 +708,16 @@ POST /cron
 }
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `tenant_id` | string | **required** | Tenant identifier |
-| `namespace` | string | **required** | Namespace |
-| `sequence_id` | UUID | **required** | Sequence to instantiate |
-| `cron_expr` | string | **required** | 7-field cron expression |
-| `timezone` | string | `"UTC"` | IANA timezone for schedule |
-| `metadata` | object | `{}` | Passed to created instances |
-| `enabled` | boolean | `true` | Whether schedule is active |
-| `overlap_policy` | string | `"allow"` | What to do when a fire is due while a previous run is still active: `allow`, `skip`, `buffer_one`, `cancel_previous` |
+| Field            | Type    | Default      | Description                                                                                                          |
+| ---------------- | ------- | ------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `tenant_id`      | string  | **required** | Tenant identifier                                                                                                    |
+| `namespace`      | string  | **required** | Namespace                                                                                                            |
+| `sequence_id`    | UUID    | **required** | Sequence to instantiate                                                                                              |
+| `cron_expr`      | string  | **required** | 7-field cron expression                                                                                              |
+| `timezone`       | string  | `"UTC"`      | IANA timezone for schedule                                                                                           |
+| `metadata`       | object  | `{}`         | Passed to created instances                                                                                          |
+| `enabled`        | boolean | `true`       | Whether schedule is active                                                                                           |
+| `overlap_policy` | string  | `"allow"`    | What to do when a fire is due while a previous run is still active: `allow`, `skip`, `buffer_one`, `cancel_previous` |
 
 **Overlap policies** — when a fire is due and a previous run from this
 schedule is still active (scheduled/running/waiting/paused):
@@ -835,40 +845,41 @@ POST /workers/tasks/poll
 }
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `handler_name` | string | **required** | Handler to claim tasks for |
-| `worker_id` | string | **required** | Unique worker identifier |
-| `limit` | integer | `1` | Max tasks to claim |
-| `version` | string | null | Worker build/deploy version, recorded on the worker registry and checked against [version pins](#worker-version-pins) |
-| `capabilities` | object | null | `RuntimeCapabilities` advertisement (`runtime_id` must equal `worker_id`, lifetime ≤ 5 min). Required to claim placed steps (`$runtime`); see [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
+| Field          | Type    | Default      | Description                                                                                                                                                                                   |
+| -------------- | ------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `handler_name` | string  | **required** | Handler to claim tasks for                                                                                                                                                                    |
+| `worker_id`    | string  | **required** | Unique worker identifier                                                                                                                                                                      |
+| `limit`        | integer | `1`          | Max tasks to claim                                                                                                                                                                            |
+| `version`      | string  | null         | Worker build/deploy version, recorded on the worker registry and checked against [version pins](#worker-version-pins)                                                                         |
+| `capabilities` | object  | null         | `RuntimeCapabilities` advertisement (`runtime_id` must equal `worker_id`, lifetime ≤ 5 min). Required to claim placed steps (`$runtime`); see [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) |
 
 **Response:** `200 OK`
 
 ```json
-[
-  {
-    "id": "d4e5f6a7-...",
-    "instance_id": "a1b2c3d4-...",
-    "block_id": "send_welcome",
-    "handler_name": "email_send",
-    "params": { "template": "welcome", "to": "john@acme.com" },
-    "context": { "data": { "name": "John" }, "config": {} },
-    "attempt": 0,
-    "timeout_ms": 30000,
-    "state": "claimed",
-    "worker_id": "node-worker-42",
-    "claimed_at": "2024-01-15T14:00:00Z",
-    "heartbeat_at": "2024-01-15T14:00:00Z",
-    "claim_epoch": 1,
-    "completed_at": null,
-    "output": null,
-    "error_message": null,
-    "error_retryable": null,
-    "created_at": "2024-01-15T13:59:58Z",
-    "effect_id": "0190f5a0-...",
-    "continuity_epoch": 0,
-    "lease_secs": 60
+{
+  "tasks": [
+    {
+      "id": "d4e5f6a7-...",
+      "instance_id": "a1b2c3d4-...",
+      "block_id": "send_welcome",
+      "handler_name": "email_send",
+      "params": { "template": "welcome", "to": "john@acme.com" },
+      "context": { "data": { "name": "John" }, "config": {} },
+      "attempt": 0,
+      "timeout_ms": 30000,
+      "state": "claimed",
+      "worker_id": "node-worker-42",
+      "claimed_at": "2024-01-15T14:00:00Z",
+      "heartbeat_at": "2024-01-15T14:00:00Z",
+      "claim_epoch": 1,
+      "completed_at": null,
+      "output": null,
+      "error_message": null,
+      "error_retryable": null,
+      "created_at": "2024-01-15T13:59:58Z",
+      "effect_id": "0190f5a0-...",
+      "continuity_epoch": 0,
+      "lease_secs": 60
     }
   ],
   "lease_secs": 60,
@@ -881,18 +892,19 @@ Returns an empty `tasks` array if no tasks are available. Clients should use
 the advertised heartbeat and poll intervals instead of hard-coded timing.
 
 **Mechanics:**
+
 - Uses `FOR UPDATE SKIP LOCKED` — concurrent workers never get the same task.
 - Sets `state = claimed`, `worker_id`, `claimed_at`, and `heartbeat_at`.
 
 **Distributed-execution fields** (all optional; older workers ignore them):
 
-| Field | Description |
-|-------|-------------|
-| `effect_id` | Deterministic id of this attempt's effect receipt, fixed at dispatch. Pass it to handlers / downstream APIs as an idempotency key. The server settles the receipt by this stored id. |
-| `continuity_epoch` | Owner epoch of the instance when the task was dispatched. Lease mutations are fenced on it (409 after a handoff). |
-| `lease_secs` | Lease for this claim: browser 30, mobile 120, otherwise the server default. Heartbeat well within it (e.g. every `lease_secs / 3`). The top-level `lease_secs` is only the server default. |
-| `target_runtime_id` / `runtime_kinds` | Echo of the step's `$runtime` placement, for debugging. |
-| `claimed_runtime_kind` | Kind from the claimant's capability advertisement. |
+| Field                                 | Description                                                                                                                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `effect_id`                           | Deterministic id of this attempt's effect receipt, fixed at dispatch. Pass it to handlers / downstream APIs as an idempotency key. The server settles the receipt by this stored id.       |
+| `continuity_epoch`                    | Owner epoch of the instance when the task was dispatched. Lease mutations are fenced on it (409 after a handoff).                                                                          |
+| `lease_secs`                          | Lease for this claim: browser 30, mobile 120, otherwise the server default. Heartbeat well within it (e.g. every `lease_secs / 3`). The top-level `lease_secs` is only the server default. |
+| `target_runtime_id` / `runtime_kinds` | Echo of the step's `$runtime` placement, for debugging.                                                                                                                                    |
+| `claimed_runtime_kind`                | Kind from the claimant's capability advertisement.                                                                                                                                         |
 
 A browser claimant receives a filtered `context` (no `config`, no audit
 trail, no credential-bearing entries, redaction policy applied) and is never
@@ -919,11 +931,11 @@ POST /workers/tasks/{task_id}/complete
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `worker_id` | string | Must match the worker that claimed the task |
+| Field         | Type    | Description                                         |
+| ------------- | ------- | --------------------------------------------------- |
+| `worker_id`   | string  | Must match the worker that claimed the task         |
 | `claim_epoch` | integer | Must match the claim generation returned by polling |
-| `output` | object | Result JSON (saved as BlockOutput) |
+| `output`      | object  | Result JSON (saved as BlockOutput)                  |
 
 **Response:** `200 OK`. A retry by the same lease holder of an already
 completed task is idempotent (`200`). `409` when the lease or the continuity
@@ -935,6 +947,7 @@ remote output is recorded as provenance (audit event
 entry when the instance is enrolled).
 
 **Side effects:**
+
 1. Worker task marked `completed`
 2. `BlockOutput` created with the output JSON
 3. Instance transitions `Waiting -> Scheduled` (immediate re-processing)
@@ -959,22 +972,24 @@ POST /workers/tasks/{task_id}/fail
 }
 ```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `worker_id` | string | **required** | Must match claimer |
+| Field         | Type    | Default      | Description                                         |
+| ------------- | ------- | ------------ | --------------------------------------------------- |
+| `worker_id`   | string  | **required** | Must match claimer                                  |
 | `claim_epoch` | integer | **required** | Must match the claim generation returned by polling |
-| `message` | string | **required** | Error description |
-| `retryable` | boolean | `false` | Whether the error is transient |
+| `message`     | string  | **required** | Error description                                   |
+| `retryable`   | boolean | `false`      | Whether the error is transient                      |
 
 **Response:** `200 OK`. Re-sending a failure for a task this lease already
 failed is idempotent (`200`); once a retry replaced the task the old id is
 `404`; a changed lease/owner epoch is `409`.
 
 **Retryable failure:**
+
 - Worker task deleted (allows re-dispatch on next tick)
 - Instance reset to `Scheduled`
 
 **Permanent failure:**
+
 - If instance has composite blocks: execution node marked `Failed`, instance re-scheduled for evaluator (try-catch can recover)
 - If instance is step-only: instance marked `Failed` (enters DLQ)
 
@@ -1051,7 +1066,12 @@ Operator/Admin only — called by the customer's app backend, never by the
 browser.
 
 ```json
-{ "runtime_id": "optional-uuid", "handlers": ["read_dom"], "ttl_secs": 900, "queues": [] }
+{
+  "runtime_id": "optional-uuid",
+  "handlers": ["read_dom"],
+  "ttl_secs": 900,
+  "queues": []
+}
 ```
 
 Returns `201 {token, runtime_id, expires_at, handlers}`. `ttl_secs` defaults
@@ -1071,7 +1091,12 @@ Operator/Admin only — called by the customer's app backend, never by the
 phone. The phone must not ship an operator (or any stored) API key.
 
 ```json
-{ "device_id": "iphone-7F3A", "runtime_id": "uuid", "handlers": ["scan_document"], "ttl_secs": 3600 }
+{
+  "device_id": "iphone-7F3A",
+  "runtime_id": "uuid",
+  "handlers": ["scan_document"],
+  "ttl_secs": 3600
+}
 ```
 
 Returns `201 {token, device_id, runtime_id, expires_at, handlers}`.
@@ -1119,41 +1144,41 @@ When `ORCH8_API_KEY` is set, the scraper must send it as `x-api-key` (and an `x-
 
 **Counters:**
 
-| Metric | Description |
-|--------|-------------|
-| `orch8_instances_claimed_total` | Instances claimed by scheduler |
-| `orch8_instances_completed_total` | Instances completed successfully |
-| `orch8_instances_failed_total` | Instances failed (entered DLQ) |
-| `orch8_steps_executed_total` | Steps executed |
-| `orch8_steps_failed_total` | Steps that failed |
-| `orch8_steps_retried_total` | Retry attempts |
-| `orch8_signals_delivered_total` | Signals processed |
-| `orch8_rate_limits_exceeded_total` | Rate limit deferrals |
-| `orch8_recovery_stale_instances_total` | Stale instances recovered at startup |
-| `orch8_webhooks_sent_total` | Webhooks delivered |
-| `orch8_webhooks_failed_total` | Webhook delivery failures |
-| `orch8_webhooks_parked_total` | Webhooks parked in the outbox after exhausting retries |
-| `orch8_cron_triggered_total` | Cron instances created |
-| `orch8_cron_skipped_total` | Cron fires skipped by the `skip` overlap policy |
-| `orch8_sla_breached_total` | SLA breach events (`type` label: runtime vs step runtime) |
+| Metric                                       | Description                                                                                   |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `orch8_instances_claimed_total`              | Instances claimed by scheduler                                                                |
+| `orch8_instances_completed_total`            | Instances completed successfully                                                              |
+| `orch8_instances_failed_total`               | Instances failed (entered DLQ)                                                                |
+| `orch8_steps_executed_total`                 | Steps executed                                                                                |
+| `orch8_steps_failed_total`                   | Steps that failed                                                                             |
+| `orch8_steps_retried_total`                  | Retry attempts                                                                                |
+| `orch8_signals_delivered_total`              | Signals processed                                                                             |
+| `orch8_rate_limits_exceeded_total`           | Rate limit deferrals                                                                          |
+| `orch8_recovery_stale_instances_total`       | Stale instances recovered at startup                                                          |
+| `orch8_webhooks_sent_total`                  | Webhooks delivered                                                                            |
+| `orch8_webhooks_failed_total`                | Webhook delivery failures                                                                     |
+| `orch8_webhooks_parked_total`                | Webhooks parked in the outbox after exhausting retries                                        |
+| `orch8_cron_triggered_total`                 | Cron instances created                                                                        |
+| `orch8_cron_skipped_total`                   | Cron fires skipped by the `skip` overlap policy                                               |
+| `orch8_sla_breached_total`                   | SLA breach events (`type` label: runtime vs step runtime)                                     |
 | `orch8_background_loop_restarts_total{loop}` | Supervised background loop restarted after it panicked or exited while the engine was running |
 
 **Histograms:**
 
-| Metric | Description |
-|--------|-------------|
-| `orch8_tick_duration_seconds` | Scheduler tick latency |
-| `orch8_step_duration_seconds` | Individual step execution time |
+| Metric                              | Description                    |
+| ----------------------------------- | ------------------------------ |
+| `orch8_tick_duration_seconds`       | Scheduler tick latency         |
+| `orch8_step_duration_seconds`       | Individual step execution time |
 | `orch8_instance_processing_seconds` | Total instance processing time |
 
 **Gauges:**
 
-| Metric | Description |
-|--------|-------------|
-| `orch8_queue_depth` | Instances claimed in current tick |
-| `orch8_queue_depth{capability,region,priority_lane}` | Pending worker backlog for autoscaling ([Placement](PLACEMENT.md)) |
-| `orch8_placement_unsatisfied{capability,region}` | Pending placed tasks no live runtime satisfies |
-| `orch8_active_tasks` | Currently in-flight step executions |
+| Metric                                                   | Description                                                                                                                                                                                                  |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `orch8_queue_depth`                                      | Instances claimed in current tick                                                                                                                                                                            |
+| `orch8_queue_depth{capability,region,priority_lane}`     | Pending worker backlog for autoscaling ([Placement](PLACEMENT.md))                                                                                                                                           |
+| `orch8_placement_unsatisfied{capability,region}`         | Pending placed tasks no live runtime satisfies                                                                                                                                                               |
+| `orch8_active_tasks`                                     | Currently in-flight step executions                                                                                                                                                                          |
 | `orch8_background_loop_last_run_timestamp_seconds{loop}` | Unix time of the last completed pass of a background loop (`tick`, `cron`, `node_heartbeat`, `node_reaper`, `worker_reaper`, `instance_reaper`, `gc`, `backlog_metrics`); alert on `time() - x > N × period` |
 
 ---
@@ -1188,34 +1213,34 @@ All blocks are defined in the `blocks` array of a sequence. Blocks can nest arbi
 
 **Built-in handlers:**
 
-| Handler | Params | Output |
-|---------|--------|--------|
-| `noop` | _(none)_ | `{}` |
-| `log` | `message` (string), `level` ("debug"/"info"/"warn") | `{ "message": "..." }` |
-| `sleep` | `duration_ms` (integer, default 100; over 60000 the instance is parked durably for that long, like the step `delay` field, instead of sleeping in-process; the sequence lint still warns, prefer `delay`) | `{ "slept_ms": N }` |
-| `fail` | `message` (string) | _(step fails with the given message)_ |
-| `http_request` | `url`, `method` ("GET"/"POST"/"PUT"/"DELETE"), `body`, `timeout_ms` (default 10000) | `{ "status": 200, "body": "..." }` |
-| `llm_call` | `provider`, `model`, `messages`, `temperature`, `max_tokens` | `{ "content": "...", "usage": {...} }` |
-| `tool_call` | `tool_name`, `arguments` | _(tool-specific output)_ |
-| `mcp_call` | `url`, `action` ("call"/"list"), `tool_name`, `arguments`, `headers`, `timeout_ms` | _(MCP tool result, or tool list for `"list"`)_ |
-| `agent` | `goal` or `messages`, `system`, `tools`, `tool_dispatch`, `max_iterations` (default 6), `auto_memory`, plus `llm_call` config passthrough | `{ "final": "...", "iterations": N, "stop_reason": "completed"\|"max_iterations", "tool_calls_made": M, "messages": [...] }` |
-| `embed` | `input`, plus embedding config (`model`, `api_key`/`api_key_env`, `base_url`, `timeout_ms`) | `{ "embedding"\|"embeddings", "model", "dimensions" }` |
-| `memory_store` | `text`, optional `embedding`, `model` (labels a precomputed vector), `key`, `metadata`, `scope` (`instance` default or `tenant`), `namespace`, `retention_secs`, `residency` | `{ "key": "...", "dimensions": N, "scope": "...", "namespace": "...", "residency": "...", "retention_secs": N, "policy_version": N }` |
-| `memory_search` | `query` or `query_embedding`, optional `model` (filters known mismatches), integer `top_k` (1–100, default 5), `scope`, `namespace`, `residency` | `{ "results": [{ key, text, embedding_model, score, metadata, provenance }], "count": N, "scope": "...", "namespace": "...", "expired_deleted": N }` |
-| `memory_delete` | `key`, optional `scope`, `namespace`, `residency` | `{ "key": "...", "deleted": true, "scope": "...", "namespace": "...", "policy_version": N }` |
-| `blob_put` | `text` or `data` (base64), `content_type`, `max_size_bytes` (default 25 MiB) | _(an `ArtifactRef` to pass between steps)_ |
-| `blob_get` | `ref` (ArtifactRef), `encoding` | _(the stored content)_ |
-| `human_review` | `prompt`, `timeout_ms`, `escalation_handler` | `{ "approved": bool, "reviewer": "...", "comments": "..." }` |
-| `self_modify` | `blocks` (array of block definitions to inject) | `{ "injected": N }` |
-| `emit_event` | See [Workflow coordination handlers](#workflow-coordination-handlers) | `{ instance_id, sequence_name, deduped }` |
-| `send_signal` | See [Workflow coordination handlers](#workflow-coordination-handlers) | `{ signal_id }` |
-| `query_instance` | See [Workflow coordination handlers](#workflow-coordination-handlers) | `{ found, state?, context?, created_at?, updated_at? }` |
-| `set_state` | `key` (string), `value` (any) | `{}` |
-| `get_state` | `key` (string) | `{ "value": ... }` |
-| `delete_state` | `key` (string) | `{}` |
-| `merge_state` | `data` (object) | `{}` |
-| `transform` | `expression` (string), `target` (string) | `{ "result": ... }` |
-| `assert` | `condition` (string), `message` (string) | `{}` |
+| Handler          | Params                                                                                                                                                                                                    | Output                                                                                                                                               |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `noop`           | _(none)_                                                                                                                                                                                                  | `{}`                                                                                                                                                 |
+| `log`            | `message` (string), `level` ("debug"/"info"/"warn")                                                                                                                                                       | `{ "message": "..." }`                                                                                                                               |
+| `sleep`          | `duration_ms` (integer, default 100; over 60000 the instance is parked durably for that long, like the step `delay` field, instead of sleeping in-process; the sequence lint still warns, prefer `delay`) | `{ "slept_ms": N }`                                                                                                                                  |
+| `fail`           | `message` (string)                                                                                                                                                                                        | _(step fails with the given message)_                                                                                                                |
+| `http_request`   | `url`, `method` ("GET"/"POST"/"PUT"/"DELETE"), `body`, `timeout_ms` (default 10000)                                                                                                                       | `{ "status": 200, "body": "..." }`                                                                                                                   |
+| `llm_call`       | `provider`, `model`, `messages`, `temperature`, `max_tokens`                                                                                                                                              | `{ "content": "...", "usage": {...} }`                                                                                                               |
+| `tool_call`      | `tool_name`, `arguments`                                                                                                                                                                                  | _(tool-specific output)_                                                                                                                             |
+| `mcp_call`       | `url`, `action` ("call"/"list"), `tool_name`, `arguments`, `headers`, `timeout_ms`                                                                                                                        | _(MCP tool result, or tool list for `"list"`)_                                                                                                       |
+| `agent`          | `goal` or `messages`, `system`, `tools`, `tool_dispatch`, `max_iterations` (default 6), `auto_memory`, plus `llm_call` config passthrough                                                                 | `{ "final": "...", "iterations": N, "stop_reason": "completed"\|"max_iterations", "tool_calls_made": M, "messages": [...] }`                         |
+| `embed`          | `input`, plus embedding config (`model`, `api_key`/`api_key_env`, `base_url`, `timeout_ms`)                                                                                                               | `{ "embedding"\|"embeddings", "model", "dimensions" }`                                                                                               |
+| `memory_store`   | `text`, optional `embedding`, `model` (labels a precomputed vector), `key`, `metadata`, `scope` (`instance` default or `tenant`), `namespace`, `retention_secs`, `residency`                              | `{ "key": "...", "dimensions": N, "scope": "...", "namespace": "...", "residency": "...", "retention_secs": N, "policy_version": N }`                |
+| `memory_search`  | `query` or `query_embedding`, optional `model` (filters known mismatches), integer `top_k` (1–100, default 5), `scope`, `namespace`, `residency`                                                          | `{ "results": [{ key, text, embedding_model, score, metadata, provenance }], "count": N, "scope": "...", "namespace": "...", "expired_deleted": N }` |
+| `memory_delete`  | `key`, optional `scope`, `namespace`, `residency`                                                                                                                                                         | `{ "key": "...", "deleted": true, "scope": "...", "namespace": "...", "policy_version": N }`                                                         |
+| `blob_put`       | `text` or `data` (base64), `content_type`, `max_size_bytes` (default 25 MiB)                                                                                                                              | _(an `ArtifactRef` to pass between steps)_                                                                                                           |
+| `blob_get`       | `ref` (ArtifactRef), `encoding`                                                                                                                                                                           | _(the stored content)_                                                                                                                               |
+| `human_review`   | `prompt`, `timeout_ms`, `escalation_handler`                                                                                                                                                              | `{ "approved": bool, "reviewer": "...", "comments": "..." }`                                                                                         |
+| `self_modify`    | `blocks` (array of block definitions to inject)                                                                                                                                                           | `{ "injected": N }`                                                                                                                                  |
+| `emit_event`     | See [Workflow coordination handlers](#workflow-coordination-handlers)                                                                                                                                     | `{ instance_id, sequence_name, deduped }`                                                                                                            |
+| `send_signal`    | See [Workflow coordination handlers](#workflow-coordination-handlers)                                                                                                                                     | `{ signal_id }`                                                                                                                                      |
+| `query_instance` | See [Workflow coordination handlers](#workflow-coordination-handlers)                                                                                                                                     | `{ found, state?, context?, created_at?, updated_at? }`                                                                                              |
+| `set_state`      | `key` (string), `value` (any)                                                                                                                                                                             | `{}`                                                                                                                                                 |
+| `get_state`      | `key` (string)                                                                                                                                                                                            | `{ "value": ... }`                                                                                                                                   |
+| `delete_state`   | `key` (string)                                                                                                                                                                                            | `{}`                                                                                                                                                 |
+| `merge_state`    | `data` (object)                                                                                                                                                                                           | `{}`                                                                                                                                                 |
+| `transform`      | `expression` (string), `target` (string)                                                                                                                                                                  | `{ "result": ... }`                                                                                                                                  |
+| `assert`         | `condition` (string), `message` (string)                                                                                                                                                                  | `{}`                                                                                                                                                 |
 
 Any handler name not registered as built-in is automatically dispatched to the external worker queue.
 
@@ -1245,28 +1270,29 @@ Fires an event trigger → spawns a new child workflow instance.
 
 **Params:**
 
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| `trigger_slug` | string | yes | Slug of an enabled event trigger in the caller's tenant |
-| `data` | object | no | Event payload; becomes the child's `context.data` (default `{}`) |
-| `meta` | object | no | Extra metadata merged into the child's metadata. `source` and `parent_instance_id` are always set by the engine and cannot be spoofed |
-| `dedupe_key` | string | no | Non-empty string. When present, dedupe is recorded atomically — subsequent calls with the same `(scope, key)` pair return the existing child and set `deduped: true`. Empty string is rejected |
-| `dedupe_scope` | string | no | `"parent"` (default) scopes dedupe to `(parent_instance_id, dedupe_key)`. `"tenant"` scopes it to `(tenant_id, dedupe_key)` so different parents in the same tenant cannot both spawn a child for the same key. Only meaningful when `dedupe_key` is present |
+| Field          | Type   | Required | Notes                                                                                                                                                                                                                                                        |
+| -------------- | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `trigger_slug` | string | yes      | Slug of an enabled event trigger in the caller's tenant                                                                                                                                                                                                      |
+| `data`         | object | no       | Event payload; becomes the child's `context.data` (default `{}`)                                                                                                                                                                                             |
+| `meta`         | object | no       | Extra metadata merged into the child's metadata. `source` and `parent_instance_id` are always set by the engine and cannot be spoofed                                                                                                                        |
+| `dedupe_key`   | string | no       | Non-empty string. When present, dedupe is recorded atomically — subsequent calls with the same `(scope, key)` pair return the existing child and set `deduped: true`. Empty string is rejected                                                               |
+| `dedupe_scope` | string | no       | `"parent"` (default) scopes dedupe to `(parent_instance_id, dedupe_key)`. `"tenant"` scopes it to `(tenant_id, dedupe_key)` so different parents in the same tenant cannot both spawn a child for the same key. Only meaningful when `dedupe_key` is present |
 
 **Returns:** `{ "instance_id": "<uuid>", "sequence_name": "<name>", "deduped": <bool> }`
 
 **Errors:**
 
-| Condition | Variant |
-|---|---|
+| Condition                                                | Variant     |
+| -------------------------------------------------------- | ----------- |
 | Missing `trigger_slug`; `dedupe_key` empty or non-string | `Permanent` |
-| Invalid `dedupe_scope` (not `"parent"` or `"tenant"`) | `Permanent` |
-| Trigger not found, disabled, or in another tenant | `Permanent` |
-| Caller instance not found | `Permanent` |
-| Storage connection / pool / query failure | `Retryable` |
-| Other storage failure | `Permanent` |
+| Invalid `dedupe_scope` (not `"parent"` or `"tenant"`)    | `Permanent` |
+| Trigger not found, disabled, or in another tenant        | `Permanent` |
+| Caller instance not found                                | `Permanent` |
+| Storage connection / pool / query failure                | `Retryable` |
+| Other storage failure                                    | `Permanent` |
 
 **Dedupe semantics:**
+
 - `dedupe_scope: "parent"` (default) — key is `(parent_instance_id, dedupe_key)`. Different parent instances can reuse the same key without colliding. Use this for the common fan-out case (e.g. one parent fires-once per external event).
 - `dedupe_scope: "tenant"` — key is `(tenant_id, dedupe_key)`. All parents within the tenant share the namespace, so the child workflow fires at most once per key across the whole tenant. Use this when the dedupe identity is global (e.g. a webhook delivery id you refuse to process twice across the system).
 
@@ -1293,11 +1319,11 @@ Enqueues a signal on an existing instance. Target must be non-terminal.
 
 **Params:**
 
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| `instance_id` | string (UUID) | yes | Target instance |
-| `signal_type` | string \| object | yes | See variants below |
-| `payload` | any | no | Arbitrary JSON delivered with the signal (default `null`) |
+| Field         | Type             | Required | Notes                                                     |
+| ------------- | ---------------- | -------- | --------------------------------------------------------- |
+| `instance_id` | string (UUID)    | yes      | Target instance                                           |
+| `signal_type` | string \| object | yes      | See variants below                                        |
+| `payload`     | any              | no       | Arbitrary JSON delivered with the signal (default `null`) |
 
 `signal_type` accepts all `SignalType` variants in snake_case:
 
@@ -1308,12 +1334,12 @@ Enqueues a signal on an existing instance. Target must be non-terminal.
 
 **Errors:**
 
-| Condition | Variant |
-|---|---|
-| Missing / invalid `instance_id`; missing / invalid `signal_type` | `Permanent` |
+| Condition                                                            | Variant     |
+| -------------------------------------------------------------------- | ----------- |
+| Missing / invalid `instance_id`; missing / invalid `signal_type`     | `Permanent` |
 | Target not found; target in another tenant; target in terminal state | `Permanent` |
-| Enqueue conflict (UUID collision; indicates a bug) | `Permanent` |
-| Storage connection / pool / query failure | `Retryable` |
+| Enqueue conflict (UUID collision; indicates a bug)                   | `Permanent` |
+| Storage connection / pool / query failure                            | `Retryable` |
 
 **Example:**
 
@@ -1350,9 +1376,9 @@ Reads another instance's context and state.
 
 **Params:**
 
-| Field | Type | Required |
-|-------|------|----------|
-| `instance_id` | string (UUID) | yes |
+| Field         | Type          | Required |
+| ------------- | ------------- | -------- |
+| `instance_id` | string (UUID) | yes      |
 
 **Returns (found):** `{ "found": true, "state": "<state>", "context": { ... }, "created_at": "<ts>", "updated_at": "<ts>" }`
 
@@ -1360,12 +1386,12 @@ Reads another instance's context and state.
 
 **Errors:**
 
-| Condition | Variant |
-|---|---|
-| Missing / invalid `instance_id` | `Permanent` |
-| Caller instance not found | `Permanent` |
-| Target in another tenant | `Permanent` (intentional — `query_instance` errors rather than masking cross-tenant as `{ found: false }`, so a missing target and a cross-tenant target are distinguishable) |
-| Storage connection / pool / query failure | `Retryable` |
+| Condition                                 | Variant                                                                                                                                                                       |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Missing / invalid `instance_id`           | `Permanent`                                                                                                                                                                   |
+| Caller instance not found                 | `Permanent`                                                                                                                                                                   |
+| Target in another tenant                  | `Permanent` (intentional — `query_instance` errors rather than masking cross-tenant as `{ found: false }`, so a missing target and a cross-tenant target are distinguishable) |
+| Storage connection / pool / query failure | `Retryable`                                                                                                                                                                   |
 
 **Example:**
 
@@ -1407,8 +1433,22 @@ Branches progress independently; the block completes when all branches finish an
   "type": "race",
   "id": "fastest_provider",
   "branches": [
-    [{ "type": "step", "id": "provider_a", "handler": "send_via_a", "params": {} }],
-    [{ "type": "step", "id": "provider_b", "handler": "send_via_b", "params": {} }]
+    [
+      {
+        "type": "step",
+        "id": "provider_a",
+        "handler": "send_via_a",
+        "params": {}
+      }
+    ],
+    [
+      {
+        "type": "step",
+        "id": "provider_b",
+        "handler": "send_via_b",
+        "params": {}
+      }
+    ]
   ],
   "semantics": "first_to_succeed"
 }
@@ -1427,15 +1467,34 @@ The first branch to complete **successfully** wins and the losing branches are c
   "routes": [
     {
       "condition": "plan == enterprise",
-      "blocks": [{ "type": "step", "id": "vip_flow", "handler": "vip_onboard", "params": {} }]
+      "blocks": [
+        {
+          "type": "step",
+          "id": "vip_flow",
+          "handler": "vip_onboard",
+          "params": {}
+        }
+      ]
     },
     {
       "condition": "plan == pro",
-      "blocks": [{ "type": "step", "id": "pro_flow", "handler": "pro_onboard", "params": {} }]
+      "blocks": [
+        {
+          "type": "step",
+          "id": "pro_flow",
+          "handler": "pro_onboard",
+          "params": {}
+        }
+      ]
     }
   ],
   "default": [
-    { "type": "step", "id": "free_flow", "handler": "free_onboard", "params": {} }
+    {
+      "type": "step",
+      "id": "free_flow",
+      "handler": "free_onboard",
+      "params": {}
+    }
   ]
 }
 ```
@@ -1459,7 +1518,12 @@ Evaluates conditions in order against `context.data`. First match wins. Falls th
     { "type": "step", "id": "fallback", "handler": "ses_send", "params": {} }
   ],
   "finally_block": [
-    { "type": "step", "id": "log_result", "handler": "log", "params": { "message": "send attempted" } }
+    {
+      "type": "step",
+      "id": "log_result",
+      "handler": "log",
+      "params": { "message": "send attempted" }
+    }
   ]
 }
 ```
@@ -1478,7 +1542,12 @@ Evaluates conditions in order against `context.data`. First match wins. Falls th
   "id": "poll_status",
   "condition": "status.pending",
   "body": [
-    { "type": "step", "id": "check", "handler": "http_request", "params": { "url": "https://api.example.com/status" } }
+    {
+      "type": "step",
+      "id": "check",
+      "handler": "http_request",
+      "params": { "url": "https://api.example.com/status" }
+    }
   ],
   "max_iterations": 50
 }
@@ -1518,14 +1587,24 @@ Iterates over `context.data[collection]` (must be an array). Each iteration has 
       "name": "control",
       "weight": 70,
       "blocks": [
-        { "type": "step", "id": "standard_flow", "handler": "standard_onboard", "params": {} }
+        {
+          "type": "step",
+          "id": "standard_flow",
+          "handler": "standard_onboard",
+          "params": {}
+        }
       ]
     },
     {
       "name": "variant_a",
       "weight": 30,
       "blocks": [
-        { "type": "step", "id": "new_flow", "handler": "new_onboard", "params": {} }
+        {
+          "type": "step",
+          "id": "new_flow",
+          "handler": "new_onboard",
+          "params": {}
+        }
       ]
     }
   ]
@@ -1543,7 +1622,12 @@ Routes traffic to one of several variants by weight. Useful for A/B testing diff
   "type": "cancellation_scope",
   "id": "critical_section",
   "blocks": [
-    { "type": "step", "id": "charge", "handler": "payment_charge", "params": {} },
+    {
+      "type": "step",
+      "id": "charge",
+      "handler": "payment_charge",
+      "params": {}
+    },
     { "type": "step", "id": "confirm", "handler": "send_receipt", "params": {} }
   ]
 }
@@ -1563,13 +1647,13 @@ Mobile sync endpoints require `ORCH8_MOBILE_SYNC_ENABLED=true`. All endpoints ar
 
 **Request body:**
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `device_id` | string | Device identifier (required) |
-| `status_updates` | array | Instance status updates from device |
-| `approval_requests` | array | Human-in-the-loop approval requests |
-| `step_delegations` | array | Step delegation requests: the server resolves `credentials://` references in `params` and returns them in a `step_result` command. **Off by default** — enable with `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` (any `device` key could then read tenant secrets); otherwise each gets a failed `step_result`. Always refused for device sessions |
-| `command_acks` | array | Command IDs the device has processed |
+| Field               | Type   | Description                                                                                                                                                                                                                                                                                                                                        |
+| ------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `device_id`         | string | Device identifier (required)                                                                                                                                                                                                                                                                                                                       |
+| `status_updates`    | array  | Instance status updates from device                                                                                                                                                                                                                                                                                                                |
+| `approval_requests` | array  | Human-in-the-loop approval requests                                                                                                                                                                                                                                                                                                                |
+| `step_delegations`  | array  | Step delegation requests: the server resolves `credentials://` references in `params` and returns them in a `step_result` command. **Off by default** — enable with `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` (any `device` key could then read tenant secrets); otherwise each gets a failed `step_result`. Always refused for device sessions |
+| `command_acks`      | array  | Command IDs the device has processed                                                                                                                                                                                                                                                                                                               |
 
 **Response:** `{ "commands": [...], "sync_interval_secs": 30 }`
 
@@ -1767,17 +1851,17 @@ All error responses follow this format:
 }
 ```
 
-| Status Code | Meaning |
-|-------------|---------|
-| `400` | Bad request (invalid JSON, missing required field, invalid argument) |
-| `401` | Unauthorized (missing or invalid API key) |
-| `403` | Forbidden (insufficient permissions) |
-| `404` | Resource not found (instance, sequence, cron schedule, worker task) |
-| `409` | Conflict (state transition not allowed, duplicate resource) |
-| `413` | Payload too large (instance context or session data exceeds `max_context_bytes`) |
-| `422` | Unprocessable entity (`context.data` fails the sequence's `input_schema`) |
-| `500` | Internal server error |
-| `503` | Service unavailable (storage connection failure) |
+| Status Code | Meaning                                                                          |
+| ----------- | -------------------------------------------------------------------------------- |
+| `400`       | Bad request (invalid JSON, missing required field, invalid argument)             |
+| `401`       | Unauthorized (missing or invalid API key)                                        |
+| `403`       | Forbidden (insufficient permissions)                                             |
+| `404`       | Resource not found (instance, sequence, cron schedule, worker task)              |
+| `409`       | Conflict (state transition not allowed, duplicate resource)                      |
+| `413`       | Payload too large (instance context or session data exceeds `max_context_bytes`) |
+| `422`       | Unprocessable entity (`context.data` fails the sequence's `input_schema`)        |
+| `500`       | Internal server error                                                            |
+| `503`       | Service unavailable (storage connection failure)                                 |
 
 ### Retarget an existing trigger
 

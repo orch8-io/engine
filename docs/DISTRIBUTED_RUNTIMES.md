@@ -17,19 +17,24 @@ live at most five minutes; nodes re-advertise before they expire.
 `$runtime` uses the `CapsuleRequirements` shape. It is stripped from the params
 the handler sees and stored on the task.
 
-| Field | Meaning |
-|-------|---------|
-| `runtime_kinds` | Only nodes of these kinds may claim (`server`, `edge`, `mobile`, `desktop`, `browser`). |
-| `runtime_id` | Only this node may claim. The task is that node's **mailbox**: it stays `pending` until the node polls (no lease reaping while pending; the step `timeout` still applies). |
-| `policy`, `classification` | A `LocalityPolicy` and data classification (default `internal`) evaluated at dispatch and re-evaluated against every claimant. |
-| `handlers`, `plugins`, `credentials`, `regions`, `hardware`, `requires_network`, `requires_human_ui`, `minimum_trust` | Capability facts the claimant must advertise (unchanged). |
-| `labels`, `residency` | Every label must be advertised with the same value; `residency` requires the label `residency=<zone>`. Usually compiled from step `placement` and tenant policies ([Placement](PLACEMENT.md)). |
-| `prefer` | Soft preference (sticky affinity / preferred labels) with a bounded wait; never widens eligibility. |
+| Field                                                                                                                 | Meaning                                                                                                                                                                                        |
+| --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runtime_kinds`                                                                                                       | Only nodes of these kinds may claim (`server`, `edge`, `mobile`, `desktop`, `browser`).                                                                                                        |
+| `runtime_id`                                                                                                          | Only this node may claim. The task is that node's **mailbox**: it stays `pending` until the node polls (no lease reaping while pending; the step `timeout` still applies).                     |
+| `policy`, `classification`                                                                                            | A `LocalityPolicy` and data classification (default `internal`) evaluated at dispatch and re-evaluated against every claimant.                                                                 |
+| `handlers`, `plugins`, `credentials`, `regions`, `hardware`, `requires_network`, `requires_human_ui`, `minimum_trust` | Capability facts the claimant must advertise (unchanged).                                                                                                                                      |
+| `labels`, `residency`                                                                                                 | Every label must be advertised with the same value; `residency` requires the label `residency=<zone>`. Usually compiled from step `placement` and tenant policies ([Placement](PLACEMENT.md)). |
+| `prefer`                                                                                                              | Soft preference (sticky affinity / preferred labels) with a bounded wait; never widens eligibility.                                                                                            |
 
 ```json
-{ "id": "scan", "handler": "scan_receipt",
-  "params": { "image": "{{context.data.image}}",
-              "$runtime": { "runtime_id": "0190f5a0-…" } } }
+{
+  "id": "scan",
+  "handler": "scan_receipt",
+  "params": {
+    "image": "{{context.data.image}}",
+    "$runtime": { "runtime_id": "0190f5a0-…" }
+  }
+}
 ```
 
 Rules:
@@ -42,7 +47,7 @@ Rules:
 - For placed steps the locality policy is evaluated at dispatch and the
   outcome is saved as a **placement decision** (evidence). Definitive denials
   fail the step permanently with `placement denied by locality policy (…);
-  decision <id>`: the policy contradicts the placement (targeted runtime id or
+decision <id>`: the policy contradicts the placement (targeted runtime id or
   placed kinds outside the rule), the classification is `confidential` or
   `restricted` with no rule, or the registered target is denied. Unknown facts
   do not block dispatch — every claim re-checks the policy and fails closed.
@@ -56,15 +61,15 @@ Every non-builtin handler is side-effecting. Dispatch creates an effect
 receipt (`dispatched`) and stores its id on the task as `effect_id`; nodes
 should pass it downstream as an idempotency key.
 
-| Event | Pure task | Side-effecting task |
-|-------|-----------|---------------------|
-| Lease expired (no heartbeat within `lease_secs`) | back to `pending` | receipt → `unknown`; retryable failure (retry policy: new attempt + new `effect_id`, else fail node/instance) |
-| Lease expired after the activity checkpointed (`checkpoint_seq > 0`) | back to `pending` | receipt → `unknown`; requeued so the next claimant resumes from `resume_checkpoint` (completion commits the receipt) |
-| `release` with `started: false` | back to `pending` | back to `pending`, receipt untouched |
-| `release` with `started: true` | back to `pending` | same as lease expiry |
-| `timeout_ms` elapsed | instance advances (retry/fail) | receipt → `unknown` (claimed) or `abandoned` (never claimed); instance advances |
-| `complete` | — | receipt → `committed` (by stored id) |
-| `fail` | retry policy | receipt → `unknown`, retry policy |
+| Event                                                                | Pure task                      | Side-effecting task                                                                                                  |
+| -------------------------------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Lease expired (no heartbeat within `lease_secs`)                     | back to `pending`              | receipt → `unknown`; retryable failure (retry policy: new attempt + new `effect_id`, else fail node/instance)        |
+| Lease expired after the activity checkpointed (`checkpoint_seq > 0`) | back to `pending`              | receipt → `unknown`; requeued so the next claimant resumes from `resume_checkpoint` (completion commits the receipt) |
+| `release` with `started: false`                                      | back to `pending`              | back to `pending`, receipt untouched                                                                                 |
+| `release` with `started: true`                                       | back to `pending`              | same as lease expiry                                                                                                 |
+| `timeout_ms` elapsed                                                 | instance advances (retry/fail) | receipt → `unknown` (claimed) or `abandoned` (never claimed); instance advances                                      |
+| `complete`                                                           | —                              | receipt → `committed` (by stored id)                                                                                 |
+| `fail`                                                               | retry policy                   | receipt → `unknown`, retry policy                                                                                    |
 
 `fail` (HTTP and gRPC) is resolved in the same single fenced transaction as
 lease expiry, timeouts and release: the receipt becomes `unknown`, then the
@@ -185,16 +190,16 @@ POST /runtimes/device-sessions
   token never verifies as `dst_` or the reverse.
 - Allowed, deny by default (`403` otherwise; expired or forged tokens `401`):
 
-  | Route | Object-level check |
-  |-------|--------------------|
-  | `POST /mobile/devices/register`, `POST /mobile/sync` | the session's `device_id`; `step_delegations` (server-side credential resolution) refused — for stored keys it is off unless `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true` |
-  | `POST /mobile/devices/{device_id}/runtime` | the session's device and `runtime_id`, kind `mobile`; handlers clamped to the allowlist |
-  | `POST /workers/tasks/poll`, `/workers/tasks/{id}/{complete,fail,heartbeat,release}` | `worker_id = runtime_id`, kind `mobile`, a granted handler |
-  | `POST /continuity/executions` | `hosted_by_runtime: true`, `runtime_id` = the session's |
-  | `POST /continuity/grants` | `allowed_actions: ["accept"]`, execution owned by the session's runtime (else `404`) |
-  | `POST /continuity/delegations/claim` | `source_runtime_id` = the session's runtime (which must own the parent) |
-  | `GET /continuity/delegations/{id}` | the session's runtime is the source or destination (else `404`) |
-  | `GET /runtimes` | only live delegation destinations (not itself, not draining/expired, ≥ `registered`, advertising `orch8.delegation`), reduced to `runtime_id`, `kind`, `handlers`, `observed_at`, `expires_at` (`trust` reported as `registered`) |
+  | Route                                                                               | Object-level check                                                                                                                                                                                                                |
+  | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `POST /mobile/devices/register`, `POST /mobile/sync`                                | the session's `device_id`; `step_delegations` (server-side credential resolution) refused — for stored keys it is off unless `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true`                                                         |
+  | `POST /mobile/devices/{device_id}/runtime`                                          | the session's device and `runtime_id`, kind `mobile`; handlers clamped to the allowlist                                                                                                                                           |
+  | `POST /workers/tasks/poll`, `/workers/tasks/{id}/{complete,fail,heartbeat,release}` | `worker_id = runtime_id`, kind `mobile`, a granted handler                                                                                                                                                                        |
+  | `POST /continuity/executions`                                                       | `hosted_by_runtime: true`, `runtime_id` = the session's                                                                                                                                                                           |
+  | `POST /continuity/grants`                                                           | `allowed_actions: ["accept"]`, execution owned by the session's runtime (else `404`)                                                                                                                                              |
+  | `POST /continuity/delegations/claim`                                                | `source_runtime_id` = the session's runtime (which must own the parent)                                                                                                                                                           |
+  | `GET /continuity/delegations/{id}`                                                  | the session's runtime is the source or destination (else `404`)                                                                                                                                                                   |
+  | `GET /runtimes`                                                                     | only live delegation destinations (not itself, not draining/expired, ≥ `registered`, advertising `orch8.delegation`), reduced to `runtime_id`, `kind`, `handlers`, `observed_at`, `expires_at` (`trust` reported as `registered`) |
 
 - Refused: task listing and stats, `/workers/tasks/poll/queue`, worker
   commands, other devices' data (`GET /mobile/devices|approvals|status`,

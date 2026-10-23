@@ -267,11 +267,13 @@ For example, restricted PII can be pinned to one device:
 ```json
 {
   "version": 1,
-  "rules": [{
-    "classification": "restricted",
-    "allowed_runtime_ids": ["<device-runtime-id>"],
-    "minimum_trust": "registered"
-  }]
+  "rules": [
+    {
+      "classification": "restricted",
+      "allowed_runtime_ids": ["<device-runtime-id>"],
+      "minimum_trust": "registered"
+    }
+  ]
 }
 ```
 
@@ -280,12 +282,14 @@ Cloud inference can require Wi-Fi and a cost ceiling:
 ```json
 {
   "version": 2,
-  "rules": [{
-    "classification": "confidential",
-    "allowed_connectivity": ["wifi"],
-    "maximum_cost_microunits": 50000,
-    "maximum_latency_ms": 1000
-  }]
+  "rules": [
+    {
+      "classification": "confidential",
+      "allowed_connectivity": ["wifi"],
+      "maximum_cost_microunits": 50000,
+      "maximum_latency_ms": 1000
+    }
+  ]
 }
 ```
 

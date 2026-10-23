@@ -259,11 +259,11 @@ Next: [Execute application code in a worker](04-external-worker.md).
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Server refuses to start without an encryption key | The variable is absent in terminal A | Export a 64-character hex key before starting |
-| CLI returns `401` | `ORCH8_API_KEY` is missing or does not match `orch8.toml` | Re-run the `sed` export in the CLI terminal |
-| CLI returns a tenant error | `ORCH8_TENANT_ID` is absent or differs from `demo` | Export it and retry |
-| `jq` captures `null` | A preceding command returned an error object | Run that command without command substitution and inspect the full response |
-| Old encrypted context cannot be read after restart | A new encryption key was generated | Restart with the original key used to write the database |
-| Port 8080 is occupied | Another server is running | Stop it or change `[api].http_addr` and `ORCH8_URL` together |
+| Symptom                                            | Likely cause                                              | Fix                                                                         |
+| -------------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Server refuses to start without an encryption key  | The variable is absent in terminal A                      | Export a 64-character hex key before starting                               |
+| CLI returns `401`                                  | `ORCH8_API_KEY` is missing or does not match `orch8.toml` | Re-run the `sed` export in the CLI terminal                                 |
+| CLI returns a tenant error                         | `ORCH8_TENANT_ID` is absent or differs from `demo`        | Export it and retry                                                         |
+| `jq` captures `null`                               | A preceding command returned an error object              | Run that command without command substitution and inspect the full response |
+| Old encrypted context cannot be read after restart | A new encryption key was generated                        | Restart with the original key used to write the database                    |
+| Port 8080 is occupied                              | Another server is running                                 | Stop it or change `[api].http_addr` and `ORCH8_URL` together                |

@@ -34,11 +34,11 @@ All configured URLs receive every event. There is no per-tenant or per-event fil
 
 ## Events
 
-| `event_type` | Fires when | `data` shape |
-|---|---|---|
-| `instance.completed` | Instance reaches terminal `completed` state | `{}` |
-| `instance.failed` | Instance reaches terminal `failed` state (including DLQ entry after retry exhaustion) | `{}`, or `{"error": "<message>"}` on some failure paths |
-| `instance.sla_breached` | An instance with an `sla` policy exceeds `max_runtime` or `max_step_runtime` | `{"type", "limit_ms", "elapsed_ms", "step_id", "sequence_id", "tenant_id"}` |
+| `event_type`            | Fires when                                                                            | `data` shape                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `instance.completed`    | Instance reaches terminal `completed` state                                           | `{}`                                                                        |
+| `instance.failed`       | Instance reaches terminal `failed` state (including DLQ entry after retry exhaustion) | `{}`, or `{"error": "<message>"}` on some failure paths                     |
+| `instance.sla_breached` | An instance with an `sla` policy exceeds `max_runtime` or `max_step_runtime`          | `{"type", "limit_ms", "elapsed_ms", "step_id", "sequence_id", "tenant_id"}` |
 
 Block-level and signal events are not published.
 
@@ -55,12 +55,12 @@ Block-level and signal events are not published.
 }
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `event_type` | string | Event identifier (see table above) |
-| `instance_id` | UUID \| null | Instance the event pertains to (always set for current events) |
-| `timestamp` | RFC 3339 string | When the event was produced |
-| `data` | object | Event-specific fields. Completion normally uses `{}`; failures may include `error`, and SLA breaches include limit/elapsed metadata. |
+| Field         | Type            | Description                                                                                                                          |
+| ------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `event_type`  | string          | Event identifier (see table above)                                                                                                   |
+| `instance_id` | UUID \| null    | Instance the event pertains to (always set for current events)                                                                       |
+| `timestamp`   | RFC 3339 string | When the event was produced                                                                                                          |
+| `data`        | object          | Event-specific fields. Completion normally uses `{}`; failures may include `error`, and SLA breaches include limit/elapsed metadata. |
 
 ---
 
@@ -107,12 +107,12 @@ Without a secret, payloads are sent unsigned. In that case, protect endpoints by
 
 Exposed at `/metrics` in Prometheus format:
 
-| Metric | Type | Description |
-|---|---|---|
-| `orch8_webhooks_sent_total` | Counter | Successful deliveries (2xx response) |
+| Metric                                  | Type    | Description                                                                |
+| --------------------------------------- | ------- | -------------------------------------------------------------------------- |
+| `orch8_webhooks_sent_total`             | Counter | Successful deliveries (2xx response)                                       |
 | `orch8_gc_webhook_parked_deleted_total` | Counter | Parked outbox rows deleted after `parked_retention_secs` (default 14 days) |
-| `orch8_webhooks_failed_total` | Counter | Deliveries that exhausted all retries |
-| `orch8_webhooks_parked_total` | Counter | Exhausted deliveries parked in the webhook outbox |
+| `orch8_webhooks_failed_total`           | Counter | Deliveries that exhausted all retries                                      |
+| `orch8_webhooks_parked_total`           | Counter | Exhausted deliveries parked in the webhook outbox                          |
 
 ---
 

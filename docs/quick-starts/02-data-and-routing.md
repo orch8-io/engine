@@ -161,12 +161,12 @@ For the paid run, the value follows this path:
 
 Orch8 template expressions use four roots:
 
-| Root | Contains | Typical use |
-|---|---|---|
-| `data` | Per-instance input in `context.data` | Customer, order, or request data |
-| `config` | Per-instance configuration in `context.config` | Region, feature flags, provider choice |
-| `outputs` | Results indexed by completed block ID | Feed one step's result into another |
-| `state` | Durable instance key/value state | Counters and values updated during a run |
+| Root      | Contains                                       | Typical use                              |
+| --------- | ---------------------------------------------- | ---------------------------------------- |
+| `data`    | Per-instance input in `context.data`           | Customer, order, or request data         |
+| `config`  | Per-instance configuration in `context.config` | Region, feature flags, provider choice   |
+| `outputs` | Results indexed by completed block ID          | Feed one step's result into another      |
+| `state`   | Durable instance key/value state               | Counters and values updated during a run |
 
 The shorter `data.customer` spelling is canonical in templates and expressions.
 Some older examples may show `context.data.customer`; both describe instance
@@ -234,9 +234,9 @@ Next: [Run the durable API server](03-durable-api.md).
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| A template prints literally | The braces or root name are misspelled | Copy `{{outputs.prepare.display_name}}` exactly |
-| `prepare` fails output validation | The transform shape and schema differ | Keep `display_name` and `selected_plan` in both places |
-| No route matches valid input | The condition uses a different field or spelling | Use `data.plan == "paid"` or `data.plan == "trial"` |
-| The dataflow command cannot connect | No API server is running | Complete Level 3 before using the API-backed command |
+| Symptom                             | Likely cause                                     | Fix                                                    |
+| ----------------------------------- | ------------------------------------------------ | ------------------------------------------------------ |
+| A template prints literally         | The braces or root name are misspelled           | Copy `{{outputs.prepare.display_name}}` exactly        |
+| `prepare` fails output validation   | The transform shape and schema differ            | Keep `display_name` and `selected_plan` in both places |
+| No route matches valid input        | The condition uses a different field or spelling | Use `data.plan == "paid"` or `data.plan == "trial"`    |
+| The dataflow command cannot connect | No API server is running                         | Complete Level 3 before using the API-backed command   |

@@ -29,23 +29,27 @@ Ref keys are structured:
 
 Configured via `[engine] externalization_mode` in `orch8.toml` (there is no environment-variable override for this setting).
 
-| Mode | Context data behavior | Block output behavior |
-|---|---|---|
-| `never` | Always inline | Always inline |
-| `threshold { bytes = N }` (default, N=65536) | Externalize fields ≥ N bytes | Externalize outputs ≥ N bytes |
-| `always_outputs` | Always inline unless per-field override | **Always externalize**, regardless of size |
+| Mode                                         | Context data behavior                   | Block output behavior                      |
+| -------------------------------------------- | --------------------------------------- | ------------------------------------------ |
+| `never`                                      | Always inline                           | Always inline                              |
+| `threshold { bytes = N }` (default, N=65536) | Externalize fields ≥ N bytes            | Externalize outputs ≥ N bytes              |
+| `always_outputs`                             | Always inline unless per-field override | **Always externalize**, regardless of size |
 
-TOML examples:
+Choose one configuration; each example is a separate `orch8.toml` fragment.
 
 ```toml
 # Default — 64 KiB cutoff
 [engine]
 externalization_mode = { type = "threshold", bytes = 65536 }
+```
 
+```toml
 # Never externalize — tests, benchmarks, small deployments
 [engine]
 externalization_mode = { type = "never" }
+```
 
+```toml
 # Dense context, heavy outputs (e.g. LLM workflows)
 [engine]
 externalization_mode = { type = "always_outputs" }

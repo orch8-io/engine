@@ -9,17 +9,17 @@ scheduler: every rule below compiles into the step's worker-task
 requirements, and the single claim predicate enforces them for HTTP polls,
 queue polls, and the negotiated gRPC stream, on PostgreSQL and SQLite alike.
 
-| Feature | Where | Guarantee |
-|---|---|---|
-| Data residency | `placement.residency`, policy `require.residency` | Never dispatched to a non-matching runtime. The step waits with the visible reason `placement_unsatisfied`. |
-| Capability labels | `placement.labels`, policy `require.labels` | Hard: every label must be advertised with the same value. |
-| Region | `placement.region`, policy `require.region` | Hard: the runtime must advertise the region. |
-| Soft preference | policy `prefer.labels` | Preferred runtimes get the task first for a bounded wait, then any eligible runtime. |
-| Sticky affinity | `placement.affinity: "instance"` | Next steps prefer the runtime that ran the previous worker step, falling back after `affinity_wait_ms`. |
-| Priority lanes | sequence `placement.priority_lane`, plan default | Maps onto instance priority and cooperative preemption. |
-| Global rate budgets | step `rate_budget` | Durable token bucket shared by every node; over budget the instance is deferred, never failed. |
-| Autoscaling metrics | `orch8_queue_depth{capability,region,priority_lane}` | Pending worker backlog for KEDA/HPA. |
-| Trace propagation | `task.context.runtime.traceparent` | One trace spans control plane → executor → completion. |
+| Feature             | Where                                                | Guarantee                                                                                                   |
+| ------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Data residency      | `placement.residency`, policy `require.residency`    | Never dispatched to a non-matching runtime. The step waits with the visible reason `placement_unsatisfied`. |
+| Capability labels   | `placement.labels`, policy `require.labels`          | Hard: every label must be advertised with the same value.                                                   |
+| Region              | `placement.region`, policy `require.region`          | Hard: the runtime must advertise the region.                                                                |
+| Soft preference     | policy `prefer.labels`                               | Preferred runtimes get the task first for a bounded wait, then any eligible runtime.                        |
+| Sticky affinity     | `placement.affinity: "instance"`                     | Next steps prefer the runtime that ran the previous worker step, falling back after `affinity_wait_ms`.     |
+| Priority lanes      | sequence `placement.priority_lane`, plan default     | Maps onto instance priority and cooperative preemption.                                                     |
+| Global rate budgets | step `rate_budget`                                   | Durable token bucket shared by every node; over budget the instance is deferred, never failed.              |
+| Autoscaling metrics | `orch8_queue_depth{capability,region,priority_lane}` | Pending worker backlog for KEDA/HPA.                                                                        |
+| Trace propagation   | `task.context.runtime.traceparent`                   | One trace spans control plane → executor → completion.                                                      |
 
 ## Step and sequence `placement`
 
@@ -28,22 +28,30 @@ queue polls, and the negotiated gRPC stream, on PostgreSQL and SQLite alike.
   "name": "billing",
   "placement": { "residency": "eu", "priority_lane": "premium" },
   "blocks": [
-    { "type": "step", "id": "charge", "handler": "stripe_charge",
+    {
+      "type": "step",
+      "id": "charge",
+      "handler": "stripe_charge",
       "rate_budget": "stripe-api",
-      "placement": { "region": "eu-west-1", "labels": { "pci": "true" },
-                     "affinity": "instance", "affinity_wait_ms": 10000 } }
+      "placement": {
+        "region": "eu-west-1",
+        "labels": { "pci": "true" },
+        "affinity": "instance",
+        "affinity_wait_ms": 10000
+      }
+    }
   ]
 }
 ```
 
-| Field | Level | Meaning |
-|---|---|---|
-| `region` | step, sequence | Only runtimes advertising this region (`capabilities.regions`). Narrows an explicit `$runtime.regions`. |
-| `labels` | step, sequence | Every `key: value` must be advertised in `capabilities.labels`. |
-| `residency` | step, sequence | Only runtimes advertising the label `residency=<zone>`. Never relaxed. |
-| `affinity` | step, sequence | `instance` or `none` (default). |
-| `affinity_wait_ms` | step, sequence | Bounded wait for affinity and preferred labels. Default 15000, max 600000. |
-| `priority_lane` | sequence only | `premium` (high), `standard` (normal), `batch` (low). |
+| Field              | Level          | Meaning                                                                                                 |
+| ------------------ | -------------- | ------------------------------------------------------------------------------------------------------- |
+| `region`           | step, sequence | Only runtimes advertising this region (`capabilities.regions`). Narrows an explicit `$runtime.regions`. |
+| `labels`           | step, sequence | Every `key: value` must be advertised in `capabilities.labels`.                                         |
+| `residency`        | step, sequence | Only runtimes advertising the label `residency=<zone>`. Never relaxed.                                  |
+| `affinity`         | step, sequence | `instance` or `none` (default).                                                                         |
+| `affinity_wait_ms` | step, sequence | Bounded wait for affinity and preferred labels. Default 15000, max 600000.                              |
+| `priority_lane`    | sequence only  | `premium` (high), `standard` (normal), `batch` (low).                                                   |
 
 Sequence-level placement applies to every worker-dispatched step. A step may
 add labels and set affinity, but it can never escape the sequence's region or
@@ -118,8 +126,10 @@ The step timeout still applies; there is no silent fallback.
 The tenant is the `X-Tenant-Id` principal (the root key may pass
 `?tenant_id=`).
 
-```json
+```http
 PUT /api/v1/placement/policies
+Content-Type: application/json
+
 {
   "items": [
     { "name": "eu-billing",
@@ -154,8 +164,15 @@ Recommended hybrid policy — every step of instances tagged `vpc` runs on
 executors in your network (join tokens issued with the label `site=vpc`):
 
 ```json
-{ "items": [ { "name": "vpc", "match": { "tag": "vpc" },
-               "require": { "labels": { "site": "vpc" } } } ] }
+{
+  "items": [
+    {
+      "name": "vpc",
+      "match": { "tag": "vpc" },
+      "require": { "labels": { "site": "vpc" } }
+    }
+  ]
+}
 ```
 
 ## Sticky affinity
@@ -211,10 +228,10 @@ the smooth, fleet-wide token bucket that downstream API quotas need.
 Every node publishes, every 15 s, the pending worker-task backlog of live
 instances:
 
-| Metric | Labels | Meaning |
-|---|---|---|
-| `orch8_queue_depth` | `capability` (handler), `region` (`any` or the required regions), `priority_lane` | Claimable pending worker tasks. Series that drain are set to 0. |
-| `orch8_placement_unsatisfied` | `capability`, `region` | Pending placed tasks no live runtime satisfies. |
+| Metric                        | Labels                                                                            | Meaning                                                         |
+| ----------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `orch8_queue_depth`           | `capability` (handler), `region` (`any` or the required regions), `priority_lane` | Claimable pending worker tasks. Series that drain are set to 0. |
+| `orch8_placement_unsatisfied` | `capability`, `region`                                                            | Pending placed tasks no live runtime satisfies.                 |
 
 The unlabeled `orch8_queue_depth` series (instances claimed in the current
 scheduler tick) is unchanged; select the backlog with `capability!=""`. All

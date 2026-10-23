@@ -11,6 +11,11 @@ embedded use), plus a native SDK that runs workflows on iOS and Android.
 
 ![Orch8 demo — orch8 init → orch8-server → engine ready in seconds](docs/demo.gif)
 
+These docs follow `main`, including changes listed under
+[Unreleased](CHANGELOG.md#unreleased). Published binaries and SDKs can lag this
+checkout. Use matching CLI/server builds when following newer examples; the
+[development instructions](#development) build the current source.
+
 ## Pick your path
 
 Each path is about ten lines. [Install](#install) the `orch8` CLI first. All three run
@@ -136,7 +141,7 @@ In CI, one command combines the candidate preflight, semantic diff, and historic
 checks into a single strict exit code:
 
 ```bash
-orch8 release gate <release-id> --sample 50
+orch8 release gate "<release-id>" --sample 50
 ```
 
 By default the gate rejects failed or unknown preflight checks, incompatible or
@@ -147,12 +152,9 @@ diff and preflight result as a PR comment. See
 
 ## Why Orch8
 
-Existing durable workflow engines either ship a multi-service cluster (Temporal:
-Cassandra + Elasticsearch + JVM workers) or assume Python everywhere (Airflow: Celery +
-Redis + scheduler). On a small team, either one is a full-time operations job.
-
-Orch8 keeps the same execution model (state-snapshot durability, retries,
-replay-on-restart) but replaces that stack with one Rust binary and Postgres. Workers can
+Orch8 stores workflow state as snapshots and resumes from durable boundaries
+after a restart. A server deployment combines the API and scheduler in one
+Rust binary with PostgreSQL, or SQLite for a single node. Workers can
 be written in any language and connect over REST long-poll. Higher-level building blocks
 (Parallel, Race, TryCatch, CancellationScope, plus LLM, HumanReview, and ToolCall) ship as
 built-in blocks rather than patterns you assemble from activities.
@@ -172,14 +174,25 @@ migrations and explicit non-guarantees.
 
 ## SDKs
 
-All SDKs live in their own repositories under the [orch8-io](https://github.com/orch8-io) GitHub organization.
+HTTP client SDKs live in repositories under the [orch8-io](https://github.com/orch8-io)
+organization. Native bindings and mobile wrapper sources also live in this
+repository under `packages/`.
 
-| Language | Package | Install | Repo |
-|----------|---------|---------|------|
-| TypeScript | `@orch8.io/sdk` | `npm install @orch8.io/sdk` | [sdk-node](https://github.com/orch8-io/sdk-node) |
-| Expo / React Native | `@orch8.io/expo` | `npx expo install @orch8.io/expo` | [sdk-expo](https://github.com/orch8-io/sdk-expo) |
-| Python | `orch8-io-sdk` | `pip install orch8-io-sdk` | [sdk-python](https://github.com/orch8-io/sdk-python) |
-| Go | `github.com/orch8-io/sdk-go` | `go get github.com/orch8-io/sdk-go` | [sdk-go](https://github.com/orch8-io/sdk-go) |
+| Language            | Package                      | Install                             | Repo                                                 |
+| ------------------- | ---------------------------- | ----------------------------------- | ---------------------------------------------------- |
+| TypeScript          | `@orch8.io/sdk`              | `npm install @orch8.io/sdk`         | [sdk-node](https://github.com/orch8-io/sdk-node)     |
+| Expo / React Native | `@orch8.io/expo`             | `npx expo install @orch8.io/expo`   | [sdk-expo](https://github.com/orch8-io/sdk-expo)     |
+| Python              | `orch8-io-sdk`               | `pip install orch8-io-sdk`          | [sdk-python](https://github.com/orch8-io/sdk-python) |
+| Go                  | `github.com/orch8-io/sdk-go` | `go get github.com/orch8-io/sdk-go` | [sdk-go](https://github.com/orch8-io/sdk-go)         |
+
+Additional HTTP clients and workers are available for
+[PHP](https://github.com/orch8-io/sdk-php),
+[Ruby](https://github.com/orch8-io/sdk-ruby),
+[Java/Kotlin](https://github.com/orch8-io/sdk-java), and
+[.NET](https://github.com/orch8-io/sdk-dotnet). Follow each repository's installation
+instructions: distribution channels and versions differ between SDKs. The
+[shared SDK contract](https://github.com/orch8-io/sdk-contract) defines worker
+protocol conformance independently of engine package versions.
 
 The TypeScript, Python, and Go SDKs include code-first builders for all eleven
 workflow block types. TypeScript carries handler-specific parameter types
@@ -201,30 +214,27 @@ See [Mobile SDK](docs/MOBILE_SDK.md) for the full design and [mobile-examples](h
 
 ## Architecture
 
-```
-orch8-server          Binary entry point, config loading, signal handling
-    |
-orch8-api             REST (axum) + SSE streaming, OpenAPI via utoipa
-    |
-orch8-grpc            gRPC service (tonic) for high-throughput clients
-    |
-orch8-engine          Scheduler, evaluator, handlers, signals, cron,
-    |                 circuit breakers, recovery, sequence cache
-    |
-orch8-storage         StorageBackend trait + Postgres + SQLite + encrypting wrapper
-    |
-orch8-types           Domain types, config, IDs, errors
-    |
-orch8-mobile          UniFFI bindings for iOS/Android, offline-first engine
-    |
-orch8-push            APNs/FCM push notification providers
-    |
-orch8-publisher       Signed sequence/package publication and CDN registry
-    |
-orch8-cli             CLI tool (init, doctor, release gate, sequence, instance, signal, health)
-```
+| Crate             | Responsibility                                              |
+| ----------------- | ----------------------------------------------------------- |
+| `orch8`           | In-process Rust facade and durable runtime                  |
+| `orch8-types`     | Domain types, configuration, IDs, and schema                |
+| `orch8-storage`   | Storage traits, PostgreSQL, SQLite, and encryption          |
+| `orch8-engine`    | Scheduler, evaluator, handlers, signals, and recovery       |
+| `orch8-api`       | REST, SSE, authorization, and generated OpenAPI             |
+| `orch8-grpc`      | Worker streaming, runtime control, artifacts, and telemetry |
+| `orch8-server`    | Server binary, configuration, and process lifecycle         |
+| `orch8-cli`       | `orch8` client, local development, and operations           |
+| `orch8-mobile`    | UniFFI API for mobile runtimes                              |
+| `orch8-push`      | APNs/FCM delivery                                           |
+| `orch8-publisher` | Signed packages and distribution registry                   |
+| `orch8-wasm`      | Browser validation, preflight, and bounded dry runs         |
+| `orch8-e2e`       | Cross-crate integration coverage                            |
+
+The Node and Python native bindings under `packages/` and the `fuzz/` package
+have separate Cargo workspaces and lockfiles. They require their own checks.
 
 **Key design decisions:**
+
 - Postgres is the timer wheel (zero engine memory for scheduled instances)
 - `FOR UPDATE SKIP LOCKED` prevents double-claiming across nodes
 - State machine enforced at type level
@@ -247,7 +257,9 @@ for field names, defaults, environment overrides, and complete examples.
 The generated OpenAPI document and Swagger UI are served by the running binary
 at `/api-docs/openapi.json` and `/swagger-ui`; stable snapshots are published at
 `https://orch8.io/contracts/openapi.json` and
-`https://orch8.io/contracts/sequence.schema.json`. Canonical product routes use the
+`https://orch8.io/contracts/sequence.schema.json`. For hand-written workflows,
+use the [authoring schema](https://orch8-io.github.io/engine/sequence-file.schema.json),
+which requires only `name` and `blocks`. Canonical product routes use the
 `/api/v1` prefix; bare paths remain compatibility aliases. The surface covers:
 
 - **Sequences** — CRUD, versioning, deprecation, migration, by-name lookup, preflight readiness, template inspection, dataflow bindings
@@ -272,61 +284,72 @@ at `/api-docs/openapi.json` and `/swagger-ui`; stable snapshots are published at
 
 ## Development
 
+Use the pinned Rust toolchain in `rust-toolchain.toml` (currently 1.97.0), a
+native C/C++ toolchain, and `protoc`. Dashboard development and the CI frontend
+checks use Node.js 22. See [Contributing](CONTRIBUTING.md) for the full check list
+and native/mobile build boundaries.
+
+From the repository root:
+
 ```bash
-# Start Postgres
-docker compose up -d
+# Start only the PostgreSQL service; Compose also validates the engine's secrets.
+export ORCH8_API_KEY="$(openssl rand -hex 32)"
+export ORCH8_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+docker compose up -d postgres
+export ORCH8_DATABASE_URL=postgres://orch8:orch8@localhost:5434/orch8
+export DATABASE_URL="$ORCH8_DATABASE_URL"
 
-# Build
-cargo build --workspace
-
-# Unit tests
-cargo test --workspace
-
-# Lint
-cargo clippy --workspace -- -D warnings
-
-# Format
+cargo build --locked --workspace
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --check
 
-# E2E tests (TypeScript)
-cd tests/e2e && npm ci && npm test
-
-# E2E tests (Rust)
-cargo test --test '*' --workspace
+# Run in a subshell so later root-relative commands keep working.
+(cd tests/e2e && npm ci && npm test)
+python3 scripts/check-docs.py
 ```
+
+The tests run against the development database above; use a disposable database.
+The TypeScript E2E harness starts its own `orch8-server` from the prebuilt
+binary and manages its lifecycle; see [Contributing](CONTRIBUTING.md#http-end-to-end-tests).
 
 ## Test Coverage
 
 The repository has two primary test layers. Exact counts change frequently, so
 the checked-in test tree and CI results are the source of truth.
 
-| Layer | Scope |
-|-------|-------|
+| Layer                       | Scope                                                                                                                                                                                                                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Rust unit + integration** | Storage backends (Postgres + SQLite), evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, API error mapping, encryption, mobile sync, expressions, circuit breakers, crash recovery, continuity/provenance/effect-receipt races, dataflow compiler soundness |
-| **TypeScript E2E** | Live HTTP API coverage for sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync, portable continuity, and typed dataflow |
+| **TypeScript E2E**          | Live HTTP API coverage for sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync, portable continuity, and typed dataflow                                                                             |
 
 **Coverage by feature area:**
 
-| Area | Test suites |
-|------|-------------|
-| Blocks | Step, Parallel, Race, TryCatch, Loop, ForEach, Router, SubSequence, CancellationScope, AB Split, Saga |
-| Conditional execution | `when` step guards, `retry_if` / `non_retryable_codes` conditional retry |
-| Handlers | Built-in handlers, external worker dispatch, LLM call, query-instance |
-| Features | Rate limiting, resource pools, circuit breakers, encryption, credentials, multi-tenancy |
-| Signals | Pause/resume/cancel, context update, terminal guards |
-| Scheduling | Cron CRUD, business days, timezone/DST, jitter, send windows, SLA timers |
-| Mixing | Complex sequences combining multiple block types and features |
-| Resilience | Crash recovery, retry, DLQ fingerprinting + auto-reproduction, idempotency, checkpoint/restore |
-| Release safety | Semantic diff, historical validation, canary gates, workflow contracts, preflight |
-| Security | API key auth, CORS, encryption at rest, tenant isolation, webhook HMAC + replay protection |
-| Templating | Context expressions, dynamic params, conditional logic, dataflow type-checking |
-| Observability | Prometheus metrics, audit log, health endpoints, SSE streaming, workbench |
-| Portable Continuity | Ownership handoff/CAS races, capsule encryption + signing, provenance chain tamper detection, effect-receipt at-most-once, compensation-run saga rollback, invariant evaluation, live migration + rollback, what-if simulation, fault-lab scenario shrinking + incident reproduction, federation/residency/disclosure minimization, human attention leases, device delegation, full-lifecycle integration scenarios, systematic tenant-isolation sweep |
+| Area                  | Test suites                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Blocks                | Step, Parallel, Race, TryCatch, Loop, ForEach, Router, SubSequence, CancellationScope, AB Split, Saga                                                                                                                                                                                                                                                                                                                                                  |
+| Conditional execution | `when` step guards, `retry_if` / `non_retryable_codes` conditional retry                                                                                                                                                                                                                                                                                                                                                                               |
+| Handlers              | Built-in handlers, external worker dispatch, LLM call, query-instance                                                                                                                                                                                                                                                                                                                                                                                  |
+| Features              | Rate limiting, resource pools, circuit breakers, encryption, credentials, multi-tenancy                                                                                                                                                                                                                                                                                                                                                                |
+| Signals               | Pause/resume/cancel, context update, terminal guards                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Scheduling            | Cron CRUD, business days, timezone/DST, jitter, send windows, SLA timers                                                                                                                                                                                                                                                                                                                                                                               |
+| Mixing                | Complex sequences combining multiple block types and features                                                                                                                                                                                                                                                                                                                                                                                          |
+| Resilience            | Crash recovery, retry, DLQ fingerprinting + auto-reproduction, idempotency, checkpoint/restore                                                                                                                                                                                                                                                                                                                                                         |
+| Release safety        | Semantic diff, historical validation, canary gates, workflow contracts, preflight                                                                                                                                                                                                                                                                                                                                                                      |
+| Security              | API key auth, CORS, encryption at rest, tenant isolation, webhook HMAC + replay protection                                                                                                                                                                                                                                                                                                                                                             |
+| Templating            | Context expressions, dynamic params, conditional logic, dataflow type-checking                                                                                                                                                                                                                                                                                                                                                                         |
+| Observability         | Prometheus metrics, audit log, health endpoints, SSE streaming, workbench                                                                                                                                                                                                                                                                                                                                                                              |
+| Portable Continuity   | Ownership handoff/CAS races, capsule encryption + signing, provenance chain tamper detection, effect-receipt at-most-once, compensation-run saga rollback, invariant evaluation, live migration + rollback, what-if simulation, fault-lab scenario shrinking + incident reproduction, federation/residency/disclosure minimization, human attention leases, device delegation, full-lifecycle integration scenarios, systematic tenant-isolation sweep |
 
 ## Project Structure
 
 ```
 engine/
+  orch8/              Embedded Rust facade
+  orch8-wasm/         Browser validation and dry runs
+  orch8-e2e/          Cross-crate Rust integration tests
+  packages/           Native bindings, mobile wrappers, embed kit, CLI shims
+  contracts/          Generated OpenAPI and authoring schemas
   orch8-api/          REST API layer (axum + utoipa)
   orch8-cli/          CLI binary
   orch8-engine/       Core scheduler, evaluator, handlers
@@ -419,7 +442,7 @@ production for several months, with extensive automated coverage of core paths.
 Honest about what it is not yet:
 
 - **Not battle-tested at Temporal-scale.** Largest internal load test: ~10K concurrent instances. If you're past that or have multiple engineers depending on uptime, run Temporal until 1.0.
-- **No deterministic replay debugger.** Temporal's SDKs ship deterministic replay; we don't yet, though continuity checkpoints support bounded time-travel and effect-free what-if simulation from any boundary (see [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md)). Time-skipping tests *are* supported: inject a `ManualClock` via `SchedulerConfig::clock` and advance virtual time manually — a workflow with a 3-day delay completes in a millisecond-scale test.
+- **No deterministic replay debugger.** Temporal's SDKs ship deterministic replay; we don't yet, though continuity checkpoints support bounded time-travel and effect-free what-if simulation from any boundary (see [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md)). Time-skipping tests _are_ supported: inject a `ManualClock` via `SchedulerConfig::clock` and advance virtual time manually — a workflow with a 3-day delay completes in a millisecond-scale test.
 - **Workflow versioning is younger.** Sequence definitions are versioned, but the migration ergonomics for in-flight instances aren't as polished as Temporal's `GetVersion` / patch system.
 - **SDK depth varies.** TypeScript has the broadest generated API surface;
   Python and Go now have complete workflow builders and workers but fewer

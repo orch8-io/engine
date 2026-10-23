@@ -56,13 +56,13 @@ else is silently dropped.
 
 ### Three execution models in one workflow
 
-| Step | Handler | Execution model | Why |
-|------|---------|----------------|-----|
-| `gate` | `check_subject_prefix` | External worker (Node.js) | Custom logic, runs on your infra |
-| `classify` | `llm_call` | Built-in (inline in engine) | No worker roundtrip, completes instantly |
-| `format` | `search_and_format` | External worker (Node.js) | HTTP scraping, custom formatting |
-| `notify` | `ap://slack.send_channel_message` | Activepieces sidecar | Zero-code Slack integration |
-| `skip`/`done` | `noop` | Built-in (inline) | No-op for clean flow completion |
+| Step          | Handler                           | Execution model             | Why                                      |
+| ------------- | --------------------------------- | --------------------------- | ---------------------------------------- |
+| `gate`        | `check_subject_prefix`            | External worker (Node.js)   | Custom logic, runs on your infra         |
+| `classify`    | `llm_call`                        | Built-in (inline in engine) | No worker roundtrip, completes instantly |
+| `format`      | `search_and_format`               | External worker (Node.js)   | HTTP scraping, custom formatting         |
+| `notify`      | `ap://slack.send_channel_message` | Activepieces sidecar        | Zero-code Slack integration              |
+| `skip`/`done` | `noop`                            | Built-in (inline)           | No-op for clean flow completion          |
 
 ### Key design decisions
 
@@ -90,13 +90,13 @@ this with your own filtering rules (sender allowlist, regex patterns, etc).
 
 ## Files
 
-| File | Purpose |
-|------|---------|
-| `deploy.ts` | Registers the workflow sequence with orch8 (raw JSON, no SDK abstraction) |
-| `worker.ts` | Node.js worker polling for `check_subject_prefix` and `search_and_format` tasks |
-| `webhook.ts` | HTTP adapter converting Resend webhook payload → orch8 instance creation |
-| `trigger.ts` | CLI script to simulate an inbound email (for testing without real email) |
-| `.env.example` | All required environment variables with documentation |
+| File           | Purpose                                                                         |
+| -------------- | ------------------------------------------------------------------------------- |
+| `deploy.ts`    | Registers the workflow sequence with orch8 (raw JSON, no SDK abstraction)       |
+| `worker.ts`    | Node.js worker polling for `check_subject_prefix` and `search_and_format` tasks |
+| `webhook.ts`   | HTTP adapter converting Resend webhook payload → orch8 instance creation        |
+| `trigger.ts`   | CLI script to simulate an inbound email (for testing without real email)        |
+| `.env.example` | All required environment variables with documentation                           |
 
 ---
 
@@ -115,12 +115,12 @@ this with your own filtering rules (sender allowlist, regex patterns, etc).
 cp .env.example .env
 ```
 
-| Variable | Where to get it |
-|----------|-----------------|
-| `DEEPSEEK_API_KEY` | https://platform.deepseek.com/api_keys (free tier: $5 credit) |
-| `SLACK_ACCESS_TOKEN` | Slack app → OAuth & Permissions → Bot Token (`xoxb-...`) |
-| `SLACK_CHANNEL_ID` | Right-click channel → View details → ID at bottom |
-| `ORCH8_URL` | Default: `http://localhost:8080/api/v1` |
+| Variable             | Where to get it                                               |
+| -------------------- | ------------------------------------------------------------- |
+| `DEEPSEEK_API_KEY`   | https://platform.deepseek.com/api_keys (free tier: $5 credit) |
+| `SLACK_ACCESS_TOKEN` | Slack app → OAuth & Permissions → Bot Token (`xoxb-...`)      |
+| `SLACK_CHANNEL_ID`   | Right-click channel → View details → ID at bottom             |
+| `ORCH8_URL`          | Default: `http://localhost:8080/api/v1`                       |
 
 ### 2. Slack app setup
 
@@ -232,6 +232,7 @@ POST /instances
 Input: `{ subject: "VIVA ORCH8: Enterprise pricing", prefix: "VIVA ORCH8:" }`
 
 Output:
+
 ```json
 { "accepted": true, "clean_subject": "Enterprise pricing" }
 ```
@@ -241,6 +242,7 @@ Output:
 The engine calls DeepSeek's OpenAI-compatible API directly. No worker involved.
 
 Output:
+
 ```json
 {
   "provider": "openai",
@@ -259,6 +261,7 @@ Receives `outputs.classify.message.content` (the JSON string), parses it,
 searches DuckDuckGo, and builds the Slack message.
 
 Output:
+
 ```json
 {
   "slack_message": ":rotating_light: *New email — sales* (high)\n\n*From:* sarah@bigcorp.com\n*Subject:* Enterprise pricing\n*AI reasoning:* Enterprise pricing request suggests large deal\n\n*Web context:*\n  • <url|BigCorp Series B>",
@@ -294,7 +297,7 @@ Also change these deployment boundaries:
 ORCH8_STORAGE_BACKEND=postgres \
 ORCH8_DATABASE_URL=postgres://... \
 ORCH8_API_KEY=your-api-key \
-ORCH8_ENCRYPTION_KEY=<64-hex-characters> \
+ORCH8_ENCRYPTION_KEY="<64-hex-characters>" \
 ./orch8-server
 ```
 
@@ -302,12 +305,12 @@ ORCH8_ENCRYPTION_KEY=<64-hex-characters> \
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `502 Bad Gateway` in ngrok | orch8 or webhook adapter not running | Start the relevant process |
-| `422 Unprocessable Entity` | Resend hitting orch8 directly (wrong port) | Point ngrok at 3333 (adapter), not 8080 |
-| Instance stuck in `waiting` | Worker not running | Start `npm run worker` |
-| `missing_scope` from Slack | Bot token lacks `chat:write` | Add scope + reinstall app + copy new token |
-| Classification returns `unknown` | Wrong output path in template | Use `{{outputs.classify.message.content}}` |
-| Steps run out of order | Worker steps in same branch run in parallel | Use top-level sequencing (separate routers) |
-| `piece 'slack' is not installed` | Missing npm package | `cd activepieces && npm install @activepieces/piece-slack` |
+| Symptom                          | Cause                                       | Fix                                                        |
+| -------------------------------- | ------------------------------------------- | ---------------------------------------------------------- |
+| `502 Bad Gateway` in ngrok       | orch8 or webhook adapter not running        | Start the relevant process                                 |
+| `422 Unprocessable Entity`       | Resend hitting orch8 directly (wrong port)  | Point ngrok at 3333 (adapter), not 8080                    |
+| Instance stuck in `waiting`      | Worker not running                          | Start `npm run worker`                                     |
+| `missing_scope` from Slack       | Bot token lacks `chat:write`                | Add scope + reinstall app + copy new token                 |
+| Classification returns `unknown` | Wrong output path in template               | Use `{{outputs.classify.message.content}}`                 |
+| Steps run out of order           | Worker steps in same branch run in parallel | Use top-level sequencing (separate routers)                |
+| `piece 'slack' is not installed` | Missing npm package                         | `cd activepieces && npm install @activepieces/piece-slack` |

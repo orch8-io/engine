@@ -8,17 +8,17 @@ the outcome you need instead of reading them in order.
 
 ## Choose an outcome
 
-| Area | Time | Quick start | You finish with |
-|---|---:|---|---|
-| Scheduling | 15 min | [Schedule recurring runs](01-cron-schedules.md) | A timezone-aware cron schedule with overlap control |
-| Inbound integration | 20 min | [Accept a signed inbound webhook](02-inbound-webhook-trigger.md) | A public HMAC-protected endpoint that starts workflows |
+| Area                 |   Time | Quick start                                                            | You finish with                                                       |
+| -------------------- | -----: | ---------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Scheduling           | 15 min | [Schedule recurring runs](01-cron-schedules.md)                        | A timezone-aware cron schedule with overlap control                   |
+| Inbound integration  | 20 min | [Accept a signed inbound webhook](02-inbound-webhook-trigger.md)       | A public HMAC-protected endpoint that starts workflows                |
 | Outbound integration | 25 min | [Deliver signed lifecycle webhooks](03-outbound-lifecycle-webhooks.md) | A receiver that verifies raw-body signatures and deduplicates retries |
-| Human operations | 20 min | [Add a human approval gate](04-human-approval.md) | A waiting approval that resumes through a validated signal |
-| Type safety | 15 min | [Generate typed dataflow bindings](05-typed-dataflow.md) | Deterministic TypeScript, Python, schema, and report files |
-| Large payloads | 20 min | [Externalize large workflow state](06-large-payloads.md) | Compact hot rows with transparently hydrated outputs |
-| Integrations | 20 min | [Run an Activepieces action](07-activepieces-action.md) | A community-piece action executed by the Node sidecar |
-| Observability | 20 min | [Connect the dashboard and metrics](08-dashboard-and-metrics.md) | An authenticated operator UI and Prometheus scrape target |
-| Performance | 20 min | [Generate disposable local load](09-load-testing.md) | Repeatable seeded traffic against an isolated database |
+| Human operations     | 20 min | [Add a human approval gate](04-human-approval.md)                      | A waiting approval that resumes through a validated signal            |
+| Type safety          | 15 min | [Generate typed dataflow bindings](05-typed-dataflow.md)               | Deterministic TypeScript, Python, schema, and report files            |
+| Large payloads       | 20 min | [Externalize large workflow state](06-large-payloads.md)               | Compact hot rows with transparently hydrated outputs                  |
+| Integrations         | 20 min | [Run an Activepieces action](07-activepieces-action.md)                | A community-piece action executed by the Node sidecar                 |
+| Observability        | 20 min | [Connect the dashboard and metrics](08-dashboard-and-metrics.md)       | An authenticated operator UI and Prometheus scrape target             |
+| Performance          | 20 min | [Generate disposable local load](09-load-testing.md)                   | Repeatable seeded traffic against an isolated database                |
 
 ## Shared starting point
 

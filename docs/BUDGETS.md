@@ -13,12 +13,12 @@ table `GET /usage` uses; override it with `ORCH8_MODEL_PRICING`.
 
 ## Instance budgets vs tenant budgets
 
-| | Instance `budget` (existing) | Tenant budget (this page) |
-|---|---|---|
-| Scope | One execution | All executions of a tenant |
-| Limits | Tokens, steps, cost/wall-time/effects (continuity) | Estimated USD per day/month, optional model prefix |
-| On breach | Instance **pauses** (`budget_exceeded`) | New `llm_call` dispatches **fail** (permanent `tenant_budget_exceeded`) |
-| Alerts | — | 50/80/100% (configurable) threshold records |
+|           | Instance `budget` (existing)                       | Tenant budget (this page)                                               |
+| --------- | -------------------------------------------------- | ----------------------------------------------------------------------- |
+| Scope     | One execution                                      | All executions of a tenant                                              |
+| Limits    | Tokens, steps, cost/wall-time/effects (continuity) | Estimated USD per day/month, optional model prefix                      |
+| On breach | Instance **pauses** (`budget_exceeded`)            | New `llm_call` dispatches **fail** (permanent `tenant_budget_exceeded`) |
+| Alerts    | —                                                  | 50/80/100% (configurable) threshold records                             |
 
 The two layers are independent and read the same `usage_events`. Only
 `llm_tokens` rows count as consumption. Response-cache hits are recorded as
@@ -39,29 +39,40 @@ orch8 budget set --tenant acme --period daily --limit-usd 20 --model gpt-5 \
 
 orch8 budget list --tenant acme      # spend, percent_used, state, blocking
 orch8 budget alerts --tenant acme
-orch8 budget set --tenant acme --id <budget-id> --period monthly --limit-usd 800  # replace
-orch8 budget delete <budget-id> --tenant acme
+orch8 budget set --tenant acme --id "<budget-id>" --period monthly --limit-usd 800  # replace
+orch8 budget delete "<budget-id>" --tenant acme
 ```
 
 REST:
 
-| Method | Path | Notes |
-|---|---|---|
-| `POST` | `/budgets` | `{tenant_id, period: daily\|monthly, limit_usd, model?, thresholds?, hard_cap?}`, admin |
-| `PUT` | `/budgets/{id}` | Replace, admin |
-| `DELETE` | `/budgets/{id}?tenant_id=` | Admin |
-| `GET` | `/budgets?tenant_id=` | Current-period `BudgetStatus` list |
-| `GET` | `/budgets/alerts?tenant_id=&limit=` | Alert records, newest first |
+| Method   | Path                                | Notes                                                                                   |
+| -------- | ----------------------------------- | --------------------------------------------------------------------------------------- |
+| `POST`   | `/budgets`                          | `{tenant_id, period: daily\|monthly, limit_usd, model?, thresholds?, hard_cap?}`, admin |
+| `PUT`    | `/budgets/{id}`                     | Replace, admin                                                                          |
+| `DELETE` | `/budgets/{id}?tenant_id=`          | Admin                                                                                   |
+| `GET`    | `/budgets?tenant_id=`               | Current-period `BudgetStatus` list                                                      |
+| `GET`    | `/budgets/alerts?tenant_id=&limit=` | Alert records, newest first                                                             |
 
 `GET /usage` includes a `budgets` array with the same status objects:
 
 ```json
 {
-  "budget": { "id": "…", "tenant_id": "acme", "model": null, "period": "monthly",
-              "limit_usd": 500.0, "thresholds": [50, 80, 100], "hard_cap": true },
-  "period_start": "2026-09-01T00:00:00Z", "period_end": "2026-10-01T00:00:00Z",
-  "spend_usd": 412.37, "percent_used": 82.47, "state": "warning",
-  "blocking": false, "unpriced_events": 0
+  "budget": {
+    "id": "…",
+    "tenant_id": "acme",
+    "model": null,
+    "period": "monthly",
+    "limit_usd": 500.0,
+    "thresholds": [50, 80, 100],
+    "hard_cap": true
+  },
+  "period_start": "2026-09-01T00:00:00Z",
+  "period_end": "2026-10-01T00:00:00Z",
+  "spend_usd": 412.37,
+  "percent_used": 82.47,
+  "state": "warning",
+  "blocking": false,
+  "unpriced_events": 0
 }
 ```
 
@@ -101,7 +112,7 @@ Consequences worth knowing:
   after it, so the call that crosses 100% completes. The same is true of
   instance budgets. Across nodes, enforcement can lag by up to ~5 s.
 - **Fails closed on errors.** If budget status cannot be read, the step fails
-  *retryably* and nothing is dispatched.
+  _retryably_ and nothing is dispatched.
 - **Cache hits are served** even when blocked, because they cost nothing.
 - **Unpriced models don't count.** Usage for models missing from the pricing
   table is excluded from spend and reported as `unpriced_events`. Add prices
@@ -122,11 +133,18 @@ Alert record (`GET /budgets/alerts`, table `tenant_budget_alerts`):
 
 ```json
 {
-  "id": "0191…", "event": "budget.threshold_crossed",
-  "tenant_id": "acme", "budget_id": "0191…", "model": null,
-  "period": "monthly", "period_start": "2026-09-01T00:00:00Z",
-  "threshold_percent": 80, "spend_usd": 401.2, "limit_usd": 500.0,
-  "blocking": false, "created_at": "2026-09-26T14:03:11Z"
+  "id": "0191…",
+  "event": "budget.threshold_crossed",
+  "tenant_id": "acme",
+  "budget_id": "0191…",
+  "model": null,
+  "period": "monthly",
+  "period_start": "2026-09-01T00:00:00Z",
+  "threshold_percent": 80,
+  "spend_usd": 401.2,
+  "limit_usd": 500.0,
+  "blocking": false,
+  "created_at": "2026-09-26T14:03:11Z"
 }
 ```
 

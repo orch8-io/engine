@@ -10,11 +10,11 @@ This page is the index. Each cloud target has its own section below with a copy-
 
 ## Which backend?
 
-| Scenario | Backend | Notes |
-|---|---|---|
-| Local dev, tests, demos | SQLite | Zero dependencies, single file on disk |
-| Single-node production | SQLite + Litestream | One engine process, no scale-out; see [SQLite in production](SQLITE_PRODUCTION.md) |
-| HA / multi-replica production | Postgres | Multiple engine replicas coordinate via `FOR UPDATE SKIP LOCKED` |
+| Scenario                      | Backend             | Notes                                                                              |
+| ----------------------------- | ------------------- | ---------------------------------------------------------------------------------- |
+| Local dev, tests, demos       | SQLite              | Zero dependencies, single file on disk                                             |
+| Single-node production        | SQLite + Litestream | One engine process, no scale-out; see [SQLite in production](SQLITE_PRODUCTION.md) |
+| HA / multi-replica production | Postgres            | Multiple engine replicas coordinate via `FOR UPDATE SKIP LOCKED`                   |
 
 SQLite is a supported backend for small single-node deployments. Pair it with Litestream for off-host durability ([guide](SQLITE_PRODUCTION.md)). Once you need more than one engine replica, split node roles, or zero-downtime deploys, move to Postgres.
 
@@ -28,7 +28,7 @@ Upgrades are safe on both backends: Postgres migrations are checksum-verified an
 
 The engine is stateless. Run N replicas pointing at the same Postgres — `FOR UPDATE SKIP LOCKED` guarantees no double-claiming. No leader election, no peer discovery, no sidecar coordinator.
 
-> **Warning — triggers are not lease-gated.** Instance *claiming* is safe at
+> **Warning — triggers are not lease-gated.** Instance _claiming_ is safe at
 > any replica count, but the trigger processor is not: every node runs the
 > trigger loop and spawns its own NATS subscription / file watcher for each
 > enabled trigger, so one event fans out into **one workflow instance per
@@ -112,8 +112,8 @@ spec:
           env:
             - { name: ORCH8_STORAGE_BACKEND, value: postgres }
             - { name: ORCH8_RUN_MIGRATIONS, value: "true" }
-            - { name: ORCH8_LOG_JSON,       value: "true" }
-            - { name: ORCH8_HTTP_ADDR,      value: 0.0.0.0:8080 }
+            - { name: ORCH8_LOG_JSON, value: "true" }
+            - { name: ORCH8_HTTP_ADDR, value: 0.0.0.0:8080 }
           envFrom:
             - secretRef: { name: orch8-secrets }
           readinessProbe:
@@ -124,7 +124,7 @@ spec:
             periodSeconds: 10
           resources:
             requests: { cpu: "200m", memory: "256Mi" }
-            limits:   { cpu: "2",    memory: "1Gi" }
+            limits: { cpu: "2", memory: "1Gi" }
 ---
 apiVersion: v1
 kind: Service
@@ -132,7 +132,7 @@ metadata: { name: orch8-engine }
 spec:
   selector: { app: orch8-engine }
   ports:
-    - { name: http, port: 8080,  targetPort: 8080 }
+    - { name: http, port: 8080, targetPort: 8080 }
     - { name: grpc, port: 50051, targetPort: 50051 }
 ```
 
@@ -212,13 +212,13 @@ fresh database gets its schema. Back up the encryption key outside the platform,
 encrypted with it can't be read without it. All templates run **one** engine instance. See
 [High availability](#high-availability) before you scale out.
 
-| Platform | File | Storage | Button / command |
-|---|---|---|---|
-| Render | [`render.yaml`](../render.yaml) | Render Postgres | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/orch8-io/engine) |
-| DigitalOcean App Platform | [`.do/deploy.template.yaml`](../.do/deploy.template.yaml) | DO dev database (PG) | [![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/orch8-io/engine/tree/main) |
-| Railway | [`deploy/railway/`](../deploy/railway/) | Railway Postgres | Template not published yet (see below) |
-| Fly.io | [`fly.toml`](../fly.toml) | SQLite on a Fly volume | `fly launch --copy-config` (no button) |
-| Coolify | [`deploy/coolify/docker-compose.yml`](../deploy/coolify/docker-compose.yml) | Postgres container | Paste as a Docker Compose resource |
+| Platform                  | File                                                                        | Storage                | Button / command                                                                                                                                         |
+| ------------------------- | --------------------------------------------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Render                    | [`render.yaml`](../render.yaml)                                             | Render Postgres        | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/orch8-io/engine)          |
+| DigitalOcean App Platform | [`.do/deploy.template.yaml`](../.do/deploy.template.yaml)                   | DO dev database (PG)   | [![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/orch8-io/engine/tree/main) |
+| Railway                   | [`deploy/railway/`](../deploy/railway/)                                     | Railway Postgres       | Template not published yet (see below)                                                                                                                   |
+| Fly.io                    | [`fly.toml`](../fly.toml)                                                   | SQLite on a Fly volume | `fly launch --copy-config` (no button)                                                                                                                   |
+| Coolify                   | [`deploy/coolify/docker-compose.yml`](../deploy/coolify/docker-compose.yml) | Postgres container     | Paste as a Docker Compose resource                                                                                                                       |
 
 The Render and DigitalOcean buttons read the template from the default branch of the
 public repository. A template added on a feature branch only takes effect after it merges.

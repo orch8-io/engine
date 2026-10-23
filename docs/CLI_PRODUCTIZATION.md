@@ -17,4 +17,3 @@
 
 These commands do not provide a full-screen TUI, hide failed release gates, or
 store credentials in shell arguments unless the operator explicitly passes one.
-

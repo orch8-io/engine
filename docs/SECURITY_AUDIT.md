@@ -22,6 +22,7 @@ the publisher's tenant, and `publish_manifest` accepted caller-supplied
 sequence URLs and signing keys without trust-boundary checks.
 
 **Fix:**
+
 - `SequencePublisher::new` now returns `Result<Self, PublishError>` and rejects
   empty tenant IDs and path metacharacters (`/`, `\`, `..`).
 - `publish_sequence` rejects sequences whose `tenant_id` does not match the
@@ -33,6 +34,7 @@ sequence URLs and signing keys without trust-boundary checks.
   `other_keys` (and the generator key) instead of silently deduplicating them.
 
 **Tests:**
+
 - Unit tests in `orch8-publisher/src/publish.rs` for invalid tenant IDs,
   tenant mismatch, outside-tenant URLs, and generator-key shadowing.
 - Unit tests in `orch8-publisher/src/manifest.rs` for duplicate signing key
@@ -49,6 +51,7 @@ to an attacker-controlled or internal endpoint (SSRF / exfiltration). The
 internal `reqwest` client also followed HTTP redirects by default.
 
 **Fix:**
+
 - Added an explicit `telemetry_url` field to `MobileEngineConfig`. The engine
   no longer derives telemetry endpoints from `manifest_url`.
 - `MobileEngine::sync` only flushes telemetry when `telemetry_enabled` is true,
@@ -61,6 +64,7 @@ internal `reqwest` client also followed HTTP redirects by default.
 - Disabled HTTP redirects in `TelemetryManager`'s `reqwest` client.
 
 **Tests:**
+
 - Unit tests in `orch8-mobile/src/lib.rs` for HTTP, loopback, and non-standard
   port rejection, and for valid HTTPS acceptance.
 - Updated integration tests in `orch8-mobile/tests/mobile_coverage.rs` to use
@@ -77,7 +81,7 @@ internal `reqwest` client also followed HTTP redirects by default.
 The following are documented as architectural/security design concerns that
 were out of scope for this tactical fix round.
 
-*Status update (2026-07-06):* the July 2026 deep-review fix pass (merge
+_Status update (2026-07-06):_ the July 2026 deep-review fix pass (merge
 `40da554`, PR #90 merge `9305586`) closed two of these:
 
 - ✅ `orch8-storage` single-row lookups lack tenant predicates — fixed:

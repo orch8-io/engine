@@ -36,13 +36,13 @@ sends `SIGKILL` to the orchestrator container (`docker compose kill`), waits
 `--down-for` seconds, and starts it again. Workers and the database keep
 running. Recorded per run:
 
-| Field | Definition |
-|---|---|
-| `in_flight_at_kill` | Workflows submitted before the kill that had not completed at the kill instant |
-| `recovered_count` | Workflows submitted before the kill that completed after the restart |
-| `lost_count` | Workflows that never completed before the driver deadline |
+| Field                           | Definition                                                                                        |
+| ------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `in_flight_at_kill`             | Workflows submitted before the kill that had not completed at the kill instant                    |
+| `recovered_count`               | Workflows submitted before the kill that completed after the restart                              |
+| `lost_count`                    | Workflows that never completed before the driver deadline                                         |
 | `duplicate_activity_executions` | Activity-log lines minus distinct (workflow, step) pairs — how many activities ran more than once |
-| `time_to_recover_ms` | Restart → first workflow completion observed after the restart |
+| `time_to_recover_ms`            | Restart → first workflow completion observed after the restart                                    |
 
 Duplicate executions are **expected** for every system here: all of them
 provide at-least-once activity execution, so an activity whose completion was
@@ -111,23 +111,23 @@ this machine. It does not rank systems in general.
 Check each vendor's documentation for the pinned version before publishing;
 the harness does not change these behaviours.
 
-| System | Durable unit in this workload | Activity execution guarantee |
-|---|---|---|
-| Orch8 | Instance state and each step's output persisted in PostgreSQL before the next step is scheduled | At least once (worker tasks are leased and re-offered after lease expiry) |
-| Temporal | Workflow event history persisted by the server before progress is acknowledged | At least once (activities retried per retry policy) |
-| Inngest | Each `step.run` result memoized by the server | At least once |
-| Hatchet | Each task run and result persisted in PostgreSQL | At least once |
-| Trigger.dev | Parent checkpointed at each `triggerAndWait`; each child run persisted | At least once |
+| System      | Durable unit in this workload                                                                   | Activity execution guarantee                                              |
+| ----------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Orch8       | Instance state and each step's output persisted in PostgreSQL before the next step is scheduled | At least once (worker tasks are leased and re-offered after lease expiry) |
+| Temporal    | Workflow event history persisted by the server before progress is acknowledged                  | At least once (activities retried per retry policy)                       |
+| Inngest     | Each `step.run` result memoized by the server                                                   | At least once                                                             |
+| Hatchet     | Each task run and result persisted in PostgreSQL                                                | At least once                                                             |
+| Trigger.dev | Parent checkpointed at each `triggerAndWait`; each child run persisted                          | At least once                                                             |
 
 ## Harness status
 
-| System | Stack | Driver/worker | Run end-to-end by the harness |
-|---|---|---|---|
-| Orch8 | Complete | Complete (REST worker, no SDK) | Yes (smoke-sized runs only) |
-| Temporal | Complete (`temporalio/auto-setup`) | Complete, `UNVERIFIED` SDK usage | No |
-| Inngest | Complete (self-hosted `inngest start`), `UNVERIFIED` flags | Complete, `UNVERIFIED` REST run-status endpoint | No |
-| Hatchet | Complete (`hatchet-lite`), `UNVERIFIED` env | Complete, `UNVERIFIED` SDK usage | No |
-| Trigger.dev | **Skeleton** — self-hosted stack incomplete | Skeleton | No (`run.sh` refuses it) |
+| System      | Stack                                                      | Driver/worker                                   | Run end-to-end by the harness |
+| ----------- | ---------------------------------------------------------- | ----------------------------------------------- | ----------------------------- |
+| Orch8       | Complete                                                   | Complete (REST worker, no SDK)                  | Yes (smoke-sized runs only)   |
+| Temporal    | Complete (`temporalio/auto-setup`)                         | Complete, `UNVERIFIED` SDK usage                | No                            |
+| Inngest     | Complete (self-hosted `inngest start`), `UNVERIFIED` flags | Complete, `UNVERIFIED` REST run-status endpoint | No                            |
+| Hatchet     | Complete (`hatchet-lite`), `UNVERIFIED` env                | Complete, `UNVERIFIED` SDK usage                | No                            |
+| Trigger.dev | **Skeleton** — self-hosted stack incomplete                | Skeleton                                        | No (`run.sh` refuses it)      |
 
 `UNVERIFIED` markers in the files name exactly which image settings or SDK
 calls have not been confirmed against a running system.
@@ -168,22 +168,22 @@ to the raw files.
 
 ### Throughput (N = —, concurrency = —)
 
-| System | Version | Throughput (wf/s) | p50 (ms) | p95 (ms) | p99 (ms) | Latency source | Failed |
-|---|---|---|---|---|---|---|---|
-| Orch8 | — | — | — | — | — | — | — |
-| Temporal | — | — | — | — | — | — | — |
-| Inngest | — | — | — | — | — | — | — |
-| Trigger.dev | — | — | — | — | — | — | — |
-| Hatchet | — | — | — | — | — | — | — |
+| System      | Version | Throughput (wf/s) | p50 (ms) | p95 (ms) | p99 (ms) | Latency source | Failed |
+| ----------- | ------- | ----------------- | -------- | -------- | -------- | -------------- | ------ |
+| Orch8       | —       | —                 | —        | —        | —        | —              | —      |
+| Temporal    | —       | —                 | —        | —        | —        | —              | —      |
+| Inngest     | —       | —                 | —        | —        | —        | —              | —      |
+| Trigger.dev | —       | —                 | —        | —        | —        | —              | —      |
+| Hatchet     | —       | —                 | —        | —        | —        | —              | —      |
 
 ### Crash recovery (N = —, concurrency = —, kill after — s, down for — s)
 
-| System | Version | In flight at kill | Recovered | Lost | Duplicate activity executions | Time to recover (ms) |
-|---|---|---|---|---|---|---|
-| Orch8 | — | — | — | — | — | — |
-| Temporal | — | — | — | — | — | — |
-| Inngest | — | — | — | — | — | — |
-| Trigger.dev | — | — | — | — | — | — |
-| Hatchet | — | — | — | — | — | — |
+| System      | Version | In flight at kill | Recovered | Lost | Duplicate activity executions | Time to recover (ms) |
+| ----------- | ------- | ----------------- | --------- | ---- | ----------------------------- | -------------------- |
+| Orch8       | —       | —                 | —         | —    | —                             | —                    |
+| Temporal    | —       | —                 | —         | —    | —                             | —                    |
+| Inngest     | —       | —                 | —         | —    | —                             | —                    |
+| Trigger.dev | —       | —                 | —         | —    | —                             | —                    |
+| Hatchet     | —       | —                 | —         | —    | —                             | —                    |
 
 Hardware: —
