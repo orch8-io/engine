@@ -279,6 +279,8 @@ pub struct CollapsibleWake {
 }
 
 impl CollapsibleWake {
+    /// Hash routing fields with eight-byte big-endian lengths, independent
+    /// of the producer's pointer width. This preserves existing 64-bit keys.
     #[must_use]
     pub fn collapse_key(&self) -> String {
         let mut hasher = Sha256::new();
@@ -288,7 +290,8 @@ impl CollapsibleWake {
             &self.execution_id,
             &self.topic,
         ] {
-            hasher.update(value.len().to_be_bytes());
+            let length = u64::try_from(value.len()).expect("routing field lengths fit in u64");
+            hasher.update(length.to_be_bytes());
             hasher.update(value.as_bytes());
         }
         hex::encode(hasher.finalize())
