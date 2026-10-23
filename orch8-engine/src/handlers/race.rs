@@ -189,14 +189,8 @@ pub async fn execute_race(
         RaceOutcome::Undecided => {}
     }
 
-    // Group by branch_index (BTreeMap: deterministic branch order). Within a
-    // group, `children_of` preserves source order — see execute_parallel.
-    let mut branches: std::collections::BTreeMap<i16, Vec<&ExecutionNode>> =
-        std::collections::BTreeMap::new();
-    for c in &children {
-        let idx = c.branch_index.unwrap_or(0);
-        branches.entry(idx).or_default().push(*c);
-    }
+    // Keep the same branch and source ordering as parallel execution.
+    let branches = evaluator::group_by_branch(&children);
 
     for (branch_idx, branch_nodes) in &branches {
         let branch_failed = branch_nodes

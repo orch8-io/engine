@@ -1739,6 +1739,22 @@ pub fn children_of(
     children
 }
 
+/// Group direct composite children in branch order, preserving their input
+/// order within each branch. Untagged children retain the defensive branch-0
+/// behavior used by parallel and race execution.
+pub(crate) fn group_by_branch<'a>(
+    children: &[&'a ExecutionNode],
+) -> std::collections::BTreeMap<i16, Vec<&'a ExecutionNode>> {
+    let mut branches = std::collections::BTreeMap::<i16, Vec<&'a ExecutionNode>>::new();
+    for child in children {
+        branches
+            .entry(child.branch_index.unwrap_or(0))
+            .or_default()
+            .push(*child);
+    }
+    branches
+}
+
 /// Check if all nodes in a set are in a terminal state.
 pub fn all_terminal(nodes: &[&ExecutionNode]) -> bool {
     nodes.iter().all(|n| n.state.is_terminal())
@@ -1850,14 +1866,14 @@ pub async fn reset_subtree_to_pending(
     children_of.sort_unstable_by_key(|&(p, _)| p);
 
     let mut frontier = vec![root_id];
-    let mut descendants: Vec<(ExecutionNodeId, BlockType, BlockId)> = Vec::new();
+    let mut descendants: Vec<&ExecutionNode> = Vec::new();
     while let Some(parent) = frontier.pop() {
         let start = children_of.partition_point(|&(p, _)| p < parent);
         for &(p, node) in children_of.iter().skip(start) {
             if p != parent {
                 break;
             }
-            descendants.push((node.id, node.block_type, node.block_id.clone()));
+            descendants.push(node);
             frontier.push(node.id);
         }
     }
@@ -1865,7 +1881,7 @@ pub async fn reset_subtree_to_pending(
         return Ok(());
     }
 
-    let node_ids: Vec<_> = descendants.iter().map(|(id, _, _)| *id).collect();
+    let node_ids: Vec<_> = descendants.iter().map(|node| node.id).collect();
     storage
         .update_nodes_state(&node_ids, NodeState::Pending)
         .await?;
@@ -1875,13 +1891,13 @@ pub async fn reset_subtree_to_pending(
     // (and decide) afresh.
     let composite_block_ids: Vec<_> = descendants
         .iter()
-        .filter(|(_, kind, _)| {
+        .filter(|node| {
             matches!(
-                kind,
+                node.block_type,
                 BlockType::Loop | BlockType::ForEach | BlockType::Router
             )
         })
-        .map(|(_, _, block_id)| block_id.clone())
+        .map(|node| node.block_id.clone())
         .collect();
     if !composite_block_ids.is_empty() {
         storage
@@ -1891,8 +1907,8 @@ pub async fn reset_subtree_to_pending(
 
     let step_block_ids: Vec<_> = descendants
         .iter()
-        .filter(|(_, kind, _)| *kind == BlockType::Step)
-        .map(|(_, _, block_id)| block_id.clone())
+        .filter(|node| node.block_type == BlockType::Step)
+        .map(|node| node.block_id.clone())
         .collect();
     if !step_block_ids.is_empty() {
         storage
@@ -1940,7 +1956,7 @@ pub async fn reset_subtree_to_pending(
 
     let all_block_ids: Vec<_> = descendants
         .iter()
-        .map(|(_, _, block_id)| block_id.as_str().to_owned())
+        .map(|node| node.block_id.as_str().to_owned())
         .collect();
     storage
         .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &all_block_ids)
