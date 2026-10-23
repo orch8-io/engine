@@ -18,11 +18,31 @@ const FCM_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const MAX_TOKEN_LEN: usize = 512;
 /// Maximum error response body we will include in a `PushError::Delivery`.
 const MAX_ERROR_BODY_LEN: usize = 4 * 1024;
+/// Bound bytes before JSON decoding or error classification, including chunked
+/// responses without Content-Length. Successful message bodies are unused.
+const MAX_RESPONSE_BODY_LEN: usize = 64 * 1024;
 /// M-21: total delivery attempts (the initial try plus retries) for a
 /// transient failure (network error, 429/quota, 5xx) or an auth rejection
 /// (401/403 — invalid/expired OAuth token) that a fresh token can resolve.
 /// An unregistered device token never retries.
 const MAX_DELIVERY_ATTEMPTS: u32 = 3;
+
+async fn read_response_body(mut response: reqwest::Response) -> Result<Vec<u8>, PushError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| PushError::Delivery(format!("FCM response read failed: {error}")))?
+    {
+        if chunk.len() > MAX_RESPONSE_BODY_LEN - bytes.len() {
+            return Err(PushError::Delivery(format!(
+                "FCM response exceeds the {MAX_RESPONSE_BODY_LEN} byte limit"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
 
 /// Minimum spacing between forced access-token refreshes triggered by a
 /// 401/403, process-wide. A rejection that persists across fresh tokens is a
@@ -274,24 +294,16 @@ impl FcmProvider {
             .await
             .map_err(|e| PushError::Delivery(format!("FCM token exchange failed: {e}")))?;
 
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let preview = if body.len() > MAX_ERROR_BODY_LEN {
-                format!(
-                    "{}… (truncated)",
-                    crate::safe_prefix(&body, MAX_ERROR_BODY_LEN)
-                )
-            } else {
-                body
-            };
+        let status = resp.status();
+        let body = read_response_body(resp).await?;
+        if !status.is_success() {
+            let preview = error_preview(&String::from_utf8_lossy(&body));
             return Err(PushError::Delivery(format!(
                 "FCM token exchange returned error: {preview}"
             )));
         }
 
-        let token_resp: TokenResponse = resp
-            .json()
-            .await
+        let token_resp: TokenResponse = serde_json::from_slice(&body)
             .map_err(|e| PushError::Delivery(format!("FCM token parse failed: {e}")))?;
 
         let access_token = token_resp.access_token;
@@ -341,6 +353,33 @@ impl FcmProvider {
         }))
     }
 
+    async fn request_message(
+        &self,
+        url: &str,
+        access_token: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(reqwest::StatusCode, String), PushError> {
+        let response = self
+            .client
+            .post(url)
+            .header("authorization", format!("Bearer {access_token}"))
+            .json(payload)
+            .send()
+            .await
+            .map_err(|error| PushError::Delivery(format!("FCM request failed: {error}")))?;
+        let status = response.status();
+        let body = if status.is_success() {
+            // The status acknowledges delivery; no body data is used. Do not
+            // turn an unused stalled body into a duplicate delivery attempt.
+            String::new()
+        } else {
+            // Reject partial/oversized bodies before classifying permanent
+            // device-token failures. The caller retries transport failures.
+            String::from_utf8_lossy(&read_response_body(response).await?).into_owned()
+        };
+        Ok((status, body))
+    }
+
     async fn send(
         &self,
         token: &str,
@@ -376,17 +415,10 @@ impl FcmProvider {
                 }
             };
 
-            let resp = match self
-                .client
-                .post(&url)
-                .header("authorization", format!("Bearer {access_token}"))
-                .json(&payload)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    last_err = format!("FCM request failed: {e}");
+            let (status, body) = match self.request_message(&url, &access_token, &payload).await {
+                Ok(response) => response,
+                Err(error) => {
+                    last_err = error.to_string();
                     warn!(attempt, error = %last_err, "FCM request failed, will retry");
                     if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
                         tokio::time::sleep(retry_backoff(attempt)).await;
@@ -394,9 +426,6 @@ impl FcmProvider {
                     continue;
                 }
             };
-
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
 
             match classify_fcm_response(status, &body) {
                 FcmOutcome::Success => {

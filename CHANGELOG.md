@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### FCM response bounds
+
+- OAuth and error responses are limited to 64 KiB before decoding, including
+  chunked responses without a content length. Failed reads retry without
+  classifying a partial body as a permanent device-token rejection.
+- Successful message status acknowledges delivery without waiting for or
+  buffering its unused response body.
+
 ### SQLite cancellation safety
 
 - Admission, scheduler and queue claims, injection, deduplication, sub-tenant
