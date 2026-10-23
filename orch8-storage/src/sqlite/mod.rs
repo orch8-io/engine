@@ -1372,6 +1372,17 @@ impl crate::OutputStore for SqliteStorage {
         .await
     }
 
+    async fn save_output_and_claimed_transition(
+        &self,
+        output: &BlockOutput,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::output_and_transition(self, output, new_state, next_fire_at, claim_token)
+            .await
+    }
+
     async fn save_output_and_transition(
         &self,
         output: &BlockOutput,
@@ -1629,6 +1640,15 @@ impl crate::SignalStore for SqliteStorage {
 
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError> {
         signals::mark_delivered(self, signal_id).await
+    }
+
+    async fn mark_signal_delivered_claimed(
+        &self,
+        instance_id: InstanceId,
+        signal_id: Uuid,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::deliver_signal(self, instance_id, signal_id, claim_token).await
     }
 
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError> {

@@ -419,3 +419,45 @@ pub(super) async fn ensure_run_started(
     tx.commit().await?;
     Ok(true)
 }
+
+pub(super) async fn deliver_signal(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+    signal_id: uuid::Uuid,
+    token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, instance_id, token).await? else {
+        return Ok(false);
+    };
+    super::signals::mark_owned_delivered_on(&mut tx, instance_id, signal_id).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Parent-row claim lock, state change and diagnostic output commit together.
+pub(super) async fn output_and_transition(
+    store: &SqliteStorage,
+    output: &BlockOutput,
+    new_state: orch8_types::instance::InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+    claim_token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, output.instance_id, claim_token).await? else {
+        return Ok(false);
+    };
+    if !super::instances::conditional_update_state_on(
+        &mut tx,
+        output.instance_id,
+        orch8_types::instance::InstanceState::Running,
+        new_state,
+        next_fire_at,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    super::outputs::save_on(&mut tx, output).await?;
+    tx.commit().await?;
+    Ok(true)
+}

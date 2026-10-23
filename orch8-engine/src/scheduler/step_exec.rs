@@ -39,6 +39,7 @@ pub(super) async fn check_step_deadline(
     step_def: &orch8_types::sequence::StepDef,
     prev_output: Option<&orch8_types::output::BlockOutput>,
     clock: &SharedClock,
+    claim_token: DateTime<Utc>,
 ) -> Result<bool, EngineError> {
     super::handle_deadline_breach(
         storage,
@@ -46,7 +47,7 @@ pub(super) async fn check_step_deadline(
         instance,
         step_def,
         prev_output,
-        InstanceState::Running,
+        super::DeadlineOrigin::Running(claim_token),
         clock,
         None,
     )
@@ -71,6 +72,7 @@ pub(super) async fn check_step_deadline(
 pub(super) async fn check_budget(
     storage: &Arc<dyn StorageBackend>,
     instance: &orch8_types::instance::TaskInstance,
+    claim_token: DateTime<Utc>,
 ) -> Result<bool, EngineError> {
     let Some(budget) = &instance.budget else {
         return Ok(false);
@@ -96,27 +98,28 @@ pub(super) async fn check_budget(
         "instance exceeded budget, pausing"
     );
 
+    let control = crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
     // Record the machine-readable reason BEFORE the state flip so an observer
     // who sees Paused is guaranteed to also see the breach metadata.
-    storage
-        .merge_instance_metadata(
-            instance.id,
-            &serde_json::json!({
-                "paused_reason": "budget_exceeded",
-                "budget_breach": {
-                    "limit": breach.limit,
-                    "limit_value": breach.limit_value,
-                    "actual": breach.actual,
-                },
-            }),
-        )
-        .await?;
+    crate::control::ExecutionControl::merge_instance_metadata(
+        &control,
+        instance.id,
+        &serde_json::json!({
+            "paused_reason": "budget_exceeded",
+            "budget_breach": {
+                "limit": breach.limit,
+                "limit_value": breach.limit_value,
+                "actual": breach.actual,
+            },
+        }),
+    )
+    .await?;
 
     crate::lifecycle::transition_claimed_instance(
         storage.as_ref(),
         instance.id,
         Some(&instance.tenant_id),
-        instance.updated_at,
+        claim_token,
         InstanceState::Running,
         InstanceState::Paused,
         None,
@@ -167,7 +170,7 @@ fn delay_fire_at_storage_precision(fire_at: DateTime<Utc>) -> DateTime<Utc> {
 /// clock reaches the recorded instant the delay is served and stays served,
 /// so retries of the step do not re-delay.
 async fn step_delay_until(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
@@ -196,7 +199,7 @@ async fn step_delay_until(
     };
     let mut until = recorded(&instance.metadata);
     if until.is_none()
-        && let Some(fresh) = storage.get_instance(instance.id).await?
+        && let Some(fresh) = storage.backend().get_instance(instance.id).await?
     {
         until = recorded(&fresh.metadata);
     }
@@ -281,13 +284,16 @@ async fn rate_limit_retry_at(
 /// transition (the flat path via `transition_instance`, the tree path via
 /// [`park_tree_instance_until`], after runnable work in the evaluation settles).
 pub(crate) async fn step_preamble_deferral(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
     if step_def.retry.is_some()
-        && let Some(previous) = storage.get_block_output(instance.id, &step_def.id).await?
+        && let Some(previous) = storage
+            .backend()
+            .get_block_output(instance.id, &step_def.id)
+            .await?
         && previous.output_ref.as_deref() == Some("__retry__")
         && let Some(value) = previous
             .output
@@ -321,11 +327,13 @@ pub(crate) async fn step_preamble_deferral(
         );
         return Ok(Some(next_open));
     }
-    if let Some(retry_after) = rate_limit_retry_at(storage, instance, step_def, clock).await? {
+    if let Some(retry_after) =
+        rate_limit_retry_at(storage.backend(), instance, step_def, clock).await?
+    {
         return Ok(Some(retry_after));
     }
     Box::pin(crate::step_placement::rate_budget_retry_at(
-        storage,
+        storage.backend(),
         instance,
         step_def,
         clock.now(),
@@ -440,7 +448,7 @@ pub(super) async fn check_step_rate_limit(
 /// signal path and the dry-run auto-approve path so both produce identical
 /// post-approval state.
 async fn accept_human_input(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
@@ -573,7 +581,7 @@ fn gate_instructions<'a>(
 /// prediction already recorded on an earlier entry, or the model being
 /// unavailable — the gate always fails safe to a human).
 async fn auto_decide_gate(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
@@ -588,7 +596,7 @@ async fn auto_decide_gate(
         Some(access) => instance.context.filtered(access).data,
         None => instance.context.data.clone(),
     };
-    let decision = match auto_decide_endpoint(storage, instance, auto).await {
+    let decision = match auto_decide_endpoint(storage.backend(), instance, auto).await {
         Ok(endpoint) => {
             crate::handlers::jev::decide_choice(
                 &endpoint,
@@ -737,7 +745,7 @@ pub async fn check_human_input_at(
     human_def: &orch8_types::sequence::HumanInputDef,
     now: DateTime<Utc>,
 ) -> Result<bool, EngineError> {
-    check_human_input_at_with_claim(
+    check_human_input_at_control(
         storage,
         instance,
         step_def,
@@ -748,10 +756,22 @@ pub async fn check_human_input_at(
     .await
 }
 
-/// Check a tree gate with the lease token captured at claim time.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+/// Check a gate with the original lease captured by the scheduler.
 pub(crate) async fn check_human_input_at_with_claim(
     storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    human_def: &orch8_types::sequence::HumanInputDef,
+    now: DateTime<Utc>,
+    claim_token: DateTime<Utc>,
+) -> Result<bool, EngineError> {
+    let control = crate::control::ClaimedControl::new(storage, instance.id, claim_token);
+    check_human_input_at_control(&control, instance, step_def, human_def, now, claim_token).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn check_human_input_at_control(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
@@ -786,7 +806,7 @@ pub(crate) async fn check_human_input_at_with_claim(
     signal_name.push_str(step_def.id.as_str());
 
     // Check if the response signal has already been delivered.
-    let signals = storage.get_pending_signals(instance.id).await?;
+    let signals = storage.backend().get_pending_signals(instance.id).await?;
     // Compute the allowed choices once, not per matching signal (each call
     // allocates a fresh Vec).
     let effective_choices = human_def.effective_choices();
@@ -810,8 +830,15 @@ pub(crate) async fn check_human_input_at_with_claim(
                     .as_ref()
                     .filter(|a| a.interpret_replies)
                     && let Some(text) = reply_text(&signal.payload)
-                    && let Some((value, evidence)) =
-                        interpret_reply(storage, instance, step_def, human_def, auto, text).await
+                    && let Some((value, evidence)) = interpret_reply(
+                        storage.backend(),
+                        instance,
+                        step_def,
+                        human_def,
+                        auto,
+                        text,
+                    )
+                    .await
                 {
                     accept_human_input(
                         storage,
@@ -822,7 +849,9 @@ pub(crate) async fn check_human_input_at_with_claim(
                         Some(evidence),
                     )
                     .await?;
-                    storage.mark_signal_delivered(signal.id).await?;
+                    storage
+                        .mark_signal_delivered(instance.id, signal.id)
+                        .await?;
                     debug!(
                         instance_id = %instance.id,
                         block_id = %step_def.id,
@@ -837,7 +866,9 @@ pub(crate) async fn check_human_input_at_with_claim(
                     "human input: payload rejected (missing `value` field or \
                      not in effective_choices); marking delivered, staying waiting"
                 );
-                storage.mark_signal_delivered(signal.id).await?;
+                storage
+                    .mark_signal_delivered(instance.id, signal.id)
+                    .await?;
                 continue;
             };
 
@@ -864,7 +895,9 @@ pub(crate) async fn check_human_input_at_with_claim(
                 evidence,
             )
             .await?;
-            storage.mark_signal_delivered(signal.id).await?;
+            storage
+                .mark_signal_delivered(instance.id, signal.id)
+                .await?;
             debug!(
                 instance_id = %instance.id,
                 block_id = %step_def.id,
@@ -888,7 +921,7 @@ pub(crate) async fn check_human_input_at_with_claim(
     // the latest effective row means the step genuinely completed — e.g. a
     // gated step inside a loop body must wait for FRESH input on the next
     // iteration, not auto-pass on the previous iteration's acceptance.
-    if gate_previously_accepted(storage, instance.id, &step_def.id).await? {
+    if gate_previously_accepted(storage.backend(), instance.id, &step_def.id).await? {
         debug!(
             instance_id = %instance.id,
             block_id = %step_def.id,
@@ -939,12 +972,16 @@ pub(crate) async fn check_human_input_at_with_claim(
                         attempt: 0,
                         created_at: chrono::Utc::now(),
                     };
-                    crate::handlers::step::persist_output(storage, &output, Some(claim_token))
-                        .await?;
+                    crate::handlers::step::persist_output(
+                        storage.backend(),
+                        &output,
+                        Some(claim_token),
+                    )
+                    .await?;
                     // Re-schedule immediately so the next tick sees the block
                     // output in completed_blocks and skips this step.
                     crate::lifecycle::transition_claimed_instance(
-                        storage,
+                        storage.backend(),
                         instance.id,
                         Some(&instance.tenant_id),
                         claim_token,
@@ -1134,9 +1171,7 @@ pub(super) async fn execute_step_block(
 
     // Shared preamble (delay → send_window → rate limit), also run by the
     // tree path in `step_block::execute_step_node_with_clock`.
-    if let Some(fire_at) =
-        step_preamble_deferral(storage.as_ref(), instance, step_def, clock).await?
-    {
+    if let Some(fire_at) = step_preamble_deferral(&control, instance, step_def, clock).await? {
         defer_flat_instance(storage.as_ref(), instance, fire_at).await?;
         return Ok(StepOutcome::Deferred);
     }

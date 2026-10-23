@@ -1347,6 +1347,18 @@ pub trait OutputStore: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<bool, StorageError>;
 
+    /// Atomically append an output and transition only while the instance is
+    /// Running under `claim_token`. False means no writes (claim lost or state
+    /// changed). Output errors roll back the state transition. The token must
+    /// be the evaluation's original claim, never a refreshed instance timestamp.
+    async fn save_output_and_claimed_transition(
+        &self,
+        output: &BlockOutput,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Atomic: save block output + overwrite instance context + update state
     /// in a single transaction.
     ///
@@ -1666,6 +1678,17 @@ pub trait SignalStore: Send + Sync + 'static {
     ) -> Result<std::collections::HashMap<InstanceId, Vec<Signal>>, StorageError>;
 
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
+
+    /// Deliver a pending signal belonging to this instance under its original
+    /// running claim. False means claim loss with no changes. A held claim
+    /// returns true even for missing, foreign or already-delivered signals;
+    /// those rows stay untouched, including their original delivery timestamp.
+    async fn mark_signal_delivered_claimed(
+        &self,
+        instance_id: InstanceId,
+        signal_id: Uuid,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     /// Batch variant: mark multiple signals delivered in one query.
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;

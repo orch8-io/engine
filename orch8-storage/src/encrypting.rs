@@ -1672,6 +1672,16 @@ passthrough_impl! {
         let encrypted = self.encrypt_block_output(output)?;
         self.inner.save_output_and_conditional_transition(encrypted.as_ref(), expected_state, new_state, next_fire_at).await
     }
+    async fn save_output_and_claimed_transition(
+        &self,
+        output: &orch8_types::output::BlockOutput,
+        new_state: orch8_types::instance::InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_block_output(output)?;
+        self.inner.save_output_and_claimed_transition(encrypted.as_ref(), new_state, next_fire_at, claim_token).await
+    }
     async fn save_output_and_transition(
         &self,
         output: &orch8_types::output::BlockOutput,
@@ -1827,6 +1837,7 @@ passthrough_impl! {
         Ok(batch)
     }
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
+    async fn mark_signal_delivered_claimed(&self, instance_id: InstanceId, signal_id: Uuid, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
     async fn get_signalled_instance_ids(&self, limit: u32) -> Result<Vec<(InstanceId, orch8_types::instance::InstanceState)>, StorageError>;
     async fn ingest_event(&self, envelope: &orch8_types::event_correlation::EventEnvelope) -> Result<bool, StorageError>;

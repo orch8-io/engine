@@ -413,9 +413,9 @@ pub(crate) async fn execute_step_node_with_clock(
     // sequence silently disabled every step's delay/window/rate limit. On
     // deferral the node stays Running. Evaluation skips it while other
     // branches progress, then parks the instance at the earliest deadline.
+    let control = crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
     if let Some(fire_at) =
-        crate::scheduler::step_preamble_deferral(storage.as_ref(), instance, step_def, clock)
-            .await?
+        crate::scheduler::step_preamble_deferral(&control, instance, step_def, clock).await?
     {
         super::step_deferral::defer_step(
             storage.as_ref(),
