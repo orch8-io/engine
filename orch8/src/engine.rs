@@ -66,6 +66,7 @@ impl Default for CreateInstanceOptions {
 
 struct Inner {
     storage: Arc<dyn StorageBackend>,
+    storage_owner: crate::storage::ConnectedStorage,
     handlers: Arc<HandlerRegistry>,
     config: SchedulerConfig,
     tenant: TenantId,
@@ -113,7 +114,7 @@ impl Engine {
     }
 
     pub(crate) fn from_parts(
-        storage: Arc<dyn StorageBackend>,
+        storage: crate::storage::ConnectedStorage,
         handlers: HandlerRegistry,
         config: SchedulerConfig,
         tenant: TenantId,
@@ -121,7 +122,8 @@ impl Engine {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_steps as usize));
         Self {
             inner: Arc::new(Inner {
-                storage,
+                storage: storage.backend(),
+                storage_owner: storage,
                 handlers: Arc::new(handlers),
                 semaphore,
                 sequence_cache: Arc::new(SequenceCache::new(1_000, Duration::from_secs(300))),
@@ -185,6 +187,15 @@ impl Engine {
             }
             task.take();
         }
+    }
+
+    /// Stop execution and gracefully close this engine's database connections.
+    ///
+    /// All clones share the closed storage. Use [`Self::shutdown`] when only
+    /// stopping execution while retaining database access for inspection.
+    pub async fn close(&self) {
+        self.shutdown().await;
+        self.inner.storage_owner.close().await;
     }
 
     /// Execute a single scheduling pass and return what it did. For hosts

@@ -181,7 +181,7 @@ impl EngineBuilder {
             .map_or(config.stale_instance_threshold_secs, |threshold| {
                 threshold.as_secs()
             });
-        recovery::recover_stale_instances(storage.as_ref(), recovery_threshold_secs).await?;
+        recovery::recover_stale_instances(&*storage, recovery_threshold_secs).await?;
 
         Ok(Engine::from_parts(storage, self.handlers, config, tenant))
     }

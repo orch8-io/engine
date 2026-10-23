@@ -1,9 +1,9 @@
 //! Host-language-neutral core of the durable, in-process engine exposed by
-//! `@orch8/engine-native` (napi) and `orch8-engine-native` (PyO3).
+//! `@orch8/engine-native` (napi) and `orch8-engine-native` (`PyO3`).
 //!
 //! Both bindings include this file with `#[path = ...]` so the semantics are
 //! identical: JSON strings in, JSON strings out, and host handlers invoked
-//! through a JSON envelope. Nothing here depends on napi or PyO3.
+//! through a JSON envelope. Nothing here depends on napi or `PyO3`.
 //!
 //! Handler protocol (per step dispatch):
 //! - request: `{"params", "data", "outputs", "instance_id", "step_id", "attempt"}`
@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use orch8::{
@@ -23,7 +23,7 @@ use orch8::{
     SequenceId, SignalType, StepContext, StepError, Storage,
 };
 use serde_json::{Map, Value, json};
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex as AsyncMutex;
 
 /// Future returned by a host handler invocation.
 pub type InvokeFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
@@ -44,7 +44,10 @@ struct Deployed {
 pub struct DurableEngine {
     path: String,
     pending: Mutex<Option<Vec<(String, Invoke)>>>,
-    engine: OnceCell<Engine>,
+    // Initialization can fail or be cancelled after registration
+    // freezes. Keep the callbacks available for every later attempt.
+    frozen_handlers: OnceLock<Vec<(String, Invoke)>>,
+    engine: AsyncMutex<Option<Engine>>,
     sequences: Mutex<HashMap<String, Vec<Deployed>>>,
     closed: Mutex<bool>,
 }
@@ -64,7 +67,8 @@ impl DurableEngine {
         Self {
             path: path.into(),
             pending: Mutex::new(Some(Vec::new())),
-            engine: OnceCell::new(),
+            frozen_handlers: OnceLock::new(),
+            engine: AsyncMutex::new(None),
             sequences: Mutex::new(HashMap::new()),
             closed: Mutex::new(false),
         }
@@ -76,6 +80,9 @@ impl DurableEngine {
 
     /// Register a host handler. Fails once the engine has been used.
     pub fn register(&self, name: &str, invoke: Invoke) -> Result<(), String> {
+        if *lock(&self.closed) {
+            return Err("engine is closed".into());
+        }
         if name.is_empty() {
             return Err("handler name must not be empty".into());
         }
@@ -91,24 +98,37 @@ impl DurableEngine {
         Ok(())
     }
 
-    async fn engine(&self) -> Result<&Engine, String> {
+    async fn engine(&self) -> Result<Engine, String> {
+        // Serialize initialization with close. Return a cheap Engine clone so
+        // close can remove the owned cache and release idle database handles.
+        let mut cached = self.engine.lock().await;
         if *lock(&self.closed) {
             return Err("engine is closed".into());
         }
-        self.engine
-            .get_or_try_init(|| async {
-                let handlers = lock(&self.pending).take().unwrap_or_default();
-                let mut builder = Engine::builder()
-                    .storage(Storage::sqlite(&self.path))
-                    // Single-process ownership: anything left `Running` was
-                    // interrupted by a crash, so resume it right away.
-                    .stale_instance_threshold(Duration::ZERO);
-                for (name, invoke) in handlers {
-                    builder = builder.handler(&name, host_handler(invoke));
-                }
-                builder.build().await.map_err(err)
-            })
-            .await
+        if let Some(engine) = cached.as_ref() {
+            return Ok(engine.clone());
+        }
+        let handlers = self
+            .frozen_handlers
+            .get_or_init(|| lock(&self.pending).take().unwrap_or_default());
+        let mut builder = Engine::builder()
+            .storage(Storage::sqlite(&self.path))
+            // Single-process ownership: anything left Running was interrupted
+            // by a crash, so resume it immediately on initialization.
+            .stale_instance_threshold(Duration::ZERO);
+        for (name, invoke) in handlers {
+            builder = builder.handler(name, host_handler(Arc::clone(invoke)));
+        }
+        let engine = builder.build().await.map_err(err)?;
+        *cached = Some(engine.clone());
+        // close may have been called while storage was opening. Do not hand
+        // the new engine to a caller after close stopped accepting work.
+        if *lock(&self.closed) {
+            engine.close().await;
+            *cached = None;
+            return Err("engine is closed".into());
+        }
+        Ok(engine)
     }
 
     /// Store a sequence (idempotent per `name` + `version`) and return its id.
@@ -219,7 +239,7 @@ impl DurableEngine {
                     InstanceState::Waiting | InstanceState::Paused
                 );
             if settled || deadline.is_some_and(|d| Instant::now() >= d) {
-                return self.snapshot(engine, id).await;
+                return self.snapshot(&engine, id).await;
             }
             if tick.steps_executed == 0 && tick.instances_advanced == 0 {
                 // Nothing was due: sleep until the instance's next fire time
@@ -240,7 +260,7 @@ impl DurableEngine {
     /// Current snapshot: `{"id", "state", "data", "outputs"}`.
     pub async fn get(&self, id: &str) -> Result<String, String> {
         let engine = self.engine().await?;
-        self.snapshot(engine, parse_instance_id(id)?).await
+        self.snapshot(&engine, parse_instance_id(id)?).await
     }
 
     async fn snapshot(&self, engine: &Engine, id: InstanceId) -> Result<String, String> {
@@ -285,9 +305,12 @@ impl DurableEngine {
     /// Stop accepting calls and release the database. Idempotent.
     pub async fn close(&self) {
         *lock(&self.closed) = true;
-        if let Some(engine) = self.engine.get() {
-            engine.shutdown().await;
+        let mut cached = self.engine.lock().await;
+        if let Some(engine) = cached.as_ref() {
+            engine.close().await;
         }
+        // Retain ownership until close completes so cancellation can retry.
+        *cached = None;
     }
 }
 
