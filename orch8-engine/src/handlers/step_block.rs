@@ -485,6 +485,8 @@ pub(crate) async fn execute_step_node_with_clock(
             // notifier (and approvals API) can identify it. Stamp only on the
             // first entry — re-stamping on every evaluator pass would reset
             // the wait_for_input timeout baseline used by the deadline sweep.
+            let control =
+                crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
             if let Some(mut inst) = storage.get_instance(instance.id).await?
                 && inst.context.runtime.current_step.as_ref() != Some(&step_def.id)
             {
@@ -499,9 +501,13 @@ pub(crate) async fn execute_step_node_with_clock(
                 let expected_updated_at = inst.updated_at;
                 inst.context.runtime.current_step = Some(step_def.id.clone());
                 inst.context.runtime.current_step_started_at = Some(stamped_at);
-                if !storage
-                    .update_instance_context_cas(instance.id, &inst.context, expected_updated_at)
-                    .await?
+                if !crate::control::ExecutionControl::update_instance_context_cas(
+                    &control,
+                    instance.id,
+                    &inst.context,
+                    expected_updated_at,
+                )
+                .await?
                 {
                     let retry_landed = match storage.get_instance(instance.id).await? {
                         Some(mut fresh)
@@ -511,13 +517,13 @@ pub(crate) async fn execute_step_node_with_clock(
                             let expected_updated_at = fresh.updated_at;
                             fresh.context.runtime.current_step = Some(step_def.id.clone());
                             fresh.context.runtime.current_step_started_at = Some(stamped_at);
-                            storage
-                                .update_instance_context_cas(
-                                    instance.id,
-                                    &fresh.context,
-                                    expected_updated_at,
-                                )
-                                .await?
+                            crate::control::ExecutionControl::update_instance_context_cas(
+                                &control,
+                                instance.id,
+                                &fresh.context,
+                                expected_updated_at,
+                            )
+                            .await?
                         }
                         // Instance gone, or a concurrent writer already
                         // stamped this step — either way nothing to do.

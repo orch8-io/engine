@@ -2,7 +2,6 @@ use std::borrow::Cow;
 
 use tracing::debug;
 
-use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
 use orch8_types::output::BlockOutput;
@@ -29,7 +28,7 @@ const SELECTED_BRANCH_KEY: &str = "_selected_branch";
 /// clears the marker when an enclosing loop/`for_each` starts a new
 /// iteration, so each iteration decides afresh.
 pub async fn execute_router(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,
@@ -113,7 +112,7 @@ pub async fn execute_router(
 /// Evaluate route conditions against the (marker-inflated) context and the
 /// instance's outputs, returning the selected branch index.
 async fn decide_branch(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     router_def: &RouterDef,
     outputs: &OutputsSnapshot,
@@ -131,7 +130,7 @@ async fn decide_branch(
         if is_marker_present(&instance.context) {
             Cow::Owned(
                 externalized::resolve_context_markers(
-                    storage,
+                    storage.backend(),
                     instance.id,
                     instance.context.clone(),
                 )
@@ -142,12 +141,9 @@ async fn decide_branch(
             Cow::Borrowed(&instance.context)
         };
 
-    // Load block outputs so route conditions can reference `outputs.step_id.field`.
-    // Uses the shared per-iteration snapshot — if earlier handlers in the same
-    // iteration already fetched, this is a no-op; on miss falls back to an
-    // empty map to keep route-selection deterministic.
-    let empty = serde_json::Value::Object(serde_json::Map::new());
-    let outputs_val = outputs.get(storage, instance.id).await.unwrap_or(&empty);
+    // A failed read must remain retryable; substituting empty inputs can
+    // permanently memoize the wrong branch during a transient storage outage.
+    let outputs_val = outputs.get(storage.backend(), instance.id).await?;
 
     Ok(select_branch(
         router_def,

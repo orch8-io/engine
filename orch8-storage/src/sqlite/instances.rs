@@ -241,9 +241,17 @@ pub(super) async fn get(
     storage: &SqliteStorage,
     id: InstanceId,
 ) -> Result<Option<TaskInstance>, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    get_on(&mut conn, id).await
+}
+
+pub(super) async fn get_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+) -> Result<Option<TaskInstance>, StorageError> {
     let row = sqlx::query("SELECT * FROM task_instances WHERE id=?1")
         .bind(id.to_string())
-        .fetch_optional(&storage.pool)
+        .fetch_optional(&mut *conn)
         .await?;
     row.as_ref().map(row_to_instance).transpose()
 }
@@ -530,6 +538,17 @@ pub(super) async fn conditional_update_state(
     new_state: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
 ) -> Result<bool, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    conditional_update_state_on(&mut conn, id, expected_state, new_state, next_fire_at).await
+}
+
+pub(super) async fn conditional_update_state_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<bool, StorageError> {
     let result = sqlx::query(
         "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1 AND state=?5",
     )
@@ -538,7 +557,7 @@ pub(super) async fn conditional_update_state(
     .bind(next_fire_at.map(ts))
     .bind(ts(Utc::now()))
     .bind(expected_state.to_string())
-    .execute(&storage.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected() > 0)
 }
@@ -654,6 +673,16 @@ pub(super) async fn update_context_cas(
     context: &ExecutionContext,
     expected_updated_at: DateTime<Utc>,
 ) -> Result<bool, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    update_context_cas_on(&mut conn, id, context, expected_updated_at).await
+}
+
+pub(super) async fn update_context_cas_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+    context: &ExecutionContext,
+    expected_updated_at: DateTime<Utc>,
+) -> Result<bool, StorageError> {
     let result = sqlx::query(
         "UPDATE task_instances SET context=?2, updated_at=?3 WHERE id=?1 AND updated_at=?4",
     )
@@ -661,7 +690,7 @@ pub(super) async fn update_context_cas(
     .bind(serde_json::to_string(context)?)
     .bind(ts(Utc::now()))
     .bind(ts(expected_updated_at))
-    .execute(&storage.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected() > 0)
 }
@@ -671,6 +700,16 @@ pub(super) async fn update_context_cas(
 /// re-serialize the entire context on the first run of an instance.
 pub(super) async fn ensure_instance_run_started(
     storage: &SqliteStorage,
+    id: InstanceId,
+    run_id: &str,
+    started_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    ensure_instance_run_started_on(&mut conn, id, run_id, started_at).await
+}
+
+pub(super) async fn ensure_instance_run_started_on(
+    conn: &mut sqlx::SqliteConnection,
     id: InstanceId,
     run_id: &str,
     started_at: DateTime<Utc>,
@@ -690,7 +729,7 @@ pub(super) async fn ensure_instance_run_started(
     .bind(run_id)
     .bind(started_at.to_rfc3339())
     .bind(ts(Utc::now()))
-    .execute(&storage.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
@@ -701,6 +740,15 @@ pub(super) async fn ensure_instance_run_started(
 /// `Option` fields deserialize back to `None`.
 pub(super) async fn reset_instance_run(
     storage: &SqliteStorage,
+    id: InstanceId,
+    run_id: &str,
+) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    reset_instance_run_on(&mut conn, id, run_id).await
+}
+
+pub(super) async fn reset_instance_run_on(
+    conn: &mut sqlx::SqliteConnection,
     id: InstanceId,
     run_id: &str,
 ) -> Result<(), StorageError> {
@@ -718,7 +766,7 @@ pub(super) async fn reset_instance_run(
     .bind(id.to_string())
     .bind(run_id)
     .bind(ts(Utc::now()))
-    .execute(&storage.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
@@ -951,28 +999,14 @@ pub(super) async fn merge_context_data(
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    // Read-modify-write for SQLite (no JSONB). `BEGIN IMMEDIATE` (not sqlx's
-    // default DEFERRED) — under DEFERRED two concurrent merges for the same
-    // instance can both read the same context snapshot before either commits,
-    // and the second writer silently drops the first writer's key. IMMEDIATE
-    // serialises the whole read-modify-write, matching the atomicity of the
-    // Postgres `jsonb_set` single-statement path.
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
-    let result = merge_context_data_inner(&mut conn, id, key, value).await;
-    match result {
-        Ok(()) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            Err(e)
-        }
-    }
+    // RAII rollback also covers cancellation between the read and write.
+    let mut tx = super::helpers::begin_immediate(&storage.pool).await?;
+    merge_context_data_on(&mut tx, id, key, value).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
-async fn merge_context_data_inner(
+pub(super) async fn merge_context_data_on(
     conn: &mut sqlx::SqliteConnection,
     id: InstanceId,
     key: &str,
@@ -1014,6 +1048,17 @@ pub(super) async fn merge_metadata(
     id: InstanceId,
     patch: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    let mut tx = super::helpers::begin_immediate(&storage.pool).await?;
+    merge_metadata_on(&mut tx, id, patch).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn merge_metadata_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+    patch: &serde_json::Value,
+) -> Result<(), StorageError> {
     // Shallow merge, matching Postgres `metadata || patch` and the trait
     // contract: top-level keys in `patch` replace existing ones wholesale
     // (a nested object is NOT merged into, and a `null` value is stored as
@@ -1024,11 +1069,10 @@ pub(super) async fn merge_metadata(
             "merge_instance_metadata: patch must be a JSON object".into(),
         ));
     };
-    let mut tx = super::helpers::begin_immediate(&storage.pool).await?;
     let current: Option<Option<String>> =
         sqlx::query_scalar("SELECT metadata FROM task_instances WHERE id = ?1")
             .bind(id.to_string())
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *conn)
             .await?;
     let Some(current) = current else {
         return Ok(());
@@ -1048,9 +1092,8 @@ pub(super) async fn merge_metadata(
         .bind(id.to_string())
         .bind(serde_json::to_string(&merged)?)
         .bind(ts(Utc::now()))
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 

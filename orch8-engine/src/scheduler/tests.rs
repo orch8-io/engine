@@ -2,12 +2,44 @@
 
 #![allow(unknown_lints, clippy::duration_suboptimal_units)]
 
-use super::step_exec::{check_step_delay, check_step_rate_limit, execute_step_block};
+use super::step_exec::{
+    check_step_delay, check_step_rate_limit, execute_step_block as execute_step_block_with_context,
+};
 use super::*;
 
 use orch8_types::ids::BlockId;
 use orch8_types::signal::{Signal, SignalType};
 use uuid::Uuid;
+
+// Keep focused step fixtures small while production always supplies its
+// original captured run context. These fixtures own one running snapshot.
+#[allow(clippy::too_many_arguments)]
+async fn execute_step_block(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    webhook_config: &WebhookConfig,
+    externalize_threshold: u32,
+    instance: &orch8_types::instance::TaskInstance,
+    step: &orch8_types::sequence::StepDef,
+    cancel: &CancellationToken,
+    clock: &SharedClock,
+) -> Result<StepOutcome, EngineError> {
+    let cache = SequenceCache::new(16, Duration::from_secs(60));
+    let lease_lost = std::sync::atomic::AtomicBool::new(false);
+    let ctx = InstanceRunCtx {
+        storage,
+        handlers,
+        webhook_config,
+        sequence_cache: &cache,
+        externalize_threshold,
+        max_steps_per_instance: u32::MAX,
+        cancel,
+        clock,
+        lease_lost: &lease_lost,
+        claim_token: instance.claimed_at.unwrap_or(instance.updated_at),
+    };
+    execute_step_block_with_context(&ctx, instance, step).await
+}
 
 #[test]
 fn build_prefetch_map_merges_signals_and_blocks() {

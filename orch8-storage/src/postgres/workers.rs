@@ -14,7 +14,7 @@ use super::rows::{WorkerTaskRow, worker_task_columns};
 const REAPER_BATCH_SIZE: i64 = 1_000;
 
 pub(super) async fn insert_attempt_events(
-    tx: &mut Transaction<'_, Postgres>,
+    conn: &mut sqlx::PgConnection,
     events: &[WorkerTaskAttemptEvent],
 ) -> Result<(), StorageError> {
     if events.is_empty() {
@@ -33,7 +33,7 @@ pub(super) async fn insert_attempt_events(
             .push_bind(&event.reason)
             .push_bind(event.created_at);
     });
-    qb.build().execute(&mut **tx).await?;
+    qb.build().execute(conn).await?;
     Ok(())
 }
 
@@ -1017,11 +1017,24 @@ pub(super) async fn cancel_for_blocks(
         return Ok(0);
     }
     let mut tx = store.pool.begin().await?;
+    let changed = cancel_for_blocks_on(&mut tx, instance_id, block_ids).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+pub(super) async fn cancel_for_blocks_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: Uuid,
+    block_ids: &[String],
+) -> Result<u64, StorageError> {
+    if block_ids.is_empty() {
+        return Ok(0);
+    }
     let rows: Vec<(Uuid, i64, Option<String>)> =
         sqlx::query_as("DELETE FROM worker_tasks WHERE instance_id = $1 AND block_id = ANY($2) RETURNING id,claim_epoch,worker_id")
             .bind(instance_id)
             .bind(block_ids)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut *conn)
             .await?;
     let events: Vec<_> = rows
         .iter()
@@ -1035,8 +1048,7 @@ pub(super) async fn cancel_for_blocks(
             )
         })
         .collect();
-    insert_attempt_events(&mut tx, &events).await?;
-    tx.commit().await?;
+    insert_attempt_events(&mut *conn, &events).await?;
     Ok(rows.len() as u64)
 }
 

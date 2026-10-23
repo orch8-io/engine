@@ -1,3 +1,5 @@
+mod child_adoption;
+pub use child_adoption::ChildAdoption;
 pub mod api_key_cache;
 #[cfg(feature = "artifacts")]
 pub mod artifacts;
@@ -428,6 +430,32 @@ impl Drop for ManifestLockGuard {
 pub trait InstanceStore: Send + Sync + 'static {
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError>;
 
+    /// Insert a child while atomically holding its parent's original running claim.
+    /// False means the claim is lost or the child does not reference this parent
+    /// with the same tenant, namespace and sub-tenant. No child is inserted then.
+    /// Errors roll back the insert; implementations must serialize with recovery.
+    async fn create_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child: &TaskInstance,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    /// Rebind a previous child and retry it if failed, under the parent's claim.
+    /// None means claim loss. Ineligible children return Some(Ineligible) with
+    /// no changes. Metadata, failed-child tree/sentinel cleanup, run reset and
+    /// rescheduling commit together; errors leave both instances unchanged.
+    /// Replaying a committed old-to-new binding returns the child without
+    /// resetting its run again.
+    async fn adopt_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child_id: InstanceId,
+        expected_activation: &str,
+        activation: &str,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<crate::ChildAdoption>, StorageError>;
+
     /// Atomically insert an instance and its tree, outputs and payloads.
     /// True means every row committed. False means this instance id already
     /// exists and no row was changed. Any error leaves no partial instance.
@@ -696,6 +724,25 @@ pub trait InstanceStore: Send + Sync + 'static {
         Ok(true)
     }
 
+    /// Context CAS under the original running claim. None means ownership
+    /// was lost; Some(false) is ordinary context contention and may be retried.
+    async fn update_instance_context_cas_claimed(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        expected_updated_at: DateTime<Utc>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<bool>, StorageError>;
+
+    /// Merge context data only while the original running claim is held.
+    async fn merge_context_data_claimed(
+        &self,
+        id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Ensure `runtime.run_id` and `runtime.started_at` are set, keeping
     /// whichever value is already stored for each (first writer wins per
     /// field). Stamps a fresh run identity on the first execution of a run
@@ -720,6 +767,17 @@ pub trait InstanceStore: Send + Sync + 'static {
         inst.context.runtime.started_at.get_or_insert(started_at);
         self.update_instance_context(id, &inst.context).await
     }
+
+    /// Initialize run identity only while the original running claim is held.
+    /// False means ownership loss, with no context or timestamp changes.
+    /// Existing run fields keep their first-writer-wins semantics.
+    async fn ensure_instance_run_started_claimed(
+        &self,
+        id: InstanceId,
+        run_id: &str,
+        started_at: DateTime<Utc>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     /// Update only the `runtime.current_step_started_at` field for an instance.
     /// Used to record when the current step began so per-step deadlines and
@@ -823,6 +881,14 @@ pub trait InstanceStore: Send + Sync + 'static {
         id: InstanceId,
         patch: &serde_json::Value,
     ) -> Result<(), StorageError>;
+
+    /// Merge metadata only while this exact running claim is held.
+    async fn merge_instance_metadata_claimed(
+        &self,
+        id: InstanceId,
+        patch: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     async fn list_instances(
         &self,
@@ -1103,6 +1169,35 @@ pub trait ExecutionTreeStore: Send + Sync + 'static {
         nodes: &[ExecutionNode],
     ) -> Result<(), StorageError>;
 
+    /// Create nodes only while this exact running claim owns the instance.
+    /// Nodes naming another instance or parents outside this instance return
+    /// false without writing any row. Existing identities remain constraint errors.
+    async fn create_execution_nodes_batch_claimed(
+        &self,
+        instance_id: InstanceId,
+        nodes: &[ExecutionNode],
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    /// Transition one owned batch atomically with the claim check. Missing or
+    /// foreign node ids return false without changing any node or timestamp.
+    async fn update_nodes_state_claimed(
+        &self,
+        instance_id: InstanceId,
+        node_ids: &[ExecutionNodeId],
+        state: NodeState,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    /// Activate pending owned nodes atomically with the claim check. Already
+    /// running nodes remain unchanged; a lost claim or foreign id returns false.
+    async fn batch_activate_nodes_claimed(
+        &self,
+        instance_id: InstanceId,
+        node_ids: &[ExecutionNodeId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     async fn get_execution_tree(
         &self,
         instance_id: InstanceId,
@@ -1355,6 +1450,23 @@ pub trait OutputStore: Send + Sync + 'static {
         instance_id: InstanceId,
         block_ids: &[BlockId],
     ) -> Result<u64, StorageError>;
+
+    /// Delete owned block outputs only under this original running claim.
+    /// None means ownership was lost; Some(0) is a successful empty delete.
+    async fn delete_block_outputs_batch_claimed(
+        &self,
+        instance_id: InstanceId,
+        block_ids: &[BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError>;
+    /// Delete one owned output under the original running claim. Foreign ids
+    /// are never deleted. Returns false only when the claim was lost.
+    async fn delete_block_output_by_id_claimed(
+        &self,
+        instance_id: InstanceId,
+        id: Uuid,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     /// Delete ALL `block_outputs` for an instance.
     async fn delete_all_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
@@ -1771,6 +1883,16 @@ pub trait WorkerStore: Send + Sync + 'static {
         instance_id: Uuid,
         block_ids: &[String],
     ) -> Result<u64, StorageError>;
+
+    /// Cancel task rows and record their cancellation events only under the
+    /// original running claim. None means ownership was lost; Some(0) means
+    /// the claim was held but there were no matching tasks.
+    async fn cancel_worker_tasks_for_blocks_claimed(
+        &self,
+        instance_id: InstanceId,
+        block_ids: &[String],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError>;
 
     /// List worker tasks with optional filtering and pagination.
     async fn list_worker_tasks(
@@ -3831,6 +3953,16 @@ pub trait ContinuityStore: Send + Sync + 'static {
         instance_id: InstanceId,
         block_ids: &[orch8_types::ids::BlockId],
     ) -> Result<u64, StorageError>;
+
+    /// Remove iteration receipts only under this original running claim.
+    /// None means ownership was lost and no receipt was changed.
+    async fn delete_effect_receipts_for_blocks_claimed(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError>;
 
     async fn get_effect_receipt(
         &self,

@@ -245,6 +245,18 @@ pub(super) async fn delete_for_blocks(
     if block_ids.is_empty() {
         return Ok(0);
     }
+    let mut conn = storage.pool.acquire().await?;
+    delete_for_blocks_on(&mut conn, instance_id, block_ids).await
+}
+
+pub(super) async fn delete_for_blocks_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    block_ids: &[BlockId],
+) -> Result<u64, StorageError> {
+    if block_ids.is_empty() {
+        return Ok(0);
+    }
     let mut qb = sqlx::QueryBuilder::new("DELETE FROM block_outputs WHERE instance_id=");
     qb.push_bind(instance_id.into_uuid().to_string());
     qb.push(" AND block_id IN (");
@@ -253,7 +265,7 @@ pub(super) async fn delete_for_blocks(
         sep.push_bind(bid.as_str());
     }
     sep.push_unseparated(")");
-    let result = qb.build().execute(&storage.pool).await?;
+    let result = qb.build().execute(&mut *conn).await?;
     Ok(result.rows_affected())
 }
 
@@ -583,6 +595,14 @@ pub(super) async fn delete_sentinels_for_instance(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<u64, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    delete_sentinels_for_instance_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn delete_sentinels_for_instance_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+) -> Result<u64, StorageError> {
     // Both `__in_progress__` (crash-mid-step) and `__error__` (permanent
     // failure) mark a step that never really finished — DLQ retry must
     // clear both so the step re-executes. Real outputs (output_ref = NULL
@@ -591,7 +611,7 @@ pub(super) async fn delete_sentinels_for_instance(
         "DELETE FROM block_outputs WHERE instance_id=?1 AND output_ref IN ('__in_progress__', '__error__')",
     )
     .bind(instance_id.into_uuid().to_string())
-    .execute(&storage.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected())
 }
@@ -603,6 +623,19 @@ pub(super) async fn delete_by_id(
     sqlx::query("DELETE FROM block_outputs WHERE id=?1")
         .bind(id.to_string())
         .execute(&storage.pool)
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn delete_owned_by_id_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    id: uuid::Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query("DELETE FROM block_outputs WHERE id=?1 AND instance_id=?2")
+        .bind(id.to_string())
+        .bind(instance_id.to_string())
+        .execute(conn)
         .await?;
     Ok(())
 }

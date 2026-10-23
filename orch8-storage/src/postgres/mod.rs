@@ -605,6 +605,34 @@ impl crate::InstanceStore for PostgresStorage {
         instances::create(self, instance).await
     }
 
+    async fn create_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child: &TaskInstance,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::create_child(self, parent_id, child, claim_token).await
+    }
+
+    async fn adopt_child_instance_claimed(
+        &self,
+        parent_id: InstanceId,
+        child_id: InstanceId,
+        expected_activation: &str,
+        activation: &str,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<crate::ChildAdoption>, StorageError> {
+        claimed_writes::adopt_child(
+            self,
+            parent_id,
+            child_id,
+            expected_activation,
+            activation,
+            claim_token,
+        )
+        .await
+    }
+
     async fn create_instance_admitted(
         &self,
         instance: &TaskInstance,
@@ -759,6 +787,25 @@ impl crate::InstanceStore for PostgresStorage {
         instances::update_context(self, id, context).await
     }
 
+    async fn update_instance_context_cas_claimed(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        expected_updated_at: DateTime<Utc>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<bool>, StorageError> {
+        claimed_writes::context_cas(self, id, context, expected_updated_at, claim_token).await
+    }
+    async fn merge_context_data_claimed(
+        &self,
+        id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::merge_context(self, id, key, value, claim_token).await
+    }
+
     async fn update_instance_context_cas(
         &self,
         id: InstanceId,
@@ -775,6 +822,16 @@ impl crate::InstanceStore for PostgresStorage {
         started_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         instances::ensure_run_started(self, id, run_id, started_at).await
+    }
+
+    async fn ensure_instance_run_started_claimed(
+        &self,
+        id: InstanceId,
+        run_id: &str,
+        started_at: DateTime<Utc>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::ensure_run_started(self, id, run_id, started_at, claim_token).await
     }
 
     async fn reset_instance_run(&self, id: InstanceId, run_id: &str) -> Result<(), StorageError> {
@@ -817,6 +874,15 @@ impl crate::InstanceStore for PostgresStorage {
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
         instances::merge_context_data(self, id, key, value).await
+    }
+
+    async fn merge_instance_metadata_claimed(
+        &self,
+        id: InstanceId,
+        patch: &serde_json::Value,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::merge_metadata(self, id, patch, claim_token).await
     }
 
     async fn merge_instance_metadata(
@@ -1012,6 +1078,32 @@ impl crate::ExecutionTreeStore for PostgresStorage {
         nodes: &[ExecutionNode],
     ) -> Result<(), StorageError> {
         execution_tree::create_batch(self, nodes).await
+    }
+
+    async fn create_execution_nodes_batch_claimed(
+        &self,
+        instance_id: InstanceId,
+        nodes: &[ExecutionNode],
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::create_nodes(self, instance_id, nodes, claim_token).await
+    }
+    async fn update_nodes_state_claimed(
+        &self,
+        instance_id: InstanceId,
+        node_ids: &[ExecutionNodeId],
+        state: NodeState,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::nodes_state(self, instance_id, node_ids, state, claim_token).await
+    }
+    async fn batch_activate_nodes_claimed(
+        &self,
+        instance_id: InstanceId,
+        node_ids: &[ExecutionNodeId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::activate_nodes(self, instance_id, node_ids, claim_token).await
     }
 
     async fn get_execution_tree(
@@ -1217,6 +1309,23 @@ impl crate::OutputStore for PostgresStorage {
         block_id: &BlockId,
     ) -> Result<u64, StorageError> {
         outputs::delete_for_block(self, instance_id, block_id).await
+    }
+
+    async fn delete_block_outputs_batch_claimed(
+        &self,
+        instance_id: InstanceId,
+        block_ids: &[BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError> {
+        claimed_writes::delete_outputs(self, instance_id, block_ids, claim_token).await
+    }
+    async fn delete_block_output_by_id_claimed(
+        &self,
+        instance_id: InstanceId,
+        id: Uuid,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::delete_output(self, instance_id, id, claim_token).await
     }
 
     async fn delete_block_outputs_batch(
@@ -1574,6 +1683,15 @@ impl crate::WorkerStore for PostgresStorage {
         block_id: &str,
     ) -> Result<u64, StorageError> {
         workers::cancel_for_block(self, instance_id, block_id).await
+    }
+
+    async fn cancel_worker_tasks_for_blocks_claimed(
+        &self,
+        instance_id: InstanceId,
+        block_ids: &[String],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError> {
+        claimed_writes::cancel_worker_blocks(self, instance_id, block_ids, claim_token).await
     }
 
     async fn cancel_worker_tasks_for_blocks(

@@ -30,7 +30,7 @@ fn compensation_branch(step_index: usize) -> Option<i16> {
 ///
 /// Returns `true` if more work.
 pub async fn execute_saga(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,
@@ -80,13 +80,12 @@ pub async fn execute_saga(
         storage
             .merge_context_data(instance.id, "_error", &error_ctx)
             .await
-            .map_err(|e| {
+            .inspect_err(|e| {
                 warn!(
                     instance_id = %instance.id,
                     error = %e,
                     "failed to inject error context for saga compensation"
                 );
-                EngineError::from(e)
             })?;
     }
 

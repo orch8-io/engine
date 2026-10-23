@@ -264,6 +264,14 @@ pub(super) async fn get(
     store: &PostgresStorage,
     id: InstanceId,
 ) -> Result<Option<TaskInstance>, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    get_on(&mut conn, id).await
+}
+
+pub(super) async fn get_on(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+) -> Result<Option<TaskInstance>, StorageError> {
     let row = sqlx::query_as::<_, InstanceRow>(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
@@ -272,7 +280,7 @@ pub(super) async fn get(
            FROM task_instances WHERE id = $1",
     )
     .bind(id.into_uuid())
-    .fetch_optional(&store.pool)
+    .fetch_optional(&mut *conn)
     .await?;
     row.map(InstanceRow::into_instance).transpose()
 }
@@ -580,6 +588,17 @@ pub(super) async fn conditional_update_state(
     new_state: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
 ) -> Result<bool, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    conditional_update_state_on(&mut conn, id, expected_state, new_state, next_fire_at).await
+}
+
+pub(super) async fn conditional_update_state_on(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<bool, StorageError> {
     let result = sqlx::query(
         r"
         UPDATE task_instances
@@ -591,7 +610,7 @@ pub(super) async fn conditional_update_state(
     .bind(new_state.to_string())
     .bind(next_fire_at)
     .bind(expected_state.to_string())
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected() > 0)
 }
@@ -703,6 +722,16 @@ pub(super) async fn update_context_cas(
     context: &orch8_types::context::ExecutionContext,
     expected_updated_at: DateTime<Utc>,
 ) -> Result<bool, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    update_context_cas_on(&mut conn, id, context, expected_updated_at).await
+}
+
+pub(super) async fn update_context_cas_on(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+    context: &orch8_types::context::ExecutionContext,
+    expected_updated_at: DateTime<Utc>,
+) -> Result<bool, StorageError> {
     let ctx_json = serde_json::to_value(context)?;
     let result = sqlx::query(
         "UPDATE task_instances SET context = $2, updated_at = NOW() WHERE id = $1 AND updated_at = $3",
@@ -710,7 +739,7 @@ pub(super) async fn update_context_cas(
     .bind(id.into_uuid())
     .bind(&ctx_json)
     .bind(expected_updated_at)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected() > 0)
 }
@@ -720,6 +749,16 @@ pub(super) async fn update_context_cas(
 /// field).
 pub(super) async fn ensure_run_started(
     store: &PostgresStorage,
+    id: InstanceId,
+    run_id: &str,
+    started_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    ensure_run_started_on(&mut conn, id, run_id, started_at).await
+}
+
+pub(super) async fn ensure_run_started_on(
+    conn: &mut sqlx::PgConnection,
     id: InstanceId,
     run_id: &str,
     started_at: DateTime<Utc>,
@@ -743,7 +782,7 @@ pub(super) async fn ensure_run_started(
     .bind(id.into_uuid())
     .bind(run_id)
     .bind(started_at_json)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
@@ -752,6 +791,15 @@ pub(super) async fn ensure_run_started(
 /// user context and audit/config data.
 pub(super) async fn reset_run(
     store: &PostgresStorage,
+    id: InstanceId,
+    run_id: &str,
+) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    reset_run_on(&mut conn, id, run_id).await
+}
+
+pub(super) async fn reset_run_on(
+    conn: &mut sqlx::PgConnection,
     id: InstanceId,
     run_id: &str,
 ) -> Result<(), StorageError> {
@@ -770,7 +818,7 @@ pub(super) async fn reset_run(
     )
     .bind(id.into_uuid())
     .bind(run_id)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
@@ -1067,6 +1115,16 @@ pub(super) async fn merge_context_data(
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    merge_context_data_on(&mut conn, id, key, value).await
+}
+
+pub(super) async fn merge_context_data_on(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), StorageError> {
     // `jsonb_set` with `create_missing=true` creates a missing *leaf* key but
     // cannot descend into a null/non-object parent. Instances are created
     // with `context.data = null` by default, so calling `jsonb_set(ctx,
@@ -1089,7 +1147,7 @@ pub(super) async fn merge_context_data(
     .bind(id.into_uuid())
     .bind(key)
     .bind(value)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
@@ -1102,6 +1160,15 @@ pub(super) async fn merge_metadata(
     id: InstanceId,
     patch: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    merge_metadata_on(&mut conn, id, patch).await
+}
+
+pub(super) async fn merge_metadata_on(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+    patch: &serde_json::Value,
+) -> Result<(), StorageError> {
     sqlx::query(
         r"UPDATE task_instances
           SET metadata = COALESCE(metadata, '{}'::jsonb) || $2,
@@ -1110,7 +1177,7 @@ pub(super) async fn merge_metadata(
     )
     .bind(id.into_uuid())
     .bind(patch)
-    .execute(&store.pool)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

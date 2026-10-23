@@ -106,7 +106,7 @@ pub const SUPERSEDED_CHILD_KEY: &str = "_superseded";
 /// instead of re-running it. `Cancelled` and superseded children are not
 /// adopted: the caller spawns a fresh one.
 async fn adopt_previous_child(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     children: &[TaskInstance],
     block_id: &str,
     activation: &str,
@@ -128,17 +128,7 @@ async fn adopt_previous_child(
     }) else {
         return Ok(None);
     };
-    storage
-        .merge_instance_metadata(
-            prev.id,
-            &serde_json::json!({ PARENT_ACTIVATION_KEY: activation }),
-        )
-        .await?;
-    if prev.state == InstanceState::Failed {
-        orch8_storage::lifecycle::retry_failed_instance(storage, prev.id).await?;
-        return Ok(storage.get_instance(prev.id).await?);
-    }
-    Ok(Some(prev.clone()))
+    storage.adopt_child_instance(prev, activation).await
 }
 
 /// `true` when a `Waiting` `SubSequence` node of `instance` has a child (for
@@ -221,10 +211,10 @@ pub(super) async fn dispatch_block(
     claim_token: chrono::DateTime<chrono::Utc>,
     pending_deferrals: Option<&crate::handlers::step_deferral::PendingStepDeferrals>,
 ) -> Result<bool, EngineError> {
-    // Mark node as running.
+    let control = crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
+    // Mark node as running under the original claim as well.
     if node.state == NodeState::Pending {
-        storage
-            .update_node_state(node.id, NodeState::Running)
+        crate::control::ExecutionControl::update_node_state(&control, node.id, NodeState::Running)
             .await?;
     }
 
@@ -279,29 +269,17 @@ pub(super) async fn dispatch_block(
         }
         BlockDefinition::Parallel(par_def) => {
             crate::handlers::parallel::execute_parallel(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                par_def,
-                tree,
+                &control, handlers, instance, node, par_def, tree,
             )
             .await
         }
         BlockDefinition::Race(race_def) => {
-            crate::handlers::race::execute_race(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                race_def,
-                tree,
-            )
-            .await
+            crate::handlers::race::execute_race(&control, handlers, instance, node, race_def, tree)
+                .await
         }
         BlockDefinition::Loop(loop_def) => {
             crate::handlers::loop_block::execute_loop_with_clock(
-                storage.as_ref(),
+                &control,
                 instance,
                 node,
                 loop_def,
@@ -313,71 +291,37 @@ pub(super) async fn dispatch_block(
         }
         BlockDefinition::ForEach(fe_def) => {
             crate::handlers::for_each::execute_for_each(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                fe_def,
-                tree,
-                outputs,
+                &control, handlers, instance, node, fe_def, tree, outputs,
             )
             .await
         }
         BlockDefinition::Router(router_def) => {
             crate::handlers::router::execute_router(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                router_def,
-                tree,
-                outputs,
+                &control, handlers, instance, node, router_def, tree, outputs,
             )
             .await
         }
         BlockDefinition::TryCatch(tc_def) => {
             crate::handlers::try_catch::execute_try_catch(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                tc_def,
-                tree,
+                &control, handlers, instance, node, tc_def, tree,
             )
             .await
         }
         BlockDefinition::ABSplit(ab_def) => {
             crate::handlers::ab_split::execute_ab_split(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                ab_def,
-                tree,
+                &control, handlers, instance, node, ab_def, tree,
             )
             .await
         }
         BlockDefinition::CancellationScope(cs_def) => {
             crate::handlers::cancellation_scope::execute_cancellation_scope(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                cs_def,
-                tree,
+                &control, handlers, instance, node, cs_def, tree,
             )
             .await
         }
         BlockDefinition::Saga(saga_def) => {
-            crate::handlers::saga::execute_saga(
-                storage.as_ref(),
-                handlers,
-                instance,
-                node,
-                saga_def,
-                tree,
-            )
-            .await
+            crate::handlers::saga::execute_saga(&control, handlers, instance, node, saga_def, tree)
+                .await
         }
         BlockDefinition::SubSequence(ss_def) => {
             // Sub-sequence: create a child instance and wait for it to complete.
@@ -398,8 +342,7 @@ pub(super) async fn dispatch_block(
             let adopted = if node.state != NodeState::Waiting
                 && find_activation_child(&children, ss_def.id.as_str(), &activation).is_none()
             {
-                adopt_previous_child(storage.as_ref(), &children, ss_def.id.as_str(), &activation)
-                    .await?
+                adopt_previous_child(&control, &children, ss_def.id.as_str(), &activation).await?
             } else {
                 None
             };
@@ -431,16 +374,20 @@ pub(super) async fn dispatch_block(
                         attempt: 0,
                         created_at: chrono::Utc::now(),
                     };
-                    storage.save_block_output(&block_output).await?;
-                    complete_node(storage.as_ref(), node.id).await?;
+                    crate::control::ExecutionControl::save_block_output(&control, &block_output)
+                        .await?;
+                    complete_node(&control, node.id).await?;
                 } else if child.state.is_terminal() {
                     // Child failed or cancelled.
-                    fail_node(storage.as_ref(), node.id).await?;
+                    fail_node(&control, node.id).await?;
                 } else {
                     // Still running — wait.
-                    storage
-                        .update_node_state(node.id, NodeState::Waiting)
-                        .await?;
+                    crate::control::ExecutionControl::update_node_state(
+                        &control,
+                        node.id,
+                        NodeState::Waiting,
+                    )
+                    .await?;
                 }
             } else {
                 // Depth guard: an A→A (or A→B→A) sub-sequence spawn has no
@@ -519,7 +466,7 @@ pub(super) async fn dispatch_block(
                             error = %e,
                             "failed to resolve sub-sequence input templates"
                         );
-                        fail_node(storage.as_ref(), node.id).await?;
+                        fail_node(&control, node.id).await?;
                         return Ok(true);
                     }
                 };
@@ -557,10 +504,13 @@ pub(super) async fn dispatch_block(
                     created_at: now,
                     updated_at: now,
                 };
-                storage.create_instance(&child).await?;
-                storage
-                    .update_node_state(node.id, NodeState::Waiting)
-                    .await?;
+                crate::control::ExecutionControl::create_child_instance(&control, &child).await?;
+                crate::control::ExecutionControl::update_node_state(
+                    &control,
+                    node.id,
+                    NodeState::Waiting,
+                )
+                .await?;
             }
             Ok(true) // Re-schedule to check child status later
         }

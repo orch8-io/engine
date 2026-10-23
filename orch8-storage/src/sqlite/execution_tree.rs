@@ -38,22 +38,18 @@ pub(super) async fn create_batch(
     nodes: &[ExecutionNode],
 ) -> Result<(), StorageError> {
     let mut tx = storage.pool.begin().await?;
-    for node in nodes {
-        sqlx::query(
-            "INSERT INTO execution_tree (id,instance_id,block_id,parent_id,block_type,branch_index,state,started_at,completed_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
-        )
-        .bind(node.id.into_uuid().to_string())
-        .bind(node.instance_id.into_uuid().to_string())
-        .bind(node.block_id.as_str())
-        .bind(node.parent_id.map(|p| p.to_string()))
-        .bind(node.block_type.to_string())
-        .bind(node.branch_index.map(|b| b as i32))
-        .bind(node.state.to_string())
-        .bind(node.started_at.map(ts))
-        .bind(node.completed_at.map(ts))
-        .execute(&mut *tx).await?;
-    }
+    create_batch_on(&mut tx, nodes).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn create_batch_on(
+    conn: &mut sqlx::SqliteConnection,
+    nodes: &[ExecutionNode],
+) -> Result<(), StorageError> {
+    for node in nodes {
+        create_node_on(&mut *conn, node).await?;
+    }
     Ok(())
 }
 
@@ -115,6 +111,18 @@ pub(super) async fn update_nodes_state(
     if node_ids.is_empty() {
         return Ok(());
     }
+    let mut conn = storage.pool.acquire().await?;
+    update_nodes_state_on(&mut conn, node_ids, state).await
+}
+
+pub(super) async fn update_nodes_state_on(
+    conn: &mut sqlx::SqliteConnection,
+    node_ids: &[ExecutionNodeId],
+    state: NodeState,
+) -> Result<(), StorageError> {
+    if node_ids.is_empty() {
+        return Ok(());
+    }
     let now = ts(chrono::Utc::now());
     let state_str = state.to_string();
 
@@ -139,12 +147,23 @@ pub(super) async fn update_nodes_state(
         sep.push_bind(id.to_string());
     }
     sep.push_unseparated(")");
-    qb.build().execute(&storage.pool).await?;
+    qb.build().execute(&mut *conn).await?;
     Ok(())
 }
 
 pub(super) async fn batch_activate_nodes(
     storage: &SqliteStorage,
+    node_ids: &[ExecutionNodeId],
+) -> Result<(), StorageError> {
+    if node_ids.is_empty() {
+        return Ok(());
+    }
+    let mut conn = storage.pool.acquire().await?;
+    batch_activate_nodes_on(&mut conn, node_ids).await
+}
+
+pub(super) async fn batch_activate_nodes_on(
+    conn: &mut sqlx::SqliteConnection,
     node_ids: &[ExecutionNodeId],
 ) -> Result<(), StorageError> {
     if node_ids.is_empty() {
@@ -161,7 +180,7 @@ pub(super) async fn batch_activate_nodes(
         sep.push_bind(id.to_string());
     }
     sep.push_unseparated(")");
-    qb.build().execute(&storage.pool).await?;
+    qb.build().execute(&mut *conn).await?;
     Ok(())
 }
 
@@ -169,9 +188,17 @@ pub(super) async fn delete_tree(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    delete_tree_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn delete_tree_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+) -> Result<(), StorageError> {
     sqlx::query("DELETE FROM execution_tree WHERE instance_id = ?1")
         .bind(instance_id.into_uuid().to_string())
-        .execute(&storage.pool)
+        .execute(&mut *conn)
         .await?;
     Ok(())
 }

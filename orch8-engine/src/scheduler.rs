@@ -2899,9 +2899,13 @@ async fn ensure_run_started(
             .run_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-        ctx.storage
-            .ensure_instance_run_started(instance_id, &run_id, started_at)
-            .await?;
+        if !ctx
+            .storage
+            .ensure_instance_run_started_claimed(instance_id, &run_id, started_at, ctx.claim_token)
+            .await?
+        {
+            return Err(EngineError::ClaimLost { instance_id });
+        }
         let mut inst = instance;
         inst.context.runtime.run_id = Some(run_id);
         inst.context.runtime.started_at = Some(started_at);
@@ -3143,17 +3147,7 @@ async fn execute_step_loop(
             .await;
         }
 
-        let outcome = step_exec::execute_step_block(
-            ctx.storage,
-            ctx.handlers,
-            ctx.webhook_config,
-            ctx.externalize_threshold,
-            instance,
-            step_def,
-            ctx.cancel,
-            ctx.clock,
-        )
-        .await?;
+        let outcome = step_exec::execute_step_block(ctx, instance, step_def).await?;
 
         // Interceptor: after_step (fires regardless of outcome)
         if let Some(ref interceptors) = sequence.interceptors {

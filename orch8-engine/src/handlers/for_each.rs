@@ -1,6 +1,5 @@
 use tracing::{debug, warn};
 
-use orch8_storage::StorageBackend;
 #[cfg(test)]
 use orch8_types::execution::BlockType;
 use orch8_types::execution::{ExecutionNode, NodeState};
@@ -60,7 +59,7 @@ const RESET_PENDING_KEY: &str = "_reset_pending";
 /// Returns `Ok(true)` to indicate more work; the scheduler will re-dispatch.
 #[allow(clippy::too_many_lines)]
 pub async fn execute_for_each(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,
@@ -110,26 +109,18 @@ pub async fn execute_for_each(
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0);
-        let items_snap = match storage
+        let items_snap = if let Some(val) = storage
             .get_externalized_state(instance.id, &snapshot_ref_key)
-            .await
+            .await?
         {
-            Ok(Some(val)) => val.as_array().cloned().unwrap_or_default(),
-            Ok(None) => {
-                warn!(
-                    instance_id = %instance.id,
-                    block_id = %fe_def.id,
-                    "for_each snapshot missing from externalized_state — treating as empty"
-                );
-                Vec::new()
-            }
-            Err(e) => {
-                return Err(orch8_types::error::StorageError::Query(format!(
-                    "for_each snapshot read failed for instance {} block {}: {e}",
-                    instance.id, fe_def.id
-                ))
-                .into());
-            }
+            val.as_array().cloned().unwrap_or_default()
+        } else {
+            warn!(
+                instance_id = %instance.id,
+                block_id = %fe_def.id,
+                "for_each snapshot missing from externalized_state — treating as empty"
+            );
+            Vec::new()
         };
         (items_snap, idx)
     } else {
@@ -142,7 +133,7 @@ pub async fn execute_for_each(
             instance,
             outputs,
         )
-        .await
+        .await?
         else {
             warn!(
                 instance_id = %instance.id,
@@ -373,7 +364,7 @@ pub async fn execute_for_each(
 /// binding and the body would otherwise fail to read `item_var` via the
 /// usual dotted-path lookup.
 async fn bind_item_var(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     item_var: &str,
     item: serde_json::Value,
@@ -401,7 +392,7 @@ fn shadowed_item_var_key(instance_id: InstanceId, block_id: &orch8_types::ids::B
 /// `item_var` shadowed when the loop started, or remove the key when it had
 /// none. Best-effort, like [`cleanup_item_var`].
 async fn release_item_var(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance_id: InstanceId,
     fe_def: &ForEachDef,
 ) {
@@ -435,7 +426,11 @@ async fn release_item_var(
 /// This prevents the last iteration's item value from leaking into
 /// subsequent steps. The cleanup is best-effort: if the instance was
 /// concurrently deleted or the context is not an object, we silently skip.
-async fn cleanup_item_var(storage: &dyn StorageBackend, instance_id: InstanceId, item_var: &str) {
+async fn cleanup_item_var(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    instance_id: InstanceId,
+    item_var: &str,
+) {
     let Ok(Some(mut inst)) = storage.get_instance(instance_id).await else {
         return;
     };
@@ -498,23 +493,15 @@ async fn cleanup_item_var(storage: &dyn StorageBackend, instance_id: InstanceId,
 async fn resolve_collection(
     path: &str,
     context: &orch8_types::context::ExecutionContext,
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     instance: &TaskInstance,
     outputs: &OutputsSnapshot,
-) -> Option<Vec<serde_json::Value>> {
+) -> Result<Option<Vec<serde_json::Value>>, EngineError> {
     if crate::template::contains_template(&serde_json::Value::String(path.to_string())) {
         let wrapped = serde_json::Value::String(path.to_string());
-        let out_snap = match outputs.get(storage, instance.id).await {
-            Ok(snap) => snap,
-            Err(e) => {
-                warn!(
-                    instance_id = %instance.id,
-                    error = %e,
-                    "for_each: failed to build outputs snapshot"
-                );
-                return None;
-            }
-        };
+        // A failed read is not an empty collection: preserve its retry
+        // classification before any snapshot or completion is persisted.
+        let out_snap = outputs.get(storage.backend(), instance.id).await?;
         let resolved = match crate::template::resolve(&wrapped, context, out_snap) {
             Ok(v) => v,
             Err(e) => {
@@ -524,11 +511,11 @@ async fn resolve_collection(
                     error = %e,
                     "for_each: template resolution failed"
                 );
-                return None;
+                return Ok(None);
             }
         };
         if resolved.is_array() {
-            return resolved.as_array().cloned();
+            return Ok(resolved.as_array().cloned());
         }
         warn!(
             instance_id = %instance.id,
@@ -536,14 +523,17 @@ async fn resolve_collection(
             resolved_type = resolved_type_name(&resolved),
             "for_each: collection resolved to non-array"
         );
-        return None;
+        return Ok(None);
     }
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = &context.data;
     for part in &parts {
-        current = current.get(part)?;
+        let Some(value) = current.get(part) else {
+            return Ok(None);
+        };
+        current = value;
     }
-    current.as_array().cloned()
+    Ok(current.as_array().cloned())
 }
 
 fn resolved_type_name(v: &serde_json::Value) -> &'static str {
@@ -635,14 +625,18 @@ mod tests {
     #[tokio::test]
     async fn resolve_collection_from_context() {
         let (s, inst, snap) = mk_resolve_ctx(json!({"users": [1, 2, 3]})).await;
-        let items = resolve_collection("users", &inst.context, &s, &inst, &snap).await;
+        let items = resolve_collection("users", &inst.context, &s, &inst, &snap)
+            .await
+            .unwrap();
         assert_eq!(items, Some(vec![json!(1), json!(2), json!(3)]));
     }
 
     #[tokio::test]
     async fn resolve_nested_collection() {
         let (s, inst, snap) = mk_resolve_ctx(json!({"data": {"items": ["a", "b"]}})).await;
-        let items = resolve_collection("data.items", &inst.context, &s, &inst, &snap).await;
+        let items = resolve_collection("data.items", &inst.context, &s, &inst, &snap)
+            .await
+            .unwrap();
         assert_eq!(items, Some(vec![json!("a"), json!("b")]));
     }
 
@@ -652,6 +646,7 @@ mod tests {
         assert!(
             resolve_collection("missing", &inst.context, &s, &inst, &snap)
                 .await
+                .unwrap()
                 .is_none()
         );
     }
@@ -662,6 +657,7 @@ mod tests {
         assert!(
             resolve_collection("users", &inst.context, &s, &inst, &snap)
                 .await
+                .unwrap()
                 .is_none()
         );
     }
@@ -671,6 +667,7 @@ mod tests {
         let (s, inst, snap) = mk_resolve_ctx(json!({"xs": []})).await;
         let v = resolve_collection("xs", &inst.context, &s, &inst, &snap)
             .await
+            .unwrap()
             .expect("empty array must still resolve");
         assert!(v.is_empty());
     }
@@ -681,6 +678,7 @@ mod tests {
         assert!(
             resolve_collection("a.b.c", &inst.context, &s, &inst, &snap)
                 .await
+                .unwrap()
                 .is_none()
         );
     }
@@ -690,6 +688,7 @@ mod tests {
         let (s, inst, snap) = mk_resolve_ctx(json!({"l1": {"l2": {"l3": [10, 20]}}})).await;
         let v = resolve_collection("l1.l2.l3", &inst.context, &s, &inst, &snap)
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(v, vec![json!(10), json!(20)]);
     }
@@ -715,7 +714,8 @@ mod tests {
             &inst,
             &snap,
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(items, Some(vec![json!("BTC"), json!("ETH"), json!("SOL")]));
     }
 

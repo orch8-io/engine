@@ -1,6 +1,5 @@
 use tracing::debug;
 
-use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::TryCatchDef;
@@ -18,7 +17,7 @@ use crate::handlers::HandlerRegistry;
 /// immediately (later try blocks never run), which hands control to `catch`;
 /// `finally` always runs once try/catch have settled.
 pub async fn execute_try_catch(
-    storage: &dyn StorageBackend,
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
     _handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,
@@ -65,7 +64,7 @@ pub async fn execute_try_catch(
                         error = %e,
                         "failed to inject error context for catch block"
                     );
-                    EngineError::from(e)
+                    e
                 })?;
         }
         if !catch_state.is_settled() {
