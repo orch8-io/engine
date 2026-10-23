@@ -156,6 +156,13 @@ jobs:
         run: cargo build --locked -p orch8-server --bin orch8-server
       - name: Test
         run: cargo test --locked --workspace
+      # Criterion's test mode exercises each workload without collecting
+      # measurements. Keep fixtures and completion assertions covered when
+      # evaluator contracts change; the scheduled workflow measures timings.
+      - name: Benchmark smoke
+        run: |
+          cargo bench --locked -p orch8-engine --bench engine_bench --profile test -- --test
+          cargo bench --locked -p orch8-storage --bench storage_bench --profile test -- --test
 
   dashboard:
     name: Dashboard
