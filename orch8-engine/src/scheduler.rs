@@ -2474,11 +2474,19 @@ async fn check_step_deadline_waiting(
         instance,
         step_def,
         prev_output,
-        InstanceState::Waiting,
+        DeadlineOrigin::Waiting,
         clock,
         Some(hooks),
     )
     .await
+}
+
+/// A running evaluation must supply its original claim. Waiting sweeps are
+/// independent coordinators and use a state-conditional transition instead.
+#[derive(Clone, Copy)]
+pub(crate) enum DeadlineOrigin {
+    Running(chrono::DateTime<Utc>),
+    Waiting,
 }
 
 /// Shared SLA deadline-breach handler parameterized on the originating state.
@@ -2487,8 +2495,8 @@ async fn check_step_deadline_waiting(
 /// waiting-deadline sweep (`check_step_deadline_waiting`) contain identical
 /// logic: compute elapsed time since the step's baseline, invoke the
 /// escalation handler if configured, record a breach output, and fail the
-/// instance. The only difference is the `from_state` passed to
-/// `transition_instance`. This function captures that shared logic.
+/// instance. Running evaluations retain their original claim through the atomic
+/// output/state write; waiting sweeps use the independent state-conditional path.
 ///
 /// `hooks`: when `Some` (the Waiting sweep, which runs on the tick task) the
 /// escalation handler is spawned there instead of awaited inline (L2-06).
@@ -2499,7 +2507,7 @@ pub(crate) async fn handle_deadline_breach(
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     prev_output: Option<&orch8_types::output::BlockOutput>,
-    from_state: InstanceState,
+    origin: DeadlineOrigin,
     clock: &SharedClock,
     hooks: Option<&HookTasks>,
 ) -> Result<bool, EngineError> {
@@ -2518,18 +2526,9 @@ pub(crate) async fn handle_deadline_breach(
     }
 
     let instance_id = instance.id;
-    let state_label = match from_state {
-        InstanceState::Running => "fast path",
-        InstanceState::Waiting => "waiting instance",
-        other => {
-            // Defensive: log the unexpected state but proceed with the breach.
-            warn!(
-                instance_id = %instance_id,
-                from_state = %other,
-                "handle_deadline_breach called with unexpected from_state"
-            );
-            "unknown"
-        }
+    let (from_state, state_label) = match origin {
+        DeadlineOrigin::Running(_) => (InstanceState::Running, "fast path"),
+        DeadlineOrigin::Waiting => (InstanceState::Waiting, "waiting instance"),
     };
     warn!(
         instance_id = %instance_id,
@@ -2562,15 +2561,21 @@ pub(crate) async fn handle_deadline_breach(
         attempt: prev_output.as_ref().map_or(0, |o| o.attempt),
         created_at: Utc::now(),
     };
-    if !storage
-        .save_output_and_conditional_transition(
-            &breach_output,
-            from_state,
-            InstanceState::Failed,
-            None,
-        )
-        .await?
-    {
+    let transitioned = if let DeadlineOrigin::Running(token) = origin {
+        storage
+            .save_output_and_claimed_transition(&breach_output, InstanceState::Failed, None, token)
+            .await?
+    } else {
+        storage
+            .save_output_and_conditional_transition(
+                &breach_output,
+                from_state,
+                InstanceState::Failed,
+                None,
+            )
+            .await?
+    };
+    if !transitioned {
         debug!(instance_id = %instance_id, block_id = %step_def.id,
             "SLA breach: instance already moved by a concurrent writer; skipping escalation");
         return Ok(true);
@@ -2996,6 +3001,7 @@ async fn check_fast_path_deadlines(
                 step_def,
                 prev,
                 ctx.clock,
+                ctx.claim_token,
             )
             .await?
             {

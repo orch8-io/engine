@@ -39,6 +39,7 @@ pub(super) async fn check_step_deadline(
     step_def: &orch8_types::sequence::StepDef,
     prev_output: Option<&orch8_types::output::BlockOutput>,
     clock: &SharedClock,
+    claim_token: DateTime<Utc>,
 ) -> Result<bool, EngineError> {
     super::handle_deadline_breach(
         storage,
@@ -46,7 +47,7 @@ pub(super) async fn check_step_deadline(
         instance,
         step_def,
         prev_output,
-        InstanceState::Running,
+        super::DeadlineOrigin::Running(claim_token),
         clock,
         None,
     )

@@ -1372,6 +1372,17 @@ impl crate::OutputStore for SqliteStorage {
         .await
     }
 
+    async fn save_output_and_claimed_transition(
+        &self,
+        output: &BlockOutput,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        claimed_writes::output_and_transition(self, output, new_state, next_fire_at, claim_token)
+            .await
+    }
+
     async fn save_output_and_transition(
         &self,
         output: &BlockOutput,

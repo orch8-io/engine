@@ -1594,7 +1594,7 @@ async fn deadline_breach_lost_cas_skips_escalation_side_effects() {
         &instance,
         &step_def,
         None,
-        InstanceState::Waiting,
+        DeadlineOrigin::Waiting,
         &SharedClock::default(),
         None,
     )
@@ -1665,9 +1665,9 @@ async fn deadline_breach_is_durable_before_escalation_runs() {
             &instance,
             &step,
             None,
-            InstanceState::Waiting,
+            DeadlineOrigin::Waiting,
             &SharedClock::default(),
-            None
+            None,
         )
         .await
         .unwrap()
@@ -1714,9 +1714,9 @@ async fn deadline_breach_persistence_error_prevents_escalation() {
             &instance,
             &step,
             None,
-            InstanceState::Waiting,
+            DeadlineOrigin::Waiting,
             &SharedClock::default(),
-            None
+            None,
         )
         .await
         .is_err()
@@ -1735,9 +1735,9 @@ async fn deadline_breach_persistence_error_prevents_escalation() {
             &instance,
             &step,
             None,
-            InstanceState::Waiting,
+            DeadlineOrigin::Waiting,
             &SharedClock::default(),
-            None
+            None,
         )
         .await
         .unwrap()

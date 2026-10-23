@@ -1672,6 +1672,16 @@ passthrough_impl! {
         let encrypted = self.encrypt_block_output(output)?;
         self.inner.save_output_and_conditional_transition(encrypted.as_ref(), expected_state, new_state, next_fire_at).await
     }
+    async fn save_output_and_claimed_transition(
+        &self,
+        output: &orch8_types::output::BlockOutput,
+        new_state: orch8_types::instance::InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_block_output(output)?;
+        self.inner.save_output_and_claimed_transition(encrypted.as_ref(), new_state, next_fire_at, claim_token).await
+    }
     async fn save_output_and_transition(
         &self,
         output: &orch8_types::output::BlockOutput,

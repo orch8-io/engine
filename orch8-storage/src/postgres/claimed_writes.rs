@@ -433,3 +433,31 @@ pub(super) async fn deliver_signal(
     tx.commit().await?;
     Ok(true)
 }
+
+/// Parent-row claim lock, state change and diagnostic output commit together.
+pub(super) async fn output_and_transition(
+    store: &PostgresStorage,
+    output: &BlockOutput,
+    new_state: orch8_types::instance::InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+    claim_token: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let Some(mut tx) = begin(store, output.instance_id, claim_token).await? else {
+        return Ok(false);
+    };
+    if !super::instances::conditional_update_state_on(
+        &mut tx,
+        output.instance_id,
+        orch8_types::instance::InstanceState::Running,
+        new_state,
+        next_fire_at,
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    super::outputs::save_on(&mut tx, output).await?;
+    tx.commit().await?;
+    Ok(true)
+}

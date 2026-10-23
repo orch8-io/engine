@@ -1347,6 +1347,18 @@ pub trait OutputStore: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<bool, StorageError>;
 
+    /// Atomically append an output and transition only while the instance is
+    /// Running under `claim_token`. False means no writes (claim lost or state
+    /// changed). Output errors roll back the state transition. The token must
+    /// be the evaluation's original claim, never a refreshed instance timestamp.
+    async fn save_output_and_claimed_transition(
+        &self,
+        output: &BlockOutput,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Atomic: save block output + overwrite instance context + update state
     /// in a single transaction.
     ///

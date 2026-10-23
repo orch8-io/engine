@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Composite write ownership
 
+- Human-input acceptance, context updates, model predictions and reply delivery
+  retain the scheduler's original claim. A stale gate cannot overwrite a
+  replacement handler's context or consume its pending reply.
+- Budget breach metadata and flat/tree delay markers retain the original claim;
+  a stale evaluator cannot replace the current pause reason or delay deadline.
+- Fast-path SLA failure commits its output and terminal state under the original
+  claim. A stale evaluator cannot fail or escalate a replacement execution.
+  Waiting sweeps retain their independent state-conditional behavior.
+- Custom storage backends also implement `mark_signal_delivered_claimed` and
+  `save_output_and_claimed_transition` atomically with the instance claim check.
+  Signal delivery preserves the first acknowledgement timestamp and scopes the
+  signal to its instance; SLA output errors roll back the terminal transition.
 - Run initialization and flat/tree waiting-step timestamps retain the original
   execution claim. A stale scheduler cannot install a replacement's run identity
   or change its current step and timeout baseline. Flat-step execution receives
