@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Loop polling and scheduler fairness
+
+- Polling loops persist their next deadline through resets, restarts and early
+  wakes while independent parallel work retains the claim and continues.
+- Ready race steps can resolve once composite controllers are blocked, including
+  nested and wide deferred branches. Deferred visits do not consume the work
+  budget; cancelled polling losers do not schedule a later wake.
+- Iteration recovery and final settlement avoid unnecessary scheduler ticks.
+  Explicit direct-helper recovery retains its existing single-pass behavior.
+  Durable deadlines round up to native storage timestamp precision.
+
 ### Restore dry runs
 
 - `restore --dry-run` inspects a consistent snapshot of existing targets and

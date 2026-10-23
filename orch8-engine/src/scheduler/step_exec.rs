@@ -143,7 +143,7 @@ pub(crate) fn delay_marker_key(block_id: &orch8_types::ids::BlockId) -> String {
 /// `PostgreSQL` stores `next_fire_at` at microsecond precision. Round delay
 /// markers up to the same precision so claiming at the persisted fire time
 /// also satisfies the marker. This applies to legacy markers with nanoseconds.
-fn delay_fire_at_storage_precision(fire_at: DateTime<Utc>) -> DateTime<Utc> {
+pub(crate) fn fire_at_storage_precision(fire_at: DateTime<Utc>) -> DateTime<Utc> {
     let nanos = fire_at.nanosecond();
     let micros = fire_at
         .with_nanosecond(nanos - nanos % 1_000)
@@ -195,7 +195,7 @@ async fn step_delay_until(
         meta.get(&marker_key)
             .and_then(|v| v.as_str())
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .map(|until| delay_fire_at_storage_precision(until.with_timezone(&Utc)))
+            .map(|until| fire_at_storage_precision(until.with_timezone(&Utc)))
     };
     let mut until = recorded(&instance.metadata);
     if until.is_none()
@@ -222,7 +222,7 @@ async fn step_delay_until(
         (None, None) => return Ok(None),
     };
 
-    let fire_at = delay_fire_at_storage_precision(fire_at);
+    let fire_at = fire_at_storage_precision(fire_at);
     storage
         .merge_instance_metadata(
             instance.id,

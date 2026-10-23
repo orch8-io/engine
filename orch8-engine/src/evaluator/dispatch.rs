@@ -286,6 +286,7 @@ pub(super) async fn dispatch_block(
                 tree,
                 clock,
                 claim_token,
+                pending_deferrals,
             )
             .await
         }

@@ -31,7 +31,7 @@ impl PendingWake {
     }
 }
 
-/// Shared by one evaluation. Deferred leaves remain Running but are skipped
+/// Shared by one evaluation. Deferred nodes remain Running but are skipped
 /// until the next evaluation, so other branches can finish their fenced writes.
 #[derive(Default)]
 pub(crate) struct PendingStepDeferrals(Mutex<HashMap<ExecutionNodeId, PendingWake>>);
