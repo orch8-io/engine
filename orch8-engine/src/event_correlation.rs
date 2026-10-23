@@ -36,15 +36,33 @@ pub async fn ingest(
     storage: &Arc<dyn StorageBackend>,
     envelope: EventEnvelope,
 ) -> Result<IngestOutcome, StorageError> {
+    let receipt_id = envelope.id;
     let inserted = storage.ingest_event(&envelope).await?;
-    if !inserted {
-        return Ok(IngestOutcome {
-            event_id: envelope.id,
-            duplicate: true,
-            matched_wait: None,
-            satisfied: false,
-        });
-    }
+    // Retry a persisted but unmatched event using its original envelope, never
+    // the retry's transport UUID, correlation key or replacement payload.
+    let envelope = if inserted {
+        envelope
+    } else {
+        let canonical = storage
+            .get_event_by_identity(
+                &envelope.tenant_id,
+                &envelope.event_name,
+                &envelope.producer_event_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                StorageError::Conflict("deduplicated event disappeared before lookup".into())
+            })?;
+        if canonical.status != EventStatus::Pending {
+            return Ok(IngestOutcome {
+                event_id: receipt_id,
+                duplicate: true,
+                matched_wait: None,
+                satisfied: false,
+            });
+        }
+        canonical
+    };
 
     let waits = storage
         .find_waiting_event_waits(
@@ -65,8 +83,8 @@ pub async fn ingest(
         if consumed == 0 {
             // A concurrent matcher won the event.
             return Ok(IngestOutcome {
-                event_id: envelope.id,
-                duplicate: false,
+                event_id: receipt_id,
+                duplicate: !inserted,
                 matched_wait: None,
                 satisfied: false,
             });
@@ -82,8 +100,8 @@ pub async fn ingest(
             warn!(wait_id = %wait_id, event = %envelope.event_name,
                 "event consumed but wait moved concurrently");
             return Ok(IngestOutcome {
-                event_id: envelope.id,
-                duplicate: false,
+                event_id: receipt_id,
+                duplicate: !inserted,
                 matched_wait: Some(wait_id),
                 satisfied: false,
             });
@@ -93,16 +111,16 @@ pub async fn ingest(
             resume_waiting_instance(storage, &persisted).await?;
         }
         return Ok(IngestOutcome {
-            event_id: envelope.id,
-            duplicate: false,
+            event_id: receipt_id,
+            duplicate: !inserted,
             matched_wait: Some(wait_id),
             satisfied,
         });
     }
 
     Ok(IngestOutcome {
-        event_id: envelope.id,
-        duplicate: false,
+        event_id: receipt_id,
+        duplicate: !inserted,
         matched_wait: None,
         satisfied: false,
     })
@@ -116,8 +134,22 @@ pub async fn ingest(
 /// Propagates storage failures.
 pub async fn register_wait(
     storage: &Arc<dyn StorageBackend>,
-    mut wait: EventWait,
+    wait: EventWait,
 ) -> Result<EventWait, StorageError> {
+    // Explicit callers retain the unclaimed storage-error API.
+    register_wait_with_control(storage, storage.as_ref(), wait)
+        .await
+        .map_err(|error| match error {
+            crate::error::EngineError::Storage(error) => error,
+            other => StorageError::Query(other.to_string()),
+        })
+}
+
+pub(crate) async fn register_wait_with_control<C: crate::control::ExecutionControl + ?Sized>(
+    storage: &Arc<dyn StorageBackend>,
+    control: &C,
+    mut wait: EventWait,
+) -> Result<EventWait, crate::error::EngineError> {
     // Idempotent re-execution: registration fires on every gate re-park
     // (any signal can wake and re-park the instance) and again when the
     // handler finally runs, each time with a freshly generated id. The
@@ -137,7 +169,7 @@ pub async fn register_wait(
         wait.matched_names = existing.matched_names;
         wait.matched_event_ids = existing.matched_event_ids;
     }
-    storage.upsert_event_wait(&wait).await?;
+    crate::control::ExecutionControl::upsert_event_wait(control, &wait).await?;
     let read_matches = wait.matched_event_ids.clone();
 
     // Event-before-wait: drain matching pending events.
@@ -170,12 +202,16 @@ pub async fn register_wait(
     let Some(persisted) = persist_matches(storage, wait, read_matches, &consumed_events).await?
     else {
         // Concurrently satisfied or cancelled — return the authoritative row.
-        return storage.get_event_wait(instance_id, &block_id).await?.ok_or(
-            StorageError::NotFound {
-                entity: "event_wait",
-                id: block_id,
-            },
-        );
+        return storage
+            .get_event_wait(instance_id, &block_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::NotFound {
+                    entity: "event_wait",
+                    id: block_id,
+                }
+                .into()
+            });
     };
     if persisted.status == WaitStatus::Satisfied {
         resume_waiting_instance(storage, &persisted).await?;
@@ -221,7 +257,7 @@ pub(crate) async fn persist_matches(
         else {
             return Ok(None);
         };
-        if fresh.status != WaitStatus::Waiting {
+        if fresh.id != wait.id || fresh.status != WaitStatus::Waiting {
             return Ok(None);
         }
         read_matches.clone_from(&fresh.matched_event_ids);
@@ -367,44 +403,42 @@ pub async fn register_wait_before_park(
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
 ) {
+    if let Err(error) =
+        register_before_park_with_control(storage, storage.as_ref(), instance, step_def).await
+    {
+        warn!(instance_id = %instance.id, block_id = %step_def.id, %error,
+            "pre-park registration failed");
+    }
+}
+
+pub(crate) async fn register_before_park_with_control<
+    C: crate::control::ExecutionControl + ?Sized,
+>(
+    storage: &Arc<dyn StorageBackend>,
+    control: &C,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+) -> Result<(), crate::error::EngineError> {
     if step_def.handler == crate::federation::FEDERATE_HANDLER {
-        // Same gate contract: persist the outbound call before parking.
-        crate::federation::register_call_before_park(storage, instance, step_def).await;
-        return;
+        return crate::federation::register_call_with_control(storage, control, instance, step_def)
+            .await;
     }
     if step_def.handler != "wait_for_event" {
-        return;
+        return Ok(());
     }
-    // Resolve templates in params against the instance context (prior
-    // step outputs are intentionally not available at the gate — use
-    // context data for correlation keys).
     let resolved = crate::template::resolve(&step_def.params, &instance.context, &json!({}))
         .unwrap_or_else(|_| step_def.params.clone());
-    match parse_wait_params(
+    let wait = parse_wait_params(
         &resolved,
         instance.tenant_id.as_str(),
         instance.id.into_uuid(),
         step_def.id.as_str(),
-    ) {
-        Ok(wait) => {
-            if let Err(e) = register_wait(storage, wait).await {
-                warn!(
-                    instance_id = %instance.id,
-                    block_id = %step_def.id,
-                    error = %e,
-                    "wait_for_event: pre-park registration failed"
-                );
-            }
-        }
-        Err(e) => {
-            warn!(
-                instance_id = %instance.id,
-                block_id = %step_def.id,
-                error = %e,
-                "wait_for_event: invalid params at gate — instance will park without a wait"
-            );
-        }
-    }
+    )
+    .map_err(|error| {
+        crate::error::EngineError::InvalidConfig(format!("wait_for_event: {error}"))
+    })?;
+    register_wait_with_control(storage, control, wait).await?;
+    Ok(())
 }
 
 /// Convenience constructor for a fresh envelope.
@@ -482,6 +516,39 @@ mod tests {
             matched_event_ids: vec![],
             created_at: Utc::now(),
         }
+    }
+
+    #[tokio::test]
+    async fn old_matcher_cannot_rebind_its_consumed_events_to_a_new_activation() {
+        let storage = store().await;
+        let old = register_wait(&storage, wait(&["a"], JoinMode::Any))
+            .await
+            .unwrap();
+        let id = InstanceId::from_uuid(old.instance_id);
+        storage
+            .delete_event_waits_for_blocks(id, std::slice::from_ref(&old.block_id))
+            .await
+            .unwrap();
+        let mut fresh = wait(&["a"], JoinMode::Any);
+        fresh.instance_id = old.instance_id;
+        let fresh = register_wait(&storage, fresh).await.unwrap();
+        let event = envelope("t1", "a", "old-producer", "order-1", json!({}));
+        let mut stale = old.clone();
+        stale.record_match(&event);
+        assert!(
+            persist_matches(&storage, stale, vec![], &[event])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .get_event_wait(id, &old.block_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            fresh
+        );
     }
 
     /// T1-GAP-131: events `a` and `b` of an all-join arrive concurrently.

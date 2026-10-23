@@ -73,6 +73,63 @@ pub trait ExecutionControl: Send + Sync {
         None
     }
 
+    async fn delete_event_waits_for_blocks(
+        &self,
+        instance_id: InstanceId,
+        blocks: &[BlockId],
+    ) -> Result<u64, EngineError> {
+        let blocks: Vec<String> = blocks.iter().map(ToString::to_string).collect();
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, instance_id)?;
+            SignalStore::delete_event_waits_for_blocks_claimed(
+                self.backend(),
+                instance_id,
+                &blocks,
+                claim.token,
+            )
+            .await?
+            .ok_or(EngineError::ClaimLost { instance_id })
+        } else {
+            Ok(
+                SignalStore::delete_event_waits_for_blocks(self.backend(), instance_id, &blocks)
+                    .await?,
+            )
+        }
+    }
+
+    /// Keep the evaluation's claim through durable gate registration.
+    async fn upsert_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+    ) -> Result<(), EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, InstanceId::from_uuid(wait.instance_id))?;
+            held(
+                claim,
+                SignalStore::upsert_event_wait_claimed(self.backend(), wait, claim.token).await?,
+            )
+        } else {
+            SignalStore::upsert_event_wait(self.backend(), wait).await?;
+            Ok(())
+        }
+    }
+
+    async fn create_federation_call(
+        &self,
+        call: &orch8_types::federation::FederationCall,
+    ) -> Result<bool, EngineError> {
+        if let Some(claim) = self.execution_claim() {
+            same_instance(claim, call.instance_id)?;
+            ContinuityStore::create_federation_call_claimed(self.backend(), call, claim.token)
+                .await?
+                .ok_or(EngineError::ClaimLost {
+                    instance_id: claim.instance_id,
+                })
+        } else {
+            Ok(ContinuityStore::create_federation_call(self.backend(), call).await?)
+        }
+    }
+
     /// Create a child under this evaluation's parent claim, never the child's.
     async fn create_child_instance(
         &self,

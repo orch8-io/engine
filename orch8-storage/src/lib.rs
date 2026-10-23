@@ -1596,6 +1596,14 @@ pub trait SignalStore: Send + Sync + 'static {
     ) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError>;
 
     /// List events for a tenant, newest first, optionally by status.
+    /// Resolve the canonical producer identity, including consumed/expired rows.
+    async fn get_event_by_identity(
+        &self,
+        tenant_id: &str,
+        event_name: &str,
+        producer_event_id: &str,
+    ) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError>;
+
     async fn list_events(
         &self,
         tenant_id: &str,
@@ -1635,6 +1643,28 @@ pub trait SignalStore: Send + Sync + 'static {
         &self,
         wait: &orch8_types::event_correlation::EventWait,
     ) -> Result<(), StorageError>;
+
+    /// Register a wait only while its instance retains the original running
+    /// claim. The claim check and write must share one transaction.
+    async fn upsert_event_wait_claimed(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+        claim_token: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    /// Remove registrations when their step activations are reset.
+    async fn delete_event_waits_for_blocks(
+        &self,
+        instance_id: InstanceId,
+        blocks: &[String],
+    ) -> Result<u64, StorageError>;
+    /// `None` means the original instance claim was lost.
+    async fn delete_event_waits_for_blocks_claimed(
+        &self,
+        instance_id: InstanceId,
+        blocks: &[String],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError>;
 
     async fn get_event_wait(
         &self,
@@ -4094,6 +4124,14 @@ pub trait ContinuityStore: Send + Sync + 'static {
         &self,
         call: &orch8_types::federation::FederationCall,
     ) -> Result<bool, StorageError>;
+
+    /// Atomically retain the parent claim while inserting the call. `None`
+    /// means claim lost; `Some(false)` means the call already existed.
+    async fn create_federation_call_claimed(
+        &self,
+        call: &orch8_types::federation::FederationCall,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<bool>, StorageError>;
 
     async fn get_federation_call(
         &self,

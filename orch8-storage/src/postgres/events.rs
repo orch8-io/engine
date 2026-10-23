@@ -152,6 +152,14 @@ pub(super) async fn upsert_wait(
     store: &PostgresStorage,
     w: &EventWait,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    upsert_wait_on(&mut conn, w).await
+}
+
+pub(super) async fn upsert_wait_on(
+    conn: &mut sqlx::PgConnection,
+    w: &EventWait,
+) -> Result<(), StorageError> {
     sqlx::query(
         r"INSERT INTO event_waits
             (id, tenant_id, instance_id, block_id, event_names, correlation_key, join_mode,
@@ -176,7 +184,7 @@ pub(super) async fn upsert_wait(
     .bind(serde_json::to_value(&w.matched_names)?)
     .bind(serde_json::to_value(&w.matched_event_ids)?)
     .bind(w.created_at)
-    .execute(&store.pool)
+    .execute(conn)
     .await?;
     Ok(())
 }
@@ -259,4 +267,44 @@ pub(super) async fn expire_before(
             return Ok(total);
         }
     }
+}
+
+pub(super) async fn get_by_identity(
+    store: &PostgresStorage,
+    tenant_id: &str,
+    event_name: &str,
+    producer_event_id: &str,
+) -> Result<Option<EventEnvelope>, StorageError> {
+    let row = sqlx::query(AssertSqlSafe(format!("SELECT {EVENT_COLUMNS} FROM event_inbox WHERE tenant_id=$1 AND event_name=$2 AND producer_event_id=$3")))
+        .bind(tenant_id).bind(event_name).bind(producer_event_id).fetch_optional(&store.pool).await?;
+    row.as_ref().map(row_to_event).transpose()
+}
+
+pub(super) async fn delete_waits_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+    blocks: &[String],
+) -> Result<u64, StorageError> {
+    if blocks.is_empty() {
+        return Ok(0);
+    }
+    Ok(
+        sqlx::query("DELETE FROM event_waits WHERE instance_id=$1 AND block_id=ANY($2)")
+            .bind(instance_id.into_uuid())
+            .bind(blocks)
+            .execute(conn)
+            .await?
+            .rows_affected(),
+    )
+}
+
+pub(super) async fn delete_waits(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    blocks: &[String],
+) -> Result<u64, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let deleted = delete_waits_on(&mut tx, instance_id, blocks).await?;
+    tx.commit().await?;
+    Ok(deleted)
 }

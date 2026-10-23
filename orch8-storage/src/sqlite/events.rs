@@ -171,6 +171,14 @@ pub(super) async fn upsert_wait(
     storage: &SqliteStorage,
     w: &EventWait,
 ) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    upsert_wait_on(&mut conn, w).await
+}
+
+pub(super) async fn upsert_wait_on(
+    conn: &mut sqlx::SqliteConnection,
+    w: &EventWait,
+) -> Result<(), StorageError> {
     sqlx::query(
         "INSERT INTO event_waits
             (id, tenant_id, instance_id, block_id, event_names, correlation_key, join_mode,
@@ -195,7 +203,7 @@ pub(super) async fn upsert_wait(
     .bind(serde_json::to_string(&w.matched_names)?)
     .bind(serde_json::to_string(&w.matched_event_ids)?)
     .bind(ts(w.created_at))
-    .execute(&storage.pool)
+    .execute(conn)
     .await?;
     Ok(())
 }
@@ -275,4 +283,47 @@ pub(super) async fn expire_before(
     .execute(&storage.pool)
     .await?;
     Ok(result.rows_affected())
+}
+
+pub(super) async fn get_by_identity(
+    store: &SqliteStorage,
+    tenant_id: &str,
+    event_name: &str,
+    producer_event_id: &str,
+) -> Result<Option<EventEnvelope>, StorageError> {
+    let row = sqlx::query(AssertSqlSafe(format!("SELECT {EVENT_COLUMNS} FROM event_inbox WHERE tenant_id=?1 AND event_name=?2 AND producer_event_id=?3")))
+        .bind(tenant_id).bind(event_name).bind(producer_event_id).fetch_optional(&store.pool).await?;
+    row.as_ref().map(row_to_event).transpose()
+}
+
+pub(super) async fn delete_waits_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    blocks: &[String],
+) -> Result<u64, StorageError> {
+    let mut deleted = 0;
+    for chunk in blocks.chunks(400) {
+        let mut query = sqlx::QueryBuilder::new("DELETE FROM event_waits WHERE instance_id=");
+        query
+            .push_bind(instance_id.to_string())
+            .push(" AND block_id IN (");
+        let mut values = query.separated(", ");
+        for block in chunk {
+            values.push_bind(block);
+        }
+        values.push_unseparated(")");
+        deleted += query.build().execute(&mut *conn).await?.rows_affected();
+    }
+    Ok(deleted)
+}
+
+pub(super) async fn delete_waits(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+    blocks: &[String],
+) -> Result<u64, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let deleted = delete_waits_on(&mut tx, instance_id, blocks).await?;
+    tx.commit().await?;
+    Ok(deleted)
 }

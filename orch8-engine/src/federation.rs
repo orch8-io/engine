@@ -357,16 +357,31 @@ async fn resolve_peer(
 }
 
 /// Pre-park hook for `federate` steps: persist the outbound call so the
-/// poller can deliver it. Never performs network I/O and never fails the
-/// park — a policy violation is recorded as an already-failed call whose
-/// resume signal makes the handler fail the step with the reason.
+/// poller can deliver it. Explicit unclaimed calls log storage failures.
+/// Scheduler calls propagate storage failures and retain their original claim.
+/// Policy violations are recorded as failed calls whose resume signal makes
+/// the handler fail the step with the reason. No network I/O occurs here.
 pub async fn register_call_before_park(
     storage: &Arc<dyn StorageBackend>,
     instance: &TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
 ) {
+    if let Err(error) =
+        register_call_with_control(storage, storage.as_ref(), instance, step_def).await
+    {
+        warn!(instance_id = %instance.id, block_id = %step_def.id, %error,
+            "federate: failed to register outbound call");
+    }
+}
+
+pub(crate) async fn register_call_with_control<C: crate::control::ExecutionControl + ?Sized>(
+    storage: &Arc<dyn StorageBackend>,
+    control: &C,
+    instance: &TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+) -> Result<(), crate::error::EngineError> {
     if step_def.handler != FEDERATE_HANDLER {
-        return;
+        return Ok(());
     }
     let resolved = crate::template::resolve(&step_def.params, &instance.context, &json!({}))
         .unwrap_or_else(|_| step_def.params.clone());
@@ -402,26 +417,32 @@ pub async fn register_call_before_park(
     };
     match build_call(storage.as_ref(), instance, parsed, &mut call, now).await {
         Ok(()) => {}
-        Err(reason) => {
+        Err(BuildCallError::Invalid(reason)) => {
             call.state = FederationCallState::Failed;
             call.error = Some(reason);
         }
+        Err(BuildCallError::Storage(error)) => return Err(error.into()),
     }
-    match storage.create_federation_call(&call).await {
-        Ok(true) => debug!(
+    if crate::control::ExecutionControl::create_federation_call(control, &call).await? {
+        debug!(
             instance_id = %instance.id,
             block_id = %step_def.id,
             call_id = %call_id,
             state = ?call.state,
             "federation call registered"
-        ),
-        Ok(false) => {}
-        Err(error) => warn!(
-            instance_id = %instance.id,
-            block_id = %step_def.id,
-            %error,
-            "federate: failed to register the outbound call; the instance parks until its wait_for_input timeout"
-        ),
+        );
+    }
+    Ok(())
+}
+
+enum BuildCallError {
+    Invalid(String),
+    Storage(StorageError),
+}
+
+impl From<String> for BuildCallError {
+    fn from(reason: String) -> Self {
+        Self::Invalid(reason)
     }
 }
 
@@ -431,26 +452,24 @@ async fn build_call(
     parsed: Result<FederateParams, String>,
     call: &mut FederationCall,
     now: DateTime<Utc>,
-) -> Result<(), String> {
+) -> Result<(), BuildCallError> {
     let params = parsed.map_err(|reason| format!("federate: {reason}"))?;
     call.sequence.clone_from(&params.sequence);
     call.sequence_version = params.sequence_version;
     let peer = resolve_peer(storage, &instance.tenant_id, &params.peer)
         .await
-        .map_err(|error| format!("federate: peer lookup failed: {error}"))?
+        .map_err(BuildCallError::Storage)?
         .ok_or_else(|| format!("federate: peer '{}' is not registered", params.peer))?;
     call.peer_id = peer.peer_id;
     if !peer.is_active(now) {
-        return Err(format!(
-            "federate: peer '{}' is revoked or expired",
-            peer.name
-        ));
+        return Err(format!("federate: peer '{}' is revoked or expired", peer.name).into());
     }
     if !peer.outbound_allows_sequence(&params.sequence) {
         return Err(format!(
             "federate: sequence '{}' is not in the outbound allowlist for peer '{}'",
             params.sequence, peer.name
-        ));
+        )
+        .into());
     }
     let disclose_all = peer.relationship == PeerRelationship::Cluster
         && peer

@@ -1896,6 +1896,9 @@ pub async fn reset_subtree_to_pending(
         .collect();
     if !step_block_ids.is_empty() {
         storage
+            .delete_event_waits_for_blocks(instance_id, &step_block_ids)
+            .await?;
+        storage
             .delete_effect_receipts_for_blocks(tenant_id, instance_id, &step_block_ids)
             .await?;
 

@@ -1272,6 +1272,14 @@ impl crate::ContinuityStore for PostgresStorage {
         super::federation::create_call(self, call).await
     }
 
+    async fn create_federation_call_claimed(
+        &self,
+        call: &orch8_types::federation::FederationCall,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<bool>, StorageError> {
+        super::claimed_writes::federation_call(self, call, claim_token).await
+    }
+
     async fn get_federation_call(
         &self,
         tenant_id: &TenantId,

@@ -814,6 +814,23 @@ async fn check_human_input_at_control(
         if let orch8_types::signal::SignalType::Custom(name) = &signal.signal_type
             && *name == signal_name
         {
+            // Delayed event callbacks must not approve a later activation of
+            // the same block. Untagged manual/legacy replies retain their API.
+            if step_def.handler == "wait_for_event"
+                && let Some(source_wait) = signal.payload.get("event_wait")
+            {
+                let current = storage
+                    .backend()
+                    .get_event_wait(instance.id, step_def.id.as_str())
+                    .await?;
+                let current_id = current.as_ref().map(|wait| wait.id.to_string());
+                if source_wait.as_str() != current_id.as_deref() || current_id.is_none() {
+                    storage
+                        .mark_signal_delivered(instance.id, signal.id)
+                        .await?;
+                    continue;
+                }
+            }
             // Strict validation: payload must be `{"value": "<string>"}` where
             // `<string>` is one of `human_def.effective_choices()[].value`.
             // On malformed/invalid payload we mark the signal delivered (so a
@@ -1271,7 +1288,15 @@ pub(super) async fn execute_step_block(
             // BEFORE parking — the handler only runs after the gate is
             // satisfied, so without this the instance would park with
             // nothing listening for its events.
-            crate::event_correlation::register_wait_before_park(storage, instance, step_def).await;
+            let registration_control =
+                crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
+            crate::event_correlation::register_before_park_with_control(
+                storage,
+                &registration_control,
+                instance,
+                step_def,
+            )
+            .await?;
             crate::lifecycle::transition_claimed_instance(
                 storage.as_ref(),
                 instance_id,

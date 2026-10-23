@@ -190,8 +190,11 @@ impl EventWait {
 /// Outcome of ingesting one event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct IngestOutcome {
+    /// ID of the submitted envelope. A duplicate may have a different
+    /// transport ID from the canonical event stored in the inbox.
     pub event_id: Uuid,
-    /// True when the producer id was already known — nothing changed.
+    /// True when the producer identity was already known. Matching can resume
+    /// if the original event is still pending after an earlier attempt.
     pub duplicate: bool,
     /// The wait (if any) this event was matched into.
     #[serde(default, skip_serializing_if = "Option::is_none")]
