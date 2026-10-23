@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use orch8::{
@@ -37,16 +37,19 @@ struct Deployed {
     version: i32,
 }
 
+#[derive(Default)]
+struct HandlerRegistrations {
+    frozen: bool,
+    entries: Vec<(String, Invoke)>,
+}
+
 /// A durable engine backed by one `SQLite` file owned by this process.
 ///
 /// The Rust engine is built lazily on first use so host handlers can be
 /// registered after `open` (handlers are fixed once the engine is built).
 pub struct DurableEngine {
     path: String,
-    pending: Mutex<Option<Vec<(String, Invoke)>>>,
-    // Initialization can fail or be cancelled after registration
-    // freezes. Keep the callbacks available for every later attempt.
-    frozen_handlers: OnceLock<Vec<(String, Invoke)>>,
+    handlers: Mutex<HandlerRegistrations>,
     engine: AsyncMutex<Option<Engine>>,
     sequences: Mutex<HashMap<String, Vec<Deployed>>>,
     closed: Mutex<bool>,
@@ -66,8 +69,7 @@ impl DurableEngine {
     pub fn new(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
-            pending: Mutex::new(Some(Vec::new())),
-            frozen_handlers: OnceLock::new(),
+            handlers: Mutex::new(HandlerRegistrations::default()),
             engine: AsyncMutex::new(None),
             sequences: Mutex::new(HashMap::new()),
             closed: Mutex::new(false),
@@ -86,15 +88,15 @@ impl DurableEngine {
         if name.is_empty() {
             return Err("handler name must not be empty".into());
         }
-        let mut pending = lock(&self.pending);
-        let Some(handlers) = pending.as_mut() else {
+        let mut handlers = lock(&self.handlers);
+        if handlers.frozen {
             return Err(format!(
                 "cannot register handler '{name}': handlers must be registered before the first \
                  deploy/start/run/get call"
             ));
-        };
-        handlers.retain(|(existing, _)| existing != name);
-        handlers.push((name.to_string(), invoke));
+        }
+        handlers.entries.retain(|(existing, _)| existing != name);
+        handlers.entries.push((name.to_string(), invoke));
         Ok(())
     }
 
@@ -108,19 +110,26 @@ impl DurableEngine {
         if let Some(engine) = cached.as_ref() {
             return Ok(engine.clone());
         }
-        let handlers = self
-            .frozen_handlers
-            .get_or_init(|| lock(&self.pending).take().unwrap_or_default());
+        let handlers = {
+            let mut handlers = lock(&self.handlers);
+            handlers.frozen = true;
+            // Keep a retry copy until initialization succeeds: build may fail
+            // or its caller may be cancelled after registration freezes.
+            handlers.entries.clone()
+        };
         let mut builder = Engine::builder()
             .storage(Storage::sqlite(&self.path))
             // Single-process ownership: anything left Running was interrupted
             // by a crash, so resume it immediately on initialization.
             .stale_instance_threshold(Duration::ZERO);
         for (name, invoke) in handlers {
-            builder = builder.handler(name, host_handler(Arc::clone(invoke)));
+            builder = builder.handler(&name, host_handler(invoke));
         }
         let engine = builder.build().await.map_err(err)?;
         *cached = Some(engine.clone());
+        // The cached engine now owns the callbacks. A second copy would
+        // unnecessarily retain host resources after the engine is closed.
+        lock(&self.handlers).entries.clear();
         // close may have been called while storage was opening. Do not hand
         // the new engine to a caller after close stopped accepting work.
         if *lock(&self.closed) {
@@ -311,6 +320,9 @@ impl DurableEngine {
         }
         // Retain ownership until close completes so cancellation can retry.
         *cached = None;
+        let mut handlers = lock(&self.handlers);
+        handlers.frozen = true;
+        handlers.entries.clear();
     }
 }
 
