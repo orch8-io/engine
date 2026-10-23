@@ -162,9 +162,9 @@ dynamic shapes, and compiler bounds.
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| CLI cannot connect | Dataflow draft compilation uses the server API | Start the Level 3 server and restore client variables |
-| Valid field is reported optional | It is absent from the schema's `required` list | Declare it required or add an explicit template fallback |
-| Report says `TYPE_UNKNOWN` | Producer has no closed output schema | Add `output_schema`, or review the warning as intentional dynamic data |
-| Regenerated hashes differ | The source definition or generator version changed | Diff the definition and record the generator version from the report |
+| Symptom                          | Likely cause                                       | Fix                                                                    |
+| -------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
+| CLI cannot connect               | Dataflow draft compilation uses the server API     | Start the Level 3 server and restore client variables                  |
+| Valid field is reported optional | It is absent from the schema's `required` list     | Declare it required or add an explicit template fallback               |
+| Report says `TYPE_UNKNOWN`       | Producer has no closed output schema               | Add `output_schema`, or review the warning as intentional dynamic data |
+| Regenerated hashes differ        | The source definition or generator version changed | Diff the definition and record the generator version from the report   |

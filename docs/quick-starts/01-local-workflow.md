@@ -81,11 +81,11 @@ The top-level object is a **sequence**. It has a stable name and a version. Its
 
 Each object here is a step **block**. A step calls one **handler**:
 
-| Block ID | Handler | Meaning |
-|---|---|---|
-| `greet` | `log` | Run the built-in log handler |
-| `wait_a_moment` | `noop` | Wait until scheduled, then succeed with `{}` |
-| `finish` | `log` | Run another built-in handler |
+| Block ID        | Handler | Meaning                                      |
+| --------------- | ------- | -------------------------------------------- |
+| `greet`         | `log`   | Run the built-in log handler                 |
+| `wait_a_moment` | `noop`  | Wait until scheduled, then succeed with `{}` |
+| `finish`        | `log`   | Run another built-in handler                 |
 
 The development runner creates one **instance** of this sequence. A second run
 creates another instance; it does not resume or overwrite the first one.
@@ -145,10 +145,9 @@ Next: [Pass data and choose a route](02-data-and-routing.md).
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `orch8: command not found` | The release binary directory is not in `PATH` | Return to the repository root and export `PATH="$PWD/target/release:$PATH"` |
-| `no sequence.json found` | The command is running in the wrong directory | Run it in `quickstart-work/level-1`, or pass the JSON file path |
-| `unknown handler` and the run stalls | A handler name is not built in | Use `log` or `noop` exactly as shown; external handlers arrive in Level 4 |
-| The delay takes real time | `--skip-timers` was omitted | Stop the run and include the flag |
-
+| Symptom                              | Likely cause                                  | Fix                                                                         |
+| ------------------------------------ | --------------------------------------------- | --------------------------------------------------------------------------- |
+| `orch8: command not found`           | The release binary directory is not in `PATH` | Return to the repository root and export `PATH="$PWD/target/release:$PATH"` |
+| `no sequence.json found`             | The command is running in the wrong directory | Run it in `quickstart-work/level-1`, or pass the JSON file path             |
+| `unknown handler` and the run stalls | A handler name is not built in                | Use `log` or `noop` exactly as shown; external handlers arrive in Level 4   |
+| The delay takes real time            | `--skip-timers` was omitted                   | Stop the run and include the flag                                           |

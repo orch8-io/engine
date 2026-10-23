@@ -149,9 +149,9 @@ For timezone behavior, overlap semantics, and update fields, use the
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `404 sequence` | `SEQUENCE_ID` came from another database or tenant | Run the lookup against the current server |
-| `400 invalid cron expression` | The field count or token is invalid | Copy the seven-field expression exactly |
-| No instance appears | The cron loop has not reached the next fire yet | Check `next_fire_at`, wait one interval, and confirm the schedule is enabled |
-| Fires overlap unexpectedly | The policy is `allow` | Update `overlap_policy` to `skip` or `buffer_one` |
+| Symptom                       | Likely cause                                       | Fix                                                                          |
+| ----------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `404 sequence`                | `SEQUENCE_ID` came from another database or tenant | Run the lookup against the current server                                    |
+| `400 invalid cron expression` | The field count or token is invalid                | Copy the seven-field expression exactly                                      |
+| No instance appears           | The cron loop has not reached the next fire yet    | Check `next_fire_at`, wait one interval, and confirm the schedule is enabled |
+| Fires overlap unexpectedly    | The policy is `allow`                              | Update `overlap_policy` to `skip` or `buffer_one`                            |

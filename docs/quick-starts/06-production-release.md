@@ -216,17 +216,17 @@ completed evidence or silently move in-flight executions.
 
 Before real traffic, verify each boundary:
 
-| Boundary | Production requirement |
-|---|---|
-| Storage | Managed PostgreSQL, backups, restore test, bounded connection pools |
-| Secrets | Stable encryption key and API keys in a secret manager, with rotation procedure |
-| Network | TLS, explicit ingress policy, restricted CORS, private database access |
-| Schema | Migrations run once before or during a controlled deployment phase |
-| Compute | Multiple engine replicas, graceful drain, resource requests and limits |
-| Workers | Independent scaling, unique worker IDs, heartbeat, idempotent side effects |
-| Observability | JSON logs, Prometheus metrics, alerts tied to runbooks |
-| Releases | Preflight, semantic diff, historical evidence, bounded canary, automatic gates |
-| Recovery | DLQ grouping, representative retry, rollback command, database restore runbook |
+| Boundary      | Production requirement                                                          |
+| ------------- | ------------------------------------------------------------------------------- |
+| Storage       | Managed PostgreSQL, backups, restore test, bounded connection pools             |
+| Secrets       | Stable encryption key and API keys in a secret manager, with rotation procedure |
+| Network       | TLS, explicit ingress policy, restricted CORS, private database access          |
+| Schema        | Migrations run once before or during a controlled deployment phase              |
+| Compute       | Multiple engine replicas, graceful drain, resource requests and limits          |
+| Workers       | Independent scaling, unique worker IDs, heartbeat, idempotent side effects      |
+| Observability | JSON logs, Prometheus metrics, alerts tied to runbooks                          |
+| Releases      | Preflight, semantic diff, historical evidence, bounded canary, automatic gates  |
+| Recovery      | DLQ grouping, representative retry, rollback command, database restore runbook  |
 
 Continue with [Deployment](../DEPLOYMENT.md) for platform-specific setup and
 [Safe workflow releases](../RELEASES.md) for full state semantics.
@@ -258,11 +258,11 @@ You should also be able to identify the correct response to each situation:
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| PostgreSQL connection is refused | Compose service is not healthy or port differs | Run `docker compose ps` and compare the repository Compose mapping |
-| Migration fails with authentication error | Connection string credentials differ from Compose | Use the exact database, user, password, and mapped port from the file |
-| Server starts with SQLite | Storage backend variable was omitted | Set `ORCH8_STORAGE_BACKEND=postgres` with the Postgres URL |
-| Creating a sequence returns a duplicate error | The fixed example IDs already exist | Reuse the stored versions, or recreate the disposable database |
-| Validation is inconclusive | The fresh database lacks historical baseline runs | Generate representative runs; do not interpret absence as pass |
-| Promotion is rejected | Gates have not passed | Gather the configured samples and evaluate again; force only under an explicit audited exception |
+| Symptom                                       | Likely cause                                      | Fix                                                                                              |
+| --------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| PostgreSQL connection is refused              | Compose service is not healthy or port differs    | Run `docker compose ps` and compare the repository Compose mapping                               |
+| Migration fails with authentication error     | Connection string credentials differ from Compose | Use the exact database, user, password, and mapped port from the file                            |
+| Server starts with SQLite                     | Storage backend variable was omitted              | Set `ORCH8_STORAGE_BACKEND=postgres` with the Postgres URL                                       |
+| Creating a sequence returns a duplicate error | The fixed example IDs already exist               | Reuse the stored versions, or recreate the disposable database                                   |
+| Validation is inconclusive                    | The fresh database lacks historical baseline runs | Generate representative runs; do not interpret absence as pass                                   |
+| Promotion is rejected                         | Gates have not passed                             | Gather the configured samples and evaluate again; force only under an explicit audited exception |

@@ -5,14 +5,14 @@
 `[node].role` selects the process assembly. Unknown roles fail during config
 parsing; a role never silently falls back to the all-in-one surface.
 
-| Role | HTTP surface | gRPC surface | Engine | Push outbox |
-|---|---|---|---:|---:|
-| `all_in_one` | Full API, metrics, docs, public webhooks, health | Full | yes | yes |
-| `control` | Full control API, metrics, docs, public webhooks, health | Full | no | yes |
-| `executor` | Health only | Worker lifecycle, runtime session, artifact transfer, telemetry, health | yes | no |
-| `executor` (remote, joined, no `database.url`) | Health only | None (dials out only) | no — claims tasks from the managed engine | no |
-| `gateway` | Canonical `/api/v1/continuity/*` plus health | Artifact transfer and health only | no | no |
-| `edge` | Health only | Disabled | yes | no |
+| Role                                           | HTTP surface                                             | gRPC surface                                                            |                                    Engine | Push outbox |
+| ---------------------------------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------: | ----------: |
+| `all_in_one`                                   | Full API, metrics, docs, public webhooks, health         | Full                                                                    |                                       yes |         yes |
+| `control`                                      | Full control API, metrics, docs, public webhooks, health | Full                                                                    |                                        no |         yes |
+| `executor`                                     | Health only                                              | Worker lifecycle, runtime session, artifact transfer, telemetry, health |                                       yes |          no |
+| `executor` (remote, joined, no `database.url`) | Health only                                              | None (dials out only)                                                   | no — claims tasks from the managed engine |          no |
+| `gateway`                                      | Canonical `/api/v1/continuity/*` plus health             | Artifact transfer and health only                                       |                                        no |          no |
+| `edge`                                         | Health only                                              | Disabled                                                                |                                       yes |          no |
 
 Executor and gateway gRPC restrictions are enforced on the fully-qualified RPC
 path before handler dispatch. Disabled methods return `PERMISSION_DENIED`; they
@@ -76,8 +76,8 @@ managed_control_runtime_id = "018f5f2d-58ef-7a61-9b4f-21f77aa1f005"
 # managed_control_headers = { "fly-force-instance-id" = "148e21ea7d9389" }
 ```
 
-An `executor` joined this way **without a `database.url`** is a *remote
-executor* (hybrid, see [HYBRID.md](HYBRID.md)): it runs no engine and needs no
+An `executor` joined this way **without a `database.url`** is a _remote
+executor_ (hybrid, see [HYBRID.md](HYBRID.md)): it runs no engine and needs no
 database, API key, or encryption key. Next to this control session it opens
 the worker protocol (gRPC worker stream, HTTP polling fallback) to the same
 endpoint, advertises its handlers, labels, region, and local credential ids

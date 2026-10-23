@@ -30,7 +30,7 @@ Sequence definitions are JSON. A device can fetch a sequence from a server at ru
 ```
 Server                          Mobile Device
   │                                   │
-  │── GET /sequences/onboarding ─────▶│
+  │── GET /api/v1/sequences/by-name?tenant_id=demo&namespace=default&name=onboarding ─────▶│
   │◀── { "blocks": [...] } ───────────│
   │                                   │
   │                          engine.run(sequence)
@@ -70,12 +70,12 @@ The audit log is append-only. Every step, signal, and branch is recorded with a 
 
 ### Tuning for mobile constraints
 
-| Config | Recommended value | Reason |
-|---|---|---|
-| `backend` | `sqlite` | Native to mobile, no server |
-| `batch_size` | `8–16` | Mobile memory constraints |
-| `max_concurrent_steps` | `4–8` | Limit background CPU |
-| `tick_interval_ms` | `500–1000` | Reduce battery drain |
+| Config                 | Recommended value | Reason                      |
+| ---------------------- | ----------------- | --------------------------- |
+| `backend`              | `sqlite`          | Native to mobile, no server |
+| `batch_size`           | `8–16`            | Mobile memory constraints   |
+| `max_concurrent_steps` | `4–8`             | Limit background CPU        |
+| `tick_interval_ms`     | `500–1000`        | Reduce battery drain        |
 
 iOS suspends background processes aggressively. The scheduler tick loop will pause when the app is backgrounded — design sequences accordingly or use background task APIs to wake the engine.
 
@@ -86,6 +86,7 @@ iOS suspends background processes aggressively. The scheduler tick loop will pau
 Rust compiles to WASM. The engine runs inside a browser tab with no server required per user session.
 
 **Use cases:**
+
 - Multi-step form state that survives page refresh
 - Offline-capable checkout flows
 - Long-running AI agent loops in the browser
@@ -100,6 +101,7 @@ Same "load sequence from server, run locally" model as mobile.
 Creative tools, IDEs, data processing applications.
 
 **Use cases:**
+
 - Resumable export pipelines that survive app crashes
 - Multi-step AI processing with human approval gates
 - Collaborative review flows where one participant signals readiness before the next step fires
@@ -114,6 +116,7 @@ Creative tools, IDEs, data processing applications.
 Raspberry Pi, industrial controllers, smart home hubs, fleet management.
 
 **Use cases:**
+
 - Device automation sequences triggered by sensor readings
 - Retry logic for flaky hardware operations
 - Escalation when a device doesn't respond within `deadline`
@@ -130,6 +133,7 @@ Industrial IoT currently implements all of this as hand-written state machines i
 Long-running CLI workflows, CI/CD pipelines, database migrations, data processing scripts.
 
 **Use cases:**
+
 - Resume a failed migration from the last successful step (checkpoint-based recovery)
 - Retry flaky network steps automatically with backoff
 - Human approval gate before a destructive operation (`wait_for_input`)
@@ -144,6 +148,7 @@ Think of it as a local alternative to GitHub Actions for operations that run on 
 Quest systems, narrative branching, event-driven game logic.
 
 **Use cases:**
+
 - Timed events ("unlock after 24h real time") — `delay` with absolute duration
 - Player decision signals resuming paused branches — `wait_for_input` + signals
 - Multi-session quest state that persists across play sessions — SQLite-backed instances
@@ -163,15 +168,15 @@ Multi-step spatial experiences — onboarding tutorials, guided spatial workflow
 
 ## Summary
 
-| Embedding context | What the engine replaces |
-|---|---|
-| Mobile | Ad-hoc state in UserDefaults / SharedPreferences |
-| Browser | Multi-page form state hacks, localStorage flags |
-| Desktop | Custom pipeline managers, hand-rolled retry logic |
-| IoT / Edge | Hand-written state machines in firmware |
-| CLI | Bash scripts with no resume capability |
-| Games | Per-game quest system implementations |
-| AR / VR | Custom spatial experience state machines |
+| Embedding context | What the engine replaces                          |
+| ----------------- | ------------------------------------------------- |
+| Mobile            | Ad-hoc state in UserDefaults / SharedPreferences  |
+| Browser           | Multi-page form state hacks, localStorage flags   |
+| Desktop           | Custom pipeline managers, hand-rolled retry logic |
+| IoT / Edge        | Hand-written state machines in firmware           |
+| CLI               | Bash scripts with no resume capability            |
+| Games             | Per-game quest system implementations             |
+| AR / VR           | Custom spatial experience state machines          |
 
 ---
 

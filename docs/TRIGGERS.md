@@ -15,18 +15,18 @@ curl -X POST http://localhost:8080/api/v1/triggers \
        "config": {"brokers": ["kafka:9092"], "topic": "orders"}}'
 ```
 
-| `trigger_type` | Source | Engine feature | In the default `orch8-server` build |
-|---|---|---|---|
-| `webhook` | `POST /webhooks/{slug}` (HMAC) | — | yes |
-| `event` | `POST /triggers/{slug}/fire`, `emit_event` | — | yes |
-| `nats` | NATS queue-group subscription | `nats` | yes |
-| `file_watch` | filesystem events | `file-watch` | yes |
-| `activepieces_poll` | Activepieces sidecar polling | — | yes |
-| `sqs` | AWS SQS queue | `sqs` | yes |
-| `pubsub` | GCP Pub/Sub pull subscription | `pubsub` | yes |
-| `postgres_rows` | row changes in a Postgres table | `postgres-rows` | yes |
-| `kafka` | Kafka topic | `kafka` | no: build with `--features trigger-kafka` |
-| `redis_streams` | Redis Streams consumer group | `redis-streams` | no: build with `--features trigger-redis-streams` |
+| `trigger_type`      | Source                                     | Engine feature  | In the default `orch8-server` build               |
+| ------------------- | ------------------------------------------ | --------------- | ------------------------------------------------- |
+| `webhook`           | `POST /webhooks/{slug}` (HMAC)             | —               | yes                                               |
+| `event`             | `POST /triggers/{slug}/fire`, `emit_event` | —               | yes                                               |
+| `nats`              | NATS queue-group subscription              | `nats`          | yes                                               |
+| `file_watch`        | filesystem events                          | `file-watch`    | yes                                               |
+| `activepieces_poll` | Activepieces sidecar polling               | —               | yes                                               |
+| `sqs`               | AWS SQS queue                              | `sqs`           | yes                                               |
+| `pubsub`            | GCP Pub/Sub pull subscription              | `pubsub`        | yes                                               |
+| `postgres_rows`     | row changes in a Postgres table            | `postgres-rows` | yes                                               |
+| `kafka`             | Kafka topic                                | `kafka`         | no: build with `--features trigger-kafka`         |
+| `redis_streams`     | Redis Streams consumer group               | `redis-streams` | no: build with `--features trigger-redis-streams` |
 
 `sqs`, `pubsub` and `postgres_rows` are compiled into the server by default
 because they reuse crates the server already links (`reqwest`, `hmac`,
@@ -99,7 +99,11 @@ starts again from `start_from`.
   "partitions": [0, 1],
   "start_from": "latest",
   "tls": true,
-  "sasl": {"mechanism": "scram-sha-512", "username": "orch8", "password": "credentials://kafka/password"},
+  "sasl": {
+    "mechanism": "scram-sha-512",
+    "username": "orch8",
+    "password": "credentials://kafka/password"
+  },
   "max_wait_ms": 500,
   "max_batch_bytes": 1048576
 }
@@ -235,7 +239,9 @@ The script is idempotent and requires PostgreSQL 13 or later. It creates:
 
 ```json
 {
-  "slug": "order-changed", "sequence_name": "on-order-change", "tenant_id": "acme",
+  "slug": "order-changed",
+  "sequence_name": "on-order-change",
+  "tenant_id": "acme",
   "trigger_type": "postgres_rows",
   "config": {
     "database_url": "credentials://app-db/url",
@@ -250,8 +256,12 @@ The script is idempotent and requires PostgreSQL 13 or later. It creates:
 The workflow receives:
 
 ```json
-{"op": "update", "table": "public.orders",
- "new": {"id": 7, "status": "paid"}, "old": {"id": 7, "status": "new"}}
+{
+  "op": "update",
+  "table": "public.orders",
+  "new": { "id": 7, "status": "paid" },
+  "old": { "id": 7, "status": "new" }
+}
 ```
 
 On insert, `old` is null. On delete, `new` is null.

@@ -21,13 +21,13 @@ flags.
 
 What the engine does with a file-backed SQLite database (`orch8-storage/src/sqlite/mod.rs`):
 
-| Setting | Value | Consequence |
-|---|---|---|
-| Journal mode | WAL | Readers don't block the writer. Litestream requires WAL. |
-| Busy timeout | 5 s | A writer waits up to 5 s for the lock before failing with `SQLITE_BUSY`. |
-| Connection pool | 8 connections, fixed | `database.max_connections` doesn't apply to file-backed SQLite. |
-| Foreign keys | on | Cascading deletes work as they do on PostgreSQL. |
-| Schema | created and reconciled at boot | A database from an older binary gains new tables and columns on startup. `ORCH8_RUN_MIGRATIONS` and `orch8 migrate` apply only to PostgreSQL. |
+| Setting         | Value                          | Consequence                                                                                                                                   |
+| --------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Journal mode    | WAL                            | Readers don't block the writer. Litestream requires WAL.                                                                                      |
+| Busy timeout    | 5 s                            | A writer waits up to 5 s for the lock before failing with `SQLITE_BUSY`.                                                                      |
+| Connection pool | 8 connections, fixed           | `database.max_connections` doesn't apply to file-backed SQLite.                                                                               |
+| Foreign keys    | on                             | Cascading deletes work as they do on PostgreSQL.                                                                                              |
+| Schema          | created and reconciled at boot | A database from an older binary gains new tables and columns on startup. `ORCH8_RUN_MIGRATIONS` and `orch8 migrate` apply only to PostgreSQL. |
 
 ## Limits (read these first)
 
@@ -87,7 +87,7 @@ export ORCH8_ENCRYPTION_KEY=$(openssl rand -hex 32)   # store this in your secre
 export LITESTREAM_BUCKET=my-orch8-backups
 export LITESTREAM_ACCESS_KEY_ID=...  LITESTREAM_SECRET_ACCESS_KEY=...
 # For R2 / B2 / MinIO also set:
-# export LITESTREAM_ENDPOINT=https://<account>.r2.cloudflarestorage.com LITESTREAM_FORCE_PATH_STYLE=true
+# export LITESTREAM_ENDPOINT=https://"<account>".r2.cloudflarestorage.com LITESTREAM_FORCE_PATH_STYLE=true
 docker compose up -d
 docker compose exec engine orch8 --url http://127.0.0.1:8080 health
 ```

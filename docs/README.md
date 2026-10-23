@@ -6,23 +6,30 @@ Use this page as the canonical map of repository documentation. It separates
 tutorials, task-oriented guides, reference, explanation, and historical audit
 records so readers know what kind of answer each document provides.
 
+This documentation follows repository `main`, including
+[unreleased changes](../CHANGELOG.md#unreleased). A capability described here may
+require a newer source build than the latest published binary. Check the
+installed CLI's `--version` and `--help`, and use matching CLI/server builds.
+
 The running server is the source of truth for HTTP schemas: open `/swagger-ui`
 or download `/api-docs/openapi.json`. Published snapshots live at
-`https://orch8.io/contracts/openapi.json` and `sequence.schema.json`.
+`https://orch8.io/contracts/openapi.json` and `sequence.schema.json`. For
+hand-written workflow files, use the
+[authoring schema](https://orch8-io.github.io/engine/sequence-file.schema.json).
 
 ## Stability labels
 
-Every page starts with a one-line **Stability** badge, and entries below carry the same
-label. The labels come from [STABILITY.md](../STABILITY.md) and the code:
+Capability guides start with a one-line **Stability** badge, and entries below
+carry the same label. Indexes, examples, and historical records may omit a badge. The labels come from [STABILITY.md](../STABILITY.md) and the code:
 
-| Label | Meaning |
-|---|---|
-| `stable` | Covered by the "Stable at 1.0" list in [STABILITY.md](../STABILITY.md): canonical `/api/v1` REST paths and the error envelope, sequence format `schema_version: 1`, persisted migrations and rolling upgrades, worker lease/heartbeat, signed package verification, and CLI commands not marked experimental. Removals or semantic changes need a major release. |
-| `beta` | Shipped, tested, and documented, but not in the stable list. This covers the mobile SDK, continuity, node roles, the gRPC stream protocol, deploy tooling, and similar. Can change in a minor release, and every change is noted in the changelog. |
-| `experimental` | Explicitly experimental in STABILITY.md (continuity lab, fault injection, provider preview), off by default, or not yet verified end to end. Can change or be removed in any release. |
-| `n/a` | Explanations, procedures, legal summaries, and historical records. These aren't capabilities. |
+| Label          | Meaning                                                                                                                                                                                                                                                                                                                                                          |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stable`       | Covered by the "Stable at 1.0" list in [STABILITY.md](../STABILITY.md): canonical `/api/v1` REST paths and the error envelope, sequence format `schema_version: 1`, persisted migrations and rolling upgrades, worker lease/heartbeat, signed package verification, and CLI commands not marked experimental. Removals or semantic changes need a major release. |
+| `beta`         | Shipped, tested, and documented, but not in the stable list. This covers the mobile SDK, continuity, node roles, the gRPC stream protocol, deploy tooling, and similar. Can change in a minor release, and every change is noted in the changelog.                                                                                                               |
+| `experimental` | Explicitly experimental in STABILITY.md (continuity lab, fault injection, provider preview), off by default, or not yet verified end to end. Can change or be removed in any release.                                                                                                                                                                            |
+| `n/a`          | Explanations, procedures, legal summaries, and historical records. These aren't capabilities.                                                                                                                                                                                                                                                                    |
 
-Orch8 is pre-1.0 (see the README's *Status & Limitations*). Until 1.0, "stable" means the
+Orch8 is pre-1.0 (see the README's _Status & Limitations_). Until 1.0, "stable" means the
 surface is on the 1.0 contract and breaking changes are kept minimal and announced in
 release notes.
 
@@ -63,11 +70,13 @@ release notes.
 - `beta` [Node roles](NODE_ROLES.md) — assemble all-in-one, control, executor, gateway, and edge processes; operate managed-control sessions and fleet draining.
 - `beta` [Federation and BYOK](FEDERATION.md): cross-organization federation, cross-cluster child workflows, and customer-owned payload vaults.
 - `beta` [Multi-region failover](FAILOVER.md): the active-passive region fence, the promotion procedure, and the RPO/RTO it gives.
+- [Logical backup and restore](BACKUP.md) — consistent snapshots, archive scope, atomic instance imports, and recovery limits.
 - `stable` [Operator support bundle](SUPPORT_BUNDLE.md) — collect bounded, redacted diagnostics atomically.
 - `beta` [Background jobs](JOBS.md) — enqueue a handler with one call (`POST /jobs`), no sequence required.
 - `beta` [End-user WASM steps](WASM_USER_STEPS.md) — accept untrusted WASM modules from your users: sandbox limits, upload validation, ABI, and threat model.
 - `stable` [External workers](WORKERS.md) — poll, heartbeat, complete, and fail work from any language.
 - `beta` [Placement](PLACEMENT.md) — data residency, capability labels, placement policies, sticky affinity, priority lanes, global rate budgets, KEDA autoscaling, and trace propagation.
+- `beta` [PostgreSQL outbox intake](POSTGRES_OUTBOX_INTAKE.md) — relay application outboxes into deduplicated event batches.
 - `beta` [Triggers](TRIGGERS.md) — start workflows from webhooks, NATS, Kafka, SQS, Pub/Sub, Redis Streams, and Postgres row changes.
 - `beta` [Negotiated gRPC worker stream](GRPC_WORKER_STREAM.md) — worker sessions, control, resumable artifacts, telemetry, and mTLS identity.
 - `stable` [Webhooks](WEBHOOKS.md) — delivery, signatures, replay protection, and receiver example.
@@ -106,12 +115,16 @@ release notes.
 
 ## Understand
 
+- `beta` [Distributed runtimes](DISTRIBUTED_RUNTIMES.md) — runtime capabilities, leases, delegation, and device sessions.
+- `beta` [Hybrid deployments](HYBRID.md) — managed control with customer-hosted executors.
+- [Embedded-to-remote migration](MIGRATING_TO_CLOUD.md) — move runtime ownership and state.
 - [Architecture](ARCHITECTURE.md) — crates, execution model, storage, concurrency, and observability.
 - [Embedding applications](APPLICATIONS.md) — mobile, desktop, browser, edge, and game-engine use cases.
 - [Engine capability priorities](ENGINE_FEATURE_PRIORITIES.md) — implemented engine primitives, deliberate bounds, and rejected duplicate abstractions.
 
 ## Component and example documentation
 
+- [Contributing and documentation checks](../CONTRIBUTING.md) — local prerequisites, validation, and generated-file ownership.
 - [Examples index](../examples/README.md) — runnable examples by use case.
 - `beta` [Activepieces sidecar](../activepieces/README.md) — execute community integration pieces.
 - `beta` [Load generator](../loadgen/README.md) — isolated local traffic and stress generation.
@@ -123,6 +136,7 @@ evidence, but current source and CI take precedence over their line numbers or
 open-item lists.
 
 - [Changelog](../CHANGELOG.md) — release history and unreleased changes.
+- [Crate review ledger](RUST_CRATE_REVIEW.md) — September review notes with the October closure report linked at the top.
 - [Rust review](RUST_REVIEW.md) — July 2026 best-practice review record.
 - [Security audit](SECURITY_AUDIT.md) — second Rust security audit record.
 - [Long-running engine review](reviews/2026-10-18-long-running-engine.md) — October 2026 lease, lifecycle, and recovery audit.

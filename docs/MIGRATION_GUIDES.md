@@ -38,30 +38,30 @@ orch8 import n8n workflow.json --out sequence.json   # and `zapier`
 Then run `orch8 sequence preflight --file sequence.json`, implement the listed
 worker handlers, and follow the common path above.
 
-| Source | Input | Fidelity |
-|---|---|---|
-| AWS Step Functions | ASL JSON, or `aws stepfunctions describe-state-machine` output | Full structural translation |
-| Temporal (TypeScript) | workflow file or directory | Static skeleton + report |
-| Inngest (TypeScript) | function file or directory | Static skeleton + report |
-| BullMQ | file or directory with `FlowProducer.add` | Flow tree translation + report |
+| Source                | Input                                                          | Fidelity                       |
+| --------------------- | -------------------------------------------------------------- | ------------------------------ |
+| AWS Step Functions    | ASL JSON, or `aws stepfunctions describe-state-machine` output | Full structural translation    |
+| Temporal (TypeScript) | workflow file or directory                                     | Static skeleton + report       |
+| Inngest (TypeScript)  | function file or directory                                     | Static skeleton + report       |
+| BullMQ                | file or directory with `FlowProducer.add`                      | Flow tree translation + report |
 
 ### Step Functions mapping
 
-| ASL | Orch8 |
-|---|---|
-| `Task` Lambda (`lambda:invoke` or function ARN) / activity | worker step (`ValidateOrder` → handler `validate_order`) |
-| `Task` `http:invoke` | `http_request` |
-| `Task` `states:startExecution.sync` | `sub_sequence` |
-| other service integrations (`sns:publish`, `aws-sdk:*`, ...) | worker stub `aws_<service>_<action>` |
-| `Retry[0]` | step `retry` (`MaxAttempts` + 1 attempts, interval, rate, max delay) |
-| `TimeoutSeconds` | step `timeout` |
-| `Catch[0]` | `try_catch`; when the error path does not rejoin, a marker step + router keeps the success path from running after a caught error |
-| `Choice` | `router`, branches converted up to their join state; no `Default` → `fail` with `States.NoChoiceMatched` |
-| `Choice` that loops back (polling) | `loop` (forward part once, then continue path + forward part per iteration) |
-| `Parallel` / `Map` (inline) | `parallel` / `for_each` over `{{items path}}` |
-| `Wait` `Seconds` / `Timestamp` | delayed `noop` / `fire_at_local` in UTC |
-| `Pass` with `Result`/`Parameters` | `transform` |
-| `Fail` / `Succeed` | `fail` / end of chain |
+| ASL                                                          | Orch8                                                                                                                             |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `Task` Lambda (`lambda:invoke` or function ARN) / activity   | worker step (`ValidateOrder` → handler `validate_order`)                                                                          |
+| `Task` `http:invoke`                                         | `http_request`                                                                                                                    |
+| `Task` `states:startExecution.sync`                          | `sub_sequence`                                                                                                                    |
+| other service integrations (`sns:publish`, `aws-sdk:*`, ...) | worker stub `aws_<service>_<action>`                                                                                              |
+| `Retry[0]`                                                   | step `retry` (`MaxAttempts` + 1 attempts, interval, rate, max delay)                                                              |
+| `TimeoutSeconds`                                             | step `timeout`                                                                                                                    |
+| `Catch[0]`                                                   | `try_catch`; when the error path does not rejoin, a marker step + router keeps the success path from running after a caught error |
+| `Choice`                                                     | `router`, branches converted up to their join state; no `Default` → `fail` with `States.NoChoiceMatched`                          |
+| `Choice` that loops back (polling)                           | `loop` (forward part once, then continue path + forward part per iteration)                                                       |
+| `Parallel` / `Map` (inline)                                  | `parallel` / `for_each` over `{{items path}}`                                                                                     |
+| `Wait` `Seconds` / `Timestamp`                               | delayed `noop` / `fire_at_local` in UTC                                                                                           |
+| `Pass` with `Result`/`Parameters`                            | `transform`                                                                                                                       |
+| `Fail` / `Succeed`                                           | `fail` / end of chain                                                                                                             |
 
 JSONPath references are resolved through the data flow: the execution input is
 `data`, a task result is `outputs.<block>` (`ResultPath`, `InputPath`,
@@ -82,19 +82,19 @@ Workflows written in code need their business logic in workers anyway, so the
 importer extracts the durable skeleton statically (no execution, no type
 checking) and turns each step body into a worker handler to port:
 
-| Source | Orch8 |
-|---|---|
-| Inngest `step.run(id, fn)` | worker step `id`, retry from the function's `retries` (default 4) |
-| Inngest `step.sleep` / `sleepUntil` | delayed `noop` |
-| Inngest `step.waitForEvent({ event, match, timeout })` | `wait_for_event` correlated on `{{data.<match>}}`, wrapped in `try_catch` when a timeout should resolve `null` |
-| Inngest `step.sendEvent` / `step.invoke` / `step.fetch` | `emit_event` / `sub_sequence` / `http_request` |
-| Temporal activity from `proxyActivities` | worker step; `startToCloseTimeout` → `timeout`, `scheduleToCloseTimeout` → `deadline`, `retry` → `retry`, `taskQueue` → `queue_name` |
-| Temporal `sleep` / `condition(fn, timeout)` | delayed `noop` / `wait_for_input` gate released by the `human_input:<gate>` signal |
-| Temporal `executeChild` / `CancellationScope.nonCancellable` | `sub_sequence` / `cancellation_scope` |
-| BullMQ `FlowProducer.add({ children })` | children in `parallel` (recursively), then the parent job; `queueName` → `queue_name`, `attempts`/`backoff`/`delay` → `retry`/`delay` |
-| `Promise.all([...])` / `Promise.race([...])` | `parallel` / `race` |
-| `Promise.all(items.map(...))` | `for_each` (sequential; reported) |
-| `if/else`, `for..of`, `while`, `try/catch/finally` around steps | `router`, `for_each`, `loop`, `try_catch` (a rethrow becomes a trailing `fail`) |
+| Source                                                          | Orch8                                                                                                                                 |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Inngest `step.run(id, fn)`                                      | worker step `id`, retry from the function's `retries` (default 4)                                                                     |
+| Inngest `step.sleep` / `sleepUntil`                             | delayed `noop`                                                                                                                        |
+| Inngest `step.waitForEvent({ event, match, timeout })`          | `wait_for_event` correlated on `{{data.<match>}}`, wrapped in `try_catch` when a timeout should resolve `null`                        |
+| Inngest `step.sendEvent` / `step.invoke` / `step.fetch`         | `emit_event` / `sub_sequence` / `http_request`                                                                                        |
+| Temporal activity from `proxyActivities`                        | worker step; `startToCloseTimeout` → `timeout`, `scheduleToCloseTimeout` → `deadline`, `retry` → `retry`, `taskQueue` → `queue_name`  |
+| Temporal `sleep` / `condition(fn, timeout)`                     | delayed `noop` / `wait_for_input` gate released by the `human_input:<gate>` signal                                                    |
+| Temporal `executeChild` / `CancellationScope.nonCancellable`    | `sub_sequence` / `cancellation_scope`                                                                                                 |
+| BullMQ `FlowProducer.add({ children })`                         | children in `parallel` (recursively), then the parent job; `queueName` → `queue_name`, `attempts`/`backoff`/`delay` → `retry`/`delay` |
+| `Promise.all([...])` / `Promise.race([...])`                    | `parallel` / `race`                                                                                                                   |
+| `Promise.all(items.map(...))`                                   | `for_each` (sequential; reported)                                                                                                     |
+| `if/else`, `for..of`, `while`, `try/catch/finally` around steps | `router`, `for_each`, `loop`, `try_catch` (a rethrow becomes a trailing `fail`)                                                       |
 
 Conditions and arguments are translated when they only read the workflow
 input (Inngest `event` → `data`, Temporal first argument → `data`) and earlier

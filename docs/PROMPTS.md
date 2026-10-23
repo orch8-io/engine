@@ -27,7 +27,11 @@ version on a slice of traffic, and reference the prompt from `llm_call`.
   "messages": [
     { "role": "user", "content": "Ticket #{{ ticket.id }}: {{ ticket.body }}" }
   ],
-  "model_params": { "provider": "openai", "model": "gpt-5.6-luna", "temperature": 0 },
+  "model_params": {
+    "provider": "openai",
+    "model": "gpt-5.6-luna",
+    "temperature": 0
+  },
   "response_schema": {
     "type": "object",
     "required": ["queue"],
@@ -71,15 +75,15 @@ orch8 prompt unlabel ticket-triage staging
 
 ## REST
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/prompts` | Push a version (`201` created, `200` identical to latest). Optional `label` moves that label to the pushed version. |
-| `GET` | `/prompts` | Registry listing: latest version, version count, labels. |
-| `GET` | `/prompts/{name}` | All versions (newest first) and labels. |
-| `GET` | `/prompts/{name}/versions/{version}` | One immutable version. |
-| `GET` | `/prompts/{name}/resolve?label=…` or `?version=…` | The version a label or number resolves to. With neither, the latest version. |
-| `PUT` | `/prompts/{name}/labels/{label}` | `{version, canary_version?, canary_percent?}` |
-| `DELETE` | `/prompts/{name}/labels/{label}` | Remove a label. |
+| Method   | Path                                              | Purpose                                                                                                             |
+| -------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `POST`   | `/prompts`                                        | Push a version (`201` created, `200` identical to latest). Optional `label` moves that label to the pushed version. |
+| `GET`    | `/prompts`                                        | Registry listing: latest version, version count, labels.                                                            |
+| `GET`    | `/prompts/{name}`                                 | All versions (newest first) and labels.                                                                             |
+| `GET`    | `/prompts/{name}/versions/{version}`              | One immutable version.                                                                                              |
+| `GET`    | `/prompts/{name}/resolve?label=…` or `?version=…` | The version a label or number resolves to. With neither, the latest version.                                        |
+| `PUT`    | `/prompts/{name}/labels/{label}`                  | `{version, canary_version?, canary_percent?}`                                                                       |
+| `DELETE` | `/prompts/{name}/labels/{label}`                  | Remove a label.                                                                                                     |
 
 Tenant: from the `X-Tenant-Id` header or a per-tenant key. Unscoped root-key
 callers pass `tenant_id` in the body or query. API keys with the `publisher`
@@ -89,7 +93,9 @@ capability may manage prompts, just as they manage sequences and releases.
 
 ```json
 {
-  "type": "step", "id": "triage", "handler": "llm_call",
+  "type": "step",
+  "id": "triage",
+  "handler": "llm_call",
   "params": {
     "api_key_env": "OPENAI_API_KEY",
     "prompt": {
@@ -118,8 +124,15 @@ Merge rules:
 The step output gains a `prompt` field:
 
 ```json
-"prompt": { "name": "ticket-triage", "version": 1, "label": "production",
-            "variant": "stable", "content_hash": "9f2c…" }
+{
+  "prompt": {
+    "name": "ticket-triage",
+    "version": 1,
+    "label": "production",
+    "variant": "stable",
+    "content_hash": "9f2c…"
+  }
+}
 ```
 
 `variant` is `stable` or `canary` when the prompt was resolved through a label,

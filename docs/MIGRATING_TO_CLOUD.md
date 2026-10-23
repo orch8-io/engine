@@ -22,13 +22,13 @@ schema migrations exactly as before.
 
 ## What moves
 
-| Moves | Stays on the source |
-|---|---|
-| every version of the tenant's sequences | completed/failed/cancelled instances |
-| non-terminal instances (`scheduled`, `running`, `waiting`, `paused`) with their context and metadata | KV state, checkpoints, audit history, step logs |
-| execution trees and block outputs, so finished steps never re-run | artifact blobs (externalized payload refs must be reachable from the target) |
-| the effect-receipt ledger, including unresolved `dispatched`/`unknown` receipts | triggers, cron schedules, credentials (use `orch8 backup`/`restore`) |
-| pending signals | |
+| Moves                                                                                                | Stays on the source                                                          |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| every version of the tenant's sequences                                                              | completed/failed/cancelled instances                                         |
+| non-terminal instances (`scheduled`, `running`, `waiting`, `paused`) with their context and metadata | KV state, checkpoints, audit history, step logs                              |
+| execution trees and block outputs, so finished steps never re-run                                    | artifact blobs (externalized payload refs must be reachable from the target) |
+| the effect-receipt ledger, including unresolved `dispatched`/`unknown` receipts                      | triggers, cron schedules, credentials (use `orch8 backup`/`restore`)         |
+| pending signals                                                                                      |                                                                              |
 
 Instance ids are preserved, so clients that stored them keep working against
 the target.
@@ -38,7 +38,7 @@ the target.
 For each instance:
 
 1. **Idle check.** An instance that is mid-step (`running`) or holds pending
-   or claimed worker tasks is *refused* — reported, left untouched, and still
+   or claimed worker tasks is _refused_ — reported, left untouched, and still
    running locally. `--wait-for-idle` waits up to `--idle-timeout-secs`
    (default 300) for it to settle instead.
 2. **Fence.** The source ownership record moves to `transferring`: the

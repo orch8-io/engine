@@ -3,7 +3,7 @@
 > **Stability: beta**, shipped and tested; may change in a minor release with a changelog note.
 
 This guide is for vendors who run Orch8 inside their own product and serve
-workflows to *their* customers. It covers:
+workflows to _their_ customers. It covers:
 
 1. [Sub-tenants](#sub-tenants): scoping, caps and metering per end customer.
 2. [Embed tokens](#embed-tokens): short-lived browser credentials for the
@@ -15,12 +15,12 @@ workflows to *their* customers. It covers:
 
 The terms used below:
 
-| Term | Meaning |
-| --- | --- |
-| Tenant | An engine tenant (`X-Tenant-Id` or a per-tenant API key). The vendor. |
-| Sub-tenant | One of the vendor's customers, scoped inside a tenant. |
+| Term           | Meaning                                                                  |
+| -------------- | ------------------------------------------------------------------------ |
+| Tenant         | An engine tenant (`X-Tenant-Id` or a per-tenant API key). The vendor.    |
+| Sub-tenant     | One of the vendor's customers, scoped inside a tenant.                   |
 | Vendor backend | The vendor's server. It holds the tenant API key and mints embed tokens. |
-| Embed kit | The `@orch8/embed` web components running in the end customer's browser. |
+| Embed kit      | The `@orch8/embed` web components running in the end customer's browser. |
 
 ## Sub-tenants
 
@@ -37,7 +37,7 @@ X-Orch8-Sub-Tenant: acme-corp
   body field `sub_tenant` is accepted too; when both are present they must
   match (403 otherwise). Without the header or field, behaviour is unchanged:
   the instance is tenant-level (`sub_tenant` absent).
-- **Sequences** created with the header (`POST /api/v1/sequences`) are *owned*
+- **Sequences** created with the header (`POST /api/v1/sequences`) are _owned_
   by that sub-tenant: only that sub-tenant's embedded builder may add versions.
 - **Children** spawned by a `sub_sequence` block inherit the parent's
   sub-tenant. Forks keep the source's sub-tenant.
@@ -49,7 +49,7 @@ X-Orch8-Sub-Tenant: acme-corp
   `(tenant, sub-tenant)`; mixing sub-tenants (or sub-tenant and tenant-level
   items) in one batch is a 400.
 
-The header is a *scoping* input for the vendor backend, which already holds a
+The header is a _scoping_ input for the vendor backend, which already holds a
 tenant key that can act on every sub-tenant. It is **not** an authorization
 boundary for end customers; embed tokens are.
 
@@ -85,8 +85,13 @@ GET /api/v1/usage/sub-tenants?from=2026-09-01T00:00:00Z&to=2026-10-01T00:00:00Z
 ```json
 {
   "items": [
-    { "sub_tenant": "acme-corp", "executions_started": 412, "executions_completed": 398,
-      "steps_executed": 2261, "last_active_at": "2026-09-28T13:02:11Z" }
+    {
+      "sub_tenant": "acme-corp",
+      "executions_started": 412,
+      "executions_completed": 398,
+      "steps_executed": 2261,
+      "last_active_at": "2026-09-28T13:02:11Z"
+    }
   ],
   "active_sub_tenants": 1,
   "from": "2026-09-01T00:00:00Z",
@@ -172,13 +177,13 @@ starts a run through an embed token (`default_max_concurrent_per_sub_tenant`,
 `PUT /embed/sequences/{name}` body). See
 [CONFIGURATION.md](CONFIGURATION.md#embed).
 
-| Scope | Grants |
-| --- | --- |
-| `runs:read` | `GET /embed/runs`, `GET /embed/runs/{id}` |
-| `runs:start` | `POST /embed/runs` (and sequence discovery) |
-| `approvals:resolve` | `GET /embed/approvals`, `POST /embed/approvals/{id}` |
-| `sequences:read` | `GET /embed/sequences`, `GET /embed/sequences/{name}` |
-| `builder:edit` | `PUT /embed/sequences/{name}` (sub-tenant-owned sequences only) |
+| Scope               | Grants                                                          |
+| ------------------- | --------------------------------------------------------------- |
+| `runs:read`         | `GET /embed/runs`, `GET /embed/runs/{id}`                       |
+| `runs:start`        | `POST /embed/runs` (and sequence discovery)                     |
+| `approvals:resolve` | `GET /embed/approvals`, `POST /embed/approvals/{id}`            |
+| `sequences:read`    | `GET /embed/sequences`, `GET /embed/sequences/{name}`           |
+| `builder:edit`      | `PUT /embed/sequences/{name}` (sub-tenant-owned sequences only) |
 
 A missing scope is `403` with error code `embed_scope_denied`.
 
@@ -201,17 +206,17 @@ constant time.
 All take `Authorization: Bearer o8e1…` and are bound to the token's tenant and
 sub-tenant.
 
-| Route | Returns |
-| --- | --- |
-| `GET /embed/runs?limit=&cursor=` | `{ items: [{ id, sequence, state, created_at, updated_at, current_step }], next_cursor }` |
-| `GET /embed/runs/{id}` | `{ id, sequence, state, created_at, updated_at, steps: [{ id, name, state, started_at, finished_at, output? }] }` |
-| `POST /embed/runs` `{ sequence, input, namespace?, idempotency_key? }` | `201 { id }` |
-| `GET /embed/approvals` | `{ items: [{ id, instance_id, step_id, prompt, choices: [{label, value}], created_at }] }` |
-| `POST /embed/approvals/{id}` `{ choice, comment? }` | `202`; `409` when already resolved or the run finished |
-| `GET /embed/sequences` | `{ items: [{ id, name, namespace, version, description, input_schema, owned, gallery, title, template }], handlers: [{ name }] }` |
-| `GET /embed/sequences/{name}?namespace=` | summary fields + `definition` + `redacted` |
-| `PUT /embed/sequences/{name}?namespace=` | `201 { id, version }`: a new version owned by the sub-tenant |
-| `GET /embed/theme` | `{ css_vars, logo_url?, hide_badge }` |
+| Route                                                                  | Returns                                                                                                                           |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /embed/runs?limit=&cursor=`                                       | `{ items: [{ id, sequence, state, created_at, updated_at, current_step }], next_cursor }`                                         |
+| `GET /embed/runs/{id}`                                                 | `{ id, sequence, state, created_at, updated_at, steps: [{ id, name, state, started_at, finished_at, output? }] }`                 |
+| `POST /embed/runs` `{ sequence, input, namespace?, idempotency_key? }` | `201 { id }`                                                                                                                      |
+| `GET /embed/approvals`                                                 | `{ items: [{ id, instance_id, step_id, prompt, choices: [{label, value}], created_at }] }`                                        |
+| `POST /embed/approvals/{id}` `{ choice, comment? }`                    | `202`; `409` when already resolved or the run finished                                                                            |
+| `GET /embed/sequences`                                                 | `{ items: [{ id, name, namespace, version, description, input_schema, owned, gallery, title, template }], handlers: [{ name }] }` |
+| `GET /embed/sequences/{name}?namespace=`                               | summary fields + `definition` + `redacted`                                                                                        |
+| `PUT /embed/sequences/{name}?namespace=`                               | `201 { id, version }`: a new version owned by the sub-tenant                                                                      |
+| `GET /embed/theme`                                                     | `{ css_vars, logo_url?, hide_badge }`                                                                                             |
 
 What an embedded viewer sees:
 
@@ -222,7 +227,18 @@ What an embedded viewer sees:
   outputs of steps the sequence lists in `embed.visible_outputs`:
 
   ```json
-  { "name": "onboarding", "embed": { "visible_outputs": ["summary"] }, "blocks": [ … ] }
+  {
+    "name": "onboarding",
+    "embed": { "visible_outputs": ["summary"] },
+    "blocks": [
+      {
+        "type": "step",
+        "id": "summary",
+        "handler": "transform",
+        "params": { "value": "Ready" }
+      }
+    ]
+  }
   ```
 
 - **Sequences.** A token sees its sub-tenant's own sequences, gallery
@@ -373,15 +389,15 @@ ephemeral keypairs and never use the production key.
 
 ## Security model
 
-| Boundary | Enforced by |
-| --- | --- |
-| Tenant ↔ tenant | API keys bind the tenant; embed tokens carry a signed `tid`. Resources of another tenant are 404. |
-| Sub-tenant ↔ sub-tenant (browser) | Embed tokens carry a signed `sub`; every embed read and write checks the resource's `sub_tenant`. Foreign resources are 404. |
-| End customer ↔ vendor configuration | No context, metadata or unlisted outputs on embed routes; tenant-level definitions are redacted. |
-| Browser ↔ management API | `o8e1` bearers are accepted only on the embed-token route allowlist; everywhere else they are not a credential. Embed CORS origins are limited to those routes. |
-| Token forgery and replay window | HMAC-SHA256 with a secret of at least 32 bytes, constant-time comparison, `exp - iat ≤ 3600`, strict claim schema. |
-| Minting | `POST /embed/tokens` requires a tenant API key with the Operator capability. |
-| License tampering | ed25519 signature over the exact token prefix and payload; any change makes the key `invalid`. |
+| Boundary                             | Enforced by                                                                                                                                                     |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tenant ↔ tenant                     | API keys bind the tenant; embed tokens carry a signed `tid`. Resources of another tenant are 404.                                                               |
+| Sub-tenant ↔ sub-tenant (browser)   | Embed tokens carry a signed `sub`; every embed read and write checks the resource's `sub_tenant`. Foreign resources are 404.                                    |
+| End customer ↔ vendor configuration | No context, metadata or unlisted outputs on embed routes; tenant-level definitions are redacted.                                                                |
+| Browser ↔ management API            | `o8e1` bearers are accepted only on the embed-token route allowlist; everywhere else they are not a credential. Embed CORS origins are limited to those routes. |
+| Token forgery and replay window      | HMAC-SHA256 with a secret of at least 32 bytes, constant-time comparison, `exp - iat ≤ 3600`, strict claim schema.                                              |
+| Minting                              | `POST /embed/tokens` requires a tenant API key with the Operator capability.                                                                                    |
+| License tampering                    | ed25519 signature over the exact token prefix and payload; any change makes the key `invalid`.                                                                  |
 
 Embed tokens are stateless: there is no per-token revocation. Keep TTLs short,
 and rotate `token_secret` to invalidate every outstanding token at once.

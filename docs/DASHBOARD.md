@@ -36,18 +36,18 @@ orch8-server --config orch8.toml
 
 ## Current surfaces
 
-| Group | Surface | Decision or action |
-|---|---|---|
-| Monitor | Overview | Is the engine healthy, and what needs attention? |
-| Monitor | Executions | Which run is blocked or failed, and what happened? |
-| Monitor | Approvals | Which human decisions are waiting? |
-| Monitor | Operations | Retry DLQ work, recover webhooks, reset breakers, or drain nodes. |
-| Build & ship | Sequences | Inspect versions and start schema-driven runs. |
-| Build & ship | Releases | Diff, validate, canary, evaluate, promote, pause, or roll back. |
-| Build & ship | Cron / Triggers / Sessions | Manage invocation and coordination. |
-| Runtime | Tasks / Workers / Queues / Pools | Diagnose and control dispatch capacity. |
-| Runtime | Mobile / Usage | Inspect device sync and resource usage. |
-| Administration | Plugins / Credentials / API keys | Manage integration and access material. |
+| Group          | Surface                          | Decision or action                                                |
+| -------------- | -------------------------------- | ----------------------------------------------------------------- |
+| Monitor        | Overview                         | Is the engine healthy, and what needs attention?                  |
+| Monitor        | Executions                       | Which run is blocked or failed, and what happened?                |
+| Monitor        | Approvals                        | Which human decisions are waiting?                                |
+| Monitor        | Operations                       | Retry DLQ work, recover webhooks, reset breakers, or drain nodes. |
+| Build & ship   | Sequences                        | Inspect versions and start schema-driven runs.                    |
+| Build & ship   | Releases                         | Diff, validate, canary, evaluate, promote, pause, or roll back.   |
+| Build & ship   | Cron / Triggers / Sessions       | Manage invocation and coordination.                               |
+| Runtime        | Tasks / Workers / Queues / Pools | Diagnose and control dispatch capacity.                           |
+| Runtime        | Mobile / Usage                   | Inspect device sync and resource usage.                           |
+| Administration | Plugins / Credentials / API keys | Manage integration and access material.                           |
 
 An execution detail page includes the execution tree, unified timeline, artifacts,
 audit entries, context patching, checkpoints, resume-from-block, and fork preview.

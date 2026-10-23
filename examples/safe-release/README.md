@@ -44,4 +44,3 @@ of a gate is to refuse success without evidence.
 
 For production semantics and rollback commands, continue with the
 [safe releases guide](../../docs/RELEASES.md).
-

@@ -5,19 +5,10 @@ Python process on `orch8-engine-native`, persisted to `orders.db` (SQLite).
 
 ## Run
 
-Build the extension once (from the repo root). With maturin:
-
-```sh
-cd packages/python-native && maturin develop
-```
-
-or without maturin (macOS shown; use `.so` from `target/debug/lib_native.so` on Linux):
-
-```sh
-cd packages/python-native
-cargo rustc --lib -- -C link-arg=-undefined -C link-arg=dynamic_lookup
-cp "${CARGO_TARGET_DIR:-../../target}"/*/debug/lib_native.dylib python/orch8_engine/_native.abi3.so
-```
+Build the extension once with the virtual-environment instructions in
+[the native Python package](../../packages/python-native/README.md#build-and-test).
+Those instructions run inside `packages/python-native`; return to the repository
+root before continuing, and keep that virtual environment active.
 
 Then:
 

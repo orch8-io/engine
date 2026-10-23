@@ -14,13 +14,13 @@ loadgen/bench/run.sh --system orch8 --scenario crash_recovery --n 500 --concurre
 node loadgen/bench/validate-result.mjs loadgen/bench/results/*/result.json
 ```
 
-| Path | Purpose |
-|---|---|
-| `run.sh` | Fresh stack per run → driver → optional kill/restart → result file → teardown |
-| `systems/<name>/docker-compose.yml` | The system under test plus its worker |
-| `systems/<name>/driver.mjs` | Submits workflows and records per-workflow samples |
-| `lib/summarize.mjs` | Builds `result.json` (percentiles, throughput, crash metrics) |
-| `results.schema.json` / `validate-result.mjs` | Result contract and dependency-free validator |
+| Path                                          | Purpose                                                                       |
+| --------------------------------------------- | ----------------------------------------------------------------------------- |
+| `run.sh`                                      | Fresh stack per run → driver → optional kill/restart → result file → teardown |
+| `systems/<name>/docker-compose.yml`           | The system under test plus its worker                                         |
+| `systems/<name>/driver.mjs`                   | Submits workflows and records per-workflow samples                            |
+| `lib/summarize.mjs`                           | Builds `result.json` (percentiles, throughput, crash metrics)                 |
+| `results.schema.json` / `validate-result.mjs` | Result contract and dependency-free validator                                 |
 
 Status per system: **orch8** has been run end-to-end by the harness.
 **temporal**, **inngest**, and **hatchet** are complete but not yet exercised

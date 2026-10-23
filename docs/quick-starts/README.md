@@ -12,14 +12,14 @@ unfamiliar concept.
 
 ## The learning path
 
-| Level | Time | You add | You finish with |
-|---|---:|---|---|
-| [1. Run one local workflow](01-local-workflow.md) | 10 min | Sequence, block, handler, instance | A completed workflow without a server |
-| [2. Pass data and choose a route](02-data-and-routing.md) | 20 min | Context, templates, outputs, router, input schema | One workflow that behaves differently for two inputs |
-| [3. Run the durable API server](03-durable-api.md) | 25 min | SQLite persistence, authentication, CLI/API operations | A workflow that survives outside the development process |
-| [4. Execute application code in a worker](04-external-worker.md) | 30 min | Worker polling, completion, outputs | A Node.js handler running outside the engine |
-| [5. Observe failure and recover](05-failure-and-recovery.md) | 30 min | Retry policy, DLQ, diagnosis, manual retry | A failed instance recovered without recreating it |
-| [6. Ship a guarded release](06-production-release.md) | 40 min | PostgreSQL, preflight, immutable versions, canary gates | A candidate version evaluated before promotion |
+| Level                                                            |   Time | You add                                                 | You finish with                                          |
+| ---------------------------------------------------------------- | -----: | ------------------------------------------------------- | -------------------------------------------------------- |
+| [1. Run one local workflow](01-local-workflow.md)                | 10 min | Sequence, block, handler, instance                      | A completed workflow without a server                    |
+| [2. Pass data and choose a route](02-data-and-routing.md)        | 20 min | Context, templates, outputs, router, input schema       | One workflow that behaves differently for two inputs     |
+| [3. Run the durable API server](03-durable-api.md)               | 25 min | SQLite persistence, authentication, CLI/API operations  | A workflow that survives outside the development process |
+| [4. Execute application code in a worker](04-external-worker.md) | 30 min | Worker polling, completion, outputs                     | A Node.js handler running outside the engine             |
+| [5. Observe failure and recover](05-failure-and-recovery.md)     | 30 min | Retry policy, DLQ, diagnosis, manual retry              | A failed instance recovered without recreating it        |
+| [6. Ship a guarded release](06-production-release.md)            | 40 min | PostgreSQL, preflight, immutable versions, canary gates | A candidate version evaluated before promotion           |
 
 The sequence is deliberate:
 

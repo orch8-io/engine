@@ -29,8 +29,8 @@ pnpm dev
 Open http://localhost:3000, then:
 
 1. **Runs** → **Start customer-onboarding** → you land on the run timeline.
-2. Steps tick along until **activate_approval** is *Waiting*.
-3. **Approvals** → choose *Activate*, add a comment, **Submit decision**.
+2. Steps tick along until **activate_approval** is _Waiting_.
+3. **Approvals** → choose _Activate_, add a comment, **Submit decision**.
 4. Back on the run, the remaining steps complete.
 5. Switch user (top right) to **Li · Globex**: a different customer, so you
    see different runs. **Raj** is a member, so the **Builder** is read-only
@@ -53,7 +53,7 @@ In `my-app/.env.local`:
 
 ```bash
 ORCH8_URL=http://127.0.0.1:8080
-ORCH8_API_KEY=<api_key from orch8-local/orch8.toml>
+ORCH8_API_KEY="<api_key from orch8-local/orch8.toml>"
 ORCH8_TENANT_ID=demo
 ```
 
@@ -75,13 +75,13 @@ logs `HTTP 401`, check `ORCH8_API_KEY` and `ORCH8_TENANT_ID`. If widgets show
 
 ## 3. Make it yours
 
-| File | What to change |
-| --- | --- |
-| `lib/users.ts`, `lib/auth.ts` | **Stub auth.** Replace `getCurrentUser()` with your session. Keep one sub-tenant per customer account (`subTenantFor`) and decide scopes per role (`scopesFor`). |
-| `app/api/orch8/embed-token/route.ts` | The only place the API key is used. Return 401 when there is no session. |
-| `lib/token-provider.ts` | Browser token cache. Widgets call it when a token is missing, about to expire, or rejected. |
-| `components/widgets.tsx` | Widget props, brand colours (`theme`), and navigation on run select. |
-| `orch8/customer-onboarding.json` | The sample workflow. `embed.visible_outputs` lists the steps whose outputs customers may see. |
+| File                                 | What to change                                                                                                                                                   |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib/users.ts`, `lib/auth.ts`        | **Stub auth.** Replace `getCurrentUser()` with your session. Keep one sub-tenant per customer account (`subTenantFor`) and decide scopes per role (`scopesFor`). |
+| `app/api/orch8/embed-token/route.ts` | The only place the API key is used. Return 401 when there is no session.                                                                                         |
+| `lib/token-provider.ts`              | Browser token cache. Widgets call it when a token is missing, about to expire, or rejected.                                                                      |
+| `components/widgets.tsx`             | Widget props, brand colours (`theme`), and navigation on run select.                                                                                             |
+| `orch8/customer-onboarding.json`     | The sample workflow. `embed.visible_outputs` lists the steps whose outputs customers may see.                                                                    |
 
 White-label: with a license that includes `white_label`, call
 `PUT /api/v1/embed/theme` with `{ "css_vars": {...}, "logo_url": "...", "hide_badge": true }`
@@ -91,8 +91,8 @@ Full widget reference: [docs/EMBED_KIT.md](https://github.com/orch8-io/engine/bl
 
 ## Scripts
 
-| Command | |
-| --- | --- |
-| `pnpm dev` / `pnpm build` / `pnpm start` | Next.js |
-| `pnpm seed` | Publish the sample workflow for each demo customer (real engine only) |
-| `pnpm lint` / `pnpm typecheck` | ESLint / TypeScript |
+| Command                                  |                                                                       |
+| ---------------------------------------- | --------------------------------------------------------------------- |
+| `pnpm dev` / `pnpm build` / `pnpm start` | Next.js                                                               |
+| `pnpm seed`                              | Publish the sample workflow for each demo customer (real engine only) |
+| `pnpm lint` / `pnpm typecheck`           | ESLint / TypeScript                                                   |

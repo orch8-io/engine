@@ -34,12 +34,12 @@ ORCH8_AP_PORT=50052 node dist/index.js
 
 Environment variables:
 
-| Var                    | Default                | Purpose                                                     |
-|------------------------|------------------------|-------------------------------------------------------------|
-| `ORCH8_AP_PORT`        | `50052`                | Listen port                                                 |
-| `ORCH8_AP_HOST`        | `127.0.0.1`            | Bind address (use `0.0.0.0` for Docker)                     |
-| `ORCH8_AP_TIMEOUT_MS`  | `60000`                | Per-action execution timeout                                |
-| `ORCH8_AP_ALLOWLIST`   | unset (allow any)      | Comma-separated piece names the worker is allowed to load   |
+| Var                   | Default           | Purpose                                                   |
+| --------------------- | ----------------- | --------------------------------------------------------- |
+| `ORCH8_AP_PORT`       | `50052`           | Listen port                                               |
+| `ORCH8_AP_HOST`       | `127.0.0.1`       | Bind address (use `0.0.0.0` for Docker)                   |
+| `ORCH8_AP_TIMEOUT_MS` | `60000`           | Per-action execution timeout                              |
+| `ORCH8_AP_ALLOWLIST`  | unset (allow any) | Comma-separated piece names the worker is allowed to load |
 
 On the Rust side:
 
@@ -57,7 +57,7 @@ ORCH8_ACTIVEPIECES_URL=http://127.0.0.1:50052/execute ./orch8-server
   "type": "step",
   "handler": "ap://slack.send_channel_message",
   "params": {
-    "auth":  { "access_token": "xoxb-..." },
+    "auth": { "access_token": "xoxb-..." },
     "props": { "channel": "C12345", "text": "deployment complete" }
   }
 }
@@ -72,12 +72,12 @@ to run a piece trigger's poll headlessly:
 
 ```json
 {
-  "piece":   "stripe",
+  "piece": "stripe",
   "trigger": "new_failed_payment",
-  "auth":    { "access_token": "sk_live_..." },
-  "props":   { },
-  "state":   { "lastPoll": 1717171717 },
-  "slug":    "stripe-failed-payments"
+  "auth": { "access_token": "sk_live_..." },
+  "props": {},
+  "state": { "lastPoll": 1717171717 },
+  "slug": "stripe-failed-payments"
 }
 ```
 
@@ -120,7 +120,7 @@ with `last_error` and `consecutive_failures`) and retried on the next tick.
 ## Error semantics
 
 | HTTP status | Error type  | Retryable? |
-|-------------|-------------|------------|
+| ----------- | ----------- | ---------- |
 | 200         | —           | —          |
 | 422         | `permanent` | No         |
 | 500         | `permanent` | No         |
@@ -129,6 +129,7 @@ with `last_error` and `consecutive_failures`) and retried on the next tick.
 The orch8 engine translates 5xx responses to `StepError::Retryable` and 4xx responses to `StepError::Permanent`, so retries and DLQ routing work identically to other handlers.
 
 Classification heuristic inside the sidecar:
+
 - Piece throws with `response.status >= 500` → **retryable**
 - Piece throws with `response.status` in 4xx → **permanent**
 - Node network error codes (`ECONNRESET`, `ETIMEDOUT`, `EAI_AGAIN`, ...) → **retryable**

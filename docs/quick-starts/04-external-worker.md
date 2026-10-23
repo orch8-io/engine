@@ -245,12 +245,12 @@ engine -> persist output and resume instance
 
 There are four operations to retain:
 
-| Operation | When to use it |
-|---|---|
-| Poll | Claim bounded work for one handler (or a named queue) |
+| Operation | When to use it                                              |
+| --------- | ----------------------------------------------------------- |
+| Poll      | Claim bounded work for one handler (or a named queue)       |
 | Heartbeat | Extend ownership of a task that may run for tens of seconds |
-| Complete | Persist JSON output and resume the workflow |
-| Fail | Report a retryable or permanent error |
+| Complete  | Persist JSON output and resume the workflow                 |
+| Fail      | Report a retryable or permanent error                       |
 
 The `worker_id` identifies one process. In a deployment, use a pod name or a
 hostname/process combination. Do not configure every replica with the same ID.
@@ -285,10 +285,10 @@ Next: [Observe failure and recover](05-failure-and-recovery.md).
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Poll returns `401` | The worker shell lacks the Level 3 API key | Export `ORCH8_API_KEY` before running Node |
-| Worker polls forever with no tasks | Handler names differ, or the instance never started | Compare `calculate_customer_score` in both files and inspect the instance |
-| Instance remains waiting after completion | Completion used the wrong task or worker ID | Use `task.id` and the exact `workerId` that claimed it |
-| Output schema rejects the result | Worker returned strings or a different field name | Return integer `score` plus `customer_id` and `segment` exactly as shown |
-| Node says `fetch is not defined` | Node is older than 18 | Upgrade Node or use the official SDK with its supported runtime |
+| Symptom                                   | Likely cause                                        | Fix                                                                       |
+| ----------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------- |
+| Poll returns `401`                        | The worker shell lacks the Level 3 API key          | Export `ORCH8_API_KEY` before running Node                                |
+| Worker polls forever with no tasks        | Handler names differ, or the instance never started | Compare `calculate_customer_score` in both files and inspect the instance |
+| Instance remains waiting after completion | Completion used the wrong task or worker ID         | Use `task.id` and the exact `workerId` that claimed it                    |
+| Output schema rejects the result          | Worker returned strings or a different field name   | Return integer `score` plus `customer_id` and `segment` exactly as shown  |
+| Node says `fetch is not defined`          | Node is older than 18                               | Upgrade Node or use the official SDK with its supported runtime           |

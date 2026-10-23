@@ -31,8 +31,8 @@ if any file that existed at that tag has changed.
 
 ## Rule: migrations must be safe for a rolling deploy
 
-`orch8 migrate` runs before the new fleet starts, so for a while the *old*
-binaries run against the *new* schema. A migration must therefore:
+`orch8 migrate` runs before the new fleet starts, so for a while the _old_
+binaries run against the _new_ schema. A migration must therefore:
 
 - never change a column type the previous release decodes (sqlx is strict:
   an `i32` field fails to decode an `INT8` column), and never drop or rename

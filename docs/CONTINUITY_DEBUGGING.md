@@ -79,10 +79,10 @@ For example:
 {
   "tenant_id": "tenant-a",
   "checkpoint_id": "019...",
-  "context_patch": {"priority": "urgent"},
-  "config_patch": {"routing_policy": "quality_first"},
+  "context_patch": { "priority": "urgent" },
+  "config_patch": { "routing_policy": "quality_first" },
   "block_param_overrides": {
-    "classify": {"model": "premium-v2"}
+    "classify": { "model": "premium-v2" }
   },
   "output_overrides": {
     "classify": {
@@ -96,11 +96,11 @@ For example:
       }
     }
   },
-  "handler_mocks": {"premium_path": {"selected": true}},
+  "handler_mocks": { "premium_path": { "selected": true } },
   "signals": [
     {
       "signal_type": "custom:human_input:approve",
-      "payload": {"value": "continue"}
+      "payload": { "value": "continue" }
     }
   ],
   "max_ticks": 5000

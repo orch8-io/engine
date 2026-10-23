@@ -4,7 +4,15 @@
 
 Objective: review every Rust crate in `engine/`, including excluded native bindings
 and the fuzz package, for edge cases, code smells, and optimization opportunities.
-Started 2026-09-05. This is an active review, not a completed audit.
+Started 2026-09-05. The entries below preserve the findings and intermediate
+status of that review; they are not the current open-work queue.
+
+> **Closure update (2026-10-23):** the subsequent reliability review and CI
+> follow-ups were merged. See [the final review report (PR #260)](https://github.com/orch8-io/engine/pull/260)
+> and [the final benchmark workload fix (PR #261)](https://github.com/orch8-io/engine/pull/261).
+> In particular, the workspace now uses SQLx 0.9 and Rust 1.97. Historical
+> dependency versions, test counts, line numbers, and “next review” entries
+> below describe earlier snapshots; consult current manifests and CI for today's state.
 
 ## Completion criteria
 
@@ -18,22 +26,22 @@ No crate is complete merely because Clippy passes.
 
 ## Inventory
 
-| Crate | Directory | Rust source files | Source lines | Review status |
-|---|---|---:|---:|---|
-| `orch8` | `orch8` | 13 | 3,138 | Source reviewed; host tests/Clippy passed |
-| `orch8-types` | `orch8-types` | 55 | 20,735 | In progress |
-| `orch8-storage` | `orch8-storage` | 91 | 42,553 | In progress |
-| `orch8-engine` | `orch8-engine` | 100 | 76,224 | In progress |
-| `orch8-mobile` | `orch8-mobile` | 27 | 13,022 | In progress |
-| `orch8-publisher` | `orch8-publisher` | 13 | 6,170 | Source reviewed; host tests/Clippy passed |
-| `orch8-push` | `orch8-push` | 10 | 4,401 | In progress |
-| `orch8-api` | `orch8-api` | 64 | 29,078 | In progress |
-| `orch8-grpc` | `orch8-grpc` | 10 | 6,664 | In progress |
-| `orch8-server` | `orch8-server` | 7 | 4,577 | In progress |
-| `orch8-cli` | `orch8-cli` | 40 | 13,883 | Production source reviewed; follow-ups/checks in progress |
-| `orch8-node` | `packages/node-native` | 1 | 42 | Source reviewed; host checks passed |
-| `orch8-python` | `packages/python-native` | 1 | 57 | Source reviewed; host checks passed |
-| `orch8-fuzz` | `fuzz` | 2 | 19 | Source reviewed; locked build passed |
+| Crate             | Directory                | Rust source files | Source lines | Review status                                             |
+| ----------------- | ------------------------ | ----------------: | -----------: | --------------------------------------------------------- |
+| `orch8`           | `orch8`                  |                13 |        3,138 | Source reviewed; host tests/Clippy passed                 |
+| `orch8-types`     | `orch8-types`            |                55 |       20,735 | In progress                                               |
+| `orch8-storage`   | `orch8-storage`          |                91 |       42,553 | In progress                                               |
+| `orch8-engine`    | `orch8-engine`           |               100 |       76,224 | In progress                                               |
+| `orch8-mobile`    | `orch8-mobile`           |                27 |       13,022 | In progress                                               |
+| `orch8-publisher` | `orch8-publisher`        |                13 |        6,170 | Source reviewed; host tests/Clippy passed                 |
+| `orch8-push`      | `orch8-push`             |                10 |        4,401 | In progress                                               |
+| `orch8-api`       | `orch8-api`              |                64 |       29,078 | In progress                                               |
+| `orch8-grpc`      | `orch8-grpc`             |                10 |        6,664 | In progress                                               |
+| `orch8-server`    | `orch8-server`           |                 7 |        4,577 | In progress                                               |
+| `orch8-cli`       | `orch8-cli`              |                40 |       13,883 | Production source reviewed; follow-ups/checks in progress |
+| `orch8-node`      | `packages/node-native`   |                 1 |           42 | Source reviewed; host checks passed                       |
+| `orch8-python`    | `packages/python-native` |                 1 |           57 | Source reviewed; host checks passed                       |
+| `orch8-fuzz`      | `fuzz`                   |                 2 |           19 | Source reviewed; locked build passed                      |
 
 ## Findings and changes
 
@@ -164,7 +172,7 @@ No crate is complete merely because Clippy passes.
 - Reviewed both harnesses and manifest: expression/template strings use fixed
   empty context and null outputs. This leaves nonempty context/output and
   nested JSON template cases outside coverage. `cargo check --locked
-  --manifest-path fuzz/Cargo.toml --bins` passes after reconciliation;
+--manifest-path fuzz/Cargo.toml --bins` passes after reconciliation;
   no fuzz campaigns have been run as part of this review.
 
 ### Publisher: production source review and host verification
@@ -531,10 +539,10 @@ No crate is complete merely because Clippy passes.
   Signal inbox batch reads and deliveries also use 500-id chunks; delivery
   retains one transaction, and multi-query reads use one snapshot. The
   regression covers duplicate IDs and
-  >32,766 inputs. Deletion and
-  replacement still rely on callers to prevent deleting active instances;
-  verify atomic admission/transition fencing in API and mobile callers.
-  The storage library and SQLite integration suites pass serially: 461 tests.
+  > 32,766 inputs. Deletion and
+  > replacement still rely on callers to prevent deleting active instances;
+  > verify atomic admission/transition fencing in API and mobile callers.
+  > The storage library and SQLite integration suites pass serially: 461 tests.
 - Medium, fixed: SQLite instance-KV and shared-knowledge batch deletes bound
   every key in one statement, so memory retention cleanup could fail above
   SQLite's variable limit. Both paths now use 500-key chunks inside one
@@ -1471,7 +1479,6 @@ and measured optimization work remain; the overall goal is still active.
   mutable usage fields, needing storage tracing for races with resource picks.
   Missing tenant on pool list becomes an empty tenant ID instead of an explicit
   scope error. Resource selection/credential ownership remains to trace.
-
 
 ### Pre-push regression verification (2026-09-05)
 

@@ -18,12 +18,12 @@ return).
    ─────────────────────────────────────────────────────────────────
 ```
 
-| File | Purpose |
-|---|---|
-| `docker-compose.yml` | Ollama plus the GPU worker. The `local-control` profile adds Postgres, a `control` node and an `executor` node. `vllm` swaps in vLLM. `executor-join` is the contract-§5 join path. |
-| `docker-compose.gpu.yml` | Override that hands NVIDIA GPUs to Ollama. Without it, Ollama runs on CPU, which is enough for a smoke test. |
-| `worker/gpu_worker.py` | The `gpu_llm_generate` handler: an [external worker](../../docs/WORKERS.md) that calls the local model. Standard library only. |
-| `sequence.json` | A workflow that places the LLM step on GPU runtimes with `params.$runtime.hardware`. **Works on current engines.** |
+| File                      | Purpose                                                                                                                                                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `docker-compose.yml`      | Ollama plus the GPU worker. The `local-control` profile adds Postgres, a `control` node and an `executor` node. `vllm` swaps in vLLM. `executor-join` is the contract-§5 join path.                                |
+| `docker-compose.gpu.yml`  | Override that hands NVIDIA GPUs to Ollama. Without it, Ollama runs on CPU, which is enough for a smoke test.                                                                                                       |
+| `worker/gpu_worker.py`    | The `gpu_llm_generate` handler: an [external worker](../../docs/WORKERS.md) that calls the local model. Standard library only.                                                                                     |
+| `sequence.json`           | A workflow that places the LLM step on GPU runtimes with `params.$runtime.hardware`. **Works on current engines.**                                                                                                 |
 | `sequence.placement.json` | The same workflow using step-level `placement: {"labels": {"gpu": "true"}}` (placement contract §7). **Requires an engine with step placement policies.** Engines without it reject the unknown `placement` field. |
 
 ## How placement works today
@@ -48,8 +48,8 @@ engine.
 2. On the GPU host (NVIDIA driver + NVIDIA Container Toolkit installed):
 
    ```bash
-   export ORCH8_URL=https://<your-control-plane>/api/v1
-   export ORCH8_API_KEY=<worker key>  ORCH8_TENANT_ID=<tenant>
+   export ORCH8_URL=https://"<your-control-plane>"/api/v1
+   export ORCH8_API_KEY="<worker key>"  ORCH8_TENANT_ID="<tenant>"
    export ORCH8_WORKER_ID=$(uuidgen)   # keep it stable across restarts
    docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
    docker compose logs -f gpu-worker   # "llm endpoint ready", then polls
@@ -106,13 +106,13 @@ and never carries workflow payloads ([Node roles](../../docs/NODE_ROLES.md#manag
 
 ## Handler contract (`gpu_llm_generate`)
 
-| Param | Default | Notes |
-|---|---|---|
-| `prompt` or `messages` | required | `messages` is an OpenAI chat array. `prompt` is truncated to 64,000 characters. |
-| `system` | none | Prepended as a system message. |
-| `model` | `LLM_MODEL` | Per-step override. |
-| `max_tokens` | 512 | Capped at 4096. |
-| `temperature` | 0.2 | |
+| Param                  | Default     | Notes                                                                           |
+| ---------------------- | ----------- | ------------------------------------------------------------------------------- |
+| `prompt` or `messages` | required    | `messages` is an OpenAI chat array. `prompt` is truncated to 64,000 characters. |
+| `system`               | none        | Prepended as a system message.                                                  |
+| `model`                | `LLM_MODEL` | Per-step override.                                                              |
+| `max_tokens`           | 512         | Capped at 4096.                                                                 |
+| `temperature`          | 0.2         |                                                                                 |
 
 Failure classification: missing or invalid params fail the step with
 `retryable: false`. An unreachable or erroring model server reports

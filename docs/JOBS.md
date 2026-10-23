@@ -60,20 +60,20 @@ return 404.
 
 ### `POST /jobs`
 
-| field | type | notes |
-|---|---|---|
-| `handler` | string | required |
-| `payload` | object | default `{}` |
-| `queue` | string | worker queue; default queue when omitted |
-| `priority` | `low` \| `normal` \| `high` \| `critical` | case-insensitive; default `normal` |
-| `retry.max_attempts` | u32 | **total** executions including the first (`1` = no retry, max 1000) |
-| `retry.initial_backoff_ms` | u64 | first backoff; doubles on each retry |
-| `retry.max_backoff_ms` | u64 | backoff cap; default `max(60000, initial_backoff_ms)` |
-| `delay_ms` | u64 | run no earlier than now + delay (mutually exclusive with `run_at`) |
-| `run_at` | RFC 3339 | run no earlier than this instant |
-| `idempotency_key` | string | tenant-scoped; a repeat returns the existing job with **200** |
-| `metadata` | object | stored on the instance (`_job` is reserved) |
-| `tenant_id`, `namespace` | string | optional; header wins; namespace defaults to `default` |
+| field                      | type                                      | notes                                                               |
+| -------------------------- | ----------------------------------------- | ------------------------------------------------------------------- |
+| `handler`                  | string                                    | required                                                            |
+| `payload`                  | object                                    | default `{}`                                                        |
+| `queue`                    | string                                    | worker queue; default queue when omitted                            |
+| `priority`                 | `low` \| `normal` \| `high` \| `critical` | case-insensitive; default `normal`                                  |
+| `retry.max_attempts`       | u32                                       | **total** executions including the first (`1` = no retry, max 1000) |
+| `retry.initial_backoff_ms` | u64                                       | first backoff; doubles on each retry                                |
+| `retry.max_backoff_ms`     | u64                                       | backoff cap; default `max(60000, initial_backoff_ms)`               |
+| `delay_ms`                 | u64                                       | run no earlier than now + delay (mutually exclusive with `run_at`)  |
+| `run_at`                   | RFC 3339                                  | run no earlier than this instant                                    |
+| `idempotency_key`          | string                                    | tenant-scoped; a repeat returns the existing job with **200**       |
+| `metadata`                 | object                                    | stored on the instance (`_job` is reserved)                         |
+| `tenant_id`, `namespace`   | string                                    | optional; header wins; namespace defaults to `default`              |
 
 Responses: `201` created, `200` idempotent replay, `400` validation error,
 `413` payload over the context size limit, `429`/`403` when plan
@@ -85,23 +85,25 @@ Returns the job plus `attempts` (executions started so far), `output` (once
 completed), and `error` (the last failure message, while retrying or after
 failing).
 
-| `status` | meaning |
-|---|---|
-| `scheduled` | waiting for its run time, a retry backoff, or a worker |
-| `running` | executing in-process or claimed by or dispatched to a worker |
-| `completed` | finished; `output` holds the handler result |
-| `failed` | failed, and the job had no retry policy |
+| `status`        | meaning                                                                            |
+| --------------- | ---------------------------------------------------------------------------------- |
+| `scheduled`     | waiting for its run time, a retry backoff, or a worker                             |
+| `running`       | executing in-process or claimed by or dispatched to a worker                       |
+| `completed`     | finished; `output` holds the handler result                                        |
+| `failed`        | failed, and the job had no retry policy                                            |
 | `dead_lettered` | failed although a retry policy was set (attempts exhausted or non-retryable error) |
-| `cancelled` | cancelled |
+| `cancelled`     | cancelled                                                                          |
 
 ### `GET /jobs?handler=&status=&limit=&cursor=`
+
+`items` contains job records. The example below is an empty page.
 
 Newest first, with keyset pagination: pass the previous page's
 `next_cursor` as `cursor`. `limit` defaults to 50 (max 500). A concurrent
 enqueue never shifts rows between pages.
 
 ```json
-{"items": [ … ], "next_cursor": "01926f3a-…", "has_more": true}
+{ "items": [], "next_cursor": null, "has_more": false }
 ```
 
 Without an `X-Tenant-Id` header, only admin callers may list, optionally
@@ -126,25 +128,40 @@ const H = { "Content-Type": "application/json", "X-Tenant-Id": "acme" };
 async function loop() {
   for (;;) {
     const res = await fetch(`${BASE}/workers/tasks/poll`, {
-      method: "POST", headers: H,
-      body: JSON.stringify({ handler_name: "send_email", worker_id: "mailer-1", limit: 10 }),
+      method: "POST",
+      headers: H,
+      body: JSON.stringify({
+        handler_name: "send_email",
+        worker_id: "mailer-1",
+        limit: 10,
+      }),
     });
     const { tasks, poll_after_ms } = await res.json();
-    await Promise.all(tasks.map(async (task) => {
-      const ack = { worker_id: "mailer-1", claim_epoch: task.claim_epoch };
-      try {
-        const output = await sendEmail(task.params); // task.params === job payload
-        await fetch(`${BASE}/workers/tasks/${task.id}/complete`, {
-          method: "POST", headers: H, body: JSON.stringify({ ...ack, output }),
-        });
-      } catch (err) {
-        await fetch(`${BASE}/workers/tasks/${task.id}/fail`, {
-          method: "POST", headers: H,
-          body: JSON.stringify({ ...ack, message: String(err), retryable: true }),
-        });
-      }
-    }));
-    if (tasks.length === 0) await new Promise((r) => setTimeout(r, poll_after_ms));
+    await Promise.all(
+      tasks.map(async (task) => {
+        const ack = { worker_id: "mailer-1", claim_epoch: task.claim_epoch };
+        try {
+          const output = await sendEmail(task.params); // task.params === job payload
+          await fetch(`${BASE}/workers/tasks/${task.id}/complete`, {
+            method: "POST",
+            headers: H,
+            body: JSON.stringify({ ...ack, output }),
+          });
+        } catch (err) {
+          await fetch(`${BASE}/workers/tasks/${task.id}/fail`, {
+            method: "POST",
+            headers: H,
+            body: JSON.stringify({
+              ...ack,
+              message: String(err),
+              retryable: true,
+            }),
+          });
+        }
+      }),
+    );
+    if (tasks.length === 0)
+      await new Promise((r) => setTimeout(r, poll_after_ms));
   }
 }
 loop();
@@ -159,7 +176,7 @@ configure `POST /queues/dispatch` for that queue. See [WORKERS.md](WORKERS.md).
 ```bash
 orch8 job enqueue send_email --payload '{"to":"ada@example.com"}' \
   --max-attempts 5 --backoff-ms 1000 --idempotency-key welcome-ada
-orch8 job get <id>
+orch8 job get "<id>"
 orch8 job list --handler send_email --status dead_lettered
-orch8 job cancel <id> --yes
+orch8 job cancel "<id>" --yes
 ```

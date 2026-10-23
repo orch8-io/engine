@@ -88,18 +88,18 @@ The integration suite parses and runs these exact files.
 
 All routes use the canonical `/api/v1` prefix:
 
-| Method | Route | Purpose |
-|---|---|---|
-| `GET` | `/continuity/protocol` | Discover protocol version, adapters, and invariants |
-| `POST` | `/continuity/offers/validate` | Validate a portable work offer |
-| `POST` | `/continuity/policies/compile` | Compile placement policy into core types |
-| `POST` | `/continuity/gateways/validate` | Validate HTTP, MCP, process, or mobile wrapper manifests |
-| `POST` | `/continuity/receipts/verify` | Verify a bill-of-execution digest and terminal effects |
-| `POST` | `/continuity/conformance/certificates` | Issue a threshold-gated conformance certificate |
-| `POST` | `/continuity/conformance/badge` | Verify a server-signed certificate and render its SVG badge |
-| `GET` | `/continuity/profiles` | List deployable trust-boundary profiles |
-| `POST` | `/continuity/profiles/{profile}/offers` | Materialize a profile as a claimable portable work offer |
-| `POST` | `/continuity/commercial/validate` | Validate hosted, private, or OEM relay invariants |
+| Method | Route                                   | Purpose                                                     |
+| ------ | --------------------------------------- | ----------------------------------------------------------- |
+| `GET`  | `/continuity/protocol`                  | Discover protocol version, adapters, and invariants         |
+| `POST` | `/continuity/offers/validate`           | Validate a portable work offer                              |
+| `POST` | `/continuity/policies/compile`          | Compile placement policy into core types                    |
+| `POST` | `/continuity/gateways/validate`         | Validate HTTP, MCP, process, or mobile wrapper manifests    |
+| `POST` | `/continuity/receipts/verify`           | Verify a bill-of-execution digest and terminal effects      |
+| `POST` | `/continuity/conformance/certificates`  | Issue a threshold-gated conformance certificate             |
+| `POST` | `/continuity/conformance/badge`         | Verify a server-signed certificate and render its SVG badge |
+| `GET`  | `/continuity/profiles`                  | List deployable trust-boundary profiles                     |
+| `POST` | `/continuity/profiles/{profile}/offers` | Materialize a profile as a claimable portable work offer    |
+| `POST` | `/continuity/commercial/validate`       | Validate hosted, private, or OEM relay invariants           |
 
 The routes use the server's normal API-key middleware. When tenant headers are
 required, send `x-tenant-id` as well as `x-api-key`. The complete generated
@@ -150,34 +150,34 @@ This table maps every opportunity scored above 21 to an executable surface.
 Existing core functionality is identified because the product contract builds
 on it rather than duplicating it.
 
-| # | Opportunity | Implementation and verification |
-|---:|---|---|
-| 1 | Durable Agent Handoff Protocol | `ProtocolVersion`, protocol discovery endpoint and CLI |
-| 3 | Portable Work Offer API | `PortableWorkOffer::validate` and capability/policy-aware claim check |
-| 4 | Runtime Passport | Capability-bound passport with structural and pluggable cryptographic verification |
-| 5 | Execution Receipt Standard | Tamper-evident `ExecutionReceipt`, digest and signature verification |
-| 6 | Placement Policy Language | Fail-closed compiler to `CapsuleRequirements` and `LocalityPolicy` |
-| 10 | Continuity Gateway | Transport-neutral manifest, executable HTTPS gateway adapter, and hardened gateway router |
-| 11 | `orch8 wrap` | Atomic local manifest generation through `orch8 portable wrap` |
-| 12 | MCP Continuity Bridge | Executable bounded JSON-RPC `tools/call` bridge preserving task, instance, context, and claim-epoch metadata |
-| 14 | Local Worker | Cross-platform CLI worker executes bounded local processes with capability-aware claims, stable runtime identity, timeouts, environment isolation, and stale-claim fencing |
-| 15 | Handoff Sandbox | Existing `orch8 demo portable-agent` performs a real three-runtime capsule round trip |
-| 16 | Continuity Chaos Lab | Existing fault-lab endpoint plus duplicate-effect/offline conformance checks |
-| 17 | Agent Continuity Score | Fixed eight-check `score_conformance` implementation and CLI |
-| 18 | CI Certification Badge | Threshold-gated, server-signed certificate and verified SVG badge endpoint |
-| 21 | Private RAG Relay | `private-rag` restricted local-execution profile |
-| 22 | Biometric Approval Rail | Attested mobile biometric profile using the existing native capability bridge |
-| 23 | Executable Data Residency | Residency profile, compiled locality policy, and existing residency evidence API |
-| 25 | Agent Bill of Execution | Receipt includes models, tools, locations, policy, consent, and effects |
-| 29 | Audit Evidence Exporter | Audit profile requiring provenance, policy, and execution-receipt evidence |
-| 31 | Secret-Safe Coding Agent | Attested desktop profile with source-control reference and secure hardware |
-| 32 | Regulated Onboarding | Attested human-UI profile forbidding identity-document disclosure |
-| 35 | Fraud Challenge Handoff | Attested mobile challenge profile |
-| 36 | Executive Action Airlock | Biometric, consent, and effect-receipt profile |
-| 40 | Personal Data-Vault Agents | Local computation profile forbidding vault-content disclosure |
-| 41 | Hosted Continuity Relay | Hosted deployment contract and hardened continuity-only router |
-| 42 | Conformance Cloud | Server-signed certificate endpoint, fixed gauntlet, evidence digest, mandatory gates |
-| 44 | OEM Runtime Licensing | OEM-embedded plan requiring product identity, isolation, conformance, and receipts |
+|   # | Opportunity                    | Implementation and verification                                                                                                                                            |
+| --: | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|   1 | Durable Agent Handoff Protocol | `ProtocolVersion`, protocol discovery endpoint and CLI                                                                                                                     |
+|   3 | Portable Work Offer API        | `PortableWorkOffer::validate` and capability/policy-aware claim check                                                                                                      |
+|   4 | Runtime Passport               | Capability-bound passport with structural and pluggable cryptographic verification                                                                                         |
+|   5 | Execution Receipt Standard     | Tamper-evident `ExecutionReceipt`, digest and signature verification                                                                                                       |
+|   6 | Placement Policy Language      | Fail-closed compiler to `CapsuleRequirements` and `LocalityPolicy`                                                                                                         |
+|  10 | Continuity Gateway             | Transport-neutral manifest, executable HTTPS gateway adapter, and hardened gateway router                                                                                  |
+|  11 | `orch8 wrap`                   | Atomic local manifest generation through `orch8 portable wrap`                                                                                                             |
+|  12 | MCP Continuity Bridge          | Executable bounded JSON-RPC `tools/call` bridge preserving task, instance, context, and claim-epoch metadata                                                               |
+|  14 | Local Worker                   | Cross-platform CLI worker executes bounded local processes with capability-aware claims, stable runtime identity, timeouts, environment isolation, and stale-claim fencing |
+|  15 | Handoff Sandbox                | Existing `orch8 demo portable-agent` performs a real three-runtime capsule round trip                                                                                      |
+|  16 | Continuity Chaos Lab           | Existing fault-lab endpoint plus duplicate-effect/offline conformance checks                                                                                               |
+|  17 | Agent Continuity Score         | Fixed eight-check `score_conformance` implementation and CLI                                                                                                               |
+|  18 | CI Certification Badge         | Threshold-gated, server-signed certificate and verified SVG badge endpoint                                                                                                 |
+|  21 | Private RAG Relay              | `private-rag` restricted local-execution profile                                                                                                                           |
+|  22 | Biometric Approval Rail        | Attested mobile biometric profile using the existing native capability bridge                                                                                              |
+|  23 | Executable Data Residency      | Residency profile, compiled locality policy, and existing residency evidence API                                                                                           |
+|  25 | Agent Bill of Execution        | Receipt includes models, tools, locations, policy, consent, and effects                                                                                                    |
+|  29 | Audit Evidence Exporter        | Audit profile requiring provenance, policy, and execution-receipt evidence                                                                                                 |
+|  31 | Secret-Safe Coding Agent       | Attested desktop profile with source-control reference and secure hardware                                                                                                 |
+|  32 | Regulated Onboarding           | Attested human-UI profile forbidding identity-document disclosure                                                                                                          |
+|  35 | Fraud Challenge Handoff        | Attested mobile challenge profile                                                                                                                                          |
+|  36 | Executive Action Airlock       | Biometric, consent, and effect-receipt profile                                                                                                                             |
+|  40 | Personal Data-Vault Agents     | Local computation profile forbidding vault-content disclosure                                                                                                              |
+|  41 | Hosted Continuity Relay        | Hosted deployment contract and hardened continuity-only router                                                                                                             |
+|  42 | Conformance Cloud              | Server-signed certificate endpoint, fixed gauntlet, evidence digest, mandatory gates                                                                                       |
+|  44 | OEM Runtime Licensing          | OEM-embedded plan requiring product identity, isolation, conformance, and receipts                                                                                         |
 
 ## Security invariants
 

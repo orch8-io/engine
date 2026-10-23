@@ -145,10 +145,9 @@ strategy triggers.
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Sidecar returns piece not found | Package is not installed or allowlisted | Install the package and include its piece name in the allowlist |
-| Engine says sidecar unreachable | Sidecar is stopped or URL is wrong | Check `/health`, then restart Orch8 with the correct `/execute` URL |
-| `parse_url` is a permanent failure | URL is not absolute | Include a scheme such as `https://` |
-| Credentialed action returns `401` upstream | Token is absent or expired | Resolve a current tenant-scoped credential into `params.auth` |
-
+| Symptom                                    | Likely cause                            | Fix                                                                 |
+| ------------------------------------------ | --------------------------------------- | ------------------------------------------------------------------- |
+| Sidecar returns piece not found            | Package is not installed or allowlisted | Install the package and include its piece name in the allowlist     |
+| Engine says sidecar unreachable            | Sidecar is stopped or URL is wrong      | Check `/health`, then restart Orch8 with the correct `/execute` URL |
+| `parse_url` is a permanent failure         | URL is not absolute                     | Include a scheme such as `https://`                                 |
+| Credentialed action returns `401` upstream | Token is absent or expired              | Resolve a current tenant-scoped credential into `params.auth`       |

@@ -18,25 +18,25 @@ tokio runtime, sqlx (PostgreSQL and SQLite drivers), reqwest, and wasmtime.
 Node. The browser has no such option, so `orch8-wasm` reuses only the parts
 that are pure:
 
-| Reused unchanged | Source |
-| --- | --- |
-| Strict decoder (`deserialize_sequence_strict`) and `SequenceDefinition::validate` | `orch8-types` (built with `default-features = false`, which drops the `sqlx` derives) |
-| Expression evaluator (router / loop / `when` / `assert` / `{{ }}` templates) | `orch8-engine/src/expression.rs`, compiled in with `#[path]` so both builds share one source file |
-| `ab_split` variant selection (SHA-256 of instance id + block id) | re-implemented byte-for-byte from `handlers/ab_split.rs` |
-| Preflight report types (`PreflightReport`, `Finding`) | `orch8-types` |
+| Reused unchanged                                                                  | Source                                                                                            |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Strict decoder (`deserialize_sequence_strict`) and `SequenceDefinition::validate` | `orch8-types` (built with `default-features = false`, which drops the `sqlx` derives)             |
+| Expression evaluator (router / loop / `when` / `assert` / `{{ }}` templates)      | `orch8-engine/src/expression.rs`, compiled in with `#[path]` so both builds share one source file |
+| `ab_split` variant selection (SHA-256 of instance id + block id)                  | re-implemented byte-for-byte from `handlers/ab_split.rs`                                          |
+| Preflight report types (`PreflightReport`, `Finding`)                             | `orch8-types`                                                                                     |
 
 ## JavaScript API
 
 All functions take and return JSON strings and never throw; a failure is
 `{"ok": false, "error": "..."}`.
 
-| Export | Returns |
-| --- | --- |
-| `validate_sequence(json)` | `{ok, sequence, defaults_applied, warnings}` — the normalized definition as the server would store it |
-| `preflight(json)` | a `PreflightReport` (same shape as `POST /sequences/preflight`) |
-| `run_dry(json, input_json, max_ticks)` | a run result (below) with `input_json` as `context.data` |
-| `run_dry_with_options(json, options_json)` | same, with `{input, config, mocks, max_ticks, instance_id}` |
-| `sequence_schema_version()` | the sequence schema version this build accepts |
+| Export                                     | Returns                                                                                               |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `validate_sequence(json)`                  | `{ok, sequence, defaults_applied, warnings}` — the normalized definition as the server would store it |
+| `preflight(json)`                          | a `PreflightReport` (same shape as `POST /sequences/preflight`)                                       |
+| `run_dry(json, input_json, max_ticks)`     | a run result (below) with `input_json` as `context.data`                                              |
+| `run_dry_with_options(json, options_json)` | same, with `{input, config, mocks, max_ticks, instance_id}`                                           |
+| `sequence_schema_version()`                | the sequence schema version this build accepts                                                        |
 
 Server-assigned fields (`id`, `tenant_id`, `namespace`, `name`, `version`,
 `created_at`) may be omitted; fixed placeholders are filled in and listed in
@@ -60,8 +60,8 @@ bookkeeping).
 {
   "mocks": {
     "classify": { "output": { "label": "spam" }, "duration_ms": 1200 },
-    "charge":   { "error": "card declined" },
-    "fetch":    { "fail_attempts": 2, "output": { "ok": true } }
+    "charge": { "error": "card declined" },
+    "fetch": { "fail_attempts": 2, "output": { "ok": true } }
   }
 }
 ```
@@ -128,9 +128,10 @@ policy and backoff are exercised in virtual time.
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version <wasm-bindgen version in Cargo.lock>
+wasm_bindgen_version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+cargo install --locked wasm-bindgen-cli --version "$wasm_bindgen_version"
 scripts/build-wasm-playground.sh            # writes ../web/public/wasm/orch8
-scripts/build-wasm-playground.sh <out-dir>  # or anywhere else
+scripts/build-wasm-playground.sh /tmp/orch8-playground  # or anywhere else
 ```
 
 The script runs `wasm-opt -Oz` when binaryen is on `PATH`. Native tests:

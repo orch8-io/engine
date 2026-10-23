@@ -130,9 +130,9 @@ flags, catalog details, and longer test design.
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
+| Symptom                | Likely cause                                                | Fix                                                                   |
+| ---------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------- |
 | Loadgen receives `401` | Authentication or tenant-header enforcement is still active | Use all three isolated-server overrides shown above with `--insecure` |
-| Port 18080 is occupied | A prior test server is still running | Stop it or choose one port consistently for server and loadgen |
-| Workload never stops | `--duration` was omitted or not forwarded | Use `npm start -- --duration=30 ...` with the separator |
-| Shared data appears | Wrong server URL or database path | Stop immediately and verify both paths before rerunning |
+| Port 18080 is occupied | A prior test server is still running                        | Stop it or choose one port consistently for server and loadgen        |
+| Workload never stops   | `--duration` was omitted or not forwarded                   | Use `npm start -- --duration=30 ...` with the separator               |
+| Shared data appears    | Wrong server URL or database path                           | Stop immediately and verify both paths before rerunning               |

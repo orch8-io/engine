@@ -17,12 +17,12 @@ Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`:
 3. `mobile-distribution` calls `.github/workflows/mobile-distribution.yml`,
    which publishes from those release assets (never from a rebuild):
 
-| Job | Publishes | Secret | Runner |
-|---|---|---|---|
-| `swift-package` | Commit to `orch8-io/orch8-mobile-swift` `main` (Package.swift url + checksum, podspec version, Sources with the release's generated bindings), tag `X.Y.Z`, GitHub release with `Orch8MobileCocoaPods-X.Y.Z.zip` | `ORCH8_MOBILE_SWIFT_TOKEN` | macOS |
-| `cocoapods` | `pod trunk push Orch8Mobile.podspec` from the `X.Y.Z` tag of orch8-mobile-swift | `COCOAPODS_TRUNK_TOKEN` | macOS |
-| `maven` | `io/orch8/orch8-mobile/X.Y.Z/` (AAR + POM + checksums) and `maven-metadata.xml` in `orch8-io/maven` | `ORCH8_MAVEN_TOKEN` | Linux |
-| `kmp` | `io.orch8:orch8-kmp` (Android + iOS variants, Gradle module metadata) in `orch8-io/maven` | `ORCH8_MAVEN_TOKEN` | macOS |
+| Job             | Publishes                                                                                                                                                                                                        | Secret                     | Runner |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ------ |
+| `swift-package` | Commit to `orch8-io/orch8-mobile-swift` `main` (Package.swift url + checksum, podspec version, Sources with the release's generated bindings), tag `X.Y.Z`, GitHub release with `Orch8MobileCocoaPods-X.Y.Z.zip` | `ORCH8_MOBILE_SWIFT_TOKEN` | macOS  |
+| `cocoapods`     | `pod trunk push Orch8Mobile.podspec` from the `X.Y.Z` tag of orch8-mobile-swift                                                                                                                                  | `COCOAPODS_TRUNK_TOKEN`    | macOS  |
+| `maven`         | `io/orch8/orch8-mobile/X.Y.Z/` (AAR + POM + checksums) and `maven-metadata.xml` in `orch8-io/maven`                                                                                                              | `ORCH8_MAVEN_TOKEN`        | Linux  |
+| `kmp`           | `io.orch8:orch8-kmp` (Android + iOS variants, Gradle module metadata) in `orch8-io/maven`                                                                                                                        | `ORCH8_MAVEN_TOKEN`        | macOS  |
 
 Ordering: `cocoapods` runs after `swift-package`, because the podspec
 downloads its source archive from the orch8-mobile-swift release. `kmp` runs
@@ -40,17 +40,27 @@ own repositories after these channels are live, with their native pin
 (`orch8NativeVersion` in the Expo `package.json`, `Orch8Mobile` in the
 podspecs, `io.orch8:orch8-mobile` in Gradle) bumped to `X.Y.Z`.
 
+## Existing release boundary
+
+Checked 2026-10-23: engine `v0.7.1` has the native bindings, AAR, and
+XCFramework assets, but no `Orch8KmpBridge-v0.7.1.swift` or checksum asset.
+The current release workflow adds the bridge pair for future tags. Do not
+assume rerunning distribution creates missing release assets, or overwrite
+immutable `0.7.1` artifacts with code from `main`. Publish a new coordinated
+version for unreleased native/wrapper changes. KMP source development uses the
+[checked-in bridge](../packages/kmp/README.md).
+
 ## Secrets
 
 Add these as repository (or `release` environment) secrets on `orch8-io/engine`.
 Each one is optional: when it is missing, its job logs a notice and skips, so
 forks and dry runs stay green.
 
-| Secret | What it must be |
-|---|---|
+| Secret                     | What it must be                                                                                                                                                                                                                                                                                           |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ORCH8_MOBILE_SWIFT_TOKEN` | Fine-grained PAT (or GitHub App token) with **Contents: read and write** on `orch8-io/orch8-mobile-swift`. Used to push `main`, push the tag, and create the release. If `main` is branch-protected, allow this token to bypass, since SwiftPM needs the tag on the commit that carries the new checksum. |
-| `COCOAPODS_TRUNK_TOKEN` | A CocoaPods trunk session token of an `Orch8Mobile` owner. Create one with `pod trunk register <email> 'Orch8' --description='engine CI'`, confirm the email, then copy the `password` for `trunk.cocoapods.org` from `~/.netrc`. Sessions expire; `pod trunk me` shows the expiry. |
-| `ORCH8_MAVEN_TOKEN` | Fine-grained PAT with **Contents: read and write** on `orch8-io/maven`. Used by both the `maven` and `kmp` jobs. |
+| `COCOAPODS_TRUNK_TOKEN`    | A CocoaPods trunk session token of an `Orch8Mobile` owner. Create one with `pod trunk register <email> 'Orch8' --description='engine CI'`, confirm the email, then copy the `password` for `trunk.cocoapods.org` from `~/.netrc`. Sessions expire; `pod trunk me` shows the expiry.                       |
+| `ORCH8_MAVEN_TOKEN`        | Fine-grained PAT with **Contents: read and write** on `orch8-io/maven`. Used by both the `maven` and `kmp` jobs.                                                                                                                                                                                          |
 
 `HOMEBREW_TAP_TOKEN` and `NPM_TOKEN` (CLI channels) are unrelated to mobile.
 

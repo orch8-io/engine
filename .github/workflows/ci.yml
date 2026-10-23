@@ -54,6 +54,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Format
         run: cargo fmt --check
+      - name: Documentation links and example syntax
+        run: python3 scripts/check-docs.py
       - name: Migration immutability
         run: ./scripts/check-migration-immutability.sh
       - name: Destructive migration lint

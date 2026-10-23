@@ -8,7 +8,9 @@
 
 ## The Big Picture
 
-Orch8 is a durable task sequencing engine. You define a **sequence** (a list of blocks), create **instances** of that sequence, and the engine executes them — surviving crashes, respecting rate limits, and scaling to hundreds of thousands of concurrent workflows.
+Orch8 is a durable task sequencing engine. You define a **sequence** (a list of blocks), create **instances** of that sequence, and the engine executes them — surviving crashes, respecting rate limits, and persisting scheduled work outside process memory. Capacity depends on
+workflow shape, handler latency, storage, and configured concurrency; measure
+your own workload before sizing a deployment.
 
 ```
 Sequence Definition          Task Instance
@@ -32,27 +34,24 @@ supports development, embedding, and mobile runtimes.
 
 ## Crate Structure
 
-```
-orch8-server          Binary entry point, wires config/storage/api/engine
-    |
-orch8-api             REST routes (axum), request/response types
-    |
-orch8-grpc            gRPC workers, runtime control, artifact transfer, telemetry
-    |
-orch8-engine          Scheduler tick loop, evaluator, handlers, signals, recovery
-    |
-orch8-storage         StorageBackend trait + PostgresStorage + SqliteStorage
-    |
-orch8-types           Domain types, IDs, config, errors (shared by every crate)
-    |
-orch8-mobile          UniFFI bindings for iOS/Android, offline-first engine
-    |
-orch8-push            Durable, governed APNs/FCM wake delivery
-    |
-orch8-publisher       Signed package registry and governed distribution
-    |
-orch8-cli             Bootstrap, authoring, operations, debugging, releases
-```
+| Crate             | Responsibility                                              |
+| ----------------- | ----------------------------------------------------------- |
+| `orch8`           | In-process Rust facade and durable runtime                  |
+| `orch8-types`     | Domain types, configuration, IDs, and schema                |
+| `orch8-storage`   | Storage traits, PostgreSQL, SQLite, and encryption          |
+| `orch8-engine`    | Scheduler, evaluator, handlers, signals, and recovery       |
+| `orch8-api`       | REST, SSE, authorization, and generated OpenAPI             |
+| `orch8-grpc`      | Worker streaming, runtime control, artifacts, and telemetry |
+| `orch8-server`    | Server binary, configuration, and process lifecycle         |
+| `orch8-cli`       | `orch8` client, local development, and operations           |
+| `orch8-mobile`    | UniFFI API for mobile runtimes                              |
+| `orch8-push`      | APNs/FCM delivery                                           |
+| `orch8-publisher` | Signed packages and distribution registry                   |
+| `orch8-wasm`      | Browser validation, preflight, and bounded dry runs         |
+| `orch8-e2e`       | Cross-crate integration coverage                            |
+
+The Node and Python native bindings under `packages/` and the `fuzz/` package
+have separate Cargo workspaces and lockfiles. They require their own checks.
 
 ---
 
@@ -60,14 +59,16 @@ orch8-cli             Bootstrap, authoring, operations, debugging, releases
 
 The engine uses **state snapshots** instead of event history replay (Temporal's model).
 
-| Aspect | Temporal | Orch8 |
-|--------|----------|-------|
-| Resume mechanism | O(n) history replay | O(1) snapshot read |
-| Determinism constraints | Required | None (write normal code) |
-| State visibility | Requires query handler boilerplate | Direct REST query |
-| Code changes | Require version markers | Apply immediately to new instances |
-| Payload limits | 64KB per history event | None (stored as DB rows) |
-| Testing | Requires running Temporal server | Embedded SQLite, same binary |
+Recovery reads the saved instance and execution tree rather than replaying an
+entire workflow history. Handlers still need idempotency for external side
+effects: a process can fail after a provider accepted a request and before its
+receipt was committed. See [External workers](WORKERS.md) and the native SDK
+semantics for the relevant retry and interrupted-dispatch behavior.
+
+Context size is bounded by `engine.max_context_bytes` (262,144 bytes by default).
+Large outputs can be externalized; HTTP requests, artifacts, and individual
+handlers have their own limits. See [Configuration](CONFIGURATION.md) and
+[Externalized state](EXTERNALIZATION.md).
 
 ### Two Execution Paths
 
@@ -110,51 +111,51 @@ A **sequence** is a named, versioned definition of work containing an ordered li
 
 ### Block Types
 
-| Block | What It Does |
-|-------|-------------|
-| **Step** | Calls a handler function (leaf node — actual work) |
-| **Parallel** | Runs all child blocks concurrently, waits for all |
-| **Race** | Runs all child blocks, first to complete wins, rest cancelled |
-| **Loop** | Repeats body while condition holds (max iterations enforced) |
-| **ForEach** | Iterates over a collection, runs body per item |
-| **Router** | N-way branch — evaluates conditions, routes to match |
-| **TryCatch** | Try block, on failure catch block, always run finally |
-| **SubSequence** | Invokes another sequence as a sub-workflow |
-| **ABSplit** | A/B split — routes traffic to one of several variants by weight |
-| **CancellationScope** | Child blocks cannot be cancelled by external cancel signals |
+| Block                 | What It Does                                                    |
+| --------------------- | --------------------------------------------------------------- |
+| **Step**              | Calls a handler function (leaf node — actual work)              |
+| **Parallel**          | Runs all child blocks concurrently, waits for all               |
+| **Race**              | Runs all child blocks, first to complete wins, rest cancelled   |
+| **Loop**              | Repeats body while condition holds (max iterations enforced)    |
+| **ForEach**           | Iterates over a collection, runs body per item                  |
+| **Router**            | N-way branch — evaluates conditions, routes to match            |
+| **TryCatch**          | Try block, on failure catch block, always run finally           |
+| **SubSequence**       | Invokes another sequence as a sub-workflow                      |
+| **ABSplit**           | A/B split — routes traffic to one of several variants by weight |
+| **CancellationScope** | Child blocks cannot be cancelled by external cancel signals     |
 
 Blocks are recursive — a Parallel can contain TryCatch, which can contain Steps.
 
 ### Built-in Step Handlers
 
-| Handler | Purpose |
-|---------|---------|
-| `noop` | Does nothing, returns `{}` |
-| `log` | Logs `params.message` at info level |
-| `sleep` | Sleeps for `params.duration_ms` milliseconds |
-| `fail` | Immediately fails the step with a given error message |
-| `http_request` | Makes an HTTP request (method, URL, headers, body) |
-| `llm_call` | Invoke an LLM provider (OpenAI/Anthropic/Bedrock) with messages |
-| `tool_call` | Dispatch to a named tool (for agent tool-use loops) |
-| `human_review` | Human-in-the-loop approval gate with timeout/escalation |
-| `self_modify` | Dynamic step injection — modifies the running sequence at runtime |
-| `emit_event` | Fire an event trigger → spawn a new workflow instance (same tenant only; supports dedupe via `dedupe_key` + `dedupe_scope` = `parent` (default) or `tenant`) |
-| `send_signal` | Enqueue a signal (`pause`/`resume`/`cancel`/`update_context`/custom) to another instance (same tenant only; target terminal-state check and enqueue happen atomically in one storage transaction) |
-| `query_instance` | Read another instance's context + state (same tenant only; returns `{ found: false }` for missing target) |
-| `set_state` | Write a value to session-scoped state |
-| `get_state` | Read a value from session-scoped state |
-| `delete_state` | Delete a value from session-scoped state |
-| `merge_state` | Merge an object into session-scoped state |
-| `transform` | Transform context data using expressions |
-| `assert` | Assert a condition, fail the step if false |
-| `mcp_call` | Invoke an MCP server tool (JSON-RPC over stdio/HTTP) |
-| `agent` | Autonomous agent loop — LLM + tool dispatch with durable checkpointing |
-| `embed` | Generate vector embeddings for text via configured provider |
-| `memory_store` | Store a vector embedding + payload in instance memory or a durable tenant/namespace knowledge store |
-| `memory_search` | Search instance memory or tenant-shared knowledge by similarity |
-| `memory_delete` | Permanently delete an authorized instance or tenant memory |
-| `blob_put` | Store a binary artifact in the configured artifact backend |
-| `blob_get` | Retrieve a binary artifact by key |
+| Handler          | Purpose                                                                                                                                                                                           |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `noop`           | Does nothing, returns `{}`                                                                                                                                                                        |
+| `log`            | Logs `params.message` at info level                                                                                                                                                               |
+| `sleep`          | Sleeps for `params.duration_ms` milliseconds                                                                                                                                                      |
+| `fail`           | Immediately fails the step with a given error message                                                                                                                                             |
+| `http_request`   | Makes an HTTP request (method, URL, headers, body)                                                                                                                                                |
+| `llm_call`       | Invoke an LLM provider (OpenAI/Anthropic/Bedrock) with messages                                                                                                                                   |
+| `tool_call`      | Dispatch to a named tool (for agent tool-use loops)                                                                                                                                               |
+| `human_review`   | Human-in-the-loop approval gate with timeout/escalation                                                                                                                                           |
+| `self_modify`    | Dynamic step injection — modifies the running sequence at runtime                                                                                                                                 |
+| `emit_event`     | Fire an event trigger → spawn a new workflow instance (same tenant only; supports dedupe via `dedupe_key` + `dedupe_scope` = `parent` (default) or `tenant`)                                      |
+| `send_signal`    | Enqueue a signal (`pause`/`resume`/`cancel`/`update_context`/custom) to another instance (same tenant only; target terminal-state check and enqueue happen atomically in one storage transaction) |
+| `query_instance` | Read another instance's context + state (same tenant only; returns `{ found: false }` for missing target)                                                                                         |
+| `set_state`      | Write a value to session-scoped state                                                                                                                                                             |
+| `get_state`      | Read a value from session-scoped state                                                                                                                                                            |
+| `delete_state`   | Delete a value from session-scoped state                                                                                                                                                          |
+| `merge_state`    | Merge an object into session-scoped state                                                                                                                                                         |
+| `transform`      | Transform context data using expressions                                                                                                                                                          |
+| `assert`         | Assert a condition, fail the step if false                                                                                                                                                        |
+| `mcp_call`       | Invoke an MCP server tool (JSON-RPC over stdio/HTTP)                                                                                                                                              |
+| `agent`          | Autonomous agent loop — LLM + tool dispatch with durable checkpointing                                                                                                                            |
+| `embed`          | Generate vector embeddings for text via configured provider                                                                                                                                       |
+| `memory_store`   | Store a vector embedding + payload in instance memory or a durable tenant/namespace knowledge store                                                                                               |
+| `memory_search`  | Search instance memory or tenant-shared knowledge by similarity                                                                                                                                   |
+| `memory_delete`  | Permanently delete an authorized instance or tenant memory                                                                                                                                        |
+| `blob_put`       | Store a binary artifact in the configured artifact backend                                                                                                                                        |
+| `blob_get`       | Retrieve a binary artifact by key                                                                                                                                                                 |
 
 See [`API.md` — Workflow coordination handlers](API.md#workflow-coordination-handlers) for full param/return schemas and error semantics.
 
@@ -212,7 +213,9 @@ The engine's heartbeat fires every N milliseconds (default 100ms, configurable).
 
 ### Memoization
 
-Step results are persisted to `block_outputs`. If the engine crashes and re-processes an instance, it checks for existing output before re-running. Steps are idempotent at the engine level.
+Step results are persisted to `block_outputs`. If the engine crashes and re-processes an instance, it checks for existing output before re-running. This prevents ordinary recovery from rerunning a step whose successful output
+is already committed. It does not make an external side effect exactly-once;
+handlers and workers must use stable idempotency keys where supported.
 
 ### Retry with Backoff
 
@@ -240,13 +243,13 @@ Write handlers in **any language**. Workers poll the engine for tasks via REST A
 
 ## Signals
 
-| Signal | Effect |
-|--------|--------|
-| `pause` | Running → Paused |
-| `resume` | Paused → Scheduled |
-| `cancel` | Running → Cancelled (terminal) |
+| Signal           | Effect                                                                                                                                                          |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pause`          | Running → Paused                                                                                                                                                |
+| `resume`         | Paused → Scheduled                                                                                                                                              |
+| `cancel`         | Running → Cancelled (terminal)                                                                                                                                  |
 | `update_context` | Merges the payload's `data` keys into the instance context (engine-owned `runtime`/`audit` bookkeeping and read-only `config` are preserved, never overwritten) |
-| `custom(name)` | Logged, for user handlers |
+| `custom(name)`   | Logged, for user handlers                                                                                                                                       |
 
 Signals are stored in `signal_inbox` and processed at the start of each claim cycle. At the handler boundary, `Signal::action()` lifts the `(signal_type, payload)` pair into a typed `SignalAction` variant — `UpdateContext` carries a validated `ExecutionContext`; decode failures are logged + marked delivered rather than re-tried, so malformed payloads cannot poison the queue.
 
@@ -254,10 +257,10 @@ Signals are stored in `signal_inbox` and processed at the start of each claim cy
 
 ## Background GC
 
-| Sweeper | Target table | Cadence | Bound per tick |
-|---------|-------------|---------|----------------|
-| `externalized_state` TTL | rows with elapsed `expires_at` | `GC_DEFAULT_INTERVAL` (5 min) | 1 000 rows |
-| `emit_event_dedupe` TTL | rows older than `EMIT_DEDUPE_DEFAULT_TTL` (30 days) | same tick | 1 000 rows |
+| Sweeper                  | Target table                                        | Cadence                       | Bound per tick |
+| ------------------------ | --------------------------------------------------- | ----------------------------- | -------------- |
+| `externalized_state` TTL | rows with elapsed `expires_at`                      | `GC_DEFAULT_INTERVAL` (5 min) | 1 000 rows     |
+| `emit_event_dedupe` TTL  | rows older than `EMIT_DEDUPE_DEFAULT_TTL` (30 days) | same tick                     | 1 000 rows     |
 
 Both sweepers share one ticker and run **concurrently via `tokio::join!`** — they touch disjoint tables and contend for neither locks nor foreign keys, so tick latency is `max(sweep_a, sweep_b)` rather than their sum. Errors are logged independently per sweep and never propagated; a missed tick is picked up by the next one. Instance-scoped cleanup (deleting an instance) is handled by `ON DELETE CASCADE` on the FK — Postgres enforces this natively; SQLite additionally requires the `PRAGMA foreign_keys = ON` pool option (already wired). The GC loop only targets **TTL-expired rows**, not instance-deletion cleanup.
 
@@ -267,22 +270,22 @@ Both sweepers share one ticker and run **concurrently via `tokio::join!`** — t
 
 ### Core Tables
 
-| Table | Purpose |
-|-------|---------|
-| `sequences` | Workflow definitions (tenant, name, version, JSONB blocks) |
-| `task_instances` | Executions (state, next_fire_at, priority, context, metadata) |
-| `execution_tree` | Runtime tree for composite blocks (parent-child nodes) |
-| `block_outputs` | Append-only step results — one row per execution (attempt, loop iteration, for_each pass). Readers that want "current state" use the most recent row by `created_at`. |
-| `signal_inbox` | Pending signals for instances |
-| `rate_limits` | Per-resource rate limit state |
-| `cron_schedules` | Recurring workflow triggers |
-| `worker_tasks` | External handler task queue |
-| `resource_pools` | Resource rotation (round-robin, weighted, random) |
-| `externalized_state` | Large outputs stored separately; TTL-swept by the GC loop |
-| `emit_event_dedupe` | `(scope_kind, scope_value, dedupe_key) → child_instance_id` — enforces at-most-once child spawn across parent or tenant scope; TTL-swept |
-| `audit_log` | Append-only state transition journal |
-| `sessions` | Session-scoped data tied to instances |
-| `checkpoints` | Periodic state snapshots |
+| Table                | Purpose                                                                                                                                                               |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sequences`          | Workflow definitions (tenant, name, version, JSONB blocks)                                                                                                            |
+| `task_instances`     | Executions (state, next_fire_at, priority, context, metadata)                                                                                                         |
+| `execution_tree`     | Runtime tree for composite blocks (parent-child nodes)                                                                                                                |
+| `block_outputs`      | Append-only step results — one row per execution (attempt, loop iteration, for_each pass). Readers that want "current state" use the most recent row by `created_at`. |
+| `signal_inbox`       | Pending signals for instances                                                                                                                                         |
+| `rate_limits`        | Per-resource rate limit state                                                                                                                                         |
+| `cron_schedules`     | Recurring workflow triggers                                                                                                                                           |
+| `worker_tasks`       | External handler task queue                                                                                                                                           |
+| `resource_pools`     | Resource rotation (round-robin, weighted, random)                                                                                                                     |
+| `externalized_state` | Large outputs stored separately; TTL-swept by the GC loop                                                                                                             |
+| `emit_event_dedupe`  | `(scope_kind, scope_value, dedupe_key) → child_instance_id` — enforces at-most-once child spawn across parent or tenant scope; TTL-swept                              |
+| `audit_log`          | Append-only state transition journal                                                                                                                                  |
+| `sessions`           | Session-scoped data tied to instances                                                                                                                                 |
+| `checkpoints`        | Periodic state snapshots                                                                                                                                              |
 
 ### Key Indexes
 
@@ -318,36 +321,42 @@ CREATE INDEX idx_rate_limits_key ON rate_limits (tenant_id, resource_key);
 
 `/metrics` (and the Swagger UI at `/swagger-ui`) sit behind the same API-key auth as the rest of the management surface — a Prometheus scraper must send the `x-api-key` header (and `x-tenant-id` when tenant enforcement is on).
 
-| Metric | Type |
-|--------|------|
-| `orch8_instances_claimed_total` | Counter |
-| `orch8_instances_completed_total` | Counter |
-| `orch8_instances_failed_total` | Counter |
-| `orch8_steps_executed_total` | Counter |
-| `orch8_steps_failed_total` | Counter |
-| `orch8_steps_retried_total` | Counter |
-| `orch8_signals_delivered_total` | Counter |
-| `orch8_rate_limits_exceeded_total` | Counter |
-| `orch8_recovery_stale_instances_total` | Counter |
-| `orch8_webhooks_sent_total` | Counter |
-| `orch8_webhooks_failed_total` | Counter |
-| `orch8_cron_triggered_total` | Counter |
-| `orch8_cache_hits_total` | Counter |
-| `orch8_cache_misses_total` | Counter |
-| `orch8_tick_duration_seconds` | Histogram |
-| `orch8_step_duration_seconds` | Histogram |
-| `orch8_instance_processing_seconds` | Histogram |
-| `orch8_queue_depth` | Gauge |
-| `orch8_active_tasks` | Gauge |
+| Metric                                 | Type      |
+| -------------------------------------- | --------- |
+| `orch8_instances_claimed_total`        | Counter   |
+| `orch8_instances_completed_total`      | Counter   |
+| `orch8_instances_failed_total`         | Counter   |
+| `orch8_steps_executed_total`           | Counter   |
+| `orch8_steps_failed_total`             | Counter   |
+| `orch8_steps_retried_total`            | Counter   |
+| `orch8_signals_delivered_total`        | Counter   |
+| `orch8_rate_limits_exceeded_total`     | Counter   |
+| `orch8_recovery_stale_instances_total` | Counter   |
+| `orch8_webhooks_sent_total`            | Counter   |
+| `orch8_webhooks_failed_total`          | Counter   |
+| `orch8_cron_triggered_total`           | Counter   |
+| `orch8_cache_hits_total`               | Counter   |
+| `orch8_cache_misses_total`             | Counter   |
+| `orch8_tick_duration_seconds`          | Histogram |
+| `orch8_step_duration_seconds`          | Histogram |
+| `orch8_instance_processing_seconds`    | Histogram |
+| `orch8_queue_depth`                    | Gauge     |
+| `orch8_active_tasks`                   | Gauge     |
 
 ### Health Checks
 
-- `GET /health/live` — liveness (always 200)
-- `GET /health/ready` — readiness (200 if the DB is reachable **and** the engine tick loop is alive; 503 if either has died, so an orchestrator pulls the pod and restarts it rather than leaving a zombie API accepting work it will never execute)
+- `GET /health/live` — 200 while the process is live; 503 if an armed local
+  scheduler has stopped completing ticks beyond `engine.liveness_stale_secs`.
+- `GET /health/ready` — 200 after startup when storage is reachable and any
+  local scheduler has made progress and remains ready; otherwise 503. API-only
+  roles do not wait for a local scheduler. Use readiness to remove a pod from
+  service and liveness to restart a stalled scheduler.
 
 ### Webhooks
 
-Events: `instance.completed`, `instance.failed`. Configurable URLs, retry with exponential backoff (up to 3 retries).
+Lifecycle notifications use a durable outbox. Retry behavior, replay protection,
+parking, and retention are described in [Webhooks](WEBHOOKS.md); the retry window
+is configurable independently from per-attempt request timeouts.
 
 ---
 
@@ -376,20 +385,20 @@ single source of truth.
 
 ## Glossary
 
-| Term | Definition |
-|------|-----------|
-| **Sequence** | Workflow template — reusable definition of blocks |
-| **Instance** | Single execution of a sequence — has state, context, outputs |
-| **Block** | Unit of work in a sequence (step or composite) |
-| **Step** | Leaf block that executes a handler function |
-| **Handler** | Function that does actual work (built-in or external worker) |
-| **Execution Tree** | Runtime tree of nodes for composite sequences |
-| **Worker Task** | Row in `worker_tasks` for external handler execution |
-| **DLQ** | Dead Letter Queue — failed instances awaiting manual retry |
-| **Tick** | One scheduler cycle (default 100ms) |
-| **Claim** | Atomic acquisition of an instance (`FOR UPDATE SKIP LOCKED`) |
-| **Context** | Multi-section state traveling with an instance (data, config, audit, runtime) |
-| **Signal** | External command sent to a running instance |
+| Term               | Definition                                                                    |
+| ------------------ | ----------------------------------------------------------------------------- |
+| **Sequence**       | Workflow template — reusable definition of blocks                             |
+| **Instance**       | Single execution of a sequence — has state, context, outputs                  |
+| **Block**          | Unit of work in a sequence (step or composite)                                |
+| **Step**           | Leaf block that executes a handler function                                   |
+| **Handler**        | Function that does actual work (built-in or external worker)                  |
+| **Execution Tree** | Runtime tree of nodes for composite sequences                                 |
+| **Worker Task**    | Row in `worker_tasks` for external handler execution                          |
+| **DLQ**            | Dead Letter Queue — failed instances awaiting manual retry                    |
+| **Tick**           | One scheduler cycle (default 100ms)                                           |
+| **Claim**          | Atomic acquisition of an instance (`FOR UPDATE SKIP LOCKED`)                  |
+| **Context**        | Multi-section state traveling with an instance (data, config, audit, runtime) |
+| **Signal**         | External command sent to a running instance                                   |
 
 ---
 

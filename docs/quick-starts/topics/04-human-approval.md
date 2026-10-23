@@ -176,10 +176,9 @@ OpenAPI.
 
 ## If something failed
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Approval is not listed | Scheduler has not reached the gate | Inspect the instance tree and wait until state is `waiting` |
-| Signal returns success but instance stays waiting | Value is not a declared choice | Send `approved`, `rejected`, or `escalated` exactly |
-| Decision stored under the wrong key | `store_as` differs from the router field | Keep `store_as: decision` and route on `data.decision` |
-| Instance fails after the decision | A downstream handler or condition is invalid | Inspect the tree and block outputs before retrying |
-
+| Symptom                                           | Likely cause                                 | Fix                                                         |
+| ------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------------- |
+| Approval is not listed                            | Scheduler has not reached the gate           | Inspect the instance tree and wait until state is `waiting` |
+| Signal returns success but instance stays waiting | Value is not a declared choice               | Send `approved`, `rejected`, or `escalated` exactly         |
+| Decision stored under the wrong key               | `store_as` differs from the router field     | Keep `store_as: decision` and route on `data.decision`      |
+| Instance fails after the decision                 | A downstream handler or condition is invalid | Inspect the tree and block outputs before retrying          |
