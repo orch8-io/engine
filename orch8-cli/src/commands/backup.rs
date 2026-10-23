@@ -175,6 +175,7 @@ fn trigger_json(trigger: &TriggerDef) -> Result<Value> {
 // ---------------------------------------------------------------------------
 
 /// Keep the `SQLite` copy alive and explicitly release the `PostgreSQL` read transaction.
+#[derive(Default)]
 struct SourceGuard {
     _sqlite_snapshot: Option<tempfile::TempDir>,
     postgres_pool: Option<sqlx::PgPool>,
@@ -244,14 +245,7 @@ async fn open_source(target: &DbTarget) -> Result<(Arc<dyn StorageBackend>, Sour
 async fn open_target(target: &DbTarget) -> Result<Arc<dyn StorageBackend>> {
     match target {
         DbTarget::Postgres(url) => {
-            let report = super::upgrade::check(target).await?;
-            if !report.is_current() {
-                bail!(
-                    "the target database has {} pending migration(s); run `orch8 migrate` first \
-                     (see `orch8 upgrade --check`)",
-                    report.pending.len()
-                );
-            }
+            require_current_target_schema(target).await?;
             Ok(Arc::new(
                 orch8_storage::postgres::PostgresStorage::new(url, 4, None)
                     .await
@@ -271,6 +265,47 @@ async fn open_target(target: &DbTarget) -> Result<Arc<dyn StorageBackend>> {
             ))
         }
     }
+}
+
+/// A dry run reads the same catalogs real restore would inspect, while schema
+/// reconciliation happens only in a disposable `SQLite` snapshot. A missing
+/// `SQLite` target is an empty catalog and does not need a filesystem entry.
+async fn open_restore_target(
+    target: &DbTarget,
+    dry_run: bool,
+) -> Result<(Arc<dyn StorageBackend>, SourceGuard)> {
+    if !dry_run {
+        return Ok((open_target(target).await?, SourceGuard::default()));
+    }
+    match target {
+        DbTarget::Sqlite(path)
+            if !path
+                .try_exists()
+                .with_context(|| format!("inspect {}", path.display()))? =>
+        {
+            Ok((
+                Arc::new(orch8_storage::sqlite::SqliteStorage::in_memory().await?),
+                SourceGuard::default(),
+            ))
+        }
+        DbTarget::Postgres(_) => {
+            require_current_target_schema(target).await?;
+            open_source(target).await
+        }
+        DbTarget::Sqlite(_) => open_source(target).await,
+    }
+}
+
+async fn require_current_target_schema(target: &DbTarget) -> Result<()> {
+    let report = super::upgrade::check(target).await?;
+    if !report.is_current() {
+        bail!(
+            "the target database has {} pending migration(s); run `orch8 migrate` first \
+                     (see `orch8 upgrade --check`)",
+            report.pending.len()
+        );
+    }
+    Ok(())
 }
 
 /// Read the complete payload catalog for one instance using bounded pages.
@@ -873,14 +908,16 @@ pub async fn run_restore(cmd: RestoreCmd, format: OutputFormat) -> Result<()> {
             }
         ))?;
     }
-    let storage = open_target(&target).await?;
-    let report = restore(
+    let (storage, guard) = open_restore_target(&target, cmd.dry_run).await?;
+    let result = restore(
         &archive,
         storage.as_ref(),
         cmd.dry_run,
         cmd.include_instances,
     )
-    .await?;
+    .await;
+    guard.close().await;
+    let report = result?;
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
         OutputFormat::Table => {

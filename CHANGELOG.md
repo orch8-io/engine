@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Restore dry runs
+
+- `restore --dry-run` inspects a consistent snapshot of existing targets and
+  uses an empty in-memory catalog for missing SQLite targets. It neither
+  creates a target directory/database nor migrates the original schema.
+- PostgreSQL dry-run snapshots close on success and read failure before the
+  command returns; normal restore still requires a fully migrated target.
+
 ### FCM response bounds
 
 - OAuth and error responses are limited to 64 KiB before decoding, including
