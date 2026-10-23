@@ -37,11 +37,10 @@
 use serde_json::{Value, json};
 use tracing::debug;
 
-use orch8_types::error::StepError;
+use orch8_types::error::{StepError, StorageError};
 use orch8_types::event_correlation::WaitStatus;
 
 use super::StepContext;
-use crate::event_correlation::register_wait;
 
 pub async fn handle_wait_for_event(ctx: StepContext) -> Result<Value, StepError> {
     let wait = crate::event_correlation::parse_wait_params(
@@ -57,12 +56,26 @@ pub async fn handle_wait_for_event(ctx: StepContext) -> Result<Value, StepError>
     let event_names = wait.event_names.clone();
     let correlation_key = wait.correlation_key.clone();
 
-    let registered = register_wait(&ctx.storage, wait)
+    let registered = if let Some(token) = ctx.claim_token {
+        let control =
+            crate::control::ClaimedControl::new(ctx.storage.as_ref(), ctx.instance_id, token);
+        crate::event_correlation::register_wait_with_control(&ctx.storage, &control, wait).await
+    } else {
+        crate::event_correlation::register_wait_with_control(
+            &ctx.storage,
+            ctx.storage.as_ref(),
+            wait,
+        )
         .await
-        .map_err(|e| StepError::Retryable {
-            message: format!("wait_for_event: registration failed: {e}"),
+    }
+    .map_err(|error| match error {
+        crate::error::EngineError::ClaimLost { .. } => StepError::ClaimLost,
+        crate::error::EngineError::Storage(error) => event_storage_error(&error),
+        other => StepError::Permanent {
+            message: other.to_string(),
             details: None,
-        })?;
+        },
+    })?;
 
     debug!(
         instance_id = %ctx.instance_id,
@@ -79,15 +92,22 @@ pub async fn handle_wait_for_event(ctx: StepContext) -> Result<Value, StepError>
     let mut all = Vec::new();
     if registered.status == WaitStatus::Satisfied {
         for event_id in &registered.matched_event_ids {
-            if let Ok(Some(event)) = ctx.storage.get_event(*event_id).await {
-                let entry = json!({
-                    "event_name": event.event_name,
-                    "producer_event_id": event.producer_event_id,
-                    "payload": event.payload,
-                });
-                by_name.insert(event.event_name.clone(), entry.clone());
-                all.push(entry);
-            }
+            let event = ctx
+                .storage
+                .get_event(*event_id)
+                .await
+                .map_err(|error| event_storage_error(&error))?
+                .ok_or_else(|| StepError::Permanent {
+                    message: format!("wait_for_event: matched event {event_id} is missing"),
+                    details: None,
+                })?;
+            let entry = json!({
+                "event_name": event.event_name,
+                "producer_event_id": event.producer_event_id,
+                "payload": event.payload,
+            });
+            by_name.insert(event.event_name.clone(), entry.clone());
+            all.push(entry);
         }
     }
 
@@ -100,6 +120,21 @@ pub async fn handle_wait_for_event(ctx: StepContext) -> Result<Value, StepError>
         "satisfied": registered.status == WaitStatus::Satisfied,
         "matched": registered.matched_names,
     }))
+}
+
+fn event_storage_error(error: &StorageError) -> StepError {
+    let message = format!("wait_for_event: storage error: {error}");
+    if error.is_transient() {
+        StepError::Retryable {
+            message,
+            details: None,
+        }
+    } else {
+        StepError::Permanent {
+            message,
+            details: None,
+        }
+    }
 }
 
 #[cfg(test)]

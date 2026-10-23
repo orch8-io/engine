@@ -461,3 +461,63 @@ pub(super) async fn output_and_transition(
     tx.commit().await?;
     Ok(true)
 }
+
+async fn require_tenant(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+    tenant_id: &str,
+) -> Result<(), StorageError> {
+    let actual: String = sqlx::query_scalar("SELECT tenant_id FROM task_instances WHERE id=$1")
+        .bind(instance_id.into_uuid())
+        .fetch_one(conn)
+        .await?;
+    if actual != tenant_id {
+        return Err(StorageError::Constraint(
+            "registration tenant differs from instance tenant".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn event_wait(
+    store: &PostgresStorage,
+    wait: &orch8_types::event_correlation::EventWait,
+    claim_token: DateTime<Utc>,
+) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError> {
+    let instance_id = InstanceId::from_uuid(wait.instance_id);
+    let Some(mut tx) = begin(store, instance_id, claim_token).await? else {
+        return Ok(None);
+    };
+    require_tenant(&mut tx, instance_id, &wait.tenant_id).await?;
+    let registered = super::events::register_wait_on(&mut tx, wait).await?;
+    tx.commit().await?;
+    Ok(Some(registered))
+}
+
+pub(super) async fn federation_call(
+    store: &PostgresStorage,
+    call: &orch8_types::federation::FederationCall,
+    claim_token: DateTime<Utc>,
+) -> Result<Option<bool>, StorageError> {
+    let Some(mut tx) = begin(store, call.instance_id, claim_token).await? else {
+        return Ok(None);
+    };
+    require_tenant(&mut tx, call.instance_id, call.tenant_id.as_str()).await?;
+    let inserted = super::federation::create_call_on(&mut tx, call).await?;
+    tx.commit().await?;
+    Ok(Some(inserted))
+}
+
+pub(super) async fn delete_event_waits(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    blocks: &[String],
+    claim_token: DateTime<Utc>,
+) -> Result<Option<u64>, StorageError> {
+    let Some(mut tx) = begin(store, instance_id, claim_token).await? else {
+        return Ok(None);
+    };
+    let deleted = super::events::delete_waits_on(&mut tx, instance_id, blocks).await?;
+    tx.commit().await?;
+    Ok(Some(deleted))
+}

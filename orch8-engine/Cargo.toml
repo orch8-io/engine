@@ -75,6 +75,9 @@ wasm = ["dep:wasmtime"]
 test-util = ["orch8-storage/test-util"]
 
 [dev-dependencies]
+# Native transaction fault fixtures use the same SQLx driver as storage.
+sqlx.workspace = true
+
 # Integration tests in `tests/` use `orch8_engine::testing`.
 orch8-engine = { path = ".", default-features = false, features = ["test-util"] }
 # Tests use `#[tokio::test(start_paused = true)]`; declare `test-util`

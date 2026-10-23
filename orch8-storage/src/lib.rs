@@ -1544,6 +1544,16 @@ pub trait OutputStore: Send + Sync + 'static {
 // Sub-trait 5: SignalStore
 // ============================================================================
 
+/// Authoritative result of one atomic event-match attempt.
+#[derive(Debug, Clone)]
+pub struct EventMatch {
+    /// The authoritative registration after this attempt.
+    pub wait: orch8_types::event_correlation::EventWait,
+    /// True only if this transaction consumed the candidate. Merely observing
+    /// another matcher's completed wait must not report a second match.
+    pub consumed: bool,
+}
+
 #[async_trait]
 pub trait SignalStore: Send + Sync + 'static {
     async fn enqueue_signal(&self, signal: &Signal) -> Result<(), StorageError>;
@@ -1596,6 +1606,14 @@ pub trait SignalStore: Send + Sync + 'static {
     ) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError>;
 
     /// List events for a tenant, newest first, optionally by status.
+    /// Resolve the canonical producer identity, including consumed/expired rows.
+    async fn get_event_by_identity(
+        &self,
+        tenant_id: &str,
+        event_name: &str,
+        producer_event_id: &str,
+    ) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError>;
+
     async fn list_events(
         &self,
         tenant_id: &str,
@@ -1635,6 +1653,47 @@ pub trait SignalStore: Send + Sync + 'static {
         &self,
         wait: &orch8_types::event_correlation::EventWait,
     ) -> Result<(), StorageError>;
+
+    /// Atomically register/refresh parameters while retaining stored identity
+    /// and matched progress. A satisfied registration is returned unchanged.
+    async fn register_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+    ) -> Result<orch8_types::event_correlation::EventWait, StorageError>;
+
+    /// Same registration under the original running claim. `None` means the
+    /// claim was lost. The ownership check and registration share a transaction.
+    async fn upsert_event_wait_claimed(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError>;
+
+    /// Match a canonical pending event into the exact registration generation.
+    /// Consumption, matched progress and its unique satisfaction notification
+    /// commit together. `None` means that generation disappeared. A missing
+    /// candidate allows already-complete joins to settle without a new event.
+    /// The notification's ID must equal the wait ID and address the same block.
+    async fn match_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+        event_id: Option<Uuid>,
+        notification: &Signal,
+    ) -> Result<Option<EventMatch>, StorageError>;
+
+    /// Remove registrations when their step activations are reset.
+    async fn delete_event_waits_for_blocks(
+        &self,
+        instance_id: InstanceId,
+        blocks: &[String],
+    ) -> Result<u64, StorageError>;
+    /// `None` means the original instance claim was lost.
+    async fn delete_event_waits_for_blocks_claimed(
+        &self,
+        instance_id: InstanceId,
+        blocks: &[String],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError>;
 
     async fn get_event_wait(
         &self,
@@ -4094,6 +4153,14 @@ pub trait ContinuityStore: Send + Sync + 'static {
         &self,
         call: &orch8_types::federation::FederationCall,
     ) -> Result<bool, StorageError>;
+
+    /// Atomically retain the parent claim while inserting the call. `None`
+    /// means claim lost; `Some(false)` means the call already existed.
+    async fn create_federation_call_claimed(
+        &self,
+        call: &orch8_types::federation::FederationCall,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<bool>, StorageError>;
 
     async fn get_federation_call(
         &self,

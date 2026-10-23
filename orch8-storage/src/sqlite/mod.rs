@@ -1548,6 +1548,14 @@ impl crate::SignalStore for SqliteStorage {
         events::get(self, id).await
     }
 
+    async fn get_event_by_identity(
+        &self,
+        tenant_id: &str,
+        event_name: &str,
+        producer_event_id: &str,
+    ) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError> {
+        events::get_by_identity(self, tenant_id, event_name, producer_event_id).await
+    }
     async fn list_events(
         &self,
         tenant_id: &str,
@@ -1591,6 +1599,44 @@ impl crate::SignalStore for SqliteStorage {
         events::upsert_wait(self, wait).await
     }
 
+    async fn register_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+    ) -> Result<orch8_types::event_correlation::EventWait, StorageError> {
+        events::register_wait(self, wait).await
+    }
+    async fn match_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+        event_id: Option<Uuid>,
+        notification: &Signal,
+    ) -> Result<Option<crate::EventMatch>, StorageError> {
+        events::match_wait(self, wait, event_id, notification).await
+    }
+
+    async fn upsert_event_wait_claimed(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError> {
+        claimed_writes::event_wait(self, wait, claim_token).await
+    }
+
+    async fn delete_event_waits_for_blocks(
+        &self,
+        instance_id: InstanceId,
+        blocks: &[String],
+    ) -> Result<u64, StorageError> {
+        events::delete_waits(self, instance_id, blocks).await
+    }
+    async fn delete_event_waits_for_blocks_claimed(
+        &self,
+        instance_id: InstanceId,
+        blocks: &[String],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError> {
+        claimed_writes::delete_event_waits(self, instance_id, blocks, claim_token).await
+    }
     async fn get_event_wait(
         &self,
         instance_id: InstanceId,

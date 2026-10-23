@@ -650,3 +650,13 @@ fn requarantine_refreshes_the_timestamp_and_keeps_the_reason() {
         Some("provider_invalid_token")
     );
 }
+
+#[test]
+fn collapse_key_preserves_the_canonical_64_bit_length_prefix_format() {
+    // A fixed vector includes multibyte fields and preserves the keys already
+    // persisted by 64-bit producers when another target computes the digest.
+    assert_eq!(
+        collapsible("té", "dev😀", "exec", "topic", "command", 0).collapse_key(),
+        "6634c26cf306d0b158ec47e93d179fdc08946d5c3ddfe30db837c0335e5039e5"
+    );
+}

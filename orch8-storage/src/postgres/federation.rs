@@ -99,6 +99,14 @@ pub(super) async fn create_call(
     store: &PostgresStorage,
     call: &FederationCall,
 ) -> Result<bool, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    create_call_on(&mut conn, call).await
+}
+
+pub(super) async fn create_call_on(
+    conn: &mut sqlx::PgConnection,
+    call: &FederationCall,
+) -> Result<bool, StorageError> {
     let result = sqlx::query(
         "INSERT INTO federation_calls
          (tenant_id, call_id, instance_id, state, notified, next_poll_at, version, record, created_at)
@@ -114,7 +122,7 @@ pub(super) async fn create_call(
     .bind(to_i64(call.version, "federation call version")?)
     .bind(encode(call)?)
     .bind(call.created_at)
-    .execute(&store.pool)
+    .execute(conn)
     .await?;
     Ok(result.rows_affected() == 1)
 }

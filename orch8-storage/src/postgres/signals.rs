@@ -1,3 +1,4 @@
+use sqlx::AssertSqlSafe;
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -198,5 +199,33 @@ pub(super) async fn mark_owned_delivered_on(
     sqlx::query("UPDATE signal_inbox SET delivered=TRUE, delivered_at=NOW() WHERE id=$1 AND instance_id=$2 AND delivered=FALSE")
         .bind(signal_id).bind(instance_id.into_uuid())
         .execute(conn).await?;
+    Ok(())
+}
+
+/// Idempotent satisfaction delivery, within the matcher's transaction.
+pub(super) async fn enqueue_once_on(
+    conn: &mut sqlx::PgConnection,
+    signal: &Signal,
+) -> Result<(), StorageError> {
+    let signal_type = signal.signal_type.to_string();
+    let count = bind_signal_insert(
+        sqlx::query(AssertSqlSafe(format!(
+            "{SIGNAL_INSERT_SQL} ON CONFLICT (id) DO NOTHING"
+        ))),
+        signal,
+        &signal_type,
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if count == 0 {
+        let same: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM signal_inbox WHERE id=$1 AND instance_id=$2 AND signal_type=$3)")
+            .bind(signal.id).bind(signal.instance_id.into_uuid()).bind(&signal_type).fetch_one(conn).await?;
+        if !same {
+            return Err(StorageError::Constraint(
+                "satisfaction signal ID belongs to another message".into(),
+            ));
+        }
+    }
     Ok(())
 }

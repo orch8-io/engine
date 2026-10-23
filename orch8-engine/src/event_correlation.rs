@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::{Value, json};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use orch8_storage::StorageBackend;
 use orch8_types::error::StorageError;
@@ -36,15 +36,33 @@ pub async fn ingest(
     storage: &Arc<dyn StorageBackend>,
     envelope: EventEnvelope,
 ) -> Result<IngestOutcome, StorageError> {
+    let receipt_id = envelope.id;
     let inserted = storage.ingest_event(&envelope).await?;
-    if !inserted {
-        return Ok(IngestOutcome {
-            event_id: envelope.id,
-            duplicate: true,
-            matched_wait: None,
-            satisfied: false,
-        });
-    }
+    // Retry a persisted but unmatched event using its original envelope, never
+    // the retry's transport UUID, correlation key or replacement payload.
+    let envelope = if inserted {
+        envelope
+    } else {
+        let canonical = storage
+            .get_event_by_identity(
+                &envelope.tenant_id,
+                &envelope.event_name,
+                &envelope.producer_event_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                StorageError::Conflict("deduplicated event disappeared before lookup".into())
+            })?;
+        if canonical.status != EventStatus::Pending {
+            return Ok(IngestOutcome {
+                event_id: receipt_id,
+                duplicate: true,
+                matched_wait: None,
+                satisfied: false,
+            });
+        }
+        canonical
+    };
 
     let waits = storage
         .find_waiting_event_waits(
@@ -53,56 +71,32 @@ pub async fn ingest(
             &envelope.correlation_key,
         )
         .await?;
-    for mut wait in waits {
-        let read_matches = wait.matched_event_ids.clone();
-        if !wait.record_match(&envelope) {
+    for wait in waits {
+        let Some(current) = storage
+            .match_event_wait(&wait, Some(envelope.id), &satisfaction_signal(&wait))
+            .await?
+        else {
+            continue;
+        };
+        if !current.consumed {
             continue;
         }
-        // At-most-once: claim the event for this wait's instance first.
-        let consumed = storage
-            .consume_events(&[envelope.id], InstanceId::from_uuid(wait.instance_id))
-            .await?;
-        if consumed == 0 {
-            // A concurrent matcher won the event.
-            return Ok(IngestOutcome {
-                event_id: envelope.id,
-                duplicate: false,
-                matched_wait: None,
-                satisfied: false,
-            });
-        }
-        let wait_id = wait.id;
-        let Some(persisted) =
-            persist_matches(storage, wait, read_matches, std::slice::from_ref(&envelope)).await?
-        else {
-            // The wait moved concurrently (cancelled / satisfied by a
-            // sibling event). The event stays consumed and attributed —
-            // log rather than un-consume: replaying it elsewhere would
-            // break at-most-once.
-            warn!(wait_id = %wait_id, event = %envelope.event_name,
-                "event consumed but wait moved concurrently");
-            return Ok(IngestOutcome {
-                event_id: envelope.id,
-                duplicate: false,
-                matched_wait: Some(wait_id),
-                satisfied: false,
-            });
-        };
-        let satisfied = persisted.status == WaitStatus::Satisfied;
+        let current = current.wait;
+        let satisfied = current.status == WaitStatus::Satisfied;
         if satisfied {
-            resume_waiting_instance(storage, &persisted).await?;
+            wake_satisfied_wait(storage, &current).await;
         }
         return Ok(IngestOutcome {
-            event_id: envelope.id,
-            duplicate: false,
-            matched_wait: Some(wait_id),
+            event_id: receipt_id,
+            duplicate: !inserted,
+            matched_wait: Some(current.id),
             satisfied,
         });
     }
 
     Ok(IngestOutcome {
-        event_id: envelope.id,
-        duplicate: false,
+        event_id: receipt_id,
+        duplicate: !inserted,
         matched_wait: None,
         satisfied: false,
     })
@@ -116,156 +110,82 @@ pub async fn ingest(
 /// Propagates storage failures.
 pub async fn register_wait(
     storage: &Arc<dyn StorageBackend>,
-    mut wait: EventWait,
+    wait: EventWait,
 ) -> Result<EventWait, StorageError> {
-    // Idempotent re-execution: registration fires on every gate re-park
-    // (any signal can wake and re-park the instance) and again when the
-    // handler finally runs, each time with a freshly generated id. The
-    // stored row's identity and accumulated matches MUST survive that:
-    // the upsert keeps the original row id on conflict, so a wait that
-    // didn't adopt it would CAS against the wrong id, and resetting
-    // matched progress would strand already-consumed events, leaving an
-    // all-join that can never complete.
-    if let Some(existing) = storage
-        .get_event_wait(InstanceId::from_uuid(wait.instance_id), &wait.block_id)
-        .await?
-    {
-        if existing.status == WaitStatus::Satisfied {
-            return Ok(existing);
-        }
-        wait.id = existing.id;
-        wait.matched_names = existing.matched_names;
-        wait.matched_event_ids = existing.matched_event_ids;
-    }
-    storage.upsert_event_wait(&wait).await?;
-    let read_matches = wait.matched_event_ids.clone();
+    // Explicit callers retain the unclaimed storage-error API.
+    register_wait_with_control(storage, storage.as_ref(), wait)
+        .await
+        .map_err(|error| match error {
+            crate::error::EngineError::Storage(error) => error,
+            other => StorageError::Query(other.to_string()),
+        })
+}
 
-    // Event-before-wait: drain matching pending events.
+pub(crate) async fn register_wait_with_control<C: crate::control::ExecutionControl + ?Sized>(
+    storage: &Arc<dyn StorageBackend>,
+    control: &C,
+    wait: EventWait,
+) -> Result<EventWait, crate::error::EngineError> {
+    // Native registration serializes with independent matching, adopting its
+    // authoritative identity/progress before refreshing the requested params.
+    let mut wait = crate::control::ExecutionControl::upsert_event_wait(control, &wait).await?;
+    if wait.status == WaitStatus::Satisfied {
+        return Ok(wait);
+    }
     let pending = storage
         .find_pending_events(&wait.tenant_id, &wait.event_names, &wait.correlation_key)
         .await?;
-    let mut consumed_events = Vec::new();
-    for event in pending {
-        if wait.is_satisfied() {
-            break;
-        }
-        if !wait.record_match(&event) {
-            continue;
-        }
-        let consumed = storage
-            .consume_events(&[event.id], InstanceId::from_uuid(wait.instance_id))
-            .await?;
-        if consumed == 0 {
-            // Lost the race for this event — roll the local match back.
-            wait.matched_event_ids.retain(|id| *id != event.id);
-            wait.matched_names.retain(|n| n != &event.event_name);
-        } else {
-            consumed_events.push(event);
-        }
-    }
-    let (instance_id, block_id) = (
-        InstanceId::from_uuid(wait.instance_id),
-        wait.block_id.clone(),
-    );
-    let Some(persisted) = persist_matches(storage, wait, read_matches, &consumed_events).await?
-    else {
-        // Concurrently satisfied or cancelled — return the authoritative row.
-        return storage.get_event_wait(instance_id, &block_id).await?.ok_or(
-            StorageError::NotFound {
-                entity: "event_wait",
-                id: block_id,
-            },
-        );
+    let candidates = if wait.is_satisfied() {
+        vec![None]
+    } else {
+        pending.iter().map(|event| Some(event.id)).collect()
     };
-    if persisted.status == WaitStatus::Satisfied {
-        resume_waiting_instance(storage, &persisted).await?;
-    }
-    Ok(persisted)
-}
-
-/// Bound on optimistic retries in [`persist_matches`]. Each retry means a
-/// sibling event landed in between; an all-join has few names, so a handful
-/// suffices.
-const PERSIST_MATCH_ATTEMPTS: usize = 16;
-
-/// Persist `wait` — already carrying the local matches of `new_events` —
-/// with an optimistic check that the stored match set is still
-/// `read_matches`. When a concurrent writer recorded another event first
-/// (T1-GAP-131: two events of an all-join arriving together), re-read the
-/// row, re-apply `new_events` on top of it and retry, so neither match is
-/// lost and exactly one writer flips the wait to `Satisfied`.
-///
-/// Returns the persisted wait, or `None` when the wait left `Waiting`
-/// concurrently (satisfied by a sibling, cancelled, or deleted).
-pub(crate) async fn persist_matches(
-    storage: &Arc<dyn StorageBackend>,
-    mut wait: EventWait,
-    mut read_matches: Vec<uuid::Uuid>,
-    new_events: &[EventEnvelope],
-) -> Result<Option<EventWait>, StorageError> {
-    for _ in 0..PERSIST_MATCH_ATTEMPTS {
-        wait.status = if wait.is_satisfied() {
-            WaitStatus::Satisfied
-        } else {
-            WaitStatus::Waiting
-        };
-        if storage
-            .update_event_wait(&wait, WaitStatus::Waiting, &read_matches)
-            .await?
-        {
-            return Ok(Some(wait));
-        }
-        let Some(fresh) = storage
-            .get_event_wait(InstanceId::from_uuid(wait.instance_id), &wait.block_id)
+    for event_id in candidates {
+        let Some(current) = storage
+            .match_event_wait(&wait, event_id, &satisfaction_signal(&wait))
             .await?
         else {
-            return Ok(None);
+            // An independent reset replaced this activation. Observe the new
+            // row without replaying this activation's candidates into it.
+            return storage
+                .get_event_wait(InstanceId::from_uuid(wait.instance_id), &wait.block_id)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::NotFound {
+                        entity: "event_wait",
+                        id: wait.block_id,
+                    }
+                    .into()
+                });
         };
-        if fresh.status != WaitStatus::Waiting {
-            return Ok(None);
+        wait = current.wait;
+        if wait.status == WaitStatus::Satisfied {
+            wake_satisfied_wait(storage, &wait).await;
+            break;
         }
-        read_matches.clone_from(&fresh.matched_event_ids);
-        wait = fresh;
-        for event in new_events {
-            wait.record_match(event);
+        if wait.status != WaitStatus::Waiting {
+            break;
         }
     }
-    Err(StorageError::Conflict(format!(
-        "event wait {} kept changing concurrently",
-        wait.id
-    )))
+    Ok(wait)
 }
 
-/// Deliver the satisfaction signal that opens the block's
-/// `wait_for_input` gate. The gate strictly validates the payload
-/// against the step's choice list, so the signal carries the default
-/// `yes` choice — `wait_for_event` steps must not define custom
-/// `choices` (linted). The matched event payloads are returned by the
-/// handler as the block's *output* once the gate opens.
-async fn resume_waiting_instance(
-    storage: &Arc<dyn StorageBackend>,
-    wait: &EventWait,
-) -> Result<(), StorageError> {
-    let signal = Signal {
-        id: uuid::Uuid::now_v7(),
+fn satisfaction_signal(wait: &EventWait) -> Signal {
+    Signal {
+        // One durable notification for this exact registration generation.
+        id: wait.id,
         instance_id: InstanceId::from_uuid(wait.instance_id),
         signal_type: SignalType::Custom(format!("human_input:{}", wait.block_id)),
         payload: json!({"value": "yes", "event_wait": wait.id}),
         delivered: false,
         created_at: Utc::now(),
         delivered_at: None,
-    };
-    match storage.enqueue_signal_if_active(&signal).await {
-        Ok(()) => {}
-        Err(StorageError::TerminalTarget { .. } | StorageError::NotFound { .. }) => {
-            // The instance finished or vanished — nothing to resume.
-            debug!(instance_id = %wait.instance_id, "event wait satisfied for terminal instance");
-            return Ok(());
-        }
-        Err(e) => return Err(e),
     }
+}
 
-    // Wake a parked instance so the signal is handled promptly.
+// The notification already committed with the match. A failed wake is harmless:
+// the scheduler's indexed pending-signal sweep retries it on the next tick.
+async fn wake_satisfied_wait(storage: &Arc<dyn StorageBackend>, wait: &EventWait) {
     let instance_id = InstanceId::from_uuid(wait.instance_id);
     if let Ok(Some(instance)) = storage.get_instance(instance_id).await
         && matches!(
@@ -275,7 +195,6 @@ async fn resume_waiting_instance(
     {
         let _ = wake_if_still_parked(storage, instance_id, instance.state).await;
     }
-    Ok(())
 }
 
 async fn wake_if_still_parked(
@@ -367,44 +286,42 @@ pub async fn register_wait_before_park(
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
 ) {
+    if let Err(error) =
+        register_before_park_with_control(storage, storage.as_ref(), instance, step_def).await
+    {
+        warn!(instance_id = %instance.id, block_id = %step_def.id, %error,
+            "pre-park registration failed");
+    }
+}
+
+pub(crate) async fn register_before_park_with_control<
+    C: crate::control::ExecutionControl + ?Sized,
+>(
+    storage: &Arc<dyn StorageBackend>,
+    control: &C,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+) -> Result<(), crate::error::EngineError> {
     if step_def.handler == crate::federation::FEDERATE_HANDLER {
-        // Same gate contract: persist the outbound call before parking.
-        crate::federation::register_call_before_park(storage, instance, step_def).await;
-        return;
+        return crate::federation::register_call_with_control(storage, control, instance, step_def)
+            .await;
     }
     if step_def.handler != "wait_for_event" {
-        return;
+        return Ok(());
     }
-    // Resolve templates in params against the instance context (prior
-    // step outputs are intentionally not available at the gate — use
-    // context data for correlation keys).
     let resolved = crate::template::resolve(&step_def.params, &instance.context, &json!({}))
         .unwrap_or_else(|_| step_def.params.clone());
-    match parse_wait_params(
+    let wait = parse_wait_params(
         &resolved,
         instance.tenant_id.as_str(),
         instance.id.into_uuid(),
         step_def.id.as_str(),
-    ) {
-        Ok(wait) => {
-            if let Err(e) = register_wait(storage, wait).await {
-                warn!(
-                    instance_id = %instance.id,
-                    block_id = %step_def.id,
-                    error = %e,
-                    "wait_for_event: pre-park registration failed"
-                );
-            }
-        }
-        Err(e) => {
-            warn!(
-                instance_id = %instance.id,
-                block_id = %step_def.id,
-                error = %e,
-                "wait_for_event: invalid params at gate — instance will park without a wait"
-            );
-        }
-    }
+    )
+    .map_err(|error| {
+        crate::error::EngineError::InvalidConfig(format!("wait_for_event: {error}"))
+    })?;
+    register_wait_with_control(storage, control, wait).await?;
+    Ok(())
 }
 
 /// Convenience constructor for a fresh envelope.
@@ -484,6 +401,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn old_matcher_cannot_consume_for_a_new_activation() {
+        let storage = store().await;
+        let old = register_wait(&storage, wait(&["a"], JoinMode::Any))
+            .await
+            .unwrap();
+        let id = InstanceId::from_uuid(old.instance_id);
+        storage
+            .delete_event_waits_for_blocks(id, std::slice::from_ref(&old.block_id))
+            .await
+            .unwrap();
+        let mut fresh = wait(&["a"], JoinMode::Any);
+        fresh.instance_id = old.instance_id;
+        let fresh = register_wait(&storage, fresh).await.unwrap();
+        let event = envelope("t1", "a", "old-producer", "order-1", json!({}));
+        storage.ingest_event(&event).await.unwrap();
+        assert!(
+            storage
+                .match_event_wait(&old, Some(event.id), &satisfaction_signal(&old))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .get_event_wait(id, &old.block_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            fresh
+        );
+    }
+
     /// T1-GAP-131: events `a` and `b` of an all-join arrive concurrently.
     /// `b`'s matcher read the wait before `a`'s match landed; persisting its
     /// stale copy used to overwrite `a`'s match (status-only CAS), leaving a
@@ -494,23 +444,17 @@ mod tests {
         let registered = register_wait(&s, wait(&["a", "b"], JoinMode::All))
             .await
             .unwrap();
-        let mut stale = s
+        let stale = s
             .find_waiting_event_waits("t1", "b", "order-1")
             .await
             .unwrap()
             .remove(0);
-        let read_matches = stale.matched_event_ids.clone();
         ingest(&s, envelope("t1", "a", "p-a", "order-1", json!({})))
             .await
             .unwrap();
         let b = envelope("t1", "b", "p-b", "order-1", json!({}));
         s.ingest_event(&b).await.unwrap();
-        assert!(stale.record_match(&b));
-        s.consume_events(&[b.id], InstanceId::from_uuid(stale.instance_id))
-            .await
-            .unwrap();
-
-        persist_matches(&s, stale, read_matches, std::slice::from_ref(&b))
+        s.match_event_wait(&stale, Some(b.id), &satisfaction_signal(&stale))
             .await
             .unwrap();
 

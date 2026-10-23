@@ -149,11 +149,17 @@ fault_impl! {
         async fn get_pending_signals(&self, instance_id: InstanceId) -> Result<Vec<Signal>, StorageError>;
         async fn ingest_event(&self, envelope: &orch8_types::event_correlation::EventEnvelope) -> Result<bool, StorageError>;
         async fn get_event(&self, id: Uuid) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError>;
+        async fn get_event_by_identity(&self, tenant_id: &str, event_name: &str, producer_event_id: &str) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError>;
         async fn list_events(&self, tenant_id: &str, status: Option<orch8_types::event_correlation::EventStatus>, limit: u32) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
         async fn list_events_page(&self, tenant_id: &str, status: Option<orch8_types::event_correlation::EventStatus>, limit: u32, offset: u32) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
         async fn find_pending_events(&self, tenant_id: &str, event_names: &[String], correlation_key: &str) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
         async fn consume_events(&self, event_ids: &[Uuid], instance_id: InstanceId) -> Result<u64, StorageError>;
         async fn upsert_event_wait(&self, wait: &orch8_types::event_correlation::EventWait) -> Result<(), StorageError>;
+        async fn register_event_wait(&self, wait: &orch8_types::event_correlation::EventWait) -> Result<orch8_types::event_correlation::EventWait, StorageError>;
+        async fn match_event_wait(&self, wait: &orch8_types::event_correlation::EventWait, event_id: Option<Uuid>, notification: &orch8_types::signal::Signal) -> Result<Option<crate::EventMatch>, StorageError>;
+        async fn upsert_event_wait_claimed(&self, wait: &orch8_types::event_correlation::EventWait, claim_token: DateTime<Utc>) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError>;
+        async fn delete_event_waits_for_blocks(&self, instance_id: InstanceId, blocks: &[String]) -> Result<u64, StorageError>;
+        async fn delete_event_waits_for_blocks_claimed(&self, instance_id: InstanceId, blocks: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
         async fn get_event_wait(&self, instance_id: InstanceId, block_id: &str) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError>;
         async fn find_waiting_event_waits(&self, tenant_id: &str, event_name: &str, correlation_key: &str) -> Result<Vec<orch8_types::event_correlation::EventWait>, StorageError>;
         async fn update_event_wait(&self, wait: &orch8_types::event_correlation::EventWait, expected_status: orch8_types::event_correlation::WaitStatus, expected_matched_event_ids: &[Uuid]) -> Result<bool, StorageError>;
@@ -481,6 +487,7 @@ fault_impl! {
         async fn list_federation_peers(&self, tenant_id: &TenantId) -> Result<Vec<orch8_types::federation::FederationPeerRecord>, StorageError>;
         async fn delete_federation_peer(&self, tenant_id: &TenantId, peer_id: orch8_types::continuity_advanced::FederationPeerId) -> Result<bool, StorageError>;
         async fn create_federation_call(&self, call: &orch8_types::federation::FederationCall) -> Result<bool, StorageError>;
+        async fn create_federation_call_claimed(&self, call: &orch8_types::federation::FederationCall, claim_token: DateTime<Utc>) -> Result<Option<bool>, StorageError>;
         async fn get_federation_call(&self, tenant_id: &TenantId, call_id: Uuid) -> Result<Option<orch8_types::federation::FederationCall>, StorageError>;
         async fn cas_federation_call(&self, expected_version: u64, next: &orch8_types::federation::FederationCall) -> Result<bool, StorageError>;
         async fn list_due_federation_calls(&self, now: DateTime<Utc>, limit: u32) -> Result<Vec<orch8_types::federation::FederationCall>, StorageError>;

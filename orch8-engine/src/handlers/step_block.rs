@@ -480,7 +480,15 @@ pub(crate) async fn execute_step_node_with_clock(
         if deferred {
             // `wait_for_event` steps must register their event wait BEFORE
             // parking — the handler only runs after the gate is satisfied.
-            crate::event_correlation::register_wait_before_park(storage, instance, step_def).await;
+            let registration_control =
+                crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
+            crate::event_correlation::register_before_park_with_control(
+                storage,
+                &registration_control,
+                instance,
+                step_def,
+            )
+            .await?;
             // Record which step the instance is waiting on so the mobile
             // notifier (and approvals API) can identify it. Stamp only on the
             // first entry — re-stamping on every evaluator pass would reset

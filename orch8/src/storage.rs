@@ -75,6 +75,40 @@ fn redacted_connection_url(url: &str) -> String {
     }
 }
 
+/// Concrete connection ownership retained so an explicit engine close can
+/// await pool shutdown after the execution loop has stopped.
+pub(crate) enum ConnectedStorage {
+    Sqlite(Arc<SqliteStorage>),
+    Postgres(Arc<PostgresStorage>),
+}
+
+impl ConnectedStorage {
+    pub(crate) fn backend(&self) -> Arc<dyn StorageBackend> {
+        match self {
+            Self::Sqlite(storage) => Arc::clone(storage) as Arc<dyn StorageBackend>,
+            Self::Postgres(storage) => Arc::clone(storage) as Arc<dyn StorageBackend>,
+        }
+    }
+
+    pub(crate) async fn close(&self) {
+        match self {
+            Self::Sqlite(storage) => storage.pool().close().await,
+            Self::Postgres(storage) => storage.pool().close().await,
+        }
+    }
+}
+
+impl std::ops::Deref for ConnectedStorage {
+    type Target = dyn StorageBackend;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Sqlite(storage) => storage.as_ref(),
+            Self::Postgres(storage) => storage.as_ref(),
+        }
+    }
+}
+
 impl Storage {
     /// File-backed `SQLite` at `path` (WAL mode). The file and the bundled
     /// schema are created on first use — durable across process restarts.
@@ -121,7 +155,7 @@ impl Storage {
     }
 
     /// Open the backend and make sure its schema is in place.
-    pub(crate) async fn connect(self) -> Result<Arc<dyn StorageBackend>, Error> {
+    pub(crate) async fn connect(self) -> Result<ConnectedStorage, Error> {
         let artifact_store = match self.artifacts {
             Some(ArtifactStorage::Local(path)) => {
                 let path = path.to_str().ok_or_else(|| {
@@ -143,14 +177,14 @@ impl Storage {
                 if let Some(store) = artifact_store {
                     storage = storage.with_artifact_store(store);
                 }
-                Ok(Arc::new(storage))
+                Ok(ConnectedStorage::Sqlite(Arc::new(storage)))
             }
             StorageKind::SqliteInMemory => {
                 let mut storage = SqliteStorage::in_memory().await?;
                 if let Some(store) = artifact_store {
                     storage = storage.with_artifact_store(store);
                 }
-                Ok(Arc::new(storage))
+                Ok(ConnectedStorage::Sqlite(Arc::new(storage)))
             }
             StorageKind::Postgres(url) => {
                 // Same pool sizing default as the server's DatabaseConfig.
@@ -159,7 +193,7 @@ impl Storage {
                     storage = storage.with_artifact_store(store);
                 }
                 storage.run_migrations().await?;
-                Ok(Arc::new(storage))
+                Ok(ConnectedStorage::Postgres(Arc::new(storage)))
             }
         }
     }
