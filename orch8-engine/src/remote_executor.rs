@@ -759,7 +759,6 @@ impl RemoteExecutor {
         }
     }
 
-    #[allow(clippy::items_after_statements)]
     async fn execute(&self, task: ClaimedTask, permit: OwnedSemaphorePermit, heartbeat: Duration) {
         let _permit = permit;
         let id = task.task.id;

@@ -260,7 +260,7 @@ fn counting_engine_builder(
 
 /// Tick until `id` is terminal (advancing virtual time over any wait).
 async fn run_to_terminal(engine: &TestEngine, id: InstanceId) -> TaskInstance {
-    for _ in 0..200 {
+    for _ in 0..80 {
         engine.tick().await;
         // Wakes (parent wake, retry) stamp real `Utc::now()`; keep the
         // virtual clock at or past it so they are due on the next tick.

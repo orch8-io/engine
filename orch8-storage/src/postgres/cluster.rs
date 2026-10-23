@@ -43,8 +43,8 @@ pub(super) async fn heartbeat(store: &PostgresStorage, node_id: Uuid) -> Result<
          WHERE id = $1",
     )
     .bind(node_id)
-    .execute(&store.pool)
-    .await?;
+        .execute(&store.pool)
+        .await?;
     Ok(())
 }
 

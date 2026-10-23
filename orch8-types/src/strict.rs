@@ -11,7 +11,7 @@ use serde::de::{Deserialize, Deserializer, Error as _};
 /// Deserialize `T`, failing on any field `T` does not know (at any depth).
 ///
 /// # Errors
-/// The inner deserializer's error, or `unknown field <path>` for the first
+/// The inner deserializer's error, or `unknown field `<path>`` for the first
 /// unrecognised field.
 pub fn deserialize<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where

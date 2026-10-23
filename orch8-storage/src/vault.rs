@@ -211,7 +211,10 @@ impl FileCredentials {
     fn stamp(path: &std::path::Path) -> Result<(std::time::SystemTime, u64), StorageError> {
         let meta = std::fs::metadata(path)
             .map_err(|e| vault_err(format!("credentials file {}: {e}", path.display())))?;
-        Ok((meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len()))
+        Ok((
+            meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+            meta.len(),
+        ))
     }
 
     fn load(path: &std::path::Path) -> Result<AwsCredentials, StorageError> {
@@ -939,19 +942,11 @@ mod tests {
         let src = FileCredentials::new(&path).unwrap();
         assert_eq!(src.current().unwrap().access_key_id, "OLD");
         // Different length guarantees a changed stamp even on coarse mtimes.
-        std::fs::write(
-            &path,
-            r#"{"access_key_id":"NEWER","secret_access_key":"s22"}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{"access_key_id":"NEWER","secret_access_key":"s22"}"#).unwrap();
         assert_eq!(src.current().unwrap().access_key_id, "NEWER");
         std::fs::write(&path, "{ half written").unwrap();
         assert_eq!(src.current().unwrap().access_key_id, "NEWER");
-        std::fs::write(
-            &path,
-            r#"{"access_key_id":"THIRD!!","secret_access_key":"s3"}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{"access_key_id":"THIRD!!","secret_access_key":"s3"}"#).unwrap();
         assert_eq!(src.current().unwrap().access_key_id, "THIRD!!");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -987,11 +982,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orch8-creds-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("creds.env");
-        std::fs::write(
-            &path,
-            "AWS_ACCESS_KEY_ID=AKIAOLDOLD\nAWS_SECRET_ACCESS_KEY=s\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "AWS_ACCESS_KEY_ID=AKIAOLDOLD\nAWS_SECRET_ACCESS_KEY=s\n").unwrap();
         let provider = AwsKmsKeyProvider::with_credential_source(
             "arn:aws:kms:us-east-1:111:key/abc",
             None,
@@ -1007,12 +998,7 @@ mod tests {
         )
         .unwrap();
         provider.wrap(&[7u8; 32]).await.unwrap();
-        assert!(
-            rx.recv()
-                .await
-                .unwrap()
-                .contains("credential=akianewnewnew/")
-        );
+        assert!(rx.recv().await.unwrap().contains("credential=akianewnewnew/"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

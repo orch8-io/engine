@@ -170,12 +170,13 @@ pub async fn register_wait(
     let Some(persisted) = persist_matches(storage, wait, read_matches, &consumed_events).await?
     else {
         // Concurrently satisfied or cancelled — return the authoritative row.
-        return storage.get_event_wait(instance_id, &block_id).await?.ok_or(
-            StorageError::NotFound {
+        return storage
+            .get_event_wait(instance_id, &block_id)
+            .await?
+            .ok_or(StorageError::NotFound {
                 entity: "event_wait",
                 id: block_id,
-            },
-        );
+            });
     };
     if persisted.status == WaitStatus::Satisfied {
         resume_waiting_instance(storage, &persisted).await?;

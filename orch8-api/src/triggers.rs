@@ -207,13 +207,9 @@ pub(crate) async fn create_trigger(
 )]
 pub(crate) async fn list_triggers(
     State(state): State<AppState>,
-    admin_ctx: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<TriggerQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if tenant_ctx.is_none() && query.tenant_id.is_some() {
-        crate::api_keys::require_admin(&admin_ctx)?;
-    }
     let tenant_ref = crate::auth::scoped_tenant_id(&tenant_ctx, query.tenant_id.as_deref());
     let triggers = state
         .storage

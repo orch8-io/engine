@@ -610,8 +610,8 @@ pub async fn drain_terminal_instances(
     let mut skip: std::collections::HashSet<orch8_types::ids::InstanceId> =
         std::collections::HashSet::new();
     loop {
-        let window =
-            INSTANCE_GC_BATCH_LIMIT.saturating_add(u32::try_from(skip.len()).unwrap_or(u32::MAX));
+        let window = INSTANCE_GC_BATCH_LIMIT
+            .saturating_add(u32::try_from(skip.len()).unwrap_or(u32::MAX));
         let fetched = storage.list_instance_gc_candidates(cutoff, window).await?;
         let candidates: Vec<_> = fetched
             .into_iter()

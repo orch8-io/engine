@@ -434,11 +434,7 @@ fn normalize_label(raw: &str) -> String {
         }
         out.push(c);
     }
-    if out.is_empty() {
-        "unknown".to_owned()
-    } else {
-        out
-    }
+    if out.is_empty() { "unknown".to_owned() } else { out }
 }
 
 /// Keep the `limit` largest series; fold the rest into one `other` series
@@ -465,13 +461,15 @@ fn cap_series<K: Ord + Clone>(
 
 /// Enforce the series ceilings on a snapshot.
 fn bound_snapshot(snapshot: &mut BacklogSnapshot) {
-    snapshot.depth = cap_series(std::mem::take(&mut snapshot.depth), MAX_DEPTH_SERIES, |k| {
-        DepthLabels {
+    snapshot.depth = cap_series(
+        std::mem::take(&mut snapshot.depth),
+        MAX_DEPTH_SERIES,
+        |k| DepthLabels {
             capability: OVERFLOW_LABEL.into(),
             region: OVERFLOW_LABEL.into(),
             priority_lane: k.priority_lane,
-        }
-    });
+        },
+    );
     snapshot.unsatisfied = cap_series(
         std::mem::take(&mut snapshot.unsatisfied),
         MAX_UNSATISFIED_SERIES,
@@ -635,10 +633,7 @@ mod cardinality_tests {
         }
         bound_snapshot(&mut snapshot);
         assert!(snapshot.unsatisfied.len() <= MAX_UNSATISFIED_SERIES + 1);
-        assert_eq!(
-            snapshot.unsatisfied.values().sum::<u64>(),
-            (MAX_UNSATISFIED_SERIES * 2) as u64
-        );
+        assert_eq!(snapshot.unsatisfied.values().sum::<u64>(), (MAX_UNSATISFIED_SERIES * 2) as u64);
     }
 
     #[test]
