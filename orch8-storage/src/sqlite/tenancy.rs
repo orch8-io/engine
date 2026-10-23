@@ -116,17 +116,14 @@ impl crate::TenancyStore for SqliteStorage {
         if instances.is_empty() {
             return Ok(0);
         }
-        let mut connection = self.pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *connection)
-            .await?;
+        let mut connection = super::helpers::begin_immediate(&self.pool).await?;
         match admit_and_insert(&mut connection, instances, max_active_instances, now).await {
             Ok(count) => {
-                sqlx::query("COMMIT").execute(&mut *connection).await?;
+                connection.commit().await?;
                 Ok(count)
             }
             Err(error) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                let _ = connection.rollback().await;
                 Err(error)
             }
         }

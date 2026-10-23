@@ -86,10 +86,7 @@ pub(super) async fn create_admitted(
     instance: &TaskInstance,
     max_active: u64,
 ) -> Result<(), StorageError> {
-    let mut connection = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *connection)
-        .await?;
+    let mut connection = super::helpers::begin_immediate(&storage.pool).await?;
     let result = async {
         let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE tenant_id=? AND state IN ('scheduled','running','waiting','paused')")
             .bind(instance.tenant_id.as_str())
@@ -108,11 +105,11 @@ pub(super) async fn create_admitted(
     .await;
     match result {
         Ok(()) => {
-            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            connection.commit().await?;
             Ok(())
         }
         Err(error) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            let _ = connection.rollback().await;
             Err(error)
         }
     }
@@ -126,10 +123,7 @@ pub(super) async fn create_batch_admitted(
     if instances.is_empty() {
         return Ok(0);
     }
-    let mut connection = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *connection)
-        .await?;
+    let mut connection = super::helpers::begin_immediate(&storage.pool).await?;
     let result = async {
         let mut requested = HashMap::<TenantId, u64>::new();
         for instance in instances {
@@ -162,11 +156,11 @@ pub(super) async fn create_batch_admitted(
     .await;
     match result {
         Ok(count) => {
-            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            connection.commit().await?;
             Ok(count)
         }
         Err(error) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            let _ = connection.rollback().await;
             Err(error)
         }
     }
@@ -272,20 +266,18 @@ pub(super) async fn claim_due(
     // SQLITE_BUSY on COMMIT and that worker's tick is wasted. IMMEDIATE
     // serialises claim_due calls, which is the closest SQLite analogue to
     // Postgres' `FOR UPDATE SKIP LOCKED`.
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut conn = super::helpers::begin_immediate(&storage.pool).await?;
 
     let result = claim_due_inner(&mut conn, &now_s, limit, max_per_tenant).await;
 
     match result {
         Ok(instances) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            conn.commit().await?;
             Ok(instances)
         }
         Err(e) => {
-            // Best-effort rollback — if it fails the connection is returned
-            // to the pool and sqlx will reset it on next acquire.
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            // The transaction guard also rolls back if the future is cancelled.
+            let _ = conn.rollback().await;
             Err(e)
         }
     }

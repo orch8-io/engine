@@ -224,17 +224,16 @@ pub(super) async fn claim_worker_tasks_from_queue(
     // form a read-then-write claim; under DEFERRED two concurrent pollers can
     // both SELECT the same pending rows before either UPDATE runs and claim
     // the same task twice. Same convention as `workers::claim`.
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut conn = super::helpers::begin_immediate(&storage.pool).await?;
     let result =
         claim_from_queue_inner(&mut conn, queue_name, handler_name, worker_id, None, limit).await;
     match result {
         Ok(tasks) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            conn.commit().await?;
             Ok(tasks)
         }
         Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            let _ = conn.rollback().await;
             Err(e)
         }
     }
@@ -338,8 +337,7 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
 ) -> Result<Vec<WorkerTask>, StorageError> {
     // BEGIN IMMEDIATE for the same double-claim reason as
     // `claim_worker_tasks_from_queue` above.
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut conn = super::helpers::begin_immediate(&storage.pool).await?;
     let result = claim_from_queue_inner(
         &mut conn,
         queue_name,
@@ -351,11 +349,11 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     .await;
     match result {
         Ok(tasks) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            conn.commit().await?;
             Ok(tasks)
         }
         Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            let _ = conn.rollback().await;
             Err(e)
         }
     }
@@ -400,8 +398,7 @@ pub(super) async fn inject_blocks_at_position(
     // SQLITE_BUSY, dropping an otherwise-valid injection. Acquire SQLite's
     // write reservation before the read, mirroring claim_due's locking
     // strategy and making the documented atomic merge reliable under load.
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut conn = super::helpers::begin_immediate(&storage.pool).await?;
 
     let result = async {
         let final_value = if let Some(pos) = position {
@@ -439,11 +436,11 @@ pub(super) async fn inject_blocks_at_position(
 
     match result {
         Ok(final_value) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            conn.commit().await?;
             Ok(final_value)
         }
         Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            let _ = conn.rollback().await;
             Err(e)
         }
     }
@@ -515,8 +512,7 @@ pub(super) async fn create_instance_with_dedupe(
     // DEFERRED begin, a concurrent dedupe race upgrades mid-transaction and
     // can fail with SQLITE_BUSY_SNAPSHOT instead of cleanly serialising —
     // same convention as `claim_due` / `workers::claim`.
-    let mut conn = storage.pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut conn = super::helpers::begin_immediate(&storage.pool).await?;
 
     let result: Result<u64, StorageError> = async {
         // Insert the child instance FIRST so any FK on emit_event_dedupe is
@@ -546,21 +542,20 @@ pub(super) async fn create_instance_with_dedupe(
 
     match result {
         Ok(inserted) if inserted > 0 => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            conn.commit().await?;
             return Ok(crate::EmitDedupeOutcome::Inserted);
         }
         Ok(_) => {
             // Key already taken — rollback the unnecessary child instance,
             // then look up the existing child id outside the transaction.
-            sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+            conn.rollback().await?;
         }
         Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            let _ = conn.rollback().await;
             return Err(e);
         }
     }
-    drop(conn);
-
+    // rollback consumes the guard and releases its pooled connection.
     let row: (String,) = sqlx::query_as(
         "SELECT child_instance_id FROM emit_event_dedupe
          WHERE scope_kind = ?1 AND scope_value = ?2 AND dedupe_key = ?3",

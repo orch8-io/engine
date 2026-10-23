@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### SQLite cancellation safety
+
+- Admission, scheduler and queue claims, injection, deduplication, sub-tenant
+  admission and guarded effect dispatch use tracked transaction guards.
+  Cancelling an in-flight write rolls back its partial rows and releases its
+  pooled connection instead of leaving an untracked transaction open.
+
 ### Composite write ownership
 
 - Human-input acceptance, context updates, model predictions and reply delivery
