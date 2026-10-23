@@ -1150,3 +1150,140 @@ async fn postgres_backup_read_failure_closes_the_snapshot_before_returning() {
     .await
     .expect("a failed backup must release its PostgreSQL snapshot promptly");
 }
+
+async fn dry_restore_archive(dir: &Path) -> PathBuf {
+    let (source, _, _) = seeded_source(dir).await;
+    let archive = dir.join("dry-run.tar.gz");
+    run_backup(
+        BackupCmd {
+            database_url: source.to_string_lossy().into_owned(),
+            out: archive.clone(),
+            include_instances: true,
+        },
+        OutputFormat::Json,
+    )
+    .await
+    .unwrap();
+    archive
+}
+
+#[tokio::test]
+async fn restore_dry_run_does_not_create_a_missing_target_or_its_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dry_restore_archive(dir.path()).await;
+    let parent = dir.path().join("not-created");
+    let target = parent.join("target.db");
+    run_restore(
+        RestoreCmd {
+            archive,
+            database_url: target.to_string_lossy().into_owned(),
+            dry_run: true,
+            include_instances: true,
+        },
+        OutputFormat::Json,
+    )
+    .await
+    .unwrap();
+    assert!(!parent.exists(), "dry-run initialized a database target");
+}
+
+#[tokio::test]
+async fn restore_dry_run_does_not_reconcile_an_existing_target_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dry_restore_archive(dir.path()).await;
+    let target = dir.path().join("old-target.db");
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&target)
+            .create_if_missing(true),
+    )
+    .await
+    .unwrap();
+    sqlx::query("CREATE TABLE operator_data (value TEXT NOT NULL)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO operator_data VALUES ('keep me')")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    let before = std::fs::read(&target).unwrap();
+    run_restore(
+        RestoreCmd {
+            archive,
+            database_url: target.to_string_lossy().into_owned(),
+            dry_run: true,
+            include_instances: true,
+        },
+        OutputFormat::Json,
+    )
+    .await
+    .unwrap();
+    assert!(
+        std::fs::read(&target).unwrap() == before,
+        "dry-run migrated the target database"
+    );
+    assert!(!target.with_extension("db-wal").exists());
+    assert!(!target.with_extension("db-shm").exists());
+}
+
+#[tokio::test]
+async fn postgres_restore_dry_run_releases_its_snapshot_on_success_and_read_error() {
+    use orch8_storage::testing::backends::{TestPostgres, postgres_url};
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dry_restore_archive(dir.path()).await;
+    for fail_read in [false, true] {
+        let Some(pg) = TestPostgres::fresh().await else {
+            return;
+        };
+        if fail_read {
+            sqlx::query("DROP TABLE credentials")
+                .execute(pg.pool())
+                .await
+                .unwrap();
+        }
+        let mut url = reqwest::Url::parse(&postgres_url().unwrap()).unwrap();
+        url.query_pairs_mut()
+            .append_pair("options", &format!("-c search_path={}", pg.schema()))
+            .append_pair("application_name", pg.schema());
+        let result = run_restore(
+            RestoreCmd {
+                archive: archive.clone(),
+                database_url: url.to_string(),
+                dry_run: true,
+                include_instances: true,
+            },
+            OutputFormat::Json,
+        )
+        .await;
+        if fail_read {
+            assert!(format!("{:#}", result.unwrap_err()).contains("credentials"));
+        } else {
+            result.unwrap();
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances")
+            .fetch_one(pg.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "dry-run wrote instances to its PostgreSQL target");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut poll = tokio::time::interval(std::time::Duration::from_millis(10));
+            loop {
+                poll.tick().await;
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE application_name=$1",
+                )
+                .bind(pg.schema())
+                .fetch_one(pg.pool())
+                .await
+                .unwrap();
+                if count == 0 {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("dry-run retained its target snapshot session after returning");
+    }
+}

@@ -798,7 +798,13 @@ pub async fn evaluate_with_claim_token(
         )
         .await?
         {
-            IterAction::Continue | IterAction::Deferred => continue,
+            IterAction::Continue => continue,
+            IterAction::Deferred => {
+                // The fixed-point fallback can discover fresh deferred race
+                // leaves too. Charge actual work, not those one-time visits.
+                iterations -= 1;
+                continue;
+            }
             IterAction::Return(outcome) => {
                 ctx.apply_deferrals(storage.as_ref()).await?;
                 return Ok(outcome);
@@ -1020,10 +1026,32 @@ async fn phase_running_steps(
         handlers,
         &node_index,
         &ctx.pending_deferrals,
+        StepSelection::PreferComposites,
     ) else {
         return Ok(IterAction::FallThrough);
     };
 
+    dispatch_single_step(
+        storage,
+        handlers,
+        ctx,
+        idx,
+        block_map,
+        sequence,
+        outputs_snapshot,
+    )
+    .await
+}
+
+async fn dispatch_single_step(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    ctx: &mut EvalContext,
+    idx: usize,
+    block_map: &[(&BlockId, &BlockDefinition)],
+    sequence: &SequenceDefinition,
+    outputs_snapshot: &OutputsSnapshot,
+) -> Result<IterAction, EngineError> {
     // Look up node and block by index — these are short-lived borrows that
     // end before we mutate ctx below.
     let node = &ctx.tree[idx];
@@ -1230,6 +1258,9 @@ async fn phase_composite_reevaluation(
     let mut early_restart = false;
     for idx in &composite_indices {
         let node = &ctx.tree[*idx];
+        if ctx.pending_deferrals.contains(node.id) {
+            continue;
+        }
         let Ok(block) = block_map
             .binary_search_by_key(&&node.block_id, |(id, _)| *id)
             .map(|idx| block_map[idx].1)
@@ -1248,7 +1279,7 @@ async fn phase_composite_reevaluation(
             outputs_snapshot,
             &ctx.clock,
             ctx.claim_token,
-            None,
+            Some(&ctx.pending_deferrals),
         )
         .await?;
         if may_mutate_instance(block) {
@@ -1282,6 +1313,9 @@ async fn phase_composite_reevaluation(
         ctx.set_tree(post_tree);
         return Ok(IterAction::Continue);
     }
+    if let Some(action) = dispatch_ready_step(storage, handlers, ctx, block_map, sequence).await? {
+        return Ok(action);
+    }
     debug!(
         instance_id = %instance_id,
         "evaluate: all composites re-entry produced no state change; parking tick"
@@ -1289,6 +1323,47 @@ async fn phase_composite_reevaluation(
     Ok(IterAction::Return(EvalOutcome::MoreWork {
         has_waiting_nodes: post_tree.iter().any(|n| n.state == NodeState::Waiting),
     }))
+}
+
+/// Once every composite controller is blocked, a ready race step may resolve
+/// without waiting for an unrelated polling deadline. Keep the normal priority
+/// while controllers can progress, and share the original dispatch capability.
+async fn dispatch_ready_step(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    ctx: &mut EvalContext,
+    block_map: &[(&BlockId, &BlockDefinition)],
+    sequence: &SequenceDefinition,
+) -> Result<Option<IterAction>, EngineError> {
+    let idx = {
+        let node_index = build_node_index(&ctx.tree);
+        find_running_step_index(
+            &ctx.tree,
+            block_map,
+            handlers,
+            &node_index,
+            &ctx.pending_deferrals,
+            StepSelection::AnyReady,
+        )
+    };
+    let Some(idx) = idx else {
+        return Ok(None);
+    };
+    ctx.refresh_instance(storage.as_ref(), ctx.instance.id)
+        .await?;
+    let outputs_snapshot = OutputsSnapshot::new();
+    Ok(Some(
+        dispatch_single_step(
+            storage,
+            handlers,
+            ctx,
+            idx,
+            block_map,
+            sequence,
+            &outputs_snapshot,
+        )
+        .await?,
+    ))
 }
 
 fn may_mutate_instance(block: &BlockDefinition) -> bool {
@@ -1336,6 +1411,12 @@ fn find_all_running_composite_indices(
     composites.into_iter().map(|(i, _)| i).collect()
 }
 
+#[derive(Clone, Copy)]
+enum StepSelection {
+    PreferComposites,
+    AnyReady,
+}
+
 /// Find the index (into `tree`) of the first Running step node that can be
 /// executed. Returns an index rather than a reference to avoid holding a
 /// borrow into the tree across mutable operations.
@@ -1345,6 +1426,7 @@ fn find_running_step_index(
     handlers: &HandlerRegistry,
     node_index: &NodeIndex<'_>,
     deferred: &crate::handlers::step_deferral::PendingStepDeferrals,
+    selection: StepSelection,
 ) -> Option<usize> {
     for (i, node) in tree.iter().enumerate() {
         if node.state != NodeState::Running || deferred.contains(node.id) {
@@ -1357,7 +1439,8 @@ fn find_running_step_index(
             if is_inside_decided_race(tree, block_map, node, node_index) {
                 continue;
             }
-            if handlers.contains(&step_def.handler)
+            if matches!(selection, StepSelection::PreferComposites)
+                && handlers.contains(&step_def.handler)
                 && has_racing_composite_sibling(tree, block_map, node, node_index)
             {
                 continue;

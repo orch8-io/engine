@@ -1029,15 +1029,7 @@ impl crate::ContinuityStore for SqliteStorage {
                 "guarded effect dispatch requires a dispatched receipt".into(),
             ));
         }
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *conn)
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        let mut conn = super::helpers::begin_immediate(&self.pool).await?;
         let operation = async {
             let rows = sqlx::query(
                 "SELECT record FROM effect_receipts
@@ -1108,21 +1100,19 @@ impl crate::ContinuityStore for SqliteStorage {
         .await;
         match operation {
             Ok(EffectDispatchOutcome::Dispatched) => {
-                sqlx::query("COMMIT")
-                    .execute(&mut *conn)
+                conn.commit()
                     .await
                     .map_err(|error| StorageError::Query(error.to_string()))?;
                 Ok(EffectDispatchOutcome::Dispatched)
             }
             Ok(outcome) => {
-                sqlx::query("ROLLBACK")
-                    .execute(&mut *conn)
+                conn.rollback()
                     .await
                     .map_err(|error| StorageError::Query(error.to_string()))?;
                 Ok(outcome)
             }
             Err(error) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                let _ = conn.rollback().await;
                 Err(error)
             }
         }

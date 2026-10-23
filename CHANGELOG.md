@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Loop polling and scheduler fairness
+
+- Polling loops persist their next deadline through resets, restarts and early
+  wakes while independent parallel work retains the claim and continues.
+- Ready race steps can resolve once composite controllers are blocked, including
+  nested and wide deferred branches. Deferred visits do not consume the work
+  budget; cancelled polling losers do not schedule a later wake.
+- Iteration recovery and final settlement avoid unnecessary scheduler ticks.
+  Explicit direct-helper recovery retains its existing single-pass behavior.
+  Durable deadlines round up to native storage timestamp precision.
+
+### Restore dry runs
+
+- `restore --dry-run` inspects a consistent snapshot of existing targets and
+  uses an empty in-memory catalog for missing SQLite targets. It neither
+  creates a target directory/database nor migrates the original schema.
+- PostgreSQL dry-run snapshots close on success and read failure before the
+  command returns; normal restore still requires a fully migrated target.
+
+### FCM response bounds
+
+- OAuth and error responses are limited to 64 KiB before decoding, including
+  chunked responses without a content length. Failed reads retry without
+  classifying a partial body as a permanent device-token rejection.
+- Successful message status acknowledges delivery without waiting for or
+  buffering its unused response body.
+
+### SQLite cancellation safety
+
+- Admission, scheduler and queue claims, injection, deduplication, sub-tenant
+  admission and guarded effect dispatch use tracked transaction guards.
+  Cancelling an in-flight write rolls back its partial rows and releases its
+  pooled connection instead of leaving an untracked transaction open.
+
 ### Composite write ownership
 
 - Human-input acceptance, context updates, model predictions and reply delivery

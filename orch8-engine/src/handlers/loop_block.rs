@@ -35,6 +35,7 @@ const MAX_POLL_INTERVAL_SECS: u64 = 365 * 24 * 60 * 60;
 /// counter is durable but the body reset may not have finished. See
 /// [`advance_iteration`].
 const RESET_PENDING_KEY: &str = "_reset_pending";
+const POLL_FIRE_AT_KEY: &str = "_poll_fire_at";
 
 /// Execute a loop block: repeatedly execute the body while `condition`
 /// evaluates truthy, up to the lesser of `loop_def.max_iterations` and
@@ -80,6 +81,7 @@ pub async fn execute_loop(
         tree,
         &clock,
         instance.claimed_at.unwrap_or(instance.updated_at),
+        None,
     )
     .await
 }
@@ -93,6 +95,7 @@ pub(crate) async fn execute_loop_with_clock(
     tree: &[ExecutionNode],
     clock: &orch8_types::clock::SharedClock,
     claim_token: chrono::DateTime<chrono::Utc>,
+    pending_deferrals: Option<&crate::handlers::step_deferral::PendingStepDeferrals>,
 ) -> Result<bool, EngineError> {
     // Empty body: nothing to run. Completing immediately prevents a
     // condition-truthy loop from spinning on a no-op body forever.
@@ -132,18 +135,48 @@ pub(crate) async fn execute_loop_with_clock(
         .and_then(|n| u32::try_from(n).ok())
         .unwrap_or(0);
 
+    let poll_deadline = marker_output
+        .and_then(|output| output.get(POLL_FIRE_AT_KEY))
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value::<chrono::DateTime<chrono::Utc>>(value.clone()))
+        .transpose()
+        .map_err(|error| {
+            orch8_types::error::StorageError::Query(format!(
+                "invalid persisted loop poll deadline: {error}"
+            ))
+        })?;
+
     // Crash recovery: a previous tick durably advanced the counter but may
     // have died before (or while) resetting the body. Finish the reset now —
     // it is idempotent — and clear the flag. The body cannot have run in
     // between: every node is still terminal (or already Pending).
-    if marker_output
+    let recovered_tree = if marker_output
         .and_then(|o| o.get(RESET_PENDING_KEY))
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        finish_iteration_reset(storage, instance, node, loop_def, tree, iteration).await?;
-        return Ok(true);
-    }
+        finish_iteration_reset(
+            storage,
+            instance,
+            node,
+            loop_def,
+            tree,
+            iteration,
+            poll_deadline,
+        )
+        .await?;
+        // The explicit direct helper performs one recovery pass. An enclosing
+        // evaluator can continue immediately using its shared deferral set.
+        if pending_deferrals.is_none() {
+            return Ok(true);
+        }
+        // Even an already-Pending body needs its marker recovery and poll
+        // deferral handled in this dispatch, without another scheduler tick.
+        Some(storage.backend().get_execution_tree(instance.id).await?)
+    } else {
+        None
+    };
+    let tree = recovered_tree.as_deref().unwrap_or(tree);
 
     // Hard cap: checked BEFORE condition evaluation so a perpetually-truthy
     // condition cannot keep the loop alive past the cap.
@@ -159,6 +192,19 @@ pub(crate) async fn execute_loop_with_clock(
         evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Completed)
             .await?;
         return Ok(true);
+    }
+
+    if let Some(fire_at) = poll_deadline.filter(|deadline| clock.now() < *deadline) {
+        defer_poll(
+            storage,
+            instance,
+            node,
+            claim_token,
+            fire_at,
+            pending_deferrals,
+        )
+        .await?;
+        return Ok(false);
     }
 
     let children = evaluator::children_of(tree, node.id, None);
@@ -223,14 +269,35 @@ pub(crate) async fn execute_loop_with_clock(
     }
 
     let next_iteration = iteration.saturating_add(1);
-    if next_iteration < effective_max {
-        advance_iteration(storage, instance, node, loop_def, tree, next_iteration).await?;
+    let next_poll = if next_iteration < effective_max {
+        loop_def
+            .poll_interval
+            .map(|seconds| poll_fire_at(clock.now(), seconds))
     } else {
-        // Cap reached after this iteration: persist the final count and leave
-        // the body terminal; the top-of-function guard completes the node on
-        // the next tick.
+        None
+    };
+    if next_iteration < effective_max {
+        advance_iteration(
+            storage,
+            instance,
+            node,
+            loop_def,
+            tree,
+            next_iteration,
+            next_poll,
+        )
+        .await?;
+    } else {
+        // Persist the final count without a reset. Settle the node below in
+        // this dispatch, so a metadata-only change cannot add another tick.
         storage
-            .save_block_output(&iteration_marker(instance, loop_def, next_iteration, false))
+            .save_block_output(&iteration_marker(
+                instance,
+                loop_def,
+                next_iteration,
+                false,
+                None,
+            ))
             .await?;
     }
 
@@ -263,37 +330,61 @@ pub(crate) async fn execute_loop_with_clock(
     );
 
     if next_iteration >= effective_max {
+        evaluator::settle_composite(storage, instance.id, tree, node.id, NodeState::Completed)
+            .await?;
         return Ok(true);
     }
 
-    // poll_interval: defer re-execution by setting next_fire_at.
-    // Use CAS (conditional_update_instance_state) so that a Cancel
-    // signal processed between this write and the next evaluator tick
-    // is not silently overwritten. The instance is Running when the
-    // loop handler executes; if a cancel has already transitioned it
-    // to Cancelled, the CAS returns false and the write is safely
-    // skipped.
-    if let Some(interval_secs) = loop_def.poll_interval {
-        let next_fire = poll_fire_at(clock.now(), interval_secs);
-        let transitioned = storage
+    // Keep the parent claim until independent runnable work settles. The
+    // marker preserves this deadline across early wakes, process restarts,
+    // interrupted resets and evaluator work-budget yields.
+    if let Some(fire_at) = next_poll {
+        defer_poll(
+            storage,
+            instance,
+            node,
+            claim_token,
+            fire_at,
+            pending_deferrals,
+        )
+        .await?;
+    }
+
+    Ok(true)
+}
+
+async fn defer_poll(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    instance: &TaskInstance,
+    node: &ExecutionNode,
+    claim_token: chrono::DateTime<chrono::Utc>,
+    fire_at: chrono::DateTime<chrono::Utc>,
+    pending: Option<&crate::handlers::step_deferral::PendingStepDeferrals>,
+) -> Result<(), EngineError> {
+    if pending.is_some() {
+        crate::handlers::step_deferral::defer_step(
+            storage.backend(),
+            instance,
+            node.id,
+            claim_token,
+            crate::handlers::step_deferral::StepDeferral::WakeAt(fire_at),
+            pending,
+        )
+        .await
+    } else {
+        // Explicit direct helper calls have no enclosing evaluator to park
+        // later. Retain their capability through the immediate transition.
+        storage
             .conditional_update_claimed_instance_state(
                 instance.id,
                 claim_token,
                 InstanceState::Running,
                 InstanceState::Scheduled,
-                Some(next_fire),
+                Some(fire_at),
             )
             .await?;
-        if !transitioned {
-            debug!(
-                instance_id = %instance.id,
-                block_id = %loop_def.id,
-                "CAS for poll_interval reschedule failed — instance state changed concurrently"
-            );
-        }
+        Ok(())
     }
-
-    Ok(true)
 }
 
 /// `now + interval_secs`, with the interval clamped to
@@ -304,8 +395,10 @@ fn poll_fire_at(
     interval_secs: u64,
 ) -> chrono::DateTime<chrono::Utc> {
     let secs = i64::try_from(interval_secs.min(MAX_POLL_INTERVAL_SECS)).unwrap_or(0);
-    now.checked_add_signed(chrono::Duration::seconds(secs))
-        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+    crate::scheduler::fire_at_storage_precision(
+        now.checked_add_signed(chrono::Duration::seconds(secs))
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+    )
 }
 
 fn iteration_marker(
@@ -313,12 +406,16 @@ fn iteration_marker(
     loop_def: &LoopDef,
     iterations: u32,
     reset_pending: bool,
+    poll_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> BlockOutput {
-    let output = if reset_pending {
+    let mut output = if reset_pending {
         serde_json::json!({ "_iterations": iterations, RESET_PENDING_KEY: true })
     } else {
         serde_json::json!({ "_iterations": iterations })
     };
+    if let Some(deadline) = poll_deadline {
+        output[POLL_FIRE_AT_KEY] = serde_json::json!(deadline);
+    }
     BlockOutput {
         id: uuid::Uuid::now_v7(),
         instance_id: instance.id,
@@ -355,11 +452,27 @@ async fn advance_iteration(
     loop_def: &LoopDef,
     tree: &[ExecutionNode],
     next_iteration: u32,
+    poll_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), EngineError> {
     storage
-        .save_block_output(&iteration_marker(instance, loop_def, next_iteration, true))
+        .save_block_output(&iteration_marker(
+            instance,
+            loop_def,
+            next_iteration,
+            true,
+            poll_deadline,
+        ))
         .await?;
-    finish_iteration_reset(storage, instance, node, loop_def, tree, next_iteration).await
+    finish_iteration_reset(
+        storage,
+        instance,
+        node,
+        loop_def,
+        tree,
+        next_iteration,
+        poll_deadline,
+    )
+    .await
 }
 
 /// Steps 2 and 3 of [`advance_iteration`].
@@ -370,11 +483,18 @@ async fn finish_iteration_reset(
     loop_def: &LoopDef,
     tree: &[ExecutionNode],
     iteration: u32,
+    poll_deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), EngineError> {
     evaluator::reset_subtree_to_pending(storage, tree, &instance.tenant_id, instance.id, node.id)
         .await?;
     storage
-        .save_block_output(&iteration_marker(instance, loop_def, iteration, false))
+        .save_block_output(&iteration_marker(
+            instance,
+            loop_def,
+            iteration,
+            false,
+            poll_deadline,
+        ))
         .await?;
     Ok(())
 }
@@ -1179,7 +1299,7 @@ mod tests {
     fn iteration_marker_keeps_counter_out_of_attempt() {
         let instance = mk_instance_for(InstanceId::new(), json!({}));
         let loop_def = two_step_loop("true", false);
-        let marker = iteration_marker(&instance, &loop_def, 40_000, false);
+        let marker = iteration_marker(&instance, &loop_def, 40_000, false, None);
         assert_eq!(marker.attempt, 0);
         assert_eq!(marker.output["_iterations"], json!(40_000));
     }
@@ -1354,7 +1474,9 @@ mod tests {
     /// ENG-C-N6: an absurd `poll_interval` must not overflow the timestamp.
     #[test]
     fn poll_fire_at_clamps_instead_of_overflowing() {
-        let now = chrono::Utc::now();
+        let now = chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00.123456Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         let fire = poll_fire_at(now, u64::MAX);
         assert!(fire > now);
         assert!(fire <= now + chrono::Duration::days(366));

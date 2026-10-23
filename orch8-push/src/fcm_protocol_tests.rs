@@ -466,3 +466,93 @@ async fn signed_wake_uses_the_same_delivery_path_and_embeds_metadata() {
         metadata
     );
 }
+
+/// Deliberately never finishes a chunked body after sending over 64 KiB.
+/// A response byte limit must stop before EOF, even without Content-Length.
+async fn spawn_unfinished_large_response(status: StatusCode) -> MockFcm {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.unwrap();
+                    connections.spawn(async move {
+                        let mut request = Vec::new();
+                        let mut chunk = [0_u8; 4096];
+                        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                            let Ok(read) = stream.read(&mut chunk).await else { return; };
+                            if read == 0 || request.len() + read > 16 * 1024 { return; }
+                            request.extend_from_slice(&chunk[..read]);
+                        }
+                        let headers = format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n", status.as_u16(), status.canonical_reason().unwrap());
+                        if stream.write_all(headers.as_bytes()).await.is_err() { return; }
+                        let body = vec![b'a'; 128 * 1024];
+                        if stream.write_all(format!("{:x}\r\n", body.len()).as_bytes()).await.is_err() { return; }
+                        if stream.write_all(&body).await.is_err() { return; }
+                        if stream.write_all(b"\r\n").await.is_err() { return; }
+                        std::future::pending::<()>().await;
+                    });
+                }
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    });
+    MockFcm {
+        endpoint,
+        state: MockFcmState::default(),
+        task,
+    }
+}
+
+async fn reject_unfinished_large_response(oauth: bool, status: StatusCode) {
+    let mock = spawn_unfinished_large_response(status).await;
+    let provider = provider(&mock.endpoint);
+    if !oauth {
+        *provider.cached_token.lock().await = Some(CachedToken {
+            token: "cached-access-token".into(),
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(3600),
+        });
+    }
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        if oauth {
+            provider.get_or_refresh_token().await.map(|_| ())
+        } else {
+            provider.send_silent_push("device-token", "android").await
+        }
+    })
+    .await
+    .expect("FCM waited for EOF after an oversized response instead of enforcing a byte limit");
+    if !oauth && status.is_success() {
+        result.expect("a successful message status already acknowledges delivery");
+    } else {
+        let error = result.expect_err("oversized FCM response must be rejected");
+        assert!(
+            error.to_string().contains("response") && error.to_string().contains("limit"),
+            "{error}"
+        );
+    }
+    if oauth {
+        assert!(provider.cached_token.lock().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn oversized_oauth_success_body_stops_before_eof() {
+    reject_unfinished_large_response(true, StatusCode::OK).await;
+}
+#[tokio::test]
+async fn oversized_oauth_error_body_stops_before_eof() {
+    reject_unfinished_large_response(true, StatusCode::BAD_REQUEST).await;
+}
+#[tokio::test]
+async fn successful_message_does_not_wait_for_an_unbounded_response_body() {
+    reject_unfinished_large_response(false, StatusCode::OK).await;
+}
+#[tokio::test]
+async fn oversized_message_error_body_stops_before_eof() {
+    reject_unfinished_large_response(false, StatusCode::BAD_REQUEST).await;
+}
