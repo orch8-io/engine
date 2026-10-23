@@ -483,15 +483,15 @@ pub(super) async fn event_wait(
     store: &PostgresStorage,
     wait: &orch8_types::event_correlation::EventWait,
     claim_token: DateTime<Utc>,
-) -> Result<bool, StorageError> {
+) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError> {
     let instance_id = InstanceId::from_uuid(wait.instance_id);
     let Some(mut tx) = begin(store, instance_id, claim_token).await? else {
-        return Ok(false);
+        return Ok(None);
     };
     require_tenant(&mut tx, instance_id, &wait.tenant_id).await?;
-    super::events::upsert_wait_on(&mut tx, wait).await?;
+    let registered = super::events::register_wait_on(&mut tx, wait).await?;
     tx.commit().await?;
-    Ok(true)
+    Ok(Some(registered))
 }
 
 pub(super) async fn federation_call(

@@ -1544,6 +1544,16 @@ pub trait OutputStore: Send + Sync + 'static {
 // Sub-trait 5: SignalStore
 // ============================================================================
 
+/// Authoritative result of one atomic event-match attempt.
+#[derive(Debug, Clone)]
+pub struct EventMatch {
+    /// The authoritative registration after this attempt.
+    pub wait: orch8_types::event_correlation::EventWait,
+    /// True only if this transaction consumed the candidate. Merely observing
+    /// another matcher's completed wait must not report a second match.
+    pub consumed: bool,
+}
+
 #[async_trait]
 pub trait SignalStore: Send + Sync + 'static {
     async fn enqueue_signal(&self, signal: &Signal) -> Result<(), StorageError>;
@@ -1644,13 +1654,32 @@ pub trait SignalStore: Send + Sync + 'static {
         wait: &orch8_types::event_correlation::EventWait,
     ) -> Result<(), StorageError>;
 
-    /// Register a wait only while its instance retains the original running
-    /// claim. The claim check and write must share one transaction.
+    /// Atomically register/refresh parameters while retaining stored identity
+    /// and matched progress. A satisfied registration is returned unchanged.
+    async fn register_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+    ) -> Result<orch8_types::event_correlation::EventWait, StorageError>;
+
+    /// Same registration under the original running claim. `None` means the
+    /// claim was lost. The ownership check and registration share a transaction.
     async fn upsert_event_wait_claimed(
         &self,
         wait: &orch8_types::event_correlation::EventWait,
         claim_token: DateTime<Utc>,
-    ) -> Result<bool, StorageError>;
+    ) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError>;
+
+    /// Match a canonical pending event into the exact registration generation.
+    /// Consumption, matched progress and its unique satisfaction notification
+    /// commit together. `None` means that generation disappeared. A missing
+    /// candidate allows already-complete joins to settle without a new event.
+    /// The notification's ID must equal the wait ID and address the same block.
+    async fn match_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+        event_id: Option<Uuid>,
+        notification: &Signal,
+    ) -> Result<Option<EventMatch>, StorageError>;
 
     /// Remove registrations when their step activations are reset.
     async fn delete_event_waits_for_blocks(

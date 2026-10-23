@@ -1460,11 +1460,26 @@ impl crate::SignalStore for PostgresStorage {
         events::upsert_wait(self, wait).await
     }
 
+    async fn register_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+    ) -> Result<orch8_types::event_correlation::EventWait, StorageError> {
+        events::register_wait(self, wait).await
+    }
+    async fn match_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+        event_id: Option<Uuid>,
+        notification: &Signal,
+    ) -> Result<Option<crate::EventMatch>, StorageError> {
+        events::match_wait(self, wait, event_id, notification).await
+    }
+
     async fn upsert_event_wait_claimed(
         &self,
         wait: &orch8_types::event_correlation::EventWait,
         claim_token: DateTime<Utc>,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError> {
         claimed_writes::event_wait(self, wait, claim_token).await
     }
 

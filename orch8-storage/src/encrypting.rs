@@ -1852,7 +1852,12 @@ passthrough_impl! {
     async fn find_pending_events(&self, tenant_id: &str, event_names: &[String], correlation_key: &str) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
     async fn consume_events(&self, event_ids: &[Uuid], instance_id: InstanceId) -> Result<u64, StorageError>;
     async fn upsert_event_wait(&self, wait: &orch8_types::event_correlation::EventWait) -> Result<(), StorageError>;
-    async fn upsert_event_wait_claimed(&self, wait: &orch8_types::event_correlation::EventWait, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+    async fn register_event_wait(&self, wait: &orch8_types::event_correlation::EventWait) -> Result<orch8_types::event_correlation::EventWait, StorageError>;
+    async fn match_event_wait(&self, wait: &orch8_types::event_correlation::EventWait, event_id: Option<Uuid>, notification: &orch8_types::signal::Signal) -> Result<Option<crate::EventMatch>, StorageError> {
+        let encrypted = self.encrypt_signal(notification)?;
+        self.inner.match_event_wait(wait, event_id, encrypted.as_ref()).await
+    }
+    async fn upsert_event_wait_claimed(&self, wait: &orch8_types::event_correlation::EventWait, claim_token: chrono::DateTime<chrono::Utc>) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError>;
     async fn delete_event_waits_for_blocks(&self, instance_id: InstanceId, blocks: &[String]) -> Result<u64, StorageError>;
     async fn delete_event_waits_for_blocks_claimed(&self, instance_id: InstanceId, blocks: &[String], claim_token: chrono::DateTime<chrono::Utc>) -> Result<Option<u64>, StorageError>;
     async fn get_event_wait(&self, instance_id: InstanceId, block_id: &str) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError>;

@@ -73,7 +73,7 @@ fn call(parent: &TaskInstance) -> FederationCall {
 backend_test!(async fn registration_rejects_stale_claims_and_preserves_replacement_rows(b) {
     let p = parent(b.storage.as_ref()).await; let token = p.claimed_at.unwrap();
     let mut wait = registration(&p); let mut outbound = call(&p);
-    assert!(b.storage.upsert_event_wait_claimed(&wait, token).await.unwrap());
+    assert!(b.storage.upsert_event_wait_claimed(&wait, token).await.unwrap().is_some());
     assert_eq!(b.storage.create_federation_call_claimed(&outbound, token).await.unwrap(), Some(true));
     assert_eq!(b.storage.create_federation_call_claimed(&outbound, token).await.unwrap(), Some(false));
     assert_eq!(b.storage.get_federation_call(&p.tenant_id, outbound.call_id).await.unwrap().unwrap().input, outbound.input);
@@ -83,11 +83,11 @@ backend_test!(async fn registration_rejects_stale_claims_and_preserves_replaceme
     let current = replacement.claimed_at.unwrap(); assert_ne!(token, current);
     let before = b.storage.get_event_wait(p.id, "work").await.unwrap().unwrap();
     wait.correlation_key = "stale".into(); outbound.call_id = uuid::Uuid::now_v7();
-    assert!(!b.storage.upsert_event_wait_claimed(&wait, token).await.unwrap());
+    assert!(b.storage.upsert_event_wait_claimed(&wait, token).await.unwrap().is_none());
     assert_eq!(b.storage.create_federation_call_claimed(&outbound, token).await.unwrap(), None);
     assert_eq!(b.storage.get_event_wait(p.id, "work").await.unwrap().unwrap(), before);
     assert!(b.storage.get_federation_call(&p.tenant_id, outbound.call_id).await.unwrap().is_none());
-    assert!(b.storage.upsert_event_wait_claimed(&wait, current).await.unwrap());
+    assert!(b.storage.upsert_event_wait_claimed(&wait, current).await.unwrap().is_some());
     assert_eq!(b.storage.create_federation_call_claimed(&outbound, current).await.unwrap(), Some(true));
 });
 
@@ -100,7 +100,7 @@ backend_test!(async fn registration_cannot_cross_the_parent_tenant(b) {
     assert!(b.storage.get_event_wait(p.id, "work").await.unwrap().is_none());
     assert!(b.storage.get_federation_call(&outbound.tenant_id, outbound.call_id).await.unwrap().is_none());
     // An error rolls back and releases the lock, allowing the same owner to retry.
-    assert!(b.storage.upsert_event_wait_claimed(&registration(&p), token).await.unwrap());
+    assert!(b.storage.upsert_event_wait_claimed(&registration(&p), token).await.unwrap().is_some());
     assert_eq!(b.storage.create_federation_call_claimed(&call(&p), token).await.unwrap(), Some(true));
 });
 

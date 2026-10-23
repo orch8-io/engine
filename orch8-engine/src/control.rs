@@ -101,16 +101,16 @@ pub trait ExecutionControl: Send + Sync {
     async fn upsert_event_wait(
         &self,
         wait: &orch8_types::event_correlation::EventWait,
-    ) -> Result<(), EngineError> {
+    ) -> Result<orch8_types::event_correlation::EventWait, EngineError> {
         if let Some(claim) = self.execution_claim() {
             same_instance(claim, InstanceId::from_uuid(wait.instance_id))?;
-            held(
-                claim,
-                SignalStore::upsert_event_wait_claimed(self.backend(), wait, claim.token).await?,
-            )
+            SignalStore::upsert_event_wait_claimed(self.backend(), wait, claim.token)
+                .await?
+                .ok_or(EngineError::ClaimLost {
+                    instance_id: claim.instance_id,
+                })
         } else {
-            SignalStore::upsert_event_wait(self.backend(), wait).await?;
-            Ok(())
+            Ok(SignalStore::register_event_wait(self.backend(), wait).await?)
         }
     }
 
