@@ -2693,6 +2693,66 @@ async fn parking_parent_rechecks_already_finished_sub_sequence_child() {
     assert_eq!(after.state, InstanceState::Waiting);
 }
 
+/// A handler or evaluator may consume Cancel before the scheduler regains
+/// control. Both tree outcomes must still notify a waiting sub-sequence parent.
+#[tokio::test]
+async fn already_terminal_child_wakes_parent_on_both_tree_outcomes() {
+    for done in [false, true] {
+        for state in [
+            InstanceState::Cancelled,
+            InstanceState::Failed,
+            InstanceState::Completed,
+        ] {
+            let storage: Arc<dyn StorageBackend> =
+                Arc::new(SqliteStorage::in_memory().await.unwrap());
+            let (parent, seq, child_id) =
+                seed_sub_sequence_parent(&storage, InstanceState::Waiting, state).await;
+            let child = storage.get_instance(child_id).await.unwrap().unwrap();
+            let registry = HandlerRegistry::new();
+            let webhook_config = WebhookConfig::default();
+            let cache = crate::sequence_cache::SequenceCache::new(16, Duration::from_secs(60));
+            let cancel = CancellationToken::new();
+            let clock = SharedClock::default();
+            let lease_lost = std::sync::atomic::AtomicBool::new(false);
+            let ctx = InstanceRunCtx {
+                storage: &storage,
+                handlers: &registry,
+                webhook_config: &webhook_config,
+                sequence_cache: &cache,
+                externalize_threshold: 0,
+                max_steps_per_instance: 0,
+                cancel: &cancel,
+                clock: &clock,
+                lease_lost: &lease_lost,
+                claim_token: child.updated_at,
+            };
+            if done {
+                handle_tree_done(&ctx, &child, &seq, TerminalReason::Cancelled)
+                    .await
+                    .unwrap();
+            } else {
+                handle_tree_more_work(&ctx, &child, &seq, false)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                storage.get_instance(child_id).await.unwrap().unwrap().state,
+                state
+            );
+            assert_eq!(
+                storage
+                    .get_instance(parent.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                InstanceState::Scheduled,
+                "done={done}, child={state:?}"
+            );
+        }
+    }
+}
+
 /// L3-01 safety net: a wake that found the parent `Running` is retried by
 /// the tick once the parent has parked.
 #[tokio::test]
