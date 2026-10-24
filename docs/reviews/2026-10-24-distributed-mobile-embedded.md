@@ -1115,3 +1115,34 @@ This is not authentication, remote audience verification, workflow/key isolation
 or a public scoped engine. Existing sync/execution still uses legacy storage.
 Credentials, running tasks/callbacks, workflow IDs, signing keys, journals,
 workers, delegation, wrappers and all S1-S12 end-to-end gates remain open.
+
+### DME080 — Failed key revocation restored authority through cache (fixed in source)
+
+**HIGH, effort M.** An injected SQLite delete failure reproduced a signed
+manifest with no signing keys still installing a sequence under the removed
+key. Revocation errors were logged/ignored, then per-entry verification loaded
+the surviving cached key. A second reproduction showed a malformed later key
+leaving earlier new keys partially persisted even though sync returned an error.
+
+Sync now decodes the entire root-authorized set and rejects empty/duplicate IDs
+before any trust mutation. Replacement is one transaction; revocation or insert
+failure aborts before reconciliation/download/install/cursor advancement and
+retains the previous complete set. Per-entry verification uses only the current
+manifest's read-only in-memory authorized keys and never recovers authority from
+cache. Entries without a current authorized key are refused before body or
+signature network requests.
+No public SDK/FFI signature changes.
+
+Five regressions cover failed revocation with a valid signed transport fixture,
+invalid-later-key partial persistence, injected insert rollback, direct refusal
+of an unlisted cached key, and empty/duplicate IDs. Internal scoped signing-key
+storage also supports atomic owner/epoch-fenced replacement and single-snapshot
+reads. Two storage cases exercise identical key IDs in four catalogs, isolated
+rotation, stale/foreign/empty-set refusal, independent-pool reopen, duplicate
+rejection and injected insert/delete rollback. This catalog persistence is not
+yet connected to scoped sync or remote audience verification; workflow ownership
+and the rest of ADR-0002 remain open.
+
+The final 419-test mobile library suite passes with no failures. All-target
+mobile Clippy passes with warnings denied; formatting, documentation and diff
+checks pass. Hosted CI remains required before merge.

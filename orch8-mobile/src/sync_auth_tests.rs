@@ -502,3 +502,6 @@ mod scope_tests;
 
 #[path = "sync_reconciliation_tests.rs"]
 mod reconciliation_tests;
+
+#[path = "sync_key_tests.rs"]
+mod key_tests;

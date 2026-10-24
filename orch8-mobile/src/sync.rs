@@ -525,7 +525,7 @@ impl SyncOrchestrator {
         }
 
         // 3. Validate signing keys against root key and cache them.
-        let mut trusted_keys = self.cache_signing_keys(&manifest).await?;
+        let trusted_keys = self.cache_signing_keys(&manifest).await?;
 
         // 4. Reconcile removed sequences.
         let local_sequences = self.list_local_sequences().await?;
@@ -539,7 +539,7 @@ impl SyncOrchestrator {
                 &scoped_auth,
                 registered_handlers,
                 &local_sequences,
-                &mut trusted_keys,
+                &trusted_keys,
             )
             .await?;
         result.added = added;
@@ -594,61 +594,34 @@ impl SyncOrchestrator {
         manifest: &Manifest,
     ) -> Result<HashMap<String, VerifyingKey>, MobileError> {
         self.check_active()?;
-        let mut trusted_keys: HashMap<String, VerifyingKey> = HashMap::new();
+        let mut trusted_keys = HashMap::new();
         for entry in &manifest.signing_keys {
             self.check_active()?;
-            let pk_bytes =
-                BASE64
-                    .decode(&entry.public_key)
-                    .map_err(|e| SyncError::SignatureInvalid {
-                        message: format!("bad base64 for signing key {}: {e}", entry.key_id),
-                    })?;
-            let pk = VerifyingKey::from_bytes(&pk_bytes.try_into().map_err(|_| {
-                SyncError::SignatureInvalid {
-                    message: format!("bad public key length for {}", entry.key_id),
+            if entry.key_id.trim().is_empty() || trusted_keys.contains_key(&entry.key_id) {
+                return Err(SyncError::InvalidManifest {
+                    message: "manifest signing key IDs must be nonempty and unique".into(),
                 }
-            })?)
-            .map_err(|e| SyncError::SignatureInvalid {
-                message: format!("bad public key for {}: {e}", entry.key_id),
-            })?;
-            trusted_keys.insert(entry.key_id.clone(), pk);
-            self.mobile_storage
-                .upsert_trusted_key(&entry.key_id, &entry.public_key)
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
+                .into());
+            }
+            let key = decode_verifying_key(&entry.public_key)
+                .map_err(|message| SyncError::SignatureInvalid { message })?;
+            trusted_keys.insert(entry.key_id.clone(), key);
         }
-
-        // Revoke rotated-out keys: the manifest's signing_keys is the current
-        // authoritative set, so any locally-cached key whose key_id is no longer
-        // present has been rotated out and must stop validating sequences.
-        // Without this, a key compromised after rotation would keep verifying
-        // forever. (The manifest itself is signed by the root key, so its
-        // key-set cannot be forged.)
-        self.check_active()?;
-        let current: HashSet<&str> = manifest
+        // Parse the entire root-authorized set before changing trust. Revocation
+        // is mandatory: on any storage failure, keep the previous complete set
+        // and abort before reconciling/installing workflows or advancing cursors.
+        let keys: Vec<_> = manifest
             .signing_keys
             .iter()
-            .map(|k| k.key_id.as_str())
+            .map(|entry| (entry.key_id.as_str(), entry.public_key.as_str()))
             .collect();
-        let stored =
-            self.mobile_storage
-                .list_trusted_keys()
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
-        for (key_id, _) in stored {
-            self.check_active()?;
-            if !current.contains(key_id.as_str()) {
-                if let Err(e) = self.mobile_storage.delete_trusted_key(&key_id).await {
-                    warn!(key_id = %key_id, error = %e, "failed to revoke rotated-out signing key");
-                } else {
-                    info!(key_id = %key_id, "revoked rotated-out signing key");
-                }
-            }
-        }
+        self.check_active()?;
+        self.mobile_storage
+            .replace_trusted_keys(&keys)
+            .await
+            .map_err(|error| MobileError::Storage {
+                message: error.to_string(),
+            })?;
 
         self.check_active()?;
         Ok(trusted_keys)
@@ -719,7 +692,7 @@ impl SyncOrchestrator {
         auth: &ScopedSyncAuth<'_>,
         registered_handlers: &HashSet<String>,
         local_sequences: &HashMap<String, i32>,
-        trusted_keys: &mut HashMap<String, VerifyingKey>,
+        trusted_keys: &HashMap<String, VerifyingKey>,
     ) -> Result<(u32, u32, u32, u32, u32), MobileError> {
         self.check_active()?;
         let mut retryable = 0u32;
@@ -770,6 +743,15 @@ impl SyncOrchestrator {
                 continue;
             }
 
+            // Admit the entry before making any body/signature request.
+            // Only the current root-signed manifest authorizes signing keys.
+            // A historical cache entry must never resurrect a rotated-out key.
+            let Some(signing_pk) = trusted_keys.get(&entry.signing_key_id) else {
+                warn!(name = %entry.name, key_id = %entry.signing_key_id, "no trusted signing key — skipping");
+                sig_failures += 1;
+                continue;
+            };
+
             let seq_url = match self.resolve_entry_url(manifest_url, &entry.url) {
                 Ok(url) => url,
                 Err(e) => {
@@ -800,35 +782,6 @@ impl SyncOrchestrator {
                 sig_failures += 1;
                 continue;
             }
-
-            // Verify sequence signature using trusted key.
-            if !trusted_keys.contains_key(&entry.signing_key_id) {
-                let cached = self
-                    .mobile_storage
-                    .get_trusted_key(&entry.signing_key_id)
-                    .await
-                    .map_err(|e| MobileError::Storage {
-                        message: e.to_string(),
-                    })?;
-                if let Some(cached_b64) = cached {
-                    // A corrupt cached key only disqualifies entries signed
-                    // with it; it must not abort the whole sync.
-                    match decode_verifying_key(&cached_b64) {
-                        Ok(pk) => {
-                            trusted_keys.insert(entry.signing_key_id.clone(), pk);
-                        }
-                        Err(message) => {
-                            warn!(key_id = %entry.signing_key_id, %message, "cached signing key unusable");
-                        }
-                    }
-                }
-            }
-
-            let Some(signing_pk) = trusted_keys.get(&entry.signing_key_id) else {
-                warn!(name = %entry.name, key_id = %entry.signing_key_id, "no trusted signing key — skipping");
-                sig_failures += 1;
-                continue;
-            };
 
             // MOB-N3: every per-entry signature failure (download, decode,
             // length, verify) counts and skips just this entry — a single
@@ -1920,7 +1873,7 @@ mod tests {
             generated_at: Utc::now(),
         };
 
-        let mut trusted_keys = HashMap::new();
+        let trusted_keys = HashMap::new();
         let (added, updated, skipped, sig_failures, _retryable) = orch
             .download_and_verify_sequences(
                 "http://127.0.0.1/manifest",
@@ -1928,7 +1881,7 @@ mod tests {
                 &ScopedSyncAuth::UrlToken,
                 &HashSet::new(),
                 &local_sequences,
-                &mut trusted_keys,
+                &trusted_keys,
             )
             .await
             .unwrap();
@@ -1981,7 +1934,7 @@ mod tests {
             // download. Respond with a 404 — this test only cares that the
             // connection was attempted, not that the full flow succeeds.
             if let Ok(Ok((mut socket, _))) =
-                tokio::time::timeout(Duration::from_millis(300), listener.accept()).await
+                tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
             {
                 connected2.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = socket
@@ -2006,7 +1959,10 @@ mod tests {
             generated_at: Utc::now(),
         };
 
-        let mut trusted_keys = HashMap::new();
+        let trusted_keys = HashMap::from([(
+            "k1".to_string(),
+            ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key(),
+        )]);
         let (_added, _updated, skipped, _sig_failures, _retryable) = orch
             .download_and_verify_sequences(
                 "http://127.0.0.1/manifest",
@@ -2014,7 +1970,7 @@ mod tests {
                 &ScopedSyncAuth::UrlToken,
                 &HashSet::new(),
                 &local_sequences,
-                &mut trusted_keys,
+                &trusted_keys,
             )
             .await
             .unwrap();
@@ -2169,7 +2125,7 @@ mod tests {
                 &ScopedSyncAuth::UrlToken,
                 &HashSet::new(),
                 &HashMap::new(),
-                &mut trusted_keys,
+                &trusted_keys,
             )
             .await
             .expect("a malformed .sig must not abort the sync");
@@ -2297,7 +2253,7 @@ mod tests {
                 &ScopedSyncAuth::UrlToken,
                 &HashSet::new(),
                 &local_sequences,
-                &mut trusted_keys,
+                &trusted_keys,
             )
             .await
             .expect("H-14: a poison entry must not abort the whole sync");

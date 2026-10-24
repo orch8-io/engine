@@ -513,6 +513,14 @@ CREATE TABLE IF NOT EXISTS mobile_catalog_metadata (
     PRIMARY KEY(account_id, catalog_id, key),
     FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id)
 );
+CREATE TABLE IF NOT EXISTS mobile_catalog_signing_keys (
+    account_id TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    PRIMARY KEY(account_id, catalog_id, key_id),
+    FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id)
+);
 
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
