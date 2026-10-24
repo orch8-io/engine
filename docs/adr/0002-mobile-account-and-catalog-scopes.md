@@ -2,8 +2,10 @@
 
 Date: 2026-10-24
 
-Status: the requirement is accepted by the user; the API/schema below is a
-proposed implementation contract. Scoped ownership is not implemented yet.
+Status: the requirement is accepted by the user. Internal account/catalog
+identity, session epochs and isolated metadata persistence are implemented;
+the remaining API/schema below is a proposed implementation contract. Public
+scoped sync and execution are not implemented yet.
 
 ## Requirement and current evidence
 
@@ -20,6 +22,23 @@ DME077/078 add bounded owned sync runs and atomic metadata commits as a shared
 foundation. They do not provide scoped ownership.
 
 ## Proposed ownership model
+
+The initial internal storage layer uses `mobile_accounts`, `mobile_catalogs`
+and `mobile_catalog_metadata`. Account keys bind immutably to issuer/subject;
+catalog keys bind immutably to a stable source descriptor and signing authority.
+Descriptors come from trusted host context, not bearer-token parsing. This
+layer does not establish remote authentication or verify manifest audiences.
+It exposes no public SDK API and is not connected to legacy sync/execution.
+
+Retirement marks an account inactive. Reopen preserves its ID/data and increments
+its durable epoch; exhaustion fails closed. Metadata reads check owner and epoch
+in one snapshot. Mutations acquire SQLite's writer reservation with an epoch
+predicate before checking catalog membership and committing the entire batch.
+Consequently, an admitted transaction settles before retirement, while a write
+from an older handle after retirement/reopen is refused across independent
+pools. Legacy tables remain separate, with no implicit adoption. Signing-key,
+workflow and instance ownership, cancellation of running work, remote principal
+proofs and wrapper handles remain unimplemented gates.
 
 Use one SQLite database with explicit owner keys and scoped SDK handles. Shared
 runtime resources stay bounded across accounts. Scope-specific state is selected

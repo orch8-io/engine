@@ -11,6 +11,11 @@ use orch8_types::error::StorageError;
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::InstanceState;
 
+// Internal persistence foundation; scoped execution and SDK handles are still
+// under development. Do not expose this as a complete scoped engine API.
+#[allow(dead_code)]
+pub(crate) mod scopes;
+
 #[cfg(test)]
 struct MetadataBarrier {
     entered: tokio::sync::oneshot::Sender<()>,

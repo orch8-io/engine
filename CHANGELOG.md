@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Persistent mobile scope foundation
+
+- Add internal account/catalog identities with immutable principal/source
+  bindings, durable retirement epochs, and isolated atomic catalog metadata.
+- Fence stale handles across independent SQLite pools and database reopen;
+  retain legacy data without assigning it to a newly opened account.
+- This is internal groundwork. Public scoped sync, workflow execution,
+  signing-key ownership and SDK handles still require implementation.
+
 ### Owned manifest sync admission and atomic metadata
 
 - Reject overlapping sync before token authorization or HTTP. Keep an owned

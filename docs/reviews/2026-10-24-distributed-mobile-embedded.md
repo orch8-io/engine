@@ -1086,3 +1086,32 @@ failure rolls back the complete snapshot. The baseline failure, success without
 an ETag, and cancelled-caller transaction tests pass in the full mobile suite.
 This does not scope the metadata to an account/catalog: S1-S4 and the complete
 scoped-runtime contract still require implementation and verification.
+
+### DME079 — Explicit persistent mobile owners (partial foundation)
+
+**HIGH, effort L.** The user confirmed multiple accounts and catalogs must share
+one database with explicit scopes. Legacy global cursors, keys and workflow data
+do not enforce that ownership. ADR-0002 remains the full implementation contract.
+
+The initial internal storage layer now creates immutable account/principal and
+catalog/source/signing-authority bindings, UUID owner identities, durable active
+session epochs, composite owner foreign keys, and atomic catalog metadata batches.
+Retiring an account preserves its data; reopening advances the epoch without
+changing IDs. Old handles cannot read/write or retire the newer session. Taking
+SQLite's writer reservation before epoch validation orders admitted transactions
+against retirement across independent pools. Source/principal mismatches and
+epoch exhaustion fail closed with diagnostics that omit descriptor values.
+
+Storage cases cover two accounts with two catalogs, identical metadata keys,
+cross-owner handles/FK rejection, immutable bindings, independent-pool concurrent
+opens, stale reads/writes after retirement/reopen, admitted-write retirement
+ordering, injected batch rollback, invalid descriptors, epoch exhaustion, and
+legacy-schema upgrade/full close/reopen without data adoption.
+All 412 mobile library tests pass, including the eight new storage tests.
+Clippy passes on all mobile targets with warnings denied; documentation, format
+and whitespace checks pass. Hosted checks are required before merge.
+
+This is not authentication, remote audience verification, workflow/key isolation,
+or a public scoped engine. Existing sync/execution still uses legacy storage.
+Credentials, running tasks/callbacks, workflow IDs, signing keys, journals,
+workers, delegation, wrappers and all S1-S12 end-to-end gates remain open.
