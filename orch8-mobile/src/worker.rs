@@ -56,12 +56,12 @@
 use orch8_engine::remote_worker::lease::{ConfirmedLease, LeaseEnd};
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -135,7 +135,9 @@ pub struct WorkerWindowResult {
     pub budget_exhausted: bool,
 }
 
+mod admission;
 mod claims;
+use admission::{Admission, Decision, Execution};
 use claims::ClaimKey;
 pub(crate) use claims::{ClaimStore, Outcome};
 
@@ -176,6 +178,11 @@ pub(crate) async fn drain_orphans(
             store.delete(&row.key).await;
             continue;
         }
+        // Registration and restart can launch independent recovery passes.
+        // Share the same cleanup I/O budget as surplus deliveries.
+        let Ok(_slot) = store.admission.release_slots.acquire().await else {
+            break;
+        };
         let settled = if let Some(outcome) = &row.outcome {
             let result = deliver_once(client, row.key.task_id, row.key.claim_epoch, outcome).await;
             if let Some(stats) = stats
@@ -282,31 +289,14 @@ pub(crate) struct Worker {
     deps: WorkerDeps,
     options: WorkerOptions,
     handlers: Vec<String>,
-    wake: Notify,
-    slots: Arc<Semaphore>,
-    in_flight: StdMutex<HashSet<ClaimKey>>,
+    wake: Arc<Notify>,
+    admission: Arc<Admission>,
     counters: Counters,
     /// Independently owned OS background windows, released on cancellation.
     active_windows: AtomicU64,
     /// Bumped after every poll round that claimed nothing.
     idle_rounds: AtomicU64,
     cancel: CancellationToken,
-}
-
-struct InFlight<'a> {
-    key: ClaimKey,
-    tasks: &'a StdMutex<HashSet<ClaimKey>>,
-    wake: &'a Notify,
-}
-
-impl Drop for InFlight<'_> {
-    fn drop(&mut self) {
-        self.tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.key);
-        self.wake.notify_one();
-    }
 }
 
 /// Each window owns one permission; cancellation and unwinding revoke it too.
@@ -340,14 +330,14 @@ impl Worker {
                 message: format!("advertised handlers are not registered: {missing:?}"),
             });
         }
-        let slots = options.max_concurrent_tasks.clamp(1, 64) as usize;
+        let admission = Arc::clone(&deps.store.admission);
+        admission.configure(options.max_concurrent_tasks);
         Ok(Arc::new(Self {
             deps,
             options,
             handlers,
-            wake: Notify::new(),
-            slots: Arc::new(Semaphore::new(slots)),
-            in_flight: StdMutex::new(HashSet::new()),
+            wake: Arc::clone(&admission.wake),
+            admission,
             counters: Counters::default(),
             active_windows: AtomicU64::new(0),
             idle_rounds: AtomicU64::new(0),
@@ -388,10 +378,7 @@ impl Worker {
     }
 
     fn in_flight_len(&self) -> usize {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        self.admission.in_flight()
     }
 
     fn power(&self) -> PowerState {
@@ -421,7 +408,7 @@ impl Worker {
                 break;
             }
             let mut wait = self.idle_interval();
-            if self.may_claim() && self.slots.available_permits() > 0 {
+            if self.may_claim() && self.admission.available() > 0 {
                 match self.poll_round(&mut cursor).await {
                     Ok((claimed, hint)) => {
                         if claimed > 0 {
@@ -446,7 +433,7 @@ impl Worker {
                 next_drain = tokio::time::Instant::now() + ORPHAN_DRAIN_INTERVAL;
             }
 
-            if wait.is_zero() && self.slots.available_permits() > 0 {
+            if wait.is_zero() && self.admission.available() > 0 {
                 tokio::task::yield_now().await;
                 continue;
             }
@@ -465,11 +452,17 @@ impl Worker {
         self: &Arc<Self>,
         cursor: &mut usize,
     ) -> Result<(usize, Option<Duration>), MobileError> {
+        // A stopped generation may still be awaiting a poll response. Keep
+        // at most one such response batch outstanding across engine workers.
+        let _owner = tokio::select! {
+            () = self.cancel.cancelled() => return Ok((0, None)),
+            owner = self.admission.poll_owner.lock() => owner,
+        };
         let mut claimed = 0usize;
         let mut hint: Option<Duration> = None;
         let count = self.handlers.len();
         for offset in 0..count {
-            let free = self.slots.available_permits();
+            let free = self.admission.available();
             if free == 0 || !self.may_claim() || self.cancel.is_cancelled() {
                 break;
             }
@@ -505,24 +498,88 @@ impl Worker {
     }
 
     fn spawn_task(self: &Arc<Self>, task: RemoteTask, heartbeat: Duration) {
-        let permit = Arc::clone(&self.slots).try_acquire_owned();
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            let Ok(permit) = permit else {
-                // More tasks than free slots (server ignored `limit`): hand
-                // the surplus back untouched.
-                if release(&this.deps.client, task.id, task.claim_epoch, false).await {
-                    this.counters.released.fetch_add(1, Ordering::Relaxed);
-                }
-                return;
-            };
-            this.execute(task, heartbeat).await;
-            drop(permit);
-            this.wake.notify_one();
-        });
+        if let Some(future) = self.task_future(task, heartbeat) {
+            tokio::spawn(future);
+        }
     }
 
+    #[cfg(test)]
     async fn execute(self: &Arc<Self>, task: RemoteTask, heartbeat: Duration) {
+        if let Some(future) = self.task_future(task, heartbeat) {
+            future.await;
+        }
+    }
+
+    /// Reserve synchronously, before spawning or polling any future. The
+    /// reservation also owns capacity when cancellation precedes first poll.
+    fn task_future(
+        self: &Arc<Self>,
+        task: RemoteTask,
+        heartbeat: Duration,
+    ) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+        let key = ClaimKey::for_task(
+            &task,
+            &self.deps.client.worker_id(),
+            self.deps.client.api_base(),
+        );
+        let decision = self.admission.admit(&key);
+        match &decision {
+            Decision::Ignore => return None,
+            Decision::Release {
+                superseded: Some(cancel),
+                ..
+            } => cancel.cancel(),
+            _ => {}
+        }
+        let this = Arc::clone(self);
+        Some(async move {
+            match decision {
+                Decision::Execute(claim) => this.execute_reserved(task, heartbeat, claim).await,
+                Decision::Release { guard, .. } => {
+                    // Both queued and active releases retain their generation
+                    // fence, and all worker generations share the I/O bound.
+                    let Ok(_slot) = this.admission.release_slots.acquire().await else {
+                        return;
+                    };
+                    this.release_unstarted(&task, &key).await;
+                    drop(guard);
+                }
+                Decision::Ignore => unreachable!("ignored before creating the future"),
+            }
+        })
+    }
+
+    async fn release_unstarted(&self, task: &RemoteTask, key: &ClaimKey) {
+        let client = &self.deps.client;
+        let store = &self.deps.store;
+        let Some(_reservation) = store.reserve(key) else {
+            return;
+        };
+        match store
+            .insert(task, &client.worker_id(), client.api_base())
+            .await
+        {
+            Ok(true) => {}
+            // Prior start/outcome evidence must be reconciled by recovery,
+            // never replaced with an unstarted release due to capacity.
+            Ok(false) => return,
+            Err(error) => {
+                warn!(%error, task_id = %task.id, "cannot journal unstarted release; leaving claim for expiry");
+                return;
+            }
+        }
+        if release(client, task.id, task.claim_epoch, false).await {
+            self.counters.released.fetch_add(1, Ordering::Relaxed);
+            store.delete(key).await;
+        }
+    }
+
+    async fn execute_reserved(
+        self: &Arc<Self>,
+        task: RemoteTask,
+        heartbeat: Duration,
+        claim: Execution,
+    ) {
         let client = &self.deps.client;
         let store = &self.deps.store;
         let task_id = task.id;
@@ -538,23 +595,16 @@ impl Worker {
             Ok(true) => {}
             Ok(false) => return, // Existing evidence belongs to recovery, not a second invocation.
             Err(error) => {
-                warn!(%error, %task_id, "cannot journal claim; releasing task");
-                if release(client, task_id, task.claim_epoch, false).await {
-                    self.counters.released.fetch_add(1, Ordering::Relaxed);
-                }
+                // A failed INSERT cannot distinguish a fresh claim from
+                // existing started/outcome evidence. Do not assert that an
+                // earlier callback never ran; recovery or lease expiry owns it.
+                warn!(%error, %task_id, "cannot journal claim; leaving it for recovery or expiry");
                 return;
             }
         }
-        self.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key.clone());
-        let _in_flight = InFlight {
-            key: key.clone(),
-            tasks: &self.in_flight,
-            wake: &self.wake,
-        };
-        let result = self.execute_journaled(&task, &key, heartbeat).await;
+        let result = self
+            .execute_journaled(&task, &key, heartbeat, claim.cancellation())
+            .await;
         if result {
             store.delete(&key).await;
         }
@@ -568,6 +618,7 @@ impl Worker {
         task: &RemoteTask,
         key: &ClaimKey,
         heartbeat: Duration,
+        superseded: &CancellationToken,
     ) -> bool {
         let client = &self.deps.client;
         let store = &self.deps.store;
@@ -582,6 +633,7 @@ impl Worker {
         }
         let acquired = tokio::select! {
             biased;
+            () = superseded.cancelled() => Some(Err(LeaseEnd::LostOwnership)),
             () = self.cancel.cancelled() => None,
             lease = ConfirmedLease::acquire(task.lease_secs, heartbeat, || client.heartbeat(task.id, task.claim_epoch)) => Some(lease),
         };
@@ -601,13 +653,15 @@ impl Worker {
         };
         let mut started = false;
         let mut outcome = None;
-        let result = lease
-            .run(
+        let result = tokio::select! {
+            biased;
+            () = superseded.cancelled() => Err(LeaseEnd::LostOwnership),
+            result = lease.run(
                 heartbeat,
                 self.execute_confirmed(task, key, &mut started, &mut outcome),
                 || client.heartbeat(task.id, task.claim_epoch),
-            )
-            .await;
+            ) => result,
+        };
         // The owned invocation is dropped before any recovery I/O. A running
         // native callback is now quarantined until its physical return.
         match result {

@@ -975,6 +975,19 @@ outcome instead of invoking the handler again.
 Live claim reservations are shared across worker generations and registration
 recovery. Stopping and restarting a worker does not make its still-running tasks
 orphans. Recovery uses only the matching control plane and worker identity.
+The configured task concurrency budget is shared across worker restarts within
+one engine: draining predecessors still consume capacity and appear in the
+successor's in-flight/window counts. A smaller replacement limit lets admitted
+work finish before accepting more. Newer lease generations cancel the owned
+predecessor and are returned unstarted rather than overlap it.
+
+Surplus deliveries and concurrent recovery share an eight-request cleanup limit.
+Pending unstarted releases block additional polls and retain their generation
+fences. Polls are serialized across worker generations; a successor can wait for
+an already-issued predecessor poll to finish. Known journal outcomes are never
+replaced by an unstarted release merely because capacity is full or an INSERT
+fails. These controls belong to one engine object. Native calls still running
+after lease expiry remain separately quarantined by handler.
 
 The older task-ID-only journal is upgraded in one SQLite write transaction,
 retaining the recorded identities, timestamps, and outcomes. Back up device

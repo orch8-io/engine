@@ -286,7 +286,8 @@ failure past the last confirmed lease deadline, and slow advertise/claim shutdow
 remain open. The release queue is backpressured to one transport claim batch;
 custom transports must bound that batch themselves. HTTP responses already have
 an 8 MiB cap. Mobile release fanout and admission across mobile worker generations
-remain separate pending review areas. This batch does not close the broader
+were still pending at this stage; the shared-admission section below records
+their subsequent fixes. This batch does not close the broader
 mobile, embedded, binding, sandbox, and security review above.
 
 Final merge-candidate validation: all 2,022 lean engine library tests and
@@ -329,9 +330,9 @@ and quarantines it until physical completion. This does not guarantee rollback
 of an external mutation accepted before cancellation. An accepted heartbeat
 confirms server authority for the current generation; it is not durable evidence
 that an earlier process never started that generation. Cold restart ambiguity,
-core durable outcome recovery, ambiguous release replies, mobile concurrency
-across worker generations, account/tenant boundaries, and the rest of the
-original review remain open.
+core durable outcome recovery, ambiguous release replies, account/tenant
+boundaries, and the rest of the original review remain open. Mobile concurrency
+across worker generations is addressed in the next section.
 
 
 Final local validation passes all 2,031 lean engine library tests, all 305 mobile
@@ -341,3 +342,48 @@ expiry regression observes quarantine while the physical callback is still
 blocked, then explicitly releases it and checks quarantine clears. The known
 outcome test restores server connectivity, drains the journal, and verifies
 exactly one handler invocation. Hosted checks for this batch remain pending.
+
+
+## Shared mobile admission and cleanup across generations
+
+Baseline: PR #266 `4da635cd`. Three behavioral regressions fail while the 28
+previous worker-level tests pass. Separate gated HTTP tests observe 100 blocked
+surplus release requests and 20 blocked requests from concurrent recovery passes.
+A SQLite trigger injecting an INSERT failure also reproduces an unsafe unstarted
+release despite a previously recorded start and outcome.
+
+The engine's cloned claim store now owns a shared admission ledger. It reserves
+capacity synchronously before spawning, keeps task scope separate from lease
+epoch, and retains an exact-generation fence while an unstarted release is queued
+or active. Newer deliveries cancel the old owned execution and defer the new
+callback; duplicate/stale deliveries cannot revoke the live lease at capacity.
+Stopping a worker still lets its existing tasks finish. A successor's configured
+limit includes predecessors; shrinking waits for existing tasks, and expanding
+adds capacity. Worker/window in-flight accounting includes draining predecessors.
+
+| ID | Finding | Correction and evidence | State |
+|---|---|---|---|
+| DME-038 | Restart grants independent slots while predecessor callbacks still execute | Share the engine admission budget across worker generations. Baseline runs two callbacks at configured concurrency one. Count predecessors in stats/windows. | Fixed; full mobile suite passes |
+| DME-039 | At-capacity duplicate delivery releases the live original | Apply task/generation ownership checks before the capacity decision. Baseline sends an unstarted release for an executing task. | Fixed; full mobile suite passes |
+| DME-040 | A new epoch can overlap a predecessor through execution/restart paths | Cancel the superseded owned future and release the replacement unstarted; retain independent epoch guards. Baseline enters both callbacks. | Fixed; full mobile suite passes |
+| DME-041 | Surplus deliveries and concurrent recovery bypass cleanup backpressure | Share eight cleanup I/O permits across surplus and orphan recovery; retain pending-release fences and block further polling while cleanup is pending. Baselines observe 100 and 20 blocked requests. | Fixed; full mobile suite passes |
+| DME-042 | A journal INSERT error is treated as proof a task never started | Preserve existing evidence and defer to recovery/expiry without an unstarted release. A real SQLite trigger failure reproduces the incorrect baseline release. | Fixed; regression and subsequent recovery pass |
+| DME-043 | Repeated restart can overlap predecessor poll batches | Serialize polls across engine worker generations with cancellable waiting. A gated pending-poll test also requires the stopped predecessor's late response to be released without invoking a callback. | Fixed; full mobile suite passes |
+
+Additional coverage requires pending release fencing after callback capacity
+returns, preservation and recovery of an already known outcome at capacity,
+capacity cleanup when a task future is dropped before first poll, and budget
+shrink/expand without cancelling existing work. All 317 mobile library tests pass.
+All-target Clippy passes across engine/server/mobile with warnings denied.
+Engine and gRPC sources are unchanged from the prior verified 2,031/146-test batch.
+
+Limits: admission belongs to one engine object, not every engine or process using
+the same database. The concurrency limit covers owned lease executions; physically
+running native calls whose leases expired remain separately quarantined by
+handler. Cleanup RPCs are bounded, while pending futures belong to a transport
+response batch bounded by the existing 8 MiB response limit. A replacement may
+wait for the predecessor's already-issued poll to finish; this does not claim
+immediate cancellation of slow HTTP calls. Ambiguous replies, recovery's
+unauthorized/rejected-response classification, journal pagination/retention,
+principal changes behind an opaque token provider, independent-engine ownership,
+and the rest of the mobile/embedded/binding/sandbox review remain open.

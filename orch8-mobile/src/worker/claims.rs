@@ -80,6 +80,7 @@ impl Drop for ClaimReservation {
 pub(crate) struct ClaimStore {
     pool: SqlitePool,
     live: LiveClaims,
+    pub(super) admission: Arc<super::admission::Admission>,
 }
 
 const CREATE_JOURNAL: &str = "CREATE TABLE IF NOT EXISTS mobile_worker_claims (
@@ -102,6 +103,7 @@ impl ClaimStore {
         Self {
             pool,
             live: Arc::default(),
+            admission: Arc::default(),
         }
     }
 

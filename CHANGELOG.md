@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Mobile worker generation admission
+
+- Share task concurrency and in-flight accounting across restarted workers;
+  fence duplicate/stale deliveries before capacity admission and cancel live
+  predecessors before deferring newer lease generations.
+- Bound surplus/recovery cleanup to eight requests across generations, serialize
+  poll batches, and backpressure claiming while unstarted releases are pending.
+- Preserve journal start/outcome evidence at capacity and on insertion failures
+  instead of incorrectly releasing previously started work as unstarted.
+
 ### Remote runtime lease supervision
 
 - Confirm task ownership before invoking core or mobile callbacks, preventing

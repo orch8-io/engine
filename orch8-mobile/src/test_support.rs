@@ -37,6 +37,14 @@ impl MockControlPlane {
 /// Serve `route` on a loopback port until the runtime shuts down. Each
 /// connection handles one request (`Connection: close`).
 pub(crate) async fn spawn_control_plane(route: Route) -> MockControlPlane {
+    spawn_control_plane_gated(route, None).await
+}
+
+/// Optionally delay replies from one endpoint without blocking the runtime.
+pub(crate) async fn spawn_control_plane_gated(
+    route: Route,
+    gate: Option<(String, Arc<tokio::sync::Semaphore>)>,
+) -> MockControlPlane {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let requests: Recorded = Arc::new(Mutex::new(Vec::new()));
@@ -48,11 +56,17 @@ pub(crate) async fn spawn_control_plane(route: Route) -> MockControlPlane {
             };
             let route = Arc::clone(&route);
             let recorded = Arc::clone(&recorded);
+            let gate = gate.clone();
             tokio::spawn(async move {
                 let Some((method, path, body)) = read_request(&mut socket).await else {
                     return;
                 };
                 recorded.lock().unwrap().push((path.clone(), body.clone()));
+                if let Some((suffix, gate)) = gate
+                    && path.ends_with(&suffix)
+                {
+                    let _permit = gate.acquire().await.unwrap();
+                }
                 let (status, reply) = route(&method, &path, &body);
                 let reply = reply.to_string();
                 let response = format!(
