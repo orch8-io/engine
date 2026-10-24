@@ -257,3 +257,43 @@ against account/tenant changes as well as literal worker/control-plane identity.
 These observations are not
 claimed fixed or fully reproduced yet. They remain part of the original goal,
 alongside the pending mobile, embedded, binding, and sandbox areas above.
+
+
+## Live claim admission and bounded release cleanup
+
+The next batch protects in-process callback ownership. A synchronous admission
+ledger tracks task UUID and lease generation before a spawned future can be
+polled. Its RAII guards return permits and clear only their own generation on
+normal exit, cancellation before first poll, and panic. A newer delivery cancels
+the live predecessor and releases the new claim as unstarted rather than running
+both callbacks concurrently. Duplicate/stale live deliveries are ignored without
+releasing the original lease.
+
+| ID | Finding | Correction and evidence | State |
+|---|---|---|---|
+| DME-026 | Duplicate delivery starts a second callback when slots are free | Reserve live task/generation synchronously before spawning. Baseline invokes twice; regression requires once. | Fixed |
+| DME-027 | A duplicate received at capacity releases the original lease | Check ownership before capacity admission. Baseline releases a live claim; regression forbids that release. | Fixed |
+| DME-028 | Older/newer task generations overlap the live callback | Fence stale generations; cancel the predecessor and defer the newer callback through unstarted release. Both overlap regressions fail on baseline. | Fixed |
+| DME-029 | Overdelivery creates unbounded release RPC fanout and continues claiming | Limit release RPCs to eight, queue the rest, and stop claiming while the queue has work. Baseline starts 100 concurrent releases. | Fixed |
+| DME-030 | A pending unstarted release races a second delivery of its generation | Retain a separate exact-generation reservation until the release future ends. Tests also verify predecessor exit cannot clear a newer reservation. | Fixed for live release futures |
+| DME-031 | Concurrent or pre-cancelled run controllers advertise/withdraw the same executor | Serialize run ownership with a cancellable async mutex before advertising. Both baseline regressions fail; queued cancellation and sequential restart pass. | Fixed |
+
+All six live-admission/fanout regressions failed against the original production
+executor while its 11 existing tests passed. Both controller regressions also
+failed before controller serialization. The final focused suite passes 25 tests,
+including cancellation before first poll, generation-specific guard cleanup,
+sequential controller restart, and bounded shutdown of a blocked release backlog.
+
+These guarantees apply to live callbacks and live release futures in one executor
+object. They do not establish durable exactly-once execution. Release ambiguity
+after a timeout, replay after callback completion or process restart, renewal
+failure past the last confirmed lease deadline, and slow advertise/claim shutdown
+remain open. The release queue is backpressured to one transport claim batch;
+custom transports must bound that batch themselves. HTTP responses already have
+an 8 MiB cap. Mobile release fanout and admission across mobile worker generations
+remain separate pending review areas. This batch does not close the broader
+mobile, embedded, binding, sandbox, and security review above.
+
+Final merge-candidate validation: all 2,022 lean engine library tests and
+all 146 gRPC library tests, and all-target engine/server/mobile Clippy with
+warnings denied pass.

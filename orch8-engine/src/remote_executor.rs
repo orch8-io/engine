@@ -33,7 +33,7 @@
 //! and the step's retry policy applies). A killed executor simply stops
 //! heartbeating; the engine's lease reaper reclaims its tasks.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -41,7 +41,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -53,6 +53,10 @@ use orch8_types::continuity::{
 };
 use orch8_types::error::StepError;
 use orch8_types::ids::{InstanceId, TenantId};
+
+#[path = "remote_executor_claims.rs"]
+mod claims;
+use claims::{Admission, Claims, Release as ReleaseGuard};
 
 use crate::credentials::LocalCredentials;
 use crate::handlers::HandlerRegistry;
@@ -71,6 +75,10 @@ const MAX_DELIVERY_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_CLAIM_BACKOFF: Duration = Duration::from_secs(15);
 /// After the drain window: how long released tasks get to report.
 const RELEASE_GRACE: Duration = Duration::from_secs(10);
+/// Bound unstarted release I/O independently of handler concurrency.
+const MAX_RELEASES: usize = 8;
+/// Allow cooperative aborted tasks to drop their owned resources.
+const ABORT_GRACE: Duration = Duration::from_secs(1);
 /// Field added to a vault reference sealed by an executor: the ref key its
 /// AEAD associated data is bound to, so another executor can open it.
 pub const VAULT_REF_KEY_FIELD: &str = "ref";
@@ -531,6 +539,11 @@ pub struct RemoteExecutorParts {
     pub scratch: Arc<dyn StorageBackend>,
 }
 
+struct PendingRelease {
+    task: ClaimedTask,
+    guard: ReleaseGuard,
+}
+
 /// A running remote executor.
 pub struct RemoteExecutor {
     identity: ExecutorIdentity,
@@ -543,7 +556,10 @@ pub struct RemoteExecutor {
     scratch: Arc<dyn StorageBackend>,
     counters: Counters,
     slots: Arc<Semaphore>,
-    running: StdMutex<HashMap<uuid::Uuid, CancellationToken>>,
+    claims: Claims,
+    run_owner: tokio::sync::Mutex<()>,
+    pending_releases: StdMutex<VecDeque<PendingRelease>>,
+    release_slots: Arc<Semaphore>,
     wake: Notify,
 }
 
@@ -576,7 +592,10 @@ impl RemoteExecutor {
             scratch: parts.scratch,
             counters: Counters::default(),
             slots: Arc::new(Semaphore::new(slots)),
-            running: StdMutex::new(HashMap::new()),
+            claims: Claims::default(),
+            run_owner: tokio::sync::Mutex::new(()),
+            pending_releases: StdMutex::new(VecDeque::new()),
+            release_slots: Arc::new(Semaphore::new(MAX_RELEASES)),
             wake: Notify::new(),
         }))
     }
@@ -594,10 +613,7 @@ impl RemoteExecutor {
     /// Tasks currently executing.
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        self.running
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        self.claims.in_flight()
     }
 
     async fn advertise(&self, draining: bool) {
@@ -612,8 +628,17 @@ impl RemoteExecutor {
 
     /// Claim and run tasks until `shutdown` fires, then drain: withdraw
     /// capability, finish in-flight work within the drain window, release
-    /// the rest. Returns the run's counters.
+    /// the rest. Concurrent callers wait for the current controller to stop;
+    /// cancelling a waiting caller leaves the active controller untouched.
+    /// Returns the executor's cumulative counters.
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> ExecutorStats {
+        let _owner = tokio::select! {
+            () = shutdown.cancelled() => return self.stats(),
+            owner = self.run_owner.lock() => owner,
+        };
+        if shutdown.is_cancelled() {
+            return self.stats();
+        }
         info!(
             transport = self.transport.name(),
             runtime_id = %self.identity.runtime_id,
@@ -632,10 +657,10 @@ impl RemoteExecutor {
             if shutdown.is_cancelled() {
                 break;
             }
-            while tasks.try_join_next().is_some() {}
+            self.pump_releases(&mut tasks);
             let free = self.slots.available_permits();
             let mut wait = self.settings.poll_interval;
-            if free > 0 {
+            if free > 0 && !self.has_pending_releases() {
                 let capacity = u32::try_from(free).unwrap_or(u32::MAX);
                 match self
                     .transport
@@ -686,7 +711,7 @@ impl RemoteExecutor {
         self.drain(tasks).await
     }
 
-    async fn drain(&self, mut tasks: JoinSet<()>) -> ExecutorStats {
+    async fn drain(self: &Arc<Self>, mut tasks: JoinSet<()>) -> ExecutorStats {
         info!(
             in_flight = self.in_flight(),
             drain_timeout_secs = self.settings.drain_timeout.as_secs(),
@@ -695,19 +720,14 @@ impl RemoteExecutor {
         self.advertise(true).await;
         let deadline = tokio::time::Instant::now() + self.settings.drain_timeout;
         loop {
-            if tasks.is_empty() {
+            self.pump_releases(&mut tasks);
+            if tasks.is_empty() && !self.has_pending_releases() {
                 break;
             }
             tokio::select! {
                 _ = tasks.join_next() => {}
                 () = tokio::time::sleep_until(deadline) => {
-                    let running: Vec<CancellationToken> = self
-                        .running
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .values()
-                        .cloned()
-                        .collect();
+                    let running = self.claims.cancellations();
                     warn!(tasks = running.len(), "drain window elapsed; releasing in-flight tasks");
                     for token in running {
                         token.cancel();
@@ -716,10 +736,25 @@ impl RemoteExecutor {
                 }
             }
         }
-        let _ = tokio::time::timeout(RELEASE_GRACE, async {
+        let _ = tokio::time::timeout(RELEASE_GRACE, self.finish_pending(&mut tasks)).await;
+        tasks.abort_all();
+        let _ = tokio::time::timeout(ABORT_GRACE, async {
             while tasks.join_next().await.is_some() {}
         })
         .await;
+        let abandoned = std::mem::take(
+            &mut *self
+                .pending_releases
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if !abandoned.is_empty() {
+            warn!(
+                claims = abandoned.len(),
+                "stopped before all unstarted surplus claims could be released; leases will expire"
+            );
+        }
+        drop(abandoned);
         let stats = self.stats();
         info!(?stats, "remote executor stopped");
         stats
@@ -732,17 +767,74 @@ impl RemoteExecutor {
         heartbeat: Duration,
     ) {
         self.counters.claimed.fetch_add(1, Ordering::Relaxed);
-        let permit = Arc::clone(&self.slots).try_acquire_owned();
+        let admission = self
+            .claims
+            .admit(task.task.id, task.task.claim_epoch, &self.slots);
         let this = Arc::clone(self);
-        tasks.spawn(async move {
-            let Ok(permit) = permit else {
-                // More tasks than free slots: hand the surplus back untouched.
-                this.release(&task, false).await;
-                return;
+        match admission {
+            Admission::Execute(claim) => {
+                tasks.spawn(async move {
+                    this.execute_inner(&task, heartbeat, claim.cancellation())
+                        .await;
+                    drop(claim);
+                    this.wake.notify_one();
+                });
+            }
+            Admission::Release { guard, superseded } => {
+                if let Some(cancel) = superseded {
+                    cancel.cancel();
+                }
+                this.pending_releases
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push_back(PendingRelease { task, guard });
+                this.pump_releases(tasks);
+            }
+            Admission::Ignore => {
+                debug!(task_id = %task.task.id, claim_epoch = task.task.claim_epoch,
+                    "ignoring a duplicate or fenced worker delivery");
+            }
+        }
+    }
+
+    fn has_pending_releases(&self) -> bool {
+        !self
+            .pending_releases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    }
+
+    /// Keep both live release requests and completed `JoinSet` entries bounded.
+    fn pump_releases(self: &Arc<Self>, tasks: &mut JoinSet<()>) {
+        while tasks.try_join_next().is_some() {}
+        while let Ok(permit) = Arc::clone(&self.release_slots).try_acquire_owned() {
+            let next = self
+                .pending_releases
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            let Some(PendingRelease { task, guard }) = next else {
+                break;
             };
-            this.execute(task, permit, heartbeat).await;
-            this.wake.notify_one();
-        });
+            let this = Arc::clone(self);
+            tasks.spawn(async move {
+                this.release(&task, false).await;
+                drop(guard);
+                drop(permit);
+                this.wake.notify_one();
+            });
+        }
+    }
+
+    async fn finish_pending(self: &Arc<Self>, tasks: &mut JoinSet<()>) {
+        loop {
+            self.pump_releases(tasks);
+            if tasks.is_empty() {
+                break;
+            }
+            let _ = tasks.join_next().await;
+        }
     }
 
     async fn release(&self, task: &ClaimedTask, started: bool) {
@@ -758,37 +850,6 @@ impl RemoteExecutor {
                     "release not accepted; the engine's lease reaper will reclaim the task");
             }
         }
-    }
-
-    async fn execute(&self, task: ClaimedTask, permit: OwnedSemaphorePermit, heartbeat: Duration) {
-        // Deregister on every exit, including a handler panic unwinding
-        // through here (T1-GAP-236): a leaked entry inflates `in_flight()`
-        // and makes drain wait out its whole window for a dead task.
-        struct Deregister<'a> {
-            running: &'a StdMutex<HashMap<uuid::Uuid, CancellationToken>>,
-            id: uuid::Uuid,
-        }
-        impl Drop for Deregister<'_> {
-            fn drop(&mut self) {
-                self.running
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&self.id);
-            }
-        }
-
-        let _permit = permit;
-        let id = task.task.id;
-        let cancel = CancellationToken::new();
-        self.running
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id, cancel.clone());
-        let _deregister = Deregister {
-            running: &self.running,
-            id,
-        };
-        self.execute_inner(&task, heartbeat, &cancel).await;
     }
 
     /// Params and context as the handler must see them: local credentials
