@@ -28,7 +28,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; durable principal/cache binding and manifest refresh remain open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
-| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery passes behavioral tests but child-history query cost remains open; callbacks remain under review |
+| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery and indexed current/historical child selection pass SQLite/Postgres behavioral and query-plan tests; callbacks remain under review |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
 | Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
@@ -1461,6 +1461,48 @@ All 12 token-provider tests pass on macOS with the production Swift wrappers and
 existing ABI-compatible native artifact. This validates the Swift test logic;
 current iOS simulator execution and native release parity remain hosted/platform
 gates. The broader original review and ADR-0002 gates remain open.
+
+
+### DME090 — Delegation queue prefixes starved later durable work (fixed)
+
+**HIGH, effort M.** Discovery repeatedly examined the oldest 50 pending tasks.
+Tasks assigned to this phone remain pending and could hide every later remote
+placement. Outcome scans likewise repeatedly examined the oldest 50 open records,
+so a backed-off or long-running prefix could hide later expired or ready work.
+Both failures are reproduced by 51-row behavioral regressions.
+
+Indexed keyset scans now persist an independent bookmark for discovery and open
+records. The bookmark advances before decoding/network work, wraps after the tail,
+and survives database reopen. A short SQLite writer transaction reserves and
+updates the bookmark across independent pools; network calls hold no scan lock.
+Idle scans make no database writes. Ordered partial indexes are explicit access
+paths, avoiding the coarse state index's full pending-queue sort. This is
+scheduling fairness, not an exclusive claim or authenticated owner boundary.
+
+Retry hints survive page rotation and are capped at 10,000 entries; terminal
+transitions explicitly forget hints without reinserting them after a poll.
+Malformed records are retained and skipped individually instead of inventing
+empty JSON, unknown kinds, missing epochs or a new deadline. The remaining valid
+page entries can progress. Tests cover ties, independent pools, close/reopen,
+bookmark-write rollback, idle writes, malformed fields, hint bounds and actual
+production query plans. This bounds rows per pass, not total record/payload size.
+
+### DME091 — Delegation outcomes lacked response identity correlation (fixed)
+
+**HIGH, effort S.** A completed answer with the correct runtime/epoch but another
+delegation ID or parent continuity ID could resolve local work. A loopback
+regression reproduced the wrong resolution before the fix. Polls now require
+both identities to match the durable record before interpreting results. Runtime
+and epoch fencing remain required. Claimed rows missing stored parent identity
+are retained without dispatch, rather than treating absent epochs as equal.
+Tests assert that mismatched answers were actually read, preserve claimed state
+and do not store the unrelated output; valid completion closes its retry hint.
+
+All 456 mobile library tests and full workspace/all-target Clippy with warnings
+denied pass on the local Rust runtime. Exact-head hosted checks remain required
+before merge. Account/catalog
+ownership of execution, delegation and authenticated control-plane bindings is
+still an explicit ADR-0002 gate; these legacy-queue fixes do not establish it.
 
 ### DME092 — New child lookup migrations omitted release metadata (fixed)
 
