@@ -2,6 +2,7 @@ use super::*;
 use ed25519_dalek::{Signer, SigningKey};
 use orch8_publisher::{ManifestGenerator, ManifestSequence};
 use orch8_storage::sqlite::SqliteStorage;
+use orch8_types::catalog::{CatalogAccess, CatalogAudience};
 use std::sync::Arc;
 
 const SOURCE: &str = "https://catalog.example/stable";
@@ -365,6 +366,8 @@ async fn acceptance_write_failure_preserves_the_previous_complete_trust_set() {
     document["manifest"]["manifest_version"] = (previous_version + 1).into();
     document["manifest"]["signing_keys"][0]["key_id"] = "replacement".into();
     document["manifest"]["sequences"][0]["signing_key_id"] = "replacement".into();
+    document["manifest"]["sequences"][0]["version"] = 2.into();
+    document["manifest"]["sequences"][0]["sha256"] = "f".repeat(64).into();
     let newer = resign(&serde_json::to_vec(&document).unwrap(), &signer());
     sqlx::query("CREATE TRIGGER reject_catalog_key BEFORE INSERT ON mobile_catalog_signing_keys WHEN NEW.key_id = 'replacement' BEGIN SELECT RAISE(ABORT, 'injected key write failure'); END")
         .execute(storage.pool()).await.unwrap();
@@ -387,6 +390,14 @@ async fn acceptance_write_failure_preserves_the_previous_complete_trust_set() {
     assert_eq!(
         storage.catalog_signing_keys(&scope).await.unwrap()[0].0,
         "key"
+    );
+    let entries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mobile_catalog_entry_history")
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        entries, 1,
+        "failed key writes must roll back newly accepted entry identity too"
     );
     sqlx::query("DROP TRIGGER reject_catalog_key")
         .execute(storage.pool())
@@ -433,7 +444,7 @@ async fn audience_and_replay_binding_survive_database_reopen() {
     assert_eq!(accepted.digest(), digest);
     let mut changed: serde_json::Value = serde_json::from_slice(body(&first)).unwrap();
     changed["manifest"]["removed"] =
-        serde_json::json!([{"name":"flow", "removed_at":chrono::Utc::now()}]);
+        serde_json::json!([{"name":"another-flow", "removed_at":chrono::Utc::now()}]);
     assert!(
         storage
             .accept_signed_catalog_manifest(

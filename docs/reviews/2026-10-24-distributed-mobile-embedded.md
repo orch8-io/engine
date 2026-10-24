@@ -26,7 +26,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | gRPC workers | Reconnect, demand/backpressure, resumable transfers, session identity, cross-tenant control, cancellation | Reviewing; full 146-test library suite passes; demand/lease invariant audit ongoing |
 | Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
-| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; scoped cache and signed audience ingestion verified internally; authenticated transport and scoped refresh remain open |
+| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; scoped cache and signed audience ingestion verified internally; internal authenticated private sync verified; public runtime/SDK integration remains open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Reviewing; legacy queue fairness and response correlation verified; scoped transfer and acceptance audit remain open |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery and indexed current/historical child selection pass SQLite/Postgres behavioral and query-plan tests; callbacks remain under review |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
@@ -1553,3 +1553,75 @@ belongs to the claimed principal, expose public scoped sync/execution, or provid
 persisted public-catalog access policy. Those requirements, reconciliation,
 compatibility evaluation, runtime ownership, quotas and SDK/platform release gates
 remain open under ADR-0002 and the original review matrix.
+
+
+### DME094 — Authenticated owner-qualified private catalog sync (implemented internally)
+
+The internal caller now connects the signed ingestion boundary to actual HTTP
+sync. Immutable per-catalog public-HTTPS manifest/identity endpoints survive
+reopen and cannot be silently rebound. A fresh nonce-bearing identity response
+must match the current credential's principal and persisted source/catalog before
+any private content request, including a 304 revalidation. The response is bounded,
+short-lived and never cached; redirects and foreign CDN bearer forwarding remain
+disabled. The backend contract is documented in
+[Private scoped catalog sync](../mobile-catalog-identity.md).
+
+Catalog ETags, acceptance/applied versions and environment fingerprints use only
+owner-qualified storage. V1 manifests are complete snapshots; missing cached names
+are withdrawn in metadata pages, without reading full workflow bodies. Compatibility
+changes bypass a prior ETag. Definition bytes/signatures and entry identity are
+checked before local-ID normalization. Legacy sync remains separate.
+
+The coordinator admits two owned operations per engine and one per account;
+retirement/reopen shares that account slot until the predecessor settles. Caller
+cancellation stops future network phases while dispatched SQLite writes keep
+admission through commit/rollback. Account epoch checks fence late identity
+responses and writes. These operation slots do not establish physical native
+callback fairness or persistent byte/history quotas; both remain open rollout gates.
+
+### DME095 — Private retries could outlive the identity response (fixed)
+
+A controlled HTTP/virtual-clock regression reproduced a retry wait continuing
+past the verified identity lifetime. Each scoped run now applies a monotonic
+private-I/O deadline to requests, reads, backoff and Retry-After sleeps. Every I/O
+admission checks cancellation/deadline before polling the request. Already-dispatched
+SQLite writes stay outside that cancellable wrapper and settle under their epoch
+fence before the owned task releases admission.
+
+### DME096 — A failed download left published workflow identity unrecorded (fixed)
+
+An HTTP regression accepted a newer root document that changed an earlier
+workflow version's hash after its original download failed. Acceptance now commits
+name/version/hash history with the root document's keys and replay digest, before
+downloads. Two indexed point lookups per entry check accepted and installed
+history; newer root documents cannot change that workflow version or roll back
+its version. Account/catalog keys qualify all reads and inserts. SQLite schema
+53 adds transport bindings and entry history; no Postgres migration changes.
+
+Collection sizes are capped at 1,000 sequences/keys/removals inside the existing
+five MiB body cap. Contradictory active/removed names are refused. An injected
+key-write failure verifies that new entry history, keys and acceptance cursor
+roll back together. The original same-version equivocation fixture now changes a
+non-active removed name so it tests the replay fence rather than the new
+contradiction check.
+
+### DME097 — An unavailable first entry starved later valid installations (fixed)
+
+The initial scoped caller aborted at the first failed download. The reproduced
+404-first/valid-second case now installs the valid entry and leaves the document
+pending. Invalid entry signatures/hashes also remain pending; cancellation,
+retirement and storage errors stop the run. Pending work cannot advance the
+applied cursor or ETag, so another sync can retry without rolling back acceptance.
+
+Validation includes all 478 mobile, 230 storage, 119 publisher and 705 shared-type
+library tests, the 15 migration integration checks and full workspace/all-target
+Clippy with warnings denied. Thirteen actual HTTP catalog contracts plus the
+endpoint-binding contract cover four isolated scopes, current-token mismatch,
+rotation, nonce/replay/time/size/redirect rejection, CDN header isolation,
+withdrawal/environment changes, entry failure recovery, retirement, account/global
+admission, real SQLite commit cancellation and full database reopen. Hosted
+exact-head checks remain required before merge.
+
+Public scoped instance/worker/delegation/handler ownership, SDK handles, production
+identity backend integration, public-catalog access policy, total storage/native
+callback quotas and the full original review matrix/ADR gates remain open.

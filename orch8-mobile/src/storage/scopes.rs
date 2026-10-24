@@ -9,7 +9,17 @@ use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
 
 mod signed;
+mod transport;
 mod workflows;
+
+pub(crate) use signed::AcceptedCatalogManifest;
+pub(crate) use transport::{CatalogBinding, CatalogTransport};
+
+struct CatalogAcceptance<'a> {
+    version: i64,
+    digest: &'a str,
+    entries: &'a [(&'a str, i32, &'a str)],
+}
 
 #[derive(Clone)]
 pub(crate) struct AccountScope {
@@ -21,6 +31,12 @@ pub(crate) struct AccountScope {
 pub(crate) struct CatalogScope {
     account: AccountScope,
     id: String,
+}
+
+impl CatalogScope {
+    pub(crate) fn account_id(&self) -> &str {
+        &self.account.id
+    }
 }
 
 fn invalid(message: &'static str) -> StorageError {
@@ -261,6 +277,7 @@ impl MobileStorage {
 
     /// Accept a verified document and its complete key set in one owner/epoch
     /// fenced transaction. Verification and audience binding are caller duties.
+    #[cfg(test)]
     async fn accept_catalog_manifest(
         &self,
         scope: &CatalogScope,
@@ -268,15 +285,23 @@ impl MobileStorage {
         version: i64,
         digest: &str,
     ) -> Result<(), StorageError> {
-        self.replace_catalog_keys_in(scope, keys, Some((version, digest)))
-            .await
+        self.replace_catalog_keys_in(
+            scope,
+            keys,
+            Some(CatalogAcceptance {
+                version,
+                digest,
+                entries: &[],
+            }),
+        )
+        .await
     }
 
     async fn replace_catalog_keys_in(
         &self,
         scope: &CatalogScope,
         keys: &[(&str, &str)],
-        acceptance: Option<(i64, &str)>,
+        acceptance: Option<CatalogAcceptance<'_>>,
     ) -> Result<(), StorageError> {
         let mut seen = std::collections::HashSet::new();
         for (id, key) in keys {
@@ -288,10 +313,28 @@ impl MobileStorage {
         }
         let mut tx = self.pool().begin().await?;
         fence_catalog(&mut tx, scope).await?;
-        if let Some((version, digest)) = acceptance {
+        if let Some(accepted) = &acceptance {
             catalog_trust_in(&mut tx, scope)
                 .await?
-                .check_candidate(version, digest)?;
+                .check_candidate(accepted.version, accepted.digest)?;
+            // Both lookups return one indexed row, never workflow bodies. A
+            // failed first download must not permit later entry equivocation
+            // or a per-workflow version rollback under a newer root document.
+            for (name, version, digest) in accepted.entries {
+                let known: Option<(i32, String)> = sqlx::query_as("SELECT version, body_digest FROM mobile_catalog_entry_history WHERE account_id = ?1 AND catalog_id = ?2 AND name = ?3 ORDER BY version DESC LIMIT 1")
+                    .bind(&scope.account.id).bind(&scope.id).bind(name).fetch_optional(&mut *tx).await?;
+                let installed: Option<(i32, String)> = sqlx::query_as("SELECT version, body_digest FROM mobile_catalog_workflows WHERE account_id = ?1 AND catalog_id = ?2 AND name = ?3 ORDER BY version DESC LIMIT 1")
+                    .bind(&scope.account.id).bind(&scope.id).bind(name).fetch_optional(&mut *tx).await?;
+                for (previous, hash) in known.into_iter().chain(installed) {
+                    if previous > *version || (previous == *version && hash != *digest) {
+                        return Err(invalid(
+                            "catalog workflow version rollback or changed published identity",
+                        ));
+                    }
+                }
+                sqlx::query("INSERT INTO mobile_catalog_entry_history(account_id, catalog_id, name, version, body_digest) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(account_id, catalog_id, name, version) DO NOTHING")
+                    .bind(&scope.account.id).bind(&scope.id).bind(name).bind(version).bind(digest).execute(&mut *tx).await?;
+            }
         }
         sqlx::query(
             "DELETE FROM mobile_catalog_signing_keys WHERE account_id = ?1 AND catalog_id = ?2",
@@ -304,13 +347,13 @@ impl MobileStorage {
             sqlx::query("INSERT INTO mobile_catalog_signing_keys (account_id, catalog_id, key_id, public_key) VALUES (?1, ?2, ?3, ?4)")
                 .bind(&scope.account.id).bind(&scope.id).bind(id).bind(key).execute(&mut *tx).await?;
         }
-        if let Some((version, digest)) = acceptance {
+        if let Some(accepted) = acceptance {
             write_metadata_in(
                 &mut tx,
                 scope,
                 &[
-                    (ACCEPTED_VERSION, Some(&version.to_string())),
-                    (ACCEPTED_DIGEST, Some(digest)),
+                    (ACCEPTED_VERSION, Some(&accepted.version.to_string())),
+                    (ACCEPTED_DIGEST, Some(accepted.digest)),
                 ],
             )
             .await?;
@@ -361,6 +404,14 @@ impl MobileStorage {
             ],
         )
         .await?;
+        #[cfg(test)]
+        {
+            let barrier = self.metadata_barrier.lock().unwrap().take();
+            if let Some(barrier) = barrier {
+                let _ = barrier.entered.send(());
+                barrier.release.acquire().await.unwrap().forget();
+            }
+        }
         tx.commit().await?;
         Ok(())
     }

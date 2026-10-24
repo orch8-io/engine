@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+#[path = "catalog_sync.rs"]
+#[allow(dead_code)]
+pub(crate) mod catalog;
 #[path = "sync_run.rs"]
 mod run;
 
@@ -291,6 +294,7 @@ pub struct SyncOrchestrator {
     // Set only on a per-operation snapshot; shared state and admission remain
     // shared across snapshots, while cancellation belongs to one run.
     run_cancelled: Option<CancellationToken>,
+    run_deadline: Option<tokio::time::Instant>,
     sdk_version: String,
     max_stored_sequences: u32,
     /// Test-only escape hatch: loopback `http://` mock servers. Production
@@ -313,6 +317,7 @@ impl SyncOrchestrator {
             http: Arc::new(OnceLock::new()),
             admission: Arc::new(tokio::sync::Semaphore::new(1)),
             run_cancelled: None,
+            run_deadline: None,
             sdk_version,
             max_stored_sequences,
             allow_insecure_urls: false,
