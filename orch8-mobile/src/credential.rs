@@ -59,6 +59,7 @@ struct CredentialState {
 
 /// One atomic credential/header snapshot. Its opaque generation contains no token.
 pub(crate) struct CredentialSnapshot {
+    available: bool,
     pub token: String,
     pub generation: String,
 }
@@ -95,6 +96,7 @@ impl CredentialState {
 
     fn snapshot(&self) -> CredentialSnapshot {
         CredentialSnapshot {
+            available: self.provider.is_none() || !self.token.trim().is_empty(),
             token: self.token.clone(),
             generation: format!("{}:{}", self.owner, self.revision),
         }
@@ -188,6 +190,27 @@ impl Credential {
             .snapshot()
     }
 
+    /// Legacy anonymous mode remains available; an installed provider that
+    /// has not produced a token must never silently downgrade to that mode.
+    pub fn request_snapshot(&self) -> Option<CredentialSnapshot> {
+        let snapshot = self.snapshot();
+        snapshot.available.then_some(snapshot)
+    }
+
+    /// Refresh an empty initial credential before any network dispatch. A
+    /// replacement while waiting fails this request rather than adopting the
+    /// successor's principal for an already prepared business operation.
+    pub async fn prepare_snapshot(&self) -> Option<CredentialSnapshot> {
+        let snapshot = self.snapshot();
+        if snapshot.available {
+            return Some(snapshot);
+        }
+        self.refresh_generation(&snapshot.generation).await;
+        // The original current_token callback can also finish while refresh
+        // runs. It remains a valid initial credential if refresh fails.
+        self.retry_snapshot(&snapshot.generation)
+    }
+
     pub fn current(&self) -> String {
         self.state
             .read()
@@ -250,12 +273,13 @@ impl Credential {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (state.owner == owner).then(|| state.snapshot())
+        let snapshot = state.snapshot();
+        (state.owner == owner && snapshot.available).then_some(snapshot)
     }
 
-    /// Refresh the opaque generation that received 401. Provider replacement
+    /// Refresh an owned generation before initial dispatch or after a 401. Replacement
     /// cancels queued/running waits and prevents any old callback publication.
-    pub async fn refresh_after_unauthorized(&self, generation: &str) -> bool {
+    pub async fn refresh_generation(&self, generation: &str) -> bool {
         let Some((owner, revision)) = parse_generation(generation) else {
             return false;
         };
@@ -274,16 +298,16 @@ impl Credential {
             () = cancelled.cancelled() => return false,
             guard = refresh.lock() => guard,
         };
-        let (provider, rejected_token, physical) = {
-            let mut state = self
+        let (provider, rejected_token, physical, initializing) = {
+            let state = self
                 .state
-                .write()
+                .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if state.owner != owner {
                 return false;
             }
             if state.revision != revision {
-                return !state.token.is_empty();
+                return !state.token.trim().is_empty();
             }
             let Some(provider) = state.provider.clone() else {
                 return false;
@@ -299,10 +323,15 @@ impl Credential {
                 return false;
             }
             let physical = PhysicalRefresh(Arc::clone(&state.physical_refresh));
-            // A refresh started after current_token: its result takes priority
-            // even if that older installation callback is still blocked.
-            state.pending_install = false;
-            (provider, state.token.clone(), physical)
+            // Initial publication may finish while refresh runs. Keep it
+            // eligible until a successful refresh supersedes it; a failed
+            // refresh must not strand an otherwise usable installation.
+            (
+                provider,
+                state.token.clone(),
+                physical,
+                state.pending_install,
+            )
         };
         let timeout = Duration::from_millis(self.refresh_timeout_ms.load(Ordering::Relaxed));
         let callback_cancelled = cancelled.clone();
@@ -319,7 +348,7 @@ impl Credential {
             result = tokio::time::timeout(timeout, call) => result,
         };
         match result {
-            Ok(Ok(Ok(token))) if !token.is_empty() && token != rejected_token => {
+            Ok(Ok(Ok(token))) if !token.trim().is_empty() && token != rejected_token => {
                 let mut state = self
                     .state
                     .write()
@@ -327,13 +356,17 @@ impl Credential {
                 if state.owner != owner {
                     return false;
                 }
-                if state.revision != revision {
-                    return !state.token.is_empty();
+                // This owner holds the refresh mutex. If initialization was
+                // pending at admission, only its initial callback can have
+                // changed the revision meanwhile; refresh takes precedence.
+                if state.revision != revision && !initializing {
+                    return !state.token.trim().is_empty();
                 }
+                state.pending_install = false;
                 state.token = token;
                 state.revision = Uuid::new_v4();
                 state.refresh_failure = None;
-                debug!("node credential refreshed after 401");
+                debug!("node credential refreshed");
                 return true;
             }
             Ok(Ok(Ok(_))) => {}
@@ -371,12 +404,15 @@ impl Credential {
     pub async fn send(
         &self,
         build: impl Fn(&str) -> reqwest::RequestBuilder,
-    ) -> reqwest::Result<reqwest::Response> {
-        let sent = self.snapshot();
+    ) -> Result<reqwest::Response, orch8_engine::remote_worker::LeaseRequestError> {
+        let sent = self
+            .prepare_snapshot()
+            .await
+            .ok_or(orch8_engine::remote_worker::LeaseRequestError::AuthorizationUnavailable)?;
         let response = build(&sent.token).send().await?;
         self.observe(&response);
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
-            && self.refresh_after_unauthorized(&sent.generation).await
+            && self.refresh_generation(&sent.generation).await
             && let Some(retry) = self.retry_snapshot(&sent.generation)
         {
             let response = build(&retry.token).send().await?;

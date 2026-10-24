@@ -495,8 +495,9 @@ one provider still need to represent its intended authenticated principal.
 The physical registry recognizes retained Rust callback instances; generated
 UniFFI wrappers may give the same foreign object distinct handles.
 
-Next wrapper check: Swift `RuntimeNode.swift` currently starts an unretained
-Task.detached for token fetch and its timeout does not cancel that task. A Rust
+At the DME060 checkpoint, Swift `RuntimeNode.swift` started an unretained
+Task.detached for token fetch and its timeout did not cancel that task (fixed
+in DME061 below). A Rust
 callback can return while that nested fetch still runs. Generated Swift lowering
 also allocates a new callback handle on each installation. Reproduce nested-fetch
 cancellation/overlap and inspect Kotlin/RN/Flutter equivalents before claiming
@@ -526,3 +527,90 @@ not change exported native signatures). Hosted CI validates the final head.
 Swift initial async provider installation ordering and Kotlin/RN/Flutter nested
 refresh ownership remain pending; this does not establish cross-instance or
 principal ownership. The broader review remains in progress.
+
+
+### DME062 — Credential readiness before dispatch (fixed in next batch)
+
+**HIGH, effort M.** Both `Credential::send` and the shared lease client could
+send an empty or whitespace-only credential while an installed provider had no usable initial token,
+including while `current_token` was blocked. A control plane accepting anonymous
+requests could accept a private sync payload or lease mutation. Real HTTP
+regressions reproduced a successful anonymous direct request and an Accepted
+lease mutation before the correction.
+
+Credential preparation now obtains an owned snapshot before invoking the request
+body builder. An empty installed provider gets one bounded, single-flight initial
+refresh under that owner; failed or superseded initialization rejects locally.
+A separate red regression reproduced blank refreshed tokens being accepted;
+readiness and refresh publication now both reject whitespace-only tokens.
+The request never adopts a replacement owner's authorization while waiting.
+Shared lease operations classify unavailable authorization as Rejected, retaining
+uncertain claim evidence rather than treating it as ownership loss. Successful
+initial refreshes and valid replacements continue normally. Explicit legacy
+configuration without a token provider keeps its existing behavior.
+
+The Rust transport exposes `LeaseRequestError::{AuthorizationUnavailable,
+Transport}` from `HttpLeaseClient::{send,post_json,get}`. Rust callers explicitly
+using `reqwest::Result` must migrate their return type or map the variants.
+Default Display/Debug redact transport URL secrets. `RefreshingAuth` has provided
+readiness/preparation hooks; existing implementations retain their behavior.
+Native exported method signatures and binding metadata are unchanged.
+
+### DME063 — Initial publication after refresh failure (fixed in next batch)
+
+**HIGH, effort S.** Starting refresh permanently disabled an older in-progress
+`current_token` callback, even when refresh failed and the initial callback later
+returned a usable token. Readiness tests exposed the stranded installation. Only
+successful refresh publication now supersedes initial publication. The per-owner
+refresh mutex permits a successful refresh to take precedence if the initial
+callback publishes while it is running; failed refresh does not transfer negative
+cache state onto that newly published revision. Controlled callback gates cover
+both completion orders and successful/failed refresh outcomes.
+
+### DME064 — Wrapper installation before the native fence (open)
+
+**HIGH, effort L.** Swift `RuntimeNode.setTokenProvider`, Kotlin
+`Orch8Engine.setTokenProvider`, RN `core.ts`, and Flutter `orch8_flutter.dart`
+await their first host fetch before native installation. Native owner fencing
+cannot prevent those first fetches completing in reverse order and installing
+an older provider last. First-fetch timeout/cancellation is also not consistently
+bounded. RN/Flutter refresh callbacks consult mutable current fetchers without
+an immutable provider identity in their bridge events.
+
+The next integration must reserve a native owner before the first host await,
+initialize only that reserved owner, and reject superseded or cancelled attempts
+across wrapper aliases of one engine. Native bridges must carry immutable
+provider/request identities; shutdown must retire pending installations and
+refresh responses. Reuse the bounded native refresh and readiness path rather
+than replay an old operation under whichever provider is current. Test reverse
+initial completion, sync-vs-async replacement, same-provider rotation, held old
+callbacks, cancellation before host invocation, shutdown/reinitialize, invalid
+timeouts, and engine aliases in every supported wrapper.
+
+DME062/063 are prerequisites, not a resolution of DME064. Principal binding,
+independent engines/processes, core durable outcomes, recovery quotas, and the
+remaining original review matrix still require work.
+
+Readiness-batch validation: 2,034 lean engine tests, 347 mobile tests, 147 gRPC
+tests, all-target Clippy for engine/server/mobile with warnings denied, and the
+documentation checker pass locally. Eight simultaneous direct/shared initial
+requests share one host refresh. Hosted full-workspace/native CI is the merge
+gate for this batch.
+
+### DME065 — Physical refresh budget across replaced providers (open)
+
+**HIGH, effort M, pre-existing.** Physical refresh admission is per retained
+provider instance. A different provider gets an independent AtomicBool, and
+`physical_owners` keeps weak records live while timed-out blocking closures hold
+the provider and running guard. Repeated replacement with non-cooperative host
+callbacks can therefore accumulate physical calls/queued closures and identity
+records without a credential-wide cap. Timeout bounds the waiter, not the host
+callback's lifetime.
+
+Add a bounded physical-call quota shared across owners and hold its permit until
+the actual blocking closure returns or is dropped before starting. Reject
+exhausted admission without starting/queuing another host callback; preserve
+successor progress while capacity exists and recover after old calls return.
+Test multiple timed-out owners, quota exhaustion, queued cancellation, and
+post-release recovery. Independent engine/process budgets remain a separate
+original-scope requirement. This finding is not fixed by readiness fencing.

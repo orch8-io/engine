@@ -28,9 +28,11 @@ use orch8_types::continuity::{
     RuntimeCapabilities, RuntimeConnectivity, RuntimeKind, RuntimeTrustLevel,
 };
 
-use orch8_engine::remote_worker::{AuthHeaders, HttpLeaseClient, LeaseAuth, RefreshingAuth};
+use orch8_engine::remote_worker::{
+    AuthHeaders, HttpLeaseClient, LeaseAuth, LeaseRequestError, RefreshingAuth,
+};
 
-use crate::credential::Credential;
+use crate::credential::{Credential, CredentialSnapshot};
 use crate::error::MobileError;
 
 /// Lifetime of one capability advertisement. The server caps it at five
@@ -348,7 +350,7 @@ impl NodeClient {
         &self,
         path: &str,
         body: &B,
-    ) -> reqwest::Result<reqwest::Response> {
+    ) -> Result<reqwest::Response, LeaseRequestError> {
         self.lease.post_json(path, body).await
     }
 
@@ -478,10 +480,8 @@ struct NodeAuth {
     device_id: String,
 }
 
-#[async_trait::async_trait]
-impl RefreshingAuth for NodeAuth {
-    fn headers(&self) -> AuthHeaders {
-        let snapshot = self.credential.snapshot();
+impl NodeAuth {
+    fn auth_headers(&self, snapshot: CredentialSnapshot) -> AuthHeaders {
         AuthHeaders {
             headers: vec![
                 ("x-api-key", snapshot.token),
@@ -490,20 +490,35 @@ impl RefreshingAuth for NodeAuth {
             generation: snapshot.generation,
         }
     }
+}
+
+#[async_trait::async_trait]
+impl RefreshingAuth for NodeAuth {
+    fn headers(&self) -> AuthHeaders {
+        self.auth_headers(self.credential.snapshot())
+    }
+
+    fn request_headers(&self) -> Option<AuthHeaders> {
+        self.credential
+            .request_snapshot()
+            .map(|snapshot| self.auth_headers(snapshot))
+    }
+
+    async fn prepare_headers(&self) -> Option<AuthHeaders> {
+        self.credential
+            .prepare_snapshot()
+            .await
+            .map(|snapshot| self.auth_headers(snapshot))
+    }
 
     fn retry_headers(&self, stale: &str) -> Option<AuthHeaders> {
-        let snapshot = self.credential.retry_snapshot(stale)?;
-        Some(AuthHeaders {
-            headers: vec![
-                ("x-api-key", snapshot.token),
-                ("x-device-id", self.device_id.clone()),
-            ],
-            generation: snapshot.generation,
-        })
+        self.credential
+            .retry_snapshot(stale)
+            .map(|snapshot| self.auth_headers(snapshot))
     }
 
     async fn refresh_after_unauthorized(&self, stale: &str) -> bool {
-        self.credential.refresh_after_unauthorized(stale).await
+        self.credential.refresh_generation(stale).await
     }
 
     fn observe(&self, response: &reqwest::Response) {
@@ -539,9 +554,9 @@ fn urlencode_path_segment(segment: &str) -> String {
     out
 }
 
-fn network_err(what: &str, e: &reqwest::Error) -> MobileError {
+fn network_err(what: &str, e: &LeaseRequestError) -> MobileError {
     MobileError::Engine {
-        message: format!("{what}: {}", orch8_engine::outbound::redact_error(e)),
+        message: format!("{what}: {e}"),
     }
 }
 
