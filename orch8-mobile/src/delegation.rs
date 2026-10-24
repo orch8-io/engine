@@ -80,6 +80,11 @@ use orch8_types::worker::{WorkerClaim, WorkerTask};
 use crate::error::MobileError;
 use crate::node::NodeClient;
 
+#[path = "delegation_scan.rs"]
+mod scan;
+
+const MAX_RETRY_HINTS: usize = 10_000;
+
 /// Worker id under which the pump holds parked local tasks.
 pub(crate) const PUMP_WORKER_ID: &str = "orch8.delegation-pump";
 /// Delegations examined per pump pass.
@@ -103,7 +108,8 @@ const POLL_RETRY_CAP: Duration = Duration::from_secs(30);
 /// (expected in `0.75..=1.25`; a parameter so the schedule is testable).
 pub(crate) fn retry_delay(attempts: u32, base: Duration, cap: Duration, jitter: f64) -> Duration {
     let factor = 2f64.powi(i32::try_from(attempts.min(20)).unwrap_or(20));
-    base.mul_f64(factor)
+    base.min(cap)
+        .mul_f64(factor)
         .min(cap)
         .mul_f64(jitter.clamp(0.0, 2.0))
 }
@@ -129,13 +135,22 @@ impl RetryGate {
     /// Record a miss and schedule the next try `delay` from `now`.
     fn miss(&self, id: &str, now: Instant, delay: Duration) {
         let mut entries = self.lock();
+        if !entries.contains_key(id) && entries.len() >= MAX_RETRY_HINTS {
+            let oldest = entries
+                .iter()
+                .min_by_key(|(_, (_, next))| *next)
+                .map(|(id, _)| id.clone());
+            if let Some(oldest) = oldest {
+                entries.remove(&oldest);
+            }
+        }
         let attempts = entries.get(id).map_or(0, |(attempts, _)| *attempts);
         entries.insert(id.to_owned(), (attempts.saturating_add(1), now + delay));
     }
 
-    /// Forget every record not in `open` (resolved, abandoned or re-keyed).
-    fn retain_open(&self, open: &std::collections::HashSet<&str>) {
-        self.lock().retain(|id, _| open.contains(id.as_str()));
+    /// Forget a record after its durable state leaves the open set.
+    fn forget(&self, id: &str) {
+        self.lock().remove(id);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, (u32, Instant)>> {
@@ -257,6 +272,7 @@ pub(crate) async fn init_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+    scan::init(pool).await?;
     Ok(())
 }
 
@@ -277,14 +293,6 @@ impl Kind {
             Self::SubSequence => "sub_sequence",
             Self::Step => "step",
             Self::Explicit => "explicit",
-        }
-    }
-
-    fn parse(value: &str) -> Self {
-        match value {
-            "sub_sequence" => Self::SubSequence,
-            "step" => Self::Step,
-            _ => Self::Explicit,
         }
     }
 }
@@ -315,33 +323,48 @@ struct Record {
     deadline_at: chrono::DateTime<chrono::Utc>,
 }
 
+fn corrupt_record(field: &'static str) -> sqlx::Error {
+    sqlx::Error::Decode(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("invalid delegation {field}"),
+    )))
+}
+
 impl Record {
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
-        let json = |column: &str| -> Result<Option<Value>, sqlx::Error> {
-            Ok(row
-                .try_get::<Option<String>, _>(column)?
-                .and_then(|text| serde_json::from_str(&text).ok()))
+        let json = |column: &'static str| -> Result<Option<Value>, sqlx::Error> {
+            row.try_get::<Option<String>, _>(column)?
+                .map(|text| serde_json::from_str(&text).map_err(|_| corrupt_record(column)))
+                .transpose()
         };
-        let epoch = |column: &str| -> Result<Option<u64>, sqlx::Error> {
-            Ok(row
-                .try_get::<Option<i64>, _>(column)?
-                .and_then(|value| u64::try_from(value).ok()))
+        let epoch = |column: &'static str| -> Result<Option<u64>, sqlx::Error> {
+            row.try_get::<Option<i64>, _>(column)?
+                .map(|value| u64::try_from(value).map_err(|_| corrupt_record(column)))
+                .transpose()
         };
         let deadline: String = row.try_get("deadline_at")?;
-        Ok(Self {
+        let record = Self {
             delegation_id: row.try_get("delegation_id")?,
             local_task_id: row.try_get("local_task_id")?,
             local_instance_id: row.try_get("local_instance_id")?,
             block_id: row.try_get("block_id")?,
             claim_epoch: epoch("claim_epoch")?,
-            kind: Kind::parse(&row.try_get::<String, _>("kind")?),
+            kind: match row.try_get::<String, _>("kind")?.as_str() {
+                "sub_sequence" => Kind::SubSequence,
+                "step" => Kind::Step,
+                "explicit" => Kind::Explicit,
+                _ => return Err(corrupt_record("kind")),
+            },
             destination_runtime_id: row.try_get("destination_runtime_id")?,
             runtime_kinds: json("runtime_kinds")?
-                .and_then(|kinds| serde_json::from_value(kinds).ok())
+                .map(|kinds| {
+                    serde_json::from_value(kinds).map_err(|_| corrupt_record("runtime_kinds"))
+                })
+                .transpose()?
                 .unwrap_or_default(),
             sub_sequence_id: row.try_get("sub_sequence_id")?,
             handler: row.try_get("handler")?,
-            input: json("input")?.unwrap_or_else(|| json!({})),
+            input: json("input")?.ok_or_else(|| corrupt_record("input"))?,
             tenant_id: row.try_get("tenant_id")?,
             continuity_id: row.try_get("continuity_id")?,
             parent_epoch: epoch("parent_epoch")?,
@@ -352,8 +375,22 @@ impl Record {
             result: json("result")?,
             last_error: row.try_get("last_error")?,
             deadline_at: chrono::DateTime::parse_from_rfc3339(&deadline)
-                .map_or_else(|_| chrono::Utc::now(), |at| at.with_timezone(&chrono::Utc)),
-        })
+                .map_err(|_| corrupt_record("deadline_at"))?
+                .with_timezone(&chrono::Utc),
+        };
+        if record.state == "claimed"
+            && (record.parent_epoch.is_none() || record.continuity_id.is_none())
+        {
+            return Err(corrupt_record("claimed parent identity"));
+        }
+        if record.kind != Kind::Explicit
+            && (record.local_task_id.is_none()
+                || record.claim_epoch.is_none()
+                || record.block_id.is_none())
+        {
+            return Err(corrupt_record("parked task identity"));
+        }
+        Ok(record)
     }
 
     fn status(&self) -> DelegationStatus {
@@ -511,11 +548,6 @@ impl DelegationPump {
             }
         };
         let force = self.force_pass.swap(false, Ordering::AcqRel);
-        let open: std::collections::HashSet<&str> = records
-            .iter()
-            .map(|record| record.delegation_id.as_str())
-            .collect();
-        self.gate.retain_open(&open);
         for record in &records {
             if self.stop.is_cancelled() {
                 break;
@@ -526,16 +558,16 @@ impl DelegationPump {
                 continue;
             }
             let outcome = match record.state.as_str() {
-                "prepared" => self.advance(record.clone()).await,
+                "prepared" => self.advance(record.clone()).await.map(|()| false),
                 "claimed" => self.poll_outcome(record.clone()).await,
-                _ => Ok(()),
+                _ => Ok(false),
             };
             if let Err(error) = outcome {
                 debug!(%error, "delegation step deferred");
                 self.schedule_retry(&id, claimed);
-            } else if claimed {
-                // Still waiting on the destination (a resolved record leaves
-                // the open set and its entry is dropped next pass).
+            } else if matches!(outcome, Ok(true)) {
+                // Still waiting on the destination; terminal transitions
+                // explicitly forget their retry hint.
                 self.schedule_retry(&id, true);
             }
         }
@@ -549,10 +581,15 @@ impl DelegationPump {
         let attempts = self.gate.attempts(id);
         let jitter = 0.75 + rand::random::<f64>() * 0.5;
         let delay = if polling {
-            let exponent = (attempts + 1).saturating_sub(POLL_FREE_MISSES);
+            let exponent = attempts.saturating_add(1).saturating_sub(POLL_FREE_MISSES);
             retry_delay(exponent, base, POLL_RETRY_CAP, jitter)
         } else {
-            retry_delay(attempts + 1, base, PLACEMENT_RETRY_CAP, jitter)
+            retry_delay(
+                attempts.saturating_add(1),
+                base,
+                PLACEMENT_RETRY_CAP,
+                jitter,
+            )
         };
         self.gate.miss(id, Instant::now(), delay);
     }
@@ -563,16 +600,14 @@ impl DelegationPump {
 
     async fn discover(&self) -> Result<(), MobileError> {
         let own = self.client.runtime_id();
-        let candidates: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, requirements FROM worker_tasks \
-             WHERE state = 'pending' AND awaiting_dispatch = 0 AND requirements <> '{}' \
-             ORDER BY created_at LIMIT ?",
-        )
-        .bind(PUMP_BATCH)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| storage_err(&error))?;
-        for (id, requirements) in candidates {
+        let candidates = scan::next_page(&self.pool, &scan::DISCOVERY, PUMP_BATCH)
+            .await
+            .map_err(|error| storage_err(&error))?;
+        for row in candidates {
+            let id: String = row.try_get("id").map_err(|error| storage_err(&error))?;
+            let requirements: String = row
+                .try_get("requirements")
+                .map_err(|error| storage_err(&error))?;
             let Ok(requirements) =
                 serde_json::from_str::<orch8_types::continuity::CapsuleRequirements>(&requirements)
             else {
@@ -591,8 +626,13 @@ impl DelegationPump {
             let Ok(uuid) = uuid::Uuid::parse_str(&id) else {
                 continue;
             };
-            let Some(task) = self.storage.get_worker_task(uuid).await? else {
-                continue;
+            let task = match self.storage.get_worker_task(uuid).await {
+                Ok(Some(task)) => task,
+                Ok(None) => continue,
+                Err(error) => {
+                    warn!(task_id = %uuid, %error, "invalid delegation task retained; continuing discovery");
+                    continue;
+                }
             };
             if let Err(error) = self.park(&task).await {
                 warn!(task_id = %task.id, %error, "failed to take a placed step for delegation");
@@ -776,18 +816,20 @@ impl DelegationPump {
     }
 
     async fn load_open(&self) -> Result<Vec<Record>, MobileError> {
-        let rows = sqlx::query(
-            "SELECT * FROM mobile_delegations WHERE state IN ('prepared', 'claimed') \
-             ORDER BY created_at LIMIT ?",
-        )
-        .bind(PUMP_BATCH)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| storage_err(&error))?;
-        rows.iter()
-            .map(Record::from_row)
-            .collect::<Result<_, _>>()
-            .map_err(|error| storage_err(&error))
+        let rows = scan::next_page(&self.pool, &scan::OPEN, PUMP_BATCH)
+            .await
+            .map_err(|error| storage_err(&error))?;
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            match Record::from_row(&row) {
+                Ok(record) => records.push(record),
+                Err(error) => {
+                    let id: &str = row.try_get("delegation_id").unwrap_or("unknown");
+                    warn!(delegation_id = id, %error, "invalid delegation record retained; continuing scan");
+                }
+            }
+        }
+        Ok(records)
     }
 
     async fn update(
@@ -1028,6 +1070,7 @@ impl DelegationPump {
             vec![None],
         )
         .await?;
+        self.gate.forget(&record.delegation_id);
         self.delegated.fetch_add(1, Ordering::Relaxed);
         info!(
             delegation_id = %record.delegation_id,
@@ -1157,7 +1200,14 @@ impl DelegationPump {
             .await
     }
 
-    async fn poll_outcome(&self, record: Record) -> Result<(), MobileError> {
+    async fn poll_outcome(&self, record: Record) -> Result<bool, MobileError> {
+        let expected_epoch = record
+            .parent_epoch
+            .ok_or_else(|| storage_err(&corrupt_record("parent_epoch")))?;
+        let continuity = record
+            .continuity_id
+            .as_deref()
+            .ok_or_else(|| storage_err(&corrupt_record("continuity_id")))?;
         let (status, body) = self.read_delegation(&record.delegation_id).await?;
         if status != 200 {
             let expired = record
@@ -1168,20 +1218,27 @@ impl DelegationPump {
                     chrono::Utc::now() > at.with_timezone(&chrono::Utc) + RESULT_GRACE
                 });
             if status == 404 && expired {
-                return self
-                    .resolve(
-                        &record,
-                        Err(("delegation outcome was lost".into(), true)),
-                        &Value::Null,
-                    )
-                    .await;
+                self.resolve(
+                    &record,
+                    Err(("delegation outcome was lost".into(), true)),
+                    &Value::Null,
+                )
+                .await?;
+                return Ok(false);
             }
-            return Ok(());
+            return Ok(true);
+        }
+        if body["delegation"]["id"].as_str() != Some(record.delegation_id.as_str())
+            || body["delegation"]["parent_continuity_id"].as_str() != Some(continuity)
+        {
+            return Err(MobileError::Engine {
+                message: "control plane returned an unrelated delegation record".into(),
+            });
         }
         let delivered = match body["status"].as_str() {
             Some("completed") => Ok(()),
             Some("failed") => Err(()),
-            _ => return Ok(()),
+            _ => return Ok(true),
         };
         let result = body["result"].clone();
         // Fence: the parent must still be this phone's, at the epoch the
@@ -1189,8 +1246,8 @@ impl DelegationPump {
         let own = self.client.runtime_id().to_string();
         let fenced = body["delegation"]["source_runtime_id"].as_str() != Some(own.as_str())
             || body["parent_owner_runtime_id"].as_str() != Some(own.as_str())
-            || body["delegation"]["parent_epoch"].as_u64() != record.parent_epoch
-            || body["parent_epoch_now"].as_u64() != record.parent_epoch;
+            || body["delegation"]["parent_epoch"].as_u64() != Some(expected_epoch)
+            || body["parent_epoch_now"].as_u64() != Some(expected_epoch);
         let outcome = if fenced {
             Err((
                 "delegation fenced: the parent's ownership moved since it was delegated".to_owned(),
@@ -1209,7 +1266,8 @@ impl DelegationPump {
                 )),
             }
         };
-        self.resolve(&record, outcome, &result).await
+        self.resolve(&record, outcome, &result).await?;
+        Ok(false)
     }
 
     /// Deliver an outcome locally and close the record. Safe to repeat.
@@ -1264,6 +1322,7 @@ impl DelegationPump {
             vec![Some(label.to_owned()), Some(result.to_string())],
         )
         .await?;
+        self.gate.forget(&record.delegation_id);
         if outcome.is_ok() {
             self.completed.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -1300,6 +1359,7 @@ impl DelegationPump {
             vec![Some(reason.to_owned())],
         )
         .await?;
+        self.gate.forget(&record.delegation_id);
         self.abandoned.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -1386,8 +1446,7 @@ mod tests {
         gate.miss("d1", t0, Duration::from_secs(8));
         assert_eq!(gate.attempts("d1"), 2);
 
-        let open: std::collections::HashSet<&str> = ["d2"].into_iter().collect();
-        gate.retain_open(&open);
+        gate.forget("d1");
         assert_eq!(gate.attempts("d1"), 0, "closed records are forgotten");
     }
 
@@ -1500,3 +1559,7 @@ mod tests {
         assert_eq!(status.error.as_deref(), Some("no destination"));
     }
 }
+
+#[cfg(test)]
+#[path = "delegation_scan_tests.rs"]
+mod scan_tests;

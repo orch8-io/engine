@@ -174,6 +174,8 @@ resources. Separate databases and token-hash cache keys do not satisfy the chose
 requirement. Keep the implementation in the current runtime and storage modules;
 no extra service, broker, or deployment is required.
 
-Next implement the persistent scope identities, catalog/source bindings, and
-owner-enforcing storage tests for S1-S4. Keep this ADR's gates open until the
-corresponding current-state evidence exists.
+The internal persistence foundation above is implemented. Next connect trusted
+principal/catalog audience verification to an explicitly scoped sync caller,
+then carry immutable owners through instance creation and all execution paths.
+Public handles must not expose partially isolated execution. Keep all gates open
+until their complete runtime and SDK evidence exists.

@@ -152,6 +152,11 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
 
+-- Mobile delegation discovery rotates over pending placement candidates.
+CREATE INDEX IF NOT EXISTS idx_mobile_delegation_discovery
+    ON worker_tasks(created_at, id)
+    WHERE state = 'pending' AND awaiting_dispatch = 0 AND requirements <> '{}';
+
 CREATE TABLE IF NOT EXISTS worker_task_attempt_events (
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
