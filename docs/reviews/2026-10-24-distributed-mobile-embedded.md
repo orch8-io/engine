@@ -26,7 +26,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | gRPC workers | Reconnect, demand/backpressure, resumable transfers, session identity, cross-tenant control, cancellation | Reviewing; full 146-test library suite passes; demand/lease invariant audit ongoing |
 | Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
-| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Pending |
+| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider-installation/refresh/retry fencing verified below; durable principal binding and command/manifest review open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Pending |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
@@ -438,3 +438,91 @@ is claimed.
 
 All-target Clippy also passes for the final engine/server/mobile default-feature
 union, with warnings denied.
+
+
+## Provider installation, refresh, and retry ownership
+
+Baseline: `e5834e61` (the stable head of PR #266). Work in this section uses a
+separate branch so the earlier hosted checks can finish. Five credential
+regressions fail against that baseline: empty-provider bootstrap retention,
+late refresh publication, delayed-401 replay through a replacement provider,
+negative-cache inheritance with identical token bytes, and older installation
+callbacks overwriting newer installations. A second controlled HTTP test
+reproduces the replay through the shared lease client. AuthHeaders Debug also
+exposes header values and its generation in a baseline regression.
+
+Credential state is now one atomic snapshot of provider owner, token revision,
+token, cancellation, and negative cache. Every installation reserves a new owner
+before host callbacks and clears its predecessor's token, including an empty
+replacement. Callback results publish only while their owner and reservation
+remain current. An initial-token callback cannot overwrite a refresh that began
+later. Refresh requests and queued waiters are cancellable; single-flight mutexes
+belong to installations, so an unpolled old future cannot hold up its successor.
+
+| ID | Finding | Correction and evidence | State |
+|---|---|---|---|
+| DME-052 | A late refresh overwrites replacement credentials | Fence callback publication and cancel old waits on installation replacement. | Fixed; gated callback and late-publication checks pass |
+| DME-053 | An empty replacement retains an old bootstrap/operator key | Clear old credentials atomically when reserving the new owner. | Fixed; empty-provider regression passes |
+| DME-054 | A delayed 401 replays an old payload under replacement authorization | Keep request-generation ownership through refresh and choose retry headers atomically within that owner. Both direct and shared HTTP paths are covered. | Fixed; real HTTP captures contain only the original credential |
+| DME-055 | A new provider inherits an old provider's negative cache when token bytes match | Scope failure/backoff to an owner/revision; reset on installation. | Fixed; replacement gets its own successful refresh |
+| DME-056 | Concurrent initial-token callbacks publish in completion order | Reserve installation ownership before calling host code; ignore superseded completions. | Fixed; slower older installation cannot replace the newer one |
+| DME-057 | A suspended old refresh holds a successor's single-flight lock | Allocate locks by installation rather than globally, independently of old future polling. | Fixed; retained, unpolled predecessor regression passes |
+| DME-058 | Timeout or A-B-A reinstallation allows overlapping physical refresh callbacks | Retain physical admission until the blocking closure returns; share the guard for a retained Rust provider instance using weak identity records. Abort queued callbacks on cancellation. | Fixed at the Rust callback-handle boundary; timeout, reinstallation, queue cancellation, and subsequent recovery pass |
+| DME-059 | Auth-header diagnostics expose credentials and raw generations | Custom Debug prints header names and redacts values/generation. Node generations contain only opaque owner/revision identifiers. | Fixed; diagnostic regression passes |
+| DME-060 | Foreign-provider destruction can re-enter a held credential lock | Move retired provider references outside the lock; compare weak identities without upgrading/dropping foreign strong references under the lock. | Lock-lifetime regression reproduced during implementation and fixed |
+
+The retained global refresh-lock design, physical timeout overlap, A-B-A guard
+bypass, and locked retirement were each reproduced during implementation before
+the corresponding corrections. Extensive tests live in `credential_tests.rs`,
+separate from the state machine. Positive controls preserve same-provider
+single-flight, backoff, timeout, and one-retry behavior, with identical lease
+payloads across authorized same-provider rotation. Another HTTP test models a
+replacement after refresh's last check and requires retry dispatch to honor the
+ownership veto.
+
+Local validation passes 2,033 lean engine tests, all 339 mobile tests, all 147
+gRPC tests, and all-target Clippy across engine/server/mobile with warnings
+denied. No exported native method signatures or journal schema change in this
+batch. The shared Rust RefreshingAuth trait gains a provided retry-header hook;
+existing single-owner implementations keep their behavior, and replaceable
+implementations must provide an atomic ownership check/snapshot.
+
+Limits remain material: installation owners are not authenticated tenant/customer
+identities. This does not validate opaque refreshed tokens, bind every ongoing
+business operation or durable journal record to a principal, cancel mutations
+already accepted by a server, or discard stale successful responses. Tokens from
+one provider still need to represent its intended authenticated principal.
+The physical registry recognizes retained Rust callback instances; generated
+UniFFI wrappers may give the same foreign object distinct handles.
+
+Next wrapper check: Swift `RuntimeNode.swift` currently starts an unretained
+Task.detached for token fetch and its timeout does not cancel that task. A Rust
+callback can return while that nested fetch still runs. Generated Swift lowering
+also allocates a new callback handle on each installation. Reproduce nested-fetch
+cancellation/overlap and inspect Kotlin/RN/Flutter equivalents before claiming
+end-to-end foreign single-flight. TokenProvider's old callback doc comments also
+need contract/metadata alignment in the binding review. Principal lifecycle,
+independent engines, core durable outcomes, recovery quotas/scheduling, and the
+remaining original areas stay open.
+
+
+### DME061 — Swift nested token-fetch lifecycle (fixed)
+
+The synchronous Swift provider returned on timeout without cancelling its
+detached async fetch, allowing another refresh to overlap the unfinished host
+operation. Regression tests reproduced overlap and missing cancellation. The
+adapter now retains per-instance admission until physical fetch completion,
+cancels cooperative tasks at timeout, rejects late token publication, and joins
+concurrent active refreshes. Detached tasks retain the flight rather than the
+provider, allowing retired providers to deallocate. Invalid/non-finite and
+unrepresentable timeout values fail before host invocation.
+
+All six repository adapter tests pass with strict concurrency and warnings
+denied in a local SwiftPM harness using the exact production adapter and tests
+with TokenProvider/MobileError FFI shape stubs. This is adapter evidence, not
+full native integration. The complete Swift package also passes all 21 tests on
+an iOS 26.3 simulator using PR #266's CI-built native framework (the adapter does
+not change exported native signatures). Hosted CI validates the final head.
+Swift initial async provider installation ordering and Kotlin/RN/Flutter nested
+refresh ownership remain pending; this does not establish cross-instance or
+principal ownership. The broader review remains in progress.
