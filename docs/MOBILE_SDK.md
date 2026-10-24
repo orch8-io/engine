@@ -959,6 +959,14 @@ are treated as missing; defaults outside the per-task integer range are ignored
 when calculating heartbeat intervals. Diagnostic API URLs omit user information,
 query strings, and fragments.
 
+Before starting a journaled callback, the worker confirms ownership with an
+accepted heartbeat and rechecks OS/power/stop admission. One monotonic deadline
+covers start/outcome journaling, execution, and result delivery; only accepted renewals extend
+it, measured from before their requests. A renewal outage stops the owned future
+at that deadline and quarantines any native call still physically running.
+Known results stay journaled for recovery instead of becoming unknown releases.
+This local cancellation does not roll back accepted external side effects.
+
 Claims are scoped to the control-plane API base, worker runtime ID, task ID,
 and claim epoch. A delayed settlement from an older lease cannot alter a newer
 lease's recovery evidence. Duplicate delivery preserves any recorded start or

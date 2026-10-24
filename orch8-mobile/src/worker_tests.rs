@@ -881,3 +881,152 @@ async fn stopped_worker_releases_a_late_poll_claim_without_starting_it() {
     assert_eq!(server.bodies(&format!("{id}/release"))[0]["started"], false);
     assert_eq!(h.store.count().await.unwrap(), 0);
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renewal_outage_quarantines_the_live_native_callback_at_lease_expiry() {
+    struct Gated {
+        entered: Arc<AtomicBool>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl StepHandler for Gated {
+        fn execute(&self, _step: String, _input: String) -> Result<String, crate::HandlerError> {
+            self.entered.store(true, Ordering::Release);
+            let _ = self
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5));
+            Ok("{}".into())
+        }
+    }
+    let entered = Arc::new(AtomicBool::new(false));
+    let started = Arc::clone(&entered);
+    let route: Route = Arc::new(move |_, path, _| {
+        let status = if path.ends_with("/heartbeat") && started.load(Ordering::Acquire) {
+            503
+        } else {
+            200
+        };
+        (status, json!({}))
+    });
+    let server = spawn_control_plane(route).await;
+    let mut h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let (release, receiver) = std::sync::mpsc::channel();
+    let mut registry = HandlerRegistry::new();
+    register_foreign_handler(
+        &mut registry,
+        "scan",
+        Arc::new(Gated {
+            entered,
+            release: Mutex::new(receiver),
+        }),
+        Duration::from_secs(60),
+        Arc::clone(&h.worker.deps.stragglers),
+    );
+    Arc::get_mut(&mut h.worker).unwrap().deps.registry = Arc::new(registry);
+    let id = uuid::Uuid::new_v4();
+    let mut task = task_json(id);
+    task["timeout_ms"] = json!(60_000);
+    task["lease_secs"] = json!(1);
+    let start = tokio::time::Instant::now();
+    h.worker
+        .execute(
+            serde_json::from_value(task).unwrap(),
+            Duration::from_millis(10),
+        )
+        .await;
+    let elapsed = start.elapsed();
+    let quarantined = h.worker.deps.stragglers.blocks("scan");
+    let _ = release.send(());
+    wait_for(|| !h.worker.deps.stragglers.blocks("scan")).await;
+    assert!(
+        quarantined,
+        "lease loss must not detach a live native callback without quarantine"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "renewal failure must not wait for physical callback completion"
+    );
+    assert_eq!(server.bodies(&format!("{id}/release"))[0]["started"], true);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert_eq!(server.count(&format!("{id}/complete")), 0);
+    assert_eq!(server.count(&format!("{id}/fail")), 0);
+}
+
+#[tokio::test]
+async fn stale_mobile_delivery_is_checked_before_native_invocation() {
+    let server = spawn_control_plane(route_with(Vec::new(), 409, 204)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let id = uuid::Uuid::new_v4();
+    h.worker
+        .execute(
+            serde_json::from_value(task_json(id)).unwrap(),
+            Duration::from_secs(1),
+        )
+        .await;
+    assert!(
+        h.inputs.lock().unwrap().is_empty(),
+        "a fenced claim must not invoke native code"
+    );
+    assert_eq!(h.worker.stats().lost, 1);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert_eq!(server.count(&format!("{id}/complete")), 0);
+}
+
+#[tokio::test]
+async fn expiry_retains_a_known_outcome_for_recovery_without_reinvoking_the_handler() {
+    let delivering = Arc::new(AtomicBool::new(false));
+    let restored = Arc::new(AtomicBool::new(false));
+    let settling = Arc::clone(&delivering);
+    let healthy = Arc::clone(&restored);
+    let server = spawn_control_plane(Arc::new(move |_, path, _| {
+        if path.ends_with("/complete") {
+            settling.store(true, Ordering::Release);
+            return (
+                if healthy.load(Ordering::Acquire) {
+                    200
+                } else {
+                    503
+                },
+                json!({}),
+            );
+        }
+        if path.ends_with("/heartbeat")
+            && settling.load(Ordering::Acquire)
+            && !healthy.load(Ordering::Acquire)
+        {
+            return (503, json!({}));
+        }
+        (200, json!({}))
+    }))
+    .await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let id = uuid::Uuid::new_v4();
+    let mut task = task_json(id);
+    task["lease_secs"] = json!(1);
+    let start = tokio::time::Instant::now();
+    h.worker
+        .execute(
+            serde_json::from_value(task).unwrap(),
+            Duration::from_millis(100),
+        )
+        .await;
+    assert!(
+        start.elapsed() < Duration::from_millis(1450),
+        "settlement must share the confirmed lease deadline"
+    );
+    let claims = h.store.list().await.unwrap();
+    assert_eq!(claims.len(), 1);
+    assert!(claims[0].started);
+    assert!(
+        matches!(&claims[0].outcome, Some(Outcome::Complete { output }) if output == &json!({"scanned":true}))
+    );
+    assert_eq!(
+        server.count(&format!("{id}/release")),
+        0,
+        "a known outcome must not become an unknown release"
+    );
+    restored.store(true, Ordering::Release);
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert_eq!(h.inputs.lock().unwrap().len(), 1);
+}

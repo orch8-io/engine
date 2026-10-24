@@ -53,6 +53,8 @@
 //! against servers that predate the distributed contract. Built-in handlers
 //! never see `__orch8`.
 
+use orch8_engine::remote_worker::lease::{ConfirmedLease, LeaseEnd};
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -578,6 +580,79 @@ impl Worker {
             }
             return released;
         }
+        let acquired = tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => None,
+            lease = ConfirmedLease::acquire(task.lease_secs, heartbeat, || client.heartbeat(task.id, task.claim_epoch)) => Some(lease),
+        };
+        let lease = match acquired {
+            Some(Ok(lease)) => lease,
+            Some(Err(LeaseEnd::LostOwnership)) => {
+                self.counters.lost.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+            _ => {
+                let released = release(client, task.id, task.claim_epoch, false).await;
+                if released {
+                    self.counters.released.fetch_add(1, Ordering::Relaxed);
+                }
+                return released;
+            }
+        };
+        let mut started = false;
+        let mut outcome = None;
+        let result = lease
+            .run(
+                heartbeat,
+                self.execute_confirmed(task, key, &mut started, &mut outcome),
+                || client.heartbeat(task.id, task.claim_epoch),
+            )
+            .await;
+        // The owned invocation is dropped before any recovery I/O. A running
+        // native callback is now quarantined until its physical return.
+        match result {
+            Ok(settled) => settled,
+            Err(LeaseEnd::LostOwnership) => {
+                self.counters.lost.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Err(_) => {
+                if let Some(outcome) = outcome {
+                    // Do not replace a known result with an ambiguous release.
+                    // Persist it even if expiry interrupted the earlier write;
+                    // the orphan drain can reconcile it with server authority.
+                    if let Err(error) = store.record_outcome(key, &outcome).await {
+                        warn!(%error, task_id = %task.id, "failed to retain outcome at lease expiry");
+                    }
+                    return false;
+                }
+                let released = release(client, task.id, task.claim_epoch, started).await;
+                if released {
+                    self.counters.released.fetch_add(1, Ordering::Relaxed);
+                }
+                released
+            }
+        }
+    }
+
+    async fn execute_confirmed(
+        self: &Arc<Self>,
+        task: &RemoteTask,
+        key: &ClaimKey,
+        started: &mut bool,
+        saved_outcome: &mut Option<Outcome>,
+    ) -> bool {
+        let client = &self.deps.client;
+        let store = &self.deps.store;
+        // Confirmation may have waited through a network outage while the OS
+        // window ended, power changed, or this worker was stopped.
+        if !self.may_claim() {
+            let released = release(client, task.id, task.claim_epoch, false).await;
+            if released {
+                self.counters.released.fetch_add(1, Ordering::Relaxed);
+            }
+            return released;
+        }
         match store.mark_started(key).await {
             Ok(true) => {}
             Ok(false) => {
@@ -594,25 +669,8 @@ impl Worker {
             }
         }
 
-        let invocation = self.invoke(task);
-        tokio::pin!(invocation);
-        let mut ticker =
-            tokio::time::interval_at(tokio::time::Instant::now() + heartbeat, heartbeat);
-        let result = loop {
-            tokio::select! {
-                result = &mut invocation => break Some(result),
-                _ = ticker.tick() => {
-                    if client.heartbeat(task.id, task.claim_epoch).await == LeaseResponse::LostOwnership {
-                        break None;
-                    }
-                }
-            }
-        };
-        let Some(result) = result else {
-            warn!(task_id = %task.id, "lease lost while executing; abandoning task");
-            self.counters.lost.fetch_add(1, Ordering::Relaxed);
-            return true;
-        };
+        *started = true;
+        let result = self.invoke(task).await;
 
         if let Err(error) = &result
             && is_device_timeout(error)
@@ -645,7 +703,8 @@ impl Worker {
                 retryable: false,
             },
         };
-        self.settle_outcome(task, key, &outcome).await
+        let outcome = saved_outcome.insert(outcome);
+        self.settle_outcome(task, key, outcome).await
     }
 
     async fn settle_outcome(&self, task: &RemoteTask, key: &ClaimKey, outcome: &Outcome) -> bool {

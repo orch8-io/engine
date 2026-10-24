@@ -27,6 +27,9 @@ use orch8_types::ids::{BlockId, InstanceId, TenantId};
 
 use crate::handlers::StepContext;
 
+#[path = "remote_worker_lease.rs"]
+pub mod lease;
+
 /// Default lease when neither the task nor the poll response carries one.
 pub const DEFAULT_LEASE_SECS: u64 = 120;
 /// Cap on any control-plane response body a node buffers.

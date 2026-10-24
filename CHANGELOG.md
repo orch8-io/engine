@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Remote runtime lease supervision
+
+- Confirm task ownership before invoking core or mobile callbacks, preventing
+  fast callbacks from executing stale completed or fenced deliveries.
+- Share one conservative monotonic deadline across preparation, callback, output
+  sealing, and result delivery. Renew concurrently, stop on unconfirmed expiry,
+  and reject late acknowledgements without adding network latency to the grant.
+- Preserve known mobile outcomes for journal recovery at expiry. Drop cancelled
+  callbacks before cleanup I/O and quarantine native calls until physical return.
+
 ### Distributed HTTP worker contracts
 
 - Keep hybrid executor credentials and payloads at the configured endpoint by

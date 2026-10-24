@@ -25,7 +25,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | REST workers | Claim generations, duplicate poll delivery, heartbeat loss, completion/failure/release retries, cancellation, queue and capability routing | Reviewing; shared HTTP contract and batch ownership fixes verified; supervision checks open |
 | gRPC workers | Reconnect, demand/backpressure, resumable transfers, session identity, cross-tenant control, cancellation | Reviewing; full 146-test library suite passes; demand/lease invariant audit ongoing |
 | Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
-| Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing |
+| Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Pending |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Pending |
@@ -248,16 +248,11 @@ union. All 146 gRPC library tests pass, including the 16 client/session checks.
 Already-existing controls include an 8 MiB response cap and status-based lease
 fencing; they were inspected rather than reimplemented.
 
-Next invariant checks remain open: duplicate/replayed deliveries while a callback
-is active (the executor running map currently keys by task UUID), renewal failure
-past the last known lease deadline, cancellation during slow claim/advertise
-calls, and gRPC demand/acknowledgement backpressure. Over-limit claim responses also
-need a bounded release-fanout review, and mobile re-registration must be checked
-against account/tenant changes as well as literal worker/control-plane identity.
-These observations are not
-claimed fixed or fully reproduced yet. They remain part of the original goal,
-alongside the pending mobile, embedded, binding, and sandbox areas above.
-
+At this stage, live duplicate admission, surplus release fanout, and lease
+supervision were still open. The subsequent sections record their fixes and
+limits. Slow advertise/claim shutdown, gRPC demand/acknowledgement backpressure,
+mobile account/tenant changes, and the remaining mobile, embedded, binding,
+and sandbox areas above remain part of the full goal.
 
 ## Live claim admission and bounded release cleanup
 
@@ -297,3 +292,52 @@ mobile, embedded, binding, sandbox, and security review above.
 Final merge-candidate validation: all 2,022 lean engine library tests and
 all 146 gRPC library tests, and all-target engine/server/mobile Clippy with
 warnings denied pass.
+
+
+## Confirmed lease authority across task phases
+
+Baseline: main `f2d88364`. Four executor regressions failed while all 25 existing
+executor tests passed. Through the real mobile HTTP client and native bridge,
+two more regressions failed while all 302 existing mobile tests passed.
+
+A shared `remote_worker::lease::ConfirmedLease` now requires a successful
+heartbeat before starting work. Transient confirmation failures retry within a
+bounded lease window; fenced or rejected confirmation cannot invoke a callback.
+Renewal runs concurrently with preparation, callback execution, output sealing,
+and outcome delivery. Every successful confirmation/renewal is measured from
+before its request, and an explicit clock check rejects late acknowledgements.
+Only confirmed renewals extend the deadline. The internal cadence also stays
+at most one third of the grant, including one-second grants.
+
+| ID | Finding | Correction and evidence | State |
+|---|---|---|---|
+| DME-032 | A fast callback executes a stale completed/fenced delivery before its first heartbeat | Check server ownership before invoking either Rust or native callbacks. Both core and mobile regressions fail on baseline. | Fixed; final validation below |
+| DME-033 | Repeated renewal failures allow callbacks to outlive confirmed authority | Stop owned work at the last confirmed deadline. Core callback expiry and mobile native quarantine regressions fail on baseline. | Fixed; final validation below |
+| DME-034 | Waiting inline for a heartbeat suspends callback and settlement polling | Poll lease supervision concurrently with the complete task operation. A blocked renewal must not block a callback result. | Fixed; final validation below |
+| DME-035 | Settlement fabricates a new lease budget and its RPC can outlive the grant | Preserve one supervisor through all phases and bound each pending RPC by that authority. Baseline stalled settlement never frees its slot. | Fixed; final validation below |
+| DME-036 | Expiry during mobile result delivery needs to preserve known outcome evidence | Keep the result outside the supervised future; retain/re-record it for orphan recovery rather than release it as unknown. New end-to-end recovery test requires one native invocation. | Covered by final validation below |
+| DME-037 | A ready late acknowledgement can be observed after a timeout deadline | Recheck the previous monotonic deadline explicitly before accepting any renewal. A deliberately delayed single-thread runtime must not resume the operation. | Covered by final validation below |
+
+Additional checks cover recovery after a transient renewal failure, request-time
+rather than response-time authority, one-second grants, and dropping a cancelled
+callback before waiting for its release RPC. Mobile stop continues to let already
+started work drain, while cancellation of a pending ownership check releases an
+unstarted claim. Mobile rechecks OS/power/stop admission after confirmation.
+
+A physically running native call cannot be forcibly stopped: its wrapper drops
+and quarantines it until physical completion. This does not guarantee rollback
+of an external mutation accepted before cancellation. An accepted heartbeat
+confirms server authority for the current generation; it is not durable evidence
+that an earlier process never started that generation. Cold restart ambiguity,
+core durable outcome recovery, ambiguous release replies, mobile concurrency
+across worker generations, account/tenant boundaries, and the rest of the
+original review remain open.
+
+
+Final local validation passes all 2,031 lean engine library tests, all 305 mobile
+library tests, all 146 gRPC library tests, and all-target Clippy across the
+engine/server/mobile default-feature union with warnings denied. The native
+expiry regression observes quarantine while the physical callback is still
+blocked, then explicitly releases it and checks quarantine clears. The known
+outcome test restores server connectivity, drains the journal, and verifies
+exactly one handler invocation. Hosted checks for this batch remain pending.

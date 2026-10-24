@@ -60,9 +60,7 @@ use claims::{Admission, Claims, Release as ReleaseGuard};
 
 use crate::credentials::LocalCredentials;
 use crate::handlers::HandlerRegistry;
-use crate::remote_worker::{
-    DEFAULT_LEASE_SECS, HttpLeaseClient, LeaseResponse, RemoteTask, heartbeat_interval,
-};
+use crate::remote_worker::{HttpLeaseClient, LeaseResponse, RemoteTask, heartbeat_interval};
 
 /// Lifetime of one capability advertisement sent by an executor.
 const CAPABILITY_TTL: Duration = Duration::from_secs(120);
@@ -874,26 +872,67 @@ impl RemoteExecutor {
         heartbeat: Duration,
         cancel: &CancellationToken,
     ) {
+        use crate::remote_worker::lease::{ConfirmedLease, LeaseEnd};
+
         let task = &claimed.task;
-        let mut heartbeat = task.lease_secs.map_or(heartbeat, |lease| {
-            heartbeat.min(heartbeat_interval(None, None, Some(lease)))
+        let heartbeat = self.settings.max_heartbeat.map_or(heartbeat, |cap| {
+            heartbeat.min(cap).max(Duration::from_millis(100))
         });
-        if let Some(cap) = self.settings.max_heartbeat {
-            heartbeat = heartbeat.min(cap).max(Duration::from_millis(100));
+        let acquired = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            lease = ConfirmedLease::acquire(task.lease_secs, heartbeat, || self.transport.heartbeat(claimed)) => Some(lease),
+        };
+        let lease = match acquired {
+            Some(Ok(lease)) => lease,
+            Some(Err(LeaseEnd::LostOwnership)) => {
+                self.counters.lost.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            _ => {
+                let _ = tokio::time::timeout(RELEASE_GRACE, self.release(claimed, false)).await;
+                return;
+            }
+        };
+        let mut started = false;
+        let result = {
+            let operation = self.execute_leased(claimed, &mut started);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => None,
+                result = lease.run(heartbeat, operation, || self.transport.heartbeat(claimed)) => Some(result),
+            }
+        };
+        // All operation futures, including the callback and vault I/O, have
+        // dropped before any cleanup RPC can wait on the network.
+        match result {
+            Some(Ok(true)) => {}
+            Some(Err(LeaseEnd::LostOwnership)) => {
+                self.counters.lost.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                warn!(task_id = %task.id, started, "execution ended without a confirmed outcome; releasing claim");
+                let _ = tokio::time::timeout(RELEASE_GRACE, self.release(claimed, started)).await;
+            }
         }
+    }
+
+    /// Returns false on callback timeout; its owner releases the ambiguous
+    /// claim after dropping the callback future.
+    async fn execute_leased(&self, claimed: &ClaimedTask, started: &mut bool) -> bool {
+        let task = &claimed.task;
         let (params, context) = match self.prepare(task).await {
             Ok(prepared) => prepared,
             Err(message) => {
-                self.settle(
+                self.deliver(
                     claimed,
                     Outcome::Fail {
                         message,
                         retryable: false,
                     },
-                    heartbeat,
                 )
                 .await;
-                return;
+                return true;
             }
         };
         let Some(handler) = self.registry.get(&task.handler_name) else {
@@ -901,16 +940,15 @@ impl RemoteExecutor {
                 "handler '{}' is not served by this executor",
                 task.handler_name
             );
-            self.settle(
+            self.deliver(
                 claimed,
                 Outcome::Fail {
                     message,
                     retryable: false,
                 },
-                heartbeat,
             )
             .await;
-            return;
+            return true;
         };
         let mut with_context = task.clone();
         with_context.context = context;
@@ -925,6 +963,7 @@ impl RemoteExecutor {
             .and_then(|ms| u64::try_from(ms).ok())
             .filter(|ms| *ms > 0)
             .map(Duration::from_millis);
+        *started = true;
         let future = handler(ctx);
         let invocation = async move {
             match timeout {
@@ -932,39 +971,16 @@ impl RemoteExecutor {
                 None => Some(future.await),
             }
         };
-        tokio::pin!(invocation);
-        let mut ticker =
-            tokio::time::interval_at(tokio::time::Instant::now() + heartbeat, heartbeat);
-        let result = loop {
-            tokio::select! {
-                result = &mut invocation => break result,
-                _ = ticker.tick() => {
-                    if self.transport.heartbeat(claimed).await == LeaseResponse::LostOwnership {
-                        warn!(task_id = %task.id, "lease lost while executing; abandoning task");
-                        self.counters.lost.fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
-                }
-                () = cancel.cancelled() => {
-                    // Drain window elapsed: the handler future is dropped
-                    // (stopped) and its effect may or may not have happened.
-                    self.release(claimed, true).await;
-                    return;
-                }
-            }
-        };
+        let result = invocation.await;
         let Some(result) = result else {
-            // Timed out: the outcome is ambiguous, not a failure. Release as
-            // started so the engine marks the effect unknown and retries.
-            warn!(task_id = %task.id, "task timed out on the executor; releasing it as started");
-            self.release(claimed, true).await;
-            return;
+            return false;
         };
         let Some(outcome) = self.outcome(task, result).await else {
             self.counters.lost.fetch_add(1, Ordering::Relaxed);
-            return;
+            return true;
         };
-        self.settle(claimed, outcome, heartbeat).await;
+        self.deliver(claimed, outcome).await;
+        true
     }
 
     /// The report for a handler result: output (sealed into the vault when
@@ -1006,23 +1022,10 @@ impl RemoteExecutor {
         })
     }
 
-    /// Report the outcome, retrying with a jittered, capped back-off until
-    /// the engine answers or the lease is about to run out. The outcome
-    /// stays buffered here and the lease keeps being renewed while the
-    /// control plane is unavailable (a deploy, a load-balancer drain), so a
-    /// finished side effect is not reaped as ambiguous and run again.
-    async fn settle(&self, claimed: &ClaimedTask, outcome: Outcome, heartbeat: Duration) {
-        let lease = Duration::from_secs(
-            claimed
-                .task
-                .lease_secs
-                .map_or(DEFAULT_LEASE_SECS, u64::from)
-                .max(1),
-        );
-        let now = tokio::time::Instant::now();
-        // The last renewal happened at most one heartbeat ago.
-        let mut lease_until = now + lease.saturating_sub(heartbeat);
-        let mut next_heartbeat = now + heartbeat;
+    /// Deliver while the enclosing lease supervisor retains authority and
+    /// renews independently. It owns the budget for every delivery request,
+    /// retry sleep, credential preparation, callback, and output sealing.
+    async fn deliver(&self, claimed: &ClaimedTask, outcome: Outcome) {
         let mut backoff = DELIVERY_BACKOFF;
         let mut attempts = 0u32;
         loop {
@@ -1056,27 +1059,7 @@ impl RemoteExecutor {
                 // the lease rather than dropping.
                 LeaseResponse::Retry | LeaseResponse::Rejected => {}
             }
-            if tokio::time::Instant::now() >= next_heartbeat {
-                match self.transport.heartbeat(claimed).await {
-                    LeaseResponse::Accepted => {
-                        lease_until = tokio::time::Instant::now() + lease;
-                    }
-                    LeaseResponse::LostOwnership => {
-                        warn!(task_id = %claimed.task.id, "lease lost while reporting the outcome");
-                        self.counters.lost.fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
-                    _ => {}
-                }
-                next_heartbeat = tokio::time::Instant::now() + heartbeat;
-            }
-            let pause = jittered(backoff).min(heartbeat);
-            if tokio::time::Instant::now() + pause >= lease_until {
-                warn!(task_id = %claimed.task.id, attempts, last = ?response,
-                    "outcome undeliverable before the lease expires; \
-                     the engine's lease reaper will reclaim the task");
-                return;
-            }
+            let pause = jittered(backoff);
             debug!(task_id = %claimed.task.id, attempts, ?response,
                 "outcome not delivered yet; retrying");
             tokio::time::sleep(pause).await;
