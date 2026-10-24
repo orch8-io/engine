@@ -58,9 +58,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::SqlitePool;
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -135,150 +133,15 @@ pub struct WorkerWindowResult {
     pub budget_exhausted: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Durable claim journal
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum Outcome {
-    Complete { output: Value },
-    Fail { message: String, retryable: bool },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ClaimRow {
-    pub task_id: uuid::Uuid,
-    pub claim_epoch: u64,
-    pub api_base: String,
-    pub started: bool,
-    pub outcome: Option<Outcome>,
-    pub claimed_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ClaimStore {
-    pool: SqlitePool,
-}
-
-impl ClaimStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
-    }
-
-    pub async fn init_tables(&self) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS mobile_worker_claims (
-                task_id      TEXT PRIMARY KEY,
-                claim_epoch  INTEGER NOT NULL,
-                worker_id    TEXT NOT NULL,
-                handler_name TEXT NOT NULL,
-                effect_id    TEXT,
-                api_base     TEXT NOT NULL,
-                started      INTEGER NOT NULL DEFAULT 0,
-                outcome      TEXT,
-                claimed_at   TEXT NOT NULL
-            )",
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn insert(
-        &self,
-        task: &RemoteTask,
-        worker_id: &str,
-        api_base: &str,
-    ) -> Result<(), sqlx::Error> {
-        #[allow(clippy::cast_possible_wrap)]
-        let epoch = task.claim_epoch as i64;
-        sqlx::query(
-            "INSERT OR REPLACE INTO mobile_worker_claims
-                (task_id, claim_epoch, worker_id, handler_name, effect_id, api_base, started, outcome, claimed_at)
-             VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)",
-        )
-        .bind(task.id.to_string())
-        .bind(epoch)
-        .bind(worker_id)
-        .bind(&task.handler_name)
-        .bind(task.effect_id.as_deref())
-        .bind(api_base)
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn mark_started(&self, task_id: uuid::Uuid) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE mobile_worker_claims SET started = 1 WHERE task_id = ?")
-            .bind(task_id.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn record_outcome(
-        &self,
-        task_id: uuid::Uuid,
-        outcome: &Outcome,
-    ) -> Result<(), sqlx::Error> {
-        let json = serde_json::to_string(outcome).unwrap_or_else(|_| "null".into());
-        sqlx::query("UPDATE mobile_worker_claims SET outcome = ? WHERE task_id = ?")
-            .bind(json)
-            .bind(task_id.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn delete(&self, task_id: uuid::Uuid) {
-        if let Err(e) = sqlx::query("DELETE FROM mobile_worker_claims WHERE task_id = ?")
-            .bind(task_id.to_string())
-            .execute(&self.pool)
-            .await
-        {
-            warn!(error = %e, %task_id, "failed to delete settled worker claim");
-        }
-    }
-
-    pub async fn list(&self) -> Result<Vec<ClaimRow>, sqlx::Error> {
-        let rows: Vec<(String, i64, String, i64, Option<String>, String)> = sqlx::query_as(
-            "SELECT task_id, claim_epoch, api_base, started, outcome, claimed_at
-             FROM mobile_worker_claims ORDER BY claimed_at",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|(id, epoch, api_base, started, outcome, claimed_at)| {
-                Some(ClaimRow {
-                    task_id: uuid::Uuid::parse_str(&id).ok()?,
-                    #[allow(clippy::cast_sign_loss)]
-                    claim_epoch: epoch as u64,
-                    api_base,
-                    started: started != 0,
-                    outcome: outcome.and_then(|o| serde_json::from_str(&o).ok()),
-                    claimed_at: chrono::DateTime::parse_from_rfc3339(&claimed_at)
-                        .map_or_else(|_| chrono::Utc::now(), |t| t.with_timezone(&chrono::Utc)),
-                })
-            })
-            .collect())
-    }
-
-    pub async fn count(&self) -> Result<i64, sqlx::Error> {
-        sqlx::query_scalar("SELECT COUNT(*) FROM mobile_worker_claims")
-            .fetch_one(&self.pool)
-            .await
-    }
-}
+mod claims;
+use claims::ClaimKey;
+pub(crate) use claims::{ClaimStore, Outcome};
 
 /// Settle every persisted claim not currently executing in this process.
 /// Returns how many claims were resolved (released, failed, or delivered).
 pub(crate) async fn drain_orphans(
     client: &NodeClient,
     store: &ClaimStore,
-    in_flight: &StdMutex<HashSet<uuid::Uuid>>,
     stats: Option<&Counters>,
 ) -> u32 {
     let rows = match store.list().await {
@@ -290,24 +153,29 @@ pub(crate) async fn drain_orphans(
     };
     let mut resolved = 0;
     for row in rows {
-        let busy = in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&row.task_id);
-        if busy {
+        if !row.key.belongs_to(&client.worker_id(), client.api_base()) {
             continue;
         }
+        let Some(_reservation) = store.reserve(&row.key) else {
+            // Another worker generation or recovery pass still owns this claim.
+            continue;
+        };
+        // The list can precede a completed live invocation. Re-read after
+        // reserving so recovery cannot release an outcome that was just saved.
+        let row = match store.get(&row.key).await {
+            Ok(Some(row)) => row,
+            Ok(None) => continue,
+            Err(error) => {
+                warn!(%error, "failed to reload worker recovery claim");
+                continue;
+            }
+        };
         if chrono::Utc::now() - row.claimed_at > STALE_CLAIM_AGE {
-            store.delete(row.task_id).await;
-            continue;
-        }
-        if row.api_base.trim_end_matches('/') != client.api_base() {
-            // Claimed against another control plane; only a client for that
-            // base can settle it (it ages out above otherwise).
+            store.delete(&row.key).await;
             continue;
         }
         let settled = if let Some(outcome) = &row.outcome {
-            let result = deliver_once(client, row.task_id, row.claim_epoch, outcome).await;
+            let result = deliver_once(client, row.key.task_id, row.key.claim_epoch, outcome).await;
             if let Some(stats) = stats
                 && result == LeaseResponse::Accepted
             {
@@ -315,15 +183,15 @@ pub(crate) async fn drain_orphans(
             }
             result != LeaseResponse::Retry
         } else {
-            let released = release(client, row.task_id, row.claim_epoch, row.started).await;
+            let released = release(client, row.key.task_id, row.key.claim_epoch, row.started).await;
             if released && let Some(stats) = stats {
                 stats.released.fetch_add(1, Ordering::Relaxed);
             }
             released
         };
         if settled {
-            info!(task_id = %row.task_id, started = row.started, "settled orphaned worker claim after restart");
-            store.delete(row.task_id).await;
+            info!(task_id = %row.key.task_id, started = row.started, "settled orphaned worker claim after restart");
+            store.delete(&row.key).await;
             resolved += 1;
         }
     }
@@ -414,7 +282,7 @@ pub(crate) struct Worker {
     handlers: Vec<String>,
     wake: Notify,
     slots: Arc<Semaphore>,
-    in_flight: StdMutex<HashSet<uuid::Uuid>>,
+    in_flight: StdMutex<HashSet<ClaimKey>>,
     counters: Counters,
     /// Set while a bounded background window may claim work even though the
     /// app is not in the foreground.
@@ -422,6 +290,22 @@ pub(crate) struct Worker {
     /// Bumped after every poll round that claimed nothing.
     idle_rounds: AtomicU64,
     cancel: CancellationToken,
+}
+
+struct InFlight<'a> {
+    key: ClaimKey,
+    tasks: &'a StdMutex<HashSet<ClaimKey>>,
+    wake: &'a Notify,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+        self.wake.notify_one();
+    }
 }
 
 impl Worker {
@@ -514,13 +398,7 @@ impl Worker {
 
     async fn run(self: Arc<Self>) {
         info!(handlers = ?self.handlers, "mobile worker loop started");
-        drain_orphans(
-            &self.deps.client,
-            &self.deps.store,
-            &self.in_flight,
-            Some(&self.counters),
-        )
-        .await;
+        drain_orphans(&self.deps.client, &self.deps.store, Some(&self.counters)).await;
         let mut next_drain = tokio::time::Instant::now() + ORPHAN_DRAIN_INTERVAL;
         let mut cursor = 0usize;
 
@@ -550,13 +428,7 @@ impl Worker {
             }
 
             if tokio::time::Instant::now() >= next_drain {
-                drain_orphans(
-                    &self.deps.client,
-                    &self.deps.store,
-                    &self.in_flight,
-                    Some(&self.counters),
-                )
-                .await;
+                drain_orphans(&self.deps.client, &self.deps.store, Some(&self.counters)).await;
                 next_drain = tokio::time::Instant::now() + ORPHAN_DRAIN_INTERVAL;
             }
 
@@ -640,39 +512,49 @@ impl Worker {
         let client = &self.deps.client;
         let store = &self.deps.store;
         let task_id = task.id;
-
-        if let Err(e) = store
+        let key = ClaimKey::for_task(&task, &client.worker_id(), client.api_base());
+        let Some(_reservation) = store.reserve(&key) else {
+            // A duplicate delivery cannot revoke or re-enter a live callback.
+            return;
+        };
+        match store
             .insert(&task, &client.worker_id(), client.api_base())
             .await
         {
-            // Without a journal entry a crash could strand the lease; do not
-            // start work we cannot recover.
-            warn!(error = %e, %task_id, "cannot journal claim; releasing task");
-            if release(client, task_id, task.claim_epoch, false).await {
-                self.counters.released.fetch_add(1, Ordering::Relaxed);
+            Ok(true) => {}
+            Ok(false) => return, // Existing evidence belongs to recovery, not a second invocation.
+            Err(error) => {
+                warn!(%error, %task_id, "cannot journal claim; releasing task");
+                if release(client, task_id, task.claim_epoch, false).await {
+                    self.counters.released.fetch_add(1, Ordering::Relaxed);
+                }
+                return;
             }
-            return;
         }
         self.in_flight
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(task_id);
-
-        let result = self.execute_journaled(&task, heartbeat).await;
-
-        self.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&task_id);
+            .insert(key.clone());
+        let _in_flight = InFlight {
+            key: key.clone(),
+            tasks: &self.in_flight,
+            wake: &self.wake,
+        };
+        let result = self.execute_journaled(&task, &key, heartbeat).await;
         if result {
-            store.delete(task_id).await;
+            store.delete(&key).await;
         }
     }
 
     /// Runs a journaled claim to settlement. Returns `true` when the journal
     /// entry can be deleted (settled or lost); `false` leaves it for the
     /// orphan drain.
-    async fn execute_journaled(self: &Arc<Self>, task: &RemoteTask, heartbeat: Duration) -> bool {
+    async fn execute_journaled(
+        self: &Arc<Self>,
+        task: &RemoteTask,
+        key: &ClaimKey,
+        heartbeat: Duration,
+    ) -> bool {
         let client = &self.deps.client;
         let store = &self.deps.store;
 
@@ -684,13 +566,20 @@ impl Worker {
             }
             return released;
         }
-        if let Err(e) = store.mark_started(task.id).await {
-            warn!(error = %e, task_id = %task.id, "cannot journal task start; releasing");
-            let released = release(client, task.id, task.claim_epoch, false).await;
-            if released {
-                self.counters.released.fetch_add(1, Ordering::Relaxed);
+        match store.mark_started(key).await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.counters.lost.fetch_add(1, Ordering::Relaxed);
+                return true;
             }
-            return released;
+            Err(error) => {
+                warn!(%error, task_id = %task.id, "cannot journal task start; releasing");
+                let released = release(client, task.id, task.claim_epoch, false).await;
+                if released {
+                    self.counters.released.fetch_add(1, Ordering::Relaxed);
+                }
+                return released;
+            }
         }
 
         let invocation = self.invoke(task);
@@ -744,15 +633,26 @@ impl Worker {
                 retryable: false,
             },
         };
-        if let Err(e) = store.record_outcome(task.id, &outcome).await {
-            warn!(error = %e, task_id = %task.id, "failed to journal task outcome");
+        self.settle_outcome(task, key, &outcome).await
+    }
+
+    async fn settle_outcome(&self, task: &RemoteTask, key: &ClaimKey, outcome: &Outcome) -> bool {
+        let client = &self.deps.client;
+        let store = &self.deps.store;
+        match store.record_outcome(key, outcome).await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.counters.lost.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+            Err(error) => warn!(%error, task_id = %task.id, "failed to journal task outcome"),
         }
 
         let mut backoff = Duration::from_millis(500);
         for attempt in 1..=DELIVERY_ATTEMPTS {
-            match deliver_once(client, task.id, task.claim_epoch, &outcome).await {
+            match deliver_once(client, task.id, task.claim_epoch, outcome).await {
                 LeaseResponse::Accepted => {
-                    self.counters.record_outcome(&outcome);
+                    self.counters.record_outcome(outcome);
                     return true;
                 }
                 LeaseResponse::LostOwnership => {

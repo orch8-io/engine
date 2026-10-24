@@ -310,18 +310,22 @@ async fn background_window_runs_until_idle() {
 
 async fn seed(
     store: &ClaimStore,
-    base: &str,
+    client: &NodeClient,
     started: bool,
     outcome: Option<Outcome>,
 ) -> uuid::Uuid {
     let id = uuid::Uuid::new_v4();
     let task: RemoteTask = serde_json::from_value(task_json(id)).unwrap();
-    store.insert(&task, "w", base).await.unwrap();
+    let key = ClaimKey::for_task(&task, &client.worker_id(), client.api_base());
+    store
+        .insert(&task, &client.worker_id(), client.api_base())
+        .await
+        .unwrap();
     if started {
-        store.mark_started(id).await.unwrap();
+        store.mark_started(&key).await.unwrap();
     }
     if let Some(outcome) = outcome {
-        store.record_outcome(id, &outcome).await.unwrap();
+        store.record_outcome(&key, &outcome).await.unwrap();
     }
     id
 }
@@ -330,11 +334,11 @@ async fn seed(
 async fn restart_drain_releases_or_redelivers_every_orphaned_claim() {
     let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
     let h = harness(&server, ok_handler(Duration::ZERO)).await;
-    let unstarted = seed(&h.store, &server.base, false, None).await;
-    let started = seed(&h.store, &server.base, true, None).await;
+    let unstarted = seed(&h.store, &h.client, false, None).await;
+    let started = seed(&h.store, &h.client, true, None).await;
     let finished = seed(
         &h.store,
-        &server.base,
+        &h.client,
         true,
         Some(Outcome::Complete {
             output: json!({"n": 1}),
@@ -342,8 +346,7 @@ async fn restart_drain_releases_or_redelivers_every_orphaned_claim() {
     )
     .await;
 
-    let none = StdMutex::new(HashSet::new());
-    let settled = drain_orphans(&h.client, &h.store, &none, None).await;
+    let settled = drain_orphans(&h.client, &h.store, None).await;
     assert_eq!(settled, 3);
     assert_eq!(h.store.count().await.unwrap(), 0);
 
@@ -373,9 +376,8 @@ async fn release_falls_back_to_retryable_fail_on_pre_contract_servers() {
     });
     let server = spawn_control_plane(route).await;
     let h = harness(&server, ok_handler(Duration::ZERO)).await;
-    let id = seed(&h.store, &server.base, true, None).await;
-    let none = StdMutex::new(HashSet::new());
-    assert_eq!(drain_orphans(&h.client, &h.store, &none, None).await, 1);
+    let id = seed(&h.store, &h.client, true, None).await;
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
     let fail = &server.bodies(&format!("{id}/fail"))[0];
     assert_eq!(fail["retryable"], true);
     assert_eq!(h.store.count().await.unwrap(), 0);
@@ -391,14 +393,20 @@ async fn unreachable_control_plane_keeps_claims_for_the_next_drain() {
     });
     let server = spawn_control_plane(route).await;
     let h = harness(&server, ok_handler(Duration::ZERO)).await;
-    seed(&h.store, &server.base, false, None).await;
+    seed(&h.store, &h.client, false, None).await;
     // In-flight claims are never touched by the drain.
-    let busy = seed(&h.store, &server.base, false, None).await;
-    let in_flight = StdMutex::new(std::iter::once(busy).collect());
-    assert_eq!(
-        drain_orphans(&h.client, &h.store, &in_flight, None).await,
-        0
-    );
+    let busy = seed(&h.store, &h.client, false, None).await;
+    let busy_key = h
+        .store
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.key.task_id == busy)
+        .unwrap()
+        .key;
+    let _live = h.store.reserve(&busy_key).unwrap();
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 0);
     assert_eq!(h.store.count().await.unwrap(), 2);
     assert_eq!(
         calls.load(Ordering::Relaxed),
@@ -525,4 +533,214 @@ async fn handler_claim_loss_clears_journal_without_reporting_an_outcome() {
     assert_eq!(server.count(&format!("{task_id}/complete")), 0);
     assert_eq!(server.count(&format!("{task_id}/fail")), 0);
     assert_eq!(server.count(&format!("{task_id}/release")), 0);
+}
+
+fn successor(h: &Harness) -> Arc<Worker> {
+    Worker::new(
+        WorkerDeps {
+            client: Arc::clone(&h.client),
+            store: h.store.clone(),
+            registry: Arc::clone(&h.worker.deps.registry),
+            foreign_handlers: h.worker.deps.foreign_handlers.clone(),
+            storage: Arc::clone(&h.worker.deps.storage),
+            signals: h.worker.deps.signals.clone(),
+            stragglers: Arc::clone(&h.worker.deps.stragglers),
+        },
+        WorkerOptions::default(),
+    )
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restarted_worker_does_not_recover_a_predecessors_live_claim() {
+    let id = uuid::Uuid::new_v4();
+    let server = spawn_control_plane(route_with(vec![task_json(id)], 200, 200)).await;
+    let mut h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let entered = Arc::new(Notify::new());
+    let finish = Arc::new(Notify::new());
+    let started = Arc::clone(&entered);
+    let release = Arc::clone(&finish);
+    let mut registry = HandlerRegistry::new();
+    registry.register("scan", move |_| {
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        async move {
+            started.notify_one();
+            release.notified().await;
+            Ok(json!({"scanned": true}))
+        }
+    });
+    Arc::get_mut(&mut h.worker).unwrap().deps.registry = Arc::new(registry);
+    h.worker.spawn(&tokio::runtime::Handle::current());
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    h.worker.stop();
+    let next = successor(&h);
+    let recovered = drain_orphans(&next.deps.client, &next.deps.store, None).await;
+    let releases = server.count(&format!("{id}/release"));
+    finish.notify_one();
+    wait_for(|| server.count(&format!("{id}/complete")) == 1).await;
+    next.stop();
+    assert_eq!(recovered, 0, "a live predecessor claim is not an orphan");
+    assert_eq!(releases, 0, "restart must not revoke in-process work");
+}
+
+#[tokio::test]
+async fn stale_journal_cleanup_does_not_delete_a_newer_claim_generation() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let id = uuid::Uuid::new_v4();
+    let old: RemoteTask = serde_json::from_value(task_json(id)).unwrap();
+    let mut new = old.clone();
+    new.claim_epoch += 1;
+    h.store
+        .insert(&old, &h.client.worker_id(), h.client.api_base())
+        .await
+        .unwrap();
+    h.store
+        .insert(&new, &h.client.worker_id(), h.client.api_base())
+        .await
+        .unwrap();
+    h.store
+        .delete(&ClaimKey::for_task(
+            &old,
+            &h.client.worker_id(),
+            h.client.api_base(),
+        ))
+        .await;
+    let rows = h.store.list().await.unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row.key.claim_epoch == new.claim_epoch),
+        "settling an old epoch must preserve the new epoch's crash journal"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_claim_preserves_its_recorded_outcome() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let task: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    let outcome = Outcome::Complete {
+        output: json!({"receipt": "already-performed"}),
+    };
+    h.store
+        .insert(&task, &h.client.worker_id(), h.client.api_base())
+        .await
+        .unwrap();
+    let key = ClaimKey::for_task(&task, &h.client.worker_id(), h.client.api_base());
+    h.store.mark_started(&key).await.unwrap();
+    h.store.record_outcome(&key, &outcome).await.unwrap();
+    h.store
+        .insert(&task, &h.client.worker_id(), h.client.api_base())
+        .await
+        .unwrap();
+    let rows = h.store.list().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].started, "redelivery must preserve the start marker");
+    assert_eq!(rows[0].outcome.as_ref(), Some(&outcome));
+}
+
+#[tokio::test]
+async fn independent_control_planes_keep_claims_with_the_same_task_id() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let task: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    h.store
+        .insert(&task, &h.client.worker_id(), h.client.api_base())
+        .await
+        .unwrap();
+    h.store
+        .insert(&task, &h.client.worker_id(), "https://other.example/api/v1")
+        .await
+        .unwrap();
+    assert_eq!(
+        h.store.count().await.unwrap(),
+        2,
+        "a task ID from another control plane must not replace recovery evidence"
+    );
+}
+
+#[tokio::test]
+async fn recovery_does_not_submit_another_workers_outcome() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let task: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    h.store
+        .insert(&task, "another-runtime", h.client.api_base())
+        .await
+        .unwrap();
+    let key = ClaimKey::for_task(&task, "another-runtime", h.client.api_base());
+    h.store.mark_started(&key).await.unwrap();
+    h.store
+        .record_outcome(
+            &key,
+            &Outcome::Complete {
+                output: json!({"private": "other-runtime"}),
+            },
+        )
+        .await
+        .unwrap();
+    let settled = drain_orphans(&h.client, &h.store, None).await;
+    assert_eq!(settled, 0, "recovery must use the original worker identity");
+    assert_eq!(server.count(&format!("{}/complete", task.id)), 0);
+    assert_eq!(h.store.count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn earlier_epoch_mutations_do_not_mark_or_overwrite_a_newer_epoch() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let old: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    let mut new = old.clone();
+    new.claim_epoch += 1;
+    h.store
+        .insert(&old, &h.client.worker_id(), h.client.api_base())
+        .await
+        .unwrap();
+    h.store
+        .insert(&new, &h.client.worker_id(), h.client.api_base())
+        .await
+        .unwrap();
+    let old_key = ClaimKey::for_task(&old, &h.client.worker_id(), h.client.api_base());
+    assert!(h.store.mark_started(&old_key).await.unwrap());
+    assert!(
+        h.store
+            .record_outcome(
+                &old_key,
+                &Outcome::Complete {
+                    output: json!({"old":true})
+                }
+            )
+            .await
+            .unwrap()
+    );
+    let new_key = ClaimKey::for_task(&new, &h.client.worker_id(), h.client.api_base());
+    let row = h.store.get(&new_key).await.unwrap().unwrap();
+    assert!(!row.started);
+    assert!(
+        row.outcome.is_none(),
+        "an older invocation cannot manufacture the new epoch's outcome"
+    );
+}
+
+#[tokio::test]
+async fn panicking_invocation_releases_local_reservations_for_crash_recovery() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let mut h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let mut registry = HandlerRegistry::new();
+    registry.register("scan", |_| async {
+        panic!("application callback panicked")
+    });
+    Arc::get_mut(&mut h.worker).unwrap().deps.registry = Arc::new(registry);
+    let task: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    let id = task.id;
+    let worker = Arc::clone(&h.worker);
+    let result =
+        tokio::spawn(async move { worker.execute(task, Duration::from_secs(1)).await }).await;
+    assert!(result.unwrap_err().is_panic());
+    assert_eq!(h.worker.stats().in_flight, 0);
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert_eq!(server.bodies(&format!("{id}/release"))[0]["started"], true);
 }
