@@ -197,6 +197,21 @@ pub(super) async fn get_child_for_activation(
     row.map(InstanceRow::into_instance).transpose()
 }
 
+pub(super) async fn get_child_for_adoption(
+    store: &PostgresStorage,
+    parent: InstanceId,
+    block: &str,
+    suffix: &str,
+) -> Result<Option<TaskInstance>, StorageError> {
+    let row = sqlx::query_as::<_, InstanceRow>(crate::child_adoption::POSTGRES)
+        .bind(parent.into_uuid())
+        .bind(block)
+        .bind(suffix)
+        .fetch_optional(&store.pool)
+        .await?;
+    row.map(InstanceRow::into_instance).transpose()
+}
+
 pub(super) async fn list_orphaned_children(
     store: &PostgresStorage,
     limit: u32,

@@ -360,6 +360,11 @@ CREATE INDEX IF NOT EXISTS idx_child_legacy_block
     ON task_instances(parent_instance_id, json_extract(metadata, '$._parent_block_id'), created_at, id)
     WHERE parent_instance_id IS NOT NULL AND json_type(metadata, '$._parent_activation') IS NULL
       AND json_type(metadata, '$._parent_block_id') = 'text';
+CREATE INDEX IF NOT EXISTS idx_child_adoption
+    ON task_instances(parent_instance_id, json_extract(metadata, '$._parent_block_id'), (CASE WHEN instr(json_extract(metadata, '$._parent_activation'), '/') = 0 THEN '' ELSE substr(json_extract(metadata, '$._parent_activation'), instr(json_extract(metadata, '$._parent_activation'), '/') + 1) END), created_at DESC, id DESC)
+    WHERE parent_instance_id IS NOT NULL AND json_type(metadata, '$._parent_block_id') = 'text'
+      AND json_type(metadata, '$._parent_activation') = 'text'
+      AND json_type(metadata, '$._superseded') IS NULL AND state <> 'cancelled';
 CREATE INDEX IF NOT EXISTS idx_task_instances_session ON task_instances(session_id);
 -- Scheduler claim (Postgres migration 101): `state = 'scheduled' ORDER BY
 -- priority DESC, next_fire_at ASC` served straight from the index instead of

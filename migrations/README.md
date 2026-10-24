@@ -118,3 +118,14 @@ CONCURRENTLY IF NOT EXISTS` statements in the migration header outside a
 transaction, one at a time, before upgrading. The normal migration then reuses
 those indexes. Keep `CONCURRENTLY` out of the sqlx migration itself, as explained
 above. SQLite creates the equivalent indexes through its idempotent schema setup.
+
+
+## Upgrading large installs to 123
+
+Migration 123 adds a partial composite index for historical child adoption,
+qualified by parent, block and enclosing activation suffix. It excludes
+cancelled and explicitly superseded children. Run the equivalent `CREATE INDEX
+CONCURRENTLY IF NOT EXISTS` statement from the migration header online, outside
+a transaction, before upgrading large installations. The normal migration then
+reuses that index. It changes no stored workflow columns or activation values.
+SQLite adds the equivalent index through idempotent schema setup.

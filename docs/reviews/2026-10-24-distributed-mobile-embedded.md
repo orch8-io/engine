@@ -1390,10 +1390,9 @@ query contracts and embedded recovery pass on required isolated Postgres; all
 owned containers are removed. Documentation, formatting and whitespace checks
 pass. Hosted current-head checks remain required before merge.
 
-**Still open:** adoption after a rebuilt node or an activation miss still reads
-history to locate a previous run's child. This is separate from periodic/current
-activation reads and remains part of the long-running workflow review. Public
-account/catalog ownership and the remaining original/ADR gates also remain open.
+Historical adoption after an activation miss was tracked separately; DME088
+below addresses that path. Public account/catalog ownership and the remaining
+original/ADR gates remain open.
 
 ## SDK main-branch inventory recheck
 
@@ -1405,6 +1404,63 @@ finds only the two monitored engine PRs. These are repository/CI observations,
 not a claim that current native artifacts or the scoped SDK contract satisfy
 ADR-0002. Those release/platform gates remain open.
 
+
+### DME088 — Historical child adoption loaded the parent's full history (fixed)
+
+**HIGH for long-running loops, effort M.** A rebuilt execution node or a new
+loop activation fetched every historical child before selecting a prior run.
+The claimed-evaluation regression fails on the previous code when full-history
+reads are rejected, with 2,048 old children present.
+
+The additive `get_child_for_adoption` lookup selects the newest eligible child
+by parent, block and the exact enclosing-loop/for-each activation suffix. It
+preserves reverse child ordering, including created-at/ID ties, and excludes
+cancelled children, absent/non-string activation keys, and every present
+supersession marker (including false/null). Native SQLite/Postgres use one
+partial composite index, select one candidate ID and fetch that row. Postgres
+hashes long block/suffix values for index width and still compares full strings.
+Encrypted and fault wrappers delegate the lookup. Custom backends preserve their
+existing behavior through a default implementation and need an override for the
+native work bounds. Migration 123 includes rollback and online precreation.
+
+Dispatch uses indexed current-activation and previous-run lookups throughout.
+The old in-memory selector was removed, and its loop-key test now uses real
+storage reads. Selection remains a read: the existing claimed adoption write
+still rechecks the original parent claim, child activation, ownership and
+eligibility before rebinding or retrying a child.
+
+All 2,060 lean engine, 230 storage and 445 mobile library tests pass, as does
+full workspace/all-target Clippy with warnings denied. Three storage contracts
+pass on plain/encrypted SQLite/Postgres, covering 2,048 historical rows (half
+older eligible matches), ordering, states, malformed metadata, supersession,
+parent isolation, decrypted data and long Unicode keys. Production query plans
+use the adoption index without a history sort, bitmap heap scan or Postgres
+sequential table scan. This is access-path evidence, not a throughput benchmark.
+Three claimed-evaluation and eleven lifecycle tests pass against required
+isolated Postgres; the rebuilt-parent test forbids bulk history reads. The owned
+container is removed. Hosted exact-head checks remain required before merge.
+
+### DME089 — Swift cancellation fixture did not establish host entry (fixed in test)
+
+**MEDIUM, effort S.** PR #285's simulator job 120975549580 failed waiting for a
+host cancellation event. The test had a five-second provider deadline but never
+established that the host fetch entered before it elapsed. Source inspection
+shows queued expiry may correctly bypass host invocation; the old failure alone
+did not distinguish that from delayed cancellation observation.
+
+The fixture now observes physical host entry before checking cancellation,
+drives the blocking callback on a host thread, and checks the actual timeout
+error. Entry-sensitive tests use a larger startup window and isolated budgets;
+the separate eight-provider test still exercises the real process-wide shared
+budget. Retirement also asserts that physical admission remains held while the
+non-cooperative callback is alive. Completion polls use monotonic deadlines,
+report the calling test location and stop on failure. Real timeout, late-result,
+single-flight, cancellation and capacity assertions remain covered.
+
+All 12 token-provider tests pass on macOS with the production Swift wrappers and
+existing ABI-compatible native artifact. This validates the Swift test logic;
+current iOS simulator execution and native release parity remain hosted/platform
+gates. The broader original review and ADR-0002 gates remain open.
 
 ### DME092 — New child lookup migrations omitted release metadata (fixed)
 

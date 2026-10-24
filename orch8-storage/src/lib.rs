@@ -71,7 +71,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 122;
+pub const STORAGE_SCHEMA_VERSION: u32 = 123;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -1064,6 +1064,42 @@ pub trait InstanceStore: Send + Sync + 'static {
             })
         });
         Ok(index.and_then(|index| children.into_iter().nth(index)))
+    }
+
+    /// Newest eligible child for an earlier run of this block and enclosing
+    /// loop/for-each activation suffix (everything after the first slash, or
+    /// empty for a top-level activation). Cancelled children, any present
+    /// `_superseded` key, and absent/non-string activation keys are excluded.
+    /// This read does not authorize adoption: the claimed write must recheck it.
+    /// Custom backends preserve their existing reverse child order by default.
+    async fn get_child_for_adoption(
+        &self,
+        parent_instance_id: InstanceId,
+        block_id: &str,
+        activation_suffix: &str,
+    ) -> Result<Option<TaskInstance>, StorageError> {
+        Ok(self
+            .get_child_instances(parent_instance_id)
+            .await?
+            .into_iter()
+            .rev()
+            .find(|child| {
+                child
+                    .metadata
+                    .get("_parent_block_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(block_id)
+                    && child
+                        .metadata
+                        .get("_parent_activation")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| {
+                            value.split_once('/').map_or("", |(_, suffix)| suffix)
+                                == activation_suffix
+                        })
+                    && child.state != InstanceState::Cancelled
+                    && child.metadata.get("_superseded").is_none()
+            }))
     }
 
     /// Ids of live (`scheduled`/`running`/`waiting`/`paused`) instances whose

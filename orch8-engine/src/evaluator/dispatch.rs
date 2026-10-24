@@ -67,28 +67,6 @@ async fn sub_sequence_activation_key(
     Ok(key)
 }
 
-/// Find the child spawned by this activation. Children created before
-/// activation keys existed carry only `_parent_block_id`; they are matched by
-/// block id so in-flight instances keep working across an upgrade.
-fn find_activation_child<'c>(
-    children: &'c [TaskInstance],
-    block_id: &str,
-    activation: &str,
-) -> Option<&'c TaskInstance> {
-    let meta_str = |c: &'c TaskInstance, key: &str| -> Option<&'c str> {
-        c.metadata.get(key).and_then(serde_json::Value::as_str)
-    };
-    children
-        .iter()
-        .find(|c| meta_str(c, PARENT_ACTIVATION_KEY) == Some(activation))
-        .or_else(|| {
-            children.iter().find(|c| {
-                c.metadata.get(PARENT_ACTIVATION_KEY).is_none()
-                    && meta_str(c, "_parent_block_id") == Some(block_id)
-            })
-        })
-}
-
 /// The loop / `for_each` part of an activation key (everything after the node
 /// id), which is stable across a tree rebuild.
 fn activation_suffix(activation: &str) -> &str {
@@ -107,28 +85,18 @@ pub const SUPERSEDED_CHILD_KEY: &str = "_superseded";
 /// adopted: the caller spawns a fresh one.
 async fn adopt_previous_child(
     storage: &(impl crate::control::ExecutionControl + ?Sized),
-    children: &[TaskInstance],
+    parent: orch8_types::ids::InstanceId,
     block_id: &str,
     activation: &str,
 ) -> Result<Option<TaskInstance>, EngineError> {
-    use orch8_types::instance::InstanceState;
-
-    let suffix = activation_suffix(activation);
-    let Some(prev) = children.iter().rev().find(|c| {
-        c.metadata
-            .get("_parent_block_id")
-            .and_then(serde_json::Value::as_str)
-            == Some(block_id)
-            && c.metadata
-                .get(PARENT_ACTIVATION_KEY)
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|a| activation_suffix(a) == suffix)
-            && c.state != InstanceState::Cancelled
-            && c.metadata.get(SUPERSEDED_CHILD_KEY).is_none()
-    }) else {
+    let Some(prev) = storage
+        .backend()
+        .get_child_for_adoption(parent, block_id, activation_suffix(activation))
+        .await?
+    else {
         return Ok(None);
     };
-    storage.adopt_child_instance(prev, activation).await
+    storage.adopt_child_instance(&prev, activation).await
 }
 
 /// `true` when a `Waiting` `SubSequence` node of `instance` has a child (for
@@ -337,17 +305,16 @@ pub(super) async fn dispatch_block(
             let current = storage
                 .get_child_for_activation(instance.id, ss_def.id.as_str(), &activation)
                 .await?;
-            // Rebuilt trees may adopt an earlier run's child. Only this miss
-            // path needs historical children; current activations stay indexed.
+            // Rebuilt trees may adopt an earlier run's child. Native lookup
+            // indexes bound both reads; the claimed write rechecks the child.
             let recovered = if node.state != NodeState::Waiting && current.is_none() {
-                let children = storage.get_child_instances(instance.id).await?;
-                // A child may have appeared since the first snapshot.
-                if let Some(child) =
-                    find_activation_child(&children, ss_def.id.as_str(), &activation)
+                if let Some(child) = storage
+                    .get_child_for_activation(instance.id, ss_def.id.as_str(), &activation)
+                    .await?
                 {
-                    Some(child.clone())
+                    Some(child)
                 } else {
-                    adopt_previous_child(&control, &children, ss_def.id.as_str(), &activation)
+                    adopt_previous_child(&control, instance.id, ss_def.id.as_str(), &activation)
                         .await?
                 }
             } else {
@@ -526,7 +493,7 @@ pub(super) async fn dispatch_block(
 mod tests {
     use super::{
         MAX_SUB_SEQUENCE_DEPTH, PARENT_ACTIVATION_KEY, SUB_SEQUENCE_DEPTH_KEY, child_context_from,
-        find_activation_child, next_sub_sequence_depth, sub_sequence_activation_key,
+        next_sub_sequence_depth, sub_sequence_activation_key,
     };
     use orch8_types::context::ExecutionContext;
     use serde_json::json;
@@ -648,25 +615,34 @@ mod tests {
         assert_ne!(k0, k1);
         assert!(k0.starts_with(&ss.id.to_string()));
 
-        let child0 = instance_with_metadata(json!({
+        let mut child0 = instance_with_metadata(json!({
             "_parent_block_id": "ss",
             PARENT_ACTIVATION_KEY: k0,
         }));
-        let children = vec![child0.clone()];
+        child0.parent_instance_id = Some(parent.id);
+        s.create_instance(&child0).await.unwrap();
         assert_eq!(
-            find_activation_child(&children, "ss", &k0).map(|c| c.id),
+            s.get_child_for_activation(parent.id, "ss", &k0)
+                .await
+                .unwrap()
+                .map(|c| c.id),
             Some(child0.id)
         );
         assert!(
-            find_activation_child(&children, "ss", &k1).is_none(),
+            s.get_child_for_activation(parent.id, "ss", &k1)
+                .await
+                .unwrap()
+                .is_none(),
             "iteration 2 must spawn its own child"
         );
-
-        // Children spawned before activation keys existed still match.
-        let legacy = instance_with_metadata(json!({ "_parent_block_id": "ss" }));
-        let children = vec![legacy.clone()];
+        let mut legacy = instance_with_metadata(json!({ "_parent_block_id": "ss" }));
+        legacy.parent_instance_id = Some(parent.id);
+        s.create_instance(&legacy).await.unwrap();
         assert_eq!(
-            find_activation_child(&children, "ss", &k1).map(|c| c.id),
+            s.get_child_for_activation(parent.id, "ss", &k1)
+                .await
+                .unwrap()
+                .map(|c| c.id),
             Some(legacy.id)
         );
     }
