@@ -599,12 +599,25 @@ and cancellation checkpoints prevent subsequent work. Cursor, ETag and
 evaluation metadata commit together. An error after an accepted operation does
 not imply that an already-started transaction was rolled back.
 
+Manifest acceptance and evaluation have separate durable cursors. After root
+verification and key validation, the accepted version and SHA-256 digest of the
+original signed body commit atomically with its key set before workflow changes.
+A partial download, cancellation or failed evaluation does not lower that fence.
+The identical document can retry; changing signed body content requires a higher
+manifest version, including when the registered handlers or SDK version change.
+The publisher already assigns a strictly increasing version on generation.
+While accepted work remains unevaluated, sync bypasses the old ETag. A 304 is
+accepted only for an eligible previously applied representation. Evaluation
+metadata cannot commit for a document older than the current acceptance fence.
+Legacy databases retain their existing applied version as the initial floor.
+
 Multiple accounts/catalogs in one database with explicit scopes is the confirmed
 target. [ADR-0002](adr/0002-mobile-account-and-catalog-scopes.md) specifies that
 work and its open gates. Internal persistence now has account/catalog bindings,
 durable session epochs, isolated atomic catalog metadata and signing-key sets,
-with stale-handle checks across database pools and reopen. These primitives are not exposed by
-SDK handles or connected to sync/execution yet. The current legacy sync metadata
+with stale-handle checks across database pools and reopen, plus atomic catalog
+acceptance/evaluation metadata. These primitives are not exposed by SDK handles
+or connected to scoped sync/execution yet. The current legacy sync metadata
 and reconciliation still need that ownership isolation.
 
 ### MobileEngineConfig

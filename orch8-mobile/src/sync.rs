@@ -494,9 +494,17 @@ impl SyncOrchestrator {
             })?;
         let env_changed = stored_fingerprint.as_deref() != Some(fingerprint.as_str());
 
+        let trust = self.mobile_storage.manifest_trust().await?;
+
+        // A previously evaluated ETag cannot stand in for an accepted document
+        // whose effects have not finished. Fetch the complete document on retry.
         // 1. Fetch manifest with ETag support.
         let (manifest_bytes, maybe_etag) = self
-            .fetch_manifest(manifest_url, &scoped_auth, !env_changed)
+            .fetch_manifest(
+                manifest_url,
+                &scoped_auth,
+                !env_changed && !trust.pending() && trust.applied_version.is_some(),
+            )
             .await?;
 
         if manifest_bytes.is_empty() {
@@ -506,26 +514,34 @@ impl SyncOrchestrator {
         // 2. Verify manifest signature.
         let manifest: Manifest = self.verify_and_parse_manifest(&manifest_bytes)?;
 
-        // 2a. Reject stale/replayed manifests. A signature only proves the
-        // manifest was authentic at some point — it does not prove freshness.
-        // Without this check an attacker who captured an older validly-signed
-        // manifest could replay it to reinstall sequences that were since
-        // removed (e.g. a withdrawn buggy/exploitable workflow). Enforce a
-        // strictly-increasing manifest_version.
-        if let Some(last_version) = self.get_last_manifest_version().await?
-            && (manifest.manifest_version < last_version
-                || (manifest.manifest_version == last_version && !env_changed))
+        let body = manifest_bytes
+            .splitn(2, |byte| *byte == b'\n')
+            .nth(1)
+            .ok_or_else(|| SyncError::InvalidManifest {
+                message: "manifest missing body".into(),
+            })?;
+        let digest = to_hex(&Sha256::digest(body));
+
+        // Acceptance precedes workflow effects, independently of whether every
+        // download succeeds. An older signed document cannot undo a removal or
+        // key rotation just because the applied/evaluation cursor trails it.
+        if trust
+            .floor()
+            .is_some_and(|floor| manifest.manifest_version < floor)
         {
             warn!(
-                seen = manifest.manifest_version,
-                last = last_version,
-                "rejecting stale/replayed manifest (version not newer than last applied)"
+                version = manifest.manifest_version,
+                "rejecting manifest below durable acceptance fence"
             );
             return Ok(result);
         }
+        trust.check_candidate(manifest.manifest_version, &digest)?;
+        if trust.applied_version == Some(manifest.manifest_version) && !env_changed {
+            return Ok(result);
+        }
 
-        // 3. Validate signing keys against root key and cache them.
-        let trusted_keys = self.cache_signing_keys(&manifest).await?;
+        // 3. Atomically accept the verified document and its validated key set.
+        let trusted_keys = self.cache_signing_keys(&manifest, &digest).await?;
 
         // 4. Reconcile removed sequences.
         let local_sequences = self.list_local_sequences().await?;
@@ -557,10 +573,11 @@ impl SyncOrchestrator {
         // manifest instead of getting a 304 and never installing the entry.
         self.check_active()?;
         if retryable_skips == 0 {
-            self.persist_sync_metadata(
+            self.persist_accepted_sync_metadata(
                 maybe_etag,
-                Some(manifest.manifest_version),
-                Some(&fingerprint),
+                manifest.manifest_version,
+                &fingerprint,
+                &digest,
             )
             .await?;
         } else {
@@ -569,11 +586,12 @@ impl SyncOrchestrator {
                 "sync had transient skips; manifest cursor not advanced"
             );
             self.mobile_storage
-                .set_sync_metadata("last_sync_ts", &Utc::now().to_rfc3339())
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
+                .commit_manifest_evaluation(
+                    &[("last_sync_ts", Some(&Utc::now().to_rfc3339()))],
+                    manifest.manifest_version,
+                    &digest,
+                )
+                .await?;
         }
 
         self.check_active()?;
@@ -592,6 +610,7 @@ impl SyncOrchestrator {
     async fn cache_signing_keys(
         &self,
         manifest: &Manifest,
+        digest: &str,
     ) -> Result<HashMap<String, VerifyingKey>, MobileError> {
         self.check_active()?;
         let mut trusted_keys = HashMap::new();
@@ -617,7 +636,7 @@ impl SyncOrchestrator {
             .collect();
         self.check_active()?;
         self.mobile_storage
-            .replace_trusted_keys(&keys)
+            .accept_manifest_trust(&keys, manifest.manifest_version, digest)
             .await
             .map_err(|error| MobileError::Storage {
                 message: error.to_string(),
@@ -625,6 +644,15 @@ impl SyncOrchestrator {
 
         self.check_active()?;
         Ok(trusted_keys)
+    }
+
+    #[cfg(test)]
+    async fn cache_test_signing_keys(
+        &self,
+        manifest: &Manifest,
+    ) -> Result<HashMap<String, VerifyingKey>, MobileError> {
+        let digest = to_hex(&Sha256::digest(serde_json::to_vec(manifest).unwrap()));
+        self.cache_signing_keys(manifest, &digest).await
     }
 
     /// Reconcile removed sequences: process explicit removals from the manifest
@@ -834,13 +862,42 @@ impl SyncOrchestrator {
         Ok((added, updated, skipped, sig_failures, retryable))
     }
 
-    /// Persist sync timestamp, optional `ETag`, and optional applied manifest
-    /// version after a successful sync.
+    async fn persist_accepted_sync_metadata(
+        &self,
+        etag: Option<String>,
+        version: i64,
+        fingerprint: &str,
+        digest: &str,
+    ) -> Result<(), MobileError> {
+        self.persist_sync_metadata_inner(
+            etag,
+            Some(version),
+            Some(fingerprint),
+            Some((version, digest)),
+        )
+        .await
+    }
+
+    /// Prepare legacy metadata snapshots for transaction/upgrade tests.
+    #[cfg(test)]
     async fn persist_sync_metadata(
         &self,
         etag: Option<String>,
         manifest_version: Option<i64>,
         fingerprint: Option<&str>,
+    ) -> Result<(), MobileError> {
+        self.persist_sync_metadata_inner(etag, manifest_version, fingerprint, None)
+            .await
+    }
+
+    /// Persist sync timestamp, optional `ETag`, and optional applied manifest
+    /// version after a successful sync.
+    async fn persist_sync_metadata_inner(
+        &self,
+        etag: Option<String>,
+        manifest_version: Option<i64>,
+        fingerprint: Option<&str>,
+        acceptance: Option<(i64, &str)>,
     ) -> Result<(), MobileError> {
         self.check_active()?;
         let timestamp = Utc::now().to_rfc3339();
@@ -855,14 +912,24 @@ impl SyncOrchestrator {
         if let Some(fingerprint) = fingerprint {
             changes.push((ENV_FINGERPRINT_KEY, Some(fingerprint)));
         }
-        self.mobile_storage
-            .update_sync_metadata_batch(&changes)
-            .await
-            .map_err(MobileError::from)
+        match acceptance {
+            Some((version, digest)) => {
+                self.mobile_storage
+                    .commit_manifest_evaluation(&changes, version, digest)
+                    .await
+            }
+            None => {
+                self.mobile_storage
+                    .update_sync_metadata_batch(&changes)
+                    .await
+            }
+        }
+        .map_err(MobileError::from)
     }
 
     /// Last successfully-applied manifest version, used to reject replays of
     /// older signed manifests. Returns `None` before the first sync.
+    #[cfg(test)]
     async fn get_last_manifest_version(&self) -> Result<Option<i64>, MobileError> {
         let raw = self
             .mobile_storage
@@ -904,6 +971,12 @@ impl SyncOrchestrator {
             .await?;
 
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            if cached_etag.is_none() {
+                return Err(SyncError::Network {
+                    message: "manifest returned 304 without an eligible validator".into(),
+                }
+                .into());
+            }
             return Ok((Vec::new(), None));
         }
 
@@ -1384,7 +1457,7 @@ mod tests {
             generated_at: Utc::now(),
         };
 
-        let keys = orch.cache_signing_keys(&manifest).await.unwrap();
+        let keys = orch.cache_test_signing_keys(&manifest).await.unwrap();
         assert_eq!(keys.len(), 1);
         assert!(keys.contains_key("test-key"));
 
@@ -1785,6 +1858,15 @@ mod tests {
             "0.4.0".to_string(),
             50,
         );
+
+        orch.mobile_storage
+            .set_sync_metadata(ENV_FINGERPRINT_KEY, &orch.env_fingerprint(&HashSet::new()))
+            .await
+            .unwrap();
+        orch.mobile_storage
+            .set_sync_metadata("last_manifest_version", "1")
+            .await
+            .unwrap();
 
         // Spin up a tiny HTTP server that returns 304.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

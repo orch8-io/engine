@@ -3,6 +3,7 @@
 //! Descriptors must come from the host's trusted account context. Matching a
 //! descriptor here does not verify a bearer token or a remote manifest audience.
 use super::MobileStorage;
+use super::manifest::{ACCEPTED_DIGEST, ACCEPTED_VERSION, ManifestTrust};
 use orch8_types::error::StorageError;
 use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
@@ -64,6 +65,32 @@ async fn fence_catalog(
     .await?;
     if !exists {
         return Err(invalid("mobile catalog scope is retired or foreign"));
+    }
+    Ok(())
+}
+
+async fn catalog_trust_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    scope: &CatalogScope,
+) -> Result<ManifestTrust, StorageError> {
+    let rows = sqlx::query_as("SELECT key, value FROM mobile_catalog_metadata WHERE account_id = ?1 AND catalog_id = ?2 AND key IN ('accepted_manifest_version', 'accepted_manifest_digest', 'last_manifest_version')")
+        .bind(&scope.account.id).bind(&scope.id).fetch_all(&mut **tx).await?;
+    ManifestTrust::from_rows(rows)
+}
+
+async fn write_metadata_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    scope: &CatalogScope,
+    values: &[(&str, Option<&str>)],
+) -> Result<(), StorageError> {
+    for (key, value) in values {
+        if let Some(value) = value {
+            sqlx::query("INSERT INTO mobile_catalog_metadata (account_id, catalog_id, key, value) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(account_id, catalog_id, key) DO UPDATE SET value = excluded.value")
+                .bind(&scope.account.id).bind(&scope.id).bind(key).bind(value).execute(&mut **tx).await?;
+        } else {
+            sqlx::query("DELETE FROM mobile_catalog_metadata WHERE account_id = ?1 AND catalog_id = ?2 AND key = ?3")
+                .bind(&scope.account.id).bind(&scope.id).bind(key).execute(&mut **tx).await?;
+        }
     }
     Ok(())
 }
@@ -177,19 +204,24 @@ impl MobileStorage {
     ) -> Result<(), StorageError> {
         for (key, _) in values {
             validate(key)?;
+            if [
+                ACCEPTED_VERSION,
+                ACCEPTED_DIGEST,
+                "last_manifest_version",
+                "manifest_etag",
+                "last_sync_ts",
+                "sync_env_fingerprint",
+            ]
+            .contains(key)
+            {
+                return Err(invalid(
+                    "manifest metadata requires an accepted-document operation",
+                ));
+            }
         }
         let mut tx = self.pool().begin().await?;
         fence_catalog(&mut tx, scope).await?;
-        for (key, value) in values {
-            if let Some(value) = value {
-                sqlx::query("INSERT INTO mobile_catalog_metadata (account_id, catalog_id, key, value) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(account_id, catalog_id, key) DO UPDATE SET value = excluded.value")
-                    .bind(&scope.account.id).bind(&scope.id).bind(key).bind(value)
-                    .execute(&mut *tx).await?;
-            } else {
-                sqlx::query("DELETE FROM mobile_catalog_metadata WHERE account_id = ?1 AND catalog_id = ?2 AND key = ?3")
-                    .bind(&scope.account.id).bind(&scope.id).bind(key).execute(&mut *tx).await?;
-            }
-        }
+        write_metadata_in(&mut tx, scope, values).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -213,12 +245,35 @@ impl MobileStorage {
             .collect())
     }
 
-    /// Caller must supply the complete, verified root-authorized set. This
-    /// persistence primitive does not authenticate a manifest or its audience.
+    /// Seed key storage independently when testing its transaction/owner rules.
+    /// Production acceptance always binds keys to a manifest version/digest.
+    #[cfg(test)]
     pub(crate) async fn replace_catalog_signing_keys(
         &self,
         scope: &CatalogScope,
         keys: &[(&str, &str)],
+    ) -> Result<(), StorageError> {
+        self.replace_catalog_keys_in(scope, keys, None).await
+    }
+
+    /// Accept a verified document and its complete key set in one owner/epoch
+    /// fenced transaction. Verification and audience binding are caller duties.
+    pub(crate) async fn accept_catalog_manifest(
+        &self,
+        scope: &CatalogScope,
+        keys: &[(&str, &str)],
+        version: i64,
+        digest: &str,
+    ) -> Result<(), StorageError> {
+        self.replace_catalog_keys_in(scope, keys, Some((version, digest)))
+            .await
+    }
+
+    async fn replace_catalog_keys_in(
+        &self,
+        scope: &CatalogScope,
+        keys: &[(&str, &str)],
+        acceptance: Option<(i64, &str)>,
     ) -> Result<(), StorageError> {
         let mut seen = std::collections::HashSet::new();
         for (id, key) in keys {
@@ -230,6 +285,11 @@ impl MobileStorage {
         }
         let mut tx = self.pool().begin().await?;
         fence_catalog(&mut tx, scope).await?;
+        if let Some((version, digest)) = acceptance {
+            catalog_trust_in(&mut tx, scope)
+                .await?
+                .check_candidate(version, digest)?;
+        }
         sqlx::query(
             "DELETE FROM mobile_catalog_signing_keys WHERE account_id = ?1 AND catalog_id = ?2",
         )
@@ -241,6 +301,63 @@ impl MobileStorage {
             sqlx::query("INSERT INTO mobile_catalog_signing_keys (account_id, catalog_id, key_id, public_key) VALUES (?1, ?2, ?3, ?4)")
                 .bind(&scope.account.id).bind(&scope.id).bind(id).bind(key).execute(&mut *tx).await?;
         }
+        if let Some((version, digest)) = acceptance {
+            write_metadata_in(
+                &mut tx,
+                scope,
+                &[
+                    (ACCEPTED_VERSION, Some(&version.to_string())),
+                    (ACCEPTED_DIGEST, Some(digest)),
+                ],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn catalog_manifest_trust(
+        &self,
+        scope: &CatalogScope,
+    ) -> Result<ManifestTrust, StorageError> {
+        let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT m.key, m.value FROM mobile_accounts a JOIN mobile_catalogs c ON c.account_id = a.id LEFT JOIN mobile_catalog_metadata m ON m.account_id = a.id AND m.catalog_id = c.id AND m.key IN ('accepted_manifest_version', 'accepted_manifest_digest', 'last_manifest_version') WHERE a.id = ?1 AND a.epoch = ?2 AND a.active = 1 AND c.id = ?3",
+        ).bind(&scope.account.id).bind(scope.account.epoch).bind(&scope.id).fetch_all(self.pool()).await?;
+        if rows.is_empty() {
+            return Err(invalid("mobile catalog scope is retired or foreign"));
+        }
+        ManifestTrust::from_rows(
+            rows.into_iter()
+                .filter_map(|(key, value)| key.zip(value))
+                .collect(),
+        )
+    }
+
+    /// Finish only the currently accepted document. A late older completion
+    /// cannot overwrite a newer catalog's replay fence or evaluation snapshot.
+    pub(crate) async fn commit_catalog_evaluation(
+        &self,
+        scope: &CatalogScope,
+        version: i64,
+        digest: &str,
+        etag: Option<&str>,
+        fingerprint: &str,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool().begin().await?;
+        fence_catalog(&mut tx, scope).await?;
+        let trust = catalog_trust_in(&mut tx, scope).await?;
+        trust.require_current(version, digest)?;
+        write_metadata_in(
+            &mut tx,
+            scope,
+            &[
+                ("last_manifest_version", Some(&version.to_string())),
+                ("manifest_etag", etag),
+                ("sync_env_fingerprint", Some(fingerprint)),
+                ("last_sync_ts", Some(&chrono::Utc::now().to_rfc3339())),
+            ],
+        )
+        .await?;
         tx.commit().await?;
         Ok(())
     }

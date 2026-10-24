@@ -13,6 +13,7 @@ use orch8_types::instance::InstanceState;
 
 // Internal persistence foundation; scoped execution and SDK handles are still
 // under development. Do not expose this as a complete scoped engine API.
+pub(crate) mod manifest;
 #[allow(dead_code)]
 pub(crate) mod scopes;
 
@@ -221,7 +222,45 @@ impl MobileStorage {
         &self,
         changes: &[(&str, Option<&str>)],
     ) -> Result<(), StorageError> {
+        self.update_sync_metadata_batch_inner(changes, None).await
+    }
+
+    pub(crate) async fn commit_manifest_evaluation(
+        &self,
+        changes: &[(&str, Option<&str>)],
+        version: i64,
+        digest: &str,
+    ) -> Result<(), StorageError> {
+        let expected_version = version.to_string();
+        for (key, value) in changes {
+            if [manifest::ACCEPTED_VERSION, manifest::ACCEPTED_DIGEST].contains(key)
+                || (*key == "last_manifest_version" && *value != Some(expected_version.as_str()))
+            {
+                return Err(StorageError::Conflict(
+                    "evaluation cannot change manifest acceptance identity".into(),
+                ));
+            }
+        }
+        self.update_sync_metadata_batch_inner(changes, Some((version, digest)))
+            .await
+    }
+
+    async fn update_sync_metadata_batch_inner(
+        &self,
+        changes: &[(&str, Option<&str>)],
+        acceptance: Option<(i64, &str)>,
+    ) -> Result<(), StorageError> {
         let mut tx = self.pool().begin().await?;
+        if let Some((version, digest)) = acceptance {
+            sqlx::query(
+                "UPDATE sync_metadata SET value = value WHERE key = 'accepted_manifest_version'",
+            )
+            .execute(&mut *tx)
+            .await?;
+            manifest::legacy_trust_in(&mut tx)
+                .await?
+                .require_current(version, digest)?;
+        }
         let timestamp = Utc::now().to_rfc3339();
         for (key, value) in changes {
             if let Some(value) = value {
@@ -260,31 +299,6 @@ impl MobileStorage {
     }
 
     // ── Trusted Keys ──
-
-    /// Replace the root-authorized key set atomically. A failed revocation
-    /// aborts the sync rather than leaving a removed key available for reuse.
-    pub(crate) async fn replace_trusted_keys(
-        &self,
-        keys: &[(&str, &str)],
-    ) -> Result<(), StorageError> {
-        let mut tx = self.pool().begin().await?;
-        sqlx::query("DELETE FROM trusted_keys")
-            .execute(&mut *tx)
-            .await?;
-        let now = Utc::now().to_rfc3339();
-        for (id, key) in keys {
-            sqlx::query(
-                "INSERT INTO trusted_keys (key_id, public_key, trusted_since) VALUES (?1, ?2, ?3)",
-            )
-            .bind(id)
-            .bind(key)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }
 
     pub async fn get_trusted_key(&self, key_id: &str) -> Result<Option<String>, StorageError> {
         let row: Option<(String,)> =
