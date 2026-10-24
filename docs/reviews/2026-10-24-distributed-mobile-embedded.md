@@ -28,7 +28,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; durable principal/cache binding and manifest refresh remain open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
-| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement and terminal shutdown verified; backend identity and callback execution remain open |
+| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; cache identity, restart wake recovery and callback execution remain open |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
 | Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
@@ -1237,3 +1237,62 @@ must be performed by the future scoped caller. Instance/handler/worker ownership
 sub-sequence and delegation references, account-wide cleanup/quotas, bindings,
 native/platform runtime verification and mixed legacy/scoped operation gates
 remain open under ADR-0002 and the full review matrix.
+
+### DME083 — Volatile scheduler state crossed independent backend lifetimes (fixed in source)
+
+**HIGH, effort M.** Two independent SQLite backends reproduced both failure
+directions. A tick against a database without the parent consumed the other
+backend's deferred wake, leaving its parent Waiting. With colliding instance IDs,
+the wrong database's Waiting instance was instead moved to Scheduled. The
+process-wide queue was keyed only by instance UUID. Transient failure counts
+and clearing also used process-global UUID-only keys.
+
+Both registries now qualify instance IDs by weak Arc allocation identity. The
+weak key cannot retain a closed backend/connection/runtime or transfer its old
+work to a replacement allocation. Arc clones share ownership; distinct storage
+decorators do not drain one another's work, even when they reach the same DB.
+Dead identities are pruned periodically or at admission pressure, avoiding a new
+full-map scan on every ordinary enqueue/failure. Existing process-wide hard caps,
+expiry and retry policies remain bounded.
+
+Each wake deferral has an independent generation. A storage result finishing
+after a newer deferral cannot remove that newer event. A failed initial wake is
+queued by its owner, and a false compare-and-set retains the pending retry.
+Scheduler/evaluator/built-in/step-failure signal paths retain the backend Arc
+through explicit owned helpers. Existing borrowed signal APIs remain available
+for immediate processing; new owned variants provide lifetime-bound deferral.
+A borrow never registers process-global work without a lifetime owner.
+
+Nine SQLite wake cases cover both reproductions, Arc clones, backend retirement,
+decorators, initial write failure, a lost CAS race, a new deferral racing an old
+attempt, and owned child cancellation. Two retry-budget tests cover colliding
+UUIDs, one backend clearing another's failure history, exhaustion isolation and
+retirement without retaining the backend.
+
+These registries are still process-local best-effort mechanisms. They are not
+authentication identities, persisted account epochs, durable restart wake
+journals, or complete cache/tenant/process isolation. Restart recovery after
+storage errors and the remaining original/ADR-0002 gates still require review.
+
+### DME084 — Audit-persistence CI fixture assumed a timed flush (fixed in test)
+
+**MEDIUM, effort S.** PR #281's E2E job failed because the persistence fixture
+expected audit rows after a fixed 200 ms pause/resume delay. Instance state
+publication precedes the best-effort audit write; observing Running did not
+prove that a signal-driven audit row had persisted.
+
+The fixture now completes a finite workflow and polls for persisted audit
+evidence with a bounded monotonic deadline before restart. It verifies every
+observed audit entry ID survives the actual stop/restart, replacing the previous
+length check that allowed losing two entries. Startup health readiness replaces
+another fixed sleep. The targeted case passes against the current rebuilt
+server and isolated tmpfs Postgres; the owned server/container are cleaned up.
+This verifies durability of observed records, not guaranteed auditing during
+storage outages. TypeScript typecheck passes.
+
+Validation for DME083/084: all 2,047 lean engine library tests and 445 mobile
+library tests pass. All-target Clippy passes for both with warnings denied.
+The current full server builds, and the targeted audit restart case passes with
+isolated Postgres, no skipped tests and owned-resource cleanup. TypeScript,
+documentation, formatting and whitespace checks pass. Hosted CI remains
+required before merge; the full review and ADR gates remain open.

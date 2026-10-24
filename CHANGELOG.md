@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Backend-owned embedded scheduler retries
+
+- Qualify process-local deferred parent wakes and transient failure budgets by
+  weak backend identity. Independent databases and storage decorators cannot
+  consume, apply or clear each other's work when instance UUIDs collide.
+- Retain wake generations across in-flight retry results, retry false CAS and
+  initial storage failures, and keep closed backends out of bounded registries.
+- Add owned Rust signal helpers and use them throughout scheduler, evaluator,
+  built-in and step-failure paths. Borrowed helpers retain immediate processing
+  without registering lifetime-free global retries. HTTP/FFI signatures remain
+  unchanged; these registries remain process-local rather than durable journals.
+- Fix the audit-persistence E2E fixture to await observed records and assert
+  every observed entry ID survives server restart, replacing fixed sleeps and
+  a length comparison that allowed losing entries.
+
 ### Owner-qualified mobile workflow storage
 
 - Add internal account/catalog workflow mappings backed by the engine's normal

@@ -1175,7 +1175,7 @@ pub(super) async fn execute_step_block(
                     "when guard failed to parse, failing instance"
                 );
                 return fail_instance_with_error(
-                    storage.as_ref(),
+                    storage,
                     instance,
                     webhook_config,
                     cancel,
@@ -1341,7 +1341,7 @@ pub(super) async fn execute_step_block(
         Err(crate::handlers::step_block::PrepareError::Infra(e)) => return Err(e),
         Err(other) => {
             return fail_instance_with_error(
-                storage.as_ref(),
+                storage,
                 instance,
                 webhook_config,
                 cancel,
@@ -1394,7 +1394,7 @@ pub(super) async fn execute_step_block(
             .await
     {
         return fail_instance_with_error(
-            storage.as_ref(),
+            storage,
             instance,
             webhook_config,
             cancel,
@@ -1438,14 +1438,8 @@ pub(super) async fn execute_step_block(
                 &message,
             )
             .await;
-            return fail_instance_with_error(
-                storage.as_ref(),
-                instance,
-                webhook_config,
-                cancel,
-                &message,
-            )
-            .await;
+            return fail_instance_with_error(storage, instance, webhook_config, cancel, &message)
+                .await;
         }
     };
     let placed_remotely = hard_placed
@@ -1473,14 +1467,7 @@ pub(super) async fn execute_step_block(
                     &message,
                 )
                 .await;
-                fail_instance_with_error(
-                    storage.as_ref(),
-                    instance,
-                    webhook_config,
-                    cancel,
-                    &message,
-                )
-                .await
+                fail_instance_with_error(storage, instance, webhook_config, cancel, &message).await
             }
         };
     }
@@ -1703,7 +1690,7 @@ pub(super) async fn execute_step_block(
                 return Ok(StepOutcome::Deferred);
             }
             handle_retryable_failure(
-                storage.as_ref(),
+                storage,
                 instance,
                 step_def,
                 attempt,
@@ -1761,7 +1748,7 @@ pub(super) async fn execute_step_block(
             // permanent step error — the tree-evaluator branches above are
             // bypassed when the step handler itself returns
             // `StepError::Permanent`.
-            wake_parent_if_child(storage.as_ref(), instance).await;
+            wake_parent_if_child(storage, instance).await;
 
             Ok(StepOutcome::Failed)
         }
@@ -1815,7 +1802,7 @@ async fn persist_permanent_error(
 /// [`handle_retryable_failure`] — max-attempts exhausted and a `retry_if`/
 /// `non_retryable_codes` denial both end here with the same payload shape.
 async fn fail_retryable_instance(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     attempt: u32,
@@ -1834,7 +1821,7 @@ async fn fail_retryable_instance(
         }),
     );
     crate::lifecycle::transition_claimed_instance_with_webhook(
-        storage,
+        storage.as_ref(),
         instance_id,
         Some(&instance.tenant_id),
         instance.updated_at,
@@ -1853,7 +1840,7 @@ async fn fail_retryable_instance(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_retryable_failure(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     attempt: u32,
@@ -1938,7 +1925,7 @@ pub(super) async fn handle_retryable_failure(
         );
 
         crate::lifecycle::transition_claimed_instance(
-            storage,
+            storage.as_ref(),
             instance_id,
             Some(&instance.tenant_id),
             instance.updated_at,
@@ -1954,7 +1941,7 @@ pub(super) async fn handle_retryable_failure(
 }
 
 async fn fail_without_retry_policy(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     instance: &orch8_types::instance::TaskInstance,
     webhook_config: &WebhookConfig,
     message: &str,
@@ -1966,7 +1953,7 @@ async fn fail_without_retry_policy(
         serde_json::json!({ "error": message }),
     );
     crate::lifecycle::transition_claimed_instance_with_webhook(
-        storage,
+        storage.as_ref(),
         instance_id,
         Some(&instance.tenant_id),
         instance.updated_at,
@@ -2002,7 +1989,7 @@ pub(crate) fn clamped_fire_at(now: DateTime<Utc>, backoff: std::time::Duration) 
 /// invoked — there is no retry policy for these malformed-params errors,
 /// so the instance is failed immediately.
 pub(super) async fn fail_instance_with_error(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     instance: &orch8_types::instance::TaskInstance,
     webhook_config: &WebhookConfig,
     _cancel: &CancellationToken,
@@ -2016,7 +2003,7 @@ pub(super) async fn fail_instance_with_error(
         serde_json::json!({ "error": error }),
     );
     crate::lifecycle::transition_claimed_instance_with_webhook(
-        storage,
+        storage.as_ref(),
         instance_id,
         Some(&instance.tenant_id),
         instance.updated_at,

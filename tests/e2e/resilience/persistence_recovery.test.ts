@@ -341,42 +341,33 @@ describe("Data Persistence and Recovery", () => {
   // --- Audit Log Persistence ---
 
   it("preserves audit log across restarts", async () => {
-    const seq = testSequence("audit-persistence", [
-      step("s1", "noop"),
-      step("s2", "sleep", { duration_ms: 3000 }),
-    ]);
+    const seq = testSequence("audit-persistence", [step("s1", "noop")]);
     await client.createSequence(seq);
-
     const { id } = await client.createInstance({
       sequence_id: seq.id,
       tenant_id: "test",
       namespace: "default",
     });
+    await client.waitForState(id, "completed", { timeoutMs: 15_000 });
 
-    // Wait for instance to start running (generates Scheduled→Running audit entry).
-    // s2 sleeps 3s giving us a generous window to signal and observe.
-    await client.waitForState(id, "running", { timeoutMs: 3_000 });
-    await client.sendSignal(id, "pause");
-    await new Promise((r) => setTimeout(r, 100));
-    await client.sendSignal(id, "resume");
-    // Small wait so signal-driven audit entries are flushed before we read.
-    await new Promise((r) => setTimeout(r, 200));
+    // State publication precedes its best-effort audit write. Observe durable
+    // evidence rather than assuming a fixed sleep flushes it under CI load.
+    let auditBefore = await client.getAuditLog(id);
+    const deadline = performance.now() + 10_000;
+    while (auditBefore.length === 0 && performance.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      auditBefore = await client.getAuditLog(id);
+    }
+    assert.ok(auditBefore.length > 0, "Should persist audit evidence before restart");
+    assert.ok(auditBefore.every((entry) => typeof entry.id === "string"));
 
-    // Get audit log before restart
-    const auditBefore = await client.getAuditLog(id);
-    assert.ok(auditBefore.length > 0, "Should have audit entries before restart");
-
-    console.log("Restarting server...");
     await stopServer(server);
     server = await startServer({ skipCleanup: true });
-    await new Promise((r) => setTimeout(r, 1000));
-
-    // Get audit log after restart
     const auditAfter = await client.getAuditLog(id);
-    assert.ok(auditAfter.length > 0, "Should have audit entries after restart");
-
-    // Audit log should contain similar entries (may not be identical due to timing)
-    assert.ok(auditAfter.length >= auditBefore.length - 2, "Audit log should be largely preserved");
+    const persistedIds = new Set(auditAfter.map((entry) => entry.id));
+    for (const entry of auditBefore) {
+      assert.ok(persistedIds.has(entry.id), `Persisted audit entry ${entry.id} must survive restart`);
+    }
 
     // Instance should still be trackable
     const instance = await client.getInstance(id);

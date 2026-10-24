@@ -535,8 +535,8 @@ async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepErro
             block_id = %ctx.block_id,
             "sleep step interrupted by pause signal — driving pause"
         );
-        let _ = crate::signals::process_signals(
-            ctx.storage.as_ref(),
+        let _ = crate::signals::process_signals_owned(
+            &ctx.storage,
             ctx.instance_id,
             orch8_types::instance::InstanceState::Running,
         )
@@ -562,8 +562,8 @@ async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepErro
             block_id = %ctx.block_id,
             "sleep step interrupted by cancel signal — driving cancel"
         );
-        let _ = crate::signals::process_signals(
-            ctx.storage.as_ref(),
+        let _ = crate::signals::process_signals_owned(
+            &ctx.storage,
             ctx.instance_id,
             orch8_types::instance::InstanceState::Running,
         )

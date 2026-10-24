@@ -4860,7 +4860,7 @@ async fn plan_live_migration(
     );
     finding_codes.sort();
     finding_codes.dedup();
-    let historical_validation_passed = validate_migration_history(
+    let historical_validation_passed = Box::pin(validate_migration_history(
         &state,
         MigrationValidationInput {
             tenant_id: &tenant_id,
@@ -4873,7 +4873,7 @@ async fn plan_live_migration(
             completed: &completed,
             transforms: &body.transforms,
         },
-    )
+    ))
     .await?;
     finding_codes.push(if historical_validation_passed {
         "HISTORICAL_REPLAY_PASS".into()
