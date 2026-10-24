@@ -53,6 +53,7 @@ pub(crate) struct Credential {
 }
 
 struct CredentialState {
+    closed: bool,
     owner: Uuid,
     revision: Uuid,
     cancelled: CancellationToken,
@@ -104,7 +105,7 @@ impl CredentialState {
 
     fn snapshot(&self) -> CredentialSnapshot {
         CredentialSnapshot {
-            available: self.provider.is_none() || !self.token.trim().is_empty(),
+            available: !self.closed && (self.provider.is_none() || !self.token.trim().is_empty()),
             token: self.token.clone(),
             generation: format!("{}:{}", self.owner, self.revision),
         }
@@ -151,6 +152,7 @@ impl Credential {
     pub fn new(token: String) -> Arc<Self> {
         Arc::new(Self {
             state: StdRwLock::new(CredentialState {
+                closed: false,
                 owner: Uuid::new_v4(),
                 revision: Uuid::new_v4(),
                 cancelled: CancellationToken::new(),
@@ -239,7 +241,31 @@ impl Credential {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        !state.token.is_empty() || state.provider.is_some()
+        !state.closed && (!state.token.is_empty() || state.provider.is_some())
+    }
+
+    /// Retire authorization before releasing foreign ownership. The caller must
+    /// drop the returned provider outside its own locks and runtime bridges.
+    pub fn close(&self) -> Option<Arc<dyn TokenProvider>> {
+        let (cancelled, provider) = {
+            let mut state = self
+                .state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.closed {
+                return None;
+            }
+            state.closed = true;
+            state.owner = Uuid::new_v4();
+            state.revision = Uuid::new_v4();
+            state.token.clear();
+            state.pending_install = false;
+            state.refresh_failure = None;
+            (state.cancelled.clone(), state.provider.take())
+        };
+        cancelled.cancel();
+        self.physical_refresh_slots.close();
+        provider
     }
 
     pub fn is_device_session(&self) -> bool {
@@ -255,6 +281,10 @@ impl Credential {
                 .state
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.closed {
+                drop(state);
+                return;
+            }
             let previous = std::mem::replace(&mut state.cancelled, CancellationToken::new());
             state.owner = owner;
             state.refresh = Arc::new(tokio::sync::Mutex::new(()));

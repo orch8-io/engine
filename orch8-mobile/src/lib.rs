@@ -23,6 +23,8 @@ mod node;
 mod notifier;
 mod privacy;
 mod runtime;
+#[cfg(test)]
+mod shutdown_tests;
 mod storage;
 mod stragglers;
 mod sync;
@@ -489,22 +491,12 @@ impl MobileEngine {
         name: String,
         handler: Arc<dyn StepHandler>,
     ) -> Result<(), MobileError> {
-        {
-            let mut foreign = self
-                .foreign_handlers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let log_name = name.clone();
+        self.update_registry(move |foreign, _| {
             foreign.retain(|(existing, _)| existing != &name);
-            foreign.push((name.clone(), handler));
-        }
-        if let Err(e) = self.rebuild_registry() {
-            self.foreign_handlers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|(existing, _)| existing != &name);
-            return Err(e);
-        }
-        debug!(handler = %name, "registered mobile handler");
+            foreign.push((name, handler));
+        })?;
+        debug!(handler = %log_name, "registered mobile handler");
         Ok(())
     }
 
@@ -512,6 +504,7 @@ impl MobileEngine {
     /// `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
     /// registered. Must be called before `resume()` / `start_worker()`.
     pub fn enable_builtin(&self, name: String) -> Result<(), MobileError> {
+        self.ensure_open()?;
         let Some(builtin) = builtins::OPT_IN_BUILTINS
             .iter()
             .chain(builtins::DEFAULT_BUILTINS)
@@ -521,31 +514,24 @@ impl MobileEngine {
                 message: format!("builtin '{name}' is not available on mobile"),
             });
         };
+        if self
+            .enabled_builtins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(builtin)
         {
-            let mut enabled = self
-                .enabled_builtins
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if enabled.contains(builtin) {
-                return Ok(());
+            return self.ensure_open();
+        }
+        self.update_registry(|_, enabled| {
+            if !enabled.contains(builtin) {
+                enabled.push(builtin);
             }
-            enabled.push(builtin);
-        }
-        if let Err(e) = self.rebuild_registry() {
-            self.enabled_builtins
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|enabled| enabled != builtin);
-            return Err(e);
-        }
-        Ok(())
+        })
     }
 
     /// Set the event listener for engine lifecycle events.
     pub fn set_listener(&self, listener: Arc<dyn EngineListener>) {
-        self.runtime.block_on(async {
-            self.notifier.set_listener(listener).await;
-        });
+        self.notifier.set_listener(listener);
         self.tick_controller.wake();
     }
 
@@ -656,6 +642,9 @@ impl MobileEngine {
     /// Start a foreground tick loop. Also lets the remote worker (if started)
     /// claim tasks again.
     pub fn resume(&self) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
         self.foreground.store(true, Ordering::Release);
         self.wake_worker();
         self.tick_controller.resume(
@@ -680,6 +669,9 @@ impl MobileEngine {
     /// tasks and gives back any task claimed but not yet started; tasks that
     /// are already executing run to completion while the process lives.
     pub fn pause(&self) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
         self.foreground.store(false, Ordering::Release);
         self.tick_controller
             .pause(&self.runtime, self.config.max_tick_duration_ms);
@@ -696,6 +688,9 @@ impl MobileEngine {
     /// Triggers an immediate sync cycle on the next tick and an immediate
     /// worker poll.
     pub fn on_push_received(&self) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
         if let Some(ref reporter) = self.sync_reporter {
             reporter.on_push_received();
             self.tick_controller.wake();
@@ -713,6 +708,9 @@ impl MobileEngine {
     /// the task arrives through a leased poll. Returns whether it was
     /// accepted.
     pub fn on_push_wake(&self, envelope_json: String) -> bool {
+        if self.cancel.is_cancelled() {
+            return false;
+        }
         let envelope: WakeEnvelope = match serde_json::from_str(&envelope_json) {
             Ok(envelope) => envelope,
             Err(e) => {
@@ -1115,6 +1113,24 @@ impl MobileEngine {
     /// Shut down the engine.
     pub fn shutdown(&self) {
         info!("mobile engine shutting down");
+        self.cancel.cancel();
+        self.tick_controller.cancel_loop();
+        let retired_provider = self.credential.close();
+        let retired_listener = self.notifier.close();
+        let retired_handlers = {
+            let mut registry = self
+                .handlers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut foreign = self
+                .foreign_handlers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                std::mem::replace(&mut *registry, Arc::new(builtins::registry_with(&[]))),
+                std::mem::take(&mut *foreign),
+            )
+        };
         self.stop_worker();
         self.stop_delegation();
         if let Some(slot) = self
@@ -1125,8 +1141,7 @@ impl MobileEngine {
         {
             slot.readvertise.cancel();
         }
-        self.cancel.cancel();
-        self.tick_controller.cancel_loop();
+        drop((retired_provider, retired_listener, retired_handlers));
     }
 
     // ------------------------------------------------------------------
@@ -1153,6 +1168,9 @@ impl MobileEngine {
     /// plane answers `401` (expired session) and the request is retried once.
     /// Call it before `register_node`. Never ship an operator key in an app.
     pub fn set_token_provider(&self, provider: Arc<dyn TokenProvider>) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
         self.credential.set_provider(provider);
         info!(
             device_session = self.credential.is_device_session(),
@@ -1258,6 +1276,7 @@ impl MobileEngine {
     /// per the task lease, and complete / fail / release them. Requires
     /// `register_node` first. Handlers must be registered before this call.
     pub fn start_worker(&self, options: WorkerOptions) -> Result<(), MobileError> {
+        self.ensure_open()?;
         let client = self
             .node_client()
             .ok_or_else(|| MobileError::InvalidInput {
@@ -1267,6 +1286,7 @@ impl MobileEngine {
             .worker
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.ensure_open()?;
         if slot.as_ref().is_some_and(|worker| !worker.is_stopped()) {
             return Err(MobileError::InvalidInput {
                 message: "worker already running".into(),
@@ -1332,6 +1352,7 @@ impl MobileEngine {
         &self,
         time_budget_ms: u64,
     ) -> Result<WorkerWindowResult, MobileError> {
+        self.ensure_open()?;
         let worker = self
             .current_worker()
             .ok_or_else(|| MobileError::InvalidInput {
@@ -1357,6 +1378,7 @@ impl MobileEngine {
     /// and app kills: delegations are journaled locally and picked up again
     /// by the next `start_delegation`.
     pub fn start_delegation(&self, options: DelegationOptions) -> Result<(), MobileError> {
+        self.ensure_open()?;
         let client = self
             .node_client()
             .ok_or_else(|| MobileError::InvalidInput {
@@ -1369,11 +1391,14 @@ impl MobileEngine {
             options,
             self.tick_controller.work_handle(),
         )?;
-        let previous = self
-            .delegation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace(Arc::clone(&pump));
+        let previous = {
+            let mut slot = self
+                .delegation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.ensure_open()?;
+            slot.replace(Arc::clone(&pump))
+        };
         if let Some(previous) = previous {
             previous.stop();
         }
@@ -1545,38 +1570,53 @@ impl MobileEngine {
     /// Rebuild the handler registry from the enabled builtins plus every
     /// host handler (host handlers win on a name clash). Fails once the
     /// registry is shared with a running tick loop or worker.
-    fn rebuild_registry(&self) -> Result<(), MobileError> {
-        let timeout = Duration::from_millis(self.config.handler_timeout_ms);
-        let mut guard = self
-            .handlers
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if Arc::get_mut(&mut guard).is_none() {
-            return Err(MobileError::Engine {
-                message: "cannot register handlers after engine has started".to_string(),
-            });
-        }
-        let enabled = self
-            .enabled_builtins
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let mut registry = builtins::registry_with(&enabled);
-        for (name, handler) in self
-            .foreign_handlers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-        {
-            handlers::register_foreign_handler(
-                &mut registry,
-                name,
-                Arc::clone(handler),
-                timeout,
-                Arc::clone(&self.stragglers),
-            );
-        }
-        *guard = Arc::new(registry);
+    fn update_registry(
+        &self,
+        edit: impl FnOnce(&mut Vec<(String, Arc<dyn StepHandler>)>, &mut Vec<&'static str>),
+    ) -> Result<(), MobileError> {
+        let retired = {
+            let mut registry = self
+                .handlers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.cancel.is_cancelled() {
+                return Err(MobileError::Shutdown);
+            }
+            if Arc::get_mut(&mut registry).is_none() {
+                return Err(MobileError::Engine {
+                    message: "cannot register handlers after engine has started".to_string(),
+                });
+            }
+            let mut foreign = self
+                .foreign_handlers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut enabled = self
+                .enabled_builtins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut next_foreign = foreign.clone();
+            let mut next_enabled = enabled.clone();
+            edit(&mut next_foreign, &mut next_enabled);
+            let mut next_registry = builtins::registry_with(&next_enabled);
+            let timeout = Duration::from_millis(self.config.handler_timeout_ms);
+            for (name, handler) in &next_foreign {
+                handlers::register_foreign_handler(
+                    &mut next_registry,
+                    name,
+                    Arc::clone(handler),
+                    timeout,
+                    Arc::clone(&self.stragglers),
+                );
+            }
+            (
+                std::mem::replace(&mut *registry, Arc::new(next_registry)),
+                std::mem::replace(&mut *foreign, next_foreign),
+                std::mem::replace(&mut *enabled, next_enabled),
+            )
+        };
+        // A last foreign reference may re-enter the engine during destruction.
+        drop(retired);
         Ok(())
     }
 
@@ -1635,14 +1675,17 @@ impl MobileEngine {
     ) -> Result<NodeRegistration, MobileError> {
         let expires_at = self.run_with_timeout(async { client.register().await })?;
         let readvertise = CancellationToken::new();
-        let previous = self
-            .node
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace(NodeSlot {
+        let previous = {
+            let mut slot = self
+                .node
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.ensure_open()?;
+            slot.replace(NodeSlot {
                 client: Arc::clone(&client),
                 readvertise: readvertise.clone(),
-            });
+            })
+        };
         if let Some(previous) = previous {
             previous.readvertise.cancel();
         }
@@ -1702,20 +1745,28 @@ impl MobileEngine {
         });
     }
 
+    fn ensure_open(&self) -> Result<(), MobileError> {
+        if self.cancel.is_cancelled() {
+            Err(MobileError::Shutdown)
+        } else {
+            Ok(())
+        }
+    }
+
     fn run_with_timeout<F, T>(&self, fut: F) -> Result<T, MobileError>
     where
         F: std::future::Future<Output = Result<T, MobileError>>,
     {
+        self.ensure_open()?;
         let timeout = Duration::from_millis(self.config.operation_timeout_ms);
         self.runtime.block_on(async {
-            tokio::time::timeout(timeout, fut)
-                .await
-                .map_err(|_| MobileError::Engine {
-                    message: format!(
-                        "operation timed out after {}ms",
-                        self.config.operation_timeout_ms
-                    ),
-                })?
+            tokio::select! {
+                biased;
+                () = self.cancel.cancelled() => Err(MobileError::Shutdown),
+                result = tokio::time::timeout(timeout, fut) => result.map_err(|_| MobileError::Engine {
+                    message: format!("operation timed out after {}ms", self.config.operation_timeout_ms),
+                })?,
+            }
         })
     }
 
