@@ -953,6 +953,12 @@ else `registerNode`, and `startWorker`) the journal is drained:
 | started, no outcome  | `release {started: true}` — server marks the effect unknown |
 | outcome recorded     | re-deliver `complete` / `fail`                              |
 
+The shared HTTP client retains the poll's lease grant on legacy task records
+that omit it. A positive per-task grant overrides the poll default. Zero grants
+are treated as missing; defaults outside the per-task integer range are ignored
+when calculating heartbeat intervals. Diagnostic API URLs omit user information,
+query strings, and fragments.
+
 Claims are scoped to the control-plane API base, worker runtime ID, task ID,
 and claim epoch. A delayed settlement from an older lease cannot alter a newer
 lease's recovery evidence. Duplicate delivery preserves any recorded start or

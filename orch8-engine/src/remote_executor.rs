@@ -265,19 +265,15 @@ impl LeaseTransport for HttpLeaseTransport {
         capabilities: &RuntimeCapabilities,
     ) -> Result<Claimed, String> {
         let mut claimed = Claimed::default();
-        if handlers.is_empty() {
+        if handlers.is_empty() || capacity == 0 {
             return Ok(claimed);
         }
         let start = self.cursor.fetch_add(1, Ordering::Relaxed);
-        let mut remaining = capacity;
         for offset in 0..handlers.len() {
-            if remaining == 0 {
-                break;
-            }
             let handler = &handlers[(start + offset) % handlers.len()];
             let response = self
                 .client
-                .poll(handler, remaining, Some(&self.version), capabilities)
+                .poll(handler, capacity, Some(&self.version), capabilities)
                 .await?;
             if let Some(ms) = response.poll_after_ms.filter(|ms| *ms > 0) {
                 let hint = Duration::from_millis(ms.min(60_000));
@@ -287,8 +283,13 @@ impl LeaseTransport for HttpLeaseTransport {
                 heartbeat_interval(response.heartbeat_interval_secs, response.lease_secs, None);
             claimed.heartbeat = Some(claimed.heartbeat.map_or(heartbeat, |h| h.min(heartbeat)));
             for task in response.tasks {
-                remaining = remaining.saturating_sub(1);
                 claimed.tasks.push(ClaimedTask { task, session: 0 });
+            }
+            // Return leased work immediately. Polling another handler can
+            // fail or spend the first batch's lease before heartbeats start.
+            // The next claim call advances the round-robin cursor.
+            if !claimed.tasks.is_empty() {
+                break;
             }
         }
         Ok(claimed)

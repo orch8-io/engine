@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Distributed HTTP worker contracts
+
+- Keep hybrid executor credentials and payloads at the configured endpoint by
+  disabling redirects through the shared outbound HTTP profile.
+- Return claimed work before polling another handler, preserving leased batches
+  through later handler failures and keeping round-robin admission.
+- Retain poll-level leases on legacy task records while preserving explicit task
+  grants. Ignore invalid zero/oversized fallback hints when scheduling heartbeats.
+- Redact URL user information, query strings, and fragments in lease client Debug
+  output. Cover optional email behavior in lean engine tests.
+
 ### Web component account ownership
 
 - Add `auth-context` / `authContext` to custom elements and React wrappers. Reset

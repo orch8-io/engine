@@ -22,9 +22,9 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 
 | Area | Scenarios to trace and verify | State |
 |---|---|---|
-| REST workers | Claim generations, duplicate poll delivery, heartbeat loss, completion/failure/release retries, cancellation, queue and capability routing | Pending |
-| gRPC workers | Reconnect, demand/backpressure, resumable transfers, session identity, cross-tenant control, cancellation | Pending |
-| Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Pending |
+| REST workers | Claim generations, duplicate poll delivery, heartbeat loss, completion/failure/release retries, cancellation, queue and capability routing | Reviewing; shared HTTP contract and batch ownership fixes verified; supervision checks open |
+| gRPC workers | Reconnect, demand/backpressure, resumable transfers, session identity, cross-tenant control, cancellation | Reviewing; full 146-test library suite passes; demand/lease invariant audit ongoing |
+| Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Pending |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
@@ -210,3 +210,50 @@ accepted may finish after local cancellation, but cannot update a replacement
 view or emit their old-account payload there. No automatic server rollback is
 claimed. A cancelled builder save resolves false; a cancelled programmatic run
 start rejects as aborted.
+
+## Distributed HTTP transport and lease contract
+
+Baseline: `428a5c69`. The production hybrid HTTP transport used a default reqwest
+client while mobile already used the hardened token-endpoint profile. A
+controlled 307 redirect captured the hybrid API key, custom routing header, and
+registration body at a second local server. The hybrid now uses the shared
+operator profile: redirects are disabled while operator-configured internal
+endpoints, proxy configuration, HTTP/1.1 routing, timeouts, and custom roots keep
+their existing behavior. The regression requires an HTTP 307 error from the
+configured server, so a blanket connection failure cannot satisfy it.
+
+The server poll contract explicitly makes each task's effective lease override
+the global poll default (`orch8-api/src/workers.rs`). The shared client preserves
+that precedence; it fills only missing/invalid task grants from valid defaults.
+A poll-level zero or value outside the per-task u32 range is ignored for timer
+calculation. No shorter global default is substituted for a valid explicit task
+lease.
+
+| ID | Finding | Reproduction and correction | State |
+|---|---|---|---|
+| DME-020 | Hybrid redirects forward control-plane credentials and bodies | A real production transport followed a 307 to a second server with API key, routing header, and JSON body intact. Use the shared redirect-disabled operator profile. | Fixed; regression and complete server tests pass |
+| DME-021 | A later handler poll discards previously claimed work | First handler returns a leased task; second returns 503, causing the whole claim call to return an error. Return work immediately and advance the cursor on successive calls. | Fixed; regression and complete lean engine tests pass |
+| DME-022 | Lease-client Debug exposes URL credentials | Debug included user information, query tokens, and fragments. Use the established URL redaction helper. | Fixed; regression and complete lean engine tests pass |
+| DME-023 | Legacy task records lose their response-level lease grant | Poll returns a short default lease but tasks omit it; later settlement uses the unrelated protocol default. Retain the grant with each task without replacing explicit task leases. | Fixed; regression and complete lean engine tests pass |
+| DME-024 | Invalid lease values bypass fallback or create unsafe timers | A zero task lease ignored a valid poll default; u64-max default produced an unrepresentable cadence. Validate positive values and wire range before choosing fallback. | Fixed; regressions and complete lean engine tests pass |
+| DME-025 | Lean-build tests assume optional email support | Full no-default-feature engine tests pass 2007 cases but fail an email-delivery assertion. Test both feature-enabled delivery and feature-disabled rejection, retaining Slack/token checks. | Corrected; lean suite and email-enabled check pass |
+
+The redirect regression failed before the production change. The five shared
+contract regressions failed while all 15 existing remote tests passed; all 20
+focused tests now pass. The server transport subtree passes its three tests.
+Complete local validation passes 2008 lean engine tests, 302 mobile tests,
+71 lean server binary tests, and the email-enabled approval check. All-target
+Clippy passes with warnings denied for the engine/server/mobile default-feature
+union. All 146 gRPC library tests pass, including the 16 client/session checks.
+Already-existing controls include an 8 MiB response cap and status-based lease
+fencing; they were inspected rather than reimplemented.
+
+Next invariant checks remain open: duplicate/replayed deliveries while a callback
+is active (the executor running map currently keys by task UUID), renewal failure
+past the last known lease deadline, cancellation during slow claim/advertise
+calls, and gRPC demand/acknowledgement backpressure. Over-limit claim responses also
+need a bounded release-fanout review, and mobile re-registration must be checked
+against account/tenant changes as well as literal worker/control-plane identity.
+These observations are not
+claimed fixed or fully reproduced yet. They remain part of the original goal,
+alongside the pending mobile, embedded, binding, and sandbox areas above.

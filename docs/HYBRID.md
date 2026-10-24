@@ -76,6 +76,18 @@ and tokens without them encode exactly as before):
   request, e.g. a shared load balancer's instance pin. Up to 16 lowercase
   names; credential, tenant, `grpc-*` and transport headers are refused.
 
+The REST transport never follows redirects, including same-origin redirects.
+Configure the canonical `api_url` so API keys, routing headers, and lease bodies
+stay at the configured endpoint. Operator-managed internal endpoints and custom
+CA bundles remain supported. A redirect is reported as an unsuccessful response.
+
+A poll returns claimed work immediately before querying another handler, so a
+later poll error cannot discard the first batch or delay its initial heartbeat.
+Successive calls advance the handler cursor round-robin. Each task retains its
+effective lease: a positive per-task grant wins, with the poll-level default
+copied into legacy records that omit it. Invalid zero or out-of-range defaults
+fall back to the protocol lease when calculating heartbeat intervals.
+
 Orch8 Cloud's managed engines all sit behind one shared host and are reached
 only through the proxy's instance pin, so Cloud issues:
 

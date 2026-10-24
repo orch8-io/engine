@@ -541,3 +541,67 @@ async fn panicking_handler_does_not_leak_an_in_flight_slot() {
     assert!(joined.unwrap_err().is_panic());
     assert_eq!(exec.in_flight(), 0);
 }
+
+/// Claimed work must be returned before unrelated handler polls can fail or
+/// consume its lease while the executor has not started heartbeating it yet.
+#[tokio::test]
+async fn http_claim_returns_owned_work_before_polling_another_handler() {
+    use axum::{Json, Router, http::StatusCode};
+    let polls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured = Arc::clone(&polls);
+    let queued = task("transform", json!({}));
+    let task_id = queued.id;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let app = Router::new().fallback(move |Json(body): Json<Value>| {
+            let polls = Arc::clone(&captured);
+            let task = queued.clone();
+            async move {
+                let handler = body["handler_name"].as_str().unwrap().to_owned();
+                polls.lock().unwrap().push(handler.clone());
+                if handler == "transform" {
+                    (
+                        StatusCode::OK,
+                        Json(json!({"tasks":[{"id":task.id,"instance_id":task.instance_id,"block_id":task.block_id,"handler_name":task.handler_name,"claim_epoch":task.claim_epoch}], "lease_secs":1})),
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error":"other handler unavailable"})),
+                    )
+                }
+            }
+        });
+        axum::serve(listener, app).await.unwrap();
+    });
+    let lease = HttpLeaseClient::new(reqwest::Client::new(), &base, Vec::new(), "worker".into());
+    let transport = HttpLeaseTransport::new(lease, "acme".into(), "test".into());
+    let identity = ExecutorIdentity {
+        runtime_id: RuntimeId::new(),
+        host: "worker".into(),
+        tenant_id: "acme".into(),
+        labels: BTreeMap::new(),
+        regions: Vec::new(),
+        handlers: vec!["transform".into(), "unavailable".into()],
+        credentials: Vec::new(),
+    };
+    let result = transport
+        .claim(&identity.handlers, 2, &identity.capabilities(false))
+        .await;
+    let first_polls = polls.lock().unwrap().clone();
+    let next = transport
+        .claim(&identity.handlers, 1, &identity.capabilities(false))
+        .await;
+    server.abort();
+    let claimed = result.expect("a later poll must not discard an already claimed task");
+    assert_eq!(claimed.tasks.len(), 1);
+    assert_eq!(claimed.tasks[0].task.id, task_id);
+    assert_eq!(first_polls, ["transform"]);
+    assert!(next.is_err());
+    assert_eq!(
+        *polls.lock().unwrap(),
+        ["transform", "unavailable"],
+        "the next call advances fairly to the next handler"
+    );
+}
