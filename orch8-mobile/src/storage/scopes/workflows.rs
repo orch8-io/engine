@@ -64,7 +64,7 @@ impl MobileStorage {
     /// The immutable source body determines published identity; local owner
     /// fields/IDs are assigned only after hashing and parsing those exact bytes.
     /// The accepted manifest fence prevents an older run's late storage writes.
-    pub(crate) async fn install_catalog_workflow(
+    pub(super) async fn install_catalog_workflow(
         &self,
         scope: &CatalogScope,
         original_json: &str,

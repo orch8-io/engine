@@ -5,6 +5,7 @@ pub mod approval_link;
 pub mod artifact;
 pub mod audit;
 pub mod auth;
+pub mod catalog;
 pub mod checkpoint;
 pub mod circuit_breaker;
 pub mod clock;

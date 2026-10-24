@@ -3,6 +3,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signer, SigningKey};
+use orch8_types::catalog::{CatalogAudience, CatalogFormat, CatalogManifest};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -49,6 +50,14 @@ pub struct SignedManifest {
     pub canonical_json: String,
 }
 
+/// Audience-bound manifest. Upload `signature_b64 + "\n" + canonical_json`;
+/// changing any audience field invalidates the signature.
+pub struct SignedCatalogManifest {
+    pub body: CatalogManifest<ManifestBody>,
+    pub signature_b64: String,
+    pub canonical_json: String,
+}
+
 /// Generates and signs manifests.
 pub struct ManifestGenerator {
     signing_key: SigningKey,
@@ -59,6 +68,34 @@ pub struct ManifestGenerator {
 }
 
 impl ManifestGenerator {
+    /// Sign a distinct catalog envelope, binding its complete manifest to a
+    /// stable audience. This is not a credential/principal authentication proof.
+    pub fn generate_catalog(
+        &self,
+        audience: CatalogAudience,
+        sequences: Vec<ManifestSequence>,
+        removed: Vec<ManifestRemoved>,
+        other_keys: Vec<ManifestSigningKey>,
+    ) -> Result<SignedCatalogManifest, ManifestError> {
+        audience
+            .validate()
+            .map_err(|message| ManifestError::Serialization(message.into()))?;
+        let manifest = self.build_body(sequences, removed, other_keys)?;
+        let body = CatalogManifest {
+            format: CatalogFormat::V1,
+            audience,
+            manifest,
+        };
+        let canonical_json = canonical_json(&body)?;
+        let signature_b64 =
+            BASE64.encode(self.signing_key.sign(canonical_json.as_bytes()).to_bytes());
+        Ok(SignedCatalogManifest {
+            body,
+            signature_b64,
+            canonical_json,
+        })
+    }
+
     pub fn new(signing_key: SigningKey, key_id: String) -> Self {
         Self {
             signing_key,
@@ -88,6 +125,31 @@ impl ManifestGenerator {
         removed: Vec<ManifestRemoved>,
         other_keys: Vec<ManifestSigningKey>,
     ) -> Result<SignedManifest, ManifestError> {
+        let body = self.build_body(sequences, removed, other_keys)?;
+
+        let canonical_json = canonical_json(&body)?;
+        let signature = self.signing_key.sign(canonical_json.as_bytes());
+        let signature_b64 = BASE64.encode(signature.to_bytes());
+
+        info!(
+            manifest_version = body.manifest_version,
+            sequences = body.sequences.len(),
+            "manifest generated"
+        );
+
+        Ok(SignedManifest {
+            body,
+            signature_b64,
+            canonical_json,
+        })
+    }
+
+    fn build_body(
+        &self,
+        sequences: Vec<ManifestSequence>,
+        removed: Vec<ManifestRemoved>,
+        other_keys: Vec<ManifestSigningKey>,
+    ) -> Result<ManifestBody, ManifestError> {
         let mut seen_keys = std::collections::HashSet::new();
         for key in &other_keys {
             if !seen_keys.insert(key.key_id.as_str()) {
@@ -142,21 +204,7 @@ impl ManifestGenerator {
             generated_at,
         };
 
-        let canonical_json = canonical_json(&body)?;
-        let signature = self.signing_key.sign(canonical_json.as_bytes());
-        let signature_b64 = BASE64.encode(signature.to_bytes());
-
-        info!(
-            manifest_version = body.manifest_version,
-            sequences = body.sequences.len(),
-            "manifest generated"
-        );
-
-        Ok(SignedManifest {
-            body,
-            signature_b64,
-            canonical_json,
-        })
+        Ok(body)
     }
 }
 
