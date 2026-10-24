@@ -132,52 +132,53 @@ final class AsyncTokenProviderTests: XCTestCase {
         }
     }
 
-    func testRetiredProvidersSharePhysicalFetchAdmissionAndRecoverAfterCompletion() {
-        let available = Date().addingTimeInterval(10)
-        while TokenFetchBudget.shared.availablePermits != 8 && Date() < available {
-            Thread.sleep(forTimeInterval: 0.005)
-        }
-        XCTAssertEqual(TokenFetchBudget.shared.availablePermits, 8)
+    func testRetiredProvidersSharePhysicalFetchAdmissionAndRecoverAfterCompletion() async throws {
+        try await waitForBudget(.shared, available: 8)
         let entered = expectation(description: "eight physical fetches entered")
         entered.expectedFulfillmentCount = 8
-        let timedOut = expectation(description: "all provider waits timed out")
-        timedOut.expectedFulfillmentCount = 8
         let gates = (0..<8).map { _ in Gate(started: entered) }
         let refused = Gate()
-        defer { gates.forEach { $0.release() }; refused.release() }
-        for gate in gates {
-            DispatchQueue.global().async {
-                let provider = AsyncTokenProvider(initialToken: "dst_first", timeout: 5) { await gate.fetch() }
-                do { _ = try provider.refreshToken(); XCTFail("held fetch must time out") }
-                catch { /* expected timeout */ }
-                timedOut.fulfill()
+        // Physical entry is the synchronization point. A short timeout could
+        // expire before a loaded simulator ever starts a host callback, which
+        // correctly releases unused admission and does not test retirement.
+        let callers = gates.map { gate in
+            Task {
+                let provider = AsyncTokenProvider(initialToken: "", timeout: 120) { await gate.fetch() }
+                do { _ = try await provider.fetchInitialToken(); return false }
+                catch is CancellationError { return true }
+                catch { return false }
             }
         }
-        wait(for: [entered, timedOut], timeout: 15)
+        defer {
+            callers.forEach { $0.cancel() }
+            gates.forEach { $0.release() }
+            refused.release()
+        }
+        await fulfillment(of: [entered], timeout: 30)
+        callers.forEach { $0.cancel() }
+        for caller in callers {
+            let cancelled = await caller.value
+            XCTAssertTrue(cancelled, "retire logical callers while host fetches remain blocked")
+        }
+        XCTAssertEqual(TokenFetchBudget.shared.availablePermits, 0)
         let replacement = AsyncTokenProvider(initialToken: "dst_cached", timeout: 5) { await refused.fetch() }
         XCTAssertThrowsError(try replacement.refreshToken())
-        let refusedCalls = refused.calls()
-        XCTAssertEqual(refusedCalls, 0, "retiring adapters must not free physical fetch capacity")
+        XCTAssertEqual(refused.calls(), 0, "retiring adapters must not free physical fetch capacity")
         XCTAssertEqual(replacement.currentToken(), "dst_cached")
-        if refusedCalls == 0 {
-            for _ in 0..<128 {
-                let provider = AsyncTokenProvider(initialToken: "dst_cached", timeout: 5) {
-                    XCTFail("exhausted admission must not invoke or queue host work")
-                    return "dst_unexpected"
-                }
-                XCTAssertThrowsError(try provider.refreshToken())
+        for _ in 0..<128 {
+            let provider = AsyncTokenProvider(initialToken: "dst_cached", timeout: 5) {
+                XCTFail("exhausted admission must not invoke or queue host work")
+                return "dst_unexpected"
             }
+            XCTAssertThrowsError(try provider.refreshToken())
         }
         gates.forEach { $0.release() }
         refused.release()
-        let recovery = AsyncTokenProvider(initialToken: "dst_first", timeout: 5) { "dst_recovered" }
-        let deadline = Date().addingTimeInterval(10)
-        var recovered: String?
-        while Date() < deadline && recovered == nil {
-            recovered = try? recovery.refreshToken()
-            if recovered == nil { Thread.sleep(forTimeInterval: 0.005) }
-        }
-        XCTAssertEqual(recovered, "dst_recovered")
+        try await waitForBudget(.shared, available: 8)
+        let recovery = AsyncTokenProvider(initialToken: "", timeout: 30) { "dst_recovered" }
+        let token = try await recovery.fetchInitialToken()
+        XCTAssertEqual(token, "dst_recovered")
+        try await waitForBudget(.shared, available: 8)
     }
 
     private func waitForBudget(_ budget: TokenFetchBudget, available: Int) async throws {
