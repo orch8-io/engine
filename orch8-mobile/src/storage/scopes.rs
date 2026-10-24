@@ -50,6 +50,24 @@ async fn fence(
     Ok(())
 }
 
+async fn fence_catalog(
+    tx: &mut Transaction<'_, Sqlite>,
+    scope: &CatalogScope,
+) -> Result<(), StorageError> {
+    fence(tx, &scope.account).await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM mobile_catalogs WHERE account_id = ?1 AND id = ?2)",
+    )
+    .bind(&scope.account.id)
+    .bind(&scope.id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !exists {
+        return Err(invalid("mobile catalog scope is retired or foreign"));
+    }
+    Ok(())
+}
+
 impl MobileStorage {
     /// Reuse an active account, or reopen a retired account with a new epoch.
     /// Identity changes require a separate explicit migration, not token refresh.
@@ -161,17 +179,7 @@ impl MobileStorage {
             validate(key)?;
         }
         let mut tx = self.pool().begin().await?;
-        fence(&mut tx, &scope.account).await?;
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM mobile_catalogs WHERE account_id = ?1 AND id = ?2)",
-        )
-        .bind(&scope.account.id)
-        .bind(&scope.id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if !exists {
-            return Err(invalid("mobile catalog scope is retired or foreign"));
-        }
+        fence_catalog(&mut tx, scope).await?;
         for (key, value) in values {
             if let Some(value) = value {
                 sqlx::query("INSERT INTO mobile_catalog_metadata (account_id, catalog_id, key, value) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(account_id, catalog_id, key) DO UPDATE SET value = excluded.value")
@@ -181,6 +189,57 @@ impl MobileStorage {
                 sqlx::query("DELETE FROM mobile_catalog_metadata WHERE account_id = ?1 AND catalog_id = ?2 AND key = ?3")
                     .bind(&scope.account.id).bind(&scope.id).bind(key).execute(&mut *tx).await?;
             }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Return keys only for this live catalog session. Empty key sets still
+    /// check ownership; retired/foreign handles never masquerade as empty sets.
+    pub(crate) async fn catalog_signing_keys(
+        &self,
+        scope: &CatalogScope,
+    ) -> Result<Vec<(String, String)>, StorageError> {
+        let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT k.key_id, k.public_key FROM mobile_accounts a JOIN mobile_catalogs c ON c.account_id = a.id LEFT JOIN mobile_catalog_signing_keys k ON k.account_id = a.id AND k.catalog_id = c.id WHERE a.id = ?1 AND a.epoch = ?2 AND a.active = 1 AND c.id = ?3 ORDER BY k.key_id",
+        ).bind(&scope.account.id).bind(scope.account.epoch).bind(&scope.id)
+            .fetch_all(self.pool()).await?;
+        if rows.is_empty() {
+            return Err(invalid("mobile catalog scope is retired or foreign"));
+        }
+        Ok(rows
+            .into_iter()
+            .filter_map(|(id, key)| id.zip(key))
+            .collect())
+    }
+
+    /// Caller must supply the complete, verified root-authorized set. This
+    /// persistence primitive does not authenticate a manifest or its audience.
+    pub(crate) async fn replace_catalog_signing_keys(
+        &self,
+        scope: &CatalogScope,
+        keys: &[(&str, &str)],
+    ) -> Result<(), StorageError> {
+        let mut seen = std::collections::HashSet::new();
+        for (id, key) in keys {
+            validate(id)?;
+            validate(key)?;
+            if !seen.insert(*id) {
+                return Err(invalid("duplicate mobile catalog signing key ID"));
+            }
+        }
+        let mut tx = self.pool().begin().await?;
+        fence_catalog(&mut tx, scope).await?;
+        sqlx::query(
+            "DELETE FROM mobile_catalog_signing_keys WHERE account_id = ?1 AND catalog_id = ?2",
+        )
+        .bind(&scope.account.id)
+        .bind(&scope.id)
+        .execute(&mut *tx)
+        .await?;
+        for (id, key) in keys {
+            sqlx::query("INSERT INTO mobile_catalog_signing_keys (account_id, catalog_id, key_id, public_key) VALUES (?1, ?2, ?3, ?4)")
+                .bind(&scope.account.id).bind(&scope.id).bind(id).bind(key).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(())

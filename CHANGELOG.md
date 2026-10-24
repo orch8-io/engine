@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Atomic manifest signing-key authority
+
+- Validate every key before replacing the root-authorized trust set in one
+  transaction. A failed revocation or insert aborts sync before workflow changes
+  and leaves the previous complete set intact.
+- Verify downloaded workflows only with keys listed by the current signed
+  manifest; historical cached keys cannot restore revoked authority. Reject
+  empty/duplicate manifest key IDs before changing trust.
+- Add internal catalog signing-key storage with atomic replacement, composite
+  ownership and session-epoch checks. Scoped sync remains under development.
+
 ### Persistent mobile scope foundation
 
 - Add internal account/catalog identities with immutable principal/source

@@ -602,8 +602,8 @@ not imply that an already-started transaction was rolled back.
 Multiple accounts/catalogs in one database with explicit scopes is the confirmed
 target. [ADR-0002](adr/0002-mobile-account-and-catalog-scopes.md) specifies that
 work and its open gates. Internal persistence now has account/catalog bindings,
-durable session epochs and isolated atomic catalog metadata, with stale-handle
-checks across database pools and reopen. These primitives are not exposed by
+durable session epochs, isolated atomic catalog metadata and signing-key sets,
+with stale-handle checks across database pools and reopen. These primitives are not exposed by
 SDK handles or connected to sync/execution yet. The current legacy sync metadata
 and reconciliation still need that ownership isolation.
 

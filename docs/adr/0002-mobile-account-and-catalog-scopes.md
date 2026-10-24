@@ -3,7 +3,7 @@
 Date: 2026-10-24
 
 Status: the requirement is accepted by the user. Internal account/catalog
-identity, session epochs and isolated metadata persistence are implemented;
+identity, session epochs, isolated metadata and signing-key persistence are implemented;
 the remaining API/schema below is a proposed implementation contract. Public
 scoped sync and execution are not implemented yet.
 
@@ -24,8 +24,9 @@ foundation. They do not provide scoped ownership.
 ## Proposed ownership model
 
 The initial internal storage layer uses `mobile_accounts`, `mobile_catalogs`
-and `mobile_catalog_metadata`. Account keys bind immutably to issuer/subject;
-catalog keys bind immutably to a stable source descriptor and signing authority.
+and `mobile_catalog_metadata`, plus owner-qualified `mobile_catalog_signing_keys`.
+Account keys bind immutably to issuer/subject; catalog keys bind immutably to a
+stable source descriptor and signing authority.
 Descriptors come from trusted host context, not bearer-token parsing. This
 layer does not establish remote authentication or verify manifest audiences.
 It exposes no public SDK API and is not connected to legacy sync/execution.
@@ -36,9 +37,12 @@ in one snapshot. Mutations acquire SQLite's writer reservation with an epoch
 predicate before checking catalog membership and committing the entire batch.
 Consequently, an admitted transaction settles before retirement, while a write
 from an older handle after retirement/reopen is refused across independent
-pools. Legacy tables remain separate, with no implicit adoption. Signing-key,
-workflow and instance ownership, cancellation of running work, remote principal
-proofs and wrapper handles remain unimplemented gates.
+pools. Catalog key replacement uses the same epoch/writer fence, replaces only
+the selected catalog's set atomically, and refuses stale/foreign handles even
+for an empty set. Legacy tables remain separate, with no implicit adoption.
+Connecting signing keys to scoped sync, workflow and instance ownership,
+cancellation of running work, remote principal proofs and wrapper handles remain
+unimplemented gates.
 
 Use one SQLite database with explicit owner keys and scoped SDK handles. Shared
 runtime resources stay bounded across accounts. Scope-specific state is selected

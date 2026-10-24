@@ -261,6 +261,31 @@ impl MobileStorage {
 
     // ── Trusted Keys ──
 
+    /// Replace the root-authorized key set atomically. A failed revocation
+    /// aborts the sync rather than leaving a removed key available for reuse.
+    pub(crate) async fn replace_trusted_keys(
+        &self,
+        keys: &[(&str, &str)],
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool().begin().await?;
+        sqlx::query("DELETE FROM trusted_keys")
+            .execute(&mut *tx)
+            .await?;
+        let now = Utc::now().to_rfc3339();
+        for (id, key) in keys {
+            sqlx::query(
+                "INSERT INTO trusted_keys (key_id, public_key, trusted_since) VALUES (?1, ?2, ?3)",
+            )
+            .bind(id)
+            .bind(key)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn get_trusted_key(&self, key_id: &str) -> Result<Option<String>, StorageError> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT public_key FROM trusted_keys WHERE key_id = ?1")

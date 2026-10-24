@@ -461,3 +461,130 @@ async fn legacy_upgrade_and_full_reopen_preserve_ownership_without_adoption() {
         Some("legacy-key")
     );
 }
+
+#[tokio::test]
+async fn catalog_key_rotation_is_isolated_and_old_sessions_cannot_revoke_keys() {
+    let (storage, dir) = fixture().await;
+    storage
+        .upsert_trusted_key("same", "legacy-key")
+        .await
+        .unwrap();
+    let a = storage
+        .open_account_scope("a", "issuer", "a")
+        .await
+        .unwrap();
+    let b = storage
+        .open_account_scope("b", "issuer", "b")
+        .await
+        .unwrap();
+    let scopes = [
+        catalog(&storage, &a, "one").await,
+        catalog(&storage, &a, "two").await,
+        catalog(&storage, &b, "one").await,
+        catalog(&storage, &b, "two").await,
+    ];
+    for (index, scope) in scopes.iter().enumerate() {
+        assert!(
+            storage
+                .catalog_signing_keys(scope)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        storage
+            .replace_catalog_signing_keys(scope, &[("same", &format!("key-{index}"))])
+            .await
+            .unwrap();
+    }
+    storage
+        .replace_catalog_signing_keys(&scopes[0], &[])
+        .await
+        .unwrap();
+    for (index, scope) in scopes.iter().enumerate() {
+        assert_eq!(
+            storage.catalog_signing_keys(scope).await.unwrap(),
+            if index == 0 {
+                vec![]
+            } else {
+                vec![("same".into(), format!("key-{index}"))]
+            }
+        );
+    }
+    assert_eq!(
+        storage.get_trusted_key("same").await.unwrap().as_deref(),
+        Some("legacy-key")
+    );
+    let forged = CatalogScope {
+        account: a.clone(),
+        id: scopes[2].id.clone(),
+    };
+    assert!(storage.catalog_signing_keys(&forged).await.is_err());
+    assert!(
+        storage
+            .replace_catalog_signing_keys(&forged, &[])
+            .await
+            .is_err()
+    );
+    storage.retire_account_scope(&a).await.unwrap();
+    let other = MobileStorage::new(Arc::new(
+        SqliteStorage::file_mobile(dir.path().join("scopes.db").to_str().unwrap())
+            .await
+            .unwrap(),
+    ));
+    let reopened = other.open_account_scope("a", "issuer", "a").await.unwrap();
+    let current = catalog(&other, &reopened, "two").await;
+    assert!(storage.catalog_signing_keys(&scopes[1]).await.is_err());
+    assert!(
+        storage
+            .replace_catalog_signing_keys(&scopes[1], &[])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        other.catalog_signing_keys(&current).await.unwrap(),
+        vec![("same".into(), "key-1".into())]
+    );
+    assert_eq!(
+        other.catalog_signing_keys(&scopes[2]).await.unwrap(),
+        vec![("same".into(), "key-2".into())]
+    );
+}
+
+#[tokio::test]
+async fn scoped_key_failure_preserves_the_complete_previous_set() {
+    let (storage, _dir) = fixture().await;
+    let a = storage
+        .open_account_scope("a", "issuer", "subject")
+        .await
+        .unwrap();
+    let c = catalog(&storage, &a, "one").await;
+    storage
+        .replace_catalog_signing_keys(&c, &[("old", "old-public-key")])
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .replace_catalog_signing_keys(&c, &[("new", "new-key"), ("new", "different-key")])
+            .await
+            .is_err()
+    );
+    sqlx::query("CREATE TRIGGER reject_scoped_key BEFORE INSERT ON mobile_catalog_signing_keys WHEN NEW.key_id = 'reject' BEGIN SELECT RAISE(ABORT, 'injected key failure'); END")
+        .execute(storage.pool()).await.unwrap();
+    assert!(
+        storage
+            .replace_catalog_signing_keys(&c, &[("new", "new-key"), ("reject", "bad-key")])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        storage.catalog_signing_keys(&c).await.unwrap(),
+        vec![("old".into(), "old-public-key".into())]
+    );
+    sqlx::query("CREATE TRIGGER reject_scoped_revoke BEFORE DELETE ON mobile_catalog_signing_keys BEGIN SELECT RAISE(ABORT, 'injected revoke failure'); END")
+        .execute(storage.pool()).await.unwrap();
+    assert!(storage.replace_catalog_signing_keys(&c, &[]).await.is_err());
+    assert_eq!(
+        storage.catalog_signing_keys(&c).await.unwrap(),
+        vec![("old".into(), "old-public-key".into())]
+    );
+}
