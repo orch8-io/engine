@@ -62,9 +62,12 @@ pub(crate) async fn caller_may_access(
         .get_instance(ctx.instance_id)
         .await
         .map_err(|e| map_storage_err(&e))?;
-    // A caller row that no longer exists (instance deleted mid-step) has no
-    // sub-tenant to confine it; the tenant check above still applies.
-    Ok(caller.is_none_or(|c| c.sub_tenant.is_none() || c.sub_tenant == target.sub_tenant))
+    // Ownership must come from a durable caller in the execution tenant.
+    // Deletion or a mismatched context cannot grant tenant-wide authority.
+    Ok(caller.is_some_and(|caller| {
+        caller.tenant_id == ctx.tenant_id
+            && (caller.sub_tenant.is_none() || caller.sub_tenant == target.sub_tenant)
+    }))
 }
 
 /// Parse an `InstanceId` from a params object field.

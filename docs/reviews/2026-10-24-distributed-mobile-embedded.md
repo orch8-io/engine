@@ -1705,3 +1705,23 @@ Hosted checks must pass on the submitted commit before merging.
 Next: continue scoped materialization/callback ownership; durable preparation is
 not a substitute for the required executable multi-account runtime. Preserve the
 full original review matrix and ADR-0002 release gates.
+
+### DME101 — Coordination authorization lost caller ownership on missing rows (fixed)
+
+`caller_may_access` treated a missing caller row as unrestricted within the context's
+tenant. It also compared the target only with the context tenant, without checking
+the durable caller's tenant. A deleted embedded customer's source or a mismatched
+execution context could therefore bypass the persisted sub-tenant boundary.
+The guard now requires an existing caller with the context's tenant before
+applying sub-tenant rules. Regression contracts exercise both `query_instance` and
+`send_signal`, requiring the ordinary missing-target response and no signal row.
+Existing tenant-level and same-sub-tenant access remain covered.
+
+Both missing-caller contracts failed before the fix. Four separate missing-caller
+and tenant-mismatch contracts pass after it, along with all 2,064 core engine
+library tests (no default features), workspace/all-target Clippy with warnings
+denied, formatting, documentation checks and diff checks. Hosted checks must pass
+on the submitted commit before merging.
+
+This check alone does not implement account-epoch/callback fencing or make catalog
+namespaces a security boundary. Those execution gates remain open.

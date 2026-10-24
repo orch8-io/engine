@@ -717,4 +717,45 @@ mod tests {
             .await
             .expect("same sub-tenant stays allowed");
     }
+    #[tokio::test]
+    async fn coordination_denies_missing_caller() {
+        assert_unowned_caller_denied(true).await;
+    }
+
+    #[tokio::test]
+    async fn coordination_denies_caller_tenant_mismatch() {
+        assert_unowned_caller_denied(false).await;
+    }
+
+    async fn assert_unowned_caller_denied(missing: bool) {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mut caller = mk_instance("T1", InstanceState::Running);
+        caller.sub_tenant = Some("acme".into());
+        let mut target = mk_instance("T1", InstanceState::Running);
+        target.sub_tenant = Some("globex".into());
+        storage.create_instance(&target).await.unwrap();
+        if !missing {
+            // The context claims T1 while its durable source belongs to T2.
+            caller.tenant_id = TenantId::unchecked("T2");
+            caller.sub_tenant = None;
+            storage.create_instance(&caller).await.unwrap();
+        }
+        let mut ctx = mk_ctx(
+            &caller,
+            storage.clone(),
+            json!({"instance_id":target.id.to_string(),"signal_type":"cancel"}),
+        );
+        ctx.tenant_id = TenantId::unchecked("T1");
+        let result = handle_send_signal(ctx).await;
+        assert!(
+            matches!(result, Err(StepError::Permanent { ref message, .. }) if message == "target instance not found")
+        );
+        assert!(
+            storage
+                .get_pending_signals(target.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

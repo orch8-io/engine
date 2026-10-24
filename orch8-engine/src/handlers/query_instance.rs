@@ -1,7 +1,7 @@
 //! `query_instance` builtin: read another instance's context + state.
 //!
-//! Same-tenant only. Returns `{ found: false }` for missing targets;
-//! cross-tenant attempts return `Permanent` (does not leak existence).
+//! Requires a durable caller in the execution tenant and obeys its sub-tenant
+//! boundary. Missing and unauthorized targets both return `{ found: false }`.
 //!
 //! Response shape (per design doc `2026-04-17-emit-event-design.md` §Handlers):
 //! `{ found, context?, state?, started_at?, completed_at?, current_node? }`.
@@ -553,5 +553,37 @@ mod tests {
             handle_query_instance(ctx).await.unwrap()["found"],
             json!(true)
         );
+    }
+    #[tokio::test]
+    async fn coordination_denies_missing_caller() {
+        assert_unowned_caller_denied(true).await;
+    }
+
+    #[tokio::test]
+    async fn coordination_denies_caller_tenant_mismatch() {
+        assert_unowned_caller_denied(false).await;
+    }
+
+    async fn assert_unowned_caller_denied(missing: bool) {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mut caller = mk_instance("T1");
+        caller.sub_tenant = Some("acme".into());
+        let mut target = mk_instance("T1");
+        target.sub_tenant = Some("globex".into());
+        storage.create_instance(&target).await.unwrap();
+        if !missing {
+            // The context claims T1 while its durable source belongs to T2.
+            caller.tenant_id = TenantId::unchecked("T2");
+            caller.sub_tenant = None;
+            storage.create_instance(&caller).await.unwrap();
+        }
+        let mut ctx = mk_ctx(
+            &caller,
+            storage.clone(),
+            json!({"instance_id":target.id.to_string()}),
+        );
+        ctx.tenant_id = TenantId::unchecked("T1");
+        let result = handle_query_instance(ctx).await;
+        assert_eq!(result.unwrap(), json!({"found":false}));
     }
 }
