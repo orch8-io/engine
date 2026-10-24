@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Credential readiness and initial publication
+
+- Obtain an initial provider token before dispatching control-plane payloads;
+  reject locally when initialization fails or is superseded, with no anonymous
+  fallback for an installed provider. Keep successful initial refresh supported.
+- Preserve usable initial publication after a failed concurrent refresh while
+  allowing successful refresh publication to take precedence.
+- Return typed `LeaseRequestError` from Rust `HttpLeaseClient` send/get/post_json
+  methods; callers using `reqwest::Result` must migrate. Native bindings retain
+  their existing signatures. Unavailable lease authorization is Rejected.
+
 ### Mobile credential provider ownership
 
 - Atomically scope token snapshots, refresh publication, cancellation, and

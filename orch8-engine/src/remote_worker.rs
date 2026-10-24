@@ -142,12 +142,68 @@ impl std::fmt::Debug for AuthHeaders {
     }
 }
 
+/// A request could not be authenticated locally or failed in transport.
+/// Display and Debug redact URL credentials and query values.
+pub enum LeaseRequestError {
+    /// A refreshable authorization owner is installed but not ready to send.
+    AuthorizationUnavailable,
+    /// The HTTP request failed; HTTP response statuses remain successful results.
+    Transport(reqwest::Error),
+}
+
+impl From<reqwest::Error> for LeaseRequestError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Transport(error)
+    }
+}
+
+impl std::fmt::Display for LeaseRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AuthorizationUnavailable => formatter.write_str("authorization is not ready"),
+            Self::Transport(error) => formatter.write_str(&crate::outbound::redact_error(error)),
+        }
+    }
+}
+
+impl std::fmt::Debug for LeaseRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AuthorizationUnavailable => formatter.write_str("AuthorizationUnavailable"),
+            Self::Transport(error) => formatter
+                .debug_tuple("Transport")
+                .field(&crate::outbound::redact_error(error))
+                .finish(),
+        }
+    }
+}
+
+impl std::error::Error for LeaseRequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::AuthorizationUnavailable => None,
+            Self::Transport(error) => Some(error),
+        }
+    }
+}
+
 /// A credential that can change while the node runs (e.g. a phone's
 /// short-lived device session delivered by a host token provider).
 #[async_trait::async_trait]
 pub trait RefreshingAuth: Send + Sync {
     /// Headers for the next request, sent with the current credential.
     fn headers(&self) -> AuthHeaders;
+    /// Atomically obtain headers only when the authorization owner is ready.
+    /// Return None to reject locally before building or dispatching a request.
+    /// Implementations with an initialization state should override this method.
+    fn request_headers(&self) -> Option<AuthHeaders> {
+        Some(self.headers())
+    }
+    /// Prepare one owned snapshot, optionally obtaining an initial credential.
+    /// Preparation must not adopt another owner when initialization is superseded.
+    async fn prepare_headers(&self) -> Option<AuthHeaders> {
+        self.request_headers()
+    }
     /// A `401` answered a request sent with `stale` (an
     /// [`AuthHeaders::generation`]). Obtain a fresh credential unless another
     /// request already did; `true` when a different credential is now
@@ -157,7 +213,7 @@ pub trait RefreshingAuth: Send + Sync {
     /// the original request. Replaceable owners should override this with an
     /// atomic check/snapshot; the default preserves a single-owner provider.
     fn retry_headers(&self, _stale: &str) -> Option<AuthHeaders> {
-        Some(self.headers())
+        self.request_headers()
     }
     /// Inspect every response (e.g. warn about an over-privileged key).
     fn observe(&self, _response: &reqwest::Response) {}
@@ -175,13 +231,13 @@ pub enum LeaseAuth {
 }
 
 impl LeaseAuth {
-    fn headers(&self) -> AuthHeaders {
+    async fn prepare_headers(&self) -> Option<AuthHeaders> {
         match self {
-            Self::Static(headers) => AuthHeaders {
+            Self::Static(headers) => Some(AuthHeaders {
                 headers: headers.clone(),
                 generation: String::new(),
-            },
-            Self::Refreshing(auth) => auth.headers(),
+            }),
+            Self::Refreshing(auth) => auth.prepare_headers().await,
         }
     }
 }
@@ -256,13 +312,13 @@ impl HttpLeaseClient {
     /// credential, refresh it and send the request once more.
     ///
     /// # Errors
-    /// Transport failures only; every HTTP status is an `Ok` response.
+    /// Unavailable authorization and transport failures; every HTTP status is an `Ok` response.
     pub async fn send(
         &self,
         method: reqwest::Method,
         path: &str,
         build: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder + Send,
-    ) -> reqwest::Result<reqwest::Response> {
+    ) -> Result<reqwest::Response, LeaseRequestError> {
         let url = self.url(path);
         let attempt = |auth: &AuthHeaders| {
             let mut request = self.http.request(method.clone(), &url);
@@ -271,7 +327,11 @@ impl HttpLeaseClient {
             }
             build(request)
         };
-        let sent = self.auth.headers();
+        let sent = self
+            .auth
+            .prepare_headers()
+            .await
+            .ok_or(LeaseRequestError::AuthorizationUnavailable)?;
         let response = attempt(&sent).send().await?;
         let LeaseAuth::Refreshing(refreshing) = &self.auth else {
             return Ok(response);
@@ -295,12 +355,12 @@ impl HttpLeaseClient {
     /// `POST` a JSON `body` to `path` (see [`Self::send`]).
     ///
     /// # Errors
-    /// Transport failures only.
+    /// Unavailable authorization and transport failures.
     pub async fn post_json<B: Serialize + Sync + ?Sized>(
         &self,
         path: &str,
         body: &B,
-    ) -> reqwest::Result<reqwest::Response> {
+    ) -> Result<reqwest::Response, LeaseRequestError> {
         self.send(reqwest::Method::POST, path, |request| request.json(body))
             .await
     }
@@ -308,8 +368,8 @@ impl HttpLeaseClient {
     /// `GET` `path` (see [`Self::send`]).
     ///
     /// # Errors
-    /// Transport failures only.
-    pub async fn get(&self, path: &str) -> reqwest::Result<reqwest::Response> {
+    /// Unavailable authorization and transport failures.
+    pub async fn get(&self, path: &str) -> Result<reqwest::Response, LeaseRequestError> {
         self.send(reqwest::Method::GET, path, |request| request)
             .await
     }
@@ -447,16 +507,17 @@ impl HttpLeaseClient {
     ) -> LeaseResponse {
         match self.post_json(path, body).await {
             Ok(resp) => classify_lease_status(resp.status().as_u16(), missing_route_is_unsupported),
+            Err(LeaseRequestError::AuthorizationUnavailable) => LeaseResponse::Rejected,
             Err(e) => {
-                debug!(path, error = %crate::outbound::redact_error(&e), "lease call failed");
+                debug!(path, error = %e, "lease call failed");
                 LeaseResponse::Retry
             }
         }
     }
 }
 
-fn network_err(what: &str, e: &reqwest::Error) -> String {
-    format!("{what}: {}", crate::outbound::redact_error(e))
+fn network_err(what: &str, e: &LeaseRequestError) -> String {
+    format!("{what}: {e}")
 }
 
 async fn expect_success(what: &str, resp: reqwest::Response) -> Result<reqwest::Response, String> {
@@ -712,6 +773,44 @@ mod tests {
         let mut scalar = serde_json::json!(5);
         inject_task_metadata(&mut scalar, &task, "rt");
         assert_eq!(scalar, serde_json::json!(5));
+    }
+
+    #[tokio::test]
+    async fn unavailable_auth_rejects_before_body_build_and_applies_to_retry_defaults() {
+        struct Unavailable;
+        #[async_trait::async_trait]
+        impl RefreshingAuth for Unavailable {
+            fn headers(&self) -> AuthHeaders {
+                panic!("unavailable authorization cannot supply request headers")
+            }
+            fn request_headers(&self) -> Option<AuthHeaders> {
+                None
+            }
+            async fn refresh_after_unauthorized(&self, _: &str) -> bool {
+                false
+            }
+        }
+        let auth = Arc::new(Unavailable);
+        assert!(auth.retry_headers("stale").is_none());
+        let client = HttpLeaseClient::with_auth(
+            reqwest::Client::new(),
+            "http://127.0.0.1:1",
+            LeaseAuth::Refreshing(auth),
+            "worker".into(),
+        );
+        let result = client
+            .send(reqwest::Method::POST, "complete", |_| {
+                panic!("body builder must not run")
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(LeaseRequestError::AuthorizationUnavailable)
+        ));
+        assert_eq!(
+            client.heartbeat(uuid::Uuid::new_v4(), 1).await,
+            LeaseResponse::Rejected
+        );
     }
 
     #[test]

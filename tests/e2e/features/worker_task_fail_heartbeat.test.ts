@@ -4,6 +4,7 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Orch8Client, testSequence, step, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
 import type { ServerHandle } from "../harness.ts";
@@ -21,7 +22,7 @@ describe("Worker Task Fail and Heartbeat", () => {
     await stopServer(server);
   });
 
-  it("fail task with retryable=true reschedules the instance", async () => {
+  it("retryable failure creates a fenced retry that completes", async () => {
     const tenantId = `wt-retry-${uuid().slice(0, 8)}`;
     const handler = `retryable_${uuid().slice(0, 8)}`;
 
@@ -38,10 +39,44 @@ describe("Worker Task Fail and Heartbeat", () => {
 
     await client.waitForState(id, "waiting", { timeoutMs: 5_000 });
     const tasks = await client.pollWorkerTasks(handler, "worker-1");
-    await client.failWorkerTask(tasks[0]!.id, "worker-1", "retryable error", true);
+    assert.equal(tasks.length, 1);
+    const first = tasks[0]!;
+    assert.ok(typeof first.attempt === "number");
+    assert.ok(typeof first.effect_id === "string");
+    await client.failWorkerTask(first.id, "worker-1", "retryable error", true);
 
-    // Instance should go back to scheduled for retry.
-    await client.waitForState(id, "scheduled", { timeoutMs: 5_000 });
+    // Scheduled is transient: a fast scheduler can dispatch the next attempt
+    // before the fail response reaches the worker. Observe the durable retry,
+    // deliberately waiting until the instance has advanced to waiting again.
+    await client.waitForState(id, "waiting", { timeoutMs: 5_000 });
+    const deadline = Date.now() + 5_000;
+    let retries = await client.pollWorkerTasks(handler, "worker-2");
+    while (retries.length === 0 && Date.now() < deadline) {
+      await sleep(25);
+      retries = await client.pollWorkerTasks(handler, "worker-2");
+    }
+    assert.equal(retries.length, 1, "the failed attempt must produce a claimable retry");
+    const retry = retries[0]!;
+    assert.notEqual(retry.id, first.id);
+    assert.equal(retry.instance_id, id);
+    assert.equal(retry.block_id, first.block_id);
+    assert.equal(retry.attempt, first.attempt + 1);
+    assert.ok(typeof retry.effect_id === "string");
+    assert.notEqual(retry.effect_id, first.effect_id);
+
+    // Retry can retire the old row entirely or retain a fenced row. Both
+    // protocol outcomes must reject completion by that former lease holder.
+    await assert.rejects(
+      () => client.completeWorkerTask(first.id, "worker-1", { stale: true }, first.claim_epoch),
+      (error: unknown) => error instanceof Error && "status" in error
+        && typeof error.status === "number" && [404, 409, 410].includes(error.status),
+    );
+    await client.completeWorkerTask(retry.id, "worker-2", { retry_completed: true });
+    await client.waitForState(id, "completed", { timeoutMs: 5_000 });
+    const outputs = await client.getOutputs(id);
+    const successful = outputs.find((row) => row.block_id === "s1"
+      && typeof row.output === "object" && row.output !== null && "retry_completed" in row.output);
+    assert.deepEqual(successful?.output, { retry_completed: true });
   });
 
   it("fail task with retryable=false moves instance to failed", async () => {

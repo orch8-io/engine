@@ -838,6 +838,14 @@ worker lease protocol, delegation, and `/mobile/sync` — carries the current
 token. When the server answers `401` (the session expired), the SDK calls
 `refreshToken()` once (however many requests saw the stale token, on a
 background thread; it may block on your HTTP call) and retries the request.
+If an installed native provider has an empty or whitespace-only initial token,
+the SDK first attempts a bounded refresh under that installation's owner. It
+builds and sends the operation only after obtaining a usable token. Failed or
+superseded initialization fails locally; it does not fall back to anonymous
+authorization or another provider's token. A failed concurrent refresh leaves a
+usable initial-token callback eligible to finish; successful refresh takes
+precedence over that callback.
+
 Sessions last `ttl_secs` (default 3600, at most 86400).
 
 Each provider installation owns its refresh and retry state. Replacing it clears
