@@ -28,7 +28,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; durable principal/cache binding and manifest refresh remain open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
-| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; restart wake recovery and callback execution remain open |
+| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery passes behavioral tests but child-history query cost remains open; callbacks remain under review |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
 | Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
@@ -1322,3 +1322,57 @@ an ADR-0002 gate. All 2,053 lean engine and 445 mobile library tests pass,
 including six new cache ownership cases. All-target Clippy passes for both
 with warnings denied; documentation, formatting and whitespace checks pass.
 Hosted CI remains required before merge.
+
+### DME086 — Waiting parent could remain stranded after backend restart (in validation)
+
+**HIGH, effort M.** A transient execution-tree read failure after the parent
+committed Running → Waiting was retried only by the volatile wake registry.
+Closing that backend and reopening its SQLite file left the parent Waiting
+forever even though the awaited child was durably Completed. The reproduction
+fails on the prior code after an actual pool close/file reopen; it does not
+claim an operating-system process kill test.
+
+The existing bounded, rotating Waiting sweep now also reconciles workflows
+containing sub-sequences against persisted execution-tree and child activation
+state. It reuses dispatch's activation matching, so a terminal child from an
+older loop activation or another block cannot authorize a wake. Only a
+Waiting → Scheduled compare-and-set reschedules the parent. Failed reads or
+writes remain eligible on later rotations without depending on a volatile
+notification. A bounded sequence-feature memo keeps ordinary workflows from
+paying for new tree/child reads. Deadline and approval timeout handling retain
+priority. The original page bounds and separate embedded single-shot full scan remain
+in effect. Child-history query cost is an open merge gate (DME087).
+
+All 2,060 lean engine and 445 mobile library tests pass. The final 16-case
+wake/recovery matrix and complete workspace/all-target Clippy pass. The public
+embedded tick case passes on both SQLite and an isolated required Postgres leg;
+the owned tmpfs container is removed. Documentation, formatting and whitespace
+checks pass. This proves persisted-state recovery behavior; the change stays a
+draft until the history-query cost below is addressed.
+
+
+### DME087 — Sub-sequence lookup loads accumulated child history (open merge gate)
+
+**HIGH for long-running loops, effort M.** Dispatch and post-park reconciliation
+use `get_child_instances(parent)` and match the current activation in memory.
+DME086 also reuses this path in the periodic Waiting sweep. Its database result
+and allocation cost grow with every historical child of a looping parent,
+even when just one current activation matters. The bounded page count limits
+parents examined, not the children loaded per parent.
+
+Before enabling periodic recovery, add an owner/activation-qualified lookup with
+indexed SQLite/Postgres implementations and preserve exact activation, legacy
+fallback and child ordering semantics. Verify accumulated-history behavior and
+query plans on the actual backends. Keep old custom backends compatible through
+a correct default implementation. Neither behavioral recovery tests nor green
+CI alone close this scaling gate.
+
+## SDK main-branch inventory recheck
+
+The current `main` head matches a successful latest Actions run in sdk-node,
+sdk-go, sdk-python, sdk-php, sdk-ruby, sdk-dotnet, sdk-java, sdk-expo,
+sdk-contract, react-native-orch8 and orch8-flutter. orch8-mobile-swift has no
+Actions runs to establish the same evidence. The organization open-PR search
+finds only the two monitored engine PRs. These are repository/CI observations,
+not a claim that current native artifacts or the scoped SDK contract satisfy
+ADR-0002. Those release/platform gates remain open.

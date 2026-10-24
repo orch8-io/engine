@@ -306,3 +306,285 @@ async fn owned_cancel_signal_preserves_the_deferred_parent_wake() {
         InstanceState::Scheduled
     );
 }
+
+#[tokio::test]
+async fn reopened_database_recovers_parent_after_post_park_read_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("parent-recovery.sqlite");
+    let path = path.to_str().unwrap();
+    let raw = Arc::new(SqliteStorage::file(path).await.unwrap());
+    let original: Arc<dyn StorageBackend> = raw.clone();
+    let (storage, faults) = orch8_storage::testing::faulty::FaultStorage::wrap(original);
+    let (parent, mut sequence, _) =
+        seed_sub_sequence_parent(&storage, InstanceState::Running, InstanceState::Completed).await;
+    sequence.id = parent.sequence_id;
+    storage.create_sequence(&sequence).await.unwrap();
+    faults.on("get_execution_tree").times(1).fail_transient();
+    run_more_work(&storage, &parent, &sequence).await;
+    assert_eq!(
+        storage
+            .get_instance(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Waiting
+    );
+    let retired = Arc::downgrade(&storage);
+    drop(storage);
+    assert!(retired.upgrade().is_none());
+    raw.pool().close().await;
+    drop(raw);
+    // The old backend's volatile registry cannot deliver into this lifetime.
+    let reopened: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::file(path).await.unwrap());
+    sweep_waiting(&reopened, &mut WaitingSweepCursor::default(), 10, 1).await;
+    assert_eq!(
+        reopened
+            .get_instance(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Scheduled,
+        "durable child state must recover a parent after volatile wake ownership ends"
+    );
+}
+
+async fn persisted_waiting_parent(
+    storage: &Arc<dyn StorageBackend>,
+    child_state: InstanceState,
+) -> (TaskInstance, InstanceId) {
+    let mut sequence = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
+        orch8_types::sequence::SubSequenceDef {
+            id: BlockId::new("sub"),
+            sequence_name: "child".into(),
+            version: None,
+            input: serde_json::json!({}),
+        },
+    ))]);
+    sequence.name = sequence.id.to_string();
+    storage.create_sequence(&sequence).await.unwrap();
+    let parent = mk_waiting_instance(sequence.id, chrono::Duration::zero(), Utc::now());
+    storage.create_instance(&parent).await.unwrap();
+    let mut child = parent.clone();
+    child.id = InstanceId::new();
+    child.parent_instance_id = Some(parent.id);
+    child.state = child_state;
+    child.metadata = serde_json::json!({"_parent_block_id": "sub"});
+    storage.create_instance(&child).await.unwrap();
+    storage
+        .create_execution_node(&orch8_types::execution::ExecutionNode {
+            id: orch8_types::ids::ExecutionNodeId::new(),
+            instance_id: parent.id,
+            block_id: BlockId::new("sub"),
+            parent_id: None,
+            block_type: orch8_types::execution::BlockType::SubSequence,
+            branch_index: None,
+            state: orch8_types::execution::NodeState::Waiting,
+            started_at: Some(Utc::now()),
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+    (parent, child.id)
+}
+
+#[tokio::test]
+async fn waiting_parent_recovery_only_wakes_for_terminal_children() {
+    for state in [
+        InstanceState::Scheduled,
+        InstanceState::Running,
+        InstanceState::Waiting,
+        InstanceState::Paused,
+        InstanceState::Completed,
+        InstanceState::Failed,
+        InstanceState::Cancelled,
+    ] {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let (parent, _) = persisted_waiting_parent(&storage, state).await;
+        sweep_waiting(&storage, &mut WaitingSweepCursor::default(), 10, 1).await;
+        assert_eq!(
+            storage
+                .get_instance(parent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            if state.is_terminal() {
+                InstanceState::Scheduled
+            } else {
+                InstanceState::Waiting
+            },
+            "child state {state:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn waiting_parent_recovery_ignores_previous_activations_and_other_blocks() {
+    for metadata in [
+        serde_json::json!({"_parent_activation": "old-node/loop:0"}),
+        serde_json::json!({"_parent_block_id": "different-block"}),
+    ] {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let (parent, child) = persisted_waiting_parent(&storage, InstanceState::Completed).await;
+        storage
+            .merge_instance_metadata(child, &metadata)
+            .await
+            .unwrap();
+        sweep_waiting(&storage, &mut WaitingSweepCursor::default(), 10, 1).await;
+        assert_eq!(
+            storage
+                .get_instance(parent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            InstanceState::Waiting
+        );
+    }
+}
+
+#[tokio::test]
+async fn waiting_parent_recovery_retries_write_failures_without_volatile_events() {
+    let raw: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let (storage, faults) = orch8_storage::testing::faulty::FaultStorage::wrap(raw);
+    let (parent, _) = persisted_waiting_parent(&storage, InstanceState::Completed).await;
+    faults
+        .on("conditional_update_instance_state")
+        .times(1)
+        .fail_transient();
+    let mut cursor = WaitingSweepCursor::default();
+    sweep_waiting(&storage, &mut cursor, 10, 1).await;
+    assert_eq!(
+        storage
+            .get_instance(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Waiting
+    );
+    sweep_waiting(&storage, &mut cursor, 10, 1).await;
+    assert_eq!(
+        storage
+            .get_instance(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Scheduled
+    );
+}
+
+#[tokio::test]
+async fn waiting_parent_recovery_does_not_overwrite_a_concurrent_pause() {
+    let raw: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let (storage, faults) = orch8_storage::testing::faulty::FaultStorage::wrap(Arc::clone(&raw));
+    let (parent, _) = persisted_waiting_parent(&storage, InstanceState::Completed).await;
+    let paused = faults
+        .on("conditional_update_instance_state")
+        .times(1)
+        .pause();
+    let sweep = {
+        let storage = Arc::clone(&storage);
+        tokio::spawn(async move {
+            sweep_waiting(&storage, &mut WaitingSweepCursor::default(), 10, 1).await;
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), paused.entered())
+        .await
+        .unwrap();
+    assert!(
+        raw.conditional_update_instance_state(
+            parent.id,
+            InstanceState::Waiting,
+            InstanceState::Paused,
+            None
+        )
+        .await
+        .unwrap()
+    );
+    paused.release();
+    tokio::time::timeout(Duration::from_secs(5), sweep)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        raw.get_instance(parent.id).await.unwrap().unwrap().state,
+        InstanceState::Paused
+    );
+}
+
+#[tokio::test]
+async fn waiting_parent_recovery_rotates_past_the_page_cap() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let (one, _) = persisted_waiting_parent(&storage, InstanceState::Running).await;
+    let (two, _) = persisted_waiting_parent(&storage, InstanceState::Running).await;
+    let (three, _) = persisted_waiting_parent(&storage, InstanceState::Completed).await;
+    let mut cursor = WaitingSweepCursor::default();
+    sweep_waiting(&storage, &mut cursor, 1, 1).await;
+    sweep_waiting(&storage, &mut cursor, 1, 1).await;
+    assert_eq!(
+        storage.get_instance(three.id).await.unwrap().unwrap().state,
+        InstanceState::Waiting
+    );
+    sweep_waiting(&storage, &mut cursor, 1, 1).await;
+    assert_eq!(
+        storage.get_instance(three.id).await.unwrap().unwrap().state,
+        InstanceState::Scheduled
+    );
+    for parent in [one, two] {
+        assert_eq!(
+            storage
+                .get_instance(parent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            InstanceState::Waiting
+        );
+    }
+}
+
+#[tokio::test]
+async fn embedded_tick_recovers_waiting_parent_and_drains_completed_child() {
+    for backend in fencing_backends().await {
+        let storage = Arc::clone(&backend.storage);
+        let (parent, _) = persisted_waiting_parent(&storage, InstanceState::Completed).await;
+        let registry = Arc::new(HandlerRegistry::new());
+        let semaphore = Arc::new(Semaphore::new(2));
+        let cache = Arc::new(SequenceCache::new(16, Duration::from_secs(60)));
+        let cancel = CancellationToken::new();
+        let config = SchedulerConfig::default();
+        let first = tick_once(&storage, &registry, &semaphore, &config, &cache, &cancel)
+            .await
+            .unwrap();
+        assert!(
+            first.has_pending_work,
+            "embedded caller must keep draining recovered work"
+        );
+        assert_eq!(
+            storage
+                .get_instance(parent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            InstanceState::Scheduled
+        );
+        let second = tick_once(&storage, &registry, &semaphore, &config, &cache, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_instance(parent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            InstanceState::Completed
+        );
+        assert!(!second.has_pending_work);
+    }
+}
