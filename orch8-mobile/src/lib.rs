@@ -1076,16 +1076,24 @@ impl MobileEngine {
                 })?)
             };
 
-            let auth = match token_provider {
-                Some(provider) => sync::SyncAuth::Bearer(
-                    self.credential
-                        .current_manifest_token(provider, &self.cancel)
-                        .await?,
-                ),
-                None => sync::SyncAuth::UrlToken,
-            };
-
-            let result = orch.sync(&manifest_url, &auth, &handler_names).await;
+            let credential = Arc::clone(&self.credential);
+            let result = orch
+                .sync_with_auth(
+                    &manifest_url,
+                    &handler_names,
+                    self.cancel.child_token(),
+                    move |cancelled| async move {
+                        Ok(match token_provider {
+                            Some(provider) => sync::SyncAuth::Bearer(
+                                credential
+                                    .current_manifest_token(provider, &cancelled)
+                                    .await?,
+                            ),
+                            None => sync::SyncAuth::UrlToken,
+                        })
+                    },
+                )
+                .await;
 
             // Piggyback telemetry flush on successful sync.
             if result.is_ok()

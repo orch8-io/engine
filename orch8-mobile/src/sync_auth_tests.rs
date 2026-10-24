@@ -23,6 +23,7 @@ struct RecordingServer {
     base: String,
     replies: Arc<Mutex<HashMap<String, VecDeque<Reply>>>>,
     requests: Arc<Mutex<Vec<Request>>>,
+    gates: Arc<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -34,16 +35,21 @@ impl RecordingServer {
         let routes = Arc::clone(&replies);
         let requests: Arc<Mutex<Vec<Request>>> = Arc::default();
         let recorded = Arc::clone(&requests);
+        let gates: Arc<Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>> = Arc::default();
+        let response_gates = Arc::clone(&gates);
         let task = tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut bytes = Vec::new();
                 let mut chunk = [0; 1024];
                 while bytes.len() < 32 * 1024 && !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let count = socket.read(&mut chunk).await.unwrap();
+                    let count = socket.read(&mut chunk).await.unwrap_or(0);
                     if count == 0 {
                         break;
                     }
                     bytes.extend_from_slice(&chunk[..count]);
+                }
+                if !bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                    continue;
                 }
                 let text = String::from_utf8_lossy(&bytes);
                 let path = text
@@ -79,6 +85,10 @@ impl RecordingServer {
                         headers: vec![],
                         body: vec![],
                     });
+                let gate = response_gates.lock().unwrap().get(&path).cloned();
+                if let Some(gate) = gate {
+                    gate.acquire().await.unwrap().forget();
+                }
                 let mut header = format!(
                     "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
                     reply.status,
@@ -88,17 +98,31 @@ impl RecordingServer {
                     write!(header, "{name}: {value}\r\n").unwrap();
                 }
                 header.push_str("\r\n");
-                socket.write_all(header.as_bytes()).await.unwrap();
-                socket.write_all(&reply.body).await.unwrap();
-                socket.shutdown().await.unwrap();
+                if socket.write_all(header.as_bytes()).await.is_err() {
+                    continue;
+                }
+                if socket.write_all(&reply.body).await.is_err() {
+                    continue;
+                }
+                let _ = socket.shutdown().await;
             }
         });
         Self {
             base: format!("http://127.0.0.1:{port}"),
             replies,
             requests,
+            gates,
             task,
         }
+    }
+
+    fn hold(&self, path: &str) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        self.gates
+            .lock()
+            .unwrap()
+            .insert(path.into(), Arc::clone(&gate));
+        gate
     }
 
     fn script(&self, path: &str, replies: Vec<Reply>) {
@@ -143,7 +167,7 @@ impl Drop for RecordingServer {
 }
 
 struct Fixture {
-    orch: SyncOrchestrator,
+    orch: Arc<SyncOrchestrator>,
     origin: RecordingServer,
     entry: RecordingServer,
     key: ed25519_dalek::SigningKey,
@@ -152,18 +176,23 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        Self::with_storage(Arc::new(SqliteStorage::in_memory().await.unwrap())).await
+    }
+
+    async fn with_storage(sqlite: Arc<SqliteStorage>) -> Self {
         let key = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
-        let orch = SyncOrchestrator::new(
-            Arc::new(MobileStorage::new(sqlite.clone())),
-            sqlite,
-            RootKey {
-                pubkey: key.verifying_key(),
-            },
-            "0.7.1".into(),
-            50,
-        )
-        .with_insecure_urls_for_tests();
+        let orch = Arc::new(
+            SyncOrchestrator::new(
+                Arc::new(MobileStorage::new(sqlite.clone())),
+                sqlite,
+                RootKey {
+                    pubkey: key.verifying_key(),
+                },
+                "0.7.1".into(),
+                50,
+            )
+            .with_insecure_urls_for_tests(),
+        );
         let sequence =
             serde_json::to_vec(&super::tests::make_test_sequence("origin-flow", Utc::now()))
                 .unwrap();
@@ -470,3 +499,6 @@ async fn unverified_manifest_does_not_authorize_entry_requests() {
 
 #[path = "sync_auth_scope_tests.rs"]
 mod scope_tests;
+
+#[path = "sync_reconciliation_tests.rs"]
+mod reconciliation_tests;

@@ -10,7 +10,11 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+#[path = "sync_run.rs"]
+mod run;
 
 use orch8_storage::StorageBackend;
 use orch8_types::ids::Namespace;
@@ -96,6 +100,7 @@ async fn read_body_capped(resp: reqwest::Response, what: &str) -> Result<Vec<u8>
 }
 
 /// Root of trust: embedded Ed25519 public key for verifying manifest signatures.
+#[derive(Clone)]
 pub struct RootKey {
     pubkey: VerifyingKey,
 }
@@ -218,6 +223,7 @@ fn decode_verifying_key(key_b64: &str) -> Result<VerifyingKey, String> {
 }
 
 /// Auth configuration for sync requests.
+#[cfg_attr(test, derive(Clone))]
 pub enum SyncAuth {
     /// Token provided via callback interface.
     Bearer(String),
@@ -275,11 +281,16 @@ impl ScopedSyncAuth<'_> {
 const ENV_FINGERPRINT_KEY: &str = "sync_env_fingerprint";
 
 /// Orchestrates manifest fetch, verification, diff, and sequence download.
+#[derive(Clone)]
 pub struct SyncOrchestrator {
     mobile_storage: Arc<MobileStorage>,
     backend: Arc<dyn StorageBackend>,
     root_key: RootKey,
-    http: OnceLock<reqwest::Client>,
+    http: Arc<OnceLock<reqwest::Client>>,
+    admission: Arc<tokio::sync::Semaphore>,
+    // Set only on a per-operation snapshot; shared state and admission remain
+    // shared across snapshots, while cancellation belongs to one run.
+    run_cancelled: Option<CancellationToken>,
     sdk_version: String,
     max_stored_sequences: u32,
     /// Test-only escape hatch: loopback `http://` mock servers. Production
@@ -299,7 +310,9 @@ impl SyncOrchestrator {
             mobile_storage,
             backend,
             root_key,
-            http: OnceLock::new(),
+            http: Arc::new(OnceLock::new()),
+            admission: Arc::new(tokio::sync::Semaphore::new(1)),
+            run_cancelled: None,
             sdk_version,
             max_stored_sequences,
             allow_insecure_urls: false,
@@ -374,7 +387,7 @@ impl SyncOrchestrator {
                 req = req.header(reqwest::header::IF_NONE_MATCH, etag);
             }
 
-            match req.send().await {
+            match self.io(req.send()).await? {
                 Ok(resp)
                     if (resp.status().is_server_error()
                         || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS)
@@ -384,7 +397,7 @@ impl SyncOrchestrator {
                     let display_url = redacted_url(url);
                     let wait = retry_after(&resp).unwrap_or(delay);
                     warn!(attempt, %status, %display_url, wait_ms = wait.as_millis(), "retryable HTTP error");
-                    tokio::time::sleep(wait).await;
+                    self.io(tokio::time::sleep(wait)).await?;
                     // Real random jitter (M-23): the previous "1.5 +
                     // attempt*0.5" factor was fully determined by the
                     // attempt number, so every client that failed at the
@@ -398,7 +411,7 @@ impl SyncOrchestrator {
                 Err(e) if attempt < max_retries && e.is_timeout() => {
                     let display_url = redacted_url(url);
                     warn!(attempt, %display_url, "request timeout, retrying");
-                    tokio::time::sleep(delay).await;
+                    self.io(tokio::time::sleep(delay)).await?;
                     delay = jittered_backoff(delay);
                     // `without_url`: reqwest errors embed the full request URL
                     // (including the query string), which carries the auth
@@ -439,12 +452,30 @@ impl SyncOrchestrator {
     }
 
     /// Perform a full sync against the given manifest URL.
+    #[cfg(test)]
     pub async fn sync(
         &self,
         manifest_url: &str,
         auth: &SyncAuth,
         registered_handlers: &HashSet<String>,
     ) -> Result<SyncResult, MobileError> {
+        let auth = auth.clone();
+        self.sync_with_auth(
+            manifest_url,
+            registered_handlers,
+            CancellationToken::new(),
+            move |_| std::future::ready(Ok(auth)),
+        )
+        .await
+    }
+
+    async fn sync_inner(
+        &self,
+        manifest_url: &str,
+        auth: &SyncAuth,
+        registered_handlers: &HashSet<String>,
+    ) -> Result<SyncResult, MobileError> {
+        self.check_active()?;
         let mut result = SyncResult::default();
         let scoped_auth = auth.for_manifest(manifest_url)?;
 
@@ -524,15 +555,14 @@ impl SyncOrchestrator {
         // when any entry was skipped for a transient reason (download
         // failure) the cursor is NOT advanced, so the next sync re-fetches the
         // manifest instead of getting a 304 and never installing the entry.
+        self.check_active()?;
         if retryable_skips == 0 {
-            self.persist_sync_metadata(maybe_etag, Some(manifest.manifest_version))
-                .await?;
-            self.mobile_storage
-                .set_sync_metadata(ENV_FINGERPRINT_KEY, &fingerprint)
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
+            self.persist_sync_metadata(
+                maybe_etag,
+                Some(manifest.manifest_version),
+                Some(&fingerprint),
+            )
+            .await?;
         } else {
             warn!(
                 retryable_skips,
@@ -546,6 +576,7 @@ impl SyncOrchestrator {
                 })?;
         }
 
+        self.check_active()?;
         info!(
             added = result.added,
             updated = result.updated,
@@ -562,8 +593,10 @@ impl SyncOrchestrator {
         &self,
         manifest: &Manifest,
     ) -> Result<HashMap<String, VerifyingKey>, MobileError> {
+        self.check_active()?;
         let mut trusted_keys: HashMap<String, VerifyingKey> = HashMap::new();
         for entry in &manifest.signing_keys {
+            self.check_active()?;
             let pk_bytes =
                 BASE64
                     .decode(&entry.public_key)
@@ -593,6 +626,7 @@ impl SyncOrchestrator {
         // Without this, a key compromised after rotation would keep verifying
         // forever. (The manifest itself is signed by the root key, so its
         // key-set cannot be forged.)
+        self.check_active()?;
         let current: HashSet<&str> = manifest
             .signing_keys
             .iter()
@@ -606,6 +640,7 @@ impl SyncOrchestrator {
                     message: e.to_string(),
                 })?;
         for (key_id, _) in stored {
+            self.check_active()?;
             if !current.contains(key_id.as_str()) {
                 if let Err(e) = self.mobile_storage.delete_trusted_key(&key_id).await {
                     warn!(key_id = %key_id, error = %e, "failed to revoke rotated-out signing key");
@@ -615,6 +650,7 @@ impl SyncOrchestrator {
             }
         }
 
+        self.check_active()?;
         Ok(trusted_keys)
     }
 
@@ -625,11 +661,13 @@ impl SyncOrchestrator {
         manifest: &Manifest,
         local_sequences: &HashMap<String, i32>,
     ) -> Result<u32, MobileError> {
+        self.check_active()?;
         let mut removed_count = 0u32;
 
         // Reconcile removed entries.
         let cutoff = Utc::now() - chrono::Duration::days(30);
         for removed in &manifest.removed {
+            self.check_active()?;
             if removed.removed_at < cutoff {
                 continue; // ignore old removals
             }
@@ -644,6 +682,7 @@ impl SyncOrchestrator {
 
         // Full reconciliation: if last sync > 30 days ago, treat any local sequence
         // not in manifest as removed.
+        self.check_active()?;
         let last_sync = self.get_last_sync_ts().await?;
         let thirty_days_ago = Utc::now() - chrono::Duration::days(30);
         if last_sync.is_none_or(|t| t < thirty_days_ago) {
@@ -653,6 +692,7 @@ impl SyncOrchestrator {
                 .map(|sequence| sequence.name.as_str())
                 .collect();
             for name in local_sequences.keys() {
+                self.check_active()?;
                 if !manifest_names.contains(name.as_str()) {
                     if let Err(e) = self.remove_local_sequence(name).await {
                         warn!(name = %name, error = %e, "failed to remove stale local sequence");
@@ -681,6 +721,7 @@ impl SyncOrchestrator {
         local_sequences: &HashMap<String, i32>,
         trusted_keys: &mut HashMap<String, VerifyingKey>,
     ) -> Result<(u32, u32, u32, u32, u32), MobileError> {
+        self.check_active()?;
         let mut retryable = 0u32;
         let mut added = 0u32;
         let mut updated = 0u32;
@@ -688,6 +729,7 @@ impl SyncOrchestrator {
         let mut sig_failures = 0u32;
 
         for entry in &manifest.sequences {
+            self.check_active()?;
             if !self.version_meets_min(&self.sdk_version, &entry.min_sdk_version) {
                 warn!(
                     name = %entry.name,
@@ -746,6 +788,7 @@ impl SyncOrchestrator {
                 }
             };
 
+            self.check_active()?;
             let computed_hash = to_hex(&Sha256::digest(&seq_json));
             if computed_hash != entry.sha256 {
                 warn!(
@@ -844,30 +887,25 @@ impl SyncOrchestrator {
         &self,
         etag: Option<String>,
         manifest_version: Option<i64>,
+        fingerprint: Option<&str>,
     ) -> Result<(), MobileError> {
+        self.check_active()?;
+        let timestamp = Utc::now().to_rfc3339();
+        let version = manifest_version.map(|value| value.to_string());
+        let mut changes = vec![
+            ("last_sync_ts", Some(timestamp.as_str())),
+            ("manifest_etag", etag.as_deref()),
+        ];
+        if let Some(version) = version.as_deref() {
+            changes.push(("last_manifest_version", Some(version)));
+        }
+        if let Some(fingerprint) = fingerprint {
+            changes.push((ENV_FINGERPRINT_KEY, Some(fingerprint)));
+        }
         self.mobile_storage
-            .set_sync_metadata("last_sync_ts", &Utc::now().to_rfc3339())
+            .update_sync_metadata_batch(&changes)
             .await
-            .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
-            })?;
-        if let Some(etag) = etag {
-            self.mobile_storage
-                .set_sync_metadata("manifest_etag", &etag)
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
-        }
-        if let Some(version) = manifest_version {
-            self.mobile_storage
-                .set_sync_metadata("last_manifest_version", &version.to_string())
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
-        }
-        Ok(())
+            .map_err(MobileError::from)
     }
 
     /// Last successfully-applied manifest version, used to reject replays of
@@ -927,7 +965,7 @@ impl SyncOrchestrator {
             .headers()
             .get("etag")
             .and_then(|v| v.to_str().ok().map(String::from));
-        let bytes = read_body_capped(response, "manifest").await?;
+        let bytes = self.io(read_body_capped(response, "manifest")).await??;
         Ok((bytes, etag))
     }
 
@@ -979,7 +1017,7 @@ impl SyncOrchestrator {
             .into());
         }
 
-        let bytes = read_body_capped(response, "sequence").await?;
+        let bytes = self.io(read_body_capped(response, "sequence")).await??;
         let text = String::from_utf8(bytes).map_err(|e| SyncError::Network {
             message: format!("sequence body is not valid utf-8: {e}"),
         })?;
@@ -999,6 +1037,7 @@ impl SyncOrchestrator {
     }
 
     async fn remove_local_sequence(&self, name: &str) -> Result<(), MobileError> {
+        self.check_active()?;
         let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
         let seq = self
@@ -1011,6 +1050,7 @@ impl SyncOrchestrator {
         if seq.is_none() {
             return Ok(());
         }
+        self.check_active()?;
         // Remove every stored version. A version that still has in-flight
         // instances is kept (storage refuses the delete, L3-04) but
         // deprecated so no new run starts on it; a later sync retries.
@@ -1022,10 +1062,12 @@ impl SyncOrchestrator {
                 message: e.to_string(),
             })?;
         for version in versions {
+            self.check_active()?;
             match self.backend.delete_sequence(version.id).await {
                 Ok(()) => {}
                 Err(orch8_types::error::StorageError::Conflict(message)) => {
                     warn!(%name, version = version.version, %message, "keeping removed sequence version with in-flight instances");
+                    self.check_active()?;
                     self.backend
                         .deprecate_sequence(version.id)
                         .await
@@ -1072,6 +1114,9 @@ impl SyncOrchestrator {
     /// in-flight instances have finished. Versions still in use are skipped
     /// (storage refuses the delete) and retried on the next upgrade.
     async fn prune_superseded_versions(&self, name: &str, keep: orch8_types::ids::SequenceId) {
+        if self.check_active().is_err() {
+            return;
+        }
         let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
         let versions = match self
@@ -1086,6 +1131,9 @@ impl SyncOrchestrator {
             }
         };
         for version in versions.into_iter().filter(|v| v.id != keep) {
+            if self.check_active().is_err() {
+                return;
+            }
             match self.backend.delete_sequence(version.id).await {
                 Ok(()) => {
                     info!(%name, version = version.version, "pruned superseded sequence version");
@@ -1099,6 +1147,7 @@ impl SyncOrchestrator {
     }
 
     async fn upsert_sequence(&self, seq: &SequenceDefinition) -> Result<(), MobileError> {
+        self.check_active()?;
         let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
         match self
@@ -1107,11 +1156,14 @@ impl SyncOrchestrator {
             .await
         {
             Ok(Some(existing)) => {
+                self.check_active()?;
                 // L3-04: never replace a version that in-flight instances
                 // still run — that cascade-deleted them. Install the new
                 // version alongside (new instances resolve the latest) and
                 // retire the old one once its instances finish.
-                let keep = if self.has_live_instances(existing.id).await? {
+                let live = self.has_live_instances(existing.id).await?;
+                self.check_active()?;
+                let keep = if live {
                     let mut new = seq.clone();
                     if new.id == existing.id {
                         new.id = orch8_types::ids::SequenceId::new();
@@ -1139,6 +1191,7 @@ impl SyncOrchestrator {
                 self.prune_superseded_versions(&seq.name, keep).await;
             }
             Ok(None) => {
+                self.check_active()?;
                 self.backend
                     .create_sequence(seq)
                     .await
@@ -1156,6 +1209,7 @@ impl SyncOrchestrator {
     }
 
     async fn evict_excess_sequences(&self) -> Result<(), MobileError> {
+        self.check_active()?;
         if self.max_stored_sequences == 0 {
             return Ok(());
         }
@@ -1169,6 +1223,7 @@ impl SyncOrchestrator {
                 message: e.to_string(),
             })?;
         for (sequence_id, name) in candidates {
+            self.check_active()?;
             if let Err(e) = self.backend.delete_sequence(sequence_id).await {
                 warn!(%name, error = %e, "failed to evict excess sequence");
             } else {
@@ -1398,7 +1453,7 @@ mod tests {
             50,
         );
 
-        orch.persist_sync_metadata(Some("etag-123".to_string()), None)
+        orch.persist_sync_metadata(Some("etag-123".to_string()), None, None)
             .await
             .unwrap();
 
@@ -1428,7 +1483,7 @@ mod tests {
             50,
         );
 
-        orch.persist_sync_metadata(None, None).await.unwrap();
+        orch.persist_sync_metadata(None, None, None).await.unwrap();
 
         let ts = mobile_storage
             .get_sync_metadata("last_sync_ts")

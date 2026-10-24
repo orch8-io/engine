@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Owned manifest sync admission and atomic metadata
+
+- Reject overlapping sync before token authorization or HTTP. Keep an owned
+  run's admission until already-dispatched storage work settles after caller
+  timeout/cancellation; stop network waits and subsequent mutation phases.
+- Commit timestamp, validator, replay version and evaluation fingerprint in one
+  SQLite transaction; retire old validators when a representation has no ETag.
+- Reproduce stale-manifest replay-fence overwrite and injected-write partial
+  commit, and add cancellation, WAL visibility, native backpressure and burst
+  admission tests. No public SDK/FFI signature changes.
+- Record the confirmed multi-account/multi-catalog scoped-runtime requirement
+  and its unimplemented ownership, migration, SDK and verification gates.
+
 ### Manifest download credential scope
 
 - Bind manifest bearer authorization to its normalized origin for sequence and

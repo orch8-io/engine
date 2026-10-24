@@ -11,15 +11,27 @@ use orch8_types::error::StorageError;
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::InstanceState;
 
+#[cfg(test)]
+struct MetadataBarrier {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
 /// Mobile-specific storage wrapper.
 pub struct MobileStorage {
     inner: Arc<SqliteStorage>,
+    #[cfg(test)]
+    metadata_barrier: std::sync::Mutex<Option<MetadataBarrier>>,
 }
 
 #[allow(dead_code)]
 impl MobileStorage {
     pub fn new(inner: Arc<SqliteStorage>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            #[cfg(test)]
+            metadata_barrier: std::sync::Mutex::new(None),
+        }
     }
 
     pub(crate) fn pool(&self) -> &sqlx::SqlitePool {
@@ -180,6 +192,53 @@ impl MobileStorage {
                 .fetch_optional(self.pool())
                 .await?;
         Ok(row.map(|r| r.0))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_metadata_commit(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        Arc<tokio::sync::Semaphore>,
+    ) {
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        *self.metadata_barrier.lock().unwrap() = Some(MetadataBarrier {
+            entered,
+            release: Arc::clone(&release),
+        });
+        (observed, release)
+    }
+
+    /// Commit one representation's validators and replay fence together.
+    /// A missing value removes that key, including a retired `ETag`.
+    pub(crate) async fn update_sync_metadata_batch(
+        &self,
+        changes: &[(&str, Option<&str>)],
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool().begin().await?;
+        let timestamp = Utc::now().to_rfc3339();
+        for (key, value) in changes {
+            if let Some(value) = value {
+                sqlx::query("INSERT INTO sync_metadata (key, value, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+                    .bind(key).bind(value).bind(&timestamp).execute(&mut *tx).await?;
+            } else {
+                sqlx::query("DELETE FROM sync_metadata WHERE key = ?1")
+                    .bind(key)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            #[cfg(test)]
+            {
+                let barrier = self.metadata_barrier.lock().unwrap().take();
+                if let Some(MetadataBarrier { entered, release }) = barrier {
+                    let _ = entered.send(());
+                    release.acquire().await.unwrap().forget();
+                }
+            }
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn set_sync_metadata(&self, key: &str, value: &str) -> Result<(), StorageError> {
