@@ -2693,6 +2693,34 @@ async fn parking_parent_rechecks_already_finished_sub_sequence_child() {
     assert_eq!(after.state, InstanceState::Waiting);
 }
 
+#[tokio::test]
+async fn handler_consumed_cancel_wakes_waiting_parent_before_claim_is_lost() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let (parent, _, child_id) =
+        seed_sub_sequence_parent(&storage, InstanceState::Waiting, InstanceState::Running).await;
+    orch8_storage::lifecycle::request_cancel(storage.as_ref(), child_id)
+        .await
+        .unwrap();
+    assert!(
+        crate::signals::process_signals(storage.as_ref(), child_id, InstanceState::Running)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        storage.get_instance(child_id).await.unwrap().unwrap().state,
+        InstanceState::Cancelled
+    );
+    assert_eq!(
+        storage
+            .get_instance(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Scheduled
+    );
+}
+
 /// A handler or evaluator may consume Cancel before the scheduler regains
 /// control. Both tree outcomes must still notify a waiting sub-sequence parent.
 #[tokio::test]

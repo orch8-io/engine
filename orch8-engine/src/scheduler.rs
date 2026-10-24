@@ -3330,7 +3330,7 @@ async fn cancel_orphans(
 /// `ManualClock` that starts at or after real time (the documented
 /// discipline), real now <= virtual now, so the parent is due on the very
 /// next virtual tick.
-async fn wake_parent_if_child(
+pub(crate) async fn wake_parent_if_child(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
 ) {
