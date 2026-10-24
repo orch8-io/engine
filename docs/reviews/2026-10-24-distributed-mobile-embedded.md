@@ -1725,3 +1725,38 @@ on the submitted commit before merging.
 
 This check alone does not implement account-epoch/callback fencing or make catalog
 namespaces a security boundary. Those execution gates remain open.
+
+### DME102 — Scoped execution needs account-epoch fencing below scheduler claims (internal prerequisite)
+
+The future scoped execution path cannot rely on a scheduler claim token alone.
+Test-only native fixtures backed by real prepared requests reproduced a successful
+KV write after account retirement, and a retired high-priority candidate winning
+admission before another account. Production scoped materialization is still
+absent; these tests do not claim an existing public scoped start API.
+
+SQLite now checks immutable request ownership and the current active account epoch
+inside the claim-bound write transaction. The same predicate fences claimed state
+transitions (including outbox transactions), lease renewal and its ownership
+fallback. Scheduler eligibility and higher-priority checks exclude invalid owners;
+both ordinary and per-tenant candidate paths filter before their limit. Reopening
+an account cannot authorize a predecessor epoch's existing native claim.
+
+A request ID cannot be relabelled as legacy by changing its native tenant,
+namespace or definition. Native rows in registered account tenants also require a
+matching request; missing provenance fails closed. Existing legacy tenants retain
+their original behavior. The correlated checks use request/account primary keys,
+not scans of request input or account history.
+
+Validation: 503 mobile, 231 storage and 2,064 core engine library tests passed.
+The storage suite includes the primary-key query-plan contract. After extracting
+shared test assertions, the three focused contracts passed again, strengthened to
+verify a successor account epoch can claim/write while its predecessor stays
+fenced. Workspace/all-target Clippy with warnings denied, formatting,
+documentation and diff checks passed. Hosted checks must pass on the submitted
+commit before merging.
+
+This is an execution storage prerequisite. No native scoped materializer or public
+start API is introduced. Handler/native callback ownership, scoped reads and
+builtins, child/delegation provenance, listeners, signals/SLA/recovery sweeps and
+complete resource accounting still require integration before scoped execution
+can be exposed. Preserve all ADR-0002 gates and the original review matrix.

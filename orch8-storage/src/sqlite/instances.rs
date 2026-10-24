@@ -17,14 +17,15 @@ pub(super) async fn has_due_higher_priority(
     now: DateTime<Utc>,
     priority: orch8_types::instance::Priority,
 ) -> Result<bool, StorageError> {
-    let exists: i64 = sqlx::query_scalar(
+    let exists: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS(
             SELECT 1 FROM task_instances
-            WHERE state = 'scheduled'
+            WHERE state = 'scheduled' AND {scope}
               AND (next_fire_at IS NULL OR next_fire_at <= ?1)
               AND priority > ?2
         )",
-    )
+        scope = super::mobile_execution::ALLOWED
+    )))
     .bind(now.to_rfc3339())
     .bind(priority as i16)
     .fetch_one(&store.pool)
@@ -297,11 +298,11 @@ async fn claim_due_inner(
         // inside a BEGIN IMMEDIATE transaction that blocks all other writers.
         // Rows trimmed by the pre-limit are claimed on a later tick.
         let overselect = i64::from(limit).saturating_mul(i64::from(max_per_tenant));
-        sqlx::query(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "WITH candidates AS (
                 SELECT id, tenant_id, priority, next_fire_at
                 FROM task_instances
-                WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1)
+                WHERE state='scheduled' AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1)
                 ORDER BY priority DESC, next_fire_at ASC
                 LIMIT ?4
             ), ranked AS (
@@ -322,7 +323,8 @@ async fn claim_due_inner(
             FROM task_instances
             JOIN winners USING (id)
             ORDER BY task_instances.priority DESC, task_instances.next_fire_at ASC",
-        )
+            scope = super::mobile_execution::ALLOWED
+        )))
         .bind(now_s)
         .bind(i64::from(limit))
         .bind(i64::from(max_per_tenant))
@@ -331,9 +333,7 @@ async fn claim_due_inner(
         .await?
     } else {
         // No per-tenant cap — original fast path.
-        sqlx::query(
-            "SELECT * FROM task_instances WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2"
-        )
+        sqlx::query(sqlx::AssertSqlSafe(format!("SELECT * FROM task_instances WHERE state='scheduled' AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2", scope = super::mobile_execution::ALLOWED)))
         .bind(now_s)
         .bind(i64::from(limit))
         .fetch_all(&mut *conn)
@@ -562,10 +562,11 @@ pub(super) async fn conditional_update_claimed_state(
     new_state: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
 ) -> Result<bool, StorageError> {
-    let result = sqlx::query(
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 \
-         WHERE id=?1 AND state=?5 AND claimed_at=?6",
-    )
+         WHERE id=?1 AND state=?5 AND claimed_at=?6 AND {scope}",
+        scope = super::mobile_execution::ALLOWED
+    )))
     .bind(id.to_string())
     .bind(new_state.to_string())
     .bind(next_fire_at.map(ts))
@@ -622,10 +623,11 @@ pub(super) async fn conditional_update_claimed_state_with_outbox(
     entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
 ) -> Result<bool, StorageError> {
     let mut tx = storage.pool.begin().await?;
-    let result = sqlx::query(
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 \
-         WHERE id=?1 AND state=?5 AND claimed_at=?6",
-    )
+         WHERE id=?1 AND state=?5 AND claimed_at=?6 AND {scope}",
+        scope = super::mobile_execution::ALLOWED
+    )))
     .bind(id.to_string())
     .bind(new_state.to_string())
     .bind(next_fire_at.map(ts))

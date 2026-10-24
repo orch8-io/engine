@@ -698,3 +698,269 @@ async fn staging_cleanup_does_not_erase_an_id_that_has_materialized_elsewhere() 
     );
     assert!(storage.catalog_run(&scope, run.id).await.unwrap().is_some());
 }
+
+// Test-only stand-in for future materialization. No production scoped API emits
+// native instances yet: handler/builtin ownership must be installed first.
+async fn native_fixture(
+    sqlite: &SqliteStorage,
+    run: &CatalogRun,
+) -> orch8_types::instance::TaskInstance {
+    let definition = sqlite.get_sequence(run.sequence_id).await.unwrap().unwrap();
+    let instance = serde_json::from_value(serde_json::json!({
+        "id":run.id,"sequence_id":run.sequence_id,"tenant_id":definition.tenant_id,"namespace":definition.namespace,
+        "state":"scheduled","priority":"Normal","timezone":"UTC","metadata":{},
+        "context":orch8_types::context::ExecutionContext::default(),"created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now()
+    })).unwrap();
+    sqlite.create_instance(&instance).await.unwrap();
+    instance
+}
+
+#[tokio::test]
+async fn execution_scope_retirement_fences_existing_claim_writes_and_reopen() {
+    use orch8_storage::ResourceStore;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("epochs.sqlite");
+    let sqlite = Arc::new(
+        SqliteStorage::file_mobile(path.to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let storage = MobileStorage::new(sqlite.clone());
+    let independent = MobileStorage::new(Arc::new(
+        SqliteStorage::file_mobile(path.to_str().unwrap())
+            .await
+            .unwrap(),
+    ));
+    let scope = scope(&storage, "alice", "one").await;
+    let run = storage
+        .prepare_catalog_run(&scope, request(Some("native"), "{}"), limits())
+        .await
+        .unwrap();
+    native_fixture(&sqlite, &run).await;
+    let claimed = sqlite
+        .claim_due_instances(chrono::Utc::now(), 1, 0)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    let token = claimed[0].claimed_at.unwrap();
+    assert!(
+        sqlite
+            .set_instance_kv_claimed(run.id, "before", &serde_json::json!(1), token)
+            .await
+            .unwrap()
+    );
+    independent
+        .retire_account_scope(&scope.account)
+        .await
+        .unwrap();
+    for reopen in [false, true] {
+        if reopen {
+            storage
+                .open_account_scope("alice", "issuer", "alice")
+                .await
+                .unwrap();
+        }
+        assert_claim_fenced(&sqlite, &run, token).await;
+    }
+    assert!(
+        sqlite
+            .get_instance_kv(run.id, "late")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        sqlite.get_instance(run.id).await.unwrap().unwrap().state,
+        orch8_types::instance::InstanceState::Running
+    );
+    assert_successor_can_execute(&storage, &sqlite).await;
+}
+
+async fn assert_claim_fenced(
+    sqlite: &SqliteStorage,
+    run: &CatalogRun,
+    token: chrono::DateTime<chrono::Utc>,
+) {
+    use orch8_storage::{OutputStore, ResourceStore};
+    assert!(
+        !sqlite
+            .set_instance_kv_claimed(run.id, "late", &serde_json::json!(2), token)
+            .await
+            .unwrap()
+    );
+    let output = orch8_types::output::BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id: run.id,
+        block_id: orch8_types::ids::BlockId::new("late"),
+        output: serde_json::json!({"secret":42}),
+        output_ref: None,
+        output_size: 13,
+        attempt: 1,
+        created_at: chrono::Utc::now(),
+    };
+    assert!(
+        !sqlite
+            .save_block_output_claimed(&output, token)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !sqlite
+            .conditional_update_claimed_instance_state_with_outbox(
+                run.id,
+                token,
+                orch8_types::instance::InstanceState::Running,
+                orch8_types::instance::InstanceState::Completed,
+                None,
+                &[],
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        sqlite.heartbeat_instance(run.id, token).await.unwrap(),
+        orch8_storage::InstanceLease::Lost
+    );
+    assert!(
+        !sqlite
+            .conditional_update_claimed_instance_state(
+                run.id,
+                token,
+                orch8_types::instance::InstanceState::Running,
+                orch8_types::instance::InstanceState::Completed,
+                None
+            )
+            .await
+            .unwrap()
+    );
+}
+
+async fn assert_successor_can_execute(storage: &MobileStorage, sqlite: &SqliteStorage) {
+    use orch8_storage::ResourceStore;
+    let fresh = scope(storage, "alice", "one").await;
+    let run = storage
+        .prepare_catalog_run(&fresh, request(Some("successor"), "{}"), limits())
+        .await
+        .unwrap();
+    native_fixture(sqlite, &run).await;
+    let claimed = sqlite
+        .claim_due_instances(chrono::Utc::now(), 1, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed.iter().map(|i| i.id).collect::<Vec<_>>(),
+        vec![run.id]
+    );
+    let token = claimed[0].claimed_at.unwrap();
+    assert_eq!(
+        sqlite.heartbeat_instance(run.id, token).await.unwrap(),
+        orch8_storage::InstanceLease::Held
+    );
+    assert!(
+        sqlite
+            .set_instance_kv_claimed(run.id, "successor", &serde_json::json!(1), token)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn execution_scope_retired_candidates_cannot_starve_another_account() {
+    let (storage, sqlite) = fixture().await;
+    let a = scope(&storage, "alice", "one").await;
+    let b = scope(&storage, "bob", "one").await;
+    let first = storage
+        .prepare_catalog_run(&a, request(Some("a"), "{}"), limits())
+        .await
+        .unwrap();
+    let second = storage
+        .prepare_catalog_run(&b, request(Some("b"), "{}"), limits())
+        .await
+        .unwrap();
+    native_fixture(&sqlite, &first).await;
+    native_fixture(&sqlite, &second).await;
+    sqlx::query("UPDATE task_instances SET priority = 2 WHERE id = ?1")
+        .bind(first.id.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    storage.retire_account_scope(&a.account).await.unwrap();
+    for per_tenant in [0, 1] {
+        let claimed = sqlite
+            .claim_due_instances(chrono::Utc::now(), 1, per_tenant)
+            .await
+            .unwrap();
+        assert_eq!(
+            claimed.iter().map(|i| i.id).collect::<Vec<_>>(),
+            vec![second.id]
+        );
+        sqlite
+            .update_instance_state(
+                second.id,
+                orch8_types::instance::InstanceState::Scheduled,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn execution_scope_proof_cannot_be_relabelled_or_omitted() {
+    let (storage, sqlite) = fixture().await;
+    let scope = scope(&storage, "alice", "one").await;
+    for mutation in ["tenant", "namespace", "definition", "missing"] {
+        let run = storage
+            .prepare_catalog_run(&scope, request(Some(mutation), "{}"), limits())
+            .await
+            .unwrap();
+        let mut instance = native_fixture(&sqlite, &run).await;
+        // Mutations are intentionally made by raw SQL: a future scoped
+        // materializer must not accidentally turn malformed rows into legacy.
+        match mutation {
+            "tenant" => {
+                sqlx::query("UPDATE task_instances SET tenant_id='legacy' WHERE id=?1")
+                    .bind(run.id.to_string())
+                    .execute(storage.pool())
+                    .await
+                    .unwrap();
+            }
+            "namespace" => {
+                sqlx::query("UPDATE task_instances SET namespace='catalog-other' WHERE id=?1")
+                    .bind(run.id.to_string())
+                    .execute(storage.pool())
+                    .await
+                    .unwrap();
+            }
+            "definition" => {
+                sqlx::query("UPDATE task_instances SET sequence_id=?2 WHERE id=?1")
+                    .bind(run.id.to_string())
+                    .bind(SequenceId::new().to_string())
+                    .execute(storage.pool())
+                    .await
+                    .unwrap();
+            }
+            _ => {
+                instance.id = InstanceId::new();
+                sqlite.create_instance(&instance).await.unwrap();
+                sqlite
+                    .update_instance_state(
+                        run.id,
+                        orch8_types::instance::InstanceState::Cancelled,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+    for cap in [0, 1] {
+        assert!(
+            sqlite
+                .claim_due_instances(chrono::Utc::now(), 32, cap)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}

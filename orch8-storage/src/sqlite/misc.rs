@@ -144,9 +144,7 @@ pub(super) async fn heartbeat_instance(
 ) -> Result<crate::InstanceLease, StorageError> {
     let id = instance_id.into_uuid().to_string();
     let token = ts(claimed_at);
-    let renewed = sqlx::query(
-        "UPDATE task_instances SET updated_at=?1 WHERE id=?2 AND state IN ('running', 'waiting') AND claimed_at=?3",
-    )
+    let renewed = sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE task_instances SET updated_at=?1 WHERE id=?2 AND state IN ('running', 'waiting') AND claimed_at=?3 AND {scope}", scope = super::mobile_execution::ALLOWED)))
     .bind(ts(chrono::Utc::now()))
     .bind(&id)
     .bind(&token)
@@ -157,13 +155,15 @@ pub(super) async fn heartbeat_instance(
     }
     // Not renewed: either the instance legitimately left Running/Waiting
     // under this claim (still ours), or the token was cleared/replaced.
-    let owned: Option<i64> =
-        sqlx::query_scalar("SELECT claimed_at = ?2 FROM task_instances WHERE id = ?1")
-            .bind(&id)
-            .bind(&token)
-            .fetch_optional(&storage.pool)
-            .await?
-            .flatten();
+    let owned: Option<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT claimed_at = ?2 FROM task_instances WHERE id = ?1 AND {scope}",
+        scope = super::mobile_execution::ALLOWED
+    )))
+    .bind(&id)
+    .bind(&token)
+    .fetch_optional(&storage.pool)
+    .await?
+    .flatten();
     Ok(if owned == Some(1) {
         crate::InstanceLease::Held
     } else {

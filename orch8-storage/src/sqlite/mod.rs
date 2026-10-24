@@ -48,6 +48,7 @@ mod helpers;
 mod instances;
 mod kv_state;
 mod misc;
+mod mobile_execution;
 mod mobile_sync;
 mod outputs;
 mod placement;
