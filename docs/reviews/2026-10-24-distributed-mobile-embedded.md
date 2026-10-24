@@ -556,6 +556,13 @@ Default Display/Debug redact transport URL secrets. `RefreshingAuth` has provide
 readiness/preparation hooks; existing implementations retain their behavior.
 Native exported method signatures and binding metadata are unchanged.
 
+The readiness CI run exposed an existing retry-lifecycle test that sampled the
+transient Scheduled state after reporting failure; the scheduler had already
+advanced to Waiting. The repaired case observes a new claimable task with an
+incremented attempt and fresh effect id, rejects completion by the old lease,
+and requires the successful retry's final output. All seven lifecycle cases
+pass against SQLite and isolated PostgreSQL 16.14; E2E TypeScript checking passes.
+
 ### DME063 — Initial publication after refresh failure (fixed in next batch)
 
 **HIGH, effort S.** Starting refresh permanently disabled an older in-progress
