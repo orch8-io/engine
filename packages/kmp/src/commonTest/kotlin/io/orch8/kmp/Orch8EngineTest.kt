@@ -3,6 +3,7 @@ package io.orch8.kmp
 import io.orch8.kmp.internal.BlockingStepHandler
 import io.orch8.kmp.internal.EngineBackend
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -39,6 +40,9 @@ private class FakeBackend : EngineBackend {
 
     override fun shutdown() {
         shutdown = true
+        (tokens as? DeviceSessionTokens)?.close()
+        tokens = null
+        installation = null
     }
 
     override fun tickOnce() = TickResult(1, 1, false)
@@ -100,9 +104,35 @@ private class FakeBackend : EngineBackend {
     override fun nodeRuntimeId() = "rt-1"
 
     var tokens: Orch8TokenSource? = null
+    private var serial = 0
+    private var installation: String? = null
+    var afterBegin: () -> Unit = {}
+    var afterComplete: () -> Unit = {}
 
     override fun setTokenProvider(tokens: Orch8TokenSource) {
+        installation = "sync-${++serial}"
         this.tokens = tokens
+    }
+
+    override fun beginTokenProviderInstallation(tokens: Orch8TokenSource): String {
+        if (shutdown) throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed")
+        this.tokens = tokens
+        val ticket = "ticket-${++serial}"
+        installation = ticket
+        afterBegin()
+        return ticket
+    }
+    override fun completeTokenProviderInstallation(installationId: String, token: String): Boolean {
+        val accepted = !shutdown && installation == installationId && token.isNotBlank()
+        if (accepted) afterComplete()
+        return accepted
+    }
+    override fun cancelTokenProviderInstallation(installationId: String): Boolean {
+        if (installation != installationId) return false
+        installation = null
+        (tokens as? DeviceSessionTokens)?.close()
+        tokens = null
+        return true
     }
 
     override fun registerNode(capabilities: NodeCapabilities): NodeRegistration {
@@ -165,6 +195,7 @@ private class FakeBackend : EngineBackend {
     override fun delegationStats() = DelegationStats(true, 1, 1, 0, 0, 1)
 }
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class Orch8EngineTest {
     @Test
     fun startEncodesJsonInputAndDedupKey() = runTest {
@@ -381,5 +412,75 @@ class Orch8EngineTest {
         val backend = FakeBackend()
         Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler)).use { }
         assertTrue(backend.shutdown)
+    }
+
+    @Test
+    fun olderInitialCompletionCannotReplaceNewerCredentialsAcrossAliases() = runTest {
+        val backend = FakeBackend()
+        val first = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        val second = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<String>()
+        val older = async {
+            runCatching { first.setTokenProvider { entered.complete(Unit); release.await() } }
+        }
+        entered.await()
+        second.setTokenProvider { "dst_newer" }
+        release.complete("dst_older")
+        assertTrue(older.await().isFailure, "obsolete installation must fail")
+        assertEquals("dst_newer", backend.tokens!!.currentToken())
+    }
+
+    @Test
+    fun cancellationDuringNativeReservationDoesNotLoseTheTicket() = runTest {
+        val backend = FakeBackend()
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        var fetched = false
+        val installing = async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            engine.setTokenProvider { fetched = true; "dst_unexpected" }
+        }
+        backend.afterBegin = { installing.cancel() }
+        installing.start()
+        assertFailsWith<kotlinx.coroutines.CancellationException> { installing.await() }
+        assertEquals(null, backend.tokens)
+        assertEquals(false, fetched)
+    }
+
+    @Test
+    fun cancellationDuringNativeCompletionRetiresTheCommittedOwner() = runTest {
+        val backend = FakeBackend()
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        val installing = async(start = kotlinx.coroutines.CoroutineStart.LAZY) { engine.setTokenProvider { "dst_first" } }
+        backend.afterComplete = { installing.cancel() }
+        installing.start()
+        assertFailsWith<kotlinx.coroutines.CancellationException> { installing.await() }
+        assertEquals(null, backend.tokens)
+    }
+
+    @Test
+    fun cancellingAnOlderCallerCannotRetireTheNewerInstallation() = runTest {
+        val backend = FakeBackend()
+        val first = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        val second = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<String>()
+        val older = async { first.setTokenProvider { entered.complete(Unit); release.await() } }
+        entered.await()
+        second.setTokenProvider { "dst_newer" }
+        older.cancel()
+        assertFailsWith<kotlinx.coroutines.CancellationException> { older.await() }
+        release.complete("dst_old")
+        assertEquals("dst_newer", backend.tokens!!.currentToken())
+    }
+
+    @Test
+    fun closedEngineAndInfiniteDeadlineRejectBeforeHostFetch() = runTest {
+        val backend = FakeBackend()
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        var fetched = false
+        assertFailsWith<IllegalArgumentException> { engine.setTokenProvider(kotlin.time.Duration.INFINITE) { fetched = true; "dst_bad" } }
+        engine.close()
+        assertEquals(Orch8ErrorKind.SHUTDOWN, assertFailsWith<Orch8Exception> { engine.setTokenProvider { fetched = true; "dst_bad" } }.kind)
+        assertEquals(false, fetched)
     }
 }

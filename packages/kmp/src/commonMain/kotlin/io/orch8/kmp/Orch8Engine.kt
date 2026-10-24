@@ -7,6 +7,9 @@ import io.orch8.kmp.internal.platformIoDispatcher
 import io.orch8.kmp.internal.runHandlerBlocking
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -210,11 +213,28 @@ class Orch8Engine internal constructor(
         refreshTimeout: Duration = 30.seconds,
         fetchToken: suspend () -> String,
     ) {
-        require(refreshTimeout.isPositive()) { "refreshTimeout must be greater than zero" }
-        val initial = fetchToken()
-        require(initial.isNotBlank()) { "fetchToken returned an empty token" }
-        val tokens = DeviceSessionTokens(initial, fetchToken, refreshTimeout)
-        offload { backend.setTokenProvider(tokens) }
+        require(refreshTimeout.isFinite() && refreshTimeout.isPositive()) { "refreshTimeout must be finite and greater than zero" }
+        currentCoroutineContext().ensureActive()
+        val tokens = DeviceSessionTokens("", fetchToken, refreshTimeout, ioDispatcher)
+        var installation: String? = null
+        try {
+            // Capture inside the bridge so prompt cancellation cannot lose a
+            // native owner committed just before withContext returns.
+            withContext(NonCancellable + ioDispatcher) { installation = backend.beginTokenProviderInstallation(tokens) }
+            currentCoroutineContext().ensureActive()
+            val initial = tokens.initialToken()
+            currentCoroutineContext().ensureActive()
+            if (!offload { backend.completeTokenProviderInstallation(installation!!, initial) }) {
+                throw Orch8Exception(Orch8ErrorKind.ENGINE, "token provider installation superseded")
+            }
+            currentCoroutineContext().ensureActive()
+        } catch (e: Throwable) {
+            tokens.close()
+            try {
+                withContext(NonCancellable + ioDispatcher) { installation?.let { backend.cancelTokenProviderInstallation(it) } }
+            } catch (cleanup: Throwable) { e.addSuppressed(cleanup) }
+            throw e
+        }
     }
 
     /**

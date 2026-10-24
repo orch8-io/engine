@@ -1178,6 +1178,39 @@ impl MobileEngine {
         );
     }
 
+    /// Reserve an authorization owner before starting an asynchronous initial
+    /// fetch. Clears prior credentials without invoking the provider getter.
+    /// Complete with this opaque ticket, or cancel it on failure/cancellation.
+    pub fn begin_token_provider_installation(
+        &self,
+        provider: Arc<dyn TokenProvider>,
+    ) -> Result<String, MobileError> {
+        self.ensure_open()?;
+        self.credential
+            .begin_installation(provider)
+            .ok_or(MobileError::Shutdown)
+    }
+
+    /// Publish an initial token only for its reserved owner. Returns false for
+    /// superseded/cancelled tickets or blank tokens. Repeated completion cannot
+    /// overwrite a token already refreshed by this same provider owner.
+    pub fn complete_token_provider_installation(
+        &self,
+        installation_id: String,
+        token: String,
+    ) -> Result<bool, MobileError> {
+        self.ensure_open()?;
+        Ok(self
+            .credential
+            .complete_installation(&installation_id, token))
+    }
+
+    /// Retire this owner on caller cancellation, even if completion just won a
+    /// race. A stale ticket cannot retire a newer provider. No anonymous fallback.
+    pub fn cancel_token_provider_installation(&self, installation_id: String) -> bool {
+        self.credential.cancel_installation(&installation_id)
+    }
+
     /// Join the distributed runtime mesh: registers the device
     /// (`/mobile/devices/register`) and its runtime capabilities
     /// (`/mobile/devices/{device_id}/runtime`) using `sync_url`'s API base,

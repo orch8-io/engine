@@ -977,13 +977,21 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckApiChecksums(this)
     }
 
+    internal fun ensureInitialized() = Unit
+
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_active_instances(): Int
 
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_begin_token_provider_installation(): Int
+
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_cancel_instance(): Int
 
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_cancel_token_provider_installation(): Int
+
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_complete_step(): Int
+
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_complete_token_provider_installation(): Int
 
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegate(): Int
 
@@ -1094,6 +1102,8 @@ internal object UniffiLib {
         uniffiCallbackInterfaceTokenProvider.register(this)
     }
 
+    internal fun ensureInitialized() = Unit
+
     external fun uniffi_orch8_mobile_fn_clone_mobileengine(
         `handle`: Long,
         uniffi_out_err: UniffiRustCallStatus,
@@ -1123,11 +1133,23 @@ internal object UniffiLib {
         uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
 
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_begin_token_provider_installation(
+        `ptr`: Long,
+        `provider`: Long,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+
     external fun uniffi_orch8_mobile_fn_method_mobileengine_cancel_instance(
         `ptr`: Long,
         `instanceId`: RustBuffer.ByValue,
         uniffi_out_err: UniffiRustCallStatus,
     ): Unit
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_cancel_token_provider_installation(
+        `ptr`: Long,
+        `installationId`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Byte
 
     external fun uniffi_orch8_mobile_fn_method_mobileengine_complete_step(
         `ptr`: Long,
@@ -1136,6 +1158,13 @@ internal object UniffiLib {
         `output`: RustBuffer.ByValue,
         uniffi_out_err: UniffiRustCallStatus,
     ): Unit
+
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_complete_token_provider_installation(
+        `ptr`: Long,
+        `installationId`: RustBuffer.ByValue,
+        `token`: RustBuffer.ByValue,
+        uniffi_out_err: UniffiRustCallStatus,
+    ): Byte
 
     external fun uniffi_orch8_mobile_fn_method_mobileengine_delegate(
         `ptr`: Long,
@@ -1677,10 +1706,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_active_instances() and 0xFFFF) != 27619) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_begin_token_provider_installation() and 0xFFFF) != 58364) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_cancel_instance() and 0xFFFF) != 42878) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_cancel_token_provider_installation() and 0xFFFF) != 41246) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_complete_step() and 0xFFFF) != 37083) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_complete_token_provider_installation() and 0xFFFF) != 46407) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_delegate() and 0xFFFF) != 27416) {
@@ -1713,7 +1751,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json() and 0xFFFF) != 44133) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_load_sequences_from_url() and 0xFFFF) != 37490) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_load_sequences_from_url() and 0xFFFF) != 44585) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_loaded_sequences() and 0xFFFF) != 59070) {
@@ -1800,10 +1838,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_orch8_mobile_checksum_method_capsulesigner_sign_manifest_sha256() and 0xFFFF) != 12400) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_orch8_mobile_checksum_method_tokenprovider_current_token() and 0xFFFF) != 29353) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_tokenprovider_current_token() and 0xFFFF) != 2726) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_orch8_mobile_checksum_method_tokenprovider_refresh_token() and 0xFFFF) != 20657) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_tokenprovider_refresh_token() and 0xFFFF) != 20427) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_completed() and 0xFFFF) != 8200) {
@@ -1827,10 +1865,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
  * @suppress
  */
 public fun uniffiEnsureInitialized() {
-    IntegrityCheckingUniffiLib
-    // UniffiLib() initialized as objects are used, but we still need to explicitly
-    // reference it so initialization across crates works as expected.
-    UniffiLib
+    // Call arbitrary methods on IntegrityCheckingUniffiLib and UniffiLib to ensure that
+    // their init blocks run. This ensures initialization across crates works as expected.
+    IntegrityCheckingUniffiLib.ensureInitialized()
+    UniffiLib.ensureInitialized()
 }
 
 // Async support
@@ -3098,9 +3136,22 @@ public interface MobileEngineInterface {
     fun `activeInstances`(): List<InstanceSummary>
 
     /**
+     * Reserve an authorization owner before starting an asynchronous initial
+     * fetch. Clears prior credentials without invoking the provider getter.
+     * Complete with this opaque ticket, or cancel it on failure/cancellation.
+     */
+    fun `beginTokenProviderInstallation`(`provider`: TokenProvider): kotlin.String
+
+    /**
      * Cancel a running instance.
      */
     fun `cancelInstance`(`instanceId`: kotlin.String)
+
+    /**
+     * Retire this owner on caller cancellation, even if completion just won a
+     * race. A stale ticket cannot retire a newer provider. No anonymous fallback.
+     */
+    fun `cancelTokenProviderInstallation`(`installationId`: kotlin.String): kotlin.Boolean
 
     /**
      * Complete a step that transitioned to Waiting state.
@@ -3110,6 +3161,16 @@ public interface MobileEngineInterface {
         `stepName`: kotlin.String,
         `output`: kotlin.String,
     )
+
+    /**
+     * Publish an initial token only for its reserved owner. Returns false for
+     * superseded/cancelled tickets or blank tokens. Repeated completion cannot
+     * overwrite a token already refreshed by this same provider owner.
+     */
+    fun `completeTokenProviderInstallation`(
+        `installationId`: kotlin.String,
+        `token`: kotlin.String,
+    ): kotlin.Boolean
 
     /**
      * Explicitly delegate a server-side sub-sequence on behalf of a local
@@ -3187,6 +3248,10 @@ public interface MobileEngineInterface {
      * Fetch and load sequences from a remote URL. The endpoint must return a
      * JSON array of sequence definition objects. Uses the URL from
      * `config.sequences_url` if `url` is empty.
+     *
+     * The array is **unsigned**, so this is a development path: it is refused
+     * whenever `config.root_public_key` is set (production apps get signed
+     * content through [`MobileEngine::sync`]). `max_stored_sequences` applies.
      */
     fun `loadSequencesFromUrl`(`url`: kotlin.String): kotlin.UInt
 
@@ -3555,6 +3620,25 @@ open class MobileEngine :
         )
 
     /**
+     * Reserve an authorization owner before starting an asynchronous initial
+     * fetch. Clears prior credentials without invoking the provider getter.
+     * Complete with this opaque ticket, or cancel it on failure/cancellation.
+     */
+    @Throws(MobileException::class)
+    override fun `beginTokenProviderInstallation`(`provider`: TokenProvider): kotlin.String =
+        FfiConverterString.lift(
+            callWithHandle {
+                uniffiRustCallWithError(MobileException) { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_begin_token_provider_installation(
+                        it,
+                        FfiConverterTypeTokenProvider.lower(`provider`),
+                        _status,
+                    )
+                }
+            },
+        )
+
+    /**
      * Cancel a running instance.
      */
     @Throws(MobileException::class)
@@ -3568,6 +3652,23 @@ open class MobileEngine :
                 )
             }
         }
+
+    /**
+     * Retire this owner on caller cancellation, even if completion just won a
+     * race. A stale ticket cannot retire a newer provider. No anonymous fallback.
+     */
+    override fun `cancelTokenProviderInstallation`(`installationId`: kotlin.String): kotlin.Boolean =
+        FfiConverterBoolean.lift(
+            callWithHandle {
+                uniffiRustCall { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_cancel_token_provider_installation(
+                        it,
+                        FfiConverterString.lower(`installationId`),
+                        _status,
+                    )
+                }
+            },
+        )
 
     /**
      * Complete a step that transitioned to Waiting state.
@@ -3588,6 +3689,29 @@ open class MobileEngine :
             )
         }
     }
+
+    /**
+     * Publish an initial token only for its reserved owner. Returns false for
+     * superseded/cancelled tickets or blank tokens. Repeated completion cannot
+     * overwrite a token already refreshed by this same provider owner.
+     */
+    @Throws(MobileException::class)
+    override fun `completeTokenProviderInstallation`(
+        `installationId`: kotlin.String,
+        `token`: kotlin.String,
+    ): kotlin.Boolean =
+        FfiConverterBoolean.lift(
+            callWithHandle {
+                uniffiRustCallWithError(MobileException) { _status ->
+                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_complete_token_provider_installation(
+                        it,
+                        FfiConverterString.lower(`installationId`),
+                        FfiConverterString.lower(`token`),
+                        _status,
+                    )
+                }
+            },
+        )
 
     /**
      * Explicitly delegate a server-side sub-sequence on behalf of a local
@@ -3786,6 +3910,10 @@ open class MobileEngine :
      * Fetch and load sequences from a remote URL. The endpoint must return a
      * JSON array of sequence definition objects. Uses the URL from
      * `config.sequences_url` if `url` is empty.
+     *
+     * The array is **unsigned**, so this is a development path: it is refused
+     * whenever `config.root_public_key` is set (production apps get signed
+     * content through [`MobileEngine::sync`]). `max_stored_sequences` applies.
      */
     @Throws(MobileException::class)
     override fun `loadSequencesFromUrl`(`url`: kotlin.String): kotlin.UInt =
@@ -4699,12 +4827,15 @@ public object FfiConverterTypeStepHandler : FfiConverter<StepHandler, Long> {
  */
 public interface TokenProvider {
     /**
-     * Return the current auth token. Called before each sync request.
+     * Return a cached bootstrap token for synchronous provider installation.
+     * Keep this prompt; reservation-based asynchronous installation does not
+     * invoke this getter. Perform network work in refresh or an async wrapper.
      */
     fun `currentToken`(): kotlin.String
 
     /**
-     * Called when a 401/403 is received to obtain a fresh token.
+     * Obtain a token for unavailable initial authorization or after a 401.
+     * Runs on a native blocking thread; it may outlive the caller's timeout.
      */
     fun `refreshToken`(): kotlin.String
 
@@ -4819,7 +4950,9 @@ open class TokenProviderImpl :
     }
 
     /**
-     * Return the current auth token. Called before each sync request.
+     * Return a cached bootstrap token for synchronous provider installation.
+     * Keep this prompt; reservation-based asynchronous installation does not
+     * invoke this getter. Perform network work in refresh or an async wrapper.
      */
     override fun `currentToken`(): kotlin.String =
         FfiConverterString.lift(
@@ -4834,7 +4967,8 @@ open class TokenProviderImpl :
         )
 
     /**
-     * Called when a 401/403 is received to obtain a fresh token.
+     * Obtain a token for unavailable initial authorization or after a 401.
+     * Runs on a native blocking thread; it may outlive the caller's timeout.
      */
     @Throws(MobileException::class)
     override fun `refreshToken`(): kotlin.String =
@@ -5629,6 +5763,8 @@ data class MobileEngineConfig(
     /**
      * URL to fetch sequence definitions from. The endpoint must return a JSON
      * array of sequence objects. If empty, no remote loading is performed.
+     * The array is unsigned: `load_sequences_from_url` is refused while
+     * `root_public_key` is set (use signed `sync` instead).
      * Example: `https://api.orch8.io/api/mobile/apps/{id}/sequences`
      */
     var `sequencesUrl`: kotlin.String,

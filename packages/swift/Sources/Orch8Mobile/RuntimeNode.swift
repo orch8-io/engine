@@ -39,7 +39,9 @@ public final class Orch8RuntimeNode: @unchecked Sendable {
     ///
     /// `fetch` should ask your backend for a short-lived device session
     /// (`POST /runtimes/device-sessions` with its operator key, for this
-    /// device and `runtimeId()`). It is awaited once now for the first token,
+    /// device and `runtimeId()`). Native ownership is reserved before fetching;
+    /// superseded completion cannot replace another alias's newer provider.
+    /// It is awaited once now for the first token,
     /// and again whenever the control plane answers `401` (the request is
     /// then retried once). `refreshTimeout` bounds both waits. An initial
     /// failure throws; failed refresh leaves authorization unavailable or
@@ -57,9 +59,24 @@ public final class Orch8RuntimeNode: @unchecked Sendable {
             timeout: refreshTimeout,
             fetch: fetch
         )
-        _ = try await provider.fetchInitialToken()
         try Task.checkCancellation()
-        engine.setTokenProvider(provider: provider)
+        let engine = self.engine
+        let installation = try engine.beginTokenProviderInstallation(provider: provider)
+        do {
+            try await withTaskCancellationHandler(operation: {
+                let token = try await provider.fetchInitialToken()
+                try Task.checkCancellation()
+                guard try engine.completeTokenProviderInstallation(installationId: installation, token: token) else {
+                    throw MobileError.Engine(message: "token provider installation superseded")
+                }
+                try Task.checkCancellation()
+            }, onCancel: {
+                _ = engine.cancelTokenProviderInstallation(installationId: installation)
+            })
+        } catch {
+            _ = engine.cancelTokenProviderInstallation(installationId: installation)
+            throw error
+        }
     }
 
     /// Install a synchronous `TokenProvider` (see `MobileEngine.setTokenProvider`).

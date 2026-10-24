@@ -1201,15 +1201,35 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func activeInstances() throws  -> [InstanceSummary]
     
     /**
+     * Reserve an authorization owner before starting an asynchronous initial
+     * fetch. Clears prior credentials without invoking the provider getter.
+     * Complete with this opaque ticket, or cancel it on failure/cancellation.
+     */
+    func beginTokenProviderInstallation(provider: TokenProvider) throws  -> String
+
+    /**
      * Cancel a running instance.
      */
     func cancelInstance(instanceId: String) throws 
     
     /**
+     * Retire this owner on caller cancellation, even if completion just won a
+     * race. A stale ticket cannot retire a newer provider. No anonymous fallback.
+     */
+    func cancelTokenProviderInstallation(installationId: String)  -> Bool
+
+    /**
      * Complete a step that transitioned to Waiting state.
      */
     func completeStep(instanceId: String, stepName: String, output: String) throws 
     
+    /**
+     * Publish an initial token only for its reserved owner. Returns false for
+     * superseded/cancelled tickets or blank tokens. Repeated completion cannot
+     * overwrite a token already refreshed by this same provider owner.
+     */
+    func completeTokenProviderInstallation(installationId: String, token: String) throws  -> Bool
+
     /**
      * Explicitly delegate a server-side sub-sequence on behalf of a local
      * instance, without parking any step. Returns the delegation id; read
@@ -1274,6 +1294,10 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * Fetch and load sequences from a remote URL. The endpoint must return a
      * JSON array of sequence definition objects. Uses the URL from
      * `config.sequences_url` if `url` is empty.
+     *
+     * The array is **unsigned**, so this is a development path: it is refused
+     * whenever `config.root_public_key` is set (production apps get signed
+     * content through [`MobileEngine::sync`]). `max_stored_sequences` applies.
      */
     func loadSequencesFromUrl(url: String) throws  -> UInt32
     
@@ -1559,6 +1583,21 @@ open func activeInstances()throws  -> [InstanceSummary]  {
     )
 })
 }
+
+    /**
+     * Reserve an authorization owner before starting an asynchronous initial
+     * fetch. Clears prior credentials without invoking the provider getter.
+     * Complete with this opaque ticket, or cancel it on failure/cancellation.
+     */
+open func beginTokenProviderInstallation(provider: TokenProvider)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_begin_token_provider_installation(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeTokenProvider_lower(provider),uniffiCallStatus
+    )
+})
+}
     
     /**
      * Cancel a running instance.
@@ -1570,6 +1609,20 @@ open func cancelInstance(instanceId: String)throws   {try rustCallWithError(FfiC
         FfiConverterString.lower(instanceId),uniffiCallStatus
     )
 }
+}
+
+    /**
+     * Retire this owner on caller cancellation, even if completion just won a
+     * race. A stale ticket cannot retire a newer provider. No anonymous fallback.
+     */
+open func cancelTokenProviderInstallation(installationId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_cancel_token_provider_installation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(installationId),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -1584,6 +1637,22 @@ open func completeStep(instanceId: String, stepName: String, output: String)thro
         FfiConverterString.lower(output),uniffiCallStatus
     )
 }
+}
+
+    /**
+     * Publish an initial token only for its reserved owner. Returns false for
+     * superseded/cancelled tickets or blank tokens. Repeated completion cannot
+     * overwrite a token already refreshed by this same provider owner.
+     */
+open func completeTokenProviderInstallation(installationId: String, token: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_complete_token_provider_installation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(installationId),
+        FfiConverterString.lower(token),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -1734,6 +1803,10 @@ open func loadSequenceFromJson(json: String)throws   {try rustCallWithError(FfiC
      * Fetch and load sequences from a remote URL. The endpoint must return a
      * JSON array of sequence definition objects. Uses the URL from
      * `config.sequences_url` if `url` is empty.
+     *
+     * The array is **unsigned**, so this is a development path: it is refused
+     * whenever `config.root_public_key` is set (production apps get signed
+     * content through [`MobileEngine::sync`]). `max_stored_sequences` applies.
      */
 open func loadSequencesFromUrl(url: String)throws  -> UInt32  {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
@@ -2371,12 +2444,15 @@ public func FfiConverterTypeStepHandler_lower(_ value: StepHandler) -> UInt64 {
 public protocol TokenProvider: AnyObject, Sendable {
     
     /**
-     * Return the current auth token. Called before each sync request.
+     * Return a cached bootstrap token for synchronous provider installation.
+     * Keep this prompt; reservation-based asynchronous installation does not
+     * invoke this getter. Perform network work in refresh or an async wrapper.
      */
     func currentToken()  -> String
     
     /**
-     * Called when a 401/403 is received to obtain a fresh token.
+     * Obtain a token for unavailable initial authorization or after a 401.
+     * Runs on a native blocking thread; it may outlive the caller's timeout.
      */
     func refreshToken() throws  -> String
     
@@ -2438,7 +2514,9 @@ open class TokenProviderImpl: TokenProvider, @unchecked Sendable {
 
     
     /**
-     * Return the current auth token. Called before each sync request.
+     * Return a cached bootstrap token for synchronous provider installation.
+     * Keep this prompt; reservation-based asynchronous installation does not
+     * invoke this getter. Perform network work in refresh or an async wrapper.
      */
 open func currentToken() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
@@ -2450,7 +2528,8 @@ open func currentToken() -> String  {
 }
     
     /**
-     * Called when a 401/403 is received to obtain a fresh token.
+     * Obtain a token for unavailable initial authorization or after a 401.
+     * Runs on a native blocking thread; it may outlive the caller's timeout.
      */
 open func refreshToken()throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
@@ -3599,6 +3678,8 @@ public struct MobileEngineConfig: Equatable, Hashable {
     /**
      * URL to fetch sequence definitions from. The endpoint must return a JSON
      * array of sequence objects. If empty, no remote loading is performed.
+     * The array is unsigned: `load_sequences_from_url` is refused while
+     * `root_public_key` is set (use signed `sync` instead).
      * Example: `https://api.orch8.io/api/mobile/apps/{id}/sequences`
      */
     public let sequencesUrl: String
@@ -3675,6 +3756,8 @@ public struct MobileEngineConfig: Equatable, Hashable {
         /**
          * URL to fetch sequence definitions from. The endpoint must return a JSON
          * array of sequence objects. If empty, no remote loading is performed.
+         * The array is unsigned: `load_sequences_from_url` is refused while
+         * `root_public_key` is set (use signed `sync` instead).
          * Example: `https://api.orch8.io/api/mobile/apps/{id}/sequences`
          */sequencesUrl: String, 
         /**
@@ -5401,10 +5484,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_active_instances() != 27619) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_begin_token_provider_installation() != 58364) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_cancel_instance() != 42878) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_cancel_token_provider_installation() != 41246) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_complete_step() != 37083) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_complete_token_provider_installation() != 46407) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_delegate() != 27416) {
@@ -5437,7 +5529,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json() != 44133) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_orch8_mobile_checksum_method_mobileengine_load_sequences_from_url() != 37490) {
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_load_sequences_from_url() != 44585) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_loaded_sequences() != 59070) {
@@ -5524,10 +5616,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_capsulesigner_sign_manifest_sha256() != 12400) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_orch8_mobile_checksum_method_tokenprovider_current_token() != 29353) {
+    if (uniffi_orch8_mobile_checksum_method_tokenprovider_current_token() != 2726) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_orch8_mobile_checksum_method_tokenprovider_refresh_token() != 20657) {
+    if (uniffi_orch8_mobile_checksum_method_tokenprovider_refresh_token() != 20427) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_completed() != 8200) {

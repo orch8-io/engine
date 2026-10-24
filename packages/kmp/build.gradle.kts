@@ -50,6 +50,16 @@ if (androidEnabled) {
 // so the JVM test run type-checks the adapter against the real binding surface.
 val uniffiJvmSources = "src/uniffiJvm/kotlin"
 
+tasks.withType<Test>().configureEach {
+    providers.gradleProperty("orch8.native.lib.path").orNull?.let {
+        systemProperty("jna.library.path", it)
+        systemProperty("orch8.native.integration", "true")
+        inputs.files(fileTree(it) {
+            include("liborch8_mobile.dylib", "liborch8_mobile.so", "orch8_mobile.dll")
+        }).withPropertyName("orch8NativeLibrary").withPathSensitivity(PathSensitivity.NAME_ONLY)
+    }
+}
+
 kotlin {
     if (jvmEnabled) {
         jvm {

@@ -3330,7 +3330,7 @@ async fn cancel_orphans(
 /// `ManualClock` that starts at or after real time (the documented
 /// discipline), real now <= virtual now, so the parent is due on the very
 /// next virtual tick.
-async fn wake_parent_if_child(
+pub(crate) async fn wake_parent_if_child(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
 ) {
@@ -3402,7 +3402,11 @@ async fn handle_tree_more_work(
     // resurrected through the `Completed -> Scheduled` resume-from-block edge
     // (duplicate `instance.completed` webhook and parent wake).
     if current == InstanceState::Paused || current.is_terminal() {
-        // Terminal/paused — leave state as-is.
+        // A handler can consume cancellation mid-evaluation. Its terminal
+        // state must still release a parent parked on this child.
+        if current.is_terminal() {
+            wake_parent_if_child(ctx.storage.as_ref(), instance).await;
+        }
     } else if has_waiting_nodes {
         match crate::lifecycle::transition_claimed_instance(
             ctx.storage.as_ref(),
@@ -3777,6 +3781,9 @@ async fn handle_tree_done(
             current = %current,
             "instance already moved by signal or concurrent writer -- skipping terminal transition"
         );
+        if current.is_terminal() {
+            wake_parent_if_child(ctx.storage.as_ref(), instance).await;
+        }
         return Ok(());
     }
 

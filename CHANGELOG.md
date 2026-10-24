@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### KMP token ownership and fetch lifetime
+
+- Reserve native ownership before Kotlin's initial fetch and retire only that
+  ticket on cancellation/failure, including cancellation while an FFI result
+  returns to its dispatcher. Initial and refresh work share eight physical
+  fetch slots; timeout/retirement cannot free a live non-cooperative fetch.
+- Scope iOS node-token callbacks to immutable provider IDs and release sources
+  with native ownership. The KMP Swift bridge protocol is now 2 and requires
+  matching native artifacts/bindings. Qualify native Swift record names to fix
+  collisions with Kotlin/Native exports.
+- Add common, real JVM/native, and real Apple bridge compilation to Mobile CI.
+
+### Reserved mobile token provider installation
+
+- Add begin/complete/cancel installation tickets so async wrappers can reserve
+  native credential ownership before fetching. Stale completion/cancellation
+  cannot replace or retire a successor, replay cannot roll back a refreshed
+  token, and cancellation cannot fall back to anonymous authorization.
+- Use reservations in Swift across runtime-node aliases, synchronous provider
+  replacement, cancellation, and shutdown. This API requires matching native
+  headers/artifacts; the published 0.7.1 XCFramework is not the release vehicle
+  for these unreleased methods. Other wrapper ports and release pins remain open.
+
 ### Swift asynchronous token fetch admission
 
 - Bound unfinished Swift SDK token fetches to eight per process across initial

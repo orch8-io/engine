@@ -120,28 +120,28 @@ describe("SubSequence Failure & Versioning", () => {
       namespace: "default",
     });
 
-    // Wait until the child instance is actually scheduled by the engine AND
-    // the parent has transitioned into `waiting`. Both conditions matter:
-    //   - child must exist so we can cancel it
-    //   - parent must be in `waiting` so the API-side "wake parent on child
-    //     terminal transition" hook fires. If we cancel while the parent is
-    //     still `scheduled` / `running` the wake is a no-op and the parent
-    //     would sit waiting forever.
+    // Exercise cancellation consumed inside the running sleep handler, with
+    // the parent already parked. Cancelling a merely scheduled child only
+    // exercises the scheduler's ordinary pre-dispatch signal path.
     const deadline = Date.now() + 10_000;
     let childInstance: ChildInstance | undefined;
     while (Date.now() < deadline) {
       const all = (await client.listInstances({ tenant_id: tenantId })) as ChildInstance[];
       childInstance = all.find((i) => i.parent_instance_id === parentId);
       const parentInst = all.find((i) => i.id === parentId);
-      if (childInstance && parentInst?.state === "waiting") break;
+      if (childInstance?.state === "running" && parentInst?.state === "waiting") break;
       await new Promise((r) => setTimeout(r, 50));
     }
     assert.ok(childInstance, "child instance should be created by the engine");
 
-    // Cancel the child directly. The parent's SubSequence node will detect
-    // the terminal non-Completed state on its next tick and fail.
+    assert.equal(childInstance.state, "running", "child sleep should be running");
+    await client.waitForState(parentId, "waiting");
+
+    // Cancellation is a durable request; the running handler consumes it and
+    // must wake the parent after reaching a terminal state.
     await client.updateState(childInstance!.id, "cancelled");
 
+    await client.waitForState(childInstance.id, "cancelled");
     const final = await client.waitForState(parentId, "failed", {
       timeoutMs: 20_000,
     });

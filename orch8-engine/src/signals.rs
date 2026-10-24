@@ -180,6 +180,12 @@ async fn process_signals_inner(
                     None,
                 )
                 .await?;
+                // The consumer may be an in-flight handler. Cancellation
+                // invalidates its claim, so evaluation can return ClaimLost
+                // before scheduler terminal handling. Notify the parent here.
+                if let Some(instance) = storage.get_instance(instance_id).await? {
+                    crate::scheduler::wake_parent_if_child(storage, &instance).await;
+                }
                 storage.mark_signal_delivered(signal.id).await?;
                 // Pending/claimed worker tasks of the now-cancelled instance
                 // would otherwise stay claimable and keep running external

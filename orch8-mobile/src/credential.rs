@@ -105,7 +105,9 @@ impl CredentialState {
 
     fn snapshot(&self) -> CredentialSnapshot {
         CredentialSnapshot {
-            available: !self.closed && (self.provider.is_none() || !self.token.trim().is_empty()),
+            available: !self.closed
+                && ((!self.pending_install && self.provider.is_none())
+                    || !self.token.trim().is_empty()),
             token: self.token.clone(),
             generation: format!("{}:{}", self.owner, self.revision),
         }
@@ -275,29 +277,9 @@ impl Credential {
     /// A provider installation is a new authorization owner, even if its
     /// initial token is empty or identical. Reserve before invoking host code.
     pub fn set_provider(&self, provider: Arc<dyn TokenProvider>) {
-        let owner = Uuid::new_v4();
-        let (previous, retired_provider) = {
-            let mut state = self
-                .state
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.closed {
-                drop(state);
-                return;
-            }
-            let previous = std::mem::replace(&mut state.cancelled, CancellationToken::new());
-            state.owner = owner;
-            state.refresh = Arc::new(tokio::sync::Mutex::new(()));
-            state.physical_refresh = state.physical_for(&provider);
-            state.revision = Uuid::new_v4();
-            state.token.clear();
-            let retired_provider = state.provider.replace(Arc::clone(&provider));
-            state.pending_install = true;
-            state.refresh_failure = None;
-            (previous, retired_provider)
+        let Some(owner) = self.reserve_provider(Arc::clone(&provider)) else {
+            return;
         };
-        previous.cancel();
-        drop(retired_provider);
         // Host callbacks run outside credential locks and can re-enter safely.
         let token = provider.current_token();
         let mut state = self
@@ -309,6 +291,91 @@ impl Credential {
             state.token = token;
             state.revision = Uuid::new_v4();
         }
+    }
+
+    /// Reserve native ownership before an asynchronous wrapper invokes its
+    /// initial fetch. The provider's synchronous getter is deliberately unused.
+    pub fn begin_installation(&self, provider: Arc<dyn TokenProvider>) -> Option<String> {
+        self.reserve_provider(provider)
+            .map(|owner| owner.to_string())
+    }
+
+    fn reserve_provider(&self, provider: Arc<dyn TokenProvider>) -> Option<Uuid> {
+        let owner = Uuid::new_v4();
+        let (previous, retired_provider) = {
+            let mut state = self
+                .state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.closed {
+                drop(state);
+                return None;
+            }
+            let previous = std::mem::replace(&mut state.cancelled, CancellationToken::new());
+            state.owner = owner;
+            state.refresh = Arc::new(tokio::sync::Mutex::new(()));
+            state.physical_refresh = state.physical_for(&provider);
+            state.revision = Uuid::new_v4();
+            state.token.clear();
+            let retired_provider = state.provider.replace(provider);
+            state.pending_install = true;
+            state.refresh_failure = None;
+            (previous, retired_provider)
+        };
+        previous.cancel();
+        drop(retired_provider);
+        Some(owner)
+    }
+
+    pub fn complete_installation(&self, installation_id: &str, token: String) -> bool {
+        let Ok(owner) = Uuid::parse_str(installation_id) else {
+            return false;
+        };
+        if token.trim().is_empty() {
+            return false;
+        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.closed || state.owner != owner {
+            return false;
+        }
+        if state.pending_install {
+            state.pending_install = false;
+            state.token = token;
+            state.revision = Uuid::new_v4();
+            state.refresh_failure = None;
+        }
+        // Refresh may have already published within this owner. Repeated
+        // initial completion must not roll it back to an earlier token.
+        true
+    }
+
+    /// Retire only this reservation, including a completion racing with caller
+    /// cancellation. Never revoke a successor owner or fall back to anonymous.
+    pub fn cancel_installation(&self, installation_id: &str) -> bool {
+        let Ok(owner) = Uuid::parse_str(installation_id) else {
+            return false;
+        };
+        let (cancelled, retired) = {
+            let mut state = self
+                .state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.closed || state.owner != owner {
+                return false;
+            }
+            state.owner = Uuid::new_v4();
+            state.revision = Uuid::new_v4();
+            state.token.clear();
+            state.pending_install = true;
+            state.refresh_failure = None;
+            (state.cancelled.clone(), state.provider.take())
+        };
+        cancelled.cancel();
+        drop(retired);
+        true
     }
 
     /// Atomically choose retry headers only within the original provider owner.
@@ -486,3 +553,7 @@ mod tests;
 #[cfg(test)]
 #[path = "credential_budget_tests.rs"]
 mod budget_tests;
+
+#[cfg(test)]
+#[path = "credential_installation_tests.rs"]
+mod installation_tests;
