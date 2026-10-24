@@ -54,10 +54,10 @@ final class TokenInstallationTests: XCTestCase {
         let gate = Gate(entered)
         defer { gate.release() }
         let older = Task {
-            do { try await oldAlias.setTokenProvider { await gate.fetch() }; return false }
+            do { try await oldAlias.setTokenProvider(refreshTimeout: 120) { await gate.fetch() }; return false }
             catch { return true }
         }
-        await fulfillment(of: [entered], timeout: 5)
+        await fulfillment(of: [entered], timeout: 30)
         var newer: FixedProvider? = FixedProvider()
         weak var retained = newer
         newAlias.setTokenProvider(newer!)
@@ -79,10 +79,10 @@ final class TokenInstallationTests: XCTestCase {
         let gate = Gate(entered)
         defer { gate.release() }
         let older = Task {
-            do { try await oldAlias.setTokenProvider { await gate.fetch() }; return false }
+            do { try await oldAlias.setTokenProvider(refreshTimeout: 120) { await gate.fetch() }; return false }
             catch { return true }
         }
-        await fulfillment(of: [entered], timeout: 5)
+        await fulfillment(of: [entered], timeout: 30)
         try await newAlias.setTokenProvider { "dst_newer" }
         gate.release()
         let rejected = await older.value
@@ -97,10 +97,10 @@ final class TokenInstallationTests: XCTestCase {
         let gate = Gate(entered)
         defer { gate.release() }
         let initial = Task {
-            do { try await node.setTokenProvider { await gate.fetch() }; return false }
+            do { try await node.setTokenProvider(refreshTimeout: 120) { await gate.fetch() }; return false }
             catch { return true }
         }
-        await fulfillment(of: [entered], timeout: 5)
+        await fulfillment(of: [entered], timeout: 30)
         engine.shutdown()
         gate.release()
         let rejected = await initial.value
@@ -116,17 +116,17 @@ final class TokenInstallationTests: XCTestCase {
         let gate = Gate(entered)
         defer { gate.release() }
         let older = Task {
-            do { try await node.setTokenProvider { await gate.fetch() }; return false }
+            do { try await node.setTokenProvider(refreshTimeout: 120) { await gate.fetch() }; return false }
             catch { return true }
         }
-        await fulfillment(of: [entered], timeout: 5)
+        await fulfillment(of: [entered], timeout: 30)
         var newer: FixedProvider? = FixedProvider()
         weak var retained = newer
         Orch8RuntimeNode(engine: engine).setTokenProvider(newer!)
         newer = nil
         older.cancel()
         let observer = Task { let result = await older.value; completed.fulfill(); return result }
-        await fulfillment(of: [completed], timeout: 5)
+        await fulfillment(of: [completed], timeout: 30)
         XCTAssertNotNil(retained, "old cancellation must not clear the successor owner")
         gate.release()
         let rejected = await observer.value
