@@ -28,7 +28,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; durable principal/cache binding and manifest refresh remain open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
-| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; cache identity, restart wake recovery and callback execution remain open |
+| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; restart wake recovery and callback execution remain open |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
 | Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
@@ -1296,3 +1296,29 @@ The current full server builds, and the targeted audit restart case passes with
 isolated Postgres, no skipped tests and owned-resource cleanup. TypeScript,
 documentation, formatting and whitespace checks pass. Hosted CI remains
 required before merge; the full review and ADR gates remain open.
+
+### DME085 — Shared sequence cache crossed backend boundaries (fixed)
+
+**HIGH, effort M.** A public `SequenceCache` accepts a backend on each read but
+keyed definitions only by sequence ID or tenant/namespace/name/version. Two
+independent SQLite databases with colliding IDs or names reproduce reads of the
+other database's definition. Both regression tests fail on the prior code.
+
+Cached reads now require an explicit backend Arc through additive owned lookup
+methods. Their keys include a weak backend lifetime identity: Arc clones share
+entries, independent backends and decorators do not, and caches do not retain
+connections or runtimes. Existing borrowed lookup methods remain source
+compatible and read directly from the supplied backend. Scheduler, notifier and
+sync-reporter paths retain their backend Arc for cached reads. Definition-cache
+capacities and TTLs remain process-local bounds. Optimization plans continue to
+verify the complete definition hash before reuse, including colliding IDs.
+
+ID invalidation conservatively clears matching entries for every owner, including
+name entries whose ID entry was independently evicted. This does not provide
+account authentication, catalog retirement fencing, cross-process invalidation,
+or a durable restart identity. Mutable views hidden behind one backend allocation
+must still have stable lookup semantics; account/catalog runtime handles remain
+an ADR-0002 gate. All 2,053 lean engine and 445 mobile library tests pass,
+including six new cache ownership cases. All-target Clippy passes for both
+with warnings denied; documentation, formatting and whitespace checks pass.
+Hosted CI remains required before merge.

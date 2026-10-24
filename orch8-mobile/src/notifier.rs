@@ -269,7 +269,7 @@ impl MobileNotifier {
                 break;
             };
             let handler = sequence_cache
-                .get_by_id(storage.as_ref(), inst.sequence_id)
+                .get_by_id_owned(storage, inst.sequence_id)
                 .await
                 .ok()
                 .and_then(|seq| {

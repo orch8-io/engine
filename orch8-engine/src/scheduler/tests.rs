@@ -590,7 +590,7 @@ async fn get_sequence_cached_hit_avoids_storage_query() {
 
     let cache = crate::sequence_cache::SequenceCache::new(16, Duration::from_secs(60));
 
-    let first = cache.get_by_id(storage.as_ref(), seq.id).await.unwrap();
+    let first = cache.get_by_id_owned(&storage, seq.id).await.unwrap();
     assert_eq!(first.id, seq.id);
 
     // Drop from storage. If the cache is working the second call still
@@ -598,7 +598,7 @@ async fn get_sequence_cached_hit_avoids_storage_query() {
     storage.delete_sequence(seq.id).await.unwrap();
 
     let second = cache
-        .get_by_id(storage.as_ref(), seq.id)
+        .get_by_id_owned(&storage, seq.id)
         .await
         .expect("cache hit should bypass the now-missing storage row");
     assert_eq!(second.id, seq.id);
@@ -611,7 +611,7 @@ async fn get_sequence_cached_miss_returns_error_when_not_in_storage() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let cache = crate::sequence_cache::SequenceCache::new(16, Duration::from_secs(60));
 
-    let err = cache.get_by_id(storage.as_ref(), SequenceId::new()).await;
+    let err = cache.get_by_id_owned(&storage, SequenceId::new()).await;
     assert!(err.is_err(), "unknown sequence must not be fabricated");
 }
 
