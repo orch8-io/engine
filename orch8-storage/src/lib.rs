@@ -1,4 +1,5 @@
 mod child_adoption;
+mod child_lookup;
 pub use child_adoption::ChildAdoption;
 pub mod api_key_cache;
 #[cfg(feature = "artifacts")]
@@ -1033,6 +1034,37 @@ pub trait InstanceStore: Send + Sync + 'static {
         &self,
         parent_instance_id: InstanceId,
     ) -> Result<Vec<TaskInstance>, StorageError>;
+
+    /// Resolve the first child for an exact activation, otherwise the first
+    /// legacy child whose activation key is absent and block matches. Explicit
+    /// JSON null/non-string activation values are not legacy. Native backends
+    /// use indexed reads; custom backends retain the existing child ordering.
+    async fn get_child_for_activation(
+        &self,
+        parent_instance_id: InstanceId,
+        block_id: &str,
+        activation: &str,
+    ) -> Result<Option<TaskInstance>, StorageError> {
+        let children = self.get_child_instances(parent_instance_id).await?;
+        let exact = children.iter().position(|child| {
+            child
+                .metadata
+                .get("_parent_activation")
+                .and_then(serde_json::Value::as_str)
+                == Some(activation)
+        });
+        let index = exact.or_else(|| {
+            children.iter().position(|child| {
+                child.metadata.get("_parent_activation").is_none()
+                    && child
+                        .metadata
+                        .get("_parent_block_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(block_id)
+            })
+        });
+        Ok(index.and_then(|index| children.into_iter().nth(index)))
+    }
 
     /// Ids of live (`scheduled`/`running`/`waiting`/`paused`) instances whose
     /// parent is already `failed` or `cancelled` (L3-07). Such a child can

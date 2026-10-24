@@ -552,6 +552,11 @@ async fn embedded_tick_recovers_waiting_parent_and_drains_completed_child() {
     for backend in fencing_backends().await {
         let storage = Arc::clone(&backend.storage);
         let (parent, _) = persisted_waiting_parent(&storage, InstanceState::Completed).await;
+        let (storage, faults) = orch8_storage::testing::faulty::FaultStorage::wrap(storage);
+        faults
+            .on("get_child_instances")
+            .times(u64::MAX)
+            .fail_permanent();
         let registry = Arc::new(HandlerRegistry::new());
         let semaphore = Arc::new(Semaphore::new(2));
         let cache = Arc::new(SequenceCache::new(16, Duration::from_secs(60)));
@@ -586,5 +591,7 @@ async fn embedded_tick_recovers_waiting_parent_and_drains_completed_child() {
             InstanceState::Completed
         );
         assert!(!second.has_pending_work);
+        assert_eq!(faults.calls("get_child_instances"), 0);
+        assert!(faults.calls("get_child_for_activation") >= 2);
     }
 }

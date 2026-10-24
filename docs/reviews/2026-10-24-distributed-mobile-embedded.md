@@ -1323,7 +1323,7 @@ including six new cache ownership cases. All-target Clippy passes for both
 with warnings denied; documentation, formatting and whitespace checks pass.
 Hosted CI remains required before merge.
 
-### DME086 — Waiting parent could remain stranded after backend restart (in validation)
+### DME086 — Waiting parent could remain stranded after backend restart (fixed)
 
 **HIGH, effort M.** A transient execution-tree read failure after the parent
 committed Running → Waiting was retried only by the volatile wake registry.
@@ -1341,31 +1341,59 @@ writes remain eligible on later rotations without depending on a volatile
 notification. A bounded sequence-feature memo keeps ordinary workflows from
 paying for new tree/child reads. Deadline and approval timeout handling retain
 priority. The original page bounds and separate embedded single-shot full scan remain
-in effect. Child-history query cost is an open merge gate (DME087).
+in effect. The native current-activation query cost gate is addressed by DME087.
 
 All 2,060 lean engine and 445 mobile library tests pass. The final 16-case
 wake/recovery matrix and complete workspace/all-target Clippy pass. The public
 embedded tick case passes on both SQLite and an isolated required Postgres leg;
 the owned tmpfs container is removed. Documentation, formatting and whitespace
-checks pass. This proves persisted-state recovery behavior; the change stays a
-draft until the history-query cost below is addressed.
+checks pass. This proves persisted-state recovery behavior. Native indexed query validation
+is documented below; hosted current-head checks remain required before merge.
 
 
-### DME087 — Sub-sequence lookup loads accumulated child history (open merge gate)
+### DME087 — Current-activation lookup loaded accumulated history (fixed)
 
-**HIGH for long-running loops, effort M.** Dispatch and post-park reconciliation
-use `get_child_instances(parent)` and match the current activation in memory.
-DME086 also reuses this path in the periodic Waiting sweep. Its database result
-and allocation cost grow with every historical child of a looping parent,
-even when just one current activation matters. The bounded page count limits
-parents examined, not the children loaded per parent.
+**HIGH for long-running parents, effort M.** Dispatch and post-park
+reconciliation previously fetched every child and matched one activation in
+memory. Reusing that path in the Waiting sweep would repeatedly deserialize an
+unbounded history. The page cap bounds parents, not their historical children.
 
-Before enabling periodic recovery, add an owner/activation-qualified lookup with
-indexed SQLite/Postgres implementations and preserve exact activation, legacy
-fallback and child ordering semantics. Verify accumulated-history behavior and
-query plans on the actual backends. Keep old custom backends compatible through
-a correct default implementation. Neither behavioral recovery tests nor green
-CI alone close this scaling gate.
+The additive `get_child_for_activation` storage method preserves exact activation
+precedence, otherwise the first legacy child whose activation key is absent and
+block matches. Explicit JSON nulls/numbers do not become legacy/string matches.
+Native SQLite/Postgres implementations select at most two candidate IDs in
+one snapshot, then fetch the winning row once. Stable created-at/ID ordering
+resolves ties.
+Postgres indexes fixed-width hash buckets and also compares the original
+strings, so hash equality never selects a different activation. A long-key
+regression first reproduced a 19,000-byte raw index-entry failure; activation
+and legacy keys built from 512 random UUID segments now work on all four
+backends. Two partial composite indexes serve exact and legacy reads; migration 122 includes
+rollback and the online precreation procedure for large Postgres installations.
+Encrypted storage forwards the indexed read and decrypts the selected result;
+fault wrappers preserve interception. Custom backends retain a correct default
+using their existing child order and must override it for native-equivalent bounds.
+
+Waiting reconciliation, post-park checks and current child dispatch use this
+method. The embedded tick regression makes any full-history read fail, proving
+recovery and consumption work without that fallback on actual SQLite/Postgres.
+A storage contract uses 2,048 historical children on each plain/encrypted
+SQLite/Postgres backend, covering exact-live precedence over terminal legacy,
+timestamp/ID ties, parent isolation, non-string/null metadata and decrypted context.
+EXPLAIN of the actual production queries selects both new indexes and rejects
+Postgres table scans. This is query-shape evidence, not a production throughput
+benchmark.
+
+Final validation: 2,060 lean engine, 227 storage and 445 mobile library tests
+pass. Full workspace/all-target Clippy passes with warnings denied. Both native
+query contracts and embedded recovery pass on required isolated Postgres; all
+owned containers are removed. Documentation, formatting and whitespace checks
+pass. Hosted current-head checks remain required before merge.
+
+**Still open:** adoption after a rebuilt node or an activation miss still reads
+history to locate a previous run's child. This is separate from periodic/current
+activation reads and remains part of the long-running workflow review. Public
+account/catalog ownership and the remaining original/ADR gates also remain open.
 
 ## SDK main-branch inventory recheck
 

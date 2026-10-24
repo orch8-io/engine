@@ -1393,6 +1393,14 @@ passthrough_impl! {
         Ok(instances)
     }
 
+    async fn get_child_for_activation(
+        &self, parent_instance_id: InstanceId, block_id: &str, activation: &str,
+    ) -> Result<Option<TaskInstance>, StorageError> {
+        let mut child = self.inner.get_child_for_activation(parent_instance_id, block_id, activation).await?;
+        if let Some(ref mut child) = child { self.decrypt_instance(child)?; }
+        Ok(child)
+    }
+
     // `create_instance_externalized` / `create_instances_batch_externalized` /
     // `update_instance_context_externalized` must externalize *before*
     // encrypting: `externalize_fields` requires `context.data` to still be a

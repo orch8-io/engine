@@ -107,3 +107,14 @@ only (the live backlog). 100 and 103 add nullable columns (metadata-only, no
 rewrite); 105 only changes storage parameters (no rewrite; `fillfactor`
 applies to newly written pages — use `pg_repack` to apply it to existing
 ones).
+
+
+## Upgrading large installs to 122
+
+Migration 122 adds two partial composite indexes on `task_instances` for exact
+child activation and legacy block lookup. It changes no stored columns or
+workflow identities. On large installs, run the equivalent `CREATE INDEX
+CONCURRENTLY IF NOT EXISTS` statements in the migration header outside a
+transaction, one at a time, before upgrading. The normal migration then reuses
+those indexes. Keep `CONCURRENTLY` out of the sqlx migration itself, as explained
+above. SQLite creates the equivalent indexes through its idempotent schema setup.

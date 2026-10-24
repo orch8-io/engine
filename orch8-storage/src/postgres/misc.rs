@@ -174,12 +174,27 @@ pub(super) async fn get_child_instances(
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
                   session_id, parent_instance_id, budget, created_at, updated_at, claimed_at, sub_tenant
-           FROM task_instances WHERE parent_instance_id = $1 ORDER BY created_at",
+           FROM task_instances WHERE parent_instance_id = $1 ORDER BY created_at, id",
     )
     .bind(parent_instance_id.into_uuid())
     .fetch_all(&store.pool)
     .await?;
     rows.into_iter().map(InstanceRow::into_instance).collect()
+}
+
+pub(super) async fn get_child_for_activation(
+    store: &PostgresStorage,
+    parent: InstanceId,
+    block: &str,
+    activation: &str,
+) -> Result<Option<TaskInstance>, StorageError> {
+    let row = sqlx::query_as::<_, InstanceRow>(crate::child_lookup::POSTGRES)
+        .bind(parent.into_uuid())
+        .bind(block)
+        .bind(activation)
+        .fetch_optional(&store.pool)
+        .await?;
+    row.map(InstanceRow::into_instance).transpose()
 }
 
 pub(super) async fn list_orphaned_children(
