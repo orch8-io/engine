@@ -665,7 +665,7 @@ async fn wake_parent_if_child_wakes_waiting_parent() {
     .await;
 
     let child = storage.get_instance(child_id).await.unwrap().unwrap();
-    wake_parent_if_child(storage.as_ref(), &child).await;
+    wake_parent_if_child(&storage, &child).await;
 
     let parent = storage.get_instance(parent_id).await.unwrap().unwrap();
     assert_eq!(
@@ -693,7 +693,7 @@ async fn wake_parent_if_child_is_noop_when_parent_not_waiting() {
     .await;
 
     let child = storage.get_instance(child_id).await.unwrap().unwrap();
-    wake_parent_if_child(storage.as_ref(), &child).await;
+    wake_parent_if_child(&storage, &child).await;
 
     let parent = storage.get_instance(parent_id).await.unwrap().unwrap();
     assert_eq!(
@@ -712,7 +712,7 @@ async fn wake_parent_if_child_is_noop_when_no_parent() {
     seed_instance_in_state(storage.as_ref(), child_id, None, InstanceState::Completed).await;
     let child = storage.get_instance(child_id).await.unwrap().unwrap();
     // Not panicking is the assertion — the function returns unit.
-    wake_parent_if_child(storage.as_ref(), &child).await;
+    wake_parent_if_child(&storage, &child).await;
 }
 
 #[tokio::test]
@@ -2789,7 +2789,7 @@ async fn dropped_parent_wake_is_retried_after_parent_parks() {
     let (parent, _, child_id) =
         seed_sub_sequence_parent(&storage, InstanceState::Running, InstanceState::Completed).await;
     let child = storage.get_instance(child_id).await.unwrap().unwrap();
-    wake_parent_if_child(storage.as_ref(), &child).await;
+    wake_parent_if_child(&storage, &child).await;
     assert_eq!(
         storage
             .get_instance(parent.id)
@@ -3026,26 +3026,39 @@ fn transient_retry_map_is_hard_bounded() {
 
 /// D-08: at capacity a new deferred parent wake evicts the oldest entry
 /// instead of being silently dropped.
-#[test]
-fn deferred_parent_wake_evicts_oldest_at_cap() {
+#[tokio::test]
+async fn deferred_parent_wake_evicts_oldest_at_cap() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let now = std::time::Instant::now();
     let mut map = HashMap::new();
     let oldest = InstanceId::new();
-    map.insert(
+    deferred_wakes::insert_bounded(
+        &mut map,
+        &storage,
         oldest,
-        (now.checked_sub(Duration::from_secs(100)).unwrap(), now),
+        now.checked_sub(Duration::from_secs(100)).unwrap(),
+        3,
     );
     for _ in 0..2 {
-        map.insert(
+        deferred_wakes::insert_bounded(
+            &mut map,
+            &storage,
             InstanceId::new(),
-            (now.checked_sub(Duration::from_secs(1)).unwrap(), now),
+            now.checked_sub(Duration::from_secs(1)).unwrap(),
+            3,
         );
     }
     let newcomer = InstanceId::new();
-    insert_bounded(&mut map, newcomer, now, 3);
+    deferred_wakes::insert_bounded(&mut map, &storage, newcomer, now, 3);
     assert_eq!(map.len(), 3);
-    assert!(map.contains_key(&newcomer), "new wake is kept");
-    assert!(!map.contains_key(&oldest), "oldest wake is evicted");
+    assert!(
+        map.contains_key(&deferred_wakes::key(&storage, newcomer)),
+        "new wake is kept"
+    );
+    assert!(
+        !map.contains_key(&deferred_wakes::key(&storage, oldest)),
+        "oldest wake is evicted"
+    );
 }
 
 /// L2-11: an instance whose signals cannot be applied (here: a context
@@ -3314,3 +3327,6 @@ async fn hook_pool_drain_waits_for_running_hooks() {
     assert!(hooks.drain(Duration::from_secs(5)).await);
     assert!(done.load(Ordering::SeqCst), "drain waited for the hook");
 }
+
+#[path = "deferred_wake_tests.rs"]
+mod deferred_wake_tests;

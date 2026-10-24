@@ -941,8 +941,8 @@ async fn phase_root_activation(
         )
     });
     if has_control_signal {
-        let abort = crate::signals::process_signals_prefetched(
-            storage.as_ref(),
+        let abort = crate::signals::process_signals_prefetched_owned(
+            storage,
             instance_id,
             ctx.instance.state,
             pending_signals,

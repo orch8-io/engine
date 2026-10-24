@@ -25,7 +25,10 @@ use crate::evaluator::{EvalOutcome, TerminalReason};
 use crate::handlers::HandlerRegistry;
 use crate::sequence_cache::SequenceCache;
 
+mod deferred_wakes;
 mod step_exec;
+#[cfg(test)]
+use deferred_wakes::RETRY as DEFERRED_WAKE_RETRY;
 #[cfg(test)]
 mod tests;
 
@@ -698,9 +701,9 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             let _ = heartbeat_handle.await;
 
             match result {
-                Ok(Ok(())) => transient_retries::clear(instance_id),
+                Ok(Ok(())) => transient_retries::clear(&storage, instance_id),
                 Ok(Err(EngineError::ClaimLost { .. })) => {
-                    transient_retries::clear(instance_id);
+                    transient_retries::clear(&storage, instance_id);
                     tracing::debug!(%instance_id, "stopped processing after claimed write was refused");
                     if let Err(error) = storage
                         .conditional_update_claimed_instance_state(
@@ -727,7 +730,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     // but recurs forever (a rotated artifact key, a deleted
                     // payload blob) used to re-claim the instance ~10x/s.
                     crate::metrics::inc(crate::metrics::INSTANCE_TRANSIENT_RETRIES);
-                    match transient_retries::record(instance_id) {
+                    match transient_retries::record(&storage, instance_id) {
                         transient_retries::Decision::Retry(delay) => {
                             warn!(
                                 instance_id = %instance_id,
@@ -829,8 +832,11 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
 /// without an extra storage write on a path that runs exactly when storage
 /// is misbehaving.
 mod transient_retries {
+    use crate::backend_identity::BackendIdentity;
+    use orch8_storage::StorageBackend;
     use std::collections::HashMap;
-    use std::sync::{LazyLock, Mutex, PoisonError};
+    use std::hash::Hash;
+    use std::sync::{Arc, LazyLock, Mutex, PoisonError};
     use std::time::{Duration, Instant};
 
     use orch8_types::ids::InstanceId;
@@ -859,8 +865,23 @@ mod transient_retries {
         Exhausted { attempts: u32 },
     }
 
-    static STATE: LazyLock<Mutex<HashMap<InstanceId, (u32, Instant)>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+    struct State {
+        entries: HashMap<(BackendIdentity, InstanceId), (u32, Instant)>,
+        next_prune: Instant,
+    }
+    static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
+        Mutex::new(State {
+            entries: HashMap::new(),
+            next_prune: Instant::now(),
+        })
+    });
+
+    fn prune_dead(state: &mut State, now: Instant) {
+        if now >= state.next_prune || state.entries.len() >= HARD_CAP {
+            state.entries.retain(|(backend, _), _| backend.is_live());
+            state.next_prune = now + Duration::from_secs(1);
+        }
+    }
 
     /// Pure policy: `attempts` consecutive transient failures, the first one
     /// `since_first` ago.
@@ -875,23 +896,26 @@ mod transient_retries {
         Decision::Retry(delay.mul_f64(rand::RngExt::random_range(&mut rand::rng(), 0.8..1.2)))
     }
 
-    pub(super) fn record(id: InstanceId) -> Decision {
+    pub(super) fn record(storage: &Arc<dyn StorageBackend>, id: InstanceId) -> Decision {
         let now = Instant::now();
-        let mut map = STATE.lock().unwrap_or_else(PoisonError::into_inner);
-        enforce_bounds(&mut map, now, PRUNE_AT, HARD_CAP);
-        let entry = map.entry(id).or_insert((0, now));
+        let mut state = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+        prune_dead(&mut state, now);
+        let map = &mut state.entries;
+        enforce_bounds(map, now, PRUNE_AT, HARD_CAP);
+        let key = (BackendIdentity::new(storage), id);
+        let entry = map.entry(key.clone()).or_insert((0, now));
         entry.0 = entry.0.saturating_add(1);
         let decision = decide(entry.0, now.duration_since(entry.1));
         if matches!(decision, Decision::Exhausted { .. }) {
-            map.remove(&id);
+            map.remove(&key);
         }
         decision
     }
 
     /// Prune stale entries at `prune_at`; if still at `hard_cap`, evict the
     /// oldest 10% (counted in a metric) so the map can never grow unbounded.
-    pub(super) fn enforce_bounds(
-        map: &mut HashMap<InstanceId, (u32, Instant)>,
+    pub(super) fn enforce_bounds<K: Clone + Eq + Hash>(
+        map: &mut HashMap<K, (u32, Instant)>,
         now: Instant,
         prune_at: usize,
         hard_cap: usize,
@@ -900,9 +924,11 @@ mod transient_retries {
             map.retain(|_, (_, first)| now.duration_since(*first) < STALE_AFTER);
         }
         if map.len() >= hard_cap {
-            let mut by_age: Vec<(Instant, InstanceId)> =
-                map.iter().map(|(id, (_, first))| (*first, *id)).collect();
-            by_age.sort_unstable();
+            let mut by_age: Vec<(Instant, K)> = map
+                .iter()
+                .map(|(id, (_, first))| (*first, id.clone()))
+                .collect();
+            by_age.sort_unstable_by_key(|(first, _)| *first);
             let evict = (hard_cap / 10).max(1);
             for (_, id) in by_age.into_iter().take(evict) {
                 map.remove(&id);
@@ -911,10 +937,82 @@ mod transient_retries {
         }
     }
 
-    pub(super) fn clear(id: InstanceId) {
-        let mut map = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+    pub(super) fn clear(storage: &Arc<dyn StorageBackend>, id: InstanceId) {
+        let mut state = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+        prune_dead(&mut state, Instant::now());
+        let map = &mut state.entries;
         if !map.is_empty() {
-            map.remove(&id);
+            map.remove(&(BackendIdentity::new(storage), id));
+        }
+    }
+    #[cfg(test)]
+    mod ownership_tests {
+        use super::*;
+        use orch8_storage::sqlite::SqliteStorage;
+
+        #[tokio::test]
+        async fn colliding_ids_do_not_share_failure_budget_or_clear_each_other() {
+            let a: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+            let b: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+            let id = InstanceId::new();
+            let a_key = (BackendIdentity::new(&a), id);
+            STATE.lock().unwrap().entries.insert(
+                a_key.clone(),
+                (
+                    MAX_ATTEMPTS - 1,
+                    Instant::now()
+                        .checked_sub(MIN_AGE + Duration::from_secs(1))
+                        .unwrap(),
+                ),
+            );
+            clear(&b, id);
+            assert!(matches!(record(&b, id), Decision::Retry(_)));
+            assert_eq!(
+                record(&a, id),
+                Decision::Exhausted {
+                    attempts: MAX_ATTEMPTS
+                }
+            );
+            assert_eq!(
+                STATE
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .get(&(BackendIdentity::new(&b), id))
+                    .unwrap()
+                    .0,
+                1
+            );
+            clear(&a, id);
+            assert_eq!(
+                STATE
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .get(&(BackendIdentity::new(&b), id))
+                    .unwrap()
+                    .0,
+                1
+            );
+            clear(&b, id);
+        }
+
+        #[tokio::test]
+        async fn failure_state_does_not_retain_retired_backends() {
+            let storage: Arc<dyn StorageBackend> =
+                Arc::new(SqliteStorage::in_memory().await.unwrap());
+            let id = InstanceId::new();
+            let key = (BackendIdentity::new(&storage), id);
+            let weak = Arc::downgrade(&storage);
+            assert!(matches!(record(&storage, id), Decision::Retry(_)));
+            drop(storage);
+            assert!(weak.upgrade().is_none());
+            let replacement: Arc<dyn StorageBackend> =
+                Arc::new(SqliteStorage::in_memory().await.unwrap());
+            STATE.lock().unwrap().next_prune = Instant::now();
+            assert!(matches!(record(&replacement, id), Decision::Retry(_)));
+            assert!(!STATE.lock().unwrap().entries.contains_key(&key));
+            clear(&replacement, id);
         }
     }
 }
@@ -1256,8 +1354,8 @@ async fn process_one_signalled_instance(
         return Ok(());
     }
 
-    let abort = crate::signals::process_signals_prefetched(
-        storage.as_ref(),
+    let abort = crate::signals::process_signals_prefetched_owned(
+        storage,
         instance_id,
         current_state,
         signals,
@@ -1303,7 +1401,7 @@ async fn process_one_signalled_instance(
         {
             // A sub-sequence parent parked on this child must observe the
             // cancel (the API no longer flips the state itself).
-            wake_parent_if_child(storage.as_ref(), &inst).await;
+            wake_parent_if_child(storage, &inst).await;
             let storage = Arc::clone(storage);
             let handlers = Arc::clone(handlers);
             let tenant = inst.tenant_id.clone();
@@ -2591,7 +2689,7 @@ pub(crate) async fn handle_deadline_breach(
     .await;
     crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
     // Parent progress must not depend on a slow or rejected escalation.
-    wake_parent_if_child(storage.as_ref(), instance).await;
+    wake_parent_if_child(storage, instance).await;
 
     // Invoke escalation handler if configured (never for a sandboxed
     // sub-tenant sequence unless the handler is allowlisted).
@@ -2876,7 +2974,7 @@ async fn finalize_completed(
     info!(instance_id = %instance_id, "instance completed all blocks");
 
     // Wake parent if this is a sub-sequence child.
-    wake_parent_if_child(ctx.storage.as_ref(), instance).await;
+    wake_parent_if_child(ctx.storage, instance).await;
 
     Ok(())
 }
@@ -2943,8 +3041,8 @@ async fn process_pending_signals(
 ) -> Result<bool, EngineError> {
     let instance_id = instance.id;
     if !signals.is_empty() {
-        let abort = crate::signals::process_signals_prefetched(
-            ctx.storage.as_ref(),
+        let abort = crate::signals::process_signals_prefetched_owned(
+            ctx.storage,
             instance_id,
             InstanceState::Running,
             signals,
@@ -2956,7 +3054,7 @@ async fn process_pending_signals(
                 && fresh.state == InstanceState::Cancelled
             {
                 run_tree_terminal_effects(ctx, &fresh, sequence, InstanceState::Cancelled).await;
-                wake_parent_if_child(ctx.storage.as_ref(), &fresh).await;
+                wake_parent_if_child(ctx.storage, &fresh).await;
             }
             return Ok(true);
         }
@@ -3331,9 +3429,27 @@ async fn cancel_orphans(
 /// discipline), real now <= virtual now, so the parent is due on the very
 /// next virtual tick.
 pub(crate) async fn wake_parent_if_child(
+    storage: &Arc<dyn StorageBackend>,
+    instance: &orch8_types::instance::TaskInstance,
+) {
+    if let Some(parent) = try_wake_parent_if_child(storage.as_ref(), instance).await {
+        defer_parent_wake(storage, parent);
+    }
+}
+
+/// Borrowed signal helpers perform an immediate wake; engine-owned paths use
+/// the Arc variant above. A borrow cannot safely own process-global retries.
+pub(crate) async fn wake_parent_if_child_borrowed(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
 ) {
+    let _ = try_wake_parent_if_child(storage, instance).await;
+}
+
+async fn try_wake_parent_if_child(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+) -> Option<InstanceId> {
     if let Some(parent_id) = instance.parent_instance_id {
         let now = Utc::now();
         match storage
@@ -3360,9 +3476,9 @@ pub(crate) async fn wake_parent_if_child(
                 debug!(
                     parent_id = %parent_id,
                     child_id = %instance.id,
-                    "parent not in Waiting state; deferring wake retry"
+                    "parent not in Waiting state; deferred wake or post-park recheck required"
                 );
-                defer_parent_wake(parent_id);
+                return Some(parent_id);
             }
             Err(e) => {
                 warn!(
@@ -3371,9 +3487,11 @@ pub(crate) async fn wake_parent_if_child(
                     error = %e,
                     "failed to wake parent instance after child completion"
                 );
+                return Some(parent_id);
             }
         }
     }
+    None
 }
 
 /// Handle `EvalOutcome::MoreWork`: if nodes are waiting for external workers,
@@ -3405,7 +3523,7 @@ async fn handle_tree_more_work(
         // A handler can consume cancellation mid-evaluation. Its terminal
         // state must still release a parent parked on this child.
         if current.is_terminal() {
-            wake_parent_if_child(ctx.storage.as_ref(), instance).await;
+            wake_parent_if_child(ctx.storage, instance).await;
         }
     } else if has_waiting_nodes {
         match crate::lifecycle::transition_claimed_instance(
@@ -3493,7 +3611,7 @@ async fn recheck_parked_sub_sequence_parent(
             ),
             Err(e) => {
                 warn!(instance_id = %instance.id, error = %e, "failed to re-schedule parked parent");
-                defer_parent_wake(instance.id);
+                defer_parent_wake(ctx.storage, instance.id);
             }
         },
         Err(e) => {
@@ -3502,117 +3620,17 @@ async fn recheck_parked_sub_sequence_parent(
                 error = %e,
                 "post-park sub-sequence recheck failed; deferring a wake retry"
             );
-            defer_parent_wake(instance.id);
+            defer_parent_wake(ctx.storage, instance.id);
         }
     }
 }
 
-/// Parents whose wake could not be delivered yet: the child's
-/// `Waiting -> Scheduled` CAS found them still `Running`, or the post-park
-/// recheck failed. Value: when to try next. In-process safety net behind the
-/// park-then-recheck fix (L3-01); bounded and lost on restart.
-static DEFERRED_PARENT_WAKES: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<InstanceId, (std::time::Instant, std::time::Instant)>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-/// Delay between deferred parent-wake attempts.
-const DEFERRED_WAKE_RETRY: Duration = Duration::from_secs(1);
-/// Give up on a deferred parent wake after this long.
-const DEFERRED_WAKE_MAX_AGE: Duration = Duration::from_secs(300);
-/// Upper bound on tracked deferred parent wakes.
-const DEFERRED_WAKE_CAP: usize = 10_000;
-
-fn defer_parent_wake(parent_id: InstanceId) {
-    let now = std::time::Instant::now();
-    let mut map = DEFERRED_PARENT_WAKES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    insert_bounded(&mut map, parent_id, now, DEFERRED_WAKE_CAP);
+fn defer_parent_wake(storage: &Arc<dyn StorageBackend>, parent: InstanceId) {
+    deferred_wakes::defer(storage, parent);
 }
 
-/// Insert/refresh a deferred wake. At `cap`, the entry closest to its max age
-/// (oldest `first`) is evicted instead of dropping the new wake. An evicted
-/// parent is recovered by the park-then-recheck path
-/// (`recheck_parked_sub_sequence_parent`), which re-reads the awaited
-/// children after the parent's `Running -> Waiting` commit; the drop is
-/// counted in a metric.
-fn insert_bounded(
-    map: &mut HashMap<InstanceId, (std::time::Instant, std::time::Instant)>,
-    parent_id: InstanceId,
-    now: std::time::Instant,
-    cap: usize,
-) {
-    if map.len() >= cap
-        && !map.contains_key(&parent_id)
-        && let Some(oldest) = map
-            .iter()
-            .min_by_key(|(_, (first, _))| *first)
-            .map(|(id, _)| *id)
-    {
-        map.remove(&oldest);
-        crate::metrics::inc(crate::metrics::DEFERRED_PARENT_WAKES_DROPPED);
-    }
-    map.entry(parent_id)
-        .and_modify(|(_, next)| *next = now + DEFERRED_WAKE_RETRY)
-        .or_insert((now, now + DEFERRED_WAKE_RETRY));
-}
-
-/// Retry deferred parent wakes that are due. A parent still `Running` (or
-/// `Scheduled`, about to run) keeps its entry until it parks; a `Waiting`
-/// parent is re-scheduled so it re-evaluates its finished child; anything
-/// else (paused, terminal, gone) is dropped. Called once per tick.
 async fn retry_deferred_parent_wakes(storage: &Arc<dyn StorageBackend>) {
-    let now = std::time::Instant::now();
-    let due: Vec<InstanceId> = {
-        let mut map = DEFERRED_PARENT_WAKES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if map.is_empty() {
-            return;
-        }
-        let before = map.len();
-        map.retain(|_, (first, _)| now.duration_since(*first) < DEFERRED_WAKE_MAX_AGE);
-        for _ in map.len()..before {
-            crate::metrics::inc(crate::metrics::DEFERRED_PARENT_WAKES_DROPPED);
-        }
-        map.iter()
-            .filter(|(_, (_, next))| *next <= now)
-            .map(|(id, _)| *id)
-            .collect()
-    };
-    for parent_id in due {
-        let keep = match storage.get_instance(parent_id).await {
-            Ok(Some(p)) if p.state == InstanceState::Waiting => {
-                if let Err(e) = storage
-                    .conditional_update_instance_state(
-                        parent_id,
-                        InstanceState::Waiting,
-                        InstanceState::Scheduled,
-                        Some(Utc::now()),
-                    )
-                    .await
-                {
-                    warn!(parent_id = %parent_id, error = %e, "deferred parent wake failed");
-                    true
-                } else {
-                    info!(parent_id = %parent_id, "delivered deferred sub-sequence parent wake");
-                    false
-                }
-            }
-            Ok(Some(p)) => p.state == InstanceState::Running,
-            Ok(None) => false,
-            Err(_) => true,
-        };
-        let mut map = DEFERRED_PARENT_WAKES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if keep {
-            if let Some((_, next)) = map.get_mut(&parent_id) {
-                *next = now + DEFERRED_WAKE_RETRY;
-            }
-        } else {
-            map.remove(&parent_id);
-        }
-    }
+    deferred_wakes::retry(storage).await;
 }
 
 /// Pre-flight step-budget check for the tree path: a fresh read guards
@@ -3657,7 +3675,7 @@ async fn fail_if_over_step_budget(
                 "step_budget",
             )
             .await;
-            wake_parent_if_child(ctx.storage.as_ref(), instance).await;
+            wake_parent_if_child(ctx.storage, instance).await;
             return Ok(true);
         }
     }
@@ -3782,7 +3800,7 @@ async fn handle_tree_done(
             "instance already moved by signal or concurrent writer -- skipping terminal transition"
         );
         if current.is_terminal() {
-            wake_parent_if_child(ctx.storage.as_ref(), instance).await;
+            wake_parent_if_child(ctx.storage, instance).await;
         }
         return Ok(());
     }
@@ -3850,7 +3868,7 @@ async fn handle_tree_done(
     }
 
     // Wake parent if this is a sub-sequence child that reached a terminal state.
-    wake_parent_if_child(ctx.storage.as_ref(), instance).await;
+    wake_parent_if_child(ctx.storage, instance).await;
     Ok(())
 }
 
@@ -3974,6 +3992,6 @@ async fn handle_tree_eval_error(
     // otherwise a SubSequence parent would remain Waiting forever,
     // since the Done branch above is the only other place that
     // calls `wake_parent_if_child`.
-    wake_parent_if_child(ctx.storage.as_ref(), instance).await;
+    wake_parent_if_child(ctx.storage, instance).await;
     Ok(())
 }

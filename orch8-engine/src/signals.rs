@@ -1,4 +1,5 @@
 use chrono::Utc;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use orch8_storage::StorageBackend;
@@ -12,17 +13,21 @@ use crate::error::EngineError;
 
 /// Process pending signals for an instance before executing blocks.
 /// Returns `true` if execution should be aborted (e.g., pause or cancel).
+/// This borrowed variant wakes parents immediately; use the owned variant for
+/// backend-lifetime-bound deferred retries.
 pub async fn process_signals(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
     current_state: InstanceState,
 ) -> Result<bool, EngineError> {
     let signals = storage.get_pending_signals(instance_id).await?;
-    process_signals_inner(storage, instance_id, current_state, signals, None).await
+    process_signals_inner(storage, instance_id, current_state, signals, None, None).await
 }
 
 /// Process pre-fetched signals (from batch query).
 /// Returns `true` if execution should be aborted (e.g., pause or cancel).
+/// This borrowed variant wakes parents immediately; use the owned variant for
+/// backend-lifetime-bound deferred retries.
 pub async fn process_signals_prefetched(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
@@ -30,7 +35,53 @@ pub async fn process_signals_prefetched(
     signals: Vec<Signal>,
     sequence_def: Option<&SequenceDefinition>,
 ) -> Result<bool, EngineError> {
-    process_signals_inner(storage, instance_id, current_state, signals, sequence_def).await
+    process_signals_inner(
+        storage,
+        instance_id,
+        current_state,
+        signals,
+        sequence_def,
+        None,
+    )
+    .await
+}
+
+/// Process signals with backend-owned deferred wake retries. Prefer this variant
+/// when retaining an `Arc`, as the scheduler and evaluator do.
+pub async fn process_signals_owned(
+    storage: &Arc<dyn StorageBackend>,
+    instance_id: InstanceId,
+    current_state: InstanceState,
+) -> Result<bool, EngineError> {
+    let signals = storage.get_pending_signals(instance_id).await?;
+    process_signals_inner(
+        storage.as_ref(),
+        instance_id,
+        current_state,
+        signals,
+        None,
+        Some(storage),
+    )
+    .await
+}
+
+/// Prefetched counterpart retaining the backend identity for wake retries.
+pub async fn process_signals_prefetched_owned(
+    storage: &Arc<dyn StorageBackend>,
+    instance_id: InstanceId,
+    current_state: InstanceState,
+    signals: Vec<Signal>,
+    sequence_def: Option<&SequenceDefinition>,
+) -> Result<bool, EngineError> {
+    process_signals_inner(
+        storage.as_ref(),
+        instance_id,
+        current_state,
+        signals,
+        sequence_def,
+        Some(storage),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines)]
@@ -40,6 +91,7 @@ async fn process_signals_inner(
     current_state: InstanceState,
     signals: Vec<Signal>,
     sequence_def: Option<&SequenceDefinition>,
+    wake_owner: Option<&Arc<dyn StorageBackend>>,
 ) -> Result<bool, EngineError> {
     if signals.is_empty() {
         return Ok(false);
@@ -184,7 +236,11 @@ async fn process_signals_inner(
                 // invalidates its claim, so evaluation can return ClaimLost
                 // before scheduler terminal handling. Notify the parent here.
                 if let Some(instance) = storage.get_instance(instance_id).await? {
-                    crate::scheduler::wake_parent_if_child(storage, &instance).await;
+                    if let Some(owner) = wake_owner {
+                        crate::scheduler::wake_parent_if_child(owner, &instance).await;
+                    } else {
+                        crate::scheduler::wake_parent_if_child_borrowed(storage, &instance).await;
+                    }
                 }
                 storage.mark_signal_delivered(signal.id).await?;
                 // Pending/claimed worker tasks of the now-cancelled instance
