@@ -294,9 +294,9 @@ async fn callback_and_foreign_destructor_panics_return_physical_capacity() {
     assert!(!request.await.unwrap());
     body_release.send(()).unwrap();
     wait_until(|| dropping.load(Ordering::SeqCst) == 1).await;
-    let held = credential.physical_refresh_slots.available_permits();
+    let held = credential.physical_token_slots.available_permits();
     drop_release.send(()).unwrap();
-    wait_until(|| credential.physical_refresh_slots.available_permits() == LIMIT).await;
+    wait_until(|| credential.physical_token_slots.available_permits() == LIMIT).await;
     assert_eq!(
         held,
         LIMIT - 1,
@@ -328,14 +328,14 @@ fn timeout_of_a_queued_refresh_returns_its_slot_without_later_host_invocation() 
         let generation = install_probe(&credential, &calls);
         let owner = Arc::clone(&credential);
         let request = tokio::spawn(async move { owner.refresh_generation(&generation).await });
-        wait_until(|| credential.physical_refresh_slots.available_permits() == LIMIT - 1).await;
+        wait_until(|| credential.physical_token_slots.available_permits() == LIMIT - 1).await;
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(11)).await;
         let result = request.await.unwrap();
         tokio::time::resume();
         release.send(()).unwrap();
         blocker.await.unwrap();
-        wait_until(|| credential.physical_refresh_slots.available_permits() == LIMIT).await;
+        wait_until(|| credential.physical_token_slots.available_permits() == LIMIT).await;
         assert!(!result);
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -345,7 +345,7 @@ fn timeout_of_a_queued_refresh_returns_its_slot_without_later_host_invocation() 
         let generation = install_probe(&credential, &calls);
         assert!(credential.refresh_generation(&generation).await);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(credential.physical_refresh_slots.available_permits(), LIMIT);
+        assert_eq!(credential.physical_token_slots.available_permits(), LIMIT);
     });
 }
 

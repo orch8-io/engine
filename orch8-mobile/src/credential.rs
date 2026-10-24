@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use tracing::{debug, warn};
 
-use crate::error::TokenProvider;
+use crate::error::{MobileError, TokenProvider};
 
 /// Prefix of a device-session token.
 pub(crate) const DEVICE_SESSION_PREFIX: &str = "dst_";
@@ -35,9 +35,10 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
 /// Retired owners may have non-cooperative callbacks still physically running.
 /// Bound their aggregate work/identity metadata while allowing successor owners
 /// to make progress until this credential-wide budget is exhausted.
-// The smallest production runtime has four blocking threads. Limit refresh
-// work to half of that pool so stale auth callbacks alone cannot occupy it.
-const MAX_PHYSICAL_REFRESHES: usize = 2;
+// The smallest production runtime has five blocking threads. Limit refresh
+// and manifest getter work to half of that pool so stale auth callbacks alone
+// cannot occupy it. Both paths share these permits.
+const MAX_PHYSICAL_TOKEN_CALLS: usize = 2;
 /// First retry delay after a refresh that failed or returned the same token;
 /// doubles per consecutive failure up to [`REFRESH_BACKOFF_MAX`].
 const REFRESH_BACKOFF_BASE: Duration = Duration::from_secs(5);
@@ -49,7 +50,7 @@ pub(crate) struct Credential {
     state: StdRwLock<CredentialState>,
     warned_operator: AtomicBool,
     refresh_timeout_ms: AtomicU64,
-    physical_refresh_slots: Arc<Semaphore>,
+    physical_token_slots: Arc<Semaphore>,
 }
 
 struct CredentialState {
@@ -130,6 +131,26 @@ impl Drop for PhysicalRefresh {
     }
 }
 
+// Retain admission through foreign destruction as well as the getter itself.
+struct PhysicalManifestToken {
+    provider: Arc<dyn TokenProvider>,
+    _slot: OwnedSemaphorePermit,
+}
+
+struct ManifestTokenWait {
+    cancelled: CancellationToken,
+    task: tokio::task::JoinHandle<Result<String, MobileError>>,
+}
+
+impl Drop for ManifestTokenWait {
+    fn drop(&mut self) {
+        // Mark abandoned before aborting queued work. A closure racing with
+        // queue removal must recheck this before entering the host.
+        self.cancelled.cancel();
+        self.task.abort();
+    }
+}
+
 struct RefreshFailure {
     revision: Uuid,
     retry_at: Instant,
@@ -166,7 +187,7 @@ impl Credential {
                 pending_install: false,
                 refresh_failure: None,
             }),
-            physical_refresh_slots: Arc::new(Semaphore::new(MAX_PHYSICAL_REFRESHES)),
+            physical_token_slots: Arc::new(Semaphore::new(MAX_PHYSICAL_TOKEN_CALLS)),
             warned_operator: AtomicBool::new(false),
             refresh_timeout_ms: AtomicU64::new(
                 u64::try_from(REFRESH_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
@@ -266,8 +287,59 @@ impl Credential {
             (state.cancelled.clone(), state.provider.take())
         };
         cancelled.cancel();
-        self.physical_refresh_slots.close();
+        self.physical_token_slots.close();
         provider
+    }
+
+    /// Manifest sources belong to one sync, independently of the node owner,
+    /// but share the engine's physical foreign-token callback admission.
+    pub(crate) async fn current_manifest_token(
+        &self,
+        provider: Arc<dyn TokenProvider>,
+        cancelled: &CancellationToken,
+    ) -> Result<String, MobileError> {
+        let slot = Arc::clone(&self.physical_token_slots)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::Closed => MobileError::Shutdown,
+                tokio::sync::TryAcquireError::NoPermits => MobileError::ResourceLimit {
+                    message: "token callback capacity exhausted".into(),
+                },
+            })?;
+        let physical = PhysicalManifestToken {
+            provider,
+            _slot: slot,
+        };
+        let abandoned = cancelled.child_token();
+        let callback_cancelled = abandoned.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let call = physical;
+            if callback_cancelled.is_cancelled() {
+                return Err(MobileError::Shutdown);
+            }
+            let token = call.provider.current_token();
+            if callback_cancelled.is_cancelled() {
+                return Err(MobileError::Shutdown);
+            }
+            if token.trim().is_empty() {
+                return Err(MobileError::InvalidInput {
+                    message: "manifest token provider returned an empty token".into(),
+                });
+            }
+            Ok(token)
+        });
+        let mut waiting = ManifestTokenWait {
+            cancelled: abandoned,
+            task,
+        };
+        (&mut waiting.task).await.map_err(|_| MobileError::Engine {
+            message: "manifest token callback failed".into(),
+        })?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_token_slots(&self) -> usize {
+        self.physical_token_slots.available_permits()
     }
 
     pub fn is_device_session(&self) -> bool {
@@ -430,7 +502,7 @@ impl Credential {
                 debug!("token refresh suppressed by backoff");
                 return false;
             }
-            let Ok(slot) = Arc::clone(&self.physical_refresh_slots).try_acquire_owned() else {
+            let Ok(slot) = Arc::clone(&self.physical_token_slots).try_acquire_owned() else {
                 // No queue and no negative-cache penalty: a different owner
                 // can recover as soon as an old physical call actually ends.
                 debug!("token refresh physical capacity exhausted");

@@ -544,7 +544,7 @@ engine.setListener(listener: MyListener())
 | `onPushWake(envelopeJson)`                       | Handle an id-only wake envelope (`{task_id?, runtime_id?, reason?}`); ignored when addressed to another runtime                            |
 | `enableBuiltin(name)`                            | Enable an opt-in builtin handler (`http_request`); see [Built-in handlers](#built-in-handlers)                                             |
 | `nodeRuntimeId()`                                | Stable runtime UUID of this installation (lease `worker_id`); your backend binds device sessions to it                                     |
-| `setTokenProvider(provider)`                     | Authenticate node, worker, delegation and sync calls with device sessions from `provider` (refreshed on `401`); call before `registerNode` |
+| `setTokenProvider(provider)`                     | Authenticate node, worker, delegation and sync reporting calls with device sessions from `provider` (refreshed on `401`); call before `registerNode` |
 | `registerNode(capabilities)`                     | Join the runtime mesh (device + capability registration, auto re-advertise)                                                                |
 | `updateNodeStatus(connectivity, batteryPercent)` | Push fresh liveness facts                                                                                                                  |
 | `unregisterNode()`                               | Stop the worker, advertise `draining`, stop re-advertising                                                                                 |
@@ -571,6 +571,17 @@ be updated with a matching release before distributing this API. Swift reserves
 before its initial fetch and rejects superseded completion across runtime-node
 aliases. KMP adopts tickets and per-sync callback identities with bridge protocol 3 and matching native artifacts;
 RN and Flutter wrapper adoption is still pending.
+
+Manifest `sync` obtains a supplied provider's token on a blocking executor so
+`operationTimeoutMs` and shutdown can stop waiting for a stuck getter. Manifest
+getters and node-token refreshes share two physical callback slots per engine.
+Exhaustion returns `ResourceLimit` from sync before invoking the getter. Timeout,
+shutdown, or caller abandonment cannot free a slot held by a running callback;
+it remains occupied through actual completion and provider cleanup. Queued
+abandoned getters are skipped. Late results cannot resume the retired request.
+A supplied empty/whitespace token returns `InvalidInput` before transport;
+passing no provider retains explicit signed-URL authentication. The manifest
+path snapshots one token and currently does not refresh after `401`.
 
 ### MobileEngineConfig
 

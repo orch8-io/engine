@@ -26,7 +26,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | gRPC workers | Reconnect, demand/backpressure, resumable transfers, session identity, cross-tenant control, cancellation | Reviewing; full 146-test library suite passes; demand/lease invariant audit ongoing |
 | Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
-| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; durable principal/cache binding and manifest callback execution remain open |
+| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; durable principal/cache binding and manifest refresh remain open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement and terminal shutdown verified; backend identity and callback execution remain open |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
@@ -945,17 +945,57 @@ were changed to synchronize on physical callback entry and then cancel logical
 waiters; dedicated timeout tests remain intact. Both final Swift simulator runs
 passed, as did the two main workflows after merge.
 
-### DME074 — Manifest token getter can block the timed operation (source finding; regression pending)
+### DME074 — Manifest token getter blocked timeout and shutdown (fixed in source)
 
-`MobileEngine.sync` calls the foreign `TokenProvider.current_token()` directly
-inside the `run_with_timeout` future before the first manifest request. This is a
-synchronous host call with no yield; the surrounding timeout/shutdown select
-cannot poll while this getter is blocked. The per-credential node refresh pool
-and wrapper async fetch budget do not bound arbitrary manifest sources. A
-controlled blocking native provider must establish timeout/shutdown behavior,
-physical ownership after caller abandonment, shared admission, resource cleanup,
-and the absence of network dispatch after retirement before choosing a fix.
-The per-sync callback identity repair does not claim to solve this execution
-boundary or add manifest `401` refresh (the native path currently snapshots one
-bearer token). Principal/cache ownership, RN/Flutter adoption, release artifacts,
-and the complete review matrix remain open.
+**HIGH, effort M.** On `4026bae3`, `MobileEngine.sync` invoked the foreign
+`TokenProvider.current_token()` directly while polling `run_with_timeout`.
+Controlled blocking providers reproduced both failures: neither timeout nor
+terminal shutdown returned before the host gate was released. The failing
+baseline tests always released their physical gates before asserting.
+
+Manifest getters now run on the blocking executor. A per-call wait guard marks
+abandonment before aborting queued work; a queued closure checks cancellation
+before host entry, and running callbacks retain their provider and physical
+permit until actual completion, including foreign provider destruction. Logical
+retirement drops the continuation that could dispatch the manifest request.
+Late token results cannot publish into node credentials or resume network work.
+Empty/whitespace tokens fail with InvalidInput; a callback panic maps to a generic
+engine error without forwarding its payload. Anonymous URL-token sync remains
+available only when the caller supplies no provider.
+
+Manifest getters and node refreshes share two physical token callback permits per
+engine, preserving blocking-pool headroom (the smallest valid mobile runtime has
+five blocking threads). Exhaustion does not queue host work: sync returns
+ResourceLimit and node refresh is refused without invoking the host. The pool
+stays closed after shutdown. Manifest sources remain per-call and independent
+of node credential installation/refresh generations. No FFI signature changes.
+
+All 386 mobile tests pass, including 11 added cases: timeout/shutdown with a held
+getter, 128 refused replacements, shared admission in both directions, foreign
+destruction, queued timeout and shutdown, panic mapping, blank results, and
+retirement of the last engine owner while a host callback retains its resources.
+Real TLS connection probes show no late transport dispatch after timeout or
+shutdown and no dispatch for blank tokens; a usable-token positive control
+reaches the same listener. No external service is needed by these probes.
+Clippy passes across all mobile targets with warnings denied; documentation
+links/example syntax and diff checks pass. Hosted validation is still required.
+
+The native manifest path still snapshots one bearer token and does not perform
+401 refresh. This repair does not establish principal-bound manifest/cache
+ownership, finish RN/Flutter adoption, resolve native release artifacts, or
+complete the original review matrix.
+
+### DME075 — Bearer scope across manifest entry origins (source finding; regression pending)
+
+`resolve_entry_url` accepts absolute/protocol-relative public HTTPS entry URLs,
+and `download_and_verify_sequences` passes the manifest's same `SyncAuth` to
+both sequence and detached-signature downloads. `http_get_with_retry` writes a
+Bearer header without comparing that target's origin to the manifest origin.
+This is separate from redirect forwarding: the publisher can point signed
+manifest entries at a CDN or another service. Verify the boundary with a signed
+manifest and controlled origin/entry servers before choosing a correction.
+Coverage must distinguish same-origin authenticated entries, cross-origin
+absolute and protocol-relative entries, detached signatures, signed-URL tokens,
+and redirects; a valid content signature alone does not establish authority to
+receive the app's bearer credential. The DME074 execution fix does not claim to
+address this scope boundary.
