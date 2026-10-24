@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Separate installation refresh locks and retain physical-call admission through
   timeout and retained-provider reinstallation; cancel queued host callbacks.
 - Retire foreign providers outside credential locks and redact AuthHeaders Debug.
+- Cancel timed-out Swift async token fetches, prevent overlapping refreshes until
+  physical completion, reject invalid timeout values, and fence late cache writes.
 
 ### Worker recovery evidence and authority
 

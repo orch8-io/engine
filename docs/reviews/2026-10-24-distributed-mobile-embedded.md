@@ -504,3 +504,23 @@ end-to-end foreign single-flight. TokenProvider's old callback doc comments also
 need contract/metadata alignment in the binding review. Principal lifecycle,
 independent engines, core durable outcomes, recovery quotas/scheduling, and the
 remaining original areas stay open.
+
+
+### DME061 — Swift nested token-fetch lifecycle (fixed)
+
+The synchronous Swift provider returned on timeout without cancelling its
+detached async fetch, allowing another refresh to overlap the unfinished host
+operation. Regression tests reproduced overlap and missing cancellation. The
+adapter now retains per-instance admission until physical fetch completion,
+cancels cooperative tasks at timeout, rejects late token publication, and joins
+concurrent active refreshes. Detached tasks retain the flight rather than the
+provider, allowing retired providers to deallocate. Invalid/non-finite and
+unrepresentable timeout values fail before host invocation.
+
+All six repository adapter tests pass with strict concurrency and warnings
+denied in a local SwiftPM harness using the exact production adapter and tests
+with TokenProvider/MobileError FFI shape stubs. This is adapter evidence, not
+full native integration. Hosted iOS simulator tests remain the integration gate.
+Swift initial async provider installation ordering and Kotlin/RN/Flutter nested
+refresh ownership remain pending; this does not establish cross-instance or
+principal ownership. The broader review remains in progress.
