@@ -520,7 +520,9 @@ unrepresentable timeout values fail before host invocation.
 All six repository adapter tests pass with strict concurrency and warnings
 denied in a local SwiftPM harness using the exact production adapter and tests
 with TokenProvider/MobileError FFI shape stubs. This is adapter evidence, not
-full native integration. Hosted iOS simulator tests remain the integration gate.
+full native integration. The complete Swift package also passes all 21 tests on
+an iOS 26.3 simulator using PR #266's CI-built native framework (the adapter does
+not change exported native signatures). Hosted CI validates the final head.
 Swift initial async provider installation ordering and Kotlin/RN/Flutter nested
 refresh ownership remain pending; this does not establish cross-instance or
 principal ownership. The broader review remains in progress.
