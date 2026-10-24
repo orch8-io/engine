@@ -47,19 +47,22 @@ interface Orch8BridgeCallbacks {
     fun refreshToken(): String
 
     /**
-     * Current node credential (device session) installed with
-     * `setTokenProvider`; empty when none. Read by the engine before each
-     * control-plane request (engine release after 0.7.1).
+     * Cached credential for one immutable provider ID; empty when retired.
+     * Used for synchronous bootstrap. Reservation-based installation publishes
+     * its initial token separately and deliberately skips this getter.
      */
-    fun currentNodeToken(): String
+    fun currentNodeToken(providerId: String): String
 
     /**
-     * Fetch a fresh node credential after a `401`. Envelope:
+     * Obtain initial authorization or refresh after a `401`. Envelope:
      * `{"ok": "<token>"}` or `{"error": {...}}`. Called from the engine's
      * blocking thread, never the main thread.
      */
-    fun refreshNodeToken(): String
+    fun refreshNodeToken(providerId: String): String
+
+    /** Native provider ownership ended; retire only its immutable source. */
+    fun releaseNodeTokenSource(providerId: String)
 }
 
 /** Bumped when the method set or payload shapes change incompatibly. */
-const val ORCH8_BRIDGE_PROTOCOL: Int = 1
+const val ORCH8_BRIDGE_PROTOCOL: Int = 2

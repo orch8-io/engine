@@ -10,7 +10,7 @@
 //     import Orch8Kmp
 //     Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
 //
-// Protocol version: 1 (must equal ORCH8_BRIDGE_PROTOCOL in
+// Protocol version: 2 (must equal ORCH8_BRIDGE_PROTOCOL in
 // src/commonMain/kotlin/io/orch8/kmp/bridge/JsonBridge.kt). Every call returns
 // {"ok": value} or {"error": {"kind": "...", "message": "..."}}; all decoding,
 // validation and error mapping happen in common Kotlin.
@@ -19,7 +19,7 @@ import Foundation
 import Orch8Kmp
 import Orch8Mobile
 
-private let bridgeProtocolVersion = 1
+private let bridgeProtocolVersion = 2
 
 public final class Orch8KmpBridgeFactory: NSObject, Orch8JsonBridgeFactory {
     public func create() -> Orch8JsonBridge {
@@ -80,7 +80,12 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
             engine.pause(); return nil
         case "shutdown":
             engine.shutdown()
-            lock.lock(); self.engine = nil; lock.unlock()
+            lock.lock()
+            let retiredCallbacks = self.callbacks
+            self.callbacks = nil
+            self.engine = nil
+            lock.unlock()
+            withExtendedLifetime(retiredCallbacks) {}
             return nil
         case "onPushReceived":
             engine.onPushReceived(); return nil
@@ -161,7 +166,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
             let r = try engine.flushTelemetry(endpointUrl: try a.string("endpointUrl"))
             return ["sent": NSNumber(value: r.sent), "dropped": NSNumber(value: r.dropped)]
         case "setDeviceContext":
-            engine.setDeviceContext(ctx: DeviceContext(
+            engine.setDeviceContext(ctx: Orch8Mobile.DeviceContext(
                 deviceId: try a.string("deviceId"),
                 osName: try a.string("osName"),
                 osVersion: try a.string("osVersion"),
@@ -197,13 +202,21 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         case "setTokenProvider":
             // Device sessions: the token lives in Kotlin (currentNodeToken /
             // refreshNodeToken), so a refresh runs the host's suspend fetch.
-            engine.setTokenProvider(provider: NodeTokenAdapter(bridge: self))
+            guard let callbacks = currentCallbacks() else { throw BridgeFailure(kind: "Shutdown", message: "callbacks not installed") }
+            engine.setTokenProvider(provider: NodeTokenAdapter(callbacks: callbacks, providerId: try a.string("providerId")))
             return nil
+        case "beginTokenProviderInstallation":
+            guard let callbacks = currentCallbacks() else { throw BridgeFailure(kind: "Shutdown", message: "callbacks not installed") }
+            return try engine.beginTokenProviderInstallation(provider: NodeTokenAdapter(callbacks: callbacks, providerId: try a.string("providerId")))
+        case "completeTokenProviderInstallation":
+            return try engine.completeTokenProviderInstallation(installationId: try a.string("installationId"), token: try a.string("token"))
+        case "cancelTokenProviderInstallation":
+            return engine.cancelTokenProviderInstallation(installationId: try a.string("installationId"))
         case "registerNode":
             guard let c = a["capabilities"] as? [String: Any] else {
                 throw BridgeFailure(kind: "InvalidInput", message: "missing capabilities")
             }
-            let r = try engine.registerNode(capabilities: NodeCapabilities(
+            let r = try engine.registerNode(capabilities: Orch8Mobile.NodeCapabilities(
                 handlers: c["handlers"] as? [String] ?? [],
                 regions: c["regions"] as? [String] ?? [],
                 hardware: c["hardware"] as? [String] ?? [],
@@ -233,7 +246,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         case "unregisterNode":
             engine.unregisterNode(); return nil
         case "startWorker":
-            try engine.startWorker(options: WorkerOptions(
+            try engine.startWorker(options: Orch8Mobile.WorkerOptions(
                 maxConcurrentTasks: UInt32(clamping: try a.uint("maxConcurrentTasks")),
                 idlePollIntervalMs: try a.uint("idlePollIntervalMs"),
                 version: a.optionalString("version")
@@ -266,7 +279,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         case "enableBuiltin":
             try engine.enableBuiltin(name: try a.string("name")); return nil
         case "startDelegation":
-            try engine.startDelegation(options: DelegationOptions(
+            try engine.startDelegation(options: Orch8Mobile.DelegationOptions(
                 tenantId: try a.string("tenantId"),
                 pollIntervalMs: try a.uint("pollIntervalMs"),
                 ttlSecs: UInt32(clamping: try a.uint("ttlSecs"))
@@ -275,7 +288,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         case "stopDelegation":
             engine.stopDelegation(); return nil
         case "delegate":
-            return try engine.delegate(request: DelegateRequest(
+            return try engine.delegate(request: Orch8Mobile.DelegateRequest(
                 instanceId: try a.string("instanceId"),
                 destinationRuntimeId: try a.string("destinationRuntimeId"),
                 subSequenceId: try a.string("subSequenceId"),
@@ -394,7 +407,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         }
     }
 
-    private static func delegationStatus(_ s: DelegationStatus) -> [String: Any] {
+    private static func delegationStatus(_ s: Orch8Mobile.DelegationStatus) -> [String: Any] {
         [
             "delegationId": s.delegationId,
             "state": s.state,
@@ -418,7 +431,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         }
     }
 
-    private static func powerState(_ wire: String) throws -> PowerState {
+    private static func powerState(_ wire: String) throws -> Orch8Mobile.PowerState {
         switch wire {
         case "charging": return .charging
         case "unplugged": return .unplugged
@@ -428,7 +441,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         }
     }
 
-    private static func connectivity(_ wire: String?) throws -> NodeConnectivity? {
+    private static func connectivity(_ wire: String?) throws -> Orch8Mobile.NodeConnectivity? {
         switch wire {
         case nil: return nil
         case "offline": return .offline
@@ -527,21 +540,22 @@ private final class TokenAdapter: TokenProvider, @unchecked Sendable {
 /// `refreshToken` runs on the engine's blocking thread, where waiting for the
 /// Kotlin suspend fetch is fine.
 private final class NodeTokenAdapter: TokenProvider, @unchecked Sendable {
-    private weak var bridge: Orch8KmpBridge?
+    private let callbacks: Orch8BridgeCallbacks
+    private let providerId: String
 
-    init(bridge: Orch8KmpBridge) {
-        self.bridge = bridge
+    init(callbacks: Orch8BridgeCallbacks, providerId: String) {
+        self.callbacks = callbacks
+        self.providerId = providerId
     }
 
+    deinit { callbacks.releaseNodeTokenSource(providerId: providerId) }
+
     func currentToken() -> String {
-        bridge?.currentCallbacks()?.currentNodeToken() ?? ""
+        callbacks.currentNodeToken(providerId: providerId)
     }
 
     func refreshToken() throws -> String {
-        guard let callbacks = bridge?.currentCallbacks() else {
-            throw MobileError.Engine(message: "Kotlin callbacks not installed")
-        }
-        switch Orch8KmpBridge.unwrapCallback(callbacks.refreshNodeToken()) {
+        switch Orch8KmpBridge.unwrapCallback(callbacks.refreshNodeToken(providerId: providerId)) {
         case let .success(token): return token
         case let .failure(failure): throw MobileError.Engine(message: failure.message)
         }

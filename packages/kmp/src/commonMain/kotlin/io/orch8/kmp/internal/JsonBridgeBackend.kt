@@ -1,5 +1,9 @@
 package io.orch8.kmp.internal
 
+import io.orch8.kmp.DeviceSessionTokens
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.getAndUpdate
+
 import io.orch8.kmp.BackgroundRunResult
 import io.orch8.kmp.ContinuityImportResult
 import io.orch8.kmp.DelegateRequest
@@ -32,7 +36,6 @@ import io.orch8.kmp.bridge.ORCH8_BRIDGE_PROTOCOL
 import io.orch8.kmp.bridge.Orch8BridgeCallbacks
 import io.orch8.kmp.bridge.Orch8JsonBridge
 import io.orch8.kmp.lenientJson
-import kotlin.concurrent.Volatile
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -304,9 +307,32 @@ internal class JsonBridgeBackend private constructor(
     // Only read while a sync() call is in flight; sync calls are serialized by the engine.
     private var activeTokens: Orch8TokenSource? = null
 
-    // The node credential installed by setTokenProvider; read from engine threads.
-    @Volatile
-    private var nodeTokens: Orch8TokenSource? = null
+    private data class NodeSources(
+        val serial: Long = 0,
+        val closed: Boolean = false,
+        val tokens: Map<String, Orch8TokenSource> = emptyMap(),
+    )
+    private val nodeSources = MutableStateFlow(NodeSources())
+
+    private fun addNodeSource(tokens: Orch8TokenSource): String {
+        while (true) {
+            val previous = nodeSources.value
+            if (previous.closed) throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed")
+            if (previous.serial == Long.MAX_VALUE) throw Orch8Exception(Orch8ErrorKind.RESOURCE_LIMIT, "provider identity exhausted")
+            val id = (previous.serial + 1).toString()
+            if (nodeSources.compareAndSet(previous, previous.copy(serial = previous.serial + 1, tokens = previous.tokens + (id to tokens)))) return id
+        }
+    }
+
+    private fun releaseNodeSource(id: String) {
+        val previous = nodeSources.getAndUpdate { it.copy(tokens = it.tokens - id) }
+        (previous.tokens[id] as? DeviceSessionTokens)?.close()
+    }
+
+    private fun <T> withNodeSource(tokens: Orch8TokenSource, call: (String) -> T): T {
+        val id = addNodeSource(tokens)
+        return try { call(id) } catch (e: Throwable) { releaseNodeSource(id); throw e }
+    }
 
     private val callbacks = object : Orch8BridgeCallbacks {
         override fun executeHandler(handlerName: String, stepName: String, inputJson: String): String {
@@ -334,9 +360,11 @@ internal class JsonBridgeBackend private constructor(
 
         override fun refreshToken(): String = refreshEnvelope(activeTokens)
 
-        override fun currentNodeToken(): String = nodeTokens?.currentToken().orEmpty()
+        override fun currentNodeToken(providerId: String): String = nodeSources.value.tokens[providerId]?.currentToken().orEmpty()
 
-        override fun refreshNodeToken(): String = refreshEnvelope(nodeTokens)
+        override fun refreshNodeToken(providerId: String): String = refreshEnvelope(nodeSources.value.tokens[providerId])
+
+        override fun releaseNodeTokenSource(providerId: String) = releaseNodeSource(providerId)
 
         private fun refreshEnvelope(tokens: Orch8TokenSource?): String {
             tokens ?: return BridgeCodec.error("invalid_input", "no token source")
@@ -350,8 +378,10 @@ internal class JsonBridgeBackend private constructor(
         }
     }
 
-    private fun call(method: String, args: JsonObjectBuilder.() -> Unit = {}): JsonElement =
-        BridgeCodec.unwrap(method, bridge.call(method, buildJsonObject(args).toString()))
+    private fun call(method: String, args: JsonObjectBuilder.() -> Unit = {}): JsonElement {
+        if (nodeSources.value.closed && method != "shutdown") throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed")
+        return BridgeCodec.unwrap(method, bridge.call(method, buildJsonObject(args).toString()))
+    }
 
     override fun registerHandler(name: String, handler: BlockingStepHandler) {
         call("registerHandler") { put("name", name) }
@@ -371,7 +401,10 @@ internal class JsonBridgeBackend private constructor(
     }
 
     override fun shutdown() {
-        call("shutdown")
+        val previous = nodeSources.getAndUpdate { it.copy(closed = true, tokens = emptyMap()) }
+        if (previous.closed) return
+        try { call("shutdown") }
+        finally { previous.tokens.values.forEach { (it as? DeviceSessionTokens)?.close() } }
     }
 
     override fun tickOnce(): TickResult = BridgeCodec.tick(call("tickOnce"))
@@ -524,17 +557,21 @@ internal class JsonBridgeBackend private constructor(
     }
 
     override fun setTokenProvider(tokens: Orch8TokenSource) {
-        val previous = nodeTokens
-        nodeTokens = tokens
-        try {
-            // The bridge installs a provider that reads currentNodeToken() /
-            // refreshNodeToken() through the callbacks.
-            call("setTokenProvider")
-        } catch (e: Exception) {
-            nodeTokens = previous
-            throw e
-        }
+        withNodeSource(tokens) { id -> call("setTokenProvider") { put("providerId", id) } }
     }
+
+    override fun beginTokenProviderInstallation(tokens: Orch8TokenSource): String = withNodeSource(tokens) { id ->
+        (call("beginTokenProviderInstallation") { put("providerId", id) } as? JsonPrimitive)?.content
+            ?: throw Orch8Exception(Orch8ErrorKind.ENGINE, "bridge returned no installation id")
+    }
+
+    override fun completeTokenProviderInstallation(installationId: String, token: String): Boolean =
+        (call("completeTokenProviderInstallation") { put("installationId", installationId); put("token", token) } as? JsonPrimitive)?.booleanOrNull
+            ?: throw Orch8Exception(Orch8ErrorKind.ENGINE, "bridge returned no completion result")
+
+    override fun cancelTokenProviderInstallation(installationId: String): Boolean =
+        (call("cancelTokenProviderInstallation") { put("installationId", installationId) } as? JsonPrimitive)?.booleanOrNull
+            ?: throw Orch8Exception(Orch8ErrorKind.ENGINE, "bridge returned no cancellation result")
 
     override fun startDelegation(options: DelegationOptions) {
         call("startDelegation") {

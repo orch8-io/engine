@@ -569,7 +569,8 @@ artifacts. For the unreleased source, build a matching XCFramework and use
 `ORCH8_MOBILE_LOCAL_XCFRAMEWORK=1`; the default published 0.7.1 artifact pin must
 be updated with a matching release before distributing this API. Swift reserves
 before its initial fetch and rejects superseded completion across runtime-node
-aliases. RN, Flutter, and KMP wrapper adoption is still pending.
+aliases. KMP adopts tickets with bridge protocol 2 and matching native artifacts;
+RN and Flutter wrapper adoption is still pending.
 
 ### MobileEngineConfig
 
@@ -889,7 +890,9 @@ host fetches per process, including fetches from retired provider instances.
 `refreshTimeout` bounds the initial wait too. Exhausted admission fails before
 host invocation; timeout or cancellation requests retain the slot until the host
 fetch returns. Blank results and abandoned late results cannot populate the
-adapter's cache. Other wrapper async-fetch budgets remain under review.
+adapter's cache. KMP also shares eight unfinished initial/refresh fetches across
+token-source instances and keeps admission through non-cooperative completion.
+RN/Flutter async-fetch budgets remain under review.
 
 A device session is bound to its tenant, `device_id`, `runtime_id`, and
 handler allowlist, and reaches only:

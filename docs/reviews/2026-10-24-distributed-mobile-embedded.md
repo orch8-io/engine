@@ -596,8 +596,8 @@ timeouts, and engine aliases in every supported wrapper. Include provider closur
 their engine in shutdown/retain-cycle tests, and verify destruction of the last
 engine reference from a callback thread.
 
-DME070 adds native reservation tickets and ports Swift. RN, Flutter, and KMP
-still require ticket integration and immutable provider identities in their
+DME070 adds native reservation tickets and ports Swift; DME071 ports KMP. RN and
+Flutter still require ticket integration and immutable provider identities in their
 bridge events. The complete cross-wrapper requirement remains open.
 
 DME062/063 are prerequisites, not a resolution of DME064. Principal binding,
@@ -672,8 +672,9 @@ late completion, cancellation, and capacity recovery in the real wrappers.
 Kotlin's structured timeout needs separate verification of completion semantics;
 this report does not claim an async-work budget there.
 
-The Swift shared initial/refresh budget is addressed in DME069. RN/Flutter bounds,
-Kotlin completion semantics, and native installation ownership remain open.
+The Swift shared initial/refresh budget is addressed in DME069, and KMP physical
+completion/admission in DME071. RN/Flutter bounds and native installation
+ownership in those wrappers remain open.
 
 ### DME067 — Runtime destruction from engine-owned execution (native fix)
 
@@ -833,6 +834,92 @@ version/checksum is released and the default package pin is updated. Keep this
 batch out of the supported default SDK release until that contract is resolved;
 the generated-header CI path alone cannot prove default-package compatibility.
 
-RN/Flutter/KMP first fetches still precede native reservation and their immutable
-bridge provider identities remain unfinished. This batch does not complete
+RN/Flutter first fetches still precede native reservation and their immutable
+bridge provider identities remain unfinished; KMP is addressed in DME071. This batch does not complete
 DME064, principal binding, SDK release parity, or the original review matrix.
+
+### DME071 — KMP installation ownership, physical fetches, and Apple bridge (implemented)
+
+**HIGH, effort L.** The KMP alias regression failed on the original setter: a
+blocked initial fetch installed its older source after a newer alias completed.
+The iOS node adapter also read one mutable `nodeTokens` field for every provider,
+allowing a retired callback to invoke the replacement fetcher. A synchronous
+`withTimeout` around structured host work could not by itself bound a wait on
+non-cooperative child work; initial fetching bypassed it entirely.
+
+KMP now uses native begin/complete/cancel tickets. The ticket is captured inside
+a non-cancellable dispatcher bridge, so prompt cancellation cannot lose an owner
+that native code just committed. Failure/cancellation retires only that ticket;
+cleanup failures are suppressed onto the original error rather than replacing
+cancellation. Finite positive timeout validation runs before reservation.
+
+Initial and refresh fetches share a source flight and eight shared physical
+permits. An SDK-owned child job retains admission through actual completion,
+including non-cooperative cancellation and a queued job cancelled before entry.
+Waiters use the flight's remaining deadline. A reproduced premature-publication regression now requires the full structured
+host scope (children and completion handlers) to finish before publication.
+Cache publication checks ownership and monotonic elapsed time; cache closure/publication are atomic. Initial calls
+reuse an already bootstrapped token rather than minting another one. SDK-owned
+coroutine exception handlers contain failing host cancellation handlers without
+forwarding sensitive messages through native callbacks.
+
+Bridge protocol 2 carries immutable node provider IDs. Each Swift node adapter
+captures its callback object and ID, and releases only that source when native
+ownership ends. The Kotlin registry is atomic, closed after shutdown, and drops
+owned fetch jobs outside registry mutation. JVM/Android tracks SDK-owned sources
+weakly and cancels live work after native shutdown without retaining retired
+fetch closures. Manifest-sync callback identity is separate and still open in
+DME072.
+
+Actual Apple compilation exposed pre-existing type collisions between Swift SDK
+records and Kotlin/Native exports (`PowerState`, `DelegationStatus`, and other
+node/delegation records). Explicit module qualification resolves them. The new
+Mobile CI job runs JVM tests against the same-commit host library, compiles the
+real iOS simulator KMP framework, and type-checks the production Swift SDK and
+bridge with warnings denied. Native library content is a JVM test-task input to
+prevent stale cached integration results after Rust-only changes.
+
+Validation: all 59 JVM tests pass, including 17 added cases and two actual
+Kotlin/JNA-to-Rust integration tests (zero skipped with a native path). The
+portable run passes 57 and explicitly skips the two native cases. Tests cover
+alias replacement, cancellation during reserve/complete dispatcher returns,
+successor-preserving cancellation, shutdown, finite deadlines, shared admission
+with 128 refused first/refresh attempts, physical completion, queue cancellation,
+host errors/cancellation-handler failures, immutable callbacks and failed bridge
+reservation. The real iOS simulator Kotlin/Native framework compiles; the actual
+Swift bridge type-checks against it and current SDK sources with warnings denied.
+This is compile/protocol evidence, not an iOS bridge runtime E2E claim.
+
+Matching native artifacts, generated bindings, and protocol-2 Swift bridge must
+ship together; the DME070 default-release gate is still open. RN/Flutter ports,
+principal binding, manifest-sync identity, and the original review matrix remain
+unfinished.
+
+### DME072 — KMP manifest-sync callback identity (open)
+
+**HIGH, effort M.** Node callback IDs do not fix manifest authentication:
+`JsonBridgeBackend.sync` still writes a mutable `activeTokens` field, and the
+Swift manifest token adapter consults the bridge's current callbacks. Concurrent
+sync calls can overwrite that source; an older callback can observe a newer
+call's token or the field cleared by another call's `finally`. The common
+`offload` API does not serialize concurrent callers. Audit cancellation and
+retained native callbacks as well as the direct overlap. Use immutable per-sync
+source ownership rather than relying on a wrapper-local scheduling assumption,
+and reproduce the crossing with controlled bridge/native callbacks before fixing.
+
+### DME073 — Parent wake after child cancellation (CI failure, open)
+
+**HIGH, effort M.** Draft #273's E2E job failed while the other 22 checks passed:
+[job 120848184366](https://github.com/orch8-io/engine/actions/runs/40085265140/job/120848184366).
+`subsequence_failures.test.ts` cancelled a child, but its parent remained Waiting
+for the full 20-second observation. The test comment already describes a lost
+wake if cancellation arrives before the parent parks; its setup loop asserts
+that the child exists but never asserts that the parent's Waiting condition was
+actually reached before the setup deadline.
+
+Do not address this solely by waiting longer or rerunning CI. Trace durable child
+terminal evidence and parent parking/wake transitions; reproduce cancellation
+before, during, and after parent parking with controlled storage/event gates on
+SQLite and Postgres. A terminal child must eventually resume/fail its parent
+without depending on an ephemeral wake arriving after a particular state write.
+The exact race and production fix remain to be established.

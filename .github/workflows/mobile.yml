@@ -12,6 +12,7 @@ on:
       - "orch8-publisher/**"
       - "packages/**"
       - "scripts/check-sdk-versions.sh"
+      - "scripts/check-kmp-apple-bridge.sh"
       - "scripts/check-android-elf-align.sh"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -27,6 +28,7 @@ on:
       - "orch8-publisher/**"
       - "packages/**"
       - "scripts/check-sdk-versions.sh"
+      - "scripts/check-kmp-apple-bridge.sh"
       - "scripts/check-android-elf-align.sh"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -182,6 +184,48 @@ jobs:
         with:
           name: bindings
           path: bindings/
+
+      - name: Upload native host library for KMP integration
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mobile-native-host
+          path: target/debug/liborch8_mobile.dylib
+          if-no-files-found: error
+
+  kmp-tests:
+    name: KMP JVM and Apple bridge
+    runs-on: macos-latest
+    timeout-minutes: 25
+    needs: [bindings]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          gradle-version: "8.9"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bindings
+          path: artifacts/bindings
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mobile-native-host
+          path: artifacts/native-host
+      - name: Run common and real native JVM tests
+        run: |
+          cp artifacts/bindings/kotlin/io/orch8/mobile/orch8_mobile.kt orch8-mobile/bindings/kotlin/io/orch8/mobile/
+          gradle -p packages/kmp -Porch8.kmp.targets=jvm \
+            "-Porch8.native.lib.path=$GITHUB_WORKSPACE/artifacts/native-host" jvmTest
+      - name: Compile real Kotlin Native framework and Swift bridge
+        run: |
+          gradle -p packages/kmp -Porch8.kmp.targets=ios linkDebugFrameworkIosSimulatorArm64
+          cp artifacts/bindings/swift/Orch8MobileFFI.modulemap artifacts/bindings/swift/module.modulemap
+          bash scripts/check-kmp-apple-bridge.sh \
+            "$GITHUB_WORKSPACE/packages/kmp/build/bin/iosSimulatorArm64/debugFramework" \
+            "$GITHUB_WORKSPACE/artifacts/bindings/swift"
 
   # -- Package XCFramework -------------------------------------------------
   xcframework:

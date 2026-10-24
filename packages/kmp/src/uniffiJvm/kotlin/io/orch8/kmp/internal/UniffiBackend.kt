@@ -4,6 +4,7 @@
 package io.orch8.kmp.internal
 
 import io.orch8.kmp.BackgroundRunResult
+import io.orch8.kmp.DeviceSessionTokens
 import io.orch8.kmp.ContinuityImportResult
 import io.orch8.kmp.DelegateRequest
 import io.orch8.kmp.DelegationOptions
@@ -61,6 +62,16 @@ internal actual fun <T> runHandlerBlocking(block: suspend () -> T): T = runBlock
 
 /** [EngineBackend] over the UniFFI Kotlin bindings (JNA). */
 internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend {
+    private val tokenSourcesLock = Any()
+    private val tokenSources = java.util.WeakHashMap<DeviceSessionTokens, Unit>()
+    private var closed = false
+
+    private fun trackTokenSource(tokens: Orch8TokenSource) {
+        synchronized(tokenSourcesLock) {
+            if (closed) throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed")
+            if (tokens is DeviceSessionTokens) tokenSources[tokens] = Unit
+        }
+    }
     override fun registerHandler(name: String, handler: BlockingStepHandler) = mapErrors {
         engine.registerHandler(
             name,
@@ -96,7 +107,15 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
 
     override fun pause() = engine.pause()
 
-    override fun shutdown() = engine.shutdown()
+    override fun shutdown() {
+        val retired = synchronized(tokenSourcesLock) {
+            if (closed) return
+            closed = true
+            tokenSources.keys.toList().also { tokenSources.clear() }
+        }
+        try { engine.shutdown() }
+        finally { retired.forEach { it.close() } }
+    }
 
     override fun tickOnce(): TickResult = mapErrors {
         engine.tickOnce().let { TickResult(it.instancesAdvanced.toInt(), it.stepsExecuted.toInt(), it.hasPendingWork) }
@@ -193,7 +212,19 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
     override fun nodeRuntimeId(): String = mapErrors { engine.nodeRuntimeId() }
 
     override fun setTokenProvider(tokens: Orch8TokenSource) = mapErrors {
+        trackTokenSource(tokens)
         engine.setTokenProvider(tokens.toUniffi())
+    }
+
+    override fun beginTokenProviderInstallation(tokens: Orch8TokenSource): String = mapErrors {
+        trackTokenSource(tokens)
+        engine.beginTokenProviderInstallation(tokens.toUniffi())
+    }
+    override fun completeTokenProviderInstallation(installationId: String, token: String): Boolean = mapErrors {
+        engine.completeTokenProviderInstallation(installationId, token)
+    }
+    override fun cancelTokenProviderInstallation(installationId: String): Boolean = mapErrors {
+        engine.cancelTokenProviderInstallation(installationId)
     }
 
     override fun registerNode(capabilities: NodeCapabilities): NodeRegistration = mapErrors {

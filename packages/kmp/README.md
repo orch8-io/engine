@@ -126,7 +126,7 @@ Kotlin/Native does not carry a Swift `throws` into Kotlin as a typed
 exception, and Kotlin cannot see UniFFI's Swift records. Keeping the Swift
 side to plain strings means all decoding, validation and error mapping run
 in common Kotlin (`JsonBridgeBackend`), where the JVM test suite covers them.
-Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 1`) when the
+Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 2`) when the
 engine opens, so a stale adapter fails immediately with a clear message.
 
 ## Usage (common code)
@@ -179,7 +179,8 @@ anyone can extract it from the binary. The recommended flow:
    `deviceId` and `engine.nodeRuntimeId()` with
    `POST /runtimes/device-sessions`.
 2. The **app** fetches that `dst_…` token from its backend through the token
-   provider. `setTokenProvider` awaits the first token, and the engine calls
+   provider. `setTokenProvider` reserves native ownership before awaiting the
+   first token, and the engine calls
    the same suspend function again whenever the control plane answers `401`
    (the session expired), then retries the request once.
 
@@ -219,9 +220,18 @@ engine.registerNode(NodeCapabilities(hardware = listOf("camera")))
 A device session is bound to its tenant, device, runtime and handler
 allowlist and reaches only this device's own mobile, worker-lease and
 delegation calls (see `docs/MOBILE_SDK.md`, "Authenticating a phone"). The
-refresh runs on the engine's background thread, bounded by `refreshTimeout`
-(default 30 s). On iOS it needs an `Orch8KmpBridge.swift` from the same
-release; an older bridge answers `setTokenProvider` with `INVALID_INPUT`.
+initial and refresh waits use `refreshTimeout` (default 30 s, finite and
+positive). Eight unfinished SDK fetches share admission across token-source
+instances. Timeout and cancellation stop waiting while non-cooperative work
+retains its slot until actual completion. Exhausted admission starts no host
+work. Late results cannot restore a closed source's cached token.
+
+Native installation tickets fence initial completion and cancellation against
+replacement through another alias. On iOS each native provider captures an
+immutable callback source ID, so retired callbacks cannot invoke a replacement
+fetcher. Protocol 2, matching native reservation APIs, and matching generated
+bindings are required; a protocol-1 Swift bridge fails during open. These
+unreleased APIs must be shipped with matching native SDK artifacts after 0.7.1.
 
 `EngineConfig.syncApiKey` is the **legacy** path and not for production apps:
 it still works, and the SDK logs a warning when the server reports the key is
@@ -331,3 +341,11 @@ docker run --rm -v "$PWD/../..":/work -w /work/packages/kmp gradle:8.9-jdk17 \
 A full build (`gradle build`) needs the Android SDK (compileSdk 35) and, for
 the iOS targets, macOS with Xcode 16. The Gradle wrapper JAR is not checked
 in. Run `gradle wrapper --gradle-version 8.9` once to create `./gradlew`.
+
+To execute the real JVM/native installation tests too, pass
+`-Porch8.native.lib.path=/absolute/path/to/the/native/library/directory` to
+`jvmTest`. Without that property those two tests are explicitly skipped. The
+test task fingerprints the native library so a Rust change invalidates cached
+results. Mobile CI runs this path against the host library built for the same
+commit, compiles `linkDebugFrameworkIosSimulatorArm64`, and checks the actual
+Swift/iOS bridge against that framework with `scripts/check-kmp-apple-bridge.sh`.

@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
 
 /** Scripted stand-in for the Swift bridge: records calls, replays envelopes. */
 private class FakeJsonBridge(
-    private val protocol: Int = 1,
+    private val protocol: Int = 2,
 ) : Orch8JsonBridge {
     val calls = mutableListOf<Pair<String, JsonObject>>()
     val replies = mutableMapOf<String, String>()
@@ -56,6 +56,73 @@ class JsonBridgeBackendTest {
     fun protocolMismatchFailsFast() {
         val e = assertFailsWith<Orch8Exception> { open(FakeJsonBridge(protocol = 99)) }
         assertEquals(Orch8ErrorKind.INVALID_INPUT, e.kind)
+    }
+
+    @Test
+    fun staleNodeCallbacksCannotUseOrReleaseTheReplacementFetcher() {
+        val (bridge, backend) = open()
+        var oldFetches = 0
+        var newFetches = 0
+        backend.setTokenProvider(object : Orch8TokenSource {
+            override fun currentToken() = "dst_old"
+            override fun refreshToken(): String { oldFetches++; return "dst_old_refreshed" }
+        })
+        val oldId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+        backend.setTokenProvider(object : Orch8TokenSource {
+            override fun currentToken() = "dst_new"
+            override fun refreshToken(): String { newFetches++; return "dst_new_refreshed" }
+        })
+        val newId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+        val callbacks = bridge.installed!!
+        assertEquals("dst_old_refreshed", Json.parseToJsonElement(callbacks.refreshNodeToken(oldId)).jsonObject["ok"]!!.jsonPrimitive.content)
+        assertEquals(1, oldFetches)
+        assertEquals(0, newFetches)
+        callbacks.releaseNodeTokenSource(oldId)
+        assertTrue("error" in Json.parseToJsonElement(callbacks.refreshNodeToken(oldId)).jsonObject)
+        assertEquals("dst_new", callbacks.currentNodeToken(newId))
+        callbacks.releaseNodeTokenSource(oldId)
+        assertEquals("dst_new", callbacks.currentNodeToken(newId))
+        backend.shutdown()
+        backend.shutdown()
+        assertEquals("", callbacks.currentNodeToken(newId))
+        assertTrue("error" in Json.parseToJsonElement(callbacks.refreshNodeToken(newId)).jsonObject)
+        assertEquals(Orch8ErrorKind.SHUTDOWN, assertFailsWith<Orch8Exception> { backend.nodeRuntimeId() }.kind)
+    }
+
+    @Test
+    fun installationBridgeCarriesTicketsAndImmutableProviderIds() {
+        val (bridge, backend) = open()
+        bridge.replies["beginTokenProviderInstallation"] = """{"ok":"ticket-1"}"""
+        val source = object : Orch8TokenSource {
+            override fun currentToken() = "dst_cached"
+            override fun refreshToken() = "dst_fresh"
+        }
+        assertEquals("ticket-1", backend.beginTokenProviderInstallation(source))
+        val id = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+        assertEquals("dst_cached", bridge.installed!!.currentNodeToken(id))
+        bridge.replies["completeTokenProviderInstallation"] = """{"ok":true}"""
+        assertTrue(backend.completeTokenProviderInstallation("ticket-1", "dst_initial"))
+        assertEquals("ticket-1", bridge.calls.last().second["installationId"]!!.jsonPrimitive.content)
+        bridge.replies["cancelTokenProviderInstallation"] = """{"ok":true}"""
+        assertTrue(backend.cancelTokenProviderInstallation("ticket-1"))
+        bridge.installed!!.releaseNodeTokenSource(id)
+        assertEquals("", bridge.installed!!.currentNodeToken(id))
+    }
+
+    @Test
+    fun failedReservationDropsOnlyItsOwnSource() {
+        val (bridge, backend) = open()
+        val source = object : Orch8TokenSource {
+            override fun currentToken() = "dst_old"
+            override fun refreshToken() = "dst_refreshed"
+        }
+        backend.setTokenProvider(source)
+        val original = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+        bridge.replies["beginTokenProviderInstallation"] = """{"error":{"kind":"Engine","message":"refused"}}"""
+        assertFailsWith<Orch8Exception> { backend.beginTokenProviderInstallation(source) }
+        val failed = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+        assertEquals("", bridge.installed!!.currentNodeToken(failed))
+        assertEquals("dst_old", bridge.installed!!.currentNodeToken(original))
     }
 
     @Test
@@ -173,15 +240,16 @@ class JsonBridgeBackendTest {
         }
         backend.setTokenProvider(tokens)
         assertEquals("setTokenProvider", bridge.calls.last().first)
+        val providerId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
         val callbacks = bridge.installed!!
-        assertEquals("dst_0", callbacks.currentNodeToken())
-        assertEquals("dst_1", Json.parseToJsonElement(callbacks.refreshNodeToken()).jsonObject["ok"]!!.jsonPrimitive.content)
+        assertEquals("dst_0", callbacks.currentNodeToken(providerId))
+        assertEquals("dst_1", Json.parseToJsonElement(callbacks.refreshNodeToken(providerId)).jsonObject["ok"]!!.jsonPrimitive.content)
         // The manifest-sync token source is separate: none is active outside sync.
         assertEquals("", callbacks.currentToken())
         bridge.replies["sync"] =
             """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
         backend.sync("https://api.example.com/manifest.json", null)
-        assertEquals("dst_0", callbacks.currentNodeToken())
+        assertEquals("dst_0", callbacks.currentNodeToken(providerId))
     }
 
     @Test
@@ -196,8 +264,8 @@ class JsonBridgeBackendTest {
         }
         val e = assertFailsWith<Orch8Exception> { backend.setTokenProvider(tokens) }
         assertEquals(Orch8ErrorKind.INVALID_INPUT, e.kind)
-        assertEquals("", bridge.installed!!.currentNodeToken())
-        assertTrue("error" in Json.parseToJsonElement(bridge.installed!!.refreshNodeToken()).jsonObject)
+        assertEquals("", bridge.installed!!.currentNodeToken("1"))
+        assertTrue("error" in Json.parseToJsonElement(bridge.installed!!.refreshNodeToken("1")).jsonObject)
     }
 
     @Test
