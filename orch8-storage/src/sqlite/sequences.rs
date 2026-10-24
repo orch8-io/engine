@@ -9,7 +9,7 @@ use super::helpers::{row_to_sequence, ts};
 /// Insert a sequence row using an already-open connection/transaction. Shared
 /// by [`create`] (its own transaction) and [`replace`] (same transaction as
 /// the preceding delete, for atomicity).
-async fn create_on(
+pub(super) async fn create_on(
     conn: &mut sqlx::SqliteConnection,
     seq: &orch8_types::sequence::SequenceDefinition,
 ) -> Result<(), StorageError> {
@@ -82,6 +82,17 @@ pub(super) async fn get(
     let row = sqlx::query("SELECT * FROM sequences WHERE id = ?1")
         .bind(id.to_string())
         .fetch_optional(&storage.pool)
+        .await?;
+    row.map(|r| row_to_sequence(&r)).transpose()
+}
+
+pub(super) async fn get_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: SequenceId,
+) -> Result<Option<orch8_types::sequence::SequenceDefinition>, StorageError> {
+    let row = sqlx::query("SELECT * FROM sequences WHERE id = ?1")
+        .bind(id.to_string())
+        .fetch_optional(conn)
         .await?;
     row.map(|r| row_to_sequence(&r)).transpose()
 }
@@ -256,7 +267,10 @@ pub(super) async fn update_status(
 /// an already-open connection/transaction. Shared by [`delete`] (its own
 /// transaction) and [`replace`] (same transaction as the following insert,
 /// for atomicity).
-async fn delete_on(conn: &mut sqlx::SqliteConnection, id: SequenceId) -> Result<(), StorageError> {
+pub(super) async fn delete_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: SequenceId,
+) -> Result<(), StorageError> {
     let id_str = id.to_string();
 
     // Refuse while any non-terminal instance still runs this sequence

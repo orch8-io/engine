@@ -521,6 +521,25 @@ CREATE TABLE IF NOT EXISTS mobile_catalog_signing_keys (
     PRIMARY KEY(account_id, catalog_id, key_id),
     FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id)
 );
+-- Keep compact published-version identity after cache eviction/removal. Live
+-- definitions remain in the engine's sequences table, with local owner IDs.
+CREATE TABLE IF NOT EXISTS mobile_catalog_workflows (
+    account_id TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version > 0),
+    source_id TEXT NOT NULL,
+    body_digest TEXT NOT NULL CHECK(length(body_digest) = 64),
+    sequence_id TEXT UNIQUE REFERENCES sequences(id) ON DELETE SET NULL,
+    withdrawn_at_version INTEGER CHECK(withdrawn_at_version >= 0),
+    last_cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(account_id, catalog_id, name, version),
+    UNIQUE(account_id, catalog_id, source_id, version),
+    FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_catalog_workflows_cached
+    ON mobile_catalog_workflows(account_id, catalog_id, name, version DESC)
+    WHERE sequence_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,

@@ -8,6 +8,8 @@ use orch8_types::error::StorageError;
 use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
 
+mod workflows;
+
 #[derive(Clone)]
 pub(crate) struct AccountScope {
     id: String,
