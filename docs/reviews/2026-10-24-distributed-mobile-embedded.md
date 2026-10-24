@@ -47,15 +47,42 @@ not establish full behavioral coverage.
 | DME-002 | Journal mutations are not fenced to a lease generation | Start/outcome/delete match only `task_id`; delayed old cleanup can overwrite or delete a new generation. Fence every mutation to the complete claim identity. | Fixed; reproduced before the change and covered by the mobile suite |
 | DME-003 | Redelivery replaces durable recovery evidence | `INSERT OR REPLACE` clears `started` and `outcome` even for an identical lease. Make insertion idempotent without erasing recovery evidence. | Fixed; reproduced before the change and covered by the mobile suite |
 | DME-004 | Journal and recovery do not isolate control-plane/worker identities | The table's sole key is task ID; the stored worker ID is omitted from recovery reads. Preserve independent claims and recover only with the matching client identity. | Fixed; reproduced before the change and covered by the mobile suite |
-| DME-005 | A lease-loss cancellation can detach the timeout-wrapped handler task | `invoke` owns a spawned task through a plain JoinHandle; dropping its caller does not run the inner native invocation's cancellation path immediately. Trace cancellation and straggler tracking before selecting a fix. | Under investigation |
+| DME-005 | A lease-loss cancellation can detach the timeout-wrapped handler task | `invoke` detached a spawned timeout wrapper on lease loss. Keep the handler future owned by execution so cancellation immediately reaches native-call quarantine. | Fixed; regression reproduced before the change and covered by the mobile suite |
+
+## Cancellation and background admission findings
+
+Baseline for this batch: main `7911a16b` (first recovery batch merged).
+
+| ID | Finding | Evidence and correction | State |
+|---|---|---|---|
+| DME-006 | Cancelling a background-window future leaves background claims enabled | A shared boolean is only reset on normal return. Each window now owns a counted RAII permission. | Fixed; reproduced before the change and covered by the mobile suite |
+| DME-007 | One background window ending revokes another live window | Concurrent OS wake handlers overwrite one boolean. Independent permissions remain until each owner returns or is cancelled. | Fixed; reproduced before the change and covered by the mobile suite |
+| DME-008 | A stopped worker starts tasks returned by a pending poll | Admission checks foreground/power but omit worker cancellation. Recheck cancellation before marking a delivery started; release it unstarted. | Fixed; reproduced before the change and covered by the mobile suite |
+| DME-009 | Quarantine expiry allows a retry while a native side effect is still running | Artificially age a live callback past 15 minutes: the old admission check returns false. Retain quarantine until physical completion; emit one prolonged-call diagnostic. | Fixed; reproduced before the change and covered by the mobile suite |
+
+The DME-005 lease-loss regression failed against the original timeout path and
+passed after removing the detached async task. A separate worker run reproduced
+DME-006/007/008 (26 passed, three expected failures). The aged quarantine test
+reproduced DME-009 without a 15-minute sleep. All five checks exercise observable
+admission or ownership behavior, with native callback cleanup controlled by a
+channel rather than a timing guess. The test harness now shares the same
+straggler tracker between native callbacks and worker admission, as production
+does.
+
+A stuck native call deliberately blocks its own handler indefinitely: availability
+cannot safely be recovered by guessing the physical side effect has ended. Other
+handlers remain eligible. Host remediation or process restart is required for a
+callback that never returns. No forced native cancellation is claimed.
 
 ## Check evidence
 
 The initial five behavioral regressions all failed on baseline `164b3031`,
 while all 14 existing worker tests passed. The corrected worker subtree passes
 25 tests, including upgrade preservation, rollback, concurrent initialization,
-generation-fenced writes, and panic cleanup. The complete mobile library passes
-297 tests with zero failures. All-target Clippy passes with warnings denied.
+generation-fenced writes, and panic cleanup. The first batch passed all
+297 mobile library tests. The cancellation batch passes all 302 tests with zero
+failures, including the five added behavioral regressions. All-target Clippy
+passes with warnings denied.
 
 Locked advisory policy checks pass for the root/default graph, all optional
 features, Node native bindings, Python native bindings, and fuzz workspace.
@@ -73,5 +100,6 @@ cargo clippy --offline --locked -p orch8-mobile --all-targets -- -D warnings
 Mock HTTP tests require loopback socket permission. One reusable target directory
 is used with incremental compilation and debug information disabled. No complete
 cross-runtime review, coverage percentage, throughput gain, or real-device
-platform certification is claimed by these checks. The pending areas above and
-DME-005 still require investigation and verification.
+platform certification is claimed by these checks. The pending areas above
+remain under review, including worker resource bounds and the remaining
+distributed and embedded trust boundaries.

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Mobile worker cancellation and background windows
+
+- Keep remote timeout futures owned by the lease execution so losing the lease
+  quarantines any still-running native callback immediately.
+- Release background claim permission on cancellation and keep overlapping OS
+  windows independent. A stopped worker releases late tasks without starting them.
+- Retain native callback quarantine until physical completion instead of allowing
+  concurrent retries after 15 minutes. Prolonged calls emit one diagnostic while
+  unrelated handlers remain eligible for work.
+
 ### Mobile remote worker recovery
 
 - Scope durable claim evidence to the control plane, worker runtime, task, and

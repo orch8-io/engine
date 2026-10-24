@@ -91,12 +91,13 @@ async fn harness_with(server: &MockControlPlane, handler: Recording, idle_ms: u6
     store.init_tables().await.unwrap();
     let inputs = Arc::clone(&handler.inputs);
     let mut registry = HandlerRegistry::new();
+    let stragglers = Arc::new(crate::stragglers::Stragglers::default());
     register_foreign_handler(
         &mut registry,
         "scan",
         Arc::new(handler),
         Duration::from_secs(10),
-        Arc::new(crate::stragglers::Stragglers::default()),
+        Arc::clone(&stragglers),
     );
     let client = NodeClient::new_unchecked(
         server.base.clone(),
@@ -122,7 +123,7 @@ async fn harness_with(server: &MockControlPlane, handler: Recording, idle_ms: u6
                 foreground: Arc::clone(&foreground),
                 power_state: Arc::clone(&power),
             },
-            stragglers: Arc::new(crate::stragglers::Stragglers::default()),
+            stragglers,
         },
         WorkerOptions {
             max_concurrent_tasks: 1,
@@ -743,4 +744,140 @@ async fn panicking_invocation_releases_local_reservations_for_crash_recovery() {
     assert_eq!(h.worker.stats().in_flight, 0);
     assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
     assert_eq!(server.bodies(&format!("{id}/release"))[0]["started"], true);
+}
+
+/// Lease loss must quarantine a live native callback even when the server
+/// supplied an additional timeout around the foreign handler wrapper.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lease_loss_with_a_remote_timeout_quarantines_the_live_native_callback() {
+    struct Gated {
+        entered: Arc<AtomicBool>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl StepHandler for Gated {
+        fn execute(&self, _step: String, _input: String) -> Result<String, crate::HandlerError> {
+            self.entered.store(true, Ordering::Release);
+            let _ = self
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5));
+            Ok("{}".into())
+        }
+    }
+    let entered = Arc::new(AtomicBool::new(false));
+    let started = Arc::clone(&entered);
+    let route: Route = Arc::new(move |_, path, _| {
+        let status = if path.ends_with("/heartbeat") && started.load(Ordering::Acquire) {
+            409
+        } else {
+            200
+        };
+        (status, json!({}))
+    });
+    let server = spawn_control_plane(route).await;
+    let mut h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let (release, receiver) = std::sync::mpsc::channel();
+    let mut registry = HandlerRegistry::new();
+    register_foreign_handler(
+        &mut registry,
+        "scan",
+        Arc::new(Gated {
+            entered,
+            release: Mutex::new(receiver),
+        }),
+        Duration::from_secs(60),
+        Arc::clone(&h.worker.deps.stragglers),
+    );
+    Arc::get_mut(&mut h.worker).unwrap().deps.registry = Arc::new(registry);
+    let id = uuid::Uuid::new_v4();
+    let mut task = task_json(id);
+    task["timeout_ms"] = json!(60_000);
+    h.worker
+        .execute(
+            serde_json::from_value(task).unwrap(),
+            Duration::from_millis(10),
+        )
+        .await;
+    let quarantined = h.worker.deps.stragglers.blocks("scan");
+    release.send(()).unwrap();
+    wait_for(|| !h.worker.deps.stragglers.blocks("scan")).await;
+    assert!(
+        quarantined,
+        "lease loss must not detach a live native callback without quarantine"
+    );
+    assert_eq!(h.worker.stats().lost, 1);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert_eq!(server.count(&format!("{id}/complete")), 0);
+    assert_eq!(server.count(&format!("{id}/fail")), 0);
+}
+
+#[tokio::test]
+async fn cancelling_a_background_window_revokes_its_claim_permission() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 204)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    h.foreground.store(false, Ordering::Release);
+    let worker = Arc::clone(&h.worker);
+    let window = tokio::spawn(async move { worker.run_window(Duration::from_secs(60)).await });
+    wait_for(|| h.worker.may_claim()).await;
+    window.abort();
+    assert!(window.await.unwrap_err().is_cancelled());
+    assert!(
+        !h.worker.may_claim(),
+        "cancelled windows cannot leave background claims enabled"
+    );
+}
+
+#[tokio::test]
+async fn overlapping_background_windows_retain_independent_claim_permission() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 204)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    h.foreground.store(false, Ordering::Release);
+    let first_worker = Arc::clone(&h.worker);
+    let first =
+        tokio::spawn(async move { first_worker.run_window(Duration::from_millis(100)).await });
+    wait_for(|| h.worker.may_claim()).await;
+    let second_worker = Arc::clone(&h.worker);
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let second = tokio::spawn(async move {
+        let window = second_worker.run_window(Duration::from_secs(60));
+        tokio::pin!(window);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(window.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        entered.send(()).unwrap();
+        window.await
+    });
+    ready.await.unwrap();
+    first.await.unwrap();
+    let still_allowed = h.worker.may_claim();
+    second.abort();
+    assert!(second.await.unwrap_err().is_cancelled());
+    assert!(
+        still_allowed,
+        "one window ending cannot revoke another active window"
+    );
+    assert!(!h.worker.may_claim());
+}
+
+#[tokio::test]
+async fn stopped_worker_releases_a_late_poll_claim_without_starting_it() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 204)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    h.worker.stop();
+    let id = uuid::Uuid::new_v4();
+    h.worker
+        .execute(
+            serde_json::from_value(task_json(id)).unwrap(),
+            Duration::from_secs(1),
+        )
+        .await;
+    assert!(
+        h.inputs.lock().unwrap().is_empty(),
+        "a stopped worker must not start a late delivery"
+    );
+    assert_eq!(server.bodies(&format!("{id}/release"))[0]["started"], false);
+    assert_eq!(h.store.count().await.unwrap(), 0);
 }
