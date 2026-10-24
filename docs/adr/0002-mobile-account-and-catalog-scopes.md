@@ -105,6 +105,29 @@ physical foreign-callback fairness or total persistent storage quotas.
 Public scoped sync/execution, instance/handler ownership, cancellation of running
 work, production identity backend integration and SDK handles remain gates.
 
+Durable run admission now stages requests outside `task_instances`. Requests
+freeze account/catalog/epoch, chosen definition/version, original creation time,
+input identity and the manifest version/digest that authorized admission. Scoped
+operation keys deduplicate canonical requests; retries of `latest` retain the
+first selection across upgrades. A new login epoch cannot silently reuse an old
+operation key. Active handles can inspect prior receipts without rebinding them.
+
+A current reconciliation marker is required before new admission. A completed
+accepted/applied cursor is also sufficient evidence for older fully evaluated
+caches; a newer pending manifest cannot borrow that readiness. The marker commits
+after the removal pass, independently of downloads, so a bad entry does not block
+other reconciled cached definitions. Record/input byte caps are checked under the
+same writer fence as insertion, with byte-accurate metadata counters and schema
+constraints. Retired/cancelled requests remain charged until explicit safe cleanup.
+Prepared requests pin definitions; withdrawal deprecates instead of deleting them.
+
+This is durable preparation, not scoped execution. No scheduler instance is
+created and a normal engine tick cannot dispatch it. Materialization must first
+install frozen handler/credential ownership and enforce account epochs, original
+admission context, current publication/capability policy and catalog boundaries
+for builtins. Core tenant/sub-tenant checks do not make a catalog namespace alone
+a security boundary. Public scoped start/dispatch remains gated on that work.
+
 Use one SQLite database with explicit owner keys and scoped SDK handles. Shared
 runtime resources stay bounded across accounts. Scope-specific state is selected
 once when creating a handle and retained by every operation from that handle.
@@ -208,8 +231,8 @@ resources. Separate databases and token-hash cache keys do not satisfy the chose
 requirement. Keep the implementation in the current runtime and storage modules;
 no extra service, broker, or deployment is required.
 
-The internal persistence foundation above is implemented. Next connect trusted
-principal/catalog audience verification to an explicitly scoped sync caller,
-then carry immutable owners through instance creation and all execution paths.
+The internal private sync caller and durable request admission are implemented.
+Next carry immutable owners through actual instance materialization, handler and
+builtin dispatch, recovery, listeners and every execution write.
 Public handles must not expose partially isolated execution. Keep all gates open
 until their complete runtime and SDK evidence exists.

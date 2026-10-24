@@ -288,6 +288,13 @@ pub(super) async fn delete_on(
             "sequence {id} still has {active} non-terminal instance(s)"
         )));
     }
+    let prepared: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mobile_catalog_run_requests WHERE sequence_id = ?1 AND state = 'prepared')")
+        .bind(&id_str).fetch_one(&mut *conn).await?;
+    if prepared {
+        return Err(StorageError::Conflict(format!(
+            "sequence {id} is pinned by prepared scoped run requests"
+        )));
+    }
 
     // Select dependent IDs inside SQLite instead of expanding one bind per
     // instance. The query stays within the bind limit regardless of run count.

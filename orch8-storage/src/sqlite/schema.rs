@@ -577,6 +577,41 @@ CREATE INDEX IF NOT EXISTS idx_mobile_catalog_workflows_cached
     ON mobile_catalog_workflows(account_id, catalog_id, name, version DESC)
     WHERE sequence_id IS NOT NULL;
 
+-- Durable scoped requests are not scheduler instances until a scoped
+-- dispatcher has installed its immutable handler/credential ownership.
+CREATE TABLE IF NOT EXISTS mobile_catalog_run_requests (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    owner_epoch INTEGER NOT NULL CHECK(owner_epoch > 0),
+    admitted_manifest_version INTEGER NOT NULL CHECK(admitted_manifest_version >= 0),
+    admitted_manifest_digest TEXT NOT NULL CHECK(length(admitted_manifest_digest) = 64),
+    sequence_id TEXT REFERENCES sequences(id) ON DELETE SET NULL,
+    selected_sequence_id TEXT NOT NULL,
+    workflow_name TEXT NOT NULL,
+    workflow_version INTEGER NOT NULL CHECK(workflow_version > 0),
+    requested_version INTEGER CHECK(requested_version IS NULL OR requested_version > 0),
+    input_bytes INTEGER NOT NULL CHECK(input_bytes >= 0 AND input_bytes <= 1048576),
+    input TEXT NOT NULL,
+    request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+    dedup_key TEXT,
+    state TEXT NOT NULL CHECK(state IN ('prepared', 'cancelled')),
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id),
+    CHECK(sequence_id IS NULL OR sequence_id = selected_sequence_id),
+    CHECK(state <> 'prepared' OR sequence_id IS NOT NULL),
+    CHECK(input_bytes = length(CAST(input AS BLOB)))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mobile_catalog_run_dedup
+    ON mobile_catalog_run_requests(account_id, catalog_id, dedup_key)
+    WHERE dedup_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mobile_catalog_run_owner
+    ON mobile_catalog_run_requests(account_id, catalog_id, id);
+CREATE INDEX IF NOT EXISTS idx_mobile_catalog_run_pin
+    ON mobile_catalog_run_requests(sequence_id) WHERE state = 'prepared';
+CREATE INDEX IF NOT EXISTS idx_mobile_catalog_run_usage
+    ON mobile_catalog_run_requests(account_id, catalog_id, input_bytes);
+
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -1548,4 +1583,4 @@ CREATE INDEX IF NOT EXISTS idx_mobile_commands_unacked_created
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 53;
+pub(super) const SCHEMA_VERSION: i64 = 54;

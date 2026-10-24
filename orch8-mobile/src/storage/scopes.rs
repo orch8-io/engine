@@ -8,6 +8,7 @@ use orch8_types::error::StorageError;
 use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
 
+pub(crate) mod runs;
 mod signed;
 mod transport;
 mod workflows;
@@ -19,6 +20,29 @@ struct CatalogAcceptance<'a> {
     version: i64,
     digest: &'a str,
     entries: &'a [(&'a str, i32, &'a str)],
+}
+
+const RECONCILED_VERSION: &str = "catalog_reconciled_version";
+const RECONCILED_DIGEST: &str = "catalog_reconciled_digest";
+
+async fn require_reconciled(
+    tx: &mut Transaction<'_, Sqlite>,
+    scope: &CatalogScope,
+) -> Result<(i64, String), StorageError> {
+    let trust = catalog_trust_in(tx, scope).await?;
+    if let Some((version, digest)) = trust.evaluated_identity() {
+        return Ok((version, digest.to_owned()));
+    }
+    let version:Option<String>=sqlx::query_scalar("SELECT value FROM mobile_catalog_metadata WHERE account_id = ?1 AND catalog_id = ?2 AND key = 'catalog_reconciled_version'")
+        .bind(&scope.account.id).bind(&scope.id).fetch_optional(&mut **tx).await?;
+    let digest:Option<String>=sqlx::query_scalar("SELECT value FROM mobile_catalog_metadata WHERE account_id = ?1 AND catalog_id = ?2 AND key = 'catalog_reconciled_digest'")
+        .bind(&scope.account.id).bind(&scope.id).fetch_optional(&mut **tx).await?;
+    let version = version
+        .and_then(|value| value.parse::<i64>().ok())
+        .ok_or_else(|| invalid("catalog reconciliation is pending"))?;
+    let digest = digest.ok_or_else(|| invalid("catalog reconciliation is pending"))?;
+    trust.require_current(version, &digest)?;
+    Ok((version, digest))
 }
 
 #[derive(Clone)]
@@ -230,6 +254,8 @@ impl MobileStorage {
                 "manifest_etag",
                 "last_sync_ts",
                 "sync_env_fingerprint",
+                RECONCILED_VERSION,
+                RECONCILED_DIGEST,
             ]
             .contains(key)
             {
@@ -412,6 +438,33 @@ impl MobileStorage {
                 barrier.release.acquire().await.unwrap().forget();
             }
         }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Called after the complete snapshot removal pass. This is independent
+    /// of downloads/evaluation: one unavailable entry need not block other
+    /// authorized cached workflows, while pending removals admit no new work.
+    pub(crate) async fn mark_catalog_reconciled(
+        &self,
+        scope: &CatalogScope,
+        version: i64,
+        digest: &str,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool().begin().await?;
+        fence_catalog(&mut tx, scope).await?;
+        catalog_trust_in(&mut tx, scope)
+            .await?
+            .require_current(version, digest)?;
+        write_metadata_in(
+            &mut tx,
+            scope,
+            &[
+                (RECONCILED_VERSION, Some(&version.to_string())),
+                (RECONCILED_DIGEST, Some(digest)),
+            ],
+        )
+        .await?;
         tx.commit().await?;
         Ok(())
     }

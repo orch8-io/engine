@@ -15,7 +15,7 @@ pub(crate) struct WorkflowRemoval {
     pub(crate) retained: u64,
 }
 
-fn owner(scope: &CatalogScope) -> Result<(TenantId, Namespace), StorageError> {
+pub(super) fn owner(scope: &CatalogScope) -> Result<(TenantId, Namespace), StorageError> {
     let tenant = TenantId::new(format!("mobile-account-{}", scope.account.id))
         .map_err(|_| invalid("invalid catalog workflow owner"))?;
     Ok((tenant, Namespace::new(format!("catalog-{}", scope.id))))
@@ -27,7 +27,7 @@ fn sequence_id(raw: &str) -> Result<SequenceId, StorageError> {
         .map_err(|_| invalid("invalid catalog workflow ID"))
 }
 
-async fn read_owner(
+pub(super) async fn read_owner(
     tx: &mut Transaction<'_, Sqlite>,
     scope: &CatalogScope,
 ) -> Result<(), StorageError> {
@@ -39,7 +39,7 @@ async fn read_owner(
     Ok(())
 }
 
-async fn checked_definition(
+pub(super) async fn checked_definition(
     tx: &mut Transaction<'_, Sqlite>,
     scope: &CatalogScope,
     id: SequenceId,
@@ -224,7 +224,7 @@ impl MobileStorage {
         for (raw_id, version) in rows {
             let id = sequence_id(&raw_id)?;
             checked_definition(&mut tx, scope, id, name, version).await?;
-            let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_instances WHERE sequence_id = ?1 AND state NOT IN ('completed', 'failed', 'cancelled'))")
+            let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_instances WHERE sequence_id = ?1 AND state NOT IN ('completed', 'failed', 'cancelled')) OR EXISTS(SELECT 1 FROM mobile_catalog_run_requests WHERE sequence_id = ?1 AND state = 'prepared')")
                 .bind(&raw_id).fetch_one(&mut *tx).await?;
             if live {
                 sqlx::query("UPDATE sequences SET deprecated = 1 WHERE id = ?1")
