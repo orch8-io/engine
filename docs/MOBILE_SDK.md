@@ -583,6 +583,14 @@ A supplied empty/whitespace token returns `InvalidInput` before transport;
 passing no provider retains explicit signed-URL authentication. The manifest
 path snapshots one token and currently does not refresh after `401`.
 
+A bearer supplied for manifest sync is sent only to the manifest's normalized
+origin (scheme, host, effective port). Same-origin sequences and detached
+signatures retain it. Cross-origin entries can serve verified public content or
+use their own signed query URLs; the SDK omits the manifest bearer on those
+requests, including retries. Redirects remain disabled. Content signatures still
+need to verify. This transport boundary does not provide per-account local-data
+or manifest-cursor isolation.
+
 ### MobileEngineConfig
 
 | Field                     | Type   | Default       | Description                                                                                                                                                                                                                                                                   |
