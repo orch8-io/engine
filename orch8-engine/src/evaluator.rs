@@ -261,25 +261,38 @@ pub async fn ensure_execution_tree(
 
 /// Ids of the nodes that have a `loop` / `for_each` ancestor.
 fn nodes_under_iteration(nodes: &[ExecutionNode]) -> std::collections::HashSet<ExecutionNodeId> {
-    let by_id: std::collections::HashMap<ExecutionNodeId, &ExecutionNode> =
-        nodes.iter().map(|n| (n.id, n)).collect();
-    nodes
-        .iter()
-        .filter(|n| {
-            let mut cur = n.parent_id;
-            while let Some(pid) = cur {
-                let Some(parent) = by_id.get(&pid) else {
-                    break;
-                };
-                if matches!(parent.block_type, BlockType::Loop | BlockType::ForEach) {
-                    return true;
-                }
-                cur = parent.parent_id;
+    // ⚡ Bolt: Use a flat Vec sorted by ExecutionNodeId instead of a HashMap to avoid
+    // hashing and memory allocation overhead on the tree resolution hot path.
+    let mut by_id = Vec::with_capacity(nodes.len());
+    for n in nodes {
+        let is_iterating_block = matches!(n.block_type, BlockType::Loop | BlockType::ForEach);
+        by_id.push((n.id, n.parent_id, is_iterating_block));
+    }
+    by_id.sort_unstable_by_key(|(id, _, _)| *id);
+
+    // ⚡ Bolt: We memoize earlier node results in the `iterating` HashSet and check it during traversal
+    // to prune full tree upward traversals, accelerating deep tree processing.
+    let mut iterating = std::collections::HashSet::with_capacity(nodes.len());
+    for n in nodes {
+        let mut cur = n.parent_id;
+        while let Some(pid) = cur {
+            if iterating.contains(&pid) {
+                iterating.insert(n.id);
+                break;
             }
-            false
-        })
-        .map(|n| n.id)
-        .collect()
+            if let Ok(idx) = by_id.binary_search_by_key(&pid, |(id, _, _)| *id) {
+                let (_, parent_id, is_iterating_block) = by_id[idx];
+                if is_iterating_block {
+                    iterating.insert(n.id);
+                    break;
+                }
+                cur = parent_id;
+            } else {
+                break;
+            }
+        }
+    }
+    iterating
 }
 
 /// Invoke `f` for each child block slice of a composite, in the order
