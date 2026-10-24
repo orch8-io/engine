@@ -895,7 +895,7 @@ ship together; the DME070 default-release gate is still open. RN/Flutter ports,
 principal binding, manifest-sync identity, and the original review matrix remain
 unfinished.
 
-### DME072 — KMP manifest-sync callback identity (fixed in source)
+### DME072 — KMP manifest-sync callback identity (fixed and merged)
 
 **HIGH, effort M.** On main `fb473301`, `JsonBridgeBackend.sync` still wrote a
 mutable `activeTokens`, and Swift's manifest adapter consulted the bridge's current
@@ -921,7 +921,7 @@ All 65 JVM tests pass with the actual Rust library and no skipped cases (six
 added regressions). The portable run passes 63 cases and explicitly skips the
 two native tests. The real iOS simulator Kotlin/Native framework links, and the
 production Swift SDK and bridge type-check against it with warnings denied.
-Documentation links, example syntax, and diff checks pass. The JVM bridge fixtures exercise production Kotlin registry behavior; Apple
+Documentation links, example syntax, and diff checks pass. PR #275 passed all 24 hosted checks and merged as `de8845e6`. The JVM bridge fixtures exercise production Kotlin registry behavior; Apple
 compilation checks the actual Swift/Kotlin callback surface, not iOS runtime E2E.
 
 ### DME073 — Parent wake after handler-consumed cancellation (fixed and merged)
@@ -985,17 +985,48 @@ The native manifest path still snapshots one bearer token and does not perform
 ownership, finish RN/Flutter adoption, resolve native release artifacts, or
 complete the original review matrix.
 
-### DME075 — Bearer scope across manifest entry origins (source finding; regression pending)
+### DME075 — Bearer scope across manifest entry origins (fixed in source)
 
-`resolve_entry_url` accepts absolute/protocol-relative public HTTPS entry URLs,
-and `download_and_verify_sequences` passes the manifest's same `SyncAuth` to
-both sequence and detached-signature downloads. `http_get_with_retry` writes a
-Bearer header without comparing that target's origin to the manifest origin.
-This is separate from redirect forwarding: the publisher can point signed
-manifest entries at a CDN or another service. Verify the boundary with a signed
-manifest and controlled origin/entry servers before choosing a correction.
-Coverage must distinguish same-origin authenticated entries, cross-origin
-absolute and protocol-relative entries, detached signatures, signed-URL tokens,
-and redirects; a valid content signature alone does not establish authority to
-receive the app's bearer credential. The DME074 execution fix does not claim to
-address this scope boundary.
+**HIGH, effort M.** On `769ac74a`, a fully signed manifest with valid sequence
+hashes/signatures reproduced the app's bearer token reaching both a separate
+sequence server and its detached-signature endpoint. Absolute and protocol-relative
+entry URLs were accepted, and the same raw SyncAuth was passed to every download.
+Content authenticity does not authorize another service to receive app credentials.
+
+Bind the provided bearer to the parsed manifest origin once per sync. Private
+request helpers require this scoped authority, and the shared HTTP GET path
+compares normalized URL origins before writing Authorization on every attempt.
+The request helper accepts only its needed conditional ETag header; no generic
+extra-header bag can override the auth decision. Same-origin entries and
+signatures retain authorization. Other origins can still serve valid signed
+public content or entry-specific signed URLs without receiving the manifest
+bearer. Existing redirect refusal remains active for manifest, sequence, and
+signature requests. No public SDK or FFI signature changes.
+
+Ten new tests cover controlled signed cross-origin sequence/signature transport,
+same-origin relative/absolute/protocol-relative URLs, per-entry query tokens,
+503 retry, all three redirect stages, different URL hosts resolved to one
+physical server, invalid signatures, normalized HTTPS origin cases, invalid
+scope diagnostics, and URL redaction (DME076). All 396 mobile tests pass;
+Clippy passes for all mobile targets with warnings denied. The network fixtures
+use production request/auth code and HTTP loopback servers with the existing
+test-only URL policy exception. HTTPS origin normalization is checked separately;
+these are not live cross-origin TLS certificate/handshake tests. Hosted
+validation remains required.
+
+### DME076 — Sync retry diagnostics retained URL credential components (fixed in source)
+
+**MEDIUM, effort S.** The local redactor removed only the query portion. A
+regression reproduced retained userinfo and fragments, including a fragment-only
+URL without a query. Delegate to the established shared outbound URL redactor,
+which removes userinfo, query, and fragment and handles malformed input.
+The regression failed before the correction and passes with the full mobile
+suite. Scoped-auth parse failures use generic errors rather than echoing the
+provider token or signed manifest URL.
+
+The broader sync review remains unfinished: the ETag, environment fingerprint,
+and replay cursor are stored globally in the engine's sync metadata. Principal
+and catalog ownership, overlapping reconciliation, stable refresh identity,
+manifest 401 refresh, RN/Flutter adoption, artifact parity, and the original
+review matrix still need authoritative evidence and corrections where required.
+Origin-bound transport authorization does not establish durable data ownership.

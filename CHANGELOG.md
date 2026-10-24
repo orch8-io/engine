@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Manifest download credential scope
+
+- Bind manifest bearer authorization to its normalized origin for sequence and
+  detached-signature downloads, including retries. Retain authenticated
+  same-origin and verified public/signed-URL cross-origin downloads.
+- Keep redirects disabled and replace generic request headers with the specific
+  conditional ETag header needed by manifest fetches.
+- Reuse shared URL redaction for sync retry diagnostics so userinfo, query
+  tokens, and fragments are removed. Add signed transport and compatibility
+  regressions. No public SDK or FFI signature changes.
+
 ### Bounded manifest token callbacks
 
 - Run manifest token getters on the blocking executor so operation timeout and

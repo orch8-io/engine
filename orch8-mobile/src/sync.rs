@@ -16,12 +16,9 @@ use orch8_storage::StorageBackend;
 use orch8_types::ids::Namespace;
 use orch8_types::sequence::SequenceDefinition;
 
-/// Redact query parameters from a URL so sync logs never leak auth tokens
-/// when `SyncAuth::UrlToken` is in use.
+/// Strip credential-bearing URL components from sync retry diagnostics.
 fn redacted_url(url: &str) -> String {
-    url.split_once('?')
-        .map_or(url, |(base, _)| base)
-        .to_string()
+    orch8_engine::outbound::redact_url(url)
 }
 
 /// Lowercase hex-encode bytes without pulling in the `hex` crate.
@@ -228,6 +225,51 @@ pub enum SyncAuth {
     UrlToken,
 }
 
+/// Bearer authority is bound to the manifest origin. Entry downloads keep
+/// their own transport origin even when their content signature is trusted.
+enum ScopedSyncAuth<'a> {
+    Bearer {
+        token: &'a str,
+        manifest_url: reqwest::Url,
+    },
+    UrlToken,
+}
+
+impl SyncAuth {
+    fn for_manifest(&self, manifest_url: &str) -> Result<ScopedSyncAuth<'_>, MobileError> {
+        match self {
+            Self::Bearer(token) => {
+                if token.trim().is_empty() {
+                    return Err(MobileError::InvalidInput {
+                        message: "manifest token provider returned an empty token".into(),
+                    });
+                }
+                let manifest_url =
+                    reqwest::Url::parse(manifest_url).map_err(|_| MobileError::InvalidInput {
+                        message: "invalid manifest URL".into(),
+                    })?;
+                Ok(ScopedSyncAuth::Bearer {
+                    token,
+                    manifest_url,
+                })
+            }
+            Self::UrlToken => Ok(ScopedSyncAuth::UrlToken),
+        }
+    }
+}
+
+impl ScopedSyncAuth<'_> {
+    fn bearer_for(&self, target: &reqwest::Url) -> Option<&str> {
+        match self {
+            Self::Bearer {
+                token,
+                manifest_url,
+            } if manifest_url.origin() == target.origin() => Some(token),
+            _ => None,
+        }
+    }
+}
+
 /// Metadata key holding the SDK-version + handler-set fingerprint the cached
 /// manifest cursor was computed under (MC-01).
 const ENV_FINGERPRINT_KEY: &str = "sync_env_fingerprint";
@@ -313,23 +355,23 @@ impl SyncOrchestrator {
     async fn http_get_with_retry(
         &self,
         url: &str,
-        auth: &SyncAuth,
-        extra_headers: Option<(&str, &str)>,
+        auth: &ScopedSyncAuth<'_>,
+        if_none_match: Option<&str>,
     ) -> Result<reqwest::Response, MobileError> {
+        let target = reqwest::Url::parse(url).map_err(|_| MobileError::InvalidInput {
+            message: "invalid sync request URL".into(),
+        })?;
         let mut delay = Duration::from_millis(200);
         let max_retries = 3u32;
         let mut last_err = None;
 
         for attempt in 0..=max_retries {
-            let mut req = self.http_client().get(url);
-            match auth {
-                SyncAuth::Bearer(token) => {
-                    req = req.header("authorization", format!("Bearer {token}"));
-                }
-                SyncAuth::UrlToken => {}
+            let mut req = self.http_client().get(target.clone());
+            if let Some(token) = auth.bearer_for(&target) {
+                req = req.header("authorization", format!("Bearer {token}"));
             }
-            if let Some((k, v)) = extra_headers {
-                req = req.header(k, v);
+            if let Some(etag) = if_none_match {
+                req = req.header(reqwest::header::IF_NONE_MATCH, etag);
             }
 
             match req.send().await {
@@ -404,6 +446,7 @@ impl SyncOrchestrator {
         registered_handlers: &HashSet<String>,
     ) -> Result<SyncResult, MobileError> {
         let mut result = SyncResult::default();
+        let scoped_auth = auth.for_manifest(manifest_url)?;
 
         // MC-01: the cached ETag / last_manifest_version are only valid for the
         // environment (SDK version + registered handler set) that evaluated
@@ -422,7 +465,7 @@ impl SyncOrchestrator {
 
         // 1. Fetch manifest with ETag support.
         let (manifest_bytes, maybe_etag) = self
-            .fetch_manifest(manifest_url, auth, !env_changed)
+            .fetch_manifest(manifest_url, &scoped_auth, !env_changed)
             .await?;
 
         if manifest_bytes.is_empty() {
@@ -462,7 +505,7 @@ impl SyncOrchestrator {
             .download_and_verify_sequences(
                 manifest_url,
                 &manifest,
-                auth,
+                &scoped_auth,
                 registered_handlers,
                 &local_sequences,
                 &mut trusted_keys,
@@ -633,7 +676,7 @@ impl SyncOrchestrator {
         &self,
         manifest_url: &str,
         manifest: &Manifest,
-        auth: &SyncAuth,
+        auth: &ScopedSyncAuth<'_>,
         registered_handlers: &HashSet<String>,
         local_sequences: &HashMap<String, i32>,
         trusted_keys: &mut HashMap<String, VerifyingKey>,
@@ -851,7 +894,7 @@ impl SyncOrchestrator {
     async fn fetch_manifest(
         &self,
         url: &str,
-        auth: &SyncAuth,
+        auth: &ScopedSyncAuth<'_>,
         use_cached_etag: bool,
     ) -> Result<(Vec<u8>, Option<String>), MobileError> {
         let cached_etag = if use_cached_etag {
@@ -865,8 +908,9 @@ impl SyncOrchestrator {
             None
         };
 
-        let extra = cached_etag.as_deref().map(|etag| ("if-none-match", etag));
-        let response = self.http_get_with_retry(url, auth, extra).await?;
+        let response = self
+            .http_get_with_retry(url, auth, cached_etag.as_deref())
+            .await?;
 
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             return Ok((Vec::new(), None));
@@ -921,7 +965,11 @@ impl SyncOrchestrator {
         Ok(manifest)
     }
 
-    async fn download_sequence(&self, url: &str, auth: &SyncAuth) -> Result<String, MobileError> {
+    async fn download_sequence(
+        &self,
+        url: &str,
+        auth: &ScopedSyncAuth<'_>,
+    ) -> Result<String, MobileError> {
         let response = self.http_get_with_retry(url, auth, None).await?;
 
         if !response.status().is_success() {
@@ -1444,7 +1492,7 @@ mod tests {
         });
     }
 
-    fn make_test_sequence(name: &str, created_at: DateTime<Utc>) -> SequenceDefinition {
+    pub(super) fn make_test_sequence(name: &str, created_at: DateTime<Utc>) -> SequenceDefinition {
         use orch8_types::ids::{Namespace, SequenceId, TenantId};
         SequenceDefinition {
             embed: None,
@@ -1822,7 +1870,7 @@ mod tests {
             .download_and_verify_sequences(
                 "http://127.0.0.1/manifest",
                 &manifest,
-                &SyncAuth::UrlToken,
+                &ScopedSyncAuth::UrlToken,
                 &HashSet::new(),
                 &local_sequences,
                 &mut trusted_keys,
@@ -1908,7 +1956,7 @@ mod tests {
             .download_and_verify_sequences(
                 "http://127.0.0.1/manifest",
                 &manifest,
-                &SyncAuth::UrlToken,
+                &ScopedSyncAuth::UrlToken,
                 &HashSet::new(),
                 &local_sequences,
                 &mut trusted_keys,
@@ -2063,7 +2111,7 @@ mod tests {
             .download_and_verify_sequences(
                 &format!("http://127.0.0.1:{port}/m/manifest.json"),
                 &manifest,
-                &SyncAuth::UrlToken,
+                &ScopedSyncAuth::UrlToken,
                 &HashSet::new(),
                 &HashMap::new(),
                 &mut trusted_keys,
@@ -2191,7 +2239,7 @@ mod tests {
             .download_and_verify_sequences(
                 "http://127.0.0.1/manifest",
                 &manifest,
-                &SyncAuth::UrlToken,
+                &ScopedSyncAuth::UrlToken,
                 &HashSet::new(),
                 &local_sequences,
                 &mut trusted_keys,
@@ -2391,7 +2439,7 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/manifest");
         let start = std::time::Instant::now();
         let resp = orch
-            .http_get_with_retry(&url, &SyncAuth::UrlToken, None)
+            .http_get_with_retry(&url, &ScopedSyncAuth::UrlToken, None)
             .await
             .unwrap();
         let elapsed = start.elapsed();
@@ -2462,7 +2510,10 @@ mod tests {
         }
     }
 
-    fn signed_manifest_bytes(signing_key: &ed25519_dalek::SigningKey, body: &[u8]) -> Vec<u8> {
+    pub(super) fn signed_manifest_bytes(
+        signing_key: &ed25519_dalek::SigningKey,
+        body: &[u8],
+    ) -> Vec<u8> {
         use ed25519_dalek::Signer;
         let signature = signing_key.sign(body);
         let mut bytes = BASE64.encode(signature.to_bytes()).into_bytes();
@@ -2724,3 +2775,7 @@ mod tests {
         assert_eq!(r.added, 1);
     }
 }
+
+#[cfg(test)]
+#[path = "sync_auth_tests.rs"]
+mod auth_tests;
