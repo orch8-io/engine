@@ -183,6 +183,33 @@ impl SqliteStorage {
         &self.pool
     }
 
+    /// Insert using an adapter-owned transaction, so ownership records and the
+    /// engine definition commit together. Uses the normal sequence encoding.
+    /// The adapter must enforce its authorization/ownership boundary.
+    pub async fn create_sequence_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        seq: &SequenceDefinition,
+    ) -> Result<(), StorageError> {
+        sequences::create_on(tx, seq).await
+    }
+
+    /// Read within the same snapshot as an adapter's ownership checks.
+    pub async fn get_sequence_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SequenceId,
+    ) -> Result<Option<SequenceDefinition>, StorageError> {
+        sequences::get_on(tx, id).await
+    }
+
+    /// Purge using the normal nonterminal-instance guard and dependent-row
+    /// cleanup, in the same transaction as an adapter's ownership checks.
+    pub async fn delete_sequence_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: SequenceId,
+    ) -> Result<(), StorageError> {
+        sequences::delete_on(tx, id).await
+    }
+
     /// Attach a durable artifact backend. Builder-style; call before boxing as
     /// `Arc<dyn StorageBackend>`.
     #[must_use]

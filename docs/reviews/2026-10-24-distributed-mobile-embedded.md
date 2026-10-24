@@ -1193,3 +1193,47 @@ denied. All eight publisher manifest tests pass (including deterministic
 canonicalization, monotonic generation and the persisted published-version
 floor). Documentation, format and whitespace checks pass. Hosted CI remains
 required before merge; no public SDK/FFI signature changed.
+
+### DME082 — Owner-qualified workflow cache and retention (partial foundation)
+
+**HIGH, effort L.** Explicit scopes must not share publisher-supplied workflow
+IDs or name/version slots. Internal catalog installation now hashes the original
+body, assigns a local engine ID/account tenant/catalog namespace, and records
+immutable source ID/body identity in `mobile_catalog_workflows`. Legacy rows
+remain separate. The remote sub-tenant/embed fields do not grant local ownership.
+
+SQLite transaction adapters reuse the engine's definition encoding, row decoding
+and guarded dependent-row deletion. The original backend read behavior remains
+unchanged. Mapping/definition changes commit together after checking the account
+epoch and exact current accepted manifest. Concurrent installs from independent
+pools converge on one mapping/local ID. Active lookup by name or physical ID
+checks ownership in one snapshot and refuses foreign or inconsistent rows.
+
+Eviction deletes only the cached definition; compact published-version identity
+and withdrawal evidence remain. Removal handles all cached versions atomically,
+retains/deprecates definitions pinned by scheduled/running/waiting/paused
+instances, and purges unpinned versions using normal engine cleanup. A failure
+after an earlier version's purge rolls the whole removal back, including terminal
+instance rows and mapping FK updates. The same withdrawing manifest cannot
+resurrect a purged version. A newer accepted manifest can explicitly reauthorize
+identical content while preserving an existing pinned definition/local ID.
+
+Eleven storage/engine-row scenarios cover four catalogs sharing names and supplied
+IDs, legacy coexistence, independent-pool idempotence, cross-owner reads, immutable
+versions after eviction, source-ID collision rollback, injected mapping failure,
+all nonterminal states, upgrades and explicit re-add, whole-removal rollback,
+full close/reopen/session fencing, stale manifest writes, malformed/oversized
+bodies and inconsistent stored owners.
+
+All 445 mobile library and 225 storage library tests pass. All-target Clippy
+passes for mobile and SQLite storage with warnings denied. The final partial
+cached-version index passes all eleven focused workflow cases; query-plan
+inspection against the canonical schema selects it for active name lookup and
+cached-version removal. Documentation, formatting and diff checks pass. Hosted
+checks remain required before merge; native/SDK signatures are unchanged.
+
+This is not public scoped sync/execution. Remote signature/entry/audience checks
+must be performed by the future scoped caller. Instance/handler/worker ownership,
+sub-sequence and delegation references, account-wide cleanup/quotas, bindings,
+native/platform runtime verification and mixed legacy/scoped operation gates
+remain open under ADR-0002 and the full review matrix.

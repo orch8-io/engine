@@ -616,7 +616,9 @@ target. [ADR-0002](adr/0002-mobile-account-and-catalog-scopes.md) specifies that
 work and its open gates. Internal persistence now has account/catalog bindings,
 durable session epochs, isolated atomic catalog metadata and signing-key sets,
 with stale-handle checks across database pools and reopen, plus atomic catalog
-acceptance/evaluation metadata. These primitives are not exposed by SDK handles
+acceptance/evaluation metadata and owner-qualified engine workflow rows. Workflow
+cache eviction retains compact immutable version/withdrawal records; nonterminal
+instances pin their physical definitions. These primitives are not exposed by SDK handles
 or connected to scoped sync/execution yet. The current legacy sync metadata
 and reconciliation still need that ownership isolation.
 

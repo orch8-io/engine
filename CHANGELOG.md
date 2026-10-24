@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Owner-qualified mobile workflow storage
+
+- Add internal account/catalog workflow mappings backed by the engine's normal
+  sequence rows. Allocate local IDs and owner namespaces independently of
+  publisher-supplied IDs; hash the original body before owner normalization.
+- Fence installation, withdrawal and eviction by account epoch and current
+  accepted manifest. Commit mappings and definitions together; keep immutable
+  version/withdrawal evidence after deleting cached definitions.
+- Retain and deprecate versions used by nonterminal instances. Withdrawals roll
+  back completely on failure, and a newer accepted manifest can explicitly
+  reauthorize the identical published definition without replacing live rows.
+- This storage layer is internal. Scoped sync, execution/callback ownership,
+  cross-reference validation, quotas and SDK handles remain under development.
+
 ### Durable manifest acceptance before workflow changes
 
 - Commit a verified manifest's accepted version and original-body digest with

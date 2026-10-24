@@ -3,7 +3,8 @@
 Date: 2026-10-24
 
 Status: the requirement is accepted by the user. Internal account/catalog
-identity, session epochs, isolated metadata and signing-key persistence are implemented;
+identity, session epochs, isolated metadata/signing keys and owner-qualified
+workflow cache persistence are implemented;
 the remaining API/schema below is a proposed implementation contract. Public
 scoped sync and execution are not implemented yet.
 
@@ -47,7 +48,26 @@ survives reopen and can retry without allowing older versions or changed content
 under the same version. Generic catalog metadata writes cannot bypass these
 reserved protocol fields. This persistence API still requires a future scoped
 sync caller to verify root signatures and audience/principal binding.
-Connecting signing keys to scoped sync, workflow and instance ownership,
+Workflow storage now maps publisher name/version/source IDs to independently
+allocated local engine sequence IDs. Engine rows use the account's local tenant
+and catalog namespace; remote tenant/namespace/sub-tenant/embed claims do not
+select local owners. The SHA-256 digest covers the original body before those
+fields are normalized. A published name/version's source ID and body remain
+immutable, including after cache eviction. Definition and mapping writes share
+the same transaction, account epoch and accepted-manifest fence.
+
+Active reads by name or local ID enforce owner/epoch in one snapshot. Withdrawal
+hides versions from these lookups, deprecates definitions used by nonterminal
+instances, and purges unpinned definitions through the engine's normal dependent
+row cleanup. Compact identity/withdrawal records remain after cached rows are
+deleted. The withdrawing manifest cannot reinstall the same version. A newer
+accepted manifest may explicitly reauthorize identical bytes, retaining a pinned
+local ID or allocating a new one after purge. These are internal persistence
+operations; the caller must still verify signatures, manifest entry identity and
+audience before installation. The compact history also needs a storage quota and
+explicit owner cleanup policy before public scoped rollout.
+
+Connecting signing keys/workflows to scoped sync and execution, instance ownership,
 cancellation of running work, remote principal proofs and wrapper handles remain
 unimplemented gates.
 
