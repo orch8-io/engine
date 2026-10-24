@@ -647,9 +647,9 @@ Independent engine/process budgets remain a separate original-scope requirement.
 See DME066 for the remaining asynchronous wrapper boundary.
 
 
-### DME066 — Nested async fetches across wrapper instances (open)
+### DME066 — Nested async fetches across wrapper instances (partially fixed)
 
-**HIGH, effort M/L.** The Swift adapter's per-instance flight prevents a second
+**HIGH, effort M/L.** At the review baseline, the Swift adapter's per-instance flight prevented a second
 fetch until its first actually ends, but timeout can return from the native
 callback while a non-cooperative detached fetch continues. A retired provider
 may deallocate while that task remains (an existing regression explicitly
@@ -667,6 +667,9 @@ Test retired non-cooperative instances, repeated replacement, shared admission,
 late completion, cancellation, and capacity recovery in the real wrappers.
 Kotlin's structured timeout needs separate verification of completion semantics;
 this report does not claim an async-work budget there.
+
+The Swift shared initial/refresh budget is addressed in DME069. RN/Flutter bounds,
+Kotlin completion semantics, and native installation ownership remain open.
 
 ### DME067 — Runtime destruction from engine-owned execution (native fix)
 
@@ -740,3 +743,46 @@ Validation: all 369 mobile library tests pass, including twelve added behavioral
 tests. Engine/server/mobile all-target Clippy passes with warnings denied;
 formatting, documentation links/examples, and diff checks pass. Hosted
 full-workspace/native CI remains the merge gate for this batch.
+
+### DME069 — Swift physical async fetch budget and initial waiting (Swift fix)
+
+**HIGH, effort M.** The per-adapter flight did not bound detached fetches left
+running after adapter retirement. A regression filled eight timed-out retired
+providers and showed that a ninth replacement invoked more host work. The
+wrapper's initial `await fetch()` also bypassed timeout validation, cancellation
+handling, and any physical-work budget.
+
+Initial fetches and refreshes now acquire one of eight process-wide Swift SDK
+permits before spawning host work. Swift admission fails without a queue when
+exhausted. The detached task retains its permit through actual
+fetch completion despite caller timeout, cancellation, or adapter retirement.
+Unrelated engines share this process resource ceiling; it is an availability
+limit, not an authorization identity. Rust's per-credential native blocking-call
+budget remains separate and still applies.
+
+The initial fetch uses the same flight and deadline validation as refresh, with
+an asynchronous continuation and cancellable dispatch-source timer instead of
+blocking a Swift executor thread or waiting for a non-cooperative child task.
+Completion, timeout, and cancellation arbitrate one result under a short lock;
+continuations resume outside the lock. Deadline sources are cancelled when the
+wait completes, and their handlers hold only weak references. Cancelled callers
+are checked again before native installation. Blank/whitespace results do not
+populate the cache; late completion cannot publish after abandonment. No FFI
+signature changes.
+
+Twelve adapter tests pass in the local strict-concurrency, warnings-as-errors
+Swift harness, including shared admission across retired instances and 128
+refused replacements, capacity recovery, first-fetch timeout and cancellation,
+pre-cancelled callers, invalid deadlines, blank results, and late publication.
+They also cover host failure cleanup and 64 completion/cancellation races. The
+Rust credential still applies refresh-failure backoff to a failed foreign call;
+immediate native retry recovery after Swift quota refusal is not proven by these
+adapter tests and needs integration review.
+The harness uses the exact production adapter and repository tests with FFI
+protocol/error shape stubs; it does not prove full SDK/FFI integration. Hosted
+iOS simulator tests and the full native workflows remain required merge gates.
+
+DME064 remains open: first fetch still precedes native owner reservation, so
+concurrent installations need native generation tickets across wrapper aliases.
+RN/Flutter shared async bounds and Kotlin structured completion still require
+work. This Swift batch does not complete DME066 or the original review matrix.

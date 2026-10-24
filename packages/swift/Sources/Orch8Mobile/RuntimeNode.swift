@@ -13,7 +13,8 @@ import Foundation
 /// ```swift
 /// try engine.registerHandler(name: "scan_document", handler: ScanHandler())
 /// let node = Orch8RuntimeNode(engine: engine)
-/// try await node.setTokenProvider { try await myBackend.deviceSession(runtimeId: node.runtimeId()) }
+/// let runtimeId = try node.runtimeId()
+/// try await node.setTokenProvider { try await myBackend.deviceSession(runtimeId: runtimeId) }
 /// try await node.join(capabilities: NodeCapabilities(hardware: ["camera"], pushToken: apnsToken))
 /// try node.startWorker()
 /// ```
@@ -40,19 +41,25 @@ public final class Orch8RuntimeNode: @unchecked Sendable {
     /// (`POST /runtimes/device-sessions` with its operator key, for this
     /// device and `runtimeId()`). It is awaited once now for the first token,
     /// and again whenever the control plane answers `401` (the request is
-    /// then retried once); a refresh that throws, returns an empty token or
-    /// exceeds `refreshTimeout` leaves the request failed with 401. Call it
-    /// before `join`. Never ship an operator key in the app.
+    /// then retried once). `refreshTimeout` bounds both waits. An initial
+    /// failure throws; failed refresh leaves authorization unavailable or
+    /// returns the original `401`. Eight unfinished Swift SDK fetches share
+    /// process-wide admission across first fetches, refreshes, and retired
+    /// providers. Exhaustion fails before invoking host code. Cancellation
+    /// requests do not release capacity until host work actually returns.
+    /// Call before `join`. Never ship an operator key in the app.
     public func setTokenProvider(
         refreshTimeout: TimeInterval = 30,
         _ fetch: @escaping @Sendable () async throws -> String
     ) async throws {
-        let first = try await fetch()
-        engine.setTokenProvider(provider: AsyncTokenProvider(
-            initialToken: first,
+        let provider = AsyncTokenProvider(
+            initialToken: "",
             timeout: refreshTimeout,
             fetch: fetch
-        ))
+        )
+        _ = try await provider.fetchInitialToken()
+        try Task.checkCancellation()
+        engine.setTokenProvider(provider: provider)
     }
 
     /// Install a synchronous `TokenProvider` (see `MobileEngine.setTokenProvider`).

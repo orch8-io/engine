@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Swift asynchronous token fetch admission
+
+- Bound unfinished Swift SDK token fetches to eight per process across initial
+  fetches, refreshes, provider replacements, timeout, and caller cancellation.
+  Exhausted admission fails without invoking or queuing another host fetch.
+- Apply timeout validation, asynchronous deadline waiting, cancellation, blank
+  token rejection, and late cache-publication fencing to the initial fetch.
+  Release physical admission only after host work actually returns.
+
 ### Terminal mobile shutdown
 
 - Retire native credential, handler, and listener ownership during shutdown to
