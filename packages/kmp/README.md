@@ -126,7 +126,7 @@ Kotlin/Native does not carry a Swift `throws` into Kotlin as a typed
 exception, and Kotlin cannot see UniFFI's Swift records. Keeping the Swift
 side to plain strings means all decoding, validation and error mapping run
 in common Kotlin (`JsonBridgeBackend`), where the JVM test suite covers them.
-Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 2`) when the
+Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 3`) when the
 engine opens, so a stale adapter fails immediately with a clear message.
 
 ## Usage (common code)
@@ -229,9 +229,17 @@ work. Late results cannot restore a closed source's cached token.
 Native installation tickets fence initial completion and cancellation against
 replacement through another alias. On iOS each native provider captures an
 immutable callback source ID, so retired callbacks cannot invoke a replacement
-fetcher. Protocol 2, matching native reservation APIs, and matching generated
-bindings are required; a protocol-1 Swift bridge fails during open. These
+fetcher. Protocol 3, matching native reservation APIs, and matching generated
+bindings are required; protocol-1 and protocol-2 Swift bridges fail during open. These
 unreleased APIs must be shipped with matching native SDK artifacts after 0.7.1.
+
+Manifest sync also captures an immutable, per-call token-source ID. Concurrent
+syncs, including anonymous calls, cannot borrow or clear another call's
+credentials. A sync's return or failure retires only its own ID; callbacks after
+retirement cannot invoke the source or resolve a successor. Shutdown retires all
+manifest IDs. The supplied source stays caller-owned, so sync does not close a
+source also used for a node or another call. This callback change requires the
+protocol-3 Swift bridge and KMP framework to ship together.
 
 `EngineConfig.syncApiKey` is the **legacy** path and not for production apps:
 it still works, and the SDK logs a warning when the server reports the key is

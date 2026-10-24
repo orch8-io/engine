@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
 
 /** Scripted stand-in for the Swift bridge: records calls, replays envelopes. */
 private class FakeJsonBridge(
-    private val protocol: Int = 2,
+    private val protocol: Int = 3,
 ) : Orch8JsonBridge {
     val calls = mutableListOf<Pair<String, JsonObject>>()
     val replies = mutableMapOf<String, String>()
@@ -54,8 +54,10 @@ class JsonBridgeBackendTest {
 
     @Test
     fun protocolMismatchFailsFast() {
-        val e = assertFailsWith<Orch8Exception> { open(FakeJsonBridge(protocol = 99)) }
-        assertEquals(Orch8ErrorKind.INVALID_INPUT, e.kind)
+        for (protocol in listOf(1, 2, 99)) {
+            val e = assertFailsWith<Orch8Exception> { open(FakeJsonBridge(protocol = protocol)) }
+            assertEquals(Orch8ErrorKind.INVALID_INPUT, e.kind)
+        }
     }
 
     @Test
@@ -200,6 +202,123 @@ class JsonBridgeBackendTest {
     }
 
     @Test
+    fun overlappingManifestSyncCannotBorrowOrClearAnotherAccountsCredential() {
+        val (bridge, backend) = open()
+        fun tokens(account: String) = object : Orch8TokenSource {
+            override fun currentToken() = account
+            override fun refreshToken() = "${account}_refreshed"
+        }
+        bridge.replies["sync"] =
+            """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
+        var outer = true
+        var readOuter: () -> String = { error("outer callback not captured") }
+        var outerWhileInner: String? = null
+        var outerAfterInner: String? = null
+        bridge.onCall = { method ->
+            if (method == "sync") {
+                if (outer) {
+                    outer = false
+                    val providerId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+                    readOuter = { bridge.installed!!.currentManifestToken(providerId) }
+                    backend.sync("https://account-b.example/manifest.json", tokens("account_b"))
+                    outerAfterInner = readOuter()
+                } else {
+                    outerWhileInner = readOuter()
+                }
+            }
+        }
+        backend.sync("https://account-a.example/manifest.json", tokens("account_a"))
+        assertEquals("account_a", outerWhileInner, "outer callback must never borrow account B authorization")
+        assertEquals("account_a", outerAfterInner, "another sync's cleanup must not clear account A authorization")
+    }
+
+    @Test
+    fun failedManifestSyncRetiresOnlyItsOwnSourceAndNeverReusesItsId() {
+        val (bridge, backend) = open()
+        val tokens = object : Orch8TokenSource {
+            override fun currentToken() = "account_a"
+            override fun refreshToken() = "account_a_refreshed"
+        }
+        bridge.replies["sync"] = BridgeCodec.error("Network", "test failure")
+        assertFailsWith<Orch8Exception> { backend.sync("https://account-a.example/manifest.json", tokens) }
+        val failedId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+        val callbacks = bridge.installed!!
+        assertEquals("", callbacks.currentManifestToken(failedId))
+        assertTrue("error" in Json.parseToJsonElement(callbacks.refreshManifestToken(failedId)).jsonObject)
+        bridge.replies["sync"] =
+            """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
+        bridge.onCall = { method ->
+            if (method == "sync") {
+                val nextId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+                assertTrue(failedId != nextId)
+                assertEquals("", callbacks.currentManifestToken(failedId), "late callback cannot acquire successor authorization")
+                assertEquals("account_a", callbacks.currentManifestToken(nextId))
+                assertEquals("", callbacks.currentNodeToken(nextId), "manifest credentials cannot authorize node callbacks")
+            }
+        }
+        backend.sync("https://account-a.example/manifest.json", tokens)
+    }
+
+    @Test
+    fun shutdownRetiresManifestCallbacksBeforeBridgeCleanupAndRejectsNewSources() {
+        val (bridge, backend) = open()
+        val tokens = object : Orch8TokenSource {
+            override fun currentToken() = "account_a"
+            override fun refreshToken() = "account_a_refreshed"
+        }
+        val callbacks = bridge.installed!!
+        var providerId = ""
+        bridge.replies["sync"] = BridgeCodec.error("Shutdown", "engine closed")
+        bridge.onCall = { method ->
+            when (method) {
+                "sync" -> {
+                    providerId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+                    assertEquals("account_a", callbacks.currentManifestToken(providerId))
+                    backend.shutdown()
+                }
+                "shutdown" -> {
+                    assertEquals("", callbacks.currentManifestToken(providerId))
+                    assertTrue("error" in Json.parseToJsonElement(callbacks.refreshManifestToken(providerId)).jsonObject)
+                }
+            }
+        }
+        assertEquals(Orch8ErrorKind.SHUTDOWN, assertFailsWith<Orch8Exception> {
+            backend.sync("https://account-a.example/manifest.json", tokens)
+        }.kind)
+        val calls = bridge.calls.size
+        assertEquals(Orch8ErrorKind.SHUTDOWN, assertFailsWith<Orch8Exception> {
+            backend.sync("https://account-b.example/manifest.json", tokens)
+        }.kind)
+        assertEquals(calls, bridge.calls.size, "closed registry must reject before native dispatch")
+    }
+
+    @Test
+    fun anonymousSyncCannotClearAnOverlappingAuthenticatedSync() {
+        val (bridge, backend) = open()
+        bridge.replies["sync"] =
+            """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
+        val tokens = object : Orch8TokenSource {
+            override fun currentToken() = "account_a"
+            override fun refreshToken() = "account_a_refreshed"
+        }
+        val callbacks = bridge.installed!!
+        var outer = true
+        bridge.onCall = { method ->
+            if (method == "sync") {
+                if (outer) {
+                    outer = false
+                    val id = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+                    backend.sync("https://anonymous.example/manifest.json", null)
+                    assertEquals("account_a", callbacks.currentManifestToken(id))
+                } else {
+                    assertTrue("providerId" !in bridge.calls.last().second)
+                }
+            }
+        }
+        backend.sync("https://account-a.example/manifest.json", tokens)
+    }
+
+    @Test
     fun tokenSourceIsOnlyVisibleDuringSync() {
         val (bridge, backend) = open()
         var refreshed = 0
@@ -210,12 +329,14 @@ class JsonBridgeBackendTest {
         }
         bridge.replies["sync"] =
             """{"ok":{"added":1,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
+        var providerId = ""
         var seenToken: String? = null
         var seenRefresh: String? = null
         bridge.onCall = { method ->
             if (method == "sync") {
-                seenToken = bridge.installed!!.currentToken()
-                seenRefresh = bridge.installed!!.refreshToken()
+                providerId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+                seenToken = bridge.installed!!.currentManifestToken(providerId)
+                seenRefresh = bridge.installed!!.refreshManifestToken(providerId)
             }
         }
 
@@ -223,10 +344,25 @@ class JsonBridgeBackendTest {
         assertEquals("t0", seenToken)
         assertEquals("t1", Json.parseToJsonElement(seenRefresh!!).jsonObject["ok"]!!.jsonPrimitive.content)
         // Outside sync the token source is gone.
-        assertEquals("", bridge.installed!!.currentToken())
-        assertTrue("error" in Json.parseToJsonElement(bridge.installed!!.refreshToken()).jsonObject)
+        assertEquals("", bridge.installed!!.currentManifestToken(providerId))
+        assertTrue("error" in Json.parseToJsonElement(bridge.installed!!.refreshManifestToken(providerId)).jsonObject)
         val args = bridge.calls.last { it.first == "sync" }.second
-        assertTrue(args["useTokenSource"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals(providerId, args["providerId"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun manifestRetirementDoesNotCloseACallerOwnedNodeSource() {
+        val (bridge, backend) = open()
+        val source = DeviceSessionTokens("dst_cached", { "dst_rotated" }, kotlin.time.Duration.parse("30s"))
+        try {
+            backend.setTokenProvider(source)
+            val nodeId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+            bridge.replies["sync"] =
+                """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
+            backend.sync("https://account-a.example/manifest.json", source)
+            assertEquals("dst_cached", bridge.installed!!.currentNodeToken(nodeId))
+            assertEquals("dst_rotated", source.refreshToken(), "sync does not own the supplied source's lifetime")
+        } finally { backend.shutdown(); source.close() }
     }
 
     @Test
@@ -245,7 +381,7 @@ class JsonBridgeBackendTest {
         assertEquals("dst_0", callbacks.currentNodeToken(providerId))
         assertEquals("dst_1", Json.parseToJsonElement(callbacks.refreshNodeToken(providerId)).jsonObject["ok"]!!.jsonPrimitive.content)
         // The manifest-sync token source is separate: none is active outside sync.
-        assertEquals("", callbacks.currentToken())
+        assertEquals("", callbacks.currentManifestToken("unknown"))
         bridge.replies["sync"] =
             """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
         backend.sync("https://api.example.com/manifest.json", null)

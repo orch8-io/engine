@@ -10,7 +10,7 @@
 //     import Orch8Kmp
 //     Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
 //
-// Protocol version: 2 (must equal ORCH8_BRIDGE_PROTOCOL in
+// Protocol version: 3 (must equal ORCH8_BRIDGE_PROTOCOL in
 // src/commonMain/kotlin/io/orch8/kmp/bridge/JsonBridge.kt). Every call returns
 // {"ok": value} or {"error": {"kind": "...", "message": "..."}}; all decoding,
 // validation and error mapping happen in common Kotlin.
@@ -19,7 +19,7 @@ import Foundation
 import Orch8Kmp
 import Orch8Mobile
 
-private let bridgeProtocolVersion = 2
+private let bridgeProtocolVersion = 3
 
 public final class Orch8KmpBridgeFactory: NSObject, Orch8JsonBridgeFactory {
     public func create() -> Orch8JsonBridge {
@@ -152,8 +152,15 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         case "loadedSequences":
             return try engine.loadedSequences().map { ["name": $0.name, "version": Int($0.version)] as [String: Any] }
         case "sync":
-            let useTokens = (a["useTokenSource"] as? Bool) ?? false
-            let provider: TokenProvider? = useTokens ? TokenAdapter(bridge: self) : nil
+            let provider: TokenProvider?
+            if let providerId = a.optionalString("providerId") {
+                guard let callbacks = currentCallbacks() else {
+                    throw BridgeFailure(kind: "Shutdown", message: "callbacks not installed")
+                }
+                provider = ManifestTokenAdapter(callbacks: callbacks, providerId: providerId)
+            } else {
+                provider = nil
+            }
             let r = try engine.sync(manifestUrl: try a.string("manifestUrl"), tokenProvider: provider)
             return [
                 "added": Int(r.added),
@@ -514,22 +521,21 @@ private final class ListenerAdapter: EngineListener, @unchecked Sendable {
     }
 }
 
-private final class TokenAdapter: TokenProvider, @unchecked Sendable {
-    private weak var bridge: Orch8KmpBridge?
+private final class ManifestTokenAdapter: TokenProvider, @unchecked Sendable {
+    private let callbacks: Orch8BridgeCallbacks
+    private let providerId: String
 
-    init(bridge: Orch8KmpBridge) {
-        self.bridge = bridge
+    init(callbacks: Orch8BridgeCallbacks, providerId: String) {
+        self.callbacks = callbacks
+        self.providerId = providerId
     }
 
     func currentToken() -> String {
-        bridge?.currentCallbacks()?.currentToken() ?? ""
+        callbacks.currentManifestToken(providerId: providerId)
     }
 
     func refreshToken() throws -> String {
-        guard let callbacks = bridge?.currentCallbacks() else {
-            throw MobileError.Engine(message: "Kotlin callbacks not installed")
-        }
-        switch Orch8KmpBridge.unwrapCallback(callbacks.refreshToken()) {
+        switch Orch8KmpBridge.unwrapCallback(callbacks.refreshManifestToken(providerId: providerId)) {
         case let .success(token): return token
         case let .failure(failure): throw MobileError.Engine(message: failure.message)
         }
