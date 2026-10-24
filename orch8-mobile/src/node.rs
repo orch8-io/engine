@@ -481,14 +481,25 @@ struct NodeAuth {
 #[async_trait::async_trait]
 impl RefreshingAuth for NodeAuth {
     fn headers(&self) -> AuthHeaders {
-        let token = self.credential.current();
+        let snapshot = self.credential.snapshot();
         AuthHeaders {
             headers: vec![
-                ("x-api-key", token.clone()),
+                ("x-api-key", snapshot.token),
                 ("x-device-id", self.device_id.clone()),
             ],
-            generation: token,
+            generation: snapshot.generation,
         }
+    }
+
+    fn retry_headers(&self, stale: &str) -> Option<AuthHeaders> {
+        let snapshot = self.credential.retry_snapshot(stale)?;
+        Some(AuthHeaders {
+            headers: vec![
+                ("x-api-key", snapshot.token),
+                ("x-device-id", self.device_id.clone()),
+            ],
+            generation: snapshot.generation,
+        })
     }
 
     async fn refresh_after_unauthorized(&self, stale: &str) -> bool {

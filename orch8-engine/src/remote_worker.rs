@@ -119,10 +119,27 @@ struct PollBody<'a> {
 
 /// Credential headers of one request, plus an opaque `generation` naming
 /// the credential they carry so a `401` refreshes exactly that one.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AuthHeaders {
     pub headers: Vec<(&'static str, String)>,
     pub generation: String,
+}
+
+impl std::fmt::Debug for AuthHeaders {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthHeaders")
+            .field(
+                "header_names",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("generation", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 /// A credential that can change while the node runs (e.g. a phone's
@@ -136,6 +153,12 @@ pub trait RefreshingAuth: Send + Sync {
     /// request already did; `true` when a different credential is now
     /// current and the request is worth one retry.
     async fn refresh_after_unauthorized(&self, stale: &str) -> bool;
+    /// Obtain retry headers only if their authorization owner still matches
+    /// the original request. Replaceable owners should override this with an
+    /// atomic check/snapshot; the default preserves a single-owner provider.
+    fn retry_headers(&self, _stale: &str) -> Option<AuthHeaders> {
+        Some(self.headers())
+    }
     /// Inspect every response (e.g. warn about an over-privileged key).
     fn observe(&self, _response: &reqwest::Response) {}
 }
@@ -261,7 +284,10 @@ impl HttpLeaseClient {
         {
             return Ok(response);
         }
-        let response = attempt(&refreshing.headers()).send().await?;
+        let Some(retry) = refreshing.retry_headers(&sent.generation) else {
+            return Ok(response);
+        };
+        let response = attempt(&retry).send().await?;
         refreshing.observe(&response);
         Ok(response)
     }
@@ -686,5 +712,90 @@ mod tests {
         let mut scalar = serde_json::json!(5);
         inject_task_metadata(&mut scalar, &task, "rt");
         assert_eq!(scalar, serde_json::json!(5));
+    }
+
+    #[test]
+    fn shared_auth_headers_debug_redacts_secrets() {
+        let auth = AuthHeaders {
+            headers: vec![
+                ("x-api-key", "credential-secret".into()),
+                ("authorization", "bearer-secret".into()),
+            ],
+            generation: "generation-secret".into(),
+        };
+        let debug = format!("{auth:?}");
+        for secret in ["credential-secret", "bearer-secret", "generation-secret"] {
+            assert!(
+                !debug.contains(secret),
+                "credential headers must be redacted from diagnostics"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_dispatch_rechecks_owner_after_refresh_has_succeeded() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Replaced {
+            changed: AtomicBool,
+        }
+        #[async_trait::async_trait]
+        impl RefreshingAuth for Replaced {
+            fn headers(&self) -> AuthHeaders {
+                AuthHeaders {
+                    headers: vec![(
+                        "x-api-key",
+                        if self.changed.load(Ordering::SeqCst) {
+                            "new"
+                        } else {
+                            "old"
+                        }
+                        .into(),
+                    )],
+                    generation: "generation".into(),
+                }
+            }
+            async fn refresh_after_unauthorized(&self, _: &str) -> bool {
+                // Model replacement just after a successful refresh's last
+                // ownership check, before its caller chooses retry headers.
+                self.changed.store(true, Ordering::SeqCst);
+                true
+            }
+            fn retry_headers(&self, _: &str) -> Option<AuthHeaders> {
+                None
+            }
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+                let recorded = Arc::clone(&recorded);
+                async move {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(headers["x-api-key"].to_str().unwrap().to_owned());
+                    axum::http::StatusCode::UNAUTHORIZED
+                }
+            });
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = HttpLeaseClient::with_auth(
+            reqwest::Client::new(),
+            &base,
+            LeaseAuth::Refreshing(Arc::new(Replaced {
+                changed: AtomicBool::new(false),
+            })),
+            "worker".into(),
+        );
+        let response = client
+            .post_json("private", &serde_json::json!({"private":"old-owner"}))
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(response.status(), 401);
+        assert_eq!(*requests.lock().unwrap(), vec!["old"]);
     }
 }

@@ -791,7 +791,8 @@ and gives the SDK a `TokenProvider` **before** `registerNode`:
 
 ```swift
 final class BackendTokens: TokenProvider {
-    func currentToken() -> String { (try? myBackend.deviceSession()) ?? "" }
+    // Seed this from a session already obtained by the app.
+    func currentToken() -> String { cachedDeviceSessionToken }
     func refreshToken() throws -> String { try myBackend.deviceSession() }
 }
 engine.setTokenProvider(provider: BackendTokens())
@@ -800,7 +801,7 @@ try engine.registerNode(capabilities: NodeCapabilities())
 
 ```kotlin
 engine.setTokenProvider(object : TokenProvider {
-    override fun currentToken() = backend.deviceSession()
+    override fun currentToken() = cachedDeviceSessionToken
     override fun refreshToken() = backend.deviceSession()
 })
 engine.registerNode(NodeCapabilities())
@@ -838,6 +839,16 @@ token. When the server answers `401` (the session expired), the SDK calls
 `refreshToken()` once (however many requests saw the stale token, on a
 background thread; it may block on your HTTP call) and retries the request.
 Sessions last `ttl_secs` (default 3600, at most 86400).
+
+Each provider installation owns its refresh and retry state. Replacing it clears
+the previous token even when the new initial token is empty, revokes pending
+refresh waits, and prevents old callback results or 401 retries from adopting the
+replacement credential. Same-provider refresh still retries once. Keep
+`currentToken()` prompt and cached; perform network work in the refresh callback
+or an async wrapper. Already-started native callbacks may physically finish, and
+this installation fence does not verify the tenant/customer inside opaque tokens.
+Account/principal lifecycle and nested async-wrapper work require their own
+ownership checks.
 
 A device session is bound to its tenant, `device_id`, `runtime_id`, and
 handler allowlist, and reaches only:

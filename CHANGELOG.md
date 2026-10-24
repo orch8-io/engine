@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Mobile credential provider ownership
+
+- Atomically scope token snapshots, refresh publication, cancellation, and
+  negative cache to provider installations; clear old bootstrap keys even when
+  replacements start empty, and fence concurrent installation callbacks.
+- Keep delayed 401 retries with their original authorization owner, including
+  shared lease-client dispatch, while preserving same-provider token rotation.
+- Separate installation refresh locks and retain physical-call admission through
+  timeout and retained-provider reinstallation; cancel queued host callbacks.
+- Retire foreign providers outside credential locks and redact AuthHeaders Debug.
+
 ### Worker recovery evidence and authority
 
 - Preserve mobile start/outcome evidence after rejected live/recovery settlements
