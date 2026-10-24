@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Terminal mobile shutdown
+
+- Retire native credential, handler, and listener ownership during shutdown to
+  break idle engine retain cycles; fence late token publication and reject new
+  operations and worker/delegation starts. Further requests through shared clients
+  fail authorization locally without anonymous fallback after closure.
+- Release foreign objects outside engine locks and synchronous-to-async bridges.
+  Update handler registry and advertised names atomically so a rejected handler
+  replacement preserves the previous configuration.
+- Cancel queued listener invocations before entering host code and retain their
+  physical admission through callback destruction. Running native calls retain
+  ownership until they physically finish.
+
 ### Mobile runtime retirement
 
 - Shut down the mobile executor without joining its threads when the last engine

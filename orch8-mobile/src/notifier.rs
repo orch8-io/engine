@@ -6,9 +6,10 @@
 //! nothing is re-notified while its row exists).
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{Mutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use orch8_engine::sequence_cache::SequenceCache;
@@ -30,7 +31,8 @@ const MAX_IN_FLIGHT_CALLBACKS: usize = 2;
 
 /// Manages listener registration and bounded deduplication of lifecycle events.
 pub(crate) struct MobileNotifier {
-    listener: Mutex<Option<Arc<dyn EngineListener>>>,
+    listener: StdMutex<ListenerState>,
+    cancelled: CancellationToken,
     callback_slots: Arc<Semaphore>,
     terminal_seen: Mutex<HashSet<InstanceId>>,
     waiting_seen: Mutex<HashSet<(InstanceId, BlockId)>>,
@@ -41,10 +43,25 @@ pub(crate) struct MobileNotifier {
     cleanup_seen: Mutex<HashSet<InstanceId>>,
 }
 
+struct ListenerState {
+    closed: bool,
+    listener: Option<Arc<dyn EngineListener>>,
+}
+
+// Keep physical capacity through foreign destruction as well as invocation.
+struct ListenerCall {
+    listener: Arc<dyn EngineListener>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 impl MobileNotifier {
     pub fn new() -> Self {
         Self {
-            listener: Mutex::new(None),
+            listener: StdMutex::new(ListenerState {
+                closed: false,
+                listener: None,
+            }),
+            cancelled: CancellationToken::new(),
             callback_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_CALLBACKS)),
             terminal_seen: Mutex::new(HashSet::new()),
             waiting_seen: Mutex::new(HashSet::new()),
@@ -53,14 +70,43 @@ impl MobileNotifier {
     }
 
     /// Replace the current listener. Called from `MobileEngine::set_listener`.
-    pub async fn set_listener(&self, listener: Arc<dyn EngineListener>) {
-        *self.listener.lock().await = Some(listener);
+    pub fn set_listener(&self, listener: Arc<dyn EngineListener>) {
+        let retired = {
+            let mut state = self
+                .listener
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.closed {
+                drop(state);
+                return;
+            }
+            state.listener.replace(listener)
+        };
+        drop(retired);
     }
 
     /// Clone the current listener (if any). Used by the tick loop to obtain a
     /// cheaply-shared reference without holding the lock.
-    pub async fn listener(&self) -> Option<Arc<dyn EngineListener>> {
-        self.listener.lock().await.clone()
+    pub fn listener(&self) -> Option<Arc<dyn EngineListener>> {
+        self.listener
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .listener
+            .clone()
+    }
+
+    pub fn close(&self) -> Option<Arc<dyn EngineListener>> {
+        let retired = {
+            let mut state = self
+                .listener
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.closed = true;
+            state.listener.take()
+        };
+        self.cancelled.cancel();
+        self.callback_slots.close();
+        retired
     }
 
     // ------------------------------------------------------------------
@@ -80,7 +126,7 @@ impl MobileNotifier {
         storage: &Arc<dyn StorageBackend>,
         mobile_storage: &MobileStorage,
     ) -> Vec<String> {
-        let listener = self.listener().await;
+        let listener = self.listener();
         let Ok(instances) = mobile_storage.list_terminal_instance_states().await else {
             return Vec::new();
         };
@@ -139,20 +185,32 @@ impl MobileNotifier {
                 InstanceState::Completed => {
                     let output = serde_json::to_string(&inst.context.data).unwrap_or_default();
                     debug!(instance_id = %id_str, "firing on_instance_completed");
-                    let cb = Arc::clone(&listener);
+                    let call = ListenerCall {
+                        listener: Arc::clone(&listener),
+                        _permit: permit,
+                    };
+                    let cancelled = self.cancelled.clone();
                     let id = id_str.clone();
                     tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        cb.on_instance_completed(id, output);
+                        if !cancelled.is_cancelled() {
+                            call.listener.on_instance_completed(id, output);
+                        }
+                        drop(call);
                     });
                 }
                 InstanceState::Failed => {
                     let error = serde_json::to_string(&inst.context.data).unwrap_or_default();
-                    let cb = Arc::clone(&listener);
+                    let call = ListenerCall {
+                        listener: Arc::clone(&listener),
+                        _permit: permit,
+                    };
+                    let cancelled = self.cancelled.clone();
                     let id = id_str.clone();
                     tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        cb.on_instance_failed(id, error);
+                        if !cancelled.is_cancelled() {
+                            call.listener.on_instance_failed(id, error);
+                        }
+                        drop(call);
                     });
                 }
                 _ => {}
@@ -176,7 +234,7 @@ impl MobileNotifier {
         mobile_storage: &MobileStorage,
         sequence_cache: &Arc<SequenceCache>,
     ) {
-        let Some(listener) = self.listener().await else {
+        let Some(listener) = self.listener() else {
             return;
         };
 
@@ -230,12 +288,18 @@ impl MobileNotifier {
                 continue;
             }
             debug!(instance_id = %inst.id, step_id = %inst.step_id, handler = %handler, "firing on_step_pending");
-            let cb = Arc::clone(&listener);
+            let call = ListenerCall {
+                listener: Arc::clone(&listener),
+                _permit: permit,
+            };
+            let cancelled = self.cancelled.clone();
             let id = inst.id.to_string();
             let step = inst.step_id.into_string();
             tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                cb.on_step_pending(id, step, handler);
+                if !cancelled.is_cancelled() {
+                    call.listener.on_step_pending(id, step, handler);
+                }
+                drop(call);
             });
         }
     }
@@ -345,6 +409,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn close_cancels_queued_terminal_callbacks_before_host_invocation() {
+        for state in [InstanceState::Completed, InstanceState::Failed] {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .max_blocking_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            let (storage, mobile, _) =
+                runtime.block_on(setup_storage_with_terminal_instance(state));
+            let notifier = MobileNotifier::new();
+            let listener = Arc::new(GatedListener {
+                ids: std::sync::Mutex::new(Vec::new()),
+                released: (std::sync::Mutex::new(true), std::sync::Condvar::new()),
+            });
+            notifier.set_listener(listener.clone());
+            let (entered, started) = std::sync::mpsc::channel();
+            let (release, gate) = std::sync::mpsc::channel();
+            drop(runtime.spawn_blocking(move || {
+                entered.send(()).unwrap();
+                let _ = gate.recv();
+            }));
+            started
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            runtime.block_on(notifier.fire_terminal_events(&storage, &mobile));
+            let admitted = notifier.callback_slots.available_permits();
+            drop(notifier.close());
+            release.send(()).unwrap();
+            runtime.block_on(async { runtime.spawn_blocking(|| ()).await.unwrap() });
+            assert_eq!(admitted, MAX_IN_FLIGHT_CALLBACKS - 1);
+            assert!(listener.ids.lock().unwrap().is_empty());
+            assert_eq!(
+                notifier.callback_slots.available_permits(),
+                MAX_IN_FLIGHT_CALLBACKS
+            );
+        }
+    }
+
     struct ReleaseListener(Arc<GatedListener>);
     impl Drop for ReleaseListener {
         fn drop(&mut self) {
@@ -389,7 +493,7 @@ mod tests {
             released: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
         });
         let _release = ReleaseListener(Arc::clone(&listener));
-        notifier.set_listener(listener.clone()).await;
+        notifier.set_listener(listener.clone());
         let cache = Arc::new(SequenceCache::new(16, std::time::Duration::from_secs(60)));
         if waiting_first {
             notifier
@@ -470,7 +574,7 @@ mod tests {
     #[tokio::test]
     async fn notifier_starts_without_listener() {
         let notifier = MobileNotifier::new();
-        assert!(notifier.listener().await.is_none());
+        assert!(notifier.listener().is_none());
     }
 
     #[test]
@@ -536,7 +640,7 @@ mod tests {
         let listener = Arc::new(RecordingListener {
             completed: tokio::sync::Mutex::new(Vec::new()),
         });
-        notifier.set_listener(listener.clone()).await;
+        notifier.set_listener(listener.clone());
 
         let ids = notifier
             .fire_terminal_events(&storage, &mobile_storage)
@@ -635,7 +739,7 @@ mod tests {
             notified: tokio::sync::Notify::new(),
         });
         let notifier = MobileNotifier::new();
-        notifier.set_listener(listener.clone()).await;
+        notifier.set_listener(listener.clone());
         let cache = Arc::new(SequenceCache::new(4, std::time::Duration::from_secs(60)));
 
         notifier

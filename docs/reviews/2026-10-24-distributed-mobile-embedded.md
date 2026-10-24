@@ -684,13 +684,59 @@ failures, destruction of the actual last `MobileEngine` reference on both
 executors, and host-owned resources remaining alive until physical callback
 completion. This changes no exported FFI signatures or protocol fields.
 
-This resolves executor destruction only. Explicit `MobileEngine::shutdown`
-still retains registered providers, handlers, and listeners; callbacks retaining
-their engine can form cycles and prevent destruction altogether. Its common
-`run_with_timeout` path also lacks a terminal cancellation fence. Those ownership
-and admission boundaries, queued callback cancellation, wrapper installation
-retirement (DME064), and cross-instance async budgets (DME066) remain open.
+This resolves executor destruction only. The separate native shutdown ownership,
+admission, and queued-listener boundaries are addressed in DME068 below. Wrapper
+installation retirement (DME064) and cross-instance async budgets (DME066) remain
+open.
 
 Local validation: all 357 mobile library tests, mobile all-target Clippy with
 warnings denied, formatting, documentation links/example syntax, and diff checks
 pass. Hosted full-workspace/native CI is required before merging this batch.
+
+### DME068 — Terminal shutdown and foreign callback ownership (native fix)
+
+**HIGH, effort M.** Explicit shutdown left native providers, registered handler
+adapters/metadata, and listeners installed. A callback retaining its engine formed
+an idle cycle. Storage operations still ran, a new provider's getter was invoked,
+and an initial getter finishing after shutdown published credentials. All four
+baseline regressions failed on the runtime-retirement parent `a36cdad7`.
+
+Shutdown now cancels operation authority first, closes the shared credential and
+listener registrations, clears registry ownership, and stops background loops.
+Credential closure invalidates owner/revision, clears cached tokens, cancels
+refresh waits, and permanently rejects installation and anonymous authorization.
+Existing node clients share that fence. All returned foreign owners are dropped
+after locks have been released. Already-running callbacks retain their resources
+until physical completion; completion cannot republish retired authorization.
+
+The common operation bridge rejects unpolled work after closure and cancels
+admitted waits. Worker, delegation, and node installation recheck cancellation
+under their installation locks. Resume cannot restart a closed engine. Listener
+registration uses a short synchronous lock, avoiding foreign destruction inside
+a nested `block_on`; queued terminal/pending invocations check closure before
+host entry. An owning listener-call guard retains physical capacity through
+foreign destruction, including unwinding.
+
+Registry updates are transactional under the registry gate: rejected replacement
+preserves both the old handler and its advertised name. Old registry and callback
+owners are dropped outside locks. Re-enabling an existing builtin remains
+idempotent for an open engine with a shared registry.
+
+Behavioral coverage includes provider/handler/listener retain cycles, repeated
+shutdown, post-close registration and restarts, initial callback races, in-flight
+refresh cancellation with physical ownership retained, direct/shared HTTP
+authorization without payload building or network traffic, operation polling and
+cancellation, foreign destruction reentry on replacement and shutdown, failed
+handler replacement, and queued listener cancellation with a saturated executor.
+No FFI signatures or journal schemas change. Closing authorization may prevent
+an immediate remote settlement; existing uncertain/started evidence remains
+journaled for later recovery rather than being erased.
+
+This native batch does not close the wrapper first-fetch races or async budgets
+(DME064/066), durable principal binding, independent-engine/process coordination,
+or the remaining original distributed/embedded/security review matrix.
+
+Validation: all 369 mobile library tests pass, including twelve added behavioral
+tests. Engine/server/mobile all-target Clippy passes with warnings denied;
+formatting, documentation links/examples, and diff checks pass. Hosted
+full-workspace/native CI remains the merge gate for this batch.

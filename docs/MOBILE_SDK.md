@@ -553,6 +553,14 @@ engine.setListener(listener: MyListener())
 | `workerStats()`                                  | Worker counters (claimed, completed, failed, released, lost, in flight)                                                                    |
 | `shutdown()`                                     | Shut down the engine                                                                                                                       |
 
+`shutdown()` is terminal and idempotent. It retires native provider, listener,
+and handler registrations, rejects new storage operations and worker/delegation
+starts, and cancels pending credential waits. Installing callbacks afterward is
+ignored or returns `Shutdown` where the method already returns an error. Create
+a new engine to restart. An already-running native callback retains its resources
+until it returns; shutdown cannot undo effects or requests already accepted.
+Unsettled distributed task evidence remains journaled for recovery.
+
 ### MobileEngineConfig
 
 | Field                     | Type   | Default       | Description                                                                                                                                                                                                                                                                   |
