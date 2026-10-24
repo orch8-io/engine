@@ -3,11 +3,9 @@
 //! Extracted from `MobileEngine` to separate instance orchestration from
 //! the `UniFFI` facade and tick loop.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 /// How long a finished instance (and its outputs, tree and logs) is kept on
@@ -18,7 +16,6 @@ pub const TERMINAL_INSTANCE_RETENTION_SECS: u64 = 2_592_000;
 const TERMINAL_PURGE_BATCH: u32 = 200;
 
 use orch8_storage::StorageBackend;
-use orch8_types::error::StorageError;
 #[cfg(test)]
 use orch8_types::ids::TenantId;
 use orch8_types::ids::{InstanceId, Namespace};
@@ -32,7 +29,6 @@ use crate::storage::{ActiveInstanceProjection, MobileStorage};
 pub struct InstanceLifecycleManager {
     storage: Arc<dyn StorageBackend>,
     mobile_storage: Arc<MobileStorage>,
-    dedup_keys: Arc<Mutex<HashMap<String, String>>>,
     max_concurrent_instances: u32,
     /// When `compact_storage` last ran (MC-07).
     last_compaction: std::sync::Mutex<Option<std::time::Instant>>,
@@ -56,7 +52,6 @@ impl InstanceLifecycleManager {
         Self {
             storage,
             mobile_storage,
-            dedup_keys: Arc::new(Mutex::new(HashMap::new())),
             max_concurrent_instances,
             last_compaction: std::sync::Mutex::new(None),
             last_delegation_sweep: std::sync::Mutex::new(None),
@@ -106,21 +101,11 @@ impl InstanceLifecycleManager {
         &self.mobile_storage
     }
 
-    /// Hydrate the in-memory dedup cache from persistent storage.
+    /// Remove stale durable dedup mappings at startup. Every start consults
+    /// storage, so separate engine handles cannot retain stale cached IDs.
     pub async fn hydrate_dedup(&self) -> Result<(), MobileError> {
-        if let Err(e) = self.mobile_storage.prune_stale_dedup().await {
-            warn!(error = %e, "failed to prune stale dedup keys");
-        }
-        match self.mobile_storage.list_all_dedup().await {
-            Ok(rows) => {
-                let mut dedup = self.dedup_keys.lock().await;
-                for (key, instance_id) in rows {
-                    dedup.insert(key, instance_id);
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "failed to hydrate dedup keys from storage");
-            }
+        if let Err(error) = self.mobile_storage.prune_stale_dedup().await {
+            warn!(%error, "failed to prune stale dedup keys");
         }
         Ok(())
     }
@@ -133,29 +118,10 @@ impl InstanceLifecycleManager {
         input: &str,
         dedup_key: Option<&str>,
     ) -> Result<String, MobileError> {
-        if let Some(key) = dedup_key {
-            let dedup = self.dedup_keys.lock().await;
-            if let Some(existing_id) = dedup.get(key) {
-                return Ok(existing_id.clone());
-            }
-            drop(dedup);
-            if let Some(persisted_id) = self.mobile_storage.get_dedup_instance(key).await? {
-                self.dedup_keys
-                    .lock()
-                    .await
-                    .insert(key.to_string(), persisted_id.clone());
-                return Ok(persisted_id);
-            }
-        }
-
-        let active = self.count_active_instances().await?;
-        if active >= u64::from(self.max_concurrent_instances) {
-            return Err(MobileError::ResourceLimit {
-                message: format!(
-                    "max concurrent instances ({}) reached",
-                    self.max_concurrent_instances
-                ),
-            });
+        if let Some(key) = dedup_key
+            && let Some(id) = self.mobile_storage.active_dedup_instance(key).await?
+        {
+            return Ok(id);
         }
 
         let tenant = crate::mobile_tenant_id();
@@ -204,58 +170,10 @@ impl InstanceLifecycleManager {
             updated_at: now,
         };
 
-        // The in-memory/persisted preflight above is fast, but concurrent
-        // callers can both observe a missing key. The storage unique index is
-        // authoritative: on that race, return the instance inserted by the
-        // winner rather than creating a second mobile workflow.
-        let id_str = match self.storage.create_instance(&instance).await {
-            Ok(()) => instance_id.to_string(),
-            Err(StorageError::Conflict(_)) if dedup_key.is_some_and(|key| !key.is_empty()) => {
-                let key = dedup_key.filter(|key| !key.is_empty()).ok_or_else(|| {
-                    MobileError::Storage {
-                        message: "missing dedup key after conflict".into(),
-                    }
-                })?;
-                let existing = self
-                    .storage
-                    .find_by_idempotency_key(&tenant, key)
-                    .await?
-                    .ok_or_else(|| MobileError::Storage {
-                        message: "dedup conflict without an instance".into(),
-                    })?;
-                match existing.state {
-                    InstanceState::Completed | InstanceState::Failed | InstanceState::Cancelled => {
-                        // The previous run with this key reached a terminal
-                        // state and its mobile dedup entry was cleaned up, so
-                        // the host intends a fresh run. The storage-level
-                        // unique index on (tenant_id, idempotency_key) is
-                        // never cleared, so re-inserting under the same key
-                        // always conflicts — returning `existing.id` here
-                        // would hand back a dead instance and the host would
-                        // believe a workflow started while nothing ever runs.
-                        // Salt the storage-level key for the fresh instance;
-                        // the user-facing dedup key still maps to the new
-                        // instance id below.
-                        warn!(instance_id = %existing.id, dedup_key = %key, "dedup key belongs to a terminal instance — starting a fresh run");
-                        let mut fresh = instance.clone();
-                        fresh.idempotency_key =
-                            Some(format!("{key}#rerun-{}", uuid::Uuid::now_v7()));
-                        self.storage.create_instance(&fresh).await?;
-                        instance_id.to_string()
-                    }
-                    _ => existing.id.to_string(),
-                }
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        if let Some(key) = dedup_key {
-            self.dedup_keys
-                .lock()
-                .await
-                .insert(key.to_string(), id_str.clone());
-            self.mobile_storage.set_dedup(key, &id_str).await?;
-        }
+        let id_str = self
+            .mobile_storage
+            .start_legacy_instance(instance, dedup_key, self.max_concurrent_instances)
+            .await?;
 
         info!(instance_id = %id_str, sequence = %sequence_name, "started mobile instance");
         Ok(id_str)
@@ -299,9 +217,6 @@ impl InstanceLifecycleManager {
             }
         }
 
-        let mut dedup = self.dedup_keys.lock().await;
-        dedup.retain(|_, v| v != instance_id);
-        drop(dedup);
         if let Err(error) = self.mobile_storage.remove_dedup(instance_id).await {
             warn!(instance_id, %error, "failed to remove persisted mobile dedup entry");
         }
@@ -500,25 +415,9 @@ impl InstanceLifecycleManager {
 
     /// Remove a dedup entry associated with the given instance ID.
     pub async fn cleanup_dedup(&self, instance_id: &str) {
-        let mut dedup = self.dedup_keys.lock().await;
-        dedup.retain(|_, v| v != instance_id);
-        drop(dedup);
         if let Err(error) = self.mobile_storage.remove_dedup(instance_id).await {
             warn!(instance_id, %error, "failed to remove persisted mobile dedup entry");
         }
-    }
-
-    async fn count_active_instances(&self) -> Result<u64, MobileError> {
-        let filter = orch8_types::filter::InstanceFilter {
-            states: Some(vec![
-                InstanceState::Scheduled,
-                InstanceState::Running,
-                InstanceState::Waiting,
-            ]),
-            ..Default::default()
-        };
-        let count = self.storage.count_instances(&filter).await?;
-        Ok(count)
     }
 }
 
@@ -828,6 +727,128 @@ mod tests {
             lifecycle.start("seq", "{}", Some("concurrent-dedup")),
         );
         assert_eq!(first.unwrap(), second.unwrap());
+    }
+
+    #[tokio::test]
+    async fn concurrent_admission_does_not_overbook_across_managers() {
+        let (lifecycle, mobile, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let first = InstanceLifecycleManager::new(lifecycle.storage.clone(), mobile.clone(), 1);
+        let independent = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::file_mobile(
+                &_dir.path().join("test.db").to_string_lossy(),
+            )
+            .await
+            .unwrap(),
+        );
+        let second = InstanceLifecycleManager::new(
+            independent.clone(),
+            Arc::new(MobileStorage::new(independent)),
+            1,
+        );
+        let (a, b) = tokio::join!(
+            first.start("seq", "{}", None),
+            second.start("seq", "{}", None)
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_terminal_key_reuse_creates_only_one_fresh_run() {
+        let (lifecycle, mobile, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let old = lifecycle.start("seq", "{}", Some("reused")).await.unwrap();
+        lifecycle
+            .storage
+            .update_instance_state(
+                parse_instance_id(&old).unwrap(),
+                InstanceState::Completed,
+                None,
+            )
+            .await
+            .unwrap();
+        lifecycle.cleanup_dedup(&old).await;
+        let other = InstanceLifecycleManager::new(lifecycle.storage.clone(), mobile, 10);
+        let (a, b) = tokio::join!(
+            lifecycle.start("seq", "{}", Some("reused")),
+            other.start("seq", "{}", Some("reused"))
+        );
+        assert_eq!(a.unwrap(), b.unwrap());
+    }
+
+    #[tokio::test]
+    async fn dedup_write_failure_rolls_back_the_instance() {
+        let (lifecycle, mobile, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        sqlx::query("CREATE TRIGGER fail_dedup BEFORE INSERT ON mobile_dedup BEGIN SELECT RAISE(ABORT, 'injected dedup failure'); END").execute(mobile.pool()).await.unwrap();
+        assert!(lifecycle.start("seq", "{}", Some("failure")).await.is_err());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances")
+            .fetch_one(mobile.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "failed start must not leave a runnable orphan");
+        sqlx::query("DROP TRIGGER fail_dedup")
+            .execute(mobile.pool())
+            .await
+            .unwrap();
+        let id = lifecycle.start("seq", "{}", Some("failure")).await.unwrap();
+        assert_eq!(
+            mobile
+                .get_dedup_instance("failure")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn paused_runs_consume_capacity_but_retry_still_succeeds() {
+        let (lifecycle, mobile, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let limited = InstanceLifecycleManager::new(lifecycle.storage.clone(), mobile, 1);
+        let id = limited.start("seq", "{}", Some("paused")).await.unwrap();
+        limited
+            .storage
+            .update_instance_state(parse_instance_id(&id).unwrap(), InstanceState::Paused, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            limited.start("seq", "{}", None).await,
+            Err(MobileError::ResourceLimit { .. })
+        ));
+        assert_eq!(
+            limited.start("seq", "{}", Some("paused")).await.unwrap(),
+            id
+        );
+    }
+
+    #[tokio::test]
+    async fn another_manager_terminal_transition_does_not_leave_a_cached_dead_id() {
+        let (lifecycle, mobile, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let id = lifecycle.start("seq", "{}", Some("shared")).await.unwrap();
+        let other = InstanceLifecycleManager::new(lifecycle.storage.clone(), mobile, 10);
+        other.cancel_instance(&id).await.unwrap();
+        let fresh = lifecycle.start("seq", "{}", Some("shared")).await.unwrap();
+        assert_ne!(fresh, id);
+        // Cleanup of the old run cannot erase its replacement's mapping.
+        other.cleanup_dedup(&id).await;
+        assert_eq!(
+            lifecycle.start("seq", "{}", Some("shared")).await.unwrap(),
+            fresh
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_legacy_dedup_keys_are_serialized_too() {
+        let (lifecycle, _mobile, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let (a, b) = tokio::join!(
+            lifecycle.start("seq", "{}", Some("")),
+            lifecycle.start("seq", "{}", Some(""))
+        );
+        assert_eq!(a.unwrap(), b.unwrap());
     }
 
     #[tokio::test]
