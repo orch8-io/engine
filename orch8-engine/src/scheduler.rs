@@ -1577,7 +1577,7 @@ impl HookTasks {
 /// across ticks so a backlog larger than this still gets fully covered.
 const MAX_SWEEP_PAGES: u32 = 64;
 
-/// Upper bound on the cursor's sequence -> has-nested-timers memo.
+/// Upper bound on the cursor's sequence-feature memo.
 const WAITING_SWEEP_MEMO_MAX: usize = 4096;
 
 /// Rotating-scan state for the Waiting deadline/timeout sweep, carried across
@@ -1587,27 +1587,41 @@ const WAITING_SWEEP_MEMO_MAX: usize = 4096;
 ///   used to restart at offset 0 every tick and stop after
 ///   [`MAX_SWEEP_PAGES`], so instances sorted past `64 × batch_size` never
 ///   had their deadlines or `wait_for_input` timeouts checked (L6-04).
-/// - `nested_timers`: memo of `sequence_id` -> "has a step *nested* in a
-///   composite that declares a `deadline` or `wait_for_input.timeout`"
-///   (immutable per sequence id), so only those instances pay for an
-///   execution-tree read (L3-02).
+/// - `features`: bounded memo of immutable sequence features. Only workflows
+///   with nested timers or sub-sequences need execution-tree reads.
 #[derive(Default)]
 pub(crate) struct WaitingSweepCursor {
     offset: u64,
-    nested_timers: HashMap<orch8_types::ids::SequenceId, bool>,
+    features: HashMap<orch8_types::ids::SequenceId, WaitingSequenceFeatures>,
+}
+
+#[derive(Clone, Copy)]
+struct WaitingSequenceFeatures {
+    nested_timers: bool,
+    sub_sequences: bool,
 }
 
 impl WaitingSweepCursor {
-    fn has_nested_timers(&mut self, seq: &SequenceDefinition) -> bool {
-        if let Some(known) = self.nested_timers.get(&seq.id) {
+    fn features(&mut self, seq: &SequenceDefinition) -> WaitingSequenceFeatures {
+        if let Some(known) = self.features.get(&seq.id) {
             return *known;
         }
-        let has = sequence_has_nested_timers(seq);
-        if self.nested_timers.len() >= WAITING_SWEEP_MEMO_MAX {
-            self.nested_timers.clear();
+        let features = WaitingSequenceFeatures {
+            nested_timers: sequence_has_nested_timers(seq),
+            sub_sequences: crate::evaluator::flatten_blocks(&seq.blocks).iter().any(
+                |(_, block)| {
+                    matches!(
+                        block,
+                        orch8_types::sequence::BlockDefinition::SubSequence(_)
+                    )
+                },
+            ),
+        };
+        if self.features.len() >= WAITING_SWEEP_MEMO_MAX {
+            self.features.clear();
         }
-        self.nested_timers.insert(seq.id, has);
-        has
+        self.features.insert(seq.id, features);
+        features
     }
 }
 
@@ -1761,7 +1775,7 @@ async fn process_waiting_deadlines(
 
         for (instance, seq) in instance_sequences {
             let completed_ids = completed.remove(&instance.id).unwrap_or_default();
-            let nested_timers = cursor.has_nested_timers(&seq);
+            let features = cursor.features(&seq);
             // Per-instance failures (a lost CAS, a transient write error) must
             // not abort the sweep for every other Waiting instance.
             if let Err(e) = check_waiting_instance(
@@ -1770,7 +1784,7 @@ async fn process_waiting_deadlines(
                 &seq,
                 &deadline_outputs_ref,
                 &completed_ids,
-                nested_timers,
+                features,
             )
             .await
             {
@@ -1804,7 +1818,7 @@ async fn check_waiting_instance(
     seq: &SequenceDefinition,
     deadline_outputs_ref: &DeadlineOutputs<'_>,
     completed_block_ids: &[BlockId],
-    nested_timers: bool,
+    features: WaitingSequenceFeatures,
 ) -> Result<(), EngineError> {
     for block in &seq.blocks {
         if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
@@ -1875,8 +1889,27 @@ async fn check_waiting_instance(
             }
         }
     }
-    if nested_timers {
+    if features.nested_timers {
         wake_on_expired_nested_timer(ctx, instance, seq).await?;
+    }
+    // A process may die after a child's terminal commit or a failed post-park
+    // read, before its volatile wake retry runs. Persisted activation matching
+    // is authoritative; old loop iterations and unrelated blocks do not wake
+    // this parent. CAS never overwrites a concurrent pause/cancel/completion.
+    if features.sub_sequences
+        && crate::evaluator::awaited_sub_sequence_child_terminal(ctx.storage.as_ref(), instance)
+            .await?
+    {
+        let woke = ctx
+            .storage
+            .conditional_update_instance_state(
+                instance.id,
+                InstanceState::Waiting,
+                InstanceState::Scheduled,
+                Some(ctx.clock.now()),
+            )
+            .await?;
+        debug!(instance_id = %instance.id, woke, "reconciled waiting parent with terminal child");
     }
     Ok(())
 }

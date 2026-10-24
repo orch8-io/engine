@@ -1000,6 +1000,15 @@ impl crate::InstanceStore for PostgresStorage {
         misc::get_child_instances(self, parent_instance_id).await
     }
 
+    async fn get_child_for_activation(
+        &self,
+        parent_instance_id: InstanceId,
+        block_id: &str,
+        activation: &str,
+    ) -> Result<Option<TaskInstance>, StorageError> {
+        misc::get_child_for_activation(self, parent_instance_id, block_id, activation).await
+    }
+
     async fn list_orphaned_children(&self, limit: u32) -> Result<Vec<InstanceId>, StorageError> {
         misc::list_orphaned_children(self, limit).await
     }

@@ -28,7 +28,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; durable principal/cache binding and manifest refresh remain open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
-| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; restart wake recovery and callback execution remain open |
+| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery passes behavioral tests but child-history query cost remains open; callbacks remain under review |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
 | Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
@@ -1322,3 +1322,96 @@ an ADR-0002 gate. All 2,053 lean engine and 445 mobile library tests pass,
 including six new cache ownership cases. All-target Clippy passes for both
 with warnings denied; documentation, formatting and whitespace checks pass.
 Hosted CI remains required before merge.
+
+### DME086 — Waiting parent could remain stranded after backend restart (fixed)
+
+**HIGH, effort M.** A transient execution-tree read failure after the parent
+committed Running → Waiting was retried only by the volatile wake registry.
+Closing that backend and reopening its SQLite file left the parent Waiting
+forever even though the awaited child was durably Completed. The reproduction
+fails on the prior code after an actual pool close/file reopen; it does not
+claim an operating-system process kill test.
+
+The existing bounded, rotating Waiting sweep now also reconciles workflows
+containing sub-sequences against persisted execution-tree and child activation
+state. It reuses dispatch's activation matching, so a terminal child from an
+older loop activation or another block cannot authorize a wake. Only a
+Waiting → Scheduled compare-and-set reschedules the parent. Failed reads or
+writes remain eligible on later rotations without depending on a volatile
+notification. A bounded sequence-feature memo keeps ordinary workflows from
+paying for new tree/child reads. Deadline and approval timeout handling retain
+priority. The original page bounds and separate embedded single-shot full scan remain
+in effect. The native current-activation query cost gate is addressed by DME087.
+
+All 2,060 lean engine and 445 mobile library tests pass. The final 16-case
+wake/recovery matrix and complete workspace/all-target Clippy pass. The public
+embedded tick case passes on both SQLite and an isolated required Postgres leg;
+the owned tmpfs container is removed. Documentation, formatting and whitespace
+checks pass. This proves persisted-state recovery behavior. Native indexed query validation
+is documented below; hosted current-head checks remain required before merge.
+
+
+### DME087 — Current-activation lookup loaded accumulated history (fixed)
+
+**HIGH for long-running parents, effort M.** Dispatch and post-park
+reconciliation previously fetched every child and matched one activation in
+memory. Reusing that path in the Waiting sweep would repeatedly deserialize an
+unbounded history. The page cap bounds parents, not their historical children.
+
+The additive `get_child_for_activation` storage method preserves exact activation
+precedence, otherwise the first legacy child whose activation key is absent and
+block matches. Explicit JSON nulls/numbers do not become legacy/string matches.
+Native SQLite/Postgres implementations select at most two candidate IDs in
+one snapshot, then fetch the winning row once. Stable created-at/ID ordering
+resolves ties.
+Postgres indexes fixed-width hash buckets and also compares the original
+strings, so hash equality never selects a different activation. A long-key
+regression first reproduced a 19,000-byte raw index-entry failure; activation
+and legacy keys built from 512 random UUID segments now work on all four
+backends. Two partial composite indexes serve exact and legacy reads; migration 122 includes
+rollback and the online precreation procedure for large Postgres installations.
+Encrypted storage forwards the indexed read and decrypts the selected result;
+fault wrappers preserve interception. Custom backends retain a correct default
+using their existing child order and must override it for native-equivalent bounds.
+
+Waiting reconciliation, post-park checks and current child dispatch use this
+method. The embedded tick regression makes any full-history read fail, proving
+recovery and consumption work without that fallback on actual SQLite/Postgres.
+A storage contract uses 2,048 historical children on each plain/encrypted
+SQLite/Postgres backend, covering exact-live precedence over terminal legacy,
+timestamp/ID ties, parent isolation, non-string/null metadata and decrypted context.
+EXPLAIN of the actual production queries selects both new indexes and rejects
+Postgres table scans. This is query-shape evidence, not a production throughput
+benchmark.
+
+Final validation: 2,060 lean engine, 227 storage and 445 mobile library tests
+pass. Full workspace/all-target Clippy passes with warnings denied. Both native
+query contracts and embedded recovery pass on required isolated Postgres; all
+owned containers are removed. Documentation, formatting and whitespace checks
+pass. Hosted current-head checks remain required before merge.
+
+**Still open:** adoption after a rebuilt node or an activation miss still reads
+history to locate a previous run's child. This is separate from periodic/current
+activation reads and remains part of the long-running workflow review. Public
+account/catalog ownership and the remaining original/ADR gates also remain open.
+
+## SDK main-branch inventory recheck
+
+The current `main` head matches a successful latest Actions run in sdk-node,
+sdk-go, sdk-python, sdk-php, sdk-ruby, sdk-dotnet, sdk-java, sdk-expo,
+sdk-contract, react-native-orch8 and orch8-flutter. orch8-mobile-swift has no
+Actions runs to establish the same evidence. The organization open-PR search
+finds only the two monitored engine PRs. These are repository/CI observations,
+not a claim that current native artifacts or the scoped SDK contract satisfy
+ADR-0002. Those release/platform gates remain open.
+
+
+### DME092 — New child lookup migrations omitted release metadata (fixed)
+
+PR #285's full hosted Unit Tests job reached the migration contract and exposed
+an omitted rollback header and an unchanged exported storage schema version.
+The exported version is used by health/backup metadata and must track the newest
+forward migration. Migration 122 now reports version 122 and its rollback names
+the indexes it removes. The complete 15-test migration rollback integration
+suite passes locally. The dependent migration 123 must carry the same correction
+and its own version increment; exact-head hosted checks remain required.

@@ -79,6 +79,7 @@ fault_impl! {
         async fn recover_stale_instances(&self, stale_threshold: Duration) -> Result<u64, StorageError>;
         async fn heartbeat_instance(&self, instance_id: InstanceId, claimed_at: DateTime<Utc>) -> Result<InstanceLease, StorageError>;
         async fn get_child_instances(&self, parent_instance_id: InstanceId) -> Result<Vec<TaskInstance>, StorageError>;
+        async fn get_child_for_activation(&self, parent_instance_id: InstanceId, block_id: &str, activation: &str) -> Result<Option<TaskInstance>, StorageError>;
         async fn list_orphaned_children(&self, limit: u32) -> Result<Vec<InstanceId>, StorageError>;
         async fn inject_blocks(&self, instance_id: InstanceId, blocks_json: &serde_json::Value) -> Result<(), StorageError>;
         async fn inject_blocks_at_position(&self, instance_id: InstanceId, new_blocks_json: &serde_json::Value, position: Option<usize>) -> Result<serde_json::Value, StorageError>;

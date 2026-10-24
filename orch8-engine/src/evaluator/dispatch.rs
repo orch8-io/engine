@@ -151,11 +151,12 @@ pub(crate) async fn awaited_sub_sequence_child_terminal(
     if waiting.is_empty() {
         return Ok(false);
     }
-    let children = storage.get_child_instances(instance.id).await?;
     for node in waiting {
         let activation = sub_sequence_activation_key(storage, instance, node, &tree).await?;
-        if find_activation_child(&children, node.block_id.as_str(), &activation)
-            .is_some_and(|c| c.state.is_terminal())
+        if storage
+            .get_child_for_activation(instance.id, node.block_id.as_str(), &activation)
+            .await?
+            .is_some_and(|child| child.state.is_terminal())
         {
             return Ok(true);
         }
@@ -333,23 +334,26 @@ pub(super) async fn dispatch_block(
             // child rather than reuse iteration 1's completed one.
             let activation =
                 sub_sequence_activation_key(storage.as_ref(), instance, node, tree).await?;
-            let children = storage.get_child_instances(instance.id).await?;
-            // After a DLQ retry / resume-from the execution tree is rebuilt
-            // with fresh node ids, so no child matches the new activation
-            // key. Adopt the previous run's child instead of spawning a
-            // second one (L3-05): a completed child is reused, a failed one
-            // is retried (resuming only its failed leaf), a live one is
-            // awaited.
-            let adopted = if node.state != NodeState::Waiting
-                && find_activation_child(&children, ss_def.id.as_str(), &activation).is_none()
-            {
-                adopt_previous_child(&control, &children, ss_def.id.as_str(), &activation).await?
+            let current = storage
+                .get_child_for_activation(instance.id, ss_def.id.as_str(), &activation)
+                .await?;
+            // Rebuilt trees may adopt an earlier run's child. Only this miss
+            // path needs historical children; current activations stay indexed.
+            let recovered = if node.state != NodeState::Waiting && current.is_none() {
+                let children = storage.get_child_instances(instance.id).await?;
+                // A child may have appeared since the first snapshot.
+                if let Some(child) =
+                    find_activation_child(&children, ss_def.id.as_str(), &activation)
+                {
+                    Some(child.clone())
+                } else {
+                    adopt_previous_child(&control, &children, ss_def.id.as_str(), &activation)
+                        .await?
+                }
             } else {
                 None
             };
-            let existing_child = adopted
-                .as_ref()
-                .or_else(|| find_activation_child(&children, ss_def.id.as_str(), &activation));
+            let existing_child = current.as_ref().or(recovered.as_ref());
 
             if let Some(child) = existing_child {
                 // Child exists — check if it's done.

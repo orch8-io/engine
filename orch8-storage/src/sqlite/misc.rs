@@ -177,12 +177,28 @@ pub(super) async fn get_child_instances(
     storage: &SqliteStorage,
     parent_instance_id: InstanceId,
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    let rows =
-        sqlx::query("SELECT * FROM task_instances WHERE parent_instance_id=?1 ORDER BY created_at")
-            .bind(parent_instance_id.into_uuid().to_string())
-            .fetch_all(&storage.pool)
-            .await?;
+    let rows = sqlx::query(
+        "SELECT * FROM task_instances WHERE parent_instance_id=?1 ORDER BY created_at, id",
+    )
+    .bind(parent_instance_id.into_uuid().to_string())
+    .fetch_all(&storage.pool)
+    .await?;
     rows.iter().map(row_to_instance).collect()
+}
+
+pub(super) async fn get_child_for_activation(
+    storage: &SqliteStorage,
+    parent: InstanceId,
+    block: &str,
+    activation: &str,
+) -> Result<Option<TaskInstance>, StorageError> {
+    let row = sqlx::query(crate::child_lookup::SQLITE)
+        .bind(parent.into_uuid().to_string())
+        .bind(block)
+        .bind(activation)
+        .fetch_optional(&storage.pool)
+        .await?;
+    row.as_ref().map(row_to_instance).transpose()
 }
 
 pub(super) async fn list_orphaned_children(
