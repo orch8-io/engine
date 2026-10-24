@@ -40,6 +40,13 @@ from an older handle after retirement/reopen is refused across independent
 pools. Catalog key replacement uses the same epoch/writer fence, replaces only
 the selected catalog's set atomically, and refuses stale/foreign handles even
 for an empty set. Legacy tables remain separate, with no implicit adoption.
+Catalog manifest acceptance now commits version, original-body digest and keys
+atomically. The applied cursor/ETag/environment commit separately after checking
+that exact accepted identity under the writer/epoch fence. Pending accepted work
+survives reopen and can retry without allowing older versions or changed content
+under the same version. Generic catalog metadata writes cannot bypass these
+reserved protocol fields. This persistence API still requires a future scoped
+sync caller to verify root signatures and audience/principal binding.
 Connecting signing keys to scoped sync, workflow and instance ownership,
 cancellation of running work, remote principal proofs and wrapper handles remain
 unimplemented gates.

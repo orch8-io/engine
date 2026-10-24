@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Durable manifest acceptance before workflow changes
+
+- Commit a verified manifest's accepted version and original-body digest with
+  its complete signing-key set before reconciliation or installation. Download
+  failures/cancellation no longer permit an intermediate older signed document
+  to restore withdrawn workflows or keys after restart.
+- Keep acceptance separate from the applied cursor so the identical document
+  can retry. Reject same-version content changes, bypass obsolete ETags during
+  pending work, and refuse unsolicited 304 responses without an eligible cache.
+- Fence evaluation metadata against the currently accepted document. Add the
+  same atomic acceptance/evaluation operations to internal catalog storage;
+  scoped sync/execution and public SDK handles remain under development.
+
 ### Atomic manifest signing-key authority
 
 - Validate every key before replacing the root-authorized trust set in one

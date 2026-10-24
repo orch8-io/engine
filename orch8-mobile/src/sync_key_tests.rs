@@ -82,7 +82,13 @@ async fn invalid_later_key_does_not_partially_replace_the_trust_set() {
         manifest_version: 1,
         generated_at: Utc::now(),
     };
-    assert!(fixture.orch.cache_signing_keys(&manifest).await.is_err());
+    assert!(
+        fixture
+            .orch
+            .cache_test_signing_keys(&manifest)
+            .await
+            .is_err()
+    );
     assert_eq!(
         fixture
             .orch
@@ -122,7 +128,13 @@ async fn failed_key_insert_rolls_back_revocation_and_all_other_inserts() {
         manifest_version: 1,
         generated_at: Utc::now(),
     };
-    assert!(fixture.orch.cache_signing_keys(&manifest).await.is_err());
+    assert!(
+        fixture
+            .orch
+            .cache_test_signing_keys(&manifest)
+            .await
+            .is_err()
+    );
     assert_eq!(
         fixture
             .orch
@@ -201,7 +213,13 @@ async fn empty_or_duplicate_manifest_key_ids_are_rejected_before_mutation() {
             manifest_version: 1,
             generated_at: Utc::now(),
         };
-        assert!(fixture.orch.cache_signing_keys(&manifest).await.is_err());
+        assert!(
+            fixture
+                .orch
+                .cache_test_signing_keys(&manifest)
+                .await
+                .is_err()
+        );
         assert_eq!(
             fixture
                 .orch

@@ -17,6 +17,7 @@ struct Reply {
 struct Request {
     path: String,
     authorization: Option<String>,
+    if_none_match: Option<String>,
 }
 
 struct RecordingServer {
@@ -65,9 +66,15 @@ impl RecordingServer {
                     .filter_map(|line| line.split_once(':'))
                     .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
                     .map(|(_, value)| value.trim().to_owned());
+                let if_none_match = text
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("if-none-match"))
+                    .map(|(_, value)| value.trim().to_owned());
                 recorded.lock().unwrap().push(Request {
                     path: path.clone(),
                     authorization,
+                    if_none_match,
                 });
                 let reply = routes
                     .lock()
@@ -505,3 +512,6 @@ mod reconciliation_tests;
 
 #[path = "sync_key_tests.rs"]
 mod key_tests;
+
+#[path = "sync_freshness_tests.rs"]
+mod freshness_tests;

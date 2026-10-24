@@ -1146,3 +1146,50 @@ and the rest of ADR-0002 remain open.
 The final 419-test mobile library suite passes with no failures. All-target
 mobile Clippy passes with warnings denied; formatting, documentation and diff
 checks pass. Hosted CI remains required before merge.
+
+### DME081 — Partial sync admitted a rollback below already-applied revocation effects (fixed in source)
+
+**HIGH, effort M.** A signed version-3 manifest removed an installed workflow and
+rotated its key, then a download failure kept the applied cursor at version 1.
+After fully closing/reopening the database, an authentic previously published
+version-2 manifest passed that cursor and reinstalled the withdrawn workflow.
+The regression reproduced the installation before correction.
+
+Acceptance now has a durable version and SHA-256 digest of the original
+root-verified body, committed atomically with the completely validated key set
+before workflow effects. Its comparison takes SQLite's writer reservation first.
+Evaluation retains a separate applied cursor so the identical accepted document
+can retry after transient failures or cancellation. Older documents are refused
+before key changes/downloads; changed content under an accepted version is
+refused even after an environment change. Signature-line encoding is excluded
+from the content identity. The publisher's generator already increases the
+version on every generation. Legacy applied cursors remain the initial floor;
+invalid/incomplete trust records fail closed.
+
+Pending accepted work bypasses the old ETag. A 304 without an eligible applied
+representation is an error, including an orphan ETag before initial sync.
+Evaluation/progress commits recheck the exact accepted version/digest under a
+writer reservation; they cannot replace acceptance identity or mislabel the
+applied cursor. A queued acceptance from another pool compares against a newer
+committed fence rather than an earlier read.
+
+Internal catalog storage has matching owner/epoch-fenced acceptance and
+evaluation transactions, isolated per catalog and durable through account
+retirement/reopen. Generic metadata writes cannot modify reserved sync fields.
+Coverage includes signed transport/reopen rollback, same-document retry and
+conditional requests, same-version content changes, invalid signatures/keys,
+injected digest-write rollback, legacy floor preservation, malformed state,
+late evaluation, cross-pool ordering, four catalogs, reserved-field bypass,
+stale/foreign handles and scoped pending work after reopen.
+
+This is freshness/trust persistence. It does not fence all workflow effects
+between independent engine/process lifetimes or implement scoped execution,
+remote principal/audience proofs, workflow IDs, workers, callbacks or SDK handles.
+Those ADR-0002 gates and the original review matrix remain open.
+
+Validation: all 434 mobile library tests pass, including fifteen new freshness,
+ownership and storage cases. All-target mobile Clippy passes with warnings
+denied. All eight publisher manifest tests pass (including deterministic
+canonicalization, monotonic generation and the persisted published-version
+floor). Documentation, format and whitespace checks pass. Hosted CI remains
+required before merge; no public SDK/FFI signature changed.

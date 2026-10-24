@@ -588,3 +588,251 @@ async fn scoped_key_failure_preserves_the_complete_previous_set() {
         vec![("old".into(), "old-public-key".into())]
     );
 }
+
+async fn four_accepted_catalogs(storage: &MobileStorage) -> (AccountScope, [CatalogScope; 4]) {
+    let a = storage
+        .open_account_scope("a", "issuer", "a")
+        .await
+        .unwrap();
+    let b = storage
+        .open_account_scope("b", "issuer", "b")
+        .await
+        .unwrap();
+    let scopes = [
+        catalog(storage, &a, "one").await,
+        catalog(storage, &a, "two").await,
+        catalog(storage, &b, "one").await,
+        catalog(storage, &b, "two").await,
+    ];
+    for (index, scope) in scopes.iter().enumerate() {
+        let version = i64::try_from(index).unwrap() + 1;
+        storage
+            .accept_catalog_manifest(
+                scope,
+                &[("same", &format!("key-{version}"))],
+                version,
+                &version.to_string().repeat(64),
+            )
+            .await
+            .unwrap();
+    }
+    (a, scopes)
+}
+
+#[tokio::test]
+async fn catalog_acceptance_and_evaluation_are_independent_and_fenced() {
+    let (storage, _dir) = fixture().await;
+    let (_account, scopes) = four_accepted_catalogs(&storage).await;
+    let one = "1".repeat(64);
+    let five = "5".repeat(64);
+    storage
+        .commit_catalog_evaluation(&scopes[0], 1, &one, Some("one"), "old-env")
+        .await
+        .unwrap();
+    storage
+        .accept_catalog_manifest(&scopes[0], &[], 5, &five)
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .commit_catalog_evaluation(&scopes[0], 1, &one, Some("stale"), "stale-env")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        storage
+            .catalog_metadata(&scopes[0], "manifest_etag")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("one")
+    );
+    assert!(
+        storage
+            .accept_catalog_manifest(&scopes[0], &[("old", "revoked")], 4, &"4".repeat(64))
+            .await
+            .is_err()
+    );
+    assert!(
+        storage
+            .accept_catalog_manifest(&scopes[0], &[], 5, &"6".repeat(64))
+            .await
+            .is_err()
+    );
+    storage
+        .accept_catalog_manifest(&scopes[0], &[], 5, &five)
+        .await
+        .unwrap();
+    storage
+        .commit_catalog_evaluation(&scopes[0], 5, &five, None, "new-env")
+        .await
+        .unwrap();
+    assert!(
+        !storage
+            .catalog_manifest_trust(&scopes[0])
+            .await
+            .unwrap()
+            .pending()
+    );
+    assert_eq!(
+        storage
+            .catalog_metadata(&scopes[0], "manifest_etag")
+            .await
+            .unwrap(),
+        None
+    );
+    for (index, scope) in scopes.iter().enumerate().skip(1) {
+        let trust = storage.catalog_manifest_trust(scope).await.unwrap();
+        assert_eq!(
+            (trust.accepted_version, trust.applied_version),
+            (Some(i64::try_from(index).unwrap() + 1), None)
+        );
+        assert_eq!(
+            storage.catalog_signing_keys(scope).await.unwrap(),
+            vec![("same".into(), format!("key-{}", index + 1))]
+        );
+    }
+}
+
+#[tokio::test]
+async fn catalog_sync_metadata_cannot_bypass_ownership_or_acceptance() {
+    let (storage, _dir) = fixture().await;
+    let (a, scopes) = four_accepted_catalogs(&storage).await;
+    for key in [
+        ACCEPTED_VERSION,
+        ACCEPTED_DIGEST,
+        "last_manifest_version",
+        "manifest_etag",
+        "sync_env_fingerprint",
+        "last_sync_ts",
+    ] {
+        assert!(
+            storage
+                .update_catalog_metadata(&scopes[0], &[(key, Some("bypass"))])
+                .await
+                .is_err()
+        );
+    }
+    let foreign = CatalogScope {
+        account: a.clone(),
+        id: scopes[2].id.clone(),
+    };
+    assert!(storage.catalog_manifest_trust(&foreign).await.is_err());
+    assert!(
+        storage
+            .accept_catalog_manifest(&foreign, &[], 9, &"9".repeat(64))
+            .await
+            .is_err()
+    );
+    storage.retire_account_scope(&a).await.unwrap();
+    assert!(storage.catalog_manifest_trust(&scopes[0]).await.is_err());
+    assert!(
+        storage
+            .accept_catalog_manifest(&scopes[0], &[], 9, &"9".repeat(64))
+            .await
+            .is_err()
+    );
+    assert!(
+        storage
+            .commit_catalog_evaluation(&scopes[0], 1, &"1".repeat(64), None, "retired")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        storage
+            .catalog_manifest_trust(&scopes[2])
+            .await
+            .unwrap()
+            .floor(),
+        Some(3)
+    );
+}
+
+#[tokio::test]
+async fn catalog_acceptance_failure_rolls_back_keys_and_both_fence_fields() {
+    let (storage, _dir) = fixture().await;
+    let a = storage
+        .open_account_scope("a", "issuer", "a")
+        .await
+        .unwrap();
+    let c = catalog(&storage, &a, "one").await;
+    let one = "1".repeat(64);
+    storage
+        .accept_catalog_manifest(&c, &[("old", "old-key")], 1, &one)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER reject_catalog_digest BEFORE INSERT ON mobile_catalog_metadata WHEN NEW.key = 'accepted_manifest_digest' BEGIN SELECT RAISE(ABORT, 'injected digest failure'); END")
+        .execute(storage.pool()).await.unwrap();
+    assert!(
+        storage
+            .accept_catalog_manifest(&c, &[("new", "new-key")], 2, &"2".repeat(64))
+            .await
+            .is_err()
+    );
+    let trust = storage.catalog_manifest_trust(&c).await.unwrap();
+    assert_eq!(trust.accepted_version, Some(1));
+    trust.check_candidate(1, &one).unwrap();
+    assert_eq!(
+        storage.catalog_signing_keys(&c).await.unwrap(),
+        vec![("old".into(), "old-key".into())]
+    );
+}
+
+#[tokio::test]
+async fn catalog_pending_freshness_survives_pool_close_and_account_reopen() {
+    let (storage, dir) = fixture().await;
+    let a = storage
+        .open_account_scope("a", "issuer", "a")
+        .await
+        .unwrap();
+    let c = catalog(&storage, &a, "one").await;
+    storage
+        .accept_catalog_manifest(&c, &[("one", "one-key")], 1, &"1".repeat(64))
+        .await
+        .unwrap();
+    storage
+        .commit_catalog_evaluation(&c, 1, &"1".repeat(64), Some("old"), "env")
+        .await
+        .unwrap();
+    storage
+        .accept_catalog_manifest(&c, &[("two", "two-key")], 2, &"2".repeat(64))
+        .await
+        .unwrap();
+    storage.retire_account_scope(&a).await.unwrap();
+    storage.pool().close().await;
+    let other = MobileStorage::new(Arc::new(
+        SqliteStorage::file_mobile(dir.path().join("scopes.db").to_str().unwrap())
+            .await
+            .unwrap(),
+    ));
+    let reopened = other.open_account_scope("a", "issuer", "a").await.unwrap();
+    let current = catalog(&other, &reopened, "one").await;
+    assert!(other.catalog_manifest_trust(&c).await.is_err());
+    let trust = other.catalog_manifest_trust(&current).await.unwrap();
+    assert_eq!(
+        (trust.accepted_version, trust.applied_version),
+        (Some(2), Some(1))
+    );
+    assert!(trust.pending());
+    assert!(
+        other
+            .commit_catalog_evaluation(&current, 1, &"1".repeat(64), Some("stale"), "old")
+            .await
+            .is_err()
+    );
+    other
+        .commit_catalog_evaluation(&current, 2, &"2".repeat(64), Some("new"), "new")
+        .await
+        .unwrap();
+    assert!(
+        !other
+            .catalog_manifest_trust(&current)
+            .await
+            .unwrap()
+            .pending()
+    );
+    assert_eq!(
+        other.catalog_signing_keys(&current).await.unwrap(),
+        vec![("two".into(), "two-key".into())]
+    );
+}
