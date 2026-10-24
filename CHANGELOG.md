@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Mobile runtime retirement
+
+- Shut down the mobile executor without joining its threads when the last engine
+  reference is released, including release from its own async task or blocking
+  callback. This prevents destructor panics, self-deadlocks, and foreground
+  stalls behind non-cooperative native callbacks. Running callbacks retain their
+  resources until they return.
+
 ### Physical token refresh admission
 
 - Bound unfinished Rust blocking token refresh calls to two per shared mobile

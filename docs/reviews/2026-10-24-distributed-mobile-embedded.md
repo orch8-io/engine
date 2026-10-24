@@ -667,3 +667,30 @@ Test retired non-cooperative instances, repeated replacement, shared admission,
 late completion, cancellation, and capacity recovery in the real wrappers.
 Kotlin's structured timeout needs separate verification of completion semantics;
 this report does not claim an async-work budget there.
+
+### DME067 — Runtime destruction from engine-owned execution (native fix)
+
+**HIGH, effort S.** `MobileRuntime` used default `Runtime` destruction. Releasing
+the last owner from its own asynchronous task panicked because Tokio cannot
+block there; releasing it from its own blocking callback waited for that same
+callback indefinitely. Foreground destruction also waited behind an unrelated
+non-cooperative host callback. All three controlled regressions failed on main
+`a31cadd0`: async panic and two bounded-observation timeouts.
+
+The runtime now has one explicit owner and uses `shutdown_background()` during
+destruction. No unused five-second joining API remains. Tokio signals scheduler
+shutdown without waiting for blocking threads. Tests cover all three original
+failures, destruction of the actual last `MobileEngine` reference on both
+executors, and host-owned resources remaining alive until physical callback
+completion. This changes no exported FFI signatures or protocol fields.
+
+This resolves executor destruction only. Explicit `MobileEngine::shutdown`
+still retains registered providers, handlers, and listeners; callbacks retaining
+their engine can form cycles and prevent destruction altogether. Its common
+`run_with_timeout` path also lacks a terminal cancellation fence. Those ownership
+and admission boundaries, queued callback cancellation, wrapper installation
+retirement (DME064), and cross-instance async budgets (DME066) remain open.
+
+Local validation: all 357 mobile library tests, mobile all-target Clippy with
+warnings denied, formatting, documentation links/example syntax, and diff checks
+pass. Hosted full-workspace/native CI is required before merging this batch.
