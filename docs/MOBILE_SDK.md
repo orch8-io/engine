@@ -874,6 +874,12 @@ all slots remain occupied, additional refreshes fail locally without queuing mor
 host callbacks. An existing usable token remains available. This quota covers
 native callbacks; asynchronous work launched independently needs its own bound.
 
+Swift SDK first fetches and refreshes share a separate limit of eight unfinished
+host fetches per process, including fetches from retired provider instances.
+`refreshTimeout` bounds the initial wait too. Exhausted admission fails before
+host invocation; timeout or cancellation requests retain the slot until the host
+fetch returns. Blank results and abandoned late results cannot populate the
+adapter's cache. Other wrapper async-fetch budgets remain under review.
 
 A device session is bound to its tenant, `device_id`, `runtime_id`, and
 handler allowlist, and reaches only:
