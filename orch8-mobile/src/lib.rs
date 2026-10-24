@@ -18,6 +18,8 @@ mod delegation;
 mod error;
 mod handlers;
 mod lifecycle;
+#[cfg(test)]
+mod manifest_callback_tests;
 mod memory;
 mod node;
 mod notifier;
@@ -1075,7 +1077,11 @@ impl MobileEngine {
             };
 
             let auth = match token_provider {
-                Some(provider) => sync::SyncAuth::Bearer(provider.current_token()),
+                Some(provider) => sync::SyncAuth::Bearer(
+                    self.credential
+                        .current_manifest_token(provider, &self.cancel)
+                        .await?,
+                ),
                 None => sync::SyncAuth::UrlToken,
             };
 

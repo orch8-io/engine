@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Bounded manifest token callbacks
+
+- Run manifest token getters on the blocking executor so operation timeout and
+  shutdown can return while a non-cooperative host getter remains in flight.
+- Share two physical callback slots with node refreshes. Retain admission
+  through timeout and foreign destruction, skip abandoned queued work, and
+  reject exhausted admission before host entry. Reject blank credentials and
+  convert callback panic to a generic engine error before transport dispatch.
+- Add callback lifetime, shared-capacity, queue, engine-retirement, and real
+  transport-suppression regressions. No FFI signature changes.
+
 ### KMP manifest credential isolation
 
 - Capture immutable per-sync credential IDs in Kotlin and Swift instead of a

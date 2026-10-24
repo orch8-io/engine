@@ -293,6 +293,14 @@ impl SyncOrchestrator {
         Ok(url)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_http_client_for_test(&self, client: reqwest::Client) {
+        assert!(
+            self.http.set(client).is_ok(),
+            "install the test client before the first sync"
+        );
+    }
+
     fn http_client(&self) -> &reqwest::Client {
         self.http
             .get_or_init(|| crate::build_mobile_http_client(Duration::from_secs(30)))
