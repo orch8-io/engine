@@ -1404,3 +1404,14 @@ Actions runs to establish the same evidence. The organization open-PR search
 finds only the two monitored engine PRs. These are repository/CI observations,
 not a claim that current native artifacts or the scoped SDK contract satisfy
 ADR-0002. Those release/platform gates remain open.
+
+
+### DME092 — New child lookup migrations omitted release metadata (fixed)
+
+PR #285's full hosted Unit Tests job reached the migration contract and exposed
+an omitted rollback header and an unchanged exported storage schema version.
+The exported version is used by health/backup metadata and must track the newest
+forward migration. Migration 122 now reports version 122 and its rollback names
+the indexes it removes. The complete 15-test migration rollback integration
+suite passes locally. The dependent migration 123 must carry the same correction
+and its own version increment; exact-head hosted checks remain required.
