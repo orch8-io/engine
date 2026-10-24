@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { EmbedClient } from "../src/client.js";
 import { badgeHref } from "../src/badge.js";
-import { cssVarsRule, safeLogoUrl, sanitizeCssVars } from "../src/theme.js";
+import { cssVarsRule, loadTheme, safeLogoUrl, sanitizeCssVars } from "../src/theme.js";
 import { BASE, makeToken, mockEngine, mount, styleText, THEME, waitFor } from "./helpers.js";
 
 describe("theme", () => {
@@ -82,5 +83,23 @@ describe("i18n", () => {
     const { root } = mount("orch8-runs", { "base-url": BASE, token: makeToken(), "poll-interval": "0" }, { fetchImpl: engine.fetch, strings: { runsEmpty: "Noch keine Läufe." } });
     await waitFor(() => root.querySelector('[part="empty"]'));
     expect(root.textContent).toContain("Noch keine Läufe.");
+  });
+});
+
+describe("theme cache account boundaries", () => {
+  it("does not share themes for distinct opaque credentials", async () => {
+    const engine = mockEngine({ "GET /theme": (call) => ({ body: { ...THEME, css_vars: { accent: call.auth === "Bearer opaque-a" ? "#aaa" : "#bbb" } } }) });
+    const a = new EmbedClient({ baseUrl: BASE, token: "opaque-a", fetch: engine.fetch });
+    const b = new EmbedClient({ baseUrl: BASE, token: "opaque-b", fetch: engine.fetch });
+    expect((await loadTheme(a)).css_vars.accent).toBe("#aaa");
+    expect((await loadTheme(b)).css_vars.accent).toBe("#bbb");
+  });
+
+  it("bounds retained themes during long-lived account switching", async () => {
+    const engine = mockEngine({ "GET /theme": { body: THEME } });
+    const clientFor = (sub: string) => new EmbedClient({ baseUrl: BASE, token: makeToken({ sub }), fetch: engine.fetch });
+    for (let i = 0; i < 160; i++) await loadTheme(clientFor(`account-${i}`));
+    await loadTheme(clientFor("account-0"));
+    expect(engine.calls).toHaveLength(161);
   });
 });

@@ -691,7 +691,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["slack"]["status"], "sent");
-        assert_eq!(out["email"]["status"], "sent");
+        if cfg!(feature = "email") {
+            assert_eq!(out["email"]["status"], "sent");
+        } else {
+            assert_eq!(out["email"]["status"], "failed");
+            assert!(
+                out["email"]["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("requires the `email` feature")
+            );
+            assert!(
+                mail_rx.try_recv().is_err(),
+                "a feature-disabled build must not send email"
+            );
+        }
 
         let slack_body: Value = serde_json::from_str(&slack_rx.recv().await.unwrap()).unwrap();
         let actions = slack_body["blocks"]
@@ -721,25 +735,27 @@ mod tests {
             "raw tokens must not be in output"
         );
 
-        let mail: Value = serde_json::from_str(&mail_rx.recv().await.unwrap()).unwrap();
-        let text = mail["text"].as_str().unwrap();
-        assert!(text.contains("https://orch8.example.com/approvals/act/"));
-        let link_token = text
-            .split("https://orch8.example.com/approvals/act/")
-            .nth(1)
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap();
-        assert_eq!(
-            storage
-                .get_approval_token(&hash_token(link_token))
-                .await
+        if cfg!(feature = "email") {
+            let mail: Value = serde_json::from_str(&mail_rx.recv().await.unwrap()).unwrap();
+            let text = mail["text"].as_str().unwrap();
+            assert!(text.contains("https://orch8.example.com/approvals/act/"));
+            let link_token = text
+                .split("https://orch8.example.com/approvals/act/")
+                .nth(1)
                 .unwrap()
-                .unwrap()
-                .channel,
-            ApprovalChannel::Email
-        );
+                .split_whitespace()
+                .next()
+                .unwrap();
+            assert_eq!(
+                storage
+                    .get_approval_token(&hash_token(link_token))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .channel,
+                ApprovalChannel::Email
+            );
+        }
 
         // Re-running (retry / recovery) does not re-send live channels.
         let again = send_interactive_approvals(&ctx, &cfg, "check refund", &Value::Null)

@@ -66,14 +66,9 @@ export class Orch8ApprovalsElement extends Orch8Element {
     this.signature = "";
   }
 
-  /** A half-typed comment or a picked choice must survive credential swaps. */
-  protected override hasUnsavedChanges(): boolean {
-    for (const card of this.cards.values()) {
-      const comment = card.form.querySelector<HTMLTextAreaElement>("textarea");
-      if (comment && comment.value.trim() !== "") return true;
-      if (card.form.querySelector('input[type="radio"]:checked')) return true;
-    }
-    return false;
+  protected override onIdentityChanged(): void {
+    this.approvals = [];
+    this.onAttributeChanged();
   }
 
   protected override renderStaleMs(): number {
@@ -82,6 +77,7 @@ export class Orch8ApprovalsElement extends Orch8Element {
 
   protected async load(signal: AbortSignal, mode: LoadMode): Promise<LoadResult> {
     const res = await this.client.listApprovals(signal);
+    if (signal.aborted) return;
     const only = this.getAttribute("instance-id");
     this.approvals = only ? res.items.filter((a) => a.instance_id === only) : res.items;
     const signature = JSON.stringify(this.approvals);
@@ -165,6 +161,7 @@ export class Orch8ApprovalsElement extends Orch8Element {
   async resolve(id: string): Promise<void> {
     const card = this.cards.get(id);
     if (!card) return;
+    const signal = this.operationSignal;
     const data = new FormData(card.form);
     const radio = card.form.querySelector<HTMLInputElement>('input[type="radio"]:checked');
     const choice = radio?.value ?? "";
@@ -180,7 +177,8 @@ export class Orch8ApprovalsElement extends Orch8Element {
     card.form.setAttribute("aria-busy", "true");
     card.submit.textContent = this.t("approvalsSubmitting");
     try {
-      await this.client.resolveApproval(id, comment ? { choice, comment } : { choice });
+      await this.client.resolveApproval(id, comment ? { choice, comment } : { choice }, signal);
+      if (signal.aborted) return;
       this.removeCard(id, this.t("approvalsResolved"));
       this.emit<ApprovalResolvedDetail>("orch8-approval-resolved", {
         id,
@@ -189,6 +187,7 @@ export class Orch8ApprovalsElement extends Orch8Element {
         ...(comment ? { comment } : {}),
       });
     } catch (err) {
+      if (signal.aborted) return;
       if (err instanceof Orch8EmbedError && (err.kind === "conflict" || err.kind === "not_found")) {
         this.removeCard(id, this.t("approvalsAlreadyResolved"));
         return;

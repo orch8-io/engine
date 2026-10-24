@@ -54,6 +54,10 @@ export class Orch8RunTimelineElement extends Orch8Element {
     }
   }
 
+  protected override onIdentityChanged(): void {
+    this.onAttributeChanged("run-id");
+  }
+
   protected override ready(): boolean {
     return Boolean(this.runId);
   }
@@ -73,6 +77,7 @@ export class Orch8RunTimelineElement extends Orch8Element {
     const id = this.runId;
     if (!id) return;
     const run = await this.client.getRun(id, signal);
+    if (signal.aborted) return;
     const signature = JSON.stringify(run);
     if (mode === "refresh" && signature === this.signature) return "unchanged"; // keep focus, scroll, selection
     this.signature = signature;

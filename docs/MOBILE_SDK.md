@@ -953,6 +953,12 @@ else `registerNode`, and `startWorker`) the journal is drained:
 | started, no outcome  | `release {started: true}` — server marks the effect unknown |
 | outcome recorded     | re-deliver `complete` / `fail`                              |
 
+The shared HTTP client retains the poll's lease grant on legacy task records
+that omit it. A positive per-task grant overrides the poll default. Zero grants
+are treated as missing; defaults outside the per-task integer range are ignored
+when calculating heartbeat intervals. Diagnostic API URLs omit user information,
+query strings, and fragments.
+
 Claims are scoped to the control-plane API base, worker runtime ID, task ID,
 and claim epoch. A delayed settlement from an older lease cannot alter a newer
 lease's recovery evidence. Duplicate delivery preserves any recorded start or
@@ -983,13 +989,23 @@ policy that outcome is **unknown**, not failed, so the worker answers
   server resolves the same way);
 - until the timed-out call actually returns, the worker **claims no new task
   for that handler**, so a retry never runs on the same device concurrently
-  with the attempt it replaces. The quarantine ends when the call returns, or
-  after 15 minutes for a call that never does (logged);
+  with the attempt it replaces. Quarantine lasts until the native call returns;
+  elapsed time cannot establish that its side effect stopped. A call still
+  running after 15 minutes emits one diagnostic and remains quarantined. Other
+  handlers remain eligible for work. A permanently stuck callback requires host
+  remediation or process restart, which ends that physical invocation;
 - the late result of the timed-out call is discarded; it is never reported.
 
 Handlers that can take longer than the step timeout should either raise the
 step's `timeout` or pass `__orch8.effect_id` downstream as an idempotency key,
 so a retry that reaches the same backend is deduplicated there.
+
+Overlapping background windows retain independent claim permissions. Returning
+from or cancelling one window revokes only that window; after the last window
+ends, a paused worker stops claiming. Stopping the worker also prevents a late
+poll response from starting new callbacks; those claims are released unstarted.
+Lease loss drops the handler wrapper immediately, including when a remote task
+timeout is configured, so any native call still running remains quarantined.
 
 ## Delegating from a phone-local workflow
 

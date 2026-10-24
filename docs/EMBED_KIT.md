@@ -96,21 +96,16 @@ export async function POST() {
 <script type="module">
   import "https://cdn.jsdelivr.net/npm/@orch8/embed/dist/cdn/orch8-embed.esm.min.js";
 
-  // One provider for every widget: fetches from your route, refreshes on expiry and on 401.
-  let cached = null;
-  async function tokenProvider({ reason }) {
-    if (
-      cached &&
-      reason !== "unauthorized" &&
-      Date.parse(cached.expires_at) - Date.now() > 60_000
-    )
-      return cached.token;
+  // The SDK coalesces refreshes within an engine/account authorization context.
+  // Do not retain a separate unscoped token cache across account changes.
+  async function tokenProvider() {
     const res = await fetch("/api/orch8/embed-token", {
       method: "POST",
       credentials: "same-origin",
     });
-    cached = await res.json();
-    return cached.token;
+    if (!res.ok) throw new Error("embed token mint failed");
+    const result = await res.json();
+    return result.token;
   }
   for (const el of document.querySelectorAll(
     "orch8-runs, orch8-run-timeline, orch8-approvals, orch8-builder",
@@ -156,8 +151,10 @@ const baseUrl = "https://orch8.example.com";
 
 export function Automations({
   tokenProvider,
+  authContext,
 }: {
   tokenProvider: TokenProvider;
+  authContext: string;
 }) {
   const router = useRouter();
   return (
@@ -165,12 +162,14 @@ export function Automations({
       <Orch8Runs
         baseUrl={baseUrl}
         tokenProvider={tokenProvider}
+        authContext={authContext}
         startSequence="customer-onboarding"
         onRunSelect={({ id }) => router.push(`/runs/${id}`)}
       />
       <Orch8Approvals
         baseUrl={baseUrl}
         tokenProvider={tokenProvider}
+        authContext={authContext}
         onApprovalResolved={({ choice }) => console.log(`Recorded ${choice}`)}
       />
     </>
@@ -189,8 +188,9 @@ Every widget takes these:
 | Attribute / prop              |                                                                                                                                                              |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `base-url` / `baseUrl`        | Engine origin. `/api/v1/embed` is appended. Defaults to the page origin.                                                                                     |
+| `auth-context` / `authContext` | Application account/session key. Change it on account switches to clear the old view, drafts, and pending operations. |
 | `token`                       | Static embed token.                                                                                                                                          |
-| `tokenProvider` (JS property) | `({ reason: "initial" \| "expiring" \| "unauthorized" }) => string \| Promise<string>`. Called when there is no token, 30 s before `exp`, and once on a 401. |
+| `tokenProvider` (JS property) | `({ reason, baseUrl, authContext }) => string \| Promise<string>`. Called when there is no token, 30 s before `exp`, and once on a 401. |
 | `theme`                       | JSON object of `--orch8-*` variables (with or without the prefix). Overrides the server theme.                                                               |
 | `color-scheme`                | `light`, `dark` or `auto` (default: follow the OS).                                                                                                          |
 | `locale`                      | BCP 47 tag for dates and relative times.                                                                                                                     |
@@ -285,6 +285,27 @@ somewhere else, for example in your app footer, use `<orch8-badge vendor="acme">
 - Approval cards are matched by ID on refresh, so polling never discards a
   comment someone is typing.
 
+Account/session changes are different from polling. Set `authContext` (React)
+or `auth-context` / `authContext` (custom elements) to your current account/session
+key and change it whenever the session changes. Also update or remove any static
+token. The provider must mint for the requesting account; the server must derive
+and authorize that identity from its authenticated session, rather than trusting
+a client-supplied account label. React's stable inline provider callback alone
+does not signal an account switch.
+
+Changing authorization, engine base, provider, transport, or explicit account
+context clears the previous model and drafts immediately. Normal token rotation
+with unchanged tenant, customer, scopes, and sequence restrictions preserves the
+view and unsaved input. Applications that preserve drafts across account changes
+must store them under their originating identity.
+
+Outstanding reads, theme loads, saves, approvals, and run starts cannot apply late
+results or emit old-account payloads after a context change or disconnection. A
+cancelled save returns `false`; a cancelled programmatic run start rejects with
+an `aborted` error. A mutation already accepted by the server may still finish;
+cancelling the view does not undo it. Refresh sharing retains at most 64 contexts
+per provider, and theme sharing retains at most 128 contexts per page.
+
 ## Reliability
 
 - **Retries.** `GET` and `PUT` retry 5xx, 429 and network errors 3 times,
@@ -303,7 +324,7 @@ somewhere else, for example in your app footer, use `<orch8-badge vendor="acme">
 
 ```ts
 import { EmbedClient } from "@orch8/embed";
-const client = new EmbedClient({ baseUrl, tokenProvider });
+const client = new EmbedClient({ baseUrl, tokenProvider, authContext });
 await client.startRun({
   sequence: "customer-onboarding",
   input: { plan: "pro" },

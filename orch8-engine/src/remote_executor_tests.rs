@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use serde_json::json;
@@ -15,6 +16,11 @@ struct FakeTransport {
     retry_completes: AtomicUsize,
     /// Override for every `heartbeat` answer (default `Accepted`).
     heartbeat_response: Mutex<Option<LeaseResponse>>,
+    ignore_capacity: std::sync::atomic::AtomicBool,
+    claim_calls: AtomicUsize,
+    release_gate: Mutex<Option<Arc<Semaphore>>>,
+    releases_active: AtomicUsize,
+    peak_releases: AtomicUsize,
 }
 
 impl FakeTransport {
@@ -60,9 +66,15 @@ impl LeaseTransport for FakeTransport {
         capacity: u32,
         _capabilities: &RuntimeCapabilities,
     ) -> Result<Claimed, String> {
+        self.claim_calls.fetch_add(1, Ordering::SeqCst);
         let mut queue = self.queue.lock().unwrap();
         let mut tasks = Vec::new();
-        while tasks.len() < capacity as usize {
+        let limit = if self.ignore_capacity.load(Ordering::SeqCst) {
+            usize::MAX
+        } else {
+            capacity as usize
+        };
+        while tasks.len() < limit {
             let Some(index) = queue
                 .iter()
                 .position(|task| handlers.contains(&task.handler_name))
@@ -111,7 +123,24 @@ impl LeaseTransport for FakeTransport {
     }
 
     async fn release(&self, task: &ClaimedTask, started: bool) -> LeaseResponse {
-        self.record("release", task, json!({"started": started}));
+        struct Active<'a>(&'a AtomicUsize);
+        impl Drop for Active<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let active = self.releases_active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_releases.fetch_max(active, Ordering::SeqCst);
+        let _active = Active(&self.releases_active);
+        self.record(
+            "release",
+            task,
+            json!({"started": started, "claim_epoch": task.task.claim_epoch}),
+        );
+        let gate = self.release_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            let _permit = gate.acquire().await.unwrap();
+        }
         LeaseResponse::Accepted
     }
 }
@@ -528,16 +557,520 @@ async fn panicking_handler_does_not_leak_an_in_flight_slot() {
         task: task("boom", json!({})),
         session: 0,
     };
-    let permit = Arc::clone(&exec.slots).try_acquire_owned().unwrap();
-    let runner = Arc::clone(&exec);
-
-    let joined = tokio::spawn(async move {
-        runner
-            .execute(claimed, permit, Duration::from_secs(30))
-            .await;
-    })
-    .await;
-
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(&mut tasks, claimed, Duration::from_secs(30));
+    let joined = tasks.join_next().await.unwrap();
     assert!(joined.unwrap_err().is_panic());
     assert_eq!(exec.in_flight(), 0);
+}
+
+/// Claimed work must be returned before unrelated handler polls can fail or
+/// consume its lease while the executor has not started heartbeating it yet.
+#[tokio::test]
+async fn http_claim_returns_owned_work_before_polling_another_handler() {
+    use axum::{Json, Router, http::StatusCode};
+    let polls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured = Arc::clone(&polls);
+    let queued = task("transform", json!({}));
+    let task_id = queued.id;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let app = Router::new().fallback(move |Json(body): Json<Value>| {
+            let polls = Arc::clone(&captured);
+            let task = queued.clone();
+            async move {
+                let handler = body["handler_name"].as_str().unwrap().to_owned();
+                polls.lock().unwrap().push(handler.clone());
+                if handler == "transform" {
+                    (
+                        StatusCode::OK,
+                        Json(json!({"tasks":[{"id":task.id,"instance_id":task.instance_id,"block_id":task.block_id,"handler_name":task.handler_name,"claim_epoch":task.claim_epoch}], "lease_secs":1})),
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error":"other handler unavailable"})),
+                    )
+                }
+            }
+        });
+        axum::serve(listener, app).await.unwrap();
+    });
+    let lease = HttpLeaseClient::new(reqwest::Client::new(), &base, Vec::new(), "worker".into());
+    let transport = HttpLeaseTransport::new(lease, "acme".into(), "test".into());
+    let identity = ExecutorIdentity {
+        runtime_id: RuntimeId::new(),
+        host: "worker".into(),
+        tenant_id: "acme".into(),
+        labels: BTreeMap::new(),
+        regions: Vec::new(),
+        handlers: vec!["transform".into(), "unavailable".into()],
+        credentials: Vec::new(),
+    };
+    let result = transport
+        .claim(&identity.handlers, 2, &identity.capabilities(false))
+        .await;
+    let first_polls = polls.lock().unwrap().clone();
+    let next = transport
+        .claim(&identity.handlers, 1, &identity.capabilities(false))
+        .await;
+    server.abort();
+    let claimed = result.expect("a later poll must not discard an already claimed task");
+    assert_eq!(claimed.tasks.len(), 1);
+    assert_eq!(claimed.tasks[0].task.id, task_id);
+    assert_eq!(first_polls, ["transform"]);
+    assert!(next.is_err());
+    assert_eq!(
+        *polls.lock().unwrap(),
+        ["transform", "unavailable"],
+        "the next call advances fairly to the next handler"
+    );
+}
+
+async fn gated_executor(
+    capacity: u32,
+) -> (
+    Arc<RemoteExecutor>,
+    Arc<FakeTransport>,
+    Arc<Semaphore>,
+    Arc<AtomicUsize>,
+) {
+    let transport = Arc::new(FakeTransport::default());
+    let mut exec = executor(
+        Arc::clone(&transport),
+        LocalCredentials::default(),
+        None,
+        Duration::from_secs(1),
+    )
+    .await;
+    let gate = Arc::new(Semaphore::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_gate = Arc::clone(&gate);
+    let handler_calls = Arc::clone(&calls);
+    let inner = Arc::get_mut(&mut exec).unwrap();
+    inner.settings.max_concurrent_tasks = capacity;
+    inner.slots = Arc::new(Semaphore::new(usize::try_from(capacity).unwrap()));
+    inner.registry.register("transform", move |_| {
+        let gate = Arc::clone(&handler_gate);
+        let calls = Arc::clone(&handler_calls);
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let _permit = gate.acquire().await.unwrap();
+            Ok(json!({"done":true}))
+        }
+    });
+    (exec, transport, gate, calls)
+}
+
+#[tokio::test]
+async fn duplicate_delivery_with_free_slots_invokes_the_callback_once() {
+    let (exec, transport, gate, calls) = gated_executor(2).await;
+    let original = task("transform", json!({}));
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: original.clone(),
+            session: 1,
+        },
+        Duration::from_secs(30),
+    );
+    wait_until("the original invocation", || {
+        calls.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: original,
+            session: 2,
+        },
+        Duration::from_secs(30),
+    );
+    gate.add_permits(2);
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "reconnecting streams cannot replay a live callback"
+    );
+    assert_eq!(transport.calls("complete").len(), 1);
+    assert!(transport.calls("release").is_empty());
+    assert_eq!(exec.in_flight(), 0);
+}
+
+#[tokio::test]
+async fn duplicate_delivery_when_full_does_not_release_the_original_lease() {
+    let (exec, transport, gate, calls) = gated_executor(1).await;
+    let original = task("transform", json!({}));
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: original.clone(),
+            session: 1,
+        },
+        Duration::from_secs(30),
+    );
+    wait_until("the original invocation", || {
+        calls.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: original,
+            session: 2,
+        },
+        Duration::from_secs(30),
+    );
+    gate.add_permits(1);
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+    assert!(
+        transport.calls("release").is_empty(),
+        "a duplicate must not revoke the live claim merely because slots are full"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn stale_delivery_cannot_run_alongside_a_newer_active_generation() {
+    let (exec, transport, gate, calls) = gated_executor(2).await;
+    let original = task("transform", json!({}));
+    let mut stale = original.clone();
+    stale.claim_epoch -= 1;
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: original,
+            session: 2,
+        },
+        Duration::from_secs(30),
+    );
+    wait_until("the current invocation", || {
+        calls.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: stale,
+            session: 1,
+        },
+        Duration::from_secs(30),
+    );
+    gate.add_permits(2);
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "an older generation must not enter a second callback"
+    );
+    assert!(transport.calls("release").is_empty());
+}
+
+#[tokio::test]
+async fn surplus_release_fanout_is_bounded_and_backpressures_new_claims() {
+    let (mut exec, transport, handler_gate, calls) = gated_executor(1).await;
+    Arc::get_mut(&mut exec).unwrap().settings.advertise_interval = Duration::from_millis(10);
+    let network_gate = Arc::new(Semaphore::new(0));
+    *transport.release_gate.lock().unwrap() = Some(Arc::clone(&network_gate));
+    transport.ignore_capacity.store(true, Ordering::SeqCst);
+    for _ in 0..101 {
+        transport.push(task("transform", json!({})));
+    }
+    let shutdown = CancellationToken::new();
+    let runner = Arc::clone(&exec);
+    let stop = shutdown.clone();
+    let running = tokio::spawn(async move { runner.run(stop).await });
+    wait_until("eight pending releases", || {
+        transport.releases_active.load(Ordering::SeqCst) >= 8
+    })
+    .await;
+    wait_until("the accepted callback", || {
+        calls.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    handler_gate.add_permits(1);
+    wait_until("the accepted completion", || {
+        transport.calls("complete").len() == 1
+    })
+    .await;
+    let ads = transport.advertisements.lock().unwrap().len();
+    wait_until("the controller servicing its next advertisement", || {
+        transport.advertisements.lock().unwrap().len() > ads
+    })
+    .await;
+    let peak = transport.peak_releases.load(Ordering::SeqCst);
+    let polls = transport.claim_calls.load(Ordering::SeqCst);
+    shutdown.cancel();
+    network_gate.add_permits(101);
+    let stats = running.await.unwrap();
+    assert!(
+        peak <= 8,
+        "overdelivery started {peak} concurrent release requests"
+    );
+    assert_eq!(
+        polls, 1,
+        "a pending surplus batch must backpressure additional claims"
+    );
+    assert_eq!(stats.released, 100);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.releases_active.load(Ordering::SeqCst), 0);
+    assert_eq!(exec.in_flight(), 0);
+}
+
+#[tokio::test]
+async fn pending_unstarted_release_prevents_reentering_the_same_lease() {
+    let (exec, transport, gate, calls) = gated_executor(1).await;
+    let network_gate = Arc::new(Semaphore::new(0));
+    *transport.release_gate.lock().unwrap() = Some(Arc::clone(&network_gate));
+    let first = task("transform", json!({}));
+    let surplus = task("transform", json!({}));
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: first,
+            session: 0,
+        },
+        Duration::from_secs(30),
+    );
+    wait_until("the first callback", || calls.load(Ordering::SeqCst) == 1).await;
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: surplus.clone(),
+            session: 0,
+        },
+        Duration::from_secs(30),
+    );
+    wait_until("the pending surplus release", || {
+        transport.releases_active.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    gate.add_permits(1);
+    wait_until("the first completion", || {
+        transport.calls("complete").len() == 1
+    })
+    .await;
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: surplus,
+            session: 1,
+        },
+        Duration::from_secs(30),
+    );
+    network_gate.add_permits(1);
+    exec.drain(tasks).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a late unstarted release must not race a new callback for the same lease"
+    );
+    assert_eq!(transport.calls("release").len(), 1);
+}
+
+#[tokio::test]
+async fn newer_delivery_cancels_its_predecessor_and_defers_the_new_callback() {
+    let (exec, transport, gate, calls) = gated_executor(2).await;
+    let first = task("transform", json!({}));
+    let mut newer = first.clone();
+    newer.claim_epoch += 1;
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: first,
+            session: 0,
+        },
+        Duration::from_secs(30),
+    );
+    wait_until("the predecessor", || calls.load(Ordering::SeqCst) == 1).await;
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: newer.clone(),
+            session: 1,
+        },
+        Duration::from_secs(30),
+    );
+    gate.add_permits(2);
+    while let Some(joined) = tasks.join_next().await {
+        joined.unwrap();
+    }
+    let first_phase_calls = calls.load(Ordering::SeqCst);
+    let deferred = transport
+        .calls("release")
+        .iter()
+        .any(|(_, body)| body["claim_epoch"] == newer.claim_epoch && body["started"] == false);
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: newer,
+            session: 1,
+        },
+        Duration::from_secs(30),
+    );
+    while let Some(joined) = tasks.join_next().await {
+        joined.unwrap();
+    }
+    assert_eq!(
+        first_phase_calls, 1,
+        "a replacement generation must not overlap its predecessor"
+    );
+    assert!(
+        deferred,
+        "the replacement must be returned unstarted while its predecessor is live"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(exec.in_flight(), 0);
+}
+
+#[tokio::test]
+async fn cancelling_a_queued_callback_frees_its_claim_and_slot() {
+    let (exec, _transport, _gate, calls) = gated_executor(1).await;
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: task("transform", json!({})),
+            session: 0,
+        },
+        Duration::from_secs(30),
+    );
+    assert_eq!(
+        exec.in_flight(),
+        1,
+        "ownership must exist before the task is first polled"
+    );
+    tasks.abort_all();
+    while let Some(result) = tasks.join_next().await {
+        assert!(result.unwrap_err().is_cancelled());
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(exec.in_flight(), 0);
+    assert_eq!(exec.slots.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn stopping_with_a_blocked_release_backlog_clears_owned_resources() {
+    let (exec, transport, _handler_gate, calls) = gated_executor(1).await;
+    *transport.release_gate.lock().unwrap() = Some(Arc::new(Semaphore::new(0)));
+    transport.ignore_capacity.store(true, Ordering::SeqCst);
+    for _ in 0..101 {
+        transport.push(task("transform", json!({})));
+    }
+    tokio::time::pause();
+    let shutdown = CancellationToken::new();
+    let stop = shutdown.clone();
+    let runner = Arc::clone(&exec);
+    let running = tokio::spawn(async move { runner.run(stop).await });
+    wait_until("the callback and release backlog", || {
+        calls.load(Ordering::SeqCst) == 1 && transport.releases_active.load(Ordering::SeqCst) == 8
+    })
+    .await;
+    let start = tokio::time::Instant::now();
+    shutdown.cancel();
+    running.await.unwrap();
+    assert!(
+        start.elapsed() <= Duration::from_secs(12),
+        "cleanup exceeded drain plus release/abort grace"
+    );
+    assert!(!exec.has_pending_releases());
+    assert_eq!(transport.releases_active.load(Ordering::SeqCst), 0);
+    assert_eq!(exec.in_flight(), 0);
+    assert_eq!(exec.slots.available_permits(), 1);
+    assert_eq!(exec.release_slots.available_permits(), 8);
+}
+
+#[tokio::test]
+async fn already_cancelled_controller_never_advertises_or_claims() {
+    let (exec, transport, _gate, calls) = gated_executor(1).await;
+    let stop = CancellationToken::new();
+    stop.cancel();
+    exec.run(stop).await;
+    assert!(
+        transport.advertisements.lock().unwrap().is_empty(),
+        "a cancelled start must not revive or withdraw capability"
+    );
+    assert_eq!(transport.claim_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cancelling_a_queued_controller_does_not_drain_the_active_controller() {
+    let (exec, transport, gate, calls) = gated_executor(1).await;
+    transport.push(task("transform", json!({})));
+    let first_stop = CancellationToken::new();
+    let worker = Arc::clone(&exec);
+    let stop = first_stop.clone();
+    let first = tokio::spawn(async move { worker.run(stop).await });
+    wait_until("the active controller's callback", || {
+        calls.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    let queued_stop = CancellationToken::new();
+    let stop = queued_stop.clone();
+    let worker = Arc::clone(&exec);
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    let second = tokio::spawn(async move {
+        entered.send(()).unwrap();
+        worker.run(stop).await
+    });
+    ready.await.unwrap();
+    queued_stop.cancel();
+    second.await.unwrap();
+    let advertisements = transport.advertisements.lock().unwrap().clone();
+    let still_active = !first.is_finished();
+    first_stop.cancel();
+    gate.add_permits(1);
+    first.await.unwrap();
+    assert_eq!(
+        advertisements.len(),
+        1,
+        "a queued controller must not duplicate or withdraw the active owner's advertisement"
+    );
+    assert!(!advertisements[0].draining);
+    assert!(still_active);
+}
+
+#[tokio::test]
+async fn queued_controller_can_restart_after_its_predecessor_drains() {
+    let (exec, transport, gate, calls) = gated_executor(1).await;
+    transport.push(task("transform", json!({})));
+    let first_stop = CancellationToken::new();
+    let worker = Arc::clone(&exec);
+    let stop = first_stop.clone();
+    let first = tokio::spawn(async move { worker.run(stop).await });
+    wait_until("the first controller", || calls.load(Ordering::SeqCst) == 1).await;
+    let second_stop = CancellationToken::new();
+    let worker = Arc::clone(&exec);
+    let stop = second_stop.clone();
+    let second = tokio::spawn(async move { worker.run(stop).await });
+    transport.push(task("transform", json!({})));
+    first_stop.cancel();
+    gate.add_permits(1);
+    first.await.unwrap();
+    wait_until("the successor controller", || {
+        calls.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    second_stop.cancel();
+    gate.add_permits(1);
+    second.await.unwrap();
+    let advertisements = transport.advertisements.lock().unwrap();
+    let draining: Vec<_> = advertisements.iter().map(|a| a.draining).collect();
+    assert_eq!(draining, vec![false, true, false, true]);
+    assert_eq!(exec.in_flight(), 0);
+    assert_eq!(exec.slots.available_permits(), 1);
 }

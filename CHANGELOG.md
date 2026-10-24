@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Distributed HTTP worker contracts
+
+- Keep hybrid executor credentials and payloads at the configured endpoint by
+  disabling redirects through the shared outbound HTTP profile.
+- Return claimed work before polling another handler, preserving leased batches
+  through later handler failures and keeping round-robin admission.
+- Retain poll-level leases on legacy task records while preserving explicit task
+  grants. Ignore invalid zero/oversized fallback hints when scheduling heartbeats.
+- Redact URL user information, query strings, and fragments in lease client Debug
+  output. Cover optional email behavior in lean engine tests.
+
+### Web component account ownership
+
+- Add `auth-context` / `authContext` to custom elements and React wrappers. Reset
+  models, drafts, theme, and pending operations when the account, authorization,
+  endpoint, provider, or transport changes; preserve ordinary token rotation.
+- Prevent late reads, saves, approvals, starts, and theme responses from updating
+  a replacement account view or emitting the previous account's payloads.
+- Cancel request waits promptly without cancelling shared token refreshes, and
+  prevent aborted mutations from dispatching through custom transports.
+- Isolate opaque theme credentials and bound page-wide theme retention to 128
+  authorization contexts.
+
+### Web embed credential isolation
+
+- Isolate shared token refresh by engine, provider, application auth context, and
+  initial authorization scope; reject tenant/customer changes during refresh.
+- Bound provider context retention and recover from synchronous provider errors.
+  Validate decoded token payload fields before using typed identity/scope data.
+- Update affected Happy DOM and Vite test tooling. Run locked dependency audits,
+  typecheck, lint, tests, and package builds for the embed SDK in CI.
+
+### Mobile worker cancellation and background windows
+
+- Keep remote timeout futures owned by the lease execution so losing the lease
+  quarantines any still-running native callback immediately.
+- Release background claim permission on cancellation and keep overlapping OS
+  windows independent. A stopped worker releases late tasks without starting them.
+- Retain native callback quarantine until physical completion instead of allowing
+  concurrent retries after 15 minutes. Prolonged calls emit one diagnostic while
+  unrelated handlers remain eligible for work.
+
 ### Mobile remote worker recovery
 
 - Scope durable claim evidence to the control plane, worker runtime, task, and

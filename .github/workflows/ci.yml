@@ -168,6 +168,28 @@ jobs:
           cargo bench --locked -p orch8-engine --bench engine_bench --profile test -- --test
           cargo bench --locked -p orch8-storage --bench storage_bench --profile test -- --test
 
+  embed:
+    name: Web embed SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Install pinned package manager
+        run: npm install --global pnpm@10.12.1
+      - name: Install locked dependencies
+        run: pnpm --dir packages/embed install --frozen-lockfile --ignore-scripts
+      - name: Dependency advisories
+        run: pnpm --dir packages/embed audit
+      - name: Typecheck, lint, test, and build
+        run: |
+          pnpm --dir packages/embed typecheck
+          pnpm --dir packages/embed lint
+          pnpm --dir packages/embed test
+          pnpm --dir packages/embed build
+
   dashboard:
     name: Dashboard
     runs-on: ubuntu-latest

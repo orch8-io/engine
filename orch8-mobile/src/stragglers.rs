@@ -6,9 +6,9 @@
 //! Such a *straggler* is tracked here until it actually returns, and the
 //! remote worker does not claim new work for that handler meanwhile — a retry
 //! of the same step must never run on this device concurrently with the
-//! attempt it replaces. A handler that never returns is quarantined for at
-//! most [`QUARANTINE_MAX`]; after that the worker claims for it again (and
-//! logs that the earlier invocation is still outstanding).
+//! attempt it replaces. Elapsed time cannot prove that a native side effect
+//! stopped: quarantine lasts until physical completion. A prolonged invocation
+//! emits one diagnostic after [`QUARANTINE_WARNING_AFTER`].
 
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
-/// Longest a timed-out invocation blocks new claims for its handler.
-pub(crate) const QUARANTINE_MAX: Duration = Duration::from_secs(15 * 60);
+/// When to warn about a live invocation that still blocks new claims.
+const QUARANTINE_WARNING_AFTER: Duration = Duration::from_secs(15 * 60);
 
 /// `details` marker on the `StepError` produced by a device-side timeout.
 pub(crate) const DEVICE_TIMEOUT_DETAIL: &str = "device_timeout";
@@ -30,6 +30,7 @@ pub(crate) struct Stragglers {
 struct Straggling {
     count: u32,
     since: Instant,
+    warned: bool,
 }
 
 impl Stragglers {
@@ -39,6 +40,7 @@ impl Stragglers {
         let entry = running.entry(handler.to_string()).or_insert(Straggling {
             count: 0,
             since: Instant::now(),
+            warned: false,
         });
         entry.count = entry.count.saturating_add(1);
     }
@@ -56,19 +58,19 @@ impl Stragglers {
 
     /// Whether new work for `handler` must wait for a straggler.
     pub(crate) fn blocks(&self, handler: &str) -> bool {
-        let running = self.lock();
-        let Some(entry) = running.get(handler) else {
+        let mut running = self.lock();
+        let Some(entry) = running.get_mut(handler) else {
             return false;
         };
-        if entry.since.elapsed() < QUARANTINE_MAX {
-            return true;
+        if !entry.warned && entry.since.elapsed() >= QUARANTINE_WARNING_AFTER {
+            entry.warned = true;
+            warn!(
+                handler,
+                outstanding = entry.count,
+                "native handler still running after 15 minutes; keeping retries quarantined"
+            );
         }
-        warn!(
-            handler,
-            outstanding = entry.count,
-            "timed-out handler invocation still running after the quarantine; claiming again"
-        );
-        false
+        true
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Straggling>> {
@@ -116,6 +118,21 @@ mod tests {
         assert!(stragglers.blocks("scan"));
         stragglers.end("scan");
         assert!(!stragglers.blocks("scan"));
+        stragglers.end("scan");
+        assert!(!stragglers.blocks("scan"));
+    }
+
+    #[test]
+    fn elapsed_quarantine_never_allows_a_retry_over_a_live_native_call() {
+        let stragglers = Stragglers::default();
+        stragglers.begin("scan");
+        stragglers.lock().get_mut("scan").unwrap().since = Instant::now()
+            .checked_sub(QUARANTINE_WARNING_AFTER + Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            stragglers.blocks("scan"),
+            "time passing does not stop a native side effect"
+        );
         stragglers.end("scan");
         assert!(!stragglers.blocks("scan"));
     }

@@ -160,7 +160,8 @@ impl LeaseAuth {
 
 /// HTTP client for the lease protocol, bound to one API base, credential,
 /// and worker identity. Transport hardening (TLS roots, timeouts) is the
-/// caller's `reqwest::Client`.
+/// caller's `reqwest::Client`. Credential-bearing requests must never follow
+/// redirects; use the appropriate [`crate::outbound`] profile.
 #[derive(Clone)]
 pub struct HttpLeaseClient {
     http: reqwest::Client,
@@ -172,7 +173,7 @@ pub struct HttpLeaseClient {
 impl std::fmt::Debug for HttpLeaseClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpLeaseClient")
-            .field("api_base", &self.api_base)
+            .field("api_base", &crate::outbound::redact_url(&self.api_base))
             .field("worker_id", &self.worker_id)
             .finish_non_exhaustive()
     }
@@ -307,7 +308,15 @@ impl HttpLeaseClient {
             .map_err(|e| network_err("poll tasks", &e))?;
         let resp = expect_success("poll tasks", resp).await?;
         let bytes = read_capped(resp).await?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("poll tasks: invalid response: {e}"))
+        let mut response: PollResponse = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("poll tasks: invalid response: {e}"))?;
+        let default_lease = valid_poll_lease(response.lease_secs);
+        for task in &mut response.tasks {
+            // A task carries its actual lease; the response is only a default
+            // for legacy records. Keep the grant with the task after batching.
+            task.lease_secs = task.lease_secs.filter(|lease| *lease > 0).or(default_lease);
+        }
+        Ok(response)
     }
 
     /// `POST /runtimes/register`: refresh this node's capability lease
@@ -440,8 +449,16 @@ async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, String> {
         })
 }
 
-/// Heartbeat cadence: the server's explicit interval, else a third of the
-/// tightest lease on offer, clamped to at least one second.
+/// Validate a legacy/default grant against the per-task wire type's range.
+fn valid_poll_lease(lease: Option<u64>) -> Option<u32> {
+    lease
+        .and_then(|seconds| u32::try_from(seconds).ok())
+        .filter(|seconds| *seconds > 0)
+}
+
+/// Heartbeat cadence: use the task's effective lease when present, otherwise
+/// the valid poll default (or the protocol default). The server interval may
+/// shorten the cadence, but cannot delay it beyond a third of that lease.
 #[must_use]
 pub fn heartbeat_interval(
     server_interval: Option<u64>,
@@ -449,10 +466,9 @@ pub fn heartbeat_interval(
     task_lease: Option<u32>,
 ) -> Duration {
     let lease = task_lease
-        .map(u64::from)
-        .or(response_lease)
-        .filter(|l| *l > 0)
-        .unwrap_or(DEFAULT_LEASE_SECS);
+        .filter(|lease| *lease > 0)
+        .or_else(|| valid_poll_lease(response_lease))
+        .map_or(DEFAULT_LEASE_SECS, u64::from);
     let from_lease = (lease / 3).max(1);
     let secs = server_interval
         .filter(|s| *s > 0)
@@ -510,6 +526,86 @@ pub fn step_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lease_client_debug_never_contains_url_credentials() {
+        let client = HttpLeaseClient::new(
+            reqwest::Client::new(),
+            "https://operator:URL_SECRET@example.invalid/api/v1?token=QUERY_SECRET#FRAGMENT_SECRET",
+            vec![("x-api-key", "HEADER_SECRET".into())],
+            "worker".into(),
+        );
+        let debug = format!("{client:?}");
+        for secret in [
+            "URL_SECRET",
+            "QUERY_SECRET",
+            "FRAGMENT_SECRET",
+            "HEADER_SECRET",
+        ] {
+            assert!(
+                !debug.contains(secret),
+                "debug output exposed credentials: {debug}"
+            );
+        }
+        assert!(debug.contains("example.invalid/api/v1"));
+    }
+
+    #[test]
+    fn heartbeat_prefers_the_actual_task_grant_then_a_valid_poll_default() {
+        assert_eq!(
+            heartbeat_interval(None, Some(3), Some(120)),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            heartbeat_interval(None, Some(3), Some(0)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            heartbeat_interval(None, Some(120), Some(3)),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn invalid_oversized_poll_lease_cannot_overflow_a_heartbeat_deadline() {
+        let interval = heartbeat_interval(None, Some(u64::MAX), None);
+        assert_eq!(interval, Duration::from_secs(DEFAULT_LEASE_SECS / 3));
+        assert!(tokio::time::Instant::now().checked_add(interval).is_some());
+    }
+
+    #[tokio::test]
+    async fn poll_preserves_its_lease_grant_on_legacy_task_records() {
+        use axum::{Json, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let app = Router::new().fallback(|| async {
+                Json(serde_json::json!({"tasks":[{
+                    "id":uuid::Uuid::new_v4(),"instance_id":uuid::Uuid::new_v4(),"block_id":"b","handler_name":"noop"
+                }, {
+                    "id":uuid::Uuid::new_v4(),"instance_id":uuid::Uuid::new_v4(),"block_id":"c","handler_name":"noop","lease_secs":120
+                }],"lease_secs":3}))
+            });
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client =
+            HttpLeaseClient::new(reqwest::Client::new(), &base, Vec::new(), "worker".into());
+        let now = chrono::Utc::now();
+        let capabilities: RuntimeCapabilities = serde_json::from_value(serde_json::json!({
+            "runtime_id":orch8_types::continuity::RuntimeId::new(),
+            "kind":"server", "trust":"registered", "observed_at":now,
+            "expires_at":now + chrono::Duration::minutes(2)
+        }))
+        .unwrap();
+        let response = client.poll("noop", 2, None, &capabilities).await.unwrap();
+        server.abort();
+        assert_eq!(response.tasks[0].lease_secs, Some(3));
+        assert_eq!(
+            response.tasks[1].lease_secs,
+            Some(120),
+            "an explicit task grant overrides the poll default"
+        );
+    }
 
     #[test]
     fn lease_status_classification() {

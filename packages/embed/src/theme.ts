@@ -1,8 +1,9 @@
 import type { EmbedClient } from "./client.js";
-import { decodeEmbedToken } from "./token.js";
+import { tokenAuthorizationIdentity } from "./token.js";
 import type { EmbedTheme } from "./types.js";
 
 const CACHE_TTL_MS = 5 * 60_000;
+const MAX_CACHED_THEMES = 128;
 const cache = new Map<string, { at: number; promise: Promise<EmbedTheme> }>();
 
 export const DEFAULT_THEME: EmbedTheme = { css_vars: {}, logo_url: null, hide_badge: false };
@@ -13,20 +14,35 @@ export function clearThemeCache(): void {
 }
 
 /**
- * Fetches `/embed/theme` once per (engine, tenant, sub-tenant) per 5 minutes and
- * shares it across all widgets on the page. Never rejects: failures fall back to
- * the default theme (badge shown).
+ * Shares themes for the same engine and authorization identity for 5 minutes.
+ * Opaque credentials stay isolated. Failures fall back to the default theme.
  */
-export function loadTheme(client: EmbedClient): Promise<EmbedTheme> {
-  const payload = decodeEmbedToken(client.currentToken);
-  const key = `${client.baseUrl}|${payload?.tid ?? "?"}|${payload?.sub ?? "?"}`;
+export async function loadTheme(client: EmbedClient): Promise<EmbedTheme> {
+  let token: string;
+  try {
+    token = await client.getToken();
+  } catch {
+    return DEFAULT_THEME;
+  }
+  const key = JSON.stringify([client.baseUrl, tokenAuthorizationIdentity(token) ?? token]);
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.promise;
-  const promise = client.getTheme().catch(() => {
+  const age = hit ? Date.now() - hit.at : Number.POSITIVE_INFINITY;
+  if (hit && age >= 0 && age < CACHE_TTL_MS) {
     cache.delete(key);
+    cache.set(key, hit);
+    return hit.promise;
+  }
+  const promise = client.getTheme().catch(() => {
+    // A failed expired request must not delete a newer replacement's entry.
+    if (cache.get(key)?.promise === promise) cache.delete(key);
     return DEFAULT_THEME;
   });
+  cache.delete(key);
   cache.set(key, { at: Date.now(), promise });
+  if (cache.size > MAX_CACHED_THEMES) {
+    const oldest = cache.keys().next();
+    if (!oldest.done) cache.delete(oldest.value);
+  }
   return promise;
 }
 

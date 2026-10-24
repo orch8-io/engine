@@ -60,7 +60,7 @@ fn http_transport(
 ) -> anyhow::Result<HttpLeaseTransport> {
     // HTTP/1.1 keep-alive is enough for lease polling and lets TLS
     // front-ends route by ALPN (h2 → gRPC, http/1.1 → REST).
-    let mut builder = reqwest::Client::builder()
+    let mut builder = orch8_engine::outbound::builder(orch8_engine::outbound::Profile::Operator)
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
         .http1_only()
@@ -327,5 +327,68 @@ mod tests {
             .managed_control_headers
             .insert("bad name".into(), "x".into());
         assert!(routing_header_map(&config).is_err());
+    }
+    #[tokio::test]
+    async fn hybrid_http_transport_never_forwards_credentials_to_redirect_targets() {
+        use axum::{
+            Router,
+            body::Bytes,
+            http::{HeaderMap, StatusCode},
+        };
+        use std::sync::Mutex;
+        let received = Arc::new(Mutex::new(None));
+        let capture = Arc::clone(&received);
+        let sink = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("http://{}/redirect-target", sink.local_addr().unwrap());
+        let sink_task = tokio::spawn(async move {
+            let app = Router::new().fallback(move |headers: HeaderMap, body: Bytes| {
+                let capture = Arc::clone(&capture);
+                async move {
+                    *capture.lock().unwrap() = Some((headers, body));
+                    StatusCode::NO_CONTENT
+                }
+            });
+            axum::serve(sink, app).await.unwrap();
+        });
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}/api/v1", source.local_addr().unwrap());
+        let source_task = tokio::spawn(async move {
+            let app = Router::new().fallback(move || {
+                let target = target.clone();
+                async move { (StatusCode::TEMPORARY_REDIRECT, [("location", target)]) }
+            });
+            axum::serve(source, app).await.unwrap();
+        });
+        let mut config = EngineConfig::default();
+        config.executor.api_url = api_url;
+        config.node.managed_control_api_key = "test-control-api-key".into();
+        config.node.managed_control_tenant_id = "test-tenant".into();
+        config.node.managed_control_headers.insert(
+            "x-control-routing-secret".into(),
+            "test-route-secret".into(),
+        );
+        let identity = ExecutorIdentity {
+            runtime_id: orch8_types::continuity::RuntimeId::new(),
+            host: "test-worker".into(),
+            tenant_id: "test-tenant".into(),
+            labels: std::collections::BTreeMap::new(),
+            regions: Vec::new(),
+            handlers: vec!["noop".into()],
+            credentials: Vec::new(),
+        };
+        let transport = http_transport(&config, &identity, None).unwrap();
+        let result = transport.advertise(&identity.capabilities(false)).await;
+        sink_task.abort();
+        source_task.abort();
+        let leaked = received.lock().unwrap().take();
+        assert!(
+            leaked.is_none(),
+            "credential-bearing registration reached the redirect target: {leaked:?}"
+        );
+        let error = result.expect_err("redirects must be rejected as unsuccessful lease responses");
+        assert!(
+            error.contains("HTTP 307"),
+            "the configured server must be reached without following its redirect: {error}"
+        );
     }
 }

@@ -284,9 +284,8 @@ pub(crate) struct Worker {
     slots: Arc<Semaphore>,
     in_flight: StdMutex<HashSet<ClaimKey>>,
     counters: Counters,
-    /// Set while a bounded background window may claim work even though the
-    /// app is not in the foreground.
-    window_active: AtomicBool,
+    /// Independently owned OS background windows, released on cancellation.
+    active_windows: AtomicU64,
     /// Bumped after every poll round that claimed nothing.
     idle_rounds: AtomicU64,
     cancel: CancellationToken,
@@ -304,6 +303,19 @@ impl Drop for InFlight<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.key);
+        self.wake.notify_one();
+    }
+}
+
+/// Each window owns one permission; cancellation and unwinding revoke it too.
+struct ClaimWindow<'a> {
+    active: &'a AtomicU64,
+    wake: &'a Notify,
+}
+
+impl Drop for ClaimWindow<'_> {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
         self.wake.notify_one();
     }
 }
@@ -335,7 +347,7 @@ impl Worker {
             slots: Arc::new(Semaphore::new(slots)),
             in_flight: StdMutex::new(HashSet::new()),
             counters: Counters::default(),
-            window_active: AtomicBool::new(false),
+            active_windows: AtomicU64::new(0),
             idle_rounds: AtomicU64::new(0),
             cancel: CancellationToken::new(),
         }))
@@ -387,8 +399,8 @@ impl Worker {
     /// May the worker claim new tasks right now?
     fn may_claim(&self) -> bool {
         let allowed_window = self.deps.signals.foreground.load(Ordering::Acquire)
-            || self.window_active.load(Ordering::Acquire);
-        allowed_window && self.power() != PowerState::CriticalBattery
+            || self.active_windows.load(Ordering::Acquire) > 0;
+        allowed_window && !self.cancel.is_cancelled() && self.power() != PowerState::CriticalBattery
     }
 
     fn idle_interval(&self) -> Duration {
@@ -705,29 +717,16 @@ impl Worker {
         else {
             return future.await;
         };
-        // Run the invocation as its own task so a timeout stops *waiting*
-        // without pretending the handler stopped: it keeps running and is
-        // tracked as a straggler until it returns.
-        let mut running = tokio::spawn(future);
-        match tokio::time::timeout(Duration::from_millis(ms), &mut running).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(join_error)) => Err(StepError::Permanent {
-                message: format!("handler task failed: {join_error}"),
-                details: None,
-            }),
-            Err(_elapsed) => {
-                let stragglers = Arc::clone(&self.deps.stragglers);
-                let handler_name = task.handler_name.clone();
-                stragglers.begin(&handler_name);
-                tokio::spawn(async move {
-                    let _ = running.await;
-                    stragglers.end(&handler_name);
-                });
+        // Keep ownership in this future. Losing the lease or timing out drops
+        // the foreign wrapper immediately, which aborts a queued native call
+        // or quarantines an already-running call until its physical completion.
+        tokio::time::timeout(Duration::from_millis(ms), future)
+            .await
+            .unwrap_or_else(|_| {
                 Err(device_timeout_error(format!(
                     "task timed out after {ms}ms on device"
                 )))
-            }
-        }
+            })
     }
 
     /// Bounded background window: claim and run tasks until the queue is
@@ -735,11 +734,15 @@ impl Worker {
     pub async fn run_window(&self, budget: Duration) -> WorkerWindowResult {
         let before = self.stats();
         let start_idle = self.idle_rounds.load(Ordering::Acquire);
-        self.window_active.store(true, Ordering::Release);
+        self.active_windows.fetch_add(1, Ordering::AcqRel);
+        let _window = ClaimWindow {
+            active: &self.active_windows,
+            wake: &self.wake,
+        };
         self.wake.notify_one();
-        let deadline = tokio::time::Instant::now() + budget;
+        let start = tokio::time::Instant::now();
         let mut exhausted = true;
-        while tokio::time::Instant::now() < deadline && !self.cancel.is_cancelled() {
+        while start.elapsed() < budget && !self.cancel.is_cancelled() {
             let idle_seen = self.idle_rounds.load(Ordering::Acquire) > start_idle;
             if idle_seen && self.in_flight_len() == 0 {
                 exhausted = false;
@@ -747,7 +750,6 @@ impl Worker {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        self.window_active.store(false, Ordering::Release);
         let after = self.stats();
         WorkerWindowResult {
             claimed: after.claimed - before.claimed,

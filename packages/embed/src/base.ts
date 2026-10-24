@@ -1,10 +1,10 @@
 import { renderBadge } from "./badge.js";
-import { EmbedClient, Orch8EmbedError } from "./client.js";
+import { EmbedClient, Orch8EmbedError, ownedWait } from "./client.js";
 import { h } from "./dom.js";
 import { defaultStrings, formatString, type Orch8StringKey, type Orch8Strings } from "./i18n.js";
 import { baseCss, createStyleSlot, type StyleSlot } from "./styles.js";
 import { cssVarsRule, DEFAULT_THEME, loadTheme, safeLogoUrl, sanitizeCssVars } from "./theme.js";
-import { decodeEmbedToken, type TokenProvider } from "./token.js";
+import { decodeEmbedToken, tokenAuthorizationIdentity, type TokenProvider } from "./token.js";
 import type { EmbedTheme } from "./types.js";
 import { VERSION } from "./version.js";
 
@@ -15,17 +15,13 @@ import { VERSION } from "./version.js";
 export const HTMLElementBase: typeof HTMLElement =
   typeof HTMLElement === "undefined" ? (class {} as unknown as typeof HTMLElement) : HTMLElement;
 
-export const BASE_ATTRIBUTES = ["token", "base-url", "color-scheme", "theme", "locale", "vendor", "nonce"] as const;
+export const BASE_ATTRIBUTES = ["token", "base-url", "auth-context", "color-scheme", "theme", "locale", "vendor", "nonce"] as const;
 
 type LoadMode = "initial" | "refresh";
 
 /** Returned by `load()` when a refresh found nothing new, so the DOM is left alone. */
 export type LoadResult = void | "unchanged";
 
-function identityOf(token: string | null): string | null {
-  const p = decodeEmbedToken(token);
-  return p ? `${p.tid}|${p.sub}` : null;
-}
 
 function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
   const ka = Object.keys(a);
@@ -57,6 +53,7 @@ export abstract class Orch8Element extends HTMLElementBase {
   private _fetch: typeof fetch | undefined;
   private _strings: Partial<Orch8Strings> = {};
   private abortCtl: AbortController | null = null;
+  private ownerCtl = new AbortController();
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private pollFailures = 0;
   private scheduled = false;
@@ -109,6 +106,44 @@ export abstract class Orch8Element extends HTMLElementBase {
     else this.removeAttribute("base-url");
   }
 
+  /** Application account/session boundary, especially for provider-only widgets. */
+  get authContext(): string | null {
+    return this.getAttribute("auth-context");
+  }
+  set authContext(value: string | null) {
+    if (value !== null) this.setAttribute("auth-context", value);
+    else this.removeAttribute("auth-context");
+  }
+
+  /** Every async mutation retains its originating view's cancellation signal. */
+  protected get operationSignal(): AbortSignal {
+    return this.ownerCtl.signal;
+  }
+
+  /** Drop all identity-owned models and forms before loading the new account. */
+  protected onIdentityChanged(): void {}
+
+  private resetIdentity(): void {
+    this.ownerCtl.abort();
+    this.ownerCtl = new AbortController();
+    this.abortCtl?.abort();
+    this.clearPoll();
+    this._client = null;
+    this.serverTheme = null;
+    this.lastError = null;
+    this.pollFailures = 0;
+    this.phase = "loading";
+    this.body.replaceChildren();
+    this.footer.replaceChildren();
+    this.live.textContent = "";
+    this.onIdentityChanged();
+    if (this.isConnected) {
+      this.applyTheme();
+      this.render();
+      this.scheduleLoad("initial");
+    }
+  }
+
   /** Called whenever a (new) token is needed. Takes precedence over expiry of `token`. */
   get tokenProvider(): TokenProvider | null {
     return this._tokenProvider;
@@ -117,7 +152,7 @@ export abstract class Orch8Element extends HTMLElementBase {
     const next = typeof fn === "function" ? fn : null;
     if (next === this._tokenProvider) return;
     this._tokenProvider = next;
-    this.invalidate();
+    this.resetIdentity();
   }
 
   /** Custom fetch (proxies, tests). */
@@ -127,7 +162,7 @@ export abstract class Orch8Element extends HTMLElementBase {
   set fetchImpl(fn: typeof fetch | undefined) {
     if (fn === this._fetch) return;
     this._fetch = fn;
-    this.invalidate();
+    this.resetIdentity();
   }
 
   /** Partial overrides of {@link defaultStrings}. */
@@ -149,6 +184,7 @@ export abstract class Orch8Element extends HTMLElementBase {
   // ---- lifecycle --------------------------------------------------------
 
   connectedCallback(): void {
+    if (this.ownerCtl.signal.aborted) this.ownerCtl = new AbortController();
     this.ensureStyles();
     if (typeof IntersectionObserver === "function") {
       this.visibleObserver = new IntersectionObserver((entries) => {
@@ -167,6 +203,7 @@ export abstract class Orch8Element extends HTMLElementBase {
   }
 
   disconnectedCallback(): void {
+    this.ownerCtl.abort();
     this.abortCtl?.abort();
     this.abortCtl = null;
     this.clearPoll();
@@ -196,27 +233,22 @@ export abstract class Orch8Element extends HTMLElementBase {
       this.themeSlot?.setNonce(newValue);
       return;
     }
-    if (name === "token" || name === "base-url") {
+    if (name === "token" || name === "base-url" || name === "auth-context") {
       this._client = null;
       if (name === "token") {
         // Rotation of the same identity (refreshed token): swap the credential, keep the view.
-        const before = identityOf(oldValue);
-        if (before !== null && before === identityOf(newValue)) {
+        const before = tokenAuthorizationIdentity(oldValue);
+        if (before !== null && before === tokenAuthorizationIdentity(newValue)) {
           if (this.isConnected && this.phase === "error") this.scheduleLoad("initial");
           return;
         }
       }
-      // Never overwrite unsaved edits: the model stays, only the credential/endpoint changes.
-      if (this.hasUnsavedChanges()) return;
-      this.serverTheme = null;
+      this.resetIdentity();
+      return;
     }
+    this.abortCtl?.abort();
     this.onAttributeChanged(name);
     if (this.isConnected) this.scheduleLoad("initial");
-  }
-
-  /** True while the user has unsaved input that a reload would wipe. */
-  protected hasUnsavedChanges(): boolean {
-    return false;
   }
 
   /** Hook for subclass-specific attribute handling before reload. */
@@ -248,6 +280,7 @@ export abstract class Orch8Element extends HTMLElementBase {
         baseUrl,
         token: this.token,
         tokenProvider: this._tokenProvider,
+        authContext: this.authContext ?? undefined,
         fetch: this._fetch,
       });
     }
@@ -384,12 +417,6 @@ export abstract class Orch8Element extends HTMLElementBase {
     return true;
   }
 
-  /** A credential source (provider / fetch) was swapped: keep a working view, recover a broken one. */
-  private invalidate(): void {
-    this._client = null;
-    if (this.isConnected && this.phase !== "ready") this.scheduleLoad("initial");
-  }
-
   /** Max age of a skipped render; elements that show relative times use a finite value. */
   protected renderStaleMs(): number {
     return Number.POSITIVE_INFINITY;
@@ -468,6 +495,7 @@ export abstract class Orch8Element extends HTMLElementBase {
     } finally {
       if (this.abortCtl === ctl) this.setBusy(false);
     }
+    if (ctl.signal.aborted) return;
     if (mode === "refresh" && this.pollFailures === 0) this.showReconnecting(false);
     if (this.wantsPolling()) {
       const base = this.pollInterval();
@@ -493,12 +521,14 @@ export abstract class Orch8Element extends HTMLElementBase {
   }
 
   private async fetchTheme(): Promise<void> {
+    const signal = this.operationSignal;
     let theme: EmbedTheme;
     try {
-      theme = await loadTheme(this.client);
+      theme = await ownedWait(loadTheme(this.client), signal);
     } catch {
       theme = DEFAULT_THEME;
     }
+    if (signal.aborted) return;
     this.serverTheme = theme;
     this.applyTheme();
     if (theme.logo_url) this.render();

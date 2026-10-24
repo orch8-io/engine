@@ -3,6 +3,9 @@ import type { EmbedTokenPayload } from "./types.js";
 /** Returns a fresh token. `reason` tells the provider why it is being asked. */
 export type TokenProvider = (context: {
   reason: "initial" | "expiring" | "unauthorized";
+  /** Engine and application session requesting the credential. */
+  baseUrl?: string;
+  authContext?: string;
 }) => string | Promise<string>;
 
 const TOKEN_PREFIX = "o8e1.";
@@ -27,11 +30,27 @@ export function decodeEmbedToken(token: string | null | undefined): EmbedTokenPa
   try {
     const payload = JSON.parse(base64UrlDecode(parts[1])) as Partial<EmbedTokenPayload>;
     if (typeof payload !== "object" || payload === null) return null;
-    if (typeof payload.exp !== "number" || !Array.isArray(payload.scp)) return null;
+    if (
+      payload.v !== 1 || typeof payload.tid !== "string" || !payload.tid ||
+      typeof payload.sub !== "string" || !payload.sub ||
+      typeof payload.jti !== "string" || !payload.jti ||
+      !Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp) ||
+      !Array.isArray(payload.scp) || !payload.scp.every((scope) => typeof scope === "string") ||
+      !(payload.seq === null || (Array.isArray(payload.seq) && payload.seq.every((id) => typeof id === "string")))
+    ) return null;
     return payload as EmbedTokenPayload;
   } catch {
     return null;
   }
+}
+
+/** Collision-free authorization identity for cache/view ownership, not signature verification. */
+export function tokenAuthorizationIdentity(token: string | null | undefined): string | null {
+  const payload = decodeEmbedToken(token);
+  return payload ? JSON.stringify([
+    payload.tid, payload.sub, [...payload.scp].sort(),
+    payload.seq === null ? null : [...payload.seq].sort(),
+  ]) : null;
 }
 
 /** True when the token is known to carry `scope`; true (optimistic) when undecodable. */
