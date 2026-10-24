@@ -530,6 +530,25 @@ CREATE TABLE IF NOT EXISTS mobile_catalog_metadata (
     PRIMARY KEY(account_id, catalog_id, key),
     FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id)
 );
+-- Immutable trusted endpoints, separate from rotating credentials and cursors.
+CREATE TABLE IF NOT EXISTS mobile_catalog_transports (
+    account_id TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    manifest_url TEXT NOT NULL,
+    identity_url TEXT NOT NULL,
+    PRIMARY KEY(account_id, catalog_id),
+    FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id)
+);
+-- Record authorized entry identity even when its content download fails.
+CREATE TABLE IF NOT EXISTS mobile_catalog_entry_history (
+    account_id TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version > 0),
+    body_digest TEXT NOT NULL CHECK(length(body_digest) = 64),
+    PRIMARY KEY(account_id, catalog_id, name, version),
+    FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id)
+);
 CREATE TABLE IF NOT EXISTS mobile_catalog_signing_keys (
     account_id TEXT NOT NULL,
     catalog_id TEXT NOT NULL,
@@ -1529,4 +1548,4 @@ CREATE INDEX IF NOT EXISTS idx_mobile_commands_unacked_created
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 52;
+pub(super) const SCHEMA_VERSION: i64 = 53;

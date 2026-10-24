@@ -58,9 +58,12 @@ impl SyncOrchestrator {
 
     pub(super) fn check_active(&self) -> Result<(), MobileError> {
         if self
-            .run_cancelled
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
+            .run_deadline
+            .is_some_and(|at| tokio::time::Instant::now() >= at)
+            || self
+                .run_cancelled
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
         {
             Err(MobileError::Shutdown)
         } else {
@@ -69,14 +72,27 @@ impl SyncOrchestrator {
     }
 
     pub(super) async fn io<F: Future>(&self, future: F) -> Result<F::Output, MobileError> {
+        self.check_active()?;
+        let deadline = async {
+            match self.run_deadline {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(deadline);
         if let Some(cancelled) = self.run_cancelled.as_ref() {
             tokio::select! {
                 biased;
                 () = cancelled.cancelled() => Err(MobileError::Shutdown),
+                () = &mut deadline => Err(MobileError::Shutdown),
                 value = future => Ok(value),
             }
         } else {
-            Ok(future.await)
+            tokio::select! {
+                biased;
+                () = &mut deadline => Err(MobileError::Shutdown),
+                value = future => Ok(value),
+            }
         }
     }
 }

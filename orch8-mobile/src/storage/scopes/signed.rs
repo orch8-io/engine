@@ -1,14 +1,11 @@
 //! Verified offline ingestion for scoped catalogs. This does not authenticate a
 //! network credential; the future scoped transport must establish that binding
 //! before fetching private content. No public execution API uses this yet.
-use super::{CatalogScope, validate};
+use super::{CatalogAcceptance, CatalogScope, validate};
 use crate::{MobileError, error::SyncError, storage::MobileStorage, sync::Manifest};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signature, VerifyingKey};
-use orch8_types::{
-    catalog::{CatalogAccess, CatalogAudience, CatalogManifest},
-    ids::SequenceId,
-};
+use orch8_types::{catalog::CatalogManifest, ids::SequenceId};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -106,13 +103,11 @@ impl MobileStorage {
         if bytes.len() > crate::MAX_SEQUENCES_RESPONSE_BYTES {
             return Err(refused());
         }
-        // One snapshot binds all descriptors to the exact active handle. They
-        // are immutable; acceptance below rechecks the durable account epoch.
-        let binding: Option<(String, String, String, String, String)> = sqlx::query_as(
-            "SELECT a.principal_issuer, a.principal_subject, c.source, c.catalog_key, c.signing_authority FROM mobile_accounts a JOIN mobile_catalogs c ON c.account_id = a.id WHERE a.id = ?1 AND a.epoch = ?2 AND a.active = 1 AND c.id = ?3"
-        ).bind(&scope.account.id).bind(scope.account.epoch).bind(&scope.id).fetch_optional(self.pool()).await.map_err(orch8_types::error::StorageError::from)?;
-        let (issuer, subject, source, catalog, authority) = binding.ok_or_else(refused)?;
-        let authority = key(authority.strip_prefix("ed25519:").ok_or_else(refused)?)?;
+        let binding = self.catalog_binding(scope).await?;
+        let authority = key(binding
+            .authority
+            .strip_prefix("ed25519:")
+            .ok_or_else(refused)?)?;
         let divider = bytes
             .iter()
             .position(|byte| *byte == b'\n')
@@ -123,17 +118,17 @@ impl MobileStorage {
         let document: CatalogManifest<Manifest> =
             serde_json::from_slice(body).map_err(|_| refused())?;
         document.audience.validate().map_err(|_| refused())?;
-        let expected = CatalogAudience {
-            source,
-            catalog,
-            access: CatalogAccess::Principal { issuer, subject },
-        };
-        // Public access requires a separately persisted policy. There is no
-        // implicit fallback from a private binding to a public document.
-        if document.audience != expected {
+        // Public access requires an explicit persisted policy; never downgrade.
+        if document.audience != binding.audience {
             return Err(refused());
         }
         let manifest = document.manifest;
+        if manifest.sequences.len() > 1000
+            || manifest.removed.len() > 1000
+            || manifest.signing_keys.len() > 1000
+        {
+            return Err(refused());
+        }
         let mut keys = HashMap::new();
         for entry in &manifest.signing_keys {
             validate(&entry.key_id)?;
@@ -161,6 +156,9 @@ impl MobileStorage {
         }
         for entry in &manifest.removed {
             validate(&entry.name)?;
+            if names.contains(&entry.name) {
+                return Err(refused());
+            }
         }
         let digest = hex::encode(Sha256::digest(body));
         let encoded: Vec<_> = manifest
@@ -168,8 +166,21 @@ impl MobileStorage {
             .iter()
             .map(|entry| (entry.key_id.as_str(), entry.public_key.as_str()))
             .collect();
-        self.accept_catalog_manifest(scope, &encoded, manifest.manifest_version, &digest)
-            .await?;
+        let entries: Vec<_> = manifest
+            .sequences
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.version, entry.sha256.as_str()))
+            .collect();
+        self.replace_catalog_keys_in(
+            scope,
+            &encoded,
+            Some(CatalogAcceptance {
+                version: manifest.manifest_version,
+                digest: &digest,
+                entries: &entries,
+            }),
+        )
+        .await?;
         Ok(AcceptedCatalogManifest {
             storage: Arc::clone(self),
             scope: scope.clone(),

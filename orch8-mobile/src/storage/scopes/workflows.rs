@@ -61,6 +61,38 @@ async fn checked_definition(
 }
 
 impl MobileStorage {
+    /// Bounded metadata pages; never materialize workflow bodies for sync.
+    pub(crate) async fn catalog_cached_page(
+        &self,
+        scope: &CatalogScope,
+        after: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, i32)>, StorageError> {
+        if !(1..=100).contains(&limit) {
+            return Err(invalid("invalid catalog page size"));
+        }
+        let mut tx = self.pool().begin().await?;
+        read_owner(&mut tx, scope).await?;
+        let rows = sqlx::query_as("SELECT w.name, MAX(w.version) FROM mobile_catalog_workflows w JOIN sequences s ON s.id = w.sequence_id WHERE w.account_id = ?1 AND w.catalog_id = ?2 AND w.name > ?3 AND w.withdrawn_at_version IS NULL AND s.deprecated = 0 GROUP BY w.name ORDER BY w.name LIMIT ?4")
+            .bind(&scope.account.id).bind(&scope.id).bind(after).bind(limit).fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
+    pub(crate) async fn catalog_cached_version(
+        &self,
+        scope: &CatalogScope,
+        name: &str,
+    ) -> Result<Option<i32>, StorageError> {
+        validate(name)?;
+        let mut tx = self.pool().begin().await?;
+        read_owner(&mut tx, scope).await?;
+        let version = sqlx::query_scalar("SELECT w.version FROM mobile_catalog_workflows w JOIN sequences s ON s.id = w.sequence_id WHERE w.account_id = ?1 AND w.catalog_id = ?2 AND w.name = ?3 AND w.withdrawn_at_version IS NULL AND s.deprecated = 0 ORDER BY w.version DESC LIMIT 1")
+            .bind(&scope.account.id).bind(&scope.id).bind(name).fetch_optional(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(version)
+    }
+
     /// The immutable source body determines published identity; local owner
     /// fields/IDs are assigned only after hashing and parsing those exact bytes.
     /// The accepted manifest fence prevents an older run's late storage writes.

@@ -29,8 +29,9 @@ and `mobile_catalog_metadata`, plus owner-qualified `mobile_catalog_signing_keys
 Account keys bind immutably to issuer/subject; catalog keys bind immutably to a
 stable source descriptor and signing authority.
 Descriptors come from trusted host context, not bearer-token parsing. This
-layer does not establish remote authentication. The signed ingestion boundary
-below verifies manifest audiences against these persisted bindings.
+storage layer does not itself authenticate remote credentials. Signed ingestion
+verifies manifest audiences; the internal private sync path additionally checks a
+fresh response from the catalog's immutable trusted identity endpoint.
 It exposes no public SDK API and is not connected to legacy sync/execution.
 
 Retirement marks an account inactive. Reopen preserves its ID/data and increments
@@ -49,7 +50,8 @@ survives reopen and can retry without allowing older versions or changed content
 under the same version. Generic catalog metadata writes cannot bypass these
 reserved protocol fields. The storage primitives remain internal; the signed
 ingestion boundary verifies root signatures and audience fields before accepting
-trust. Credential-to-principal verification remains a separate requirement.
+trust. The internal private network caller connects fresh credential/principal
+verification before fetching content, as described below.
 Workflow storage now maps publisher name/version/source IDs to independently
 allocated local engine sequence IDs. Engine rows use the account's local tenant
 and catalog namespace; remote tenant/namespace/sub-tenant/embed claims do not
@@ -85,12 +87,23 @@ accepted document handle owns its storage and scope; verified installation check
 the entry hash, detached signature, name/version and current acceptance before
 normalizing local IDs. It cannot install after a newer manifest revokes its keys
 or its account retires. This is an offline trust boundary, not proof that an
-arbitrary bearer token belongs to the declared principal. Authenticated transport,
-compatibility evaluation, reconciliation and public SDK handles remain required.
+arbitrary bearer token belongs to the declared principal. The internal private
+sync caller now adds an authenticated identity response before content fetch,
+scoped ETags/replay state, compatibility evaluation and full reconciliation.
+Public SDK and scoped execution integration remain required.
 
-Connecting signing keys/workflows to scoped sync and execution, instance ownership,
-cancellation of running work, remote principal proofs and wrapper handles remain
-unimplemented gates.
+The internal [private catalog sync contract](../mobile-catalog-identity.md) pins
+identity/manifest endpoints, matches a fresh nonce/principal/source/catalog response,
+and retains owner/epoch through verification, installation and metadata writes.
+SQLite schema 53 adds immutable transport bindings and accepted entry history.
+Workflow version/hash history commits before downloads and refuses rollback or
+equivocation even when the earlier download never succeeded. Private I/O uses a
+monotonic identity deadline; owned runs retain their account/global operation slots
+through dispatched writes. These operation slots do not prove the still-required
+physical foreign-callback fairness or total persistent storage quotas.
+
+Public scoped sync/execution, instance/handler ownership, cancellation of running
+work, production identity backend integration and SDK handles remain gates.
 
 Use one SQLite database with explicit owner keys and scoped SDK handles. Shared
 runtime resources stay bounded across accounts. Scope-specific state is selected
