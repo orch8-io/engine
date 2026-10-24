@@ -29,7 +29,8 @@ and `mobile_catalog_metadata`, plus owner-qualified `mobile_catalog_signing_keys
 Account keys bind immutably to issuer/subject; catalog keys bind immutably to a
 stable source descriptor and signing authority.
 Descriptors come from trusted host context, not bearer-token parsing. This
-layer does not establish remote authentication or verify manifest audiences.
+layer does not establish remote authentication. The signed ingestion boundary
+below verifies manifest audiences against these persisted bindings.
 It exposes no public SDK API and is not connected to legacy sync/execution.
 
 Retirement marks an account inactive. Reopen preserves its ID/data and increments
@@ -46,8 +47,9 @@ atomically. The applied cursor/ETag/environment commit separately after checking
 that exact accepted identity under the writer/epoch fence. Pending accepted work
 survives reopen and can retry without allowing older versions or changed content
 under the same version. Generic catalog metadata writes cannot bypass these
-reserved protocol fields. This persistence API still requires a future scoped
-sync caller to verify root signatures and audience/principal binding.
+reserved protocol fields. The storage primitives remain internal; the signed
+ingestion boundary verifies root signatures and audience fields before accepting
+trust. Credential-to-principal verification remains a separate requirement.
 Workflow storage now maps publisher name/version/source IDs to independently
 allocated local engine sequence IDs. Engine rows use the account's local tenant
 and catalog namespace; remote tenant/namespace/sub-tenant/embed claims do not
@@ -66,6 +68,25 @@ local ID or allocating a new one after purge. These are internal persistence
 operations; the caller must still verify signatures, manifest entry identity and
 audience before installation. The compact history also needs a storage quota and
 explicit owner cleanup policy before public scoped rollout.
+
+The publisher now supports a distinct `orch8.catalog.v1` signed envelope with
+source, catalog and explicit public/principal audience fields. Its complete
+original body is signed. The internal mobile ingestion path loads the immutable
+principal/source/catalog/root binding in one active-owner snapshot and requires
+an exact private audience match. Authority pins use `ed25519:<base64 public key>`;
+opaque older authority descriptors cannot silently authorize a signed document.
+Legacy manifests, unknown/duplicate envelope fields and implicit private-to-public
+fallback are refused. Public catalog admission still requires a persisted access
+policy and is not exposed yet.
+
+Verified ingestion validates the complete authorized key set and commits it with
+the original envelope digest under the existing epoch/replay transaction. The
+accepted document handle owns its storage and scope; verified installation checks
+the entry hash, detached signature, name/version and current acceptance before
+normalizing local IDs. It cannot install after a newer manifest revokes its keys
+or its account retires. This is an offline trust boundary, not proof that an
+arbitrary bearer token belongs to the declared principal. Authenticated transport,
+compatibility evaluation, reconciliation and public SDK handles remain required.
 
 Connecting signing keys/workflows to scoped sync and execution, instance ownership,
 cancellation of running work, remote principal proofs and wrapper handles remain

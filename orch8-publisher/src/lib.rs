@@ -24,7 +24,7 @@ pub use distribution::{
 };
 pub use manifest::{
     ManifestBody, ManifestGenerator, ManifestRemoved, ManifestSequence, ManifestSigningKey,
-    SignedManifest,
+    SignedCatalogManifest, SignedManifest,
 };
 pub use publish::{PublishError, SequencePublisher};
 pub use registry::{

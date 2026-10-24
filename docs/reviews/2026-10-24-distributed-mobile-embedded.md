@@ -26,8 +26,8 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | gRPC workers | Reconnect, demand/backpressure, resumable transfers, session identity, cross-tenant control, cancellation | Reviewing; full 146-test library suite passes; demand/lease invariant audit ongoing |
 | Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
-| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; durable principal/cache binding and manifest refresh remain open |
-| Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
+| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; scoped cache and signed audience ingestion verified internally; authenticated transport and scoped refresh remain open |
+| Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Reviewing; legacy queue fairness and response correlation verified; scoped transfer and acceptance audit remain open |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery and indexed current/historical child selection pass SQLite/Postgres behavioral and query-plan tests; callbacks remain under review |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
@@ -1511,5 +1511,45 @@ an omitted rollback header and an unchanged exported storage schema version.
 The exported version is used by health/backup metadata and must track the newest
 forward migration. Migration 122 now reports version 122 and its rollback names
 the indexes it removes. The complete 15-test migration rollback integration
-suite passes locally. The dependent migration 123 must carry the same correction
-and its own version increment; exact-head hosted checks remain required.
+suite passes locally. The dependent migration 123 carries the matching rollback
+header and version 123; its complete 15-test contract also passes locally.
+Exact-head hosted checks remain required.
+
+
+### DME093 — Scoped signed-document ingestion boundary (implemented internally)
+
+The explicit account/catalog requirement needs a signed audience and a verified
+installation boundary, not only owner-qualified storage primitives. The publisher
+now generates a distinct `orch8.catalog.v1` envelope; the root signature covers
+format, stable source/catalog and explicit principal/public audience plus the
+complete manifest. Existing legacy publisher output is unchanged.
+
+Internal mobile ingestion checks the pinned Ed25519 authority and exact persisted
+principal/source/catalog binding before changing keys or acceptance state. Unknown
+or duplicate envelope fields, wrong format, foreign audiences, legacy documents,
+malformed/duplicate key sets and implicit public fallback fail closed. Input size
+is bounded. The original signed envelope bytes determine the replay digest.
+Acceptance shares the existing owner/epoch/replay transaction.
+
+An accepted document retains its storage owner and immutable scope. Installation
+checks the selected entry's original-byte digest, detached signature and actual
+workflow name/version. Existing normalization and immutable published identity
+remain enforced. A later manifest/key revocation or account retirement fences
+older verified handles; rejected storage writes preserve the previous complete
+key set and acceptance cursor.
+
+Eight actual publisher-to-mobile contracts pass, covering four independent
+account/catalog combinations sharing source IDs/names/keys, foreign documents,
+ambiguous protocol fields, key errors, valid and invalid installation, revocation,
+account retirement/reopen, injected write failure and database close/reopen with
+same-version equivocation. All 464 mobile, 119 publisher and 705 shared-type
+library tests and full workspace/all-target Clippy with warnings denied pass.
+Raw trust and install primitives are restricted to the internal scope module;
+callers outside that module use the verified-document boundary. Hosted exact-head
+CI remains required.
+
+This is an offline trust boundary. It does not establish that a network credential
+belongs to the claimed principal, expose public scoped sync/execution, or provide
+persisted public-catalog access policy. Those requirements, reconciliation,
+compatibility evaluation, runtime ownership, quotas and SDK/platform release gates
+remain open under ADR-0002 and the original review matrix.

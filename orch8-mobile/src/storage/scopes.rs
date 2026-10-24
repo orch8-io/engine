@@ -8,6 +8,7 @@ use orch8_types::error::StorageError;
 use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
 
+mod signed;
 mod workflows;
 
 #[derive(Clone)]
@@ -250,7 +251,7 @@ impl MobileStorage {
     /// Seed key storage independently when testing its transaction/owner rules.
     /// Production acceptance always binds keys to a manifest version/digest.
     #[cfg(test)]
-    pub(crate) async fn replace_catalog_signing_keys(
+    async fn replace_catalog_signing_keys(
         &self,
         scope: &CatalogScope,
         keys: &[(&str, &str)],
@@ -260,7 +261,7 @@ impl MobileStorage {
 
     /// Accept a verified document and its complete key set in one owner/epoch
     /// fenced transaction. Verification and audience binding are caller duties.
-    pub(crate) async fn accept_catalog_manifest(
+    async fn accept_catalog_manifest(
         &self,
         scope: &CatalogScope,
         keys: &[(&str, &str)],
