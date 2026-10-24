@@ -248,11 +248,14 @@ fn status_is_unsupported(status: &Status) -> bool {
 /// Unary-RPC status → lease outcome.
 fn classify_status(status: &Status) -> LeaseResponse {
     match status.code() {
-        Code::NotFound | Code::FailedPrecondition | Code::PermissionDenied => {
-            LeaseResponse::LostOwnership
-        }
+        Code::NotFound | Code::FailedPrecondition => LeaseResponse::LostOwnership,
         Code::Unimplemented => LeaseResponse::Unsupported,
-        Code::InvalidArgument | Code::Unauthenticated | Code::OutOfRange => LeaseResponse::Rejected,
+        // Listener role, tenant, and credential policy can deny a request
+        // without changing its task lease. Do not discard a buffered result.
+        Code::InvalidArgument
+        | Code::Unauthenticated
+        | Code::PermissionDenied
+        | Code::OutOfRange => LeaseResponse::Rejected,
         _ => LeaseResponse::Retry,
     }
 }

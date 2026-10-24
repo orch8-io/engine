@@ -47,7 +47,9 @@ pub enum LeaseResponse {
     Unsupported,
     /// Network error, 408/429/5xx — try again later.
     Retry,
-    /// Any other 4xx — the request itself is wrong; retrying cannot help.
+    /// Other rejection, including 401/403: the current request was not
+    /// accepted. Correct its credentials or payload before retrying; this
+    /// response does not prove ownership ended or justify discarding evidence.
     Rejected,
 }
 

@@ -36,11 +36,6 @@ impl ClaimKey {
             sqlx::Error::Protocol("worker claim epoch exceeds SQLite integer range".into())
         })
     }
-
-    pub fn belongs_to(&self, worker_id: &str, api_base: &str) -> bool {
-        self.worker_id == worker_id
-            && self.api_base.trim_end_matches('/') == api_base.trim_end_matches('/')
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -240,14 +235,40 @@ impl ClaimStore {
             FROM mobile_worker_claims WHERE task_id = ? AND claim_epoch = ? AND worker_id = ? AND api_base = ?")
             .bind(key.task_id.to_string()).bind(key.database_epoch()?)
             .bind(&key.worker_id).bind(&key.api_base).fetch_optional(&self.pool).await?;
-        Ok(row.and_then(decode_row))
+        row.map(decode_row).transpose()
     }
 
+    /// Scan only bounded identity keys, never aggregate stored outcomes.
+    /// The raw composite cursor advances even past malformed UUID/epoch keys.
+    pub async fn recovery_keys(
+        &self,
+        worker_id: &str,
+        api_base: &str,
+        after: Option<&(String, i64)>,
+    ) -> Result<Vec<(String, i64)>, sqlx::Error> {
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT task_id, claim_epoch FROM mobile_worker_claims WHERE api_base = ",
+        );
+        query.push_bind(api_base.trim_end_matches('/'));
+        query.push(" AND worker_id = ").push_bind(worker_id);
+        if let Some((id, epoch)) = after {
+            query
+                .push(" AND (task_id, claim_epoch) > (")
+                .push_bind(id)
+                .push(", ")
+                .push_bind(epoch)
+                .push(")");
+        }
+        query.push(" ORDER BY task_id, claim_epoch LIMIT 64");
+        query.build_query_as().fetch_all(&self.pool).await
+    }
+
+    #[cfg(test)]
     pub async fn list(&self) -> Result<Vec<ClaimRow>, sqlx::Error> {
         let rows: Vec<StoredClaim> = sqlx::query_as("SELECT task_id, claim_epoch, worker_id, api_base, started, outcome, claimed_at
             FROM mobile_worker_claims ORDER BY claimed_at, api_base, worker_id, task_id, claim_epoch")
             .fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().filter_map(decode_row).collect())
+        rows.into_iter().map(decode_row).collect()
     }
 
     pub async fn count(&self) -> Result<i64, sqlx::Error> {
@@ -259,16 +280,26 @@ impl ClaimStore {
 
 fn decode_row(
     (id, epoch, worker_id, api_base, started, outcome, claimed_at): StoredClaim,
-) -> Option<ClaimRow> {
-    Some(ClaimRow {
+) -> Result<ClaimRow, sqlx::Error> {
+    let task_id = uuid::Uuid::parse_str(&id)
+        .map_err(|_| sqlx::Error::Protocol("invalid mobile worker journal task identity".into()))?;
+    let claim_epoch = u64::try_from(epoch)
+        .map_err(|_| sqlx::Error::Protocol("invalid mobile worker journal claim epoch".into()))?;
+    let outcome = outcome
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()
+        .map_err(|_| {
+            sqlx::Error::Protocol("invalid mobile worker journal outcome encoding".into())
+        })?;
+    Ok(ClaimRow {
         key: ClaimKey {
-            task_id: uuid::Uuid::parse_str(&id).ok()?,
-            claim_epoch: u64::try_from(epoch).ok()?,
+            task_id,
+            claim_epoch,
             worker_id,
             api_base,
         },
         started: started != 0,
-        outcome: outcome.and_then(|o| serde_json::from_str(&o).ok()),
+        outcome,
         claimed_at: chrono::DateTime::parse_from_rfc3339(&claimed_at)
             .map_or_else(|_| chrono::Utc::now(), |t| t.with_timezone(&chrono::Utc)),
     })

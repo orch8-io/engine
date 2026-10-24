@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Worker recovery evidence and authority
+
+- Preserve mobile start/outcome evidence after rejected live/recovery settlements
+  and legacy release fallback, including temporary authorization failures.
+- Remove unproven seven-day claim deletion. Retain malformed/future outcome bytes
+  with generic diagnostics and recover healthy records independently.
+- Page recovery keys by control-plane/worker identity; avoid aggregating unrelated
+  outcomes or skipping epochs when earlier pages are deleted.
+- Treat gRPC permission denial as rejection rather than ownership loss. Stop
+  owned work on denied renewal while preserving uncertain recovery evidence.
+
 ### Mobile worker generation admission
 
 - Share task concurrency and in-flight accounting across restarted workers;

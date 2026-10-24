@@ -317,3 +317,67 @@ async fn dropping_transport_cancels_its_reader_session() {
         "an idle reader must not outlive its transport"
     );
 }
+
+#[tokio::test]
+async fn role_denial_does_not_claim_that_a_unary_task_lease_ended() {
+    use crate::auth::GrpcAuthLayer;
+    use crate::service::Orch8GrpcService;
+    use orch8_storage::StorageBackend;
+
+    let storage: Arc<dyn StorageBackend> = Arc::new(
+        orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let shutdown = stop.clone();
+    let auth = GrpcAuthLayer::new(Arc::clone(&storage), None, false).with_allowed_rpc_paths(&[]);
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .layer(auth)
+            .add_service(crate::Orch8ServiceServer::new(Orch8GrpcService::new(
+                storage,
+            )))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                shutdown.cancelled_owned(),
+            )
+            .await
+            .unwrap();
+    });
+    let transport = GrpcLeaseTransport::new(GrpcWorkerConfig {
+        endpoint,
+        api_key: "test-key".into(),
+        tenant_id: "acme".into(),
+        worker_id: "worker".into(),
+        ca_pem: None,
+        drain: CancellationToken::new(),
+        headers: BTreeMap::new(),
+    })
+    .unwrap();
+    let task = ClaimedTask {
+        task: serde_json::from_value(serde_json::json!({
+            "id":uuid::Uuid::new_v4(),"instance_id":uuid::Uuid::new_v4(),
+            "block_id":"step","handler_name":"noop","claim_epoch":7
+        }))
+        .unwrap(),
+        session: 0,
+    };
+    let responses = [
+        transport.heartbeat(&task).await,
+        transport
+            .complete(&task, &serde_json::json!({"receipt":"known"}))
+            .await,
+        transport.fail(&task, "known failure", false).await,
+        transport.release(&task, true).await,
+    ];
+    stop.cancel();
+    server.await.unwrap();
+    assert_eq!(
+        responses,
+        [LeaseResponse::Rejected; 4],
+        "node-role policy does not establish task ownership loss"
+    );
+}

@@ -19,7 +19,7 @@ pub enum LeaseEnd {
     LostOwnership,
     /// No successful renewal arrived before the confirmed deadline.
     Expired,
-    /// The server rejected or does not support the initial ownership check.
+    /// The server rejected or does not support the ownership check.
     Unconfirmed,
 }
 
@@ -128,7 +128,10 @@ impl ConfirmedLease {
             match response {
                 LeaseResponse::Accepted => self.until = started + self.duration,
                 LeaseResponse::LostOwnership => return LeaseEnd::LostOwnership,
-                LeaseResponse::Retry | LeaseResponse::Rejected | LeaseResponse::Unsupported => {}
+                LeaseResponse::Rejected | LeaseResponse::Unsupported => {
+                    return LeaseEnd::Unconfirmed;
+                }
+                LeaseResponse::Retry => {}
             }
             if Instant::now() >= self.until {
                 return LeaseEnd::Expired;

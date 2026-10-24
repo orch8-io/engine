@@ -1367,3 +1367,360 @@ async fn concurrent_recovery_drains_share_the_cleanup_io_bound() {
     assert_eq!(server.count("/release"), 20);
     assert_eq!(h.store.count().await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn rejected_recovery_keeps_all_claim_evidence_until_authority_resolves_it() {
+    for rejected in [400, 401, 403, 405, 422, 429, 503] {
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(rejected));
+        let current = Arc::clone(&status);
+        let server = spawn_control_plane(Arc::new(move |_, _, _| {
+            (current.load(Ordering::Acquire), json!({}))
+        }))
+        .await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        seed(&h.store, &h.client, false, None).await;
+        seed(&h.store, &h.client, true, None).await;
+        seed(
+            &h.store,
+            &h.client,
+            true,
+            Some(Outcome::Complete {
+                output: json!({"receipt": "performed"}),
+            }),
+        )
+        .await;
+        seed(
+            &h.store,
+            &h.client,
+            true,
+            Some(Outcome::Fail {
+                message: "known failure".into(),
+                retryable: false,
+            }),
+        )
+        .await;
+        assert_eq!(
+            drain_orphans(&h.client, &h.store, None).await,
+            0,
+            "status {rejected} does not prove the claim ended"
+        );
+        assert_eq!(h.store.count().await.unwrap(), 4);
+        status.store(200, Ordering::Release);
+        assert_eq!(drain_orphans(&h.client, &h.store, None).await, 4);
+        assert_eq!(h.store.count().await.unwrap(), 0);
+        assert!(h.inputs.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rejected_legacy_release_fallback_retains_started_evidence() {
+    for rejected in [400, 401, 403, 405, 503] {
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(rejected));
+        let current = Arc::clone(&status);
+        let server = spawn_control_plane(Arc::new(move |_, path, _| {
+            (
+                if path.ends_with("/release") {
+                    404
+                } else {
+                    current.load(Ordering::Acquire)
+                },
+                json!({}),
+            )
+        }))
+        .await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        let id = seed(&h.store, &h.client, true, None).await;
+        assert_eq!(
+            drain_orphans(&h.client, &h.store, None).await,
+            0,
+            "fallback status {rejected} is not a settlement acknowledgement"
+        );
+        assert!(h.store.list().await.unwrap()[0].started);
+        status.store(200, Ordering::Release);
+        assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+        assert_eq!(server.bodies(&format!("{id}/release"))[1]["started"], true);
+        assert!(
+            server.bodies(&format!("{id}/fail"))[1]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown")
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejected_live_result_is_recovered_without_reinvoking_the_native_handler() {
+    for rejected in [400, 401, 403, 405] {
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(rejected));
+        let current = Arc::clone(&status);
+        let server = spawn_control_plane(Arc::new(move |_, path, _| {
+            (
+                if path.ends_with("/heartbeat") {
+                    200
+                } else {
+                    current.load(Ordering::Acquire)
+                },
+                json!({}),
+            )
+        }))
+        .await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        let id = uuid::Uuid::new_v4();
+        let task = serde_json::from_value(task_json(id)).unwrap();
+        h.worker.execute(task, Duration::from_millis(100)).await;
+        let rows = h.store.list().await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "status {rejected} must retain the known outcome"
+        );
+        assert!(
+            matches!(&rows[0].outcome, Some(Outcome::Complete { output }) if output == &json!({"scanned":true}))
+        );
+        assert_eq!(h.worker.stats().completed, 0);
+        status.store(200, Ordering::Release);
+        assert_eq!(
+            drain_orphans(&h.client, &h.store, Some(&h.worker.counters)).await,
+            1
+        );
+        assert_eq!(h.worker.stats().completed, 1);
+        assert_eq!(h.inputs.lock().unwrap().len(), 1);
+        assert_eq!(server.count(&format!("{id}/release")), 0);
+    }
+}
+
+#[tokio::test]
+async fn recovery_does_not_forget_old_claims_without_server_authority() {
+    let status = Arc::new(std::sync::atomic::AtomicU16::new(503));
+    let current = Arc::clone(&status);
+    let server = spawn_control_plane(Arc::new(move |_, _, _| {
+        (current.load(Ordering::Acquire), json!({}))
+    }))
+    .await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    seed(&h.store, &h.client, false, None).await;
+    seed(&h.store, &h.client, true, None).await;
+    seed(
+        &h.store,
+        &h.client,
+        true,
+        Some(Outcome::Complete {
+            output: json!({"receipt":"old-but-known"}),
+        }),
+    )
+    .await;
+    sqlx::query("UPDATE mobile_worker_claims SET claimed_at = '2010-01-01T00:00:00Z'")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 0);
+    assert_eq!(
+        h.store.count().await.unwrap(),
+        3,
+        "age alone does not prove that the server ended these attempts"
+    );
+    status.store(200, Ordering::Release);
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 3);
+    assert_eq!(
+        server.bodies("/complete")[1]["output"],
+        json!({"receipt":"old-but-known"})
+    );
+}
+
+#[tokio::test]
+async fn recovery_preserves_malformed_or_future_outcomes_instead_of_releasing_them() {
+    for raw in [
+        "{private-secret-invalid",
+        r#"{"kind":"future-outcome","private":"private-secret"}"#,
+    ] {
+        let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        let bad = seed(&h.store, &h.client, true, None).await;
+        sqlx::query("UPDATE mobile_worker_claims SET outcome = ? WHERE task_id = ?")
+            .bind(raw)
+            .bind(bad.to_string())
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        seed(
+            &h.store,
+            &h.client,
+            true,
+            Some(Outcome::Complete {
+                output: json!({"healthy":true}),
+            }),
+        )
+        .await;
+        assert_eq!(
+            drain_orphans(&h.client, &h.store, None).await,
+            1,
+            "unknown evidence must not become an unknown-effect release"
+        );
+        assert_eq!(server.count(&format!("{bad}/release")), 0);
+        let preserved: String =
+            sqlx::query_scalar("SELECT outcome FROM mobile_worker_claims WHERE task_id = ?")
+                .bind(bad.to_string())
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved, raw);
+        let key = ClaimKey {
+            task_id: bad,
+            claim_epoch: 7,
+            worker_id: h.client.worker_id(),
+            api_base: h.client.api_base().into(),
+        };
+        let error = h.store.get(&key).await.unwrap_err().to_string();
+        assert!(
+            !error.contains("private-secret"),
+            "diagnostics must not include stored outcome content"
+        );
+    }
+}
+
+#[tokio::test]
+async fn recovery_reads_only_its_identity_even_when_another_outcome_is_corrupt() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    seed(
+        &h.store,
+        &h.client,
+        true,
+        Some(Outcome::Complete {
+            output: json!({"healthy":true}),
+        }),
+    )
+    .await;
+    let foreign: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    h.store
+        .insert(&foreign, "foreign-runtime", h.client.api_base())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mobile_worker_claims SET started = 1, outcome = x'ff' WHERE worker_id = 'foreign-runtime'").execute(&h.pool).await.unwrap();
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert_eq!(h.store.count().await.unwrap(), 1);
+    assert_eq!(server.count(&format!("{}/release", foreign.id)), 0);
+    assert_eq!(server.count(&format!("{}/complete", foreign.id)), 0);
+}
+
+#[tokio::test]
+async fn recovery_paging_keeps_every_epoch_when_prior_pages_are_deleted() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    for id in [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)] {
+        for epoch in 1..=65 {
+            let mut task: RemoteTask = serde_json::from_value(task_json(id)).unwrap();
+            task.claim_epoch = epoch;
+            h.store
+                .insert(&task, &h.client.worker_id(), h.client.api_base())
+                .await
+                .unwrap();
+        }
+    }
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 130);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    let unique: HashSet<_> = server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path.ends_with("/release"))
+        .map(|(path, body)| (path.clone(), body["claim_epoch"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(unique.len(), 130);
+}
+
+#[tokio::test]
+async fn recovery_advances_past_a_full_page_of_invalid_identity_keys() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    for index in 0..65 {
+        sqlx::query("INSERT INTO mobile_worker_claims (task_id,claim_epoch,worker_id,handler_name,api_base,started,claimed_at) VALUES (?,7,?,'scan',?,1,'2026-10-24T00:00:00Z')")
+            .bind(format!("!not-a-task-{index:03}"))
+            .bind(h.client.worker_id()).bind(h.client.api_base())
+            .execute(&h.pool).await.unwrap();
+    }
+    seed(
+        &h.store,
+        &h.client,
+        true,
+        Some(Outcome::Complete {
+            output: json!({"healthy":true}),
+        }),
+    )
+    .await;
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert_eq!(h.store.count().await.unwrap(), 65);
+    assert_eq!(server.count("/complete"), 1);
+    assert_eq!(server.count("/release"), 0);
+}
+
+#[tokio::test]
+async fn recovery_clears_claims_when_the_server_explicitly_fences_them() {
+    for status in [404, 409, 410] {
+        let server = spawn_control_plane(route_with(Vec::new(), status, status)).await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        seed(&h.store, &h.client, false, None).await;
+        seed(&h.store, &h.client, true, None).await;
+        seed(
+            &h.store,
+            &h.client,
+            true,
+            Some(Outcome::Complete {
+                output: json!({"receipt":"performed"}),
+            }),
+        )
+        .await;
+        assert_eq!(drain_orphans(&h.client, &h.store, None).await, 3);
+        assert_eq!(h.store.count().await.unwrap(), 0);
+        assert!(h.inputs.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn denied_renewal_stops_owned_native_work_but_retains_started_evidence() {
+    let handler = ok_handler(Duration::from_secs(2));
+    let entered = Arc::clone(&handler.inputs);
+    let restored = Arc::new(AtomicBool::new(false));
+    let healthy = Arc::clone(&restored);
+    let server = spawn_control_plane(Arc::new(move |_, _, _| {
+        let denied = !entered.lock().unwrap().is_empty() && !healthy.load(Ordering::Acquire);
+        (if denied { 403 } else { 200 }, json!({}))
+    }))
+    .await;
+    let h = harness(&server, handler).await;
+    let id = uuid::Uuid::new_v4();
+    let task = serde_json::from_value(task_json(id)).unwrap();
+    let start = tokio::time::Instant::now();
+    h.worker.execute(task, Duration::from_millis(50)).await;
+    let elapsed = start.elapsed();
+    let quarantined = h.worker.deps.stragglers.blocks("scan");
+    restored.store(true, Ordering::Release);
+    let rows = h.store.list().await.unwrap();
+    wait_for(|| !h.worker.deps.stragglers.blocks("scan")).await;
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "denied renewal must stop owned work immediately, elapsed: {elapsed:?}"
+    );
+    assert!(
+        quarantined,
+        "the physical native call must remain quarantined"
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].started);
+    assert_eq!(rows[0].outcome, None);
+    assert_eq!(
+        h.worker.stats().lost,
+        0,
+        "authorization denial is not proof of ownership loss"
+    );
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert!(
+        server
+            .bodies(&format!("{id}/release"))
+            .iter()
+            .all(|body| body["started"] == true)
+    );
+    assert_eq!(server.count(&format!("{id}/complete")), 0);
+    assert_eq!(h.inputs.lock().unwrap().len(), 1);
+}

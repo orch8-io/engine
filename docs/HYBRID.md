@@ -92,8 +92,9 @@ Before invoking a task, the executor confirms its current claim generation with
 an accepted heartbeat. Preparation, callback execution, output sealing, and
 outcome delivery share one monotonic lease deadline. Only accepted renewals
 extend it, measured from before the renewal request. A stalled heartbeat does
-not suspend callback/result polling; failure to renew before the deadline stops
-owned work and releases any started claim as ambiguous. This cannot roll back
+not suspend callback/result polling. Rejected/unsupported renewals stop owned
+work as unconfirmed without asserting the lease ended; transient network failures
+can retry until the last confirmed deadline. Expiry also stops owned work and releases any started claim as ambiguous. This cannot roll back
 external side effects already accepted. Custom lease transports must implement
 real ownership checks rather than return unconditional heartbeat success.
 

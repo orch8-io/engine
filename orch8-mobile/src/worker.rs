@@ -79,8 +79,6 @@ use crate::stragglers::{Stragglers, device_timeout_error, is_device_timeout};
 const DELIVERY_ATTEMPTS: u32 = 3;
 /// How often the loop re-drains undelivered outcomes of earlier tasks.
 const ORPHAN_DRAIN_INTERVAL: Duration = Duration::from_secs(60);
-/// Claims older than this are forgotten: the server reaped them long ago.
-const STALE_CLAIM_AGE: chrono::Duration = chrono::Duration::days(7);
 /// Back-off after a failed poll.
 const POLL_ERROR_BACKOFF: Duration = Duration::from_secs(15);
 
@@ -148,63 +146,94 @@ pub(crate) async fn drain_orphans(
     store: &ClaimStore,
     stats: Option<&Counters>,
 ) -> u32 {
-    let rows = match store.list().await {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!(error = %e, "failed to read worker claim journal");
-            return 0;
-        }
-    };
     let mut resolved = 0;
-    for row in rows {
-        if !row.key.belongs_to(&client.worker_id(), client.api_base()) {
-            continue;
-        }
-        let Some(_reservation) = store.reserve(&row.key) else {
-            // Another worker generation or recovery pass still owns this claim.
-            continue;
-        };
-        // The list can precede a completed live invocation. Re-read after
-        // reserving so recovery cannot release an outcome that was just saved.
-        let row = match store.get(&row.key).await {
-            Ok(Some(row)) => row,
-            Ok(None) => continue,
+    let mut after = None;
+    let mut invalid_keys = 0usize;
+    'scan: loop {
+        let keys = match store
+            .recovery_keys(&client.worker_id(), client.api_base(), after.as_ref())
+            .await
+        {
+            Ok(keys) if keys.is_empty() => break,
+            Ok(keys) => keys,
             Err(error) => {
-                warn!(%error, "failed to reload worker recovery claim");
+                warn!(%error, "failed to scan worker recovery journal");
+                break;
+            }
+        };
+        // Deleting prior pages must not shift an OFFSET and skip later claims.
+        after = keys.last().cloned();
+        for (id, epoch) in keys {
+            let (Ok(task_id), Ok(claim_epoch)) = (uuid::Uuid::parse_str(&id), u64::try_from(epoch))
+            else {
+                invalid_keys += 1;
                 continue;
+            };
+            let key = ClaimKey {
+                task_id,
+                claim_epoch,
+                worker_id: client.worker_id(),
+                api_base: client.api_base().trim_end_matches('/').into(),
+            };
+            let Some(_reservation) = store.reserve(&key) else {
+                // Another worker generation or recovery pass still owns this claim.
+                continue;
+            };
+            // Bound decoded recovery payloads as well as outgoing requests
+            // across registration, restart, and surplus cleanup passes.
+            let Ok(_slot) = store.admission.release_slots.acquire().await else {
+                break 'scan;
+            };
+            // The key scan can precede a completed live invocation. Re-read after
+            // reserving so recovery cannot release an outcome that was just saved.
+            let row = match store.get(&key).await {
+                Ok(Some(row)) => row,
+                Ok(None) => continue,
+                Err(error) => {
+                    warn!(%error, "failed to reload worker recovery claim");
+                    continue;
+                }
+            };
+            let settled = if let Some(outcome) = &row.outcome {
+                let result =
+                    deliver_once(client, row.key.task_id, row.key.claim_epoch, outcome).await;
+                if let Some(stats) = stats
+                    && result == LeaseResponse::Accepted
+                {
+                    stats.record_outcome(outcome);
+                }
+                claim_resolved(result)
+            } else {
+                let released =
+                    release(client, row.key.task_id, row.key.claim_epoch, row.started).await;
+                if released && let Some(stats) = stats {
+                    stats.released.fetch_add(1, Ordering::Relaxed);
+                }
+                released
+            };
+            if settled {
+                info!(task_id = %row.key.task_id, claimed_at = %row.claimed_at, started = row.started, "settled orphaned worker claim after restart");
+                store.delete(&row.key).await;
+                resolved += 1;
             }
-        };
-        if chrono::Utc::now() - row.claimed_at > STALE_CLAIM_AGE {
-            store.delete(&row.key).await;
-            continue;
-        }
-        // Registration and restart can launch independent recovery passes.
-        // Share the same cleanup I/O budget as surplus deliveries.
-        let Ok(_slot) = store.admission.release_slots.acquire().await else {
-            break;
-        };
-        let settled = if let Some(outcome) = &row.outcome {
-            let result = deliver_once(client, row.key.task_id, row.key.claim_epoch, outcome).await;
-            if let Some(stats) = stats
-                && result == LeaseResponse::Accepted
-            {
-                stats.record_outcome(outcome);
-            }
-            result != LeaseResponse::Retry
-        } else {
-            let released = release(client, row.key.task_id, row.key.claim_epoch, row.started).await;
-            if released && let Some(stats) = stats {
-                stats.released.fetch_add(1, Ordering::Relaxed);
-            }
-            released
-        };
-        if settled {
-            info!(task_id = %row.key.task_id, started = row.started, "settled orphaned worker claim after restart");
-            store.delete(&row.key).await;
-            resolved += 1;
         }
     }
+    if invalid_keys > 0 {
+        warn!(
+            invalid_keys,
+            "invalid worker journal identities retained for repair"
+        );
+    }
     resolved
+}
+
+/// A rejected request (including 401/403) does not establish that the server
+/// ended this lease. Only an acknowledgement or explicit fence resolves it.
+fn claim_resolved(response: LeaseResponse) -> bool {
+    matches!(
+        response,
+        LeaseResponse::Accepted | LeaseResponse::LostOwnership
+    )
 }
 
 /// Give a claim back. `true` once the server no longer considers it ours.
@@ -215,8 +244,8 @@ async fn release(
     started: bool,
 ) -> bool {
     match client.release(task_id, claim_epoch, started).await {
-        LeaseResponse::Accepted | LeaseResponse::LostOwnership | LeaseResponse::Rejected => true,
-        LeaseResponse::Retry => false,
+        LeaseResponse::Accepted | LeaseResponse::LostOwnership => true,
+        LeaseResponse::Retry | LeaseResponse::Rejected => false,
         LeaseResponse::Unsupported => {
             // Pre-contract server: a retryable failure requeues the task.
             let message = if started {
@@ -224,7 +253,7 @@ async fn release(
             } else {
                 "released by mobile node before start"
             };
-            client.fail(task_id, claim_epoch, message, true).await != LeaseResponse::Retry
+            claim_resolved(client.fail(task_id, claim_epoch, message, true).await)
         }
     }
 }
@@ -670,7 +699,9 @@ impl Worker {
                 self.counters.lost.fetch_add(1, Ordering::Relaxed);
                 true
             }
-            Err(_) => {
+            Err(reason) => {
+                warn!(task_id = %task.id, ?reason, started,
+                    "lease authority unconfirmed; reconciling recovery evidence");
                 if let Some(outcome) = outcome {
                     // Do not replace a known result with an ambiguous release.
                     // Persist it even if expiry interrupted the earlier write;
@@ -785,8 +816,8 @@ impl Worker {
                     return true;
                 }
                 LeaseResponse::Rejected | LeaseResponse::Unsupported => {
-                    warn!(task_id = %task.id, "server rejected task settlement");
-                    return true;
+                    warn!(task_id = %task.id, "server rejected task settlement; retaining journal evidence");
+                    return false;
                 }
                 LeaseResponse::Retry if attempt < DELIVERY_ATTEMPTS => {
                     tokio::select! {

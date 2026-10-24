@@ -964,6 +964,8 @@ accepted heartbeat and rechecks OS/power/stop admission. One monotonic deadline
 covers start/outcome journaling, execution, and result delivery; only accepted renewals extend
 it, measured from before their requests. A renewal outage stops the owned future
 at that deadline and quarantines any native call still physically running.
+Rejected or unsupported renewals stop owned work immediately as unconfirmed;
+they do not by themselves prove the task lease ended.
 Known results stay journaled for recovery instead of becoming unknown releases.
 This local cancellation does not roll back accepted external side effects.
 
@@ -994,7 +996,13 @@ retaining the recorded identities, timestamps, and outcomes. Back up device
 storage before adopting a schema upgrade; restore that backup before downgrading
 to an engine that expects the old journal layout.
 
-Servers without `/release` (404/405) get a retryable `fail` instead.
+Servers without `/release` (404/405) get a retryable `fail` instead. A rejected
+release, fallback, completion, or failure (including 401/403) retains its journal
+evidence until a later acknowledgement or explicit ownership-loss response.
+Age alone never proves an attempt ended. Recovery reads only the matching
+control-plane/worker identity, scans keys in bounded pages, and retains malformed
+or unsupported stored outcomes for repair rather than treating them as absent.
+This bounds aggregate reads, not the duration of a full pass or journal disk use.
 
 **Device-side timeouts.** A remote task's `timeout_ms` (and the engine's
 `handlerTimeoutMs`) is enforced on the device too, but a timeout cannot stop

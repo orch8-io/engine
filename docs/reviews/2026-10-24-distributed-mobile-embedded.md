@@ -383,7 +383,58 @@ running native calls whose leases expired remain separately quarantined by
 handler. Cleanup RPCs are bounded, while pending futures belong to a transport
 response batch bounded by the existing 8 MiB response limit. A replacement may
 wait for the predecessor's already-issued poll to finish; this does not claim
-immediate cancellation of slow HTTP calls. Ambiguous replies, recovery's
-unauthorized/rejected-response classification, journal pagination/retention,
-principal changes behind an opaque token provider, independent-engine ownership,
-and the rest of the mobile/embedded/binding/sandbox review remain open.
+immediate cancellation of slow HTTP calls. At this stage, recovery response
+classification and bulk journal reads still needed review; the next section
+records their fixes. Principal changes behind opaque token providers,
+independent-engine ownership, and the remaining mobile/embedded/binding/sandbox
+areas remain open.
+
+
+## Recovery authority, retained evidence, and scoped reads
+
+Baseline: PR #266 `5aacd57f`. Three rejected-response regressions fail against
+that production code: recovery clears four evidence states on rejection,
+pre-contract release fallback clears a started claim on rejected fail, and live
+result delivery clears its known outcome. The corrected matrix covers 400, 401,
+403, 405, 422, 429, and 503, plus restoration to accepted responses without native
+reinvocation. Explicit 404/409/410 fencing still clears resolved claims according
+to the existing lease protocol.
+
+Three further regressions reproduce deletion of old claims without a server
+request, conversion of malformed outcomes into releases, and recovery of one
+runtime being blocked by a different runtime's invalid UTF-8 outcome.
+A real tonic server using production node-role authorization also returns four
+permission denials that the old client misclassifies as ownership loss.
+A native handler continues for its full two seconds after renewal is denied;
+the corrected supervisor cancels its owned future promptly, observes quarantine,
+and retains started evidence when the release is also denied.
+
+| ID | Finding | Correction and evidence | State |
+|---|---|---|---|
+| DME-044 | Rejected recovery responses erase durable start/outcome evidence | Clear only accepted settlements or explicit ownership-loss replies; preserve all other records for correction/retry. | Fixed; status matrix and recovery pass |
+| DME-045 | Rejected legacy fail fallback is treated as an acknowledged release | Apply the same authority criterion to fallback, retaining started evidence and its unknown-effect semantics. | Fixed; fallback/restoration cases pass |
+| DME-046 | Live result rejection deletes the already performed outcome | Retain the journaled result for recovery instead of reporting settlement success. | Fixed; one native invocation across rejection/recovery |
+| DME-047 | Seven-day age is treated as proof the server reaped a claim | Remove unconditional age-based deletion. Old attempts are reconciled with server authority like other records. | Fixed; old unstarted, started, and known-result records survive outage and later resolve |
+| DME-048 | Malformed/future outcome encodings become absence of outcome | Return a generic decoding error, retain original bytes, and continue recovering healthy rows. Do not log stored content. | Fixed; malformed/future encodings and diagnostic secrecy checks pass |
+| DME-049 | Recovery aggregates every identity's payloads before filtering | Query matching API/worker identity keys in pages of 64 using `(task_id, claim_epoch)` cursors; load one reserved payload under the shared cleanup quota. | Fixed; foreign corruption isolation, deletion-safe 130-epoch paging, and invalid-key page progress pass |
+| DME-050 | gRPC permission denial falsely ends the task lease | Classify permission denial as rejection, matching HTTP authorization semantics. Explicit lease-fence statuses keep their existing mapping. | Fixed; production role-layer integration verifies heartbeat/complete/fail/release |
+| DME-051 | Denied renewal leaves owned native work running | Return unconfirmed authority on rejected/unsupported renewal, rather than wait for expiry or assert ownership loss. Drop owned work, quarantine the native call, and retain recovery evidence until resolved. | Fixed; denied-native-renewal regression passes |
+
+Final library validation passes 2,031 lean engine tests, 327 mobile tests, and
+147 gRPC tests. The full main CI and Mobile workflows also passed on `f2d88364`
+when rechecked; hosted checks for this follow-up are separate and still pending.
+
+Paging bounds identity aggregation and concurrent decoded recovery payloads; it
+does not bound the duration of a full recovery pass or the bytes in one native
+result. Unresolved evidence can remain on disk until authority is restored;
+explicit quota/backpressure, recovery scheduling/fairness, and retention policy
+still need review. Malformed records require repair or compatible decoding and
+are not silently discarded. This batch adds no journal schema change.
+Opaque-provider principal changes, independent-engine ownership, durable core
+outcomes, ambiguous core release replies, typed fencing versus generic gRPC
+precondition errors, and all remaining control/delegation/binding/sandbox areas
+remain part of the full objective. No exactly-once or external rollback guarantee
+is claimed.
+
+All-target Clippy also passes for the final engine/server/mobile default-feature
+union, with warnings denied.
