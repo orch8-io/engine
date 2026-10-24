@@ -591,6 +591,19 @@ requests, including retries. Redirects remain disabled. Content signatures still
 need to verify. This transport boundary does not provide per-account local-data
 or manifest-cursor isolation.
 
+Manifest sync has bounded admission per configured orchestrator. An overlapping
+call returns `ResourceLimit` before authorization or network dispatch; retry once
+the admitted run settles. Timeout or shutdown stops the caller's wait. An owned
+run finishes an already-dispatched storage operation before releasing admission,
+and cancellation checkpoints prevent subsequent work. Cursor, ETag and
+evaluation metadata commit together. An error after an accepted operation does
+not imply that an already-started transaction was rolled back.
+
+Multiple accounts/catalogs in one database with explicit scopes is the confirmed
+target. [ADR-0002](adr/0002-mobile-account-and-catalog-scopes.md) specifies that
+work and its open gates. The current legacy sync metadata and reconciliation
+still need that ownership isolation.
+
 ### MobileEngineConfig
 
 | Field                     | Type   | Default       | Description                                                                                                                                                                                                                                                                   |

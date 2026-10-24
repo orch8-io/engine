@@ -39,6 +39,16 @@ coverage inspection, reproduced confirmed defects, fixes with regression checks,
 and explicit remaining limitations. Source file counts or green tests alone do
 not establish full behavioral coverage.
 
+## Confirmed scoped-runtime requirement
+
+The user confirmed that one engine/database must support **multiple accounts
+and multiple catalogs with explicit scopes**. Stable account/catalog identity
+must survive token refresh and cannot be inferred from rotating token strings.
+[ADR-0002](../adr/0002-mobile-account-and-catalog-scopes.md) records the proposed
+ownership/API/storage contract and gates S1-S12. These gates remain open; bounded
+sync admission and atomic metadata are foundations, not scoped isolation.
+The original distributed/mobile/embedded completion matrix remains required.
+
 ## Initial findings: mobile worker ownership
 
 | ID | Finding | Evidence and required fix | State |
@@ -945,7 +955,7 @@ were changed to synchronize on physical callback entry and then cancel logical
 waiters; dedicated timeout tests remain intact. Both final Swift simulator runs
 passed, as did the two main workflows after merge.
 
-### DME074 — Manifest token getter blocked timeout and shutdown (fixed in source)
+### DME074 — Manifest token getter blocked timeout and shutdown (fixed and merged)
 
 **HIGH, effort M.** On `4026bae3`, `MobileEngine.sync` invoked the foreign
 `TokenProvider.current_token()` directly while polling `run_with_timeout`.
@@ -978,7 +988,7 @@ Real TLS connection probes show no late transport dispatch after timeout or
 shutdown and no dispatch for blank tokens; a usable-token positive control
 reaches the same listener. No external service is needed by these probes.
 Clippy passes across all mobile targets with warnings denied; documentation
-links/example syntax and diff checks pass. Hosted validation is still required.
+links/example syntax and diff checks pass. PR #276 passed all 24 hosted checks and merged as `9da12688`.
 
 The native manifest path still snapshots one bearer token and does not perform
 401 refresh. This repair does not establish principal-bound manifest/cache
@@ -1030,3 +1040,49 @@ and catalog ownership, overlapping reconciliation, stable refresh identity,
 manifest 401 refresh, RN/Flutter adoption, artifact parity, and the original
 review matrix still need authoritative evidence and corrections where required.
 Origin-bound transport authorization does not establish durable data ownership.
+
+### DME077 — Overlapping sync overwrote a newer replay fence (fixed in source)
+
+**HIGH, effort M.** On `5ceb8ca0`, a controlled sequence-download gate allowed
+an older signed manifest to overlap a newer signed removal. The older run
+committed replay version 1 after version 2 had completed. The regression failed
+before the correction and now verifies the version-2 fence and workflow removal.
+
+A configured orchestrator and its snapshots share one bounded sync admission
+permit. Admission precedes token authorization; concurrent callers receive
+ResourceLimit before invoking the host or starting HTTP. Each run executes in an
+owned task with its own cancellation token and shared HTTP/storage resources.
+Retiring the caller cancels network waits and future phases while the task keeps
+admission through an already-dispatched storage operation. Checkpoints prevent
+additional key, reconciliation, installation, deprecation, pruning or eviction
+mutations after retirement. Completed/failed runs release admission for retry.
+This prevents a cancelled waiter from handing ownership to another sync while
+its database write is still in flight. No SDK/FFI signature changes.
+
+Coverage includes the stale-writer/removal reproduction, native rejection before
+a second host getter, 128 rejected authorization attempts, already-retired run
+admission, cancellation during download, and cancellation inside a real WAL
+transaction with a dedicated pre-opened reader. The WAL test proves readers see
+the old snapshot, another sync remains refused until commit, and the new snapshot
+is complete after the original caller is cancelled. All 404 mobile tests pass;
+Clippy passes on all mobile targets with warnings denied. The final fixture
+refactor passes all seven focused reconciliation tests. Hosted checks remain
+required. This is one configured engine's admission/ownership foundation;
+persistent epochs across engine/process destruction and scope-specific fairness
+remain gates in ADR-0002.
+
+### DME078 — Failed sync persisted a mixed metadata snapshot (fixed in source)
+
+**HIGH, effort M.** A SQLite trigger rejecting the replay-cursor write reproduced
+partial persistence: the sync returned an error after changing its timestamp and
+validator, leaving the previous cursor/environment. This could make a later
+conditional fetch skip required evaluation.
+
+The timestamp, ETag, replay version and evaluation fingerprint now commit in one
+SQLite transaction. Removing an ETag from the successful representation retires
+the old validator. An admitted transaction completes coherently if the caller
+retires; its owned run keeps admission until the result settles. Injected-write
+failure rolls back the complete snapshot. The baseline failure, success without
+an ETag, and cancelled-caller transaction tests pass in the full mobile suite.
+This does not scope the metadata to an account/catalog: S1-S4 and the complete
+scoped-runtime contract still require implementation and verification.

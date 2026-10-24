@@ -90,6 +90,13 @@ fn manifest_shutdown_does_not_wait_for_a_non_cooperative_host_getter() {
     interrupted_manifest(true);
 }
 
+fn wait_for_sync_cleanup(engine: &MobileEngine) {
+    let orchestrator = engine
+        .runtime
+        .block_on(async { Arc::clone(engine.sync_orchestrator.lock().await.as_ref().unwrap()) });
+    wait_until(|| !orchestrator.sync_in_progress());
+}
+
 fn wait_until(predicate: impl Fn() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !predicate() {
@@ -151,6 +158,7 @@ fn timed_out_manifest_getters_retain_shared_admission_without_queueing() {
             releases.clear();
         }
         caller.join().unwrap();
+        wait_for_sync_cleanup(&engine);
         assert!(began);
         assert!(
             matches!(result, Some(Err(MobileError::Engine { message })) if message.contains("timed out"))
@@ -418,3 +426,45 @@ fn engine_can_retire_while_manifest_callback_keeps_its_physical_resources() {
 
 #[path = "manifest_callback_transport_tests.rs"]
 mod transport_tests;
+
+#[test]
+fn manifest_sync_backpressure_precedes_a_second_host_getter() {
+    let (engine, _directory) = engine(30_000);
+    let (entered, started) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    let first_engine = Arc::clone(&engine);
+    let (first_done, first_result) = mpsc::channel();
+    let first = std::thread::spawn(move || {
+        let _ = first_done.send(first_engine.sync(
+            "https://manifest.example.invalid/manifest.json".into(),
+            Some(Arc::new(BlockedToken {
+                entered,
+                release: StdMutex::new(blocked),
+            })),
+        ));
+    });
+    let began = started.recv_timeout(Duration::from_secs(5)).is_ok();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = counted(&calls, "dst_second");
+    let second_engine = Arc::clone(&engine);
+    let (second_done, second_result) = mpsc::channel();
+    let second = std::thread::spawn(move || {
+        let _ = second_done.send(second_engine.sync(
+            "https://manifest.example.invalid/manifest.json".into(),
+            Some(provider),
+        ));
+    });
+    let refused = second_result.recv_timeout(Duration::from_secs(5)).ok();
+    engine.shutdown();
+    let interrupted = first_result.recv_timeout(Duration::from_secs(5)).ok();
+    let _ = release.send(());
+    first.join().unwrap();
+    second.join().unwrap();
+    assert!(began);
+    assert!(matches!(
+        refused,
+        Some(Err(MobileError::ResourceLimit { .. }))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(interrupted, Some(Err(MobileError::Shutdown))));
+}
