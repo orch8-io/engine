@@ -49,6 +49,8 @@ export interface EmbedClientOptions {
   token?: string | null;
   /** Called for a new token when none is cached, it is about to expire, or on 401. */
   tokenProvider?: TokenProvider | null;
+  /** Application account/session identity. Construct a new client when it changes. */
+  authContext?: string;
   /** Retries for idempotent requests (GET/PUT) on 5xx, 429 and network errors. */
   retries?: number;
   /** Base backoff in ms; attempt n waits `base * 2^n` (+ jitter), capped at 8s. */
@@ -75,20 +77,40 @@ const EMBED_PREFIX = "/api/v1/embed";
 /** Minimum gap between two provider calls for a non-forced ("expiring") refresh. */
 const MIN_REFRESH_GAP_MS = 5000;
 
-/**
- * Token state shared by every client built on the same provider function, so N
- * widgets on a page ask the provider once at expiry instead of N times.
- */
+/** Token refreshes are shared only within the same credential boundary. */
 interface TokenStore {
   token: string | null;
   inflight: Promise<string> | null;
   fetchedAt: number;
 }
-const stores = new WeakMap<object, TokenStore>();
-function storeFor(provider: TokenProvider): TokenStore {
-  let s = stores.get(provider);
-  if (!s) stores.set(provider, (s = { token: null, inflight: null, fetchedAt: 0 }));
-  return s;
+// Bound retained contexts for long-lived admin sessions/account switching.
+const MAX_PROVIDER_CONTEXTS = 64;
+const stores = new WeakMap<TokenProvider, Map<string, TokenStore>>();
+
+function principalOf(token: string | null): string | null {
+  const payload = decodeEmbedToken(token);
+  return payload ? JSON.stringify([payload.tid, payload.sub]) : null;
+}
+
+function authorizationSeed(token: string | null): unknown {
+  const payload = decodeEmbedToken(token);
+  return payload
+    ? [payload.tid, payload.sub, [...payload.scp].sort(), payload.seq === null ? null : [...payload.seq].sort()]
+    : token;
+}
+
+function storeFor(provider: TokenProvider, key: string): TokenStore {
+  let contexts = stores.get(provider);
+  if (!contexts) stores.set(provider, (contexts = new Map()));
+  const hit = contexts.get(key);
+  const store = hit ?? { token: null, inflight: null, fetchedAt: 0 };
+  contexts.delete(key);
+  contexts.set(key, store);
+  if (contexts.size > MAX_PROVIDER_CONTEXTS) {
+    const oldest = contexts.keys().next();
+    if (!oldest.done) contexts.delete(oldest.value);
+  }
+  return store;
 }
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -152,6 +174,9 @@ export class EmbedClient {
   readonly baseUrl: string;
   private token: string | null;
   private readonly provider: TokenProvider | null;
+  private readonly authContext: string | undefined;
+  private readonly tokenStore: TokenStore | null;
+  private principal: string | null;
   private readonly retries: number;
   private readonly retryBaseMs: number;
   private readonly skew: number;
@@ -163,6 +188,11 @@ export class EmbedClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.token = options.token || null;
     this.provider = options.tokenProvider ?? null;
+    this.authContext = options.authContext;
+    this.principal = principalOf(this.token);
+    this.tokenStore = this.provider
+      ? storeFor(this.provider, JSON.stringify([this.baseUrl, this.authContext ?? null, authorizationSeed(this.token)]))
+      : null;
     this.retries = options.retries ?? 3;
     this.retryBaseMs = options.retryBaseMs ?? 300;
     this.skew = options.refreshSkewSeconds ?? 30;
@@ -189,43 +219,57 @@ export class EmbedClient {
   async getToken(force: "unauthorized" | null = null): Promise<string> {
     if (!force && this.token && (this.tokenIsFresh(this.token) || !this.provider)) return this.token;
     const provider = this.provider;
-    if (!provider) {
+    const store = this.tokenStore;
+    if (!provider || !store) {
       throw new Orch8EmbedError("config", "No embed token: set the `token` attribute or a `tokenProvider`.");
     }
-    const store = storeFor(provider);
     // Another widget already refreshed: adopt its token instead of asking again.
     if (store.token && store.token !== this.token && this.tokenIsFresh(store.token)) {
-      this.token = store.token;
-      return store.token;
+      return this.adoptToken(store.token);
     }
     if (store.inflight) {
       const next = await store.inflight;
-      this.token = next;
-      return next;
+      return this.adoptToken(next);
     }
     // A provider whose tokens look expired to this clock (skew) must not be hit on every request.
-    if (!force && store.token && this.now() - store.fetchedAt < MIN_REFRESH_GAP_MS) {
-      this.token = store.token;
-      return store.token;
+    if (!force && store.token && this.now() >= store.fetchedAt && this.now() - store.fetchedAt < MIN_REFRESH_GAP_MS) {
+      return this.adoptToken(store.token);
     }
     const reason = force ?? (this.token ? "expiring" : "initial");
     const run = (async () => {
-      try {
-        const next = await provider({ reason });
-        if (typeof next !== "string" || !next) {
-          throw new Orch8EmbedError("config", "tokenProvider returned an empty token");
-        }
-        store.token = next;
-        store.fetchedAt = this.now();
-        return next;
-      } finally {
-        store.inflight = null;
+      const next = await provider({ reason, baseUrl: this.baseUrl, authContext: this.authContext });
+      if (typeof next !== "string" || !next) {
+        throw new Orch8EmbedError("config", "tokenProvider returned an empty token");
       }
+      this.validatePrincipal(next);
+      store.token = next;
+      store.fetchedAt = this.now();
+      return next;
     })();
     store.inflight = run;
-    const next = await run;
-    this.token = next;
-    return next;
+    // Own cleanup after publishing the promise: a synchronous provider throw
+    // must not leave a permanently rejected promise in the shared store.
+    try {
+      return this.adoptToken(await run);
+    } finally {
+      if (store.inflight === run) store.inflight = null;
+    }
+  }
+
+  private validatePrincipal(token: string): void {
+    if (this.principal !== null && principalOf(token) !== this.principal) {
+      throw new Orch8EmbedError(
+        "unauthorized", "Token refresh changed the customer identity; create a new client for an account switch.",
+        0, "token_scope_mismatch",
+      );
+    }
+  }
+
+  private adoptToken(token: string): string {
+    this.validatePrincipal(token);
+    this.principal ??= principalOf(token);
+    this.token = token;
+    return token;
   }
 
   private url(path: string, query?: RequestOptions["query"]): string {

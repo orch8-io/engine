@@ -5,7 +5,7 @@ export function b64url(s: string): string {
 }
 
 /** Builds an unsigned-but-well-formed o8e1 token (signature is not checked client side). */
-export function makeToken(overrides: Partial<{ scp: string[]; exp: number; tid: string; sub: string; jti: string }> = {}): string {
+export function makeToken(overrides: Partial<{ scp: string[]; seq: string[] | null; exp: number; tid: string; sub: string; jti: string }> = {}): string {
   const now = Math.floor(Date.now() / 1000);
   const payload = {
     v: 1,

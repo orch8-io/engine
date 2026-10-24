@@ -45,6 +45,31 @@ Mint embed tokens on your server (`POST /api/v1/embed/tokens` with your tenant
 API key) and hand them to the browser, ideally through the `tokenProvider`
 property so they refresh on their own.
 
+`EmbedClient` shares refreshes only for the same provider, engine base URL,
+application `authContext`, and initial authorization scope. Provider callbacks
+receive `{ reason, baseUrl, authContext }`, so one callback can mint the correct
+credential for its caller. For provider-only clients, supply a stable account or
+session key as `authContext`; construct a new client with a new context when the
+account changes. A refresh that changes a known tenant/customer identity fails
+with `token_scope_mismatch` before sending that credential. Token decoding is
+only a consistency/UX check; the server verifies signatures and permissions.
+
+```js
+const client = new EmbedClient({
+  baseUrl: "https://orch8.example.com",
+  authContext: currentAccount.sessionId,
+  tokenProvider: ({ authContext }) => fetchEmbedTokenForSession(authContext),
+});
+```
+
+At most 64 context stores are retained per provider. Eviction can cause an extra
+refresh when an old context is revisited; it never authorizes reuse across
+contexts. Provider errors clear the in-flight refresh so the next call can retry.
+The `authContext` option here belongs to the low-level `EmbedClient`; when changing
+accounts in a component host, remount its widgets and discard the prior account's
+view state. React's stable provider trampoline alone is not an account-switch
+signal.
+
 ## Content Security Policy
 
 The widgets work under a strict CSP with no `'unsafe-inline'` for styles:

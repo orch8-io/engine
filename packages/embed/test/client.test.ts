@@ -36,7 +36,7 @@ describe("EmbedClient", () => {
     });
     const client = new EmbedClient({ baseUrl: BASE, token: stale, tokenProvider: provider, fetch: engine.fetch });
     await expect(client.listApprovals()).resolves.toEqual({ items: [] });
-    expect(provider).toHaveBeenCalledWith({ reason: "unauthorized" });
+    expect(provider).toHaveBeenCalledWith({ reason: "unauthorized", baseUrl: BASE, authContext: undefined });
     expect(engine.calls.map((c) => c.auth)).toEqual([`Bearer ${stale}`, `Bearer ${fresh}`]);
   });
 
@@ -48,7 +48,7 @@ describe("EmbedClient", () => {
     const engine = mockEngine({ "GET /runs": { body: { items: [] } } });
     const client = new EmbedClient({ baseUrl: BASE, token: expiring, tokenProvider: provider, fetch: engine.fetch, now: () => now });
     await client.listRuns();
-    expect(provider).toHaveBeenCalledWith({ reason: "expiring" });
+    expect(provider).toHaveBeenCalledWith({ reason: "expiring", baseUrl: BASE, authContext: undefined });
     expect(engine.calls[0]!.auth).toBe(`Bearer ${fresh}`);
   });
 
@@ -61,7 +61,7 @@ describe("EmbedClient", () => {
     resolve(makeToken());
     await both;
     expect(provider).toHaveBeenCalledTimes(1);
-    expect(provider).toHaveBeenCalledWith({ reason: "initial" });
+    expect(provider).toHaveBeenCalledWith({ reason: "initial", baseUrl: BASE, authContext: undefined });
   });
 
   it("retries GET on 5xx with exponential backoff, then succeeds", async () => {

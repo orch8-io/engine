@@ -31,7 +31,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Pending |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Pending |
-| Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Pending |
+| Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh boundaries fixed; component account-switch lifecycle pending |
 | Operations and security | Payload bounds, resource retention, diagnostics without secrets, dependency advisories, migration/rollback and supported platforms | Pending |
 
 For each area, completion requires source and caller review, relevant existing
@@ -103,3 +103,70 @@ cross-runtime review, coverage percentage, throughput gain, or real-device
 platform certification is claimed by these checks. The pending areas above
 remain under review, including worker resource bounds and the remaining
 distributed and embedded trust boundaries.
+
+## Web credential usage schema (TypeScript phase 0)
+
+`TokenProvider` originates in application code, flows through the React stable
+trampoline and the base custom-element property, and is called by `EmbedClient`.
+The callback currently receives refresh reason only. `EmbedClient` mutates its
+current bearer token; provider-level shared state retains a token, in-flight
+promise, and fetch time. HTTP requests serialize the selected bearer into
+`Authorization`. The token decoder supplies expiry/scope UX, base-element
+identity comparison, and theme-cache identity; the engine remains authoritative
+for signature and access verification.
+
+The same callback may serve multiple engine origins, explicit initial customer
+tokens, or successive application sessions. Cache ownership therefore requires
+provider, engine base, explicit application auth context, and initial
+authorization scope. Once a client has a readable principal, refresh must not
+silently change it. Same-context widgets must continue deduplicating expiry and
+401 refreshes. Context cache retention must be bounded independently of token
+rotation. Provider-only callers must change auth context or construct a new
+provider/client when the signed-in account changes.
+
+Observed lifecycle follow-up: the React trampoline intentionally retains callback
+identity across renders; base-element invalidation retains ready views and
+unsaved forms. Explicit account switches and late asynchronous UI responses need
+separate lifecycle verification, beyond HTTP token-cache isolation.
+
+## Web credential findings and evidence
+
+| ID | Finding | Evidence and correction | State |
+|---|---|---|---|
+| DME-010 | Provider cache sends another engine's bearer token | Two clients with one provider and different engines reused the first credential. Isolate engine bases. | Fixed; regression reproduced |
+| DME-011 | A 401 can adopt another customer's refreshed credential | Customer A received customer B's run in a mock flow. Isolate initial authorization scopes and explicit provider-only auth contexts. | Fixed; regression reproduced |
+| DME-012 | Refresh silently changes a known tenant/customer principal | Two regressions confirmed tenant and customer changes reached HTTP. Validate principal before publishing/adopting refresh tokens. | Fixed; regressions reproduced |
+| DME-013 | A synchronous provider exception permanently poisons shared refresh | A second request reused the rejected promise after the provider recovered. Publish the promise before owner cleanup. | Fixed; regression reproduced |
+| DME-014 | Embed tests/build were absent from CI | Existing workflows did not invoke `packages/embed`. Add a pinned Node/pnpm job for locked installation, advisory audit, typecheck, lint, tests, and build. | Added; actionlint passes; hosted validation pending |
+| DME-015 | Embed test tooling retained seven published advisories | Audit reported two high, four moderate, and one low advisory across Happy DOM 21.0.3 and Vite 8.3.1. Upgrade the locked tooling and audit the full graph. | Fixed; refreshed audit passes |
+
+The original isolation tests produced four expected failures while all six
+pre-existing client-hardening tests passed. The provider-lifecycle test separately
+reproduced a synchronous failure permanently blocking recovery (13 passed, one
+expected failure). New coverage includes distinct application account contexts,
+initial permission scopes, rejection recovery, malformed payload shapes, and
+refresh after context eviction. All 115 embed tests pass locally, along with TypeScript checking, ESLint, and
+the package/CDN build. Hosted CI remains pending. Additional checks preserve
+coalescing across token rotations and isolate sequence restrictions, reject
+unreadable principal replacements, and handle backwards client-clock jumps.
+
+The decoder validates payload shape before returning its public typed payload;
+it does not verify token authenticity. Opaque tokens remain server-validated,
+but cannot replace a readable principal during an anchored refresh. Cache
+retention is capped at 64 contexts per provider; eviction only reduces refresh
+deduplication. Existing same-context expiry and 401 coalescing tests remain green.
+
+Still pending: account-switch handling for dirty builders/approval comments and
+late component responses. Remounting widgets is currently required for an
+application account/session switch. Explicit `EmbedClient.authContext` does not
+by itself reset a previously mounted component's state.
+
+The complete embed dependency audit initially reported seven advisories. Happy
+DOM is now locked to 21.0.4 and Vite to 8.3.5, with patched minimum requirements
+in the manifest. The refreshed complete graph audit reports zero vulnerabilities.
+The affected tooling is used for development/tests; no browser-runtime impact is
+inferred from those advisories. References: [Happy DOM advisory](https://github.com/advisories/GHSA-834v-8h66-3h79)
+and [Vite/launch-editor advisory](https://github.com/advisories/GHSA-587h-7wmj-h5pm).
+The new CI job audits this graph without severity exclusions. `actionlint` passes
+for the updated workflow. Frozen installation, all 115 tests, typecheck, lint,
+and the package build are rerun on the patched dependency graph.

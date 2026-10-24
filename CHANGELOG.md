@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Web embed credential isolation
+
+- Isolate shared token refresh by engine, provider, application auth context, and
+  initial authorization scope; reject tenant/customer changes during refresh.
+- Bound provider context retention and recover from synchronous provider errors.
+  Validate decoded token payload fields before using typed identity/scope data.
+- Update affected Happy DOM and Vite test tooling. Run locked dependency audits,
+  typecheck, lint, tests, and package builds for the embed SDK in CI.
+
 ### Mobile worker cancellation and background windows
 
 - Keep remote timeout futures owned by the lease execution so losing the lease
