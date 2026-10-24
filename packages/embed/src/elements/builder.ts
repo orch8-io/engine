@@ -103,9 +103,17 @@ export class Orch8BuilderElement extends Orch8Element {
     return Boolean(this.sequence);
   }
 
-  /** Unsaved edits are never replaced by a reload triggered by a credential/endpoint swap. */
-  protected override hasUnsavedChanges(): boolean {
-    return this.dirty;
+  protected override onIdentityChanged(): void {
+    this.definition = null;
+    this.items = [];
+    this.handlers = [];
+    this.errors.clear();
+    this.setDirty(false);
+    this.saving = false;
+    this.saveMessage = null;
+    this.pendingFocus = null;
+    this.dirtyEl = null;
+    this.saveBtn = null;
   }
 
   protected override onAttributeChanged(name: string): void {
@@ -128,6 +136,7 @@ export class Orch8BuilderElement extends Orch8Element {
       this.client.listSequences(signal).catch(() => ({ items: [], handlers: [] as HandlerInfo[] })),
       this.client.getSequence(name, signal),
     ]);
+    if (signal.aborted) return;
     const def = unwrapDefinition(raw);
     if (!def) throw new Error("Unexpected sequence payload: missing blocks");
     this.handlers = list.handlers;
@@ -289,11 +298,13 @@ export class Orch8BuilderElement extends Orch8Element {
         : it.block,
     );
     const definition: SequenceDefinitionJson = { ...this.definition, blocks };
+    const signal = this.operationSignal;
     this.saving = true;
     this.saveMessage = null;
     this.renderContent();
     try {
-      const res = await this.client.putSequence(name, definition);
+      const res = await this.client.putSequence(name, definition, signal);
+      if (signal.aborted) return false;
       const saved = unwrapDefinition(res) ?? definition;
       if (this.sequence !== name) {
         // The element moved to another sequence mid-save: the PUT landed, but must not clobber the new model.
@@ -306,13 +317,16 @@ export class Orch8BuilderElement extends Orch8Element {
       this.emit<SequenceSavedDetail>("orch8-sequence-saved", { name, definition: saved });
       return true;
     } catch (err) {
+      if (signal.aborted) return false;
       const { message, detail } = this.errorMessage(err);
       this.saveMessage = { text: detail ? `${message} ${detail}` : message, error: true };
       return false;
     } finally {
-      this.saving = false;
-      this.pendingFocus = this.saveMessage?.error ? "save" : this.pendingFocus;
-      this.renderContent();
+      if (!signal.aborted) {
+        this.saving = false;
+        this.pendingFocus = this.saveMessage?.error ? "save" : this.pendingFocus;
+        this.renderContent();
+      }
     }
   }
 

@@ -1,3 +1,4 @@
+import { Orch8EmbedError } from "../client.js";
 import { BASE_ATTRIBUTES, Orch8Element, type LoadMode, type LoadResult } from "../base.js";
 import { formatDateTime, formatRelative, h } from "../dom.js";
 import type { RunSummary } from "../types.js";
@@ -62,6 +63,12 @@ export class Orch8RunsElement extends Orch8Element {
     this.signature = "";
   }
 
+  protected override onIdentityChanged(): void {
+    this.onAttributeChanged();
+    this.starting = false;
+    this.startError = null;
+  }
+
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.moreCtl?.abort();
@@ -75,6 +82,7 @@ export class Orch8RunsElement extends Orch8Element {
 
   protected async load(signal: AbortSignal, mode: LoadMode): Promise<LoadResult> {
     const page = await this.client.listRuns({ limit: this.pageSize }, signal);
+    if (signal.aborted) return;
     if (mode === "initial" || this.items.length === 0) {
       this.items = page.items;
       this.firstPageLen = page.items.length;
@@ -121,7 +129,9 @@ export class Orch8RunsElement extends Orch8Element {
 
   /** Starts a run of `sequence` (defaults to the `start-sequence` attribute). */
   async startRun(sequence = this.getAttribute("start-sequence") ?? "", input: unknown = {}): Promise<string> {
-    const res = await this.client.startRun({ sequence, input });
+    const signal = this.operationSignal;
+    const res = await this.client.startRun({ sequence, input }, signal);
+    if (signal.aborted) throw new Orch8EmbedError("aborted", "Account view changed");
     this.emit("orch8-run-started", { id: res.id, sequence });
     this.announce(this.t("runsStarted"));
     this.refresh();
@@ -130,16 +140,20 @@ export class Orch8RunsElement extends Orch8Element {
 
   private async onStartClick(): Promise<void> {
     if (this.starting) return;
+    const signal = this.operationSignal;
     this.starting = true;
     this.render();
     try {
       await this.startRun();
     } catch (err) {
+      if (signal.aborted) return;
       this.announce(this.errorMessage(err).message);
       this.startError = this.errorMessage(err).message;
     } finally {
-      this.starting = false;
-      this.render();
+      if (!signal.aborted) {
+        this.starting = false;
+        this.render();
+      }
     }
   }
 

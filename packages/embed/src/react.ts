@@ -22,6 +22,8 @@ export interface Orch8CommonProps {
   /** Static embed token (`o8e1…`). Prefer `tokenProvider` for refresh. */
   token?: string;
   tokenProvider?: TokenProvider;
+  /** Change on account/session switches to clear the previous view and pending actions. */
+  authContext?: string;
   strings?: Partial<Orch8Strings>;
   /** Extra `--orch8-*` variables; override the server theme. */
   theme?: Record<string, string>;
@@ -130,6 +132,7 @@ function createWrapper<E extends HTMLElement, P extends Orch8CommonProps>(spec: 
     const domProps: Record<string, unknown> = { ref: inner, id: common.id, class: common.className, style: common.style };
     const commonAttrs: Record<string, string> = {
       baseUrl: "base-url",
+      authContext: "auth-context",
       token: "token",
       theme: "theme",
       colorScheme: "color-scheme",

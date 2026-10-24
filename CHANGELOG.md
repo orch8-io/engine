@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Web component account ownership
+
+- Add `auth-context` / `authContext` to custom elements and React wrappers. Reset
+  models, drafts, theme, and pending operations when the account, authorization,
+  endpoint, provider, or transport changes; preserve ordinary token rotation.
+- Prevent late reads, saves, approvals, starts, and theme responses from updating
+  a replacement account view or emitting the previous account's payloads.
+- Cancel request waits promptly without cancelling shared token refreshes, and
+  prevent aborted mutations from dispatching through custom transports.
+- Isolate opaque theme credentials and bound page-wide theme retention to 128
+  authorization contexts.
+
 ### Web embed credential isolation
 
 - Isolate shared token refresh by engine, provider, application auth context, and

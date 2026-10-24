@@ -230,3 +230,54 @@ describe("refresh authorization continuity", () => {
     expect(provider).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("request cancellation ownership", () => {
+  it("does not dispatch an already-cancelled mutation even through a transport that ignores abort", async () => {
+    const engine = mockEngine({ "POST /runs": { body: { id: "should-not-start" } } });
+    const provider = vi.fn(() => makeToken());
+    const client = new EmbedClient({ baseUrl: BASE, tokenProvider: provider, fetch: engine.fetch });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(client.startRun({ sequence: "flow" }, controller.signal)).rejects.toMatchObject({ kind: "aborted" });
+    expect(provider).not.toHaveBeenCalled();
+    expect(engine.calls).toHaveLength(0);
+  });
+
+  it("does not dispatch after cancellation while waiting for a shared provider", async () => {
+    let issue!: (token: string) => void;
+    const provider = vi.fn(() => new Promise<string>((resolve) => { issue = resolve; }));
+    const engine = mockEngine({ "POST /runs": { body: { id: "should-not-start" } }, "GET /runs": { body: { items: [] } } });
+    const client = new EmbedClient({ baseUrl: BASE, tokenProvider: provider, fetch: engine.fetch });
+    const other = new EmbedClient({ baseUrl: BASE, tokenProvider: provider, fetch: engine.fetch });
+    const controller = new AbortController();
+    const pending = client.startRun({ sequence: "flow" }, controller.signal);
+    const kept = other.listRuns();
+    controller.abort();
+    issue(makeToken());
+    await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+    await expect(kept).resolves.toMatchObject({ items: [] });
+    expect(engine.calls.map((call) => call.method)).toEqual(["GET"]);
+    expect(provider).toHaveBeenCalledTimes(1);
+  });
+});
+
+it("settles a cancelled caller while its shared token provider remains pending", async () => {
+  let issue!: (token: string) => void;
+  const provider = vi.fn(() => new Promise<string>((resolve) => { issue = resolve; }));
+  const client = new EmbedClient({ baseUrl: BASE, tokenProvider: provider });
+  const controller = new AbortController();
+  const pending = client.startRun({ sequence: "flow" }, controller.signal).catch((error: unknown) => error);
+  controller.abort();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      pending,
+      new Promise<string>((resolve) => { timer = setTimeout(() => resolve("still waiting for provider"), 100); }),
+    ]);
+    expect(result).toMatchObject({ kind: "aborted" });
+  } finally {
+    clearTimeout(timer);
+    issue(makeToken());
+    await pending;
+  }
+});

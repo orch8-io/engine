@@ -44,6 +44,15 @@ export function decodeEmbedToken(token: string | null | undefined): EmbedTokenPa
   }
 }
 
+/** Collision-free authorization identity for cache/view ownership, not signature verification. */
+export function tokenAuthorizationIdentity(token: string | null | undefined): string | null {
+  const payload = decodeEmbedToken(token);
+  return payload ? JSON.stringify([
+    payload.tid, payload.sub, [...payload.scp].sort(),
+    payload.seq === null ? null : [...payload.seq].sort(),
+  ]) : null;
+}
+
 /** True when the token is known to carry `scope`; true (optimistic) when undecodable. */
 export function tokenAllows(token: string | null | undefined, scope: string): boolean {
   const payload = decodeEmbedToken(token);

@@ -79,6 +79,30 @@ describe("React wrapper prop stability (EW-03, EW-04, EW-11)", () => {
     await act(async () => root.unmount());
   });
 
+  it("reloads on explicit account context changes while keeping the provider trampoline stable", async () => {
+    const a = makeToken({ sub: "account-a" });
+    const b = makeToken({ sub: "account-b" });
+    const engine = mockEngine({
+      "GET /runs": (call) => ({ body: { items: [{ ...RUNS.items[0], sequence: call.auth === `Bearer ${a}` ? "private-a" : "private-b" }] } }),
+      "GET /theme": { body: THEME },
+    });
+    const { container, root } = host();
+    const render = (account: string) => root.render(createElement(Orch8Runs, {
+      baseUrl: BASE, authContext: account, pollInterval: 0, fetchImpl: engine.fetch,
+      tokenProvider: () => account === "a" ? a : b,
+    }));
+    await act(async () => render("a"));
+    const el = container.querySelector("orch8-runs") as unknown as { tokenProvider: unknown; shadowRoot: ShadowRoot };
+    await waitFor(() => el.shadowRoot.textContent?.includes("private-a") ? true : null);
+    const provider = el.tokenProvider;
+    await act(async () => render("b"));
+    await waitFor(() => el.shadowRoot.textContent?.includes("private-b") ? true : null);
+    expect(el.tokenProvider).toBe(provider);
+    expect(el.shadowRoot.textContent).not.toContain("private-a");
+    expect(engine.calls.filter((call) => call.path === "/runs").map((call) => call.auth)).toEqual([`Bearer ${a}`, `Bearer ${b}`]);
+    await act(async () => root.unmount());
+  });
+
   it("maps className to class on the custom element (React 18 would emit 'classname')", () => {
     const html = renderToString(createElement(Orch8Runs, { baseUrl: BASE, className: "my-widget" }));
     expect(html).toMatch(/<orch8-runs [^>]*class="my-widget"/);

@@ -134,7 +134,7 @@ describe("token attribute rotation (EW-02)", () => {
     await waitFor(() => root.querySelector("table"));
   });
 
-  it("builder keeps unsaved edits across a token or base-url change", async () => {
+  it("builder keeps unsaved edits across a same-authorization token rotation", async () => {
     const def = {
       name: "onboard",
       blocks: [
@@ -155,20 +155,19 @@ describe("token attribute rotation (EW-02)", () => {
     const edited = order();
     expect(edited[0]).toContain("b");
 
-    el.setAttribute("token", makeToken({ sub: "someone-else" }));
-    el.setAttribute("base-url", "https://other.test");
+    el.setAttribute("token", makeToken({ sub: "c1" }));
     await sleep(50);
     expect(el.isDirty).toBe(true);
     expect(order()).toEqual(edited);
     expect(engine.calls.filter((c) => c.path === "/sequences/onboard")).toHaveLength(1);
   });
 
-  it("approvals keeps a half-typed comment across a credential swap", async () => {
+  it("approvals keeps a half-typed comment across a same-authorization rotation", async () => {
     const engine = mockEngine({ "GET /approvals": { body: { items: [APPROVAL("a1")] } }, "GET /theme": { body: THEME } });
     const { el, root } = mount("orch8-approvals", { "base-url": BASE, token: makeToken({ sub: "c1" }), "poll-interval": "0" }, { fetchImpl: engine.fetch });
     const ta = await waitFor(() => root.querySelector<HTMLTextAreaElement>("textarea"));
     ta.value = "half typed";
-    el.setAttribute("token", makeToken({ sub: "c2" }));
+    el.setAttribute("token", makeToken({ sub: "c1" }));
     await sleep(50);
     expect(root.querySelector("textarea")).toBe(ta);
     expect(ta.value).toBe("half typed");

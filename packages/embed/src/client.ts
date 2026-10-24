@@ -1,4 +1,4 @@
-import { decodeEmbedToken, type TokenProvider } from "./token.js";
+import { decodeEmbedToken, tokenAuthorizationIdentity, type TokenProvider } from "./token.js";
 import type {
   ApprovalList,
   EmbedTheme,
@@ -92,11 +92,8 @@ function principalOf(token: string | null): string | null {
   return payload ? JSON.stringify([payload.tid, payload.sub]) : null;
 }
 
-function authorizationSeed(token: string | null): unknown {
-  const payload = decodeEmbedToken(token);
-  return payload
-    ? [payload.tid, payload.sub, [...payload.scp].sort(), payload.seq === null ? null : [...payload.seq].sort()]
-    : token;
+function authorizationSeed(token: string | null): string | null {
+  return tokenAuthorizationIdentity(token) ?? token;
 }
 
 function storeFor(provider: TokenProvider, key: string): TokenStore {
@@ -125,6 +122,26 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new Orch8EmbedError("aborted", "aborted"));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Cancel this caller's wait without cancelling a shared refresh for other widgets. */
+export function ownedWait<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return pending;
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(new Orch8EmbedError("aborted", "aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    // Attach both handlers even when already aborted, so a late provider or
+    // transport rejection is observed and cannot become an unhandled rejection.
+    pending.then(
+      (value) => { cleanup(); resolve(value); },
+      (error: unknown) => { cleanup(); reject(error); },
+    );
   });
 }
 
@@ -284,6 +301,7 @@ export class EmbedClient {
   }
 
   private async once<T>(opts: RequestOptions, path: string, token: string): Promise<T> {
+    if (opts.signal?.aborted) throw new Orch8EmbedError("aborted", "aborted");
     const headers: Record<string, string> = {
       Accept: "application/json",
       Authorization: `Bearer ${token}`,
@@ -291,19 +309,20 @@ export class EmbedClient {
     if (opts.body !== undefined) headers["Content-Type"] = "application/json";
     let res: Response;
     try {
-      res = await this.fetchImpl(this.url(path, opts.query), {
+      res = await ownedWait(this.fetchImpl(this.url(path, opts.query), {
         method: opts.method ?? "GET",
         headers,
         body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
         signal: opts.signal,
         credentials: "omit",
         mode: "cors",
-      });
+      }), opts.signal);
     } catch (err) {
       if (opts.signal?.aborted) throw new Orch8EmbedError("aborted", "aborted");
       throw new Orch8EmbedError("network", err instanceof Error ? err.message : "network error");
     }
-    const text = await res.text().catch(() => null);
+    const text = await ownedWait(res.text().catch(() => null), opts.signal);
+    if (opts.signal?.aborted) throw new Orch8EmbedError("aborted", "aborted");
     let json: unknown = undefined;
     let parsed = false;
     if (text) {
@@ -345,9 +364,10 @@ export class EmbedClient {
 
   /** Low-level request against `/api/v1/embed{path}`. */
   async request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+    if (opts.signal?.aborted) throw new Orch8EmbedError("aborted", "aborted");
     const method = opts.method ?? "GET";
     const idempotent = method === "GET" || method === "PUT";
-    let token = await this.getToken();
+    let token = await ownedWait(this.getToken(), opts.signal);
     let refreshed = false;
     for (let attempt = 0; ; attempt++) {
       try {
@@ -356,7 +376,7 @@ export class EmbedClient {
         const err = e as Orch8EmbedError;
         if (err.kind === "unauthorized" && this.provider && !refreshed) {
           refreshed = true;
-          token = await this.getToken("unauthorized");
+          token = await ownedWait(this.getToken("unauthorized"), opts.signal);
           attempt--; // a refresh is not a retry
           continue;
         }
@@ -364,7 +384,7 @@ export class EmbedClient {
         const hinted = (err as { retryAfterMs?: number }).retryAfterMs;
         const backoff = Math.min(this.retryBaseMs * 2 ** attempt, 8000);
         const jitter = Math.random() * this.retryBaseMs;
-        await this.sleep(hinted ?? backoff + jitter, opts.signal);
+        await ownedWait(this.sleep(hinted ?? backoff + jitter, opts.signal), opts.signal);
       }
     }
   }

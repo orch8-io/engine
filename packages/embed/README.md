@@ -65,10 +65,21 @@ const client = new EmbedClient({
 At most 64 context stores are retained per provider. Eviction can cause an extra
 refresh when an old context is revisited; it never authorizes reuse across
 contexts. Provider errors clear the in-flight refresh so the next call can retry.
-The `authContext` option here belongs to the low-level `EmbedClient`; when changing
-accounts in a component host, remount its widgets and discard the prior account's
-view state. React's stable provider trampoline alone is not an account-switch
-signal.
+Components expose the same boundary as the `auth-context` attribute / `authContext`
+property, and React wrappers accept an `authContext` prop. Change it whenever the
+account/session changes, especially when using an inline provider callback. The
+widget immediately clears its old model, drafts, theme, and pending actions,
+then loads the new context. Update or remove any static `token` at the same time;
+changing a context label does not mint a different credential. A provider or
+transport function replacement also resets the view. React keeps inline provider
+callbacks stable, so changing only that closure is not an account-switch signal.
+
+Pending operations are cancelled on a boundary change or disconnection. A
+mutation already accepted by the engine can still finish; cancellation prevents
+its late response or events from entering the new view and does not undo server
+side effects. An old builder save resolves `false`; an old programmatic run start
+rejects with an `aborted` error. Theme sharing is bounded to 128 authorization
+contexts per page, with a five-minute TTL.
 
 ## Content Security Policy
 
@@ -93,10 +104,10 @@ The widgets work under a strict CSP with no `'unsafe-inline'` for styles:
   `tokenProvider` / `strings` literals are safe; they do not cause reloads.
 - Widgets pause polling while scrolled out of view or in a background tab, and
   add jitter and exponential backoff when the engine is failing.
-- Changing the `token` attribute to another token of the same tenant and
-  sub-tenant swaps the credential without reloading the widget. A token for a
-  different sub-tenant reloads it, except that the builder and unsent approval
-  comments are never discarded.
+- Rotating a token with the same tenant, customer, permission scopes, and sequence
+  restrictions keeps the current view and unsaved input. Changing authorization,
+  endpoint, or account context discards old drafts and reloads; applications that
+  need to preserve drafts should store them under their originating account.
 - Form controls use a 3:1 border colour (`--orch8-control-border`) and the
   widgets honour `forced-colors` (Windows High Contrast).
 

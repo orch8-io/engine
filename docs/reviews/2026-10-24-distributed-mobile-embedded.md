@@ -31,7 +31,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Pending |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Pending |
-| Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh boundaries fixed; component account-switch lifecycle pending |
+| Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
 | Operations and security | Payload bounds, resource retention, diagnostics without secrets, dependency advisories, migration/rollback and supported platforms | Pending |
 
 For each area, completion requires source and caller review, relevant existing
@@ -124,10 +124,9 @@ silently change it. Same-context widgets must continue deduplicating expiry and
 rotation. Provider-only callers must change auth context or construct a new
 provider/client when the signed-in account changes.
 
-Observed lifecycle follow-up: the React trampoline intentionally retains callback
-identity across renders; base-element invalidation retains ready views and
-unsaved forms. Explicit account switches and late asynchronous UI responses need
-separate lifecycle verification, beyond HTTP token-cache isolation.
+The lifecycle follow-up below verifies the React trampoline, retained ready
+views, dirty forms, and late asynchronous responses separately from HTTP refresh
+isolation.
 
 ## Web credential findings and evidence
 
@@ -156,10 +155,8 @@ but cannot replace a readable principal during an anchored refresh. Cache
 retention is capped at 64 contexts per provider; eviction only reduces refresh
 deduplication. Existing same-context expiry and 401 coalescing tests remain green.
 
-Still pending: account-switch handling for dirty builders/approval comments and
-late component responses. Remounting widgets is currently required for an
-application account/session switch. Explicit `EmbedClient.authContext` does not
-by itself reset a previously mounted component's state.
+The subsequent component batch exposes the auth context on elements and React
+wrappers and verifies account-switch handling below.
 
 The complete embed dependency audit initially reported seven advisories. Happy
 DOM is now locked to 21.0.4 and Vite to 8.3.5, with patched minimum requirements
@@ -170,3 +167,46 @@ and [Vite/launch-editor advisory](https://github.com/advisories/GHSA-587h-7wmj-h
 The new CI job audits this graph without severity exclusions. `actionlint` passes
 for the updated workflow. Frozen installation, all 115 tests, typecheck, lint,
 and the package build are rerun on the patched dependency graph.
+
+## Component account ownership and cancellation
+
+Baseline: `31ed6938`, the verified HTTP credential-isolation batch. Runtime state
+ownership now follows account/session context, engine base, authorization scopes,
+and credential/transport sources. Each component operation captures its owner's
+abort signal. Boundary changes clear visible state before resetting models or
+notifying dirty-state listeners. Disconnection cancels pending operations too.
+A new signal is created on reconnection. Cosmetic changes and same-authorization
+token rotation retain the view. Sequence-only changes retain the existing
+same-account save-completion behavior.
+
+| ID | Finding | Reproduction and correction | State |
+|---|---|---|---|
+| DME-016 | Dirty builders and approval comments cross customer/engine boundaries | A builder can submit account A's draft using account B's credentials; comments persist for matching approval IDs. Clear old models/forms synchronously on explicit ownership changes; expose account context to custom elements and React. | Fixed; baseline regressions reproduced |
+| DME-017 | Late asynchronous results restore old-account models or events | An aborted initial read still mutates its model before the base check; a late save checks sequence name but not account. Capture ownership for reads, saves, approvals, starts, and theme results, guarding state and events. | Fixed; baseline read/save regressions reproduced |
+| DME-018 | Cancelled requests still dispatch through custom transports | Already-aborted mutations and mutations cancelled during token refresh reach HTTP if the transport ignores signals. Check cancellation before dispatch and cancel each caller's wait without cancelling shared refreshes. | Fixed; two regressions reproduced |
+| DME-019 | Theme caching merges opaque credentials and grows without bound | Two opaque tokens share the unknown-identity cache key; visiting 160 accounts retains every theme. Resolve identity before lookup, use structured authorization keys, and retain at most 128 entries. | Fixed; two regressions reproduced |
+
+Four account-isolation regressions fail against the original component sources;
+these cover dirty state, comment state, late reads, and late saves. The corrected
+sources pass those scenarios. Additional checks cover engine changes, React's
+stable provider trampoline with explicit account context, provider replacement,
+late approval/run-start events, late themes, cancellation while a provider is
+still pending, and theme cache eviction. Existing same-authorization token
+rotation and inline provider stability tests remain green. Tests intentionally
+use transports that ignore abort to verify ownership independently of transport
+cooperation. The old tests that preserved unsaved data across different customers
+were corrected to require preservation only during same-authorization rotation.
+
+Local checks pass all 130 embed tests, typecheck, ESLint, package/CDN build,
+frozen installation, and a fresh full advisory audit (zero vulnerabilities).
+Hosted validation of this component batch remains pending.
+The previous HTTP/cache commit's hosted Web embed SDK job passed.
+
+Compatibility: switching accounts now deliberately discards old drafts. Hosts
+that preserve drafts must store them under the originating account. Providers
+must mint for the requested authenticated session; an auth-context label does
+not authorize or change a static token. Physical server mutations already
+accepted may finish after local cancellation, but cannot update a replacement
+view or emit their old-account payload there. No automatic server rollback is
+claimed. A cancelled builder save resolves false; a cancelled programmatic run
+start rejects as aborted.
