@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock, Weak};
 use std::time::Duration;
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -31,6 +32,12 @@ pub(crate) const DEVICE_SESSION_PREFIX: &str = "dst_";
 /// Longest the host's `refresh_token` may take while the single-flight lock is
 /// held (MC-12). A hung provider must not wedge every authenticated request.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
+/// Retired owners may have non-cooperative callbacks still physically running.
+/// Bound their aggregate work/identity metadata while allowing successor owners
+/// to make progress until this credential-wide budget is exhausted.
+// The smallest production runtime has four blocking threads. Limit refresh
+// work to half of that pool so stale auth callbacks alone cannot occupy it.
+const MAX_PHYSICAL_REFRESHES: usize = 2;
 /// First retry delay after a refresh that failed or returned the same token;
 /// doubles per consecutive failure up to [`REFRESH_BACKOFF_MAX`].
 const REFRESH_BACKOFF_BASE: Duration = Duration::from_secs(5);
@@ -42,6 +49,7 @@ pub(crate) struct Credential {
     state: StdRwLock<CredentialState>,
     warned_operator: AtomicBool,
     refresh_timeout_ms: AtomicU64,
+    physical_refresh_slots: Arc<Semaphore>,
 }
 
 struct CredentialState {
@@ -105,11 +113,17 @@ impl CredentialState {
 
 // Owned by the blocking closure, including while queued. Timeout/cancellation
 // cannot free physical admission before the closure returns or is dropped.
-struct PhysicalRefresh(Arc<AtomicBool>);
+struct PhysicalRefresh {
+    // Fields drop in declaration order. Foreign destruction can block or
+    // re-enter, so retain capacity until the provider is fully destroyed.
+    provider: Arc<dyn TokenProvider>,
+    running: Arc<AtomicBool>,
+    _slot: OwnedSemaphorePermit,
+}
 
 impl Drop for PhysicalRefresh {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.running.store(false, Ordering::Release);
     }
 }
 
@@ -148,6 +162,7 @@ impl Credential {
                 pending_install: false,
                 refresh_failure: None,
             }),
+            physical_refresh_slots: Arc::new(Semaphore::new(MAX_PHYSICAL_REFRESHES)),
             warned_operator: AtomicBool::new(false),
             refresh_timeout_ms: AtomicU64::new(
                 u64::try_from(REFRESH_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
@@ -298,7 +313,7 @@ impl Credential {
             () = cancelled.cancelled() => return false,
             guard = refresh.lock() => guard,
         };
-        let (provider, rejected_token, physical, initializing) = {
+        let (rejected_token, physical, initializing) = {
             let state = self
                 .state
                 .read()
@@ -318,29 +333,34 @@ impl Credential {
                 debug!("token refresh suppressed by backoff");
                 return false;
             }
+            let Ok(slot) = Arc::clone(&self.physical_refresh_slots).try_acquire_owned() else {
+                // No queue and no negative-cache penalty: a different owner
+                // can recover as soon as an old physical call actually ends.
+                debug!("token refresh physical capacity exhausted");
+                return false;
+            };
             if state.physical_refresh.swap(true, Ordering::AcqRel) {
                 // A timed-out host callback still owns physical admission.
                 return false;
             }
-            let physical = PhysicalRefresh(Arc::clone(&state.physical_refresh));
+            let physical = PhysicalRefresh {
+                provider,
+                running: Arc::clone(&state.physical_refresh),
+                _slot: slot,
+            };
             // Initial publication may finish while refresh runs. Keep it
             // eligible until a successful refresh supersedes it; a failed
             // refresh must not strand an otherwise usable installation.
-            (
-                provider,
-                state.token.clone(),
-                physical,
-                state.pending_install,
-            )
+            (state.token.clone(), physical, state.pending_install)
         };
         let timeout = Duration::from_millis(self.refresh_timeout_ms.load(Ordering::Relaxed));
         let callback_cancelled = cancelled.clone();
         let call = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
-            let _physical = physical;
+            let physical_call = physical;
             if callback_cancelled.is_cancelled() {
                 return Ok(String::new());
             }
-            provider.refresh_token()
+            physical_call.provider.refresh_token()
         }));
         let result = tokio::select! {
             biased;
@@ -432,3 +452,7 @@ impl std::fmt::Debug for Credential {
 #[cfg(test)]
 #[path = "credential_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "credential_budget_tests.rs"]
+mod budget_tests;

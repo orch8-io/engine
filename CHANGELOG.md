@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Physical token refresh admission
+
+- Bound unfinished Rust blocking token refresh calls to two per shared mobile
+  credential across provider replacements, including retired calls and queued
+  work, preserving executor headroom in the smallest mobile runtime. Refuse exhausted admission without queuing work or poisoning backoff.
+- Retain capacity through provider destruction, timeout and cancellation; return
+  it on physical completion, queued cancellation and unwinding. Nested async
+  wrapper fetches that outlive native callbacks still require their own bounds.
+
 ### Credential readiness and initial publication
 
 - Obtain an initial provider token before dispatching control-plane payloads;

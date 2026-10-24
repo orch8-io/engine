@@ -858,6 +858,15 @@ this installation fence does not verify the tenant/customer inside opaque tokens
 Account/principal lifecycle and nested async-wrapper work require their own
 ownership checks.
 
+At most two unfinished synchronous refresh calls share one mobile credential,
+including callbacks from replaced providers. This leaves blocking-executor
+headroom for other work in the smallest mobile runtime. Timeouts stop waiting; the slot
+returns when the native callback and its provider cleanup actually finish. When
+all slots remain occupied, additional refreshes fail locally without queuing more
+host callbacks. An existing usable token remains available. This quota covers
+native callbacks; asynchronous work launched independently needs its own bound.
+
+
 A device session is bound to its tenant, `device_id`, `runtime_id`, and
 handler allowlist, and reaches only:
 

@@ -592,7 +592,9 @@ refresh responses. Reuse the bounded native refresh and readiness path rather
 than replay an old operation under whichever provider is current. Test reverse
 initial completion, sync-vs-async replacement, same-provider rotation, held old
 callbacks, cancellation before host invocation, shutdown/reinitialize, invalid
-timeouts, and engine aliases in every supported wrapper.
+timeouts, and engine aliases in every supported wrapper. Include provider closures retaining
+their engine in shutdown/retain-cycle tests, and verify destruction of the last
+engine reference from a callback thread.
 
 DME062/063 are prerequisites, not a resolution of DME064. Principal binding,
 independent engines/processes, core durable outcomes, recovery quotas, and the
@@ -604,7 +606,7 @@ documentation checker pass locally. Eight simultaneous direct/shared initial
 requests share one host refresh. Hosted full-workspace/native CI is the merge
 gate for this batch.
 
-### DME065 — Physical refresh budget across replaced providers (open)
+### DME065 — Physical refresh budget across replaced providers (native fix)
 
 **HIGH, effort M, pre-existing.** Physical refresh admission is per retained
 provider instance. A different provider gets an independent AtomicBool, and
@@ -614,10 +616,54 @@ callbacks can therefore accumulate physical calls/queued closures and identity
 records without a credential-wide cap. Timeout bounds the waiter, not the host
 callback's lifetime.
 
-Add a bounded physical-call quota shared across owners and hold its permit until
-the actual blocking closure returns or is dropped before starting. Reject
-exhausted admission without starting/queuing another host callback; preserve
-successor progress while capacity exists and recover after old calls return.
-Test multiple timed-out owners, quota exhaustion, queued cancellation, and
-post-release recovery. Independent engine/process budgets remain a separate
-original-scope requirement. This finding is not fixed by readiness fencing.
+The shared credential now admits at most two unfinished Rust blocking refresh
+calls across all owners. The minimum production blocking pool has four threads;
+a separate baseline using the initial eight-call limit reproduced starvation of
+other blocking work. The two-call cap leaves headroom, verified on the actual
+minimum mobile runtime. A failed try-acquire rejects immediately without
+queuing foreign work or recording refresh backoff. The permit remains owned by
+the blocking closure through timeout/cancellation, and through provider cleanup.
+The guard stores its provider before its permit so foreign destruction finishes
+before capacity returns, using Rust's defined field destruction order
+([Rust Reference](https://doc.rust-lang.org/reference/destructors.html)). No
+foreign destruction occurs under a credential lock.
+
+Two baseline regressions reproduced 128 additional admitted refreshes despite
+eight retired calls, and admission while eight provider destructors remained
+blocked. Controlled gates now cover both owner cancellation and expired waits,
+128 refused owner rotations with bounded identity metadata, recovery after one
+slot returns, callback/destructor panics, and timeout before queued invocation.
+Running-call timeout tests freeze Tokio time after confirmed host entry;
+the queued timeout test freezes it after confirmed slot reservation. Cached
+valid credentials still send direct requests and heartbeats while all refresh
+slots are held.
+All 352 mobile tests and all-target engine/server/mobile Clippy pass locally;
+the focused lifecycle suite also covers cached-token progress and production
+executor headroom. Native exported
+signatures and metadata are unchanged. Full hosted CI remains a merge gate.
+
+This cap covers Rust blocking closures, not detached work outliving them.
+Independent engine/process budgets remain a separate original-scope requirement.
+See DME066 for the remaining asynchronous wrapper boundary.
+
+
+### DME066 — Nested async fetches across wrapper instances (open)
+
+**HIGH, effort M/L.** The Swift adapter's per-instance flight prevents a second
+fetch until its first actually ends, but timeout can return from the native
+callback while a non-cooperative detached fetch continues. A retired provider
+may deallocate while that task remains (an existing regression explicitly
+verifies this). Fresh provider instances therefore need a shared async-work
+budget in addition to the native blocking-call cap. RN and Flutter await host
+fetch promises/futures after native callers may already have timed out; their
+refresh handlers also lack a shared physical admission bound.
+
+Bound SDK-owned async fetches across provider instances, retain admission until
+actual completion despite timeout/retirement, reject exhausted admission without
+creating or queuing more host work, and recover when prior work finishes. Apply
+the rule to first fetch as well as refresh. Preserve DME064's immutable provider
+and engine-lifecycle ownership; cancellation must not publish stale results.
+Test retired non-cooperative instances, repeated replacement, shared admission,
+late completion, cancellation, and capacity recovery in the real wrappers.
+Kotlin's structured timeout needs separate verification of completion semantics;
+this report does not claim an async-work budget there.
