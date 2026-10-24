@@ -552,6 +552,9 @@ engine.setListener(listener: MyListener())
 | `runWorkerWindow(timeBudgetMs)`                  | Claim and run remote tasks inside a bounded background window                                                                              |
 | `workerStats()`                                  | Worker counters (claimed, completed, failed, released, lost, in flight)                                                                    |
 | `shutdown()`                                     | Shut down the engine                                                                                                                       |
+| `beginTokenProviderInstallation(provider)`       | Reserve an opaque credential owner before an asynchronous initial fetch                                                                   |
+| `completeTokenProviderInstallation(id, token)`   | Publish only for that owner; returns false for obsolete tickets or blank tokens                                                            |
+| `cancelTokenProviderInstallation(id)`            | Retire that owner without revoking a successor or enabling anonymous fallback                                                              |
 
 `shutdown()` is terminal and idempotent. It retires native provider, listener,
 and handler registrations, rejects new storage operations and worker/delegation
@@ -560,6 +563,13 @@ ignored or returns `Shutdown` where the method already returns an error. Create
 a new engine to restart. An already-running native callback retains its resources
 until it returns; shutdown cannot undo effects or requests already accepted.
 Unsettled distributed task evidence remains journaled for recovery.
+
+The installation-ticket methods require matching generated bindings and native
+artifacts. For the unreleased source, build a matching XCFramework and use
+`ORCH8_MOBILE_LOCAL_XCFRAMEWORK=1`; the default published 0.7.1 artifact pin must
+be updated with a matching release before distributing this API. Swift reserves
+before its initial fetch and rejects superseded completion across runtime-node
+aliases. RN, Flutter, and KMP wrapper adoption is still pending.
 
 ### MobileEngineConfig
 

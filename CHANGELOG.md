@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Reserved mobile token provider installation
+
+- Add begin/complete/cancel installation tickets so async wrappers can reserve
+  native credential ownership before fetching. Stale completion/cancellation
+  cannot replace or retire a successor, replay cannot roll back a refreshed
+  token, and cancellation cannot fall back to anonymous authorization.
+- Use reservations in Swift across runtime-node aliases, synchronous provider
+  replacement, cancellation, and shutdown. This API requires matching native
+  headers/artifacts; the published 0.7.1 XCFramework is not the release vehicle
+  for these unreleased methods. Other wrapper ports and release pins remain open.
+
 ### Swift asynchronous token fetch admission
 
 - Bound unfinished Swift SDK token fetches to eight per process across initial

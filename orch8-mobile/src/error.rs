@@ -75,8 +75,11 @@ pub enum HandlerError {
 /// Callback interface for refreshable authentication tokens.
 #[uniffi::export(with_foreign)]
 pub trait TokenProvider: Send + Sync {
-    /// Return the current auth token. Called before each sync request.
+    /// Return a cached bootstrap token for synchronous provider installation.
+    /// Keep this prompt; reservation-based asynchronous installation does not
+    /// invoke this getter. Perform network work in refresh or an async wrapper.
     fn current_token(&self) -> String;
-    /// Called when a 401/403 is received to obtain a fresh token.
+    /// Obtain a token for unavailable initial authorization or after a 401.
+    /// Runs on a native blocking thread; it may outlive the caller's timeout.
     fn refresh_token(&self) -> Result<String, MobileError>;
 }

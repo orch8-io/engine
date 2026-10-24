@@ -574,7 +574,7 @@ callback publishes while it is running; failed refresh does not transfer negativ
 cache state onto that newly published revision. Controlled callback gates cover
 both completion orders and successful/failed refresh outcomes.
 
-### DME064 — Wrapper installation before the native fence (open)
+### DME064 — Wrapper installation before the native fence (partially fixed)
 
 **HIGH, effort L.** Swift `RuntimeNode.setTokenProvider`, Kotlin
 `Orch8Engine.setTokenProvider`, RN `core.ts`, and Flutter `orch8_flutter.dart`
@@ -595,6 +595,10 @@ callbacks, cancellation before host invocation, shutdown/reinitialize, invalid
 timeouts, and engine aliases in every supported wrapper. Include provider closures retaining
 their engine in shutdown/retain-cycle tests, and verify destruction of the last
 engine reference from a callback thread.
+
+DME070 adds native reservation tickets and ports Swift. RN, Flutter, and KMP
+still require ticket integration and immutable provider identities in their
+bridge events. The complete cross-wrapper requirement remains open.
 
 DME062/063 are prerequisites, not a resolution of DME064. Principal binding,
 independent engines/processes, core durable outcomes, recovery quotas, and the
@@ -786,3 +790,49 @@ DME064 remains open: first fetch still precedes native owner reservation, so
 concurrent installations need native generation tickets across wrapper aliases.
 RN/Flutter shared async bounds and Kotlin structured completion still require
 work. This Swift batch does not complete DME066 or the original review matrix.
+
+### DME070 — Native provider reservations and Swift installation ordering (partial fix)
+
+**HIGH, effort L across wrappers.** Real Swift-to-Rust regressions reproduced
+older async completion replacing a newer async installation, replacing a newer
+synchronous provider through another alias of the same engine, and reporting
+successful installation after shutdown. The synchronous case also proved that
+the newer native callback was released by the stale completion.
+
+The native engine now reserves an opaque installation ticket before any initial
+fetch. Reservation installs the provider without invoking its synchronous getter,
+clears old credentials, and establishes one owner shared by every wrapper alias.
+Only the current ticket can complete. Duplicate completion cannot roll back an
+already-published refresh. Cancelling a ticket retires only its owner, including
+a just-completed owner when caller cancellation races completion; stale tickets
+cannot revoke successors. Failed/cancelled reservation never enables anonymous
+fallback. Shutdown permanently rejects reservation and completion.
+
+Swift reserves before fetching, checks caller cancellation around completion,
+and retires its own ticket on failure/cancellation. Its initial/refresh shared
+flight remains bounded by DME069. Completion after supersession or shutdown
+throws instead of silently reinstalling old authorization. Native tests cover
+ticket identity, malformed/blank completion, cross-engine isolation, replay,
+refresh-vs-initial ordering, cancellation and recovery. Real FFI tests cover
+async/sync replacement through aliases, async replacement, shutdown, cancellation
+that must preserve a successor, and closed-engine refusal before host invocation.
+
+Validation: 375 mobile tests and engine/server/mobile all-target Clippy pass with
+warnings denied. All 32 production Swift SDK tests pass against freshly generated
+bindings and the actual macOS Rust library, including five new installation
+tests. The three baseline FFI cases failed before the fix. Swift and Kotlin
+binding generation succeeds; committed Swift bindings match generated output
+after whitespace normalization. macOS FFI tests do not prove iOS simulator or
+Android integration; hosted native/SDK checks remain required.
+
+**Release requirement remains open.** These three additive FFI entry points
+require matching generated headers and native artifacts. `Package.swift` still
+pins the published 0.7.1 XCFramework by default. The new source must be paired
+with a newly built artifact via `ORCH8_MOBILE_LOCAL_XCFRAMEWORK=1` until a matching
+version/checksum is released and the default package pin is updated. Keep this
+batch out of the supported default SDK release until that contract is resolved;
+the generated-header CI path alone cannot prove default-package compatibility.
+
+RN/Flutter/KMP first fetches still precede native reservation and their immutable
+bridge provider identities remain unfinished. This batch does not complete
+DME064, principal binding, SDK release parity, or the original review matrix.
