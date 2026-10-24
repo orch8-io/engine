@@ -201,6 +201,21 @@ pub(super) async fn get_child_for_activation(
     row.as_ref().map(row_to_instance).transpose()
 }
 
+pub(super) async fn get_child_for_adoption(
+    storage: &SqliteStorage,
+    parent: InstanceId,
+    block: &str,
+    suffix: &str,
+) -> Result<Option<TaskInstance>, StorageError> {
+    let row = sqlx::query(crate::child_adoption::SQLITE)
+        .bind(parent.into_uuid().to_string())
+        .bind(block)
+        .bind(suffix)
+        .fetch_optional(&storage.pool)
+        .await?;
+    row.as_ref().map(row_to_instance).transpose()
+}
+
 pub(super) async fn list_orphaned_children(
     storage: &SqliteStorage,
     limit: u32,
