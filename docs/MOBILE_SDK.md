@@ -959,6 +959,16 @@ are treated as missing; defaults outside the per-task integer range are ignored
 when calculating heartbeat intervals. Diagnostic API URLs omit user information,
 query strings, and fragments.
 
+Before starting a journaled callback, the worker confirms ownership with an
+accepted heartbeat and rechecks OS/power/stop admission. One monotonic deadline
+covers start/outcome journaling, execution, and result delivery; only accepted renewals extend
+it, measured from before their requests. A renewal outage stops the owned future
+at that deadline and quarantines any native call still physically running.
+Rejected or unsupported renewals stop owned work immediately as unconfirmed;
+they do not by themselves prove the task lease ended.
+Known results stay journaled for recovery instead of becoming unknown releases.
+This local cancellation does not roll back accepted external side effects.
+
 Claims are scoped to the control-plane API base, worker runtime ID, task ID,
 and claim epoch. A delayed settlement from an older lease cannot alter a newer
 lease's recovery evidence. Duplicate delivery preserves any recorded start or
@@ -967,13 +977,32 @@ outcome instead of invoking the handler again.
 Live claim reservations are shared across worker generations and registration
 recovery. Stopping and restarting a worker does not make its still-running tasks
 orphans. Recovery uses only the matching control plane and worker identity.
+The configured task concurrency budget is shared across worker restarts within
+one engine: draining predecessors still consume capacity and appear in the
+successor's in-flight/window counts. A smaller replacement limit lets admitted
+work finish before accepting more. Newer lease generations cancel the owned
+predecessor and are returned unstarted rather than overlap it.
+
+Surplus deliveries and concurrent recovery share an eight-request cleanup limit.
+Pending unstarted releases block additional polls and retain their generation
+fences. Polls are serialized across worker generations; a successor can wait for
+an already-issued predecessor poll to finish. Known journal outcomes are never
+replaced by an unstarted release merely because capacity is full or an INSERT
+fails. These controls belong to one engine object. Native calls still running
+after lease expiry remain separately quarantined by handler.
 
 The older task-ID-only journal is upgraded in one SQLite write transaction,
 retaining the recorded identities, timestamps, and outcomes. Back up device
 storage before adopting a schema upgrade; restore that backup before downgrading
 to an engine that expects the old journal layout.
 
-Servers without `/release` (404/405) get a retryable `fail` instead.
+Servers without `/release` (404/405) get a retryable `fail` instead. A rejected
+release, fallback, completion, or failure (including 401/403) retains its journal
+evidence until a later acknowledgement or explicit ownership-loss response.
+Age alone never proves an attempt ended. Recovery reads only the matching
+control-plane/worker identity, scans keys in bounded pages, and retains malformed
+or unsupported stored outcomes for repair rather than treating them as absent.
+This bounds aggregate reads, not the duration of a full pass or journal disk use.
 
 **Device-side timeouts.** A remote task's `timeout_ms` (and the engine's
 `handlerTimeoutMs`) is enforced on the device too, but a timeout cannot stop

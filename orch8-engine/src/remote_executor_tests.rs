@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use serde_json::json;
 
 use super::*;
+use crate::remote_worker::lease::ConfirmedLease;
 
 /// In-memory lease transport: hands out queued tasks once, records every
 /// mutation.
@@ -21,6 +22,8 @@ struct FakeTransport {
     release_gate: Mutex<Option<Arc<Semaphore>>>,
     releases_active: AtomicUsize,
     peak_releases: AtomicUsize,
+    heartbeat_gate: Mutex<Option<Arc<Semaphore>>>,
+    complete_gate: Mutex<Option<Arc<Semaphore>>>,
 }
 
 impl FakeTransport {
@@ -95,6 +98,10 @@ impl LeaseTransport for FakeTransport {
 
     async fn heartbeat(&self, task: &ClaimedTask) -> LeaseResponse {
         self.record("heartbeat", task, Value::Null);
+        let gate = self.heartbeat_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            let _permit = gate.acquire().await.unwrap();
+        }
         self.heartbeat_response
             .lock()
             .unwrap()
@@ -103,6 +110,10 @@ impl LeaseTransport for FakeTransport {
 
     async fn complete(&self, task: &ClaimedTask, output: &Value) -> LeaseResponse {
         self.record("complete", task, output.clone());
+        let gate = self.complete_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            let _permit = gate.acquire().await.unwrap();
+        }
         if self
             .retry_completes
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
@@ -466,12 +477,8 @@ async fn settle_retries_through_a_control_plane_outage_and_keeps_the_lease() {
         session: 0,
     };
     let started = tokio::time::Instant::now();
-    exec.settle(
-        &claimed,
-        Outcome::Complete(json!({"ok": true})),
-        Duration::from_secs(2),
-    )
-    .await;
+    exec.execute_inner(&claimed, Duration::from_secs(2), &CancellationToken::new())
+        .await;
     assert!(started.elapsed() >= Duration::from_secs(3));
     assert_eq!(
         transport.calls("complete").len(),
@@ -492,7 +499,6 @@ async fn settle_gives_up_when_the_lease_runs_out() {
     transport
         .retry_completes
         .store(usize::MAX, Ordering::Relaxed);
-    *transport.heartbeat_response.lock().unwrap() = Some(LeaseResponse::Retry);
     let exec = executor(
         Arc::clone(&transport),
         LocalCredentials::default(),
@@ -508,19 +514,33 @@ async fn settle_gives_up_when_the_lease_runs_out() {
         session: 0,
     };
     let started = tokio::time::Instant::now();
-    exec.settle(
-        &claimed,
-        Outcome::Complete(json!({})),
-        Duration::from_secs(2),
-    )
-    .await;
-    assert!(started.elapsed() <= Duration::from_secs(4));
+    let lease = ConfirmedLease::acquire(claimed.task.lease_secs, Duration::from_secs(2), || {
+        transport.heartbeat(&claimed)
+    })
+    .await
+    .unwrap();
+    *transport.heartbeat_response.lock().unwrap() = Some(LeaseResponse::Retry);
+    assert!(
+        lease
+            .run(
+                Duration::from_secs(2),
+                exec.deliver(&claimed, Outcome::Complete(json!({}))),
+                || transport.heartbeat(&claimed)
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        started.elapsed() <= Duration::from_millis(6010),
+        "elapsed: {:?}",
+        started.elapsed()
+    );
     assert!(transport.calls("complete").len() > 4);
     assert_eq!(exec.stats().completed, 0);
 
     // A heartbeat answering LostOwnership ends delivery at once.
     *transport.heartbeat_response.lock().unwrap() = Some(LeaseResponse::LostOwnership);
-    exec.settle(&claimed, Outcome::Complete(json!({})), Duration::ZERO)
+    exec.execute_inner(&claimed, Duration::from_secs(2), &CancellationToken::new())
         .await;
     assert_eq!(exec.stats().lost, 1);
 }
@@ -1073,4 +1093,149 @@ async fn queued_controller_can_restart_after_its_predecessor_drains() {
     assert_eq!(draining, vec![false, true, false, true]);
     assert_eq!(exec.in_flight(), 0);
     assert_eq!(exec.slots.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn stale_delivery_is_checked_before_a_fast_callback_can_run() {
+    let (exec, transport, gate, calls) = gated_executor(1).await;
+    *transport.heartbeat_response.lock().unwrap() = Some(LeaseResponse::LostOwnership);
+    gate.add_permits(1);
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: task("transform", json!({})),
+            session: 0,
+        },
+        Duration::from_millis(50),
+    );
+    while tasks.join_next().await.is_some() {}
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a stale delivery must not invoke even a fast callback"
+    );
+    assert_eq!(exec.stats().lost, 1);
+    assert!(transport.calls("complete").is_empty());
+}
+
+#[tokio::test]
+async fn failed_renewals_stop_the_callback_at_the_confirmed_deadline() {
+    let (exec, transport, _gate, calls) = gated_executor(1).await;
+    tokio::time::pause();
+    let mut short = task("transform", json!({}));
+    short.lease_secs = Some(1);
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: short,
+            session: 0,
+        },
+        Duration::from_millis(50),
+    );
+    wait_until("callback start", || calls.load(Ordering::SeqCst) == 1).await;
+    *transport.heartbeat_response.lock().unwrap() = Some(LeaseResponse::Retry);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    wait_until("expired callback cleanup", || exec.in_flight() == 0).await;
+    assert!(transport.calls("complete").is_empty());
+    assert_eq!(transport.calls("release")[0].1["started"], true);
+}
+
+#[tokio::test]
+async fn blocked_renewal_does_not_block_callback_progress() {
+    let (exec, transport, gate, calls) = gated_executor(1).await;
+    tokio::time::pause();
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: task("transform", json!({})),
+            session: 0,
+        },
+        Duration::from_millis(50),
+    );
+    wait_until("callback start", || calls.load(Ordering::SeqCst) == 1).await;
+    let before = transport.calls("heartbeat").len();
+    *transport.heartbeat_gate.lock().unwrap() = Some(Arc::new(Semaphore::new(0)));
+    wait_until("blocked renewal", || {
+        transport.calls("heartbeat").len() > before
+    })
+    .await;
+    gate.add_permits(1);
+    wait_until("callback completes during renewal", || {
+        exec.stats().completed == 1
+    })
+    .await;
+    while tasks.join_next().await.is_some() {}
+}
+
+#[tokio::test]
+async fn stalled_settlement_cannot_keep_the_execution_alive_past_its_lease() {
+    let (exec, transport, gate, _calls) = gated_executor(1).await;
+    gate.add_permits(1);
+    *transport.complete_gate.lock().unwrap() = Some(Arc::new(Semaphore::new(0)));
+    tokio::time::pause();
+    let mut short = task("transform", json!({}));
+    short.lease_secs = Some(1);
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: short,
+            session: 0,
+        },
+        Duration::from_millis(50),
+    );
+    wait_until("settlement RPC", || !transport.calls("complete").is_empty()).await;
+    *transport.heartbeat_response.lock().unwrap() = Some(LeaseResponse::Retry);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    wait_until("settlement deadline cleanup", || exec.in_flight() == 0).await;
+    assert_eq!(exec.stats().completed, 0);
+}
+
+#[tokio::test]
+async fn cancellation_drops_the_callback_before_waiting_for_release() {
+    struct Active(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Active {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let (mut exec, transport, _gate, _calls) = gated_executor(1).await;
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let active = Arc::clone(&alive);
+    let mut registry = HandlerRegistry::new();
+    registry.register("transform", move |_ctx| {
+        let active = Arc::clone(&active);
+        async move {
+            active.store(true, Ordering::SeqCst);
+            let _active = Active(active);
+            std::future::pending::<Result<Value, StepError>>().await
+        }
+    });
+    Arc::get_mut(&mut exec).unwrap().registry = registry;
+    *transport.release_gate.lock().unwrap() = Some(Arc::new(Semaphore::new(0)));
+    let mut tasks = JoinSet::new();
+    exec.spawn_task(
+        &mut tasks,
+        ClaimedTask {
+            task: task("transform", json!({})),
+            session: 0,
+        },
+        Duration::from_millis(50),
+    );
+    wait_until("live callback", || alive.load(Ordering::SeqCst)).await;
+    exec.claims.cancellations()[0].cancel();
+    wait_until("blocked cleanup release", || {
+        !transport.calls("release").is_empty()
+    })
+    .await;
+    assert!(
+        !alive.load(Ordering::SeqCst),
+        "cleanup I/O must not retain a cancelled callback"
+    );
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    assert_eq!(exec.in_flight(), 0);
 }

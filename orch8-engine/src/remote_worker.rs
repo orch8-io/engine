@@ -27,6 +27,9 @@ use orch8_types::ids::{BlockId, InstanceId, TenantId};
 
 use crate::handlers::StepContext;
 
+#[path = "remote_worker_lease.rs"]
+pub mod lease;
+
 /// Default lease when neither the task nor the poll response carries one.
 pub const DEFAULT_LEASE_SECS: u64 = 120;
 /// Cap on any control-plane response body a node buffers.
@@ -44,7 +47,9 @@ pub enum LeaseResponse {
     Unsupported,
     /// Network error, 408/429/5xx — try again later.
     Retry,
-    /// Any other 4xx — the request itself is wrong; retrying cannot help.
+    /// Other rejection, including 401/403: the current request was not
+    /// accepted. Correct its credentials or payload before retrying; this
+    /// response does not prove ownership ended or justify discarding evidence.
     Rejected,
 }
 

@@ -53,13 +53,15 @@
 //! against servers that predate the distributed contract. Built-in handlers
 //! never see `__orch8`.
 
+use orch8_engine::remote_worker::lease::{ConfirmedLease, LeaseEnd};
+
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -77,8 +79,6 @@ use crate::stragglers::{Stragglers, device_timeout_error, is_device_timeout};
 const DELIVERY_ATTEMPTS: u32 = 3;
 /// How often the loop re-drains undelivered outcomes of earlier tasks.
 const ORPHAN_DRAIN_INTERVAL: Duration = Duration::from_secs(60);
-/// Claims older than this are forgotten: the server reaped them long ago.
-const STALE_CLAIM_AGE: chrono::Duration = chrono::Duration::days(7);
 /// Back-off after a failed poll.
 const POLL_ERROR_BACKOFF: Duration = Duration::from_secs(15);
 
@@ -133,7 +133,9 @@ pub struct WorkerWindowResult {
     pub budget_exhausted: bool,
 }
 
+mod admission;
 mod claims;
+use admission::{Admission, Decision, Execution};
 use claims::ClaimKey;
 pub(crate) use claims::{ClaimStore, Outcome};
 
@@ -144,58 +146,94 @@ pub(crate) async fn drain_orphans(
     store: &ClaimStore,
     stats: Option<&Counters>,
 ) -> u32 {
-    let rows = match store.list().await {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!(error = %e, "failed to read worker claim journal");
-            return 0;
-        }
-    };
     let mut resolved = 0;
-    for row in rows {
-        if !row.key.belongs_to(&client.worker_id(), client.api_base()) {
-            continue;
-        }
-        let Some(_reservation) = store.reserve(&row.key) else {
-            // Another worker generation or recovery pass still owns this claim.
-            continue;
-        };
-        // The list can precede a completed live invocation. Re-read after
-        // reserving so recovery cannot release an outcome that was just saved.
-        let row = match store.get(&row.key).await {
-            Ok(Some(row)) => row,
-            Ok(None) => continue,
+    let mut after = None;
+    let mut invalid_keys = 0usize;
+    'scan: loop {
+        let keys = match store
+            .recovery_keys(&client.worker_id(), client.api_base(), after.as_ref())
+            .await
+        {
+            Ok(keys) if keys.is_empty() => break,
+            Ok(keys) => keys,
             Err(error) => {
-                warn!(%error, "failed to reload worker recovery claim");
+                warn!(%error, "failed to scan worker recovery journal");
+                break;
+            }
+        };
+        // Deleting prior pages must not shift an OFFSET and skip later claims.
+        after = keys.last().cloned();
+        for (id, epoch) in keys {
+            let (Ok(task_id), Ok(claim_epoch)) = (uuid::Uuid::parse_str(&id), u64::try_from(epoch))
+            else {
+                invalid_keys += 1;
                 continue;
+            };
+            let key = ClaimKey {
+                task_id,
+                claim_epoch,
+                worker_id: client.worker_id(),
+                api_base: client.api_base().trim_end_matches('/').into(),
+            };
+            let Some(_reservation) = store.reserve(&key) else {
+                // Another worker generation or recovery pass still owns this claim.
+                continue;
+            };
+            // Bound decoded recovery payloads as well as outgoing requests
+            // across registration, restart, and surplus cleanup passes.
+            let Ok(_slot) = store.admission.release_slots.acquire().await else {
+                break 'scan;
+            };
+            // The key scan can precede a completed live invocation. Re-read after
+            // reserving so recovery cannot release an outcome that was just saved.
+            let row = match store.get(&key).await {
+                Ok(Some(row)) => row,
+                Ok(None) => continue,
+                Err(error) => {
+                    warn!(%error, "failed to reload worker recovery claim");
+                    continue;
+                }
+            };
+            let settled = if let Some(outcome) = &row.outcome {
+                let result =
+                    deliver_once(client, row.key.task_id, row.key.claim_epoch, outcome).await;
+                if let Some(stats) = stats
+                    && result == LeaseResponse::Accepted
+                {
+                    stats.record_outcome(outcome);
+                }
+                claim_resolved(result)
+            } else {
+                let released =
+                    release(client, row.key.task_id, row.key.claim_epoch, row.started).await;
+                if released && let Some(stats) = stats {
+                    stats.released.fetch_add(1, Ordering::Relaxed);
+                }
+                released
+            };
+            if settled {
+                info!(task_id = %row.key.task_id, claimed_at = %row.claimed_at, started = row.started, "settled orphaned worker claim after restart");
+                store.delete(&row.key).await;
+                resolved += 1;
             }
-        };
-        if chrono::Utc::now() - row.claimed_at > STALE_CLAIM_AGE {
-            store.delete(&row.key).await;
-            continue;
-        }
-        let settled = if let Some(outcome) = &row.outcome {
-            let result = deliver_once(client, row.key.task_id, row.key.claim_epoch, outcome).await;
-            if let Some(stats) = stats
-                && result == LeaseResponse::Accepted
-            {
-                stats.record_outcome(outcome);
-            }
-            result != LeaseResponse::Retry
-        } else {
-            let released = release(client, row.key.task_id, row.key.claim_epoch, row.started).await;
-            if released && let Some(stats) = stats {
-                stats.released.fetch_add(1, Ordering::Relaxed);
-            }
-            released
-        };
-        if settled {
-            info!(task_id = %row.key.task_id, started = row.started, "settled orphaned worker claim after restart");
-            store.delete(&row.key).await;
-            resolved += 1;
         }
     }
+    if invalid_keys > 0 {
+        warn!(
+            invalid_keys,
+            "invalid worker journal identities retained for repair"
+        );
+    }
     resolved
+}
+
+/// A rejected request (including 401/403) does not establish that the server
+/// ended this lease. Only an acknowledgement or explicit fence resolves it.
+fn claim_resolved(response: LeaseResponse) -> bool {
+    matches!(
+        response,
+        LeaseResponse::Accepted | LeaseResponse::LostOwnership
+    )
 }
 
 /// Give a claim back. `true` once the server no longer considers it ours.
@@ -206,8 +244,8 @@ async fn release(
     started: bool,
 ) -> bool {
     match client.release(task_id, claim_epoch, started).await {
-        LeaseResponse::Accepted | LeaseResponse::LostOwnership | LeaseResponse::Rejected => true,
-        LeaseResponse::Retry => false,
+        LeaseResponse::Accepted | LeaseResponse::LostOwnership => true,
+        LeaseResponse::Retry | LeaseResponse::Rejected => false,
         LeaseResponse::Unsupported => {
             // Pre-contract server: a retryable failure requeues the task.
             let message = if started {
@@ -215,7 +253,7 @@ async fn release(
             } else {
                 "released by mobile node before start"
             };
-            client.fail(task_id, claim_epoch, message, true).await != LeaseResponse::Retry
+            claim_resolved(client.fail(task_id, claim_epoch, message, true).await)
         }
     }
 }
@@ -280,31 +318,14 @@ pub(crate) struct Worker {
     deps: WorkerDeps,
     options: WorkerOptions,
     handlers: Vec<String>,
-    wake: Notify,
-    slots: Arc<Semaphore>,
-    in_flight: StdMutex<HashSet<ClaimKey>>,
+    wake: Arc<Notify>,
+    admission: Arc<Admission>,
     counters: Counters,
     /// Independently owned OS background windows, released on cancellation.
     active_windows: AtomicU64,
     /// Bumped after every poll round that claimed nothing.
     idle_rounds: AtomicU64,
     cancel: CancellationToken,
-}
-
-struct InFlight<'a> {
-    key: ClaimKey,
-    tasks: &'a StdMutex<HashSet<ClaimKey>>,
-    wake: &'a Notify,
-}
-
-impl Drop for InFlight<'_> {
-    fn drop(&mut self) {
-        self.tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.key);
-        self.wake.notify_one();
-    }
 }
 
 /// Each window owns one permission; cancellation and unwinding revoke it too.
@@ -338,14 +359,14 @@ impl Worker {
                 message: format!("advertised handlers are not registered: {missing:?}"),
             });
         }
-        let slots = options.max_concurrent_tasks.clamp(1, 64) as usize;
+        let admission = Arc::clone(&deps.store.admission);
+        admission.configure(options.max_concurrent_tasks);
         Ok(Arc::new(Self {
             deps,
             options,
             handlers,
-            wake: Notify::new(),
-            slots: Arc::new(Semaphore::new(slots)),
-            in_flight: StdMutex::new(HashSet::new()),
+            wake: Arc::clone(&admission.wake),
+            admission,
             counters: Counters::default(),
             active_windows: AtomicU64::new(0),
             idle_rounds: AtomicU64::new(0),
@@ -386,10 +407,7 @@ impl Worker {
     }
 
     fn in_flight_len(&self) -> usize {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        self.admission.in_flight()
     }
 
     fn power(&self) -> PowerState {
@@ -419,7 +437,7 @@ impl Worker {
                 break;
             }
             let mut wait = self.idle_interval();
-            if self.may_claim() && self.slots.available_permits() > 0 {
+            if self.may_claim() && self.admission.available() > 0 {
                 match self.poll_round(&mut cursor).await {
                     Ok((claimed, hint)) => {
                         if claimed > 0 {
@@ -444,7 +462,7 @@ impl Worker {
                 next_drain = tokio::time::Instant::now() + ORPHAN_DRAIN_INTERVAL;
             }
 
-            if wait.is_zero() && self.slots.available_permits() > 0 {
+            if wait.is_zero() && self.admission.available() > 0 {
                 tokio::task::yield_now().await;
                 continue;
             }
@@ -463,11 +481,17 @@ impl Worker {
         self: &Arc<Self>,
         cursor: &mut usize,
     ) -> Result<(usize, Option<Duration>), MobileError> {
+        // A stopped generation may still be awaiting a poll response. Keep
+        // at most one such response batch outstanding across engine workers.
+        let _owner = tokio::select! {
+            () = self.cancel.cancelled() => return Ok((0, None)),
+            owner = self.admission.poll_owner.lock() => owner,
+        };
         let mut claimed = 0usize;
         let mut hint: Option<Duration> = None;
         let count = self.handlers.len();
         for offset in 0..count {
-            let free = self.slots.available_permits();
+            let free = self.admission.available();
             if free == 0 || !self.may_claim() || self.cancel.is_cancelled() {
                 break;
             }
@@ -503,24 +527,88 @@ impl Worker {
     }
 
     fn spawn_task(self: &Arc<Self>, task: RemoteTask, heartbeat: Duration) {
-        let permit = Arc::clone(&self.slots).try_acquire_owned();
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            let Ok(permit) = permit else {
-                // More tasks than free slots (server ignored `limit`): hand
-                // the surplus back untouched.
-                if release(&this.deps.client, task.id, task.claim_epoch, false).await {
-                    this.counters.released.fetch_add(1, Ordering::Relaxed);
-                }
-                return;
-            };
-            this.execute(task, heartbeat).await;
-            drop(permit);
-            this.wake.notify_one();
-        });
+        if let Some(future) = self.task_future(task, heartbeat) {
+            tokio::spawn(future);
+        }
     }
 
+    #[cfg(test)]
     async fn execute(self: &Arc<Self>, task: RemoteTask, heartbeat: Duration) {
+        if let Some(future) = self.task_future(task, heartbeat) {
+            future.await;
+        }
+    }
+
+    /// Reserve synchronously, before spawning or polling any future. The
+    /// reservation also owns capacity when cancellation precedes first poll.
+    fn task_future(
+        self: &Arc<Self>,
+        task: RemoteTask,
+        heartbeat: Duration,
+    ) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+        let key = ClaimKey::for_task(
+            &task,
+            &self.deps.client.worker_id(),
+            self.deps.client.api_base(),
+        );
+        let decision = self.admission.admit(&key);
+        match &decision {
+            Decision::Ignore => return None,
+            Decision::Release {
+                superseded: Some(cancel),
+                ..
+            } => cancel.cancel(),
+            _ => {}
+        }
+        let this = Arc::clone(self);
+        Some(async move {
+            match decision {
+                Decision::Execute(claim) => this.execute_reserved(task, heartbeat, claim).await,
+                Decision::Release { guard, .. } => {
+                    // Both queued and active releases retain their generation
+                    // fence, and all worker generations share the I/O bound.
+                    let Ok(_slot) = this.admission.release_slots.acquire().await else {
+                        return;
+                    };
+                    this.release_unstarted(&task, &key).await;
+                    drop(guard);
+                }
+                Decision::Ignore => unreachable!("ignored before creating the future"),
+            }
+        })
+    }
+
+    async fn release_unstarted(&self, task: &RemoteTask, key: &ClaimKey) {
+        let client = &self.deps.client;
+        let store = &self.deps.store;
+        let Some(_reservation) = store.reserve(key) else {
+            return;
+        };
+        match store
+            .insert(task, &client.worker_id(), client.api_base())
+            .await
+        {
+            Ok(true) => {}
+            // Prior start/outcome evidence must be reconciled by recovery,
+            // never replaced with an unstarted release due to capacity.
+            Ok(false) => return,
+            Err(error) => {
+                warn!(%error, task_id = %task.id, "cannot journal unstarted release; leaving claim for expiry");
+                return;
+            }
+        }
+        if release(client, task.id, task.claim_epoch, false).await {
+            self.counters.released.fetch_add(1, Ordering::Relaxed);
+            store.delete(key).await;
+        }
+    }
+
+    async fn execute_reserved(
+        self: &Arc<Self>,
+        task: RemoteTask,
+        heartbeat: Duration,
+        claim: Execution,
+    ) {
         let client = &self.deps.client;
         let store = &self.deps.store;
         let task_id = task.id;
@@ -536,23 +624,16 @@ impl Worker {
             Ok(true) => {}
             Ok(false) => return, // Existing evidence belongs to recovery, not a second invocation.
             Err(error) => {
-                warn!(%error, %task_id, "cannot journal claim; releasing task");
-                if release(client, task_id, task.claim_epoch, false).await {
-                    self.counters.released.fetch_add(1, Ordering::Relaxed);
-                }
+                // A failed INSERT cannot distinguish a fresh claim from
+                // existing started/outcome evidence. Do not assert that an
+                // earlier callback never ran; recovery or lease expiry owns it.
+                warn!(%error, %task_id, "cannot journal claim; leaving it for recovery or expiry");
                 return;
             }
         }
-        self.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key.clone());
-        let _in_flight = InFlight {
-            key: key.clone(),
-            tasks: &self.in_flight,
-            wake: &self.wake,
-        };
-        let result = self.execute_journaled(&task, &key, heartbeat).await;
+        let result = self
+            .execute_journaled(&task, &key, heartbeat, claim.cancellation())
+            .await;
         if result {
             store.delete(&key).await;
         }
@@ -566,12 +647,91 @@ impl Worker {
         task: &RemoteTask,
         key: &ClaimKey,
         heartbeat: Duration,
+        superseded: &CancellationToken,
     ) -> bool {
         let client = &self.deps.client;
         let store = &self.deps.store;
 
         if !self.may_claim() {
             // Backgrounded (or battery critical) between claim and start.
+            let released = release(client, task.id, task.claim_epoch, false).await;
+            if released {
+                self.counters.released.fetch_add(1, Ordering::Relaxed);
+            }
+            return released;
+        }
+        let acquired = tokio::select! {
+            biased;
+            () = superseded.cancelled() => Some(Err(LeaseEnd::LostOwnership)),
+            () = self.cancel.cancelled() => None,
+            lease = ConfirmedLease::acquire(task.lease_secs, heartbeat, || client.heartbeat(task.id, task.claim_epoch)) => Some(lease),
+        };
+        let lease = match acquired {
+            Some(Ok(lease)) => lease,
+            Some(Err(LeaseEnd::LostOwnership)) => {
+                self.counters.lost.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+            _ => {
+                let released = release(client, task.id, task.claim_epoch, false).await;
+                if released {
+                    self.counters.released.fetch_add(1, Ordering::Relaxed);
+                }
+                return released;
+            }
+        };
+        let mut started = false;
+        let mut outcome = None;
+        let result = tokio::select! {
+            biased;
+            () = superseded.cancelled() => Err(LeaseEnd::LostOwnership),
+            result = lease.run(
+                heartbeat,
+                self.execute_confirmed(task, key, &mut started, &mut outcome),
+                || client.heartbeat(task.id, task.claim_epoch),
+            ) => result,
+        };
+        // The owned invocation is dropped before any recovery I/O. A running
+        // native callback is now quarantined until its physical return.
+        match result {
+            Ok(settled) => settled,
+            Err(LeaseEnd::LostOwnership) => {
+                self.counters.lost.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Err(reason) => {
+                warn!(task_id = %task.id, ?reason, started,
+                    "lease authority unconfirmed; reconciling recovery evidence");
+                if let Some(outcome) = outcome {
+                    // Do not replace a known result with an ambiguous release.
+                    // Persist it even if expiry interrupted the earlier write;
+                    // the orphan drain can reconcile it with server authority.
+                    if let Err(error) = store.record_outcome(key, &outcome).await {
+                        warn!(%error, task_id = %task.id, "failed to retain outcome at lease expiry");
+                    }
+                    return false;
+                }
+                let released = release(client, task.id, task.claim_epoch, started).await;
+                if released {
+                    self.counters.released.fetch_add(1, Ordering::Relaxed);
+                }
+                released
+            }
+        }
+    }
+
+    async fn execute_confirmed(
+        self: &Arc<Self>,
+        task: &RemoteTask,
+        key: &ClaimKey,
+        started: &mut bool,
+        saved_outcome: &mut Option<Outcome>,
+    ) -> bool {
+        let client = &self.deps.client;
+        let store = &self.deps.store;
+        // Confirmation may have waited through a network outage while the OS
+        // window ended, power changed, or this worker was stopped.
+        if !self.may_claim() {
             let released = release(client, task.id, task.claim_epoch, false).await;
             if released {
                 self.counters.released.fetch_add(1, Ordering::Relaxed);
@@ -594,25 +754,8 @@ impl Worker {
             }
         }
 
-        let invocation = self.invoke(task);
-        tokio::pin!(invocation);
-        let mut ticker =
-            tokio::time::interval_at(tokio::time::Instant::now() + heartbeat, heartbeat);
-        let result = loop {
-            tokio::select! {
-                result = &mut invocation => break Some(result),
-                _ = ticker.tick() => {
-                    if client.heartbeat(task.id, task.claim_epoch).await == LeaseResponse::LostOwnership {
-                        break None;
-                    }
-                }
-            }
-        };
-        let Some(result) = result else {
-            warn!(task_id = %task.id, "lease lost while executing; abandoning task");
-            self.counters.lost.fetch_add(1, Ordering::Relaxed);
-            return true;
-        };
+        *started = true;
+        let result = self.invoke(task).await;
 
         if let Err(error) = &result
             && is_device_timeout(error)
@@ -645,7 +788,8 @@ impl Worker {
                 retryable: false,
             },
         };
-        self.settle_outcome(task, key, &outcome).await
+        let outcome = saved_outcome.insert(outcome);
+        self.settle_outcome(task, key, outcome).await
     }
 
     async fn settle_outcome(&self, task: &RemoteTask, key: &ClaimKey, outcome: &Outcome) -> bool {
@@ -672,8 +816,8 @@ impl Worker {
                     return true;
                 }
                 LeaseResponse::Rejected | LeaseResponse::Unsupported => {
-                    warn!(task_id = %task.id, "server rejected task settlement");
-                    return true;
+                    warn!(task_id = %task.id, "server rejected task settlement; retaining journal evidence");
+                    return false;
                 }
                 LeaseResponse::Retry if attempt < DELIVERY_ATTEMPTS => {
                     tokio::select! {

@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 
 use serde_json::json;
+use tokio::sync::Semaphore;
 
 use super::*;
 use crate::handlers::{StepHandler, register_foreign_handler};
@@ -73,6 +74,7 @@ fn route_with(tasks: Vec<Value>, heartbeat_status: u16, settle_status: u16) -> R
 }
 
 struct Harness {
+    pool: sqlx::SqlitePool,
     worker: Arc<Worker>,
     client: Arc<NodeClient>,
     store: ClaimStore,
@@ -87,7 +89,8 @@ async fn harness_with(server: &MockControlPlane, handler: Recording, idle_ms: u6
             .await
             .unwrap(),
     );
-    let store = ClaimStore::new(sqlite.pool().clone());
+    let pool = sqlite.pool().clone();
+    let store = ClaimStore::new(pool.clone());
     store.init_tables().await.unwrap();
     let inputs = Arc::clone(&handler.inputs);
     let mut registry = HandlerRegistry::new();
@@ -133,6 +136,7 @@ async fn harness_with(server: &MockControlPlane, handler: Recording, idle_ms: u6
     )
     .unwrap();
     Harness {
+        pool,
         worker,
         client,
         store,
@@ -880,4 +884,843 @@ async fn stopped_worker_releases_a_late_poll_claim_without_starting_it() {
     );
     assert_eq!(server.bodies(&format!("{id}/release"))[0]["started"], false);
     assert_eq!(h.store.count().await.unwrap(), 0);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renewal_outage_quarantines_the_live_native_callback_at_lease_expiry() {
+    struct Gated {
+        entered: Arc<AtomicBool>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl StepHandler for Gated {
+        fn execute(&self, _step: String, _input: String) -> Result<String, crate::HandlerError> {
+            self.entered.store(true, Ordering::Release);
+            let _ = self
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5));
+            Ok("{}".into())
+        }
+    }
+    let entered = Arc::new(AtomicBool::new(false));
+    let started = Arc::clone(&entered);
+    let route: Route = Arc::new(move |_, path, _| {
+        let status = if path.ends_with("/heartbeat") && started.load(Ordering::Acquire) {
+            503
+        } else {
+            200
+        };
+        (status, json!({}))
+    });
+    let server = spawn_control_plane(route).await;
+    let mut h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let (release, receiver) = std::sync::mpsc::channel();
+    let mut registry = HandlerRegistry::new();
+    register_foreign_handler(
+        &mut registry,
+        "scan",
+        Arc::new(Gated {
+            entered,
+            release: Mutex::new(receiver),
+        }),
+        Duration::from_secs(60),
+        Arc::clone(&h.worker.deps.stragglers),
+    );
+    Arc::get_mut(&mut h.worker).unwrap().deps.registry = Arc::new(registry);
+    let id = uuid::Uuid::new_v4();
+    let mut task = task_json(id);
+    task["timeout_ms"] = json!(60_000);
+    task["lease_secs"] = json!(1);
+    let start = tokio::time::Instant::now();
+    h.worker
+        .execute(
+            serde_json::from_value(task).unwrap(),
+            Duration::from_millis(10),
+        )
+        .await;
+    let elapsed = start.elapsed();
+    let quarantined = h.worker.deps.stragglers.blocks("scan");
+    let _ = release.send(());
+    wait_for(|| !h.worker.deps.stragglers.blocks("scan")).await;
+    assert!(
+        quarantined,
+        "lease loss must not detach a live native callback without quarantine"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "renewal failure must not wait for physical callback completion"
+    );
+    assert_eq!(server.bodies(&format!("{id}/release"))[0]["started"], true);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert_eq!(server.count(&format!("{id}/complete")), 0);
+    assert_eq!(server.count(&format!("{id}/fail")), 0);
+}
+
+#[tokio::test]
+async fn stale_mobile_delivery_is_checked_before_native_invocation() {
+    let server = spawn_control_plane(route_with(Vec::new(), 409, 204)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let id = uuid::Uuid::new_v4();
+    h.worker
+        .execute(
+            serde_json::from_value(task_json(id)).unwrap(),
+            Duration::from_secs(1),
+        )
+        .await;
+    assert!(
+        h.inputs.lock().unwrap().is_empty(),
+        "a fenced claim must not invoke native code"
+    );
+    assert_eq!(h.worker.stats().lost, 1);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert_eq!(server.count(&format!("{id}/complete")), 0);
+}
+
+#[tokio::test]
+async fn expiry_retains_a_known_outcome_for_recovery_without_reinvoking_the_handler() {
+    let delivering = Arc::new(AtomicBool::new(false));
+    let restored = Arc::new(AtomicBool::new(false));
+    let settling = Arc::clone(&delivering);
+    let healthy = Arc::clone(&restored);
+    let server = spawn_control_plane(Arc::new(move |_, path, _| {
+        if path.ends_with("/complete") {
+            settling.store(true, Ordering::Release);
+            return (
+                if healthy.load(Ordering::Acquire) {
+                    200
+                } else {
+                    503
+                },
+                json!({}),
+            );
+        }
+        if path.ends_with("/heartbeat")
+            && settling.load(Ordering::Acquire)
+            && !healthy.load(Ordering::Acquire)
+        {
+            return (503, json!({}));
+        }
+        (200, json!({}))
+    }))
+    .await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let id = uuid::Uuid::new_v4();
+    let mut task = task_json(id);
+    task["lease_secs"] = json!(1);
+    let start = tokio::time::Instant::now();
+    h.worker
+        .execute(
+            serde_json::from_value(task).unwrap(),
+            Duration::from_millis(100),
+        )
+        .await;
+    assert!(
+        start.elapsed() < Duration::from_millis(1450),
+        "settlement must share the confirmed lease deadline"
+    );
+    let claims = h.store.list().await.unwrap();
+    assert_eq!(claims.len(), 1);
+    assert!(claims[0].started);
+    assert!(
+        matches!(&claims[0].outcome, Some(Outcome::Complete { output }) if output == &json!({"scanned":true}))
+    );
+    assert_eq!(
+        server.count(&format!("{id}/release")),
+        0,
+        "a known outcome must not become an unknown release"
+    );
+    restored.store(true, Ordering::Release);
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert_eq!(h.inputs.lock().unwrap().len(), 1);
+}
+
+async fn admission_harness(
+    server: &MockControlPlane,
+) -> (Harness, Arc<Semaphore>, Arc<AtomicUsize>) {
+    let mut h = harness(server, ok_handler(Duration::ZERO)).await;
+    let gate = Arc::new(Semaphore::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let release = Arc::clone(&gate);
+    let entered = Arc::clone(&calls);
+    let mut registry = HandlerRegistry::new();
+    registry.register("scan", move |_| {
+        let release = Arc::clone(&release);
+        let entered = Arc::clone(&entered);
+        async move {
+            entered.fetch_add(1, Ordering::SeqCst);
+            let _permit = release.acquire().await.unwrap();
+            Ok(json!({"scanned": true}))
+        }
+    });
+    Arc::get_mut(&mut h.worker).unwrap().deps.registry = Arc::new(registry);
+    (h, gate, calls)
+}
+
+#[tokio::test]
+async fn restarted_worker_keeps_predecessor_capacity_and_reports_its_live_work() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let (h, gate, calls) = admission_harness(&server).await;
+    let first = uuid::Uuid::new_v4();
+    h.worker.spawn_task(
+        serde_json::from_value(task_json(first)).unwrap(),
+        Duration::from_millis(100),
+    );
+    wait_for(|| calls.load(Ordering::SeqCst) == 1).await;
+    h.worker.stop();
+    let next = successor(&h);
+    let inherited = next.stats().in_flight;
+    let second = uuid::Uuid::new_v4();
+    next.spawn_task(
+        serde_json::from_value(task_json(second)).unwrap(),
+        Duration::from_millis(100),
+    );
+    wait_for(|| {
+        calls.load(Ordering::SeqCst) == 2 || server.count(&format!("{second}/release")) > 0
+    })
+    .await;
+    let observed = calls.load(Ordering::SeqCst);
+    gate.add_permits(2);
+    wait_for(|| server.count(&format!("{first}/complete")) == 1).await;
+    assert_eq!(
+        observed, 1,
+        "restart must not grant a second independent concurrency budget"
+    );
+    assert_eq!(
+        inherited, 1,
+        "window/stats accounting must include draining predecessors"
+    );
+    assert_eq!(
+        server.bodies(&format!("{second}/release"))[0]["started"],
+        false
+    );
+    wait_for(|| next.stats().in_flight == 0).await;
+}
+
+#[tokio::test]
+async fn duplicate_mobile_delivery_at_capacity_does_not_release_the_active_claim() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let (h, gate, calls) = admission_harness(&server).await;
+    let id = uuid::Uuid::new_v4();
+    let task: RemoteTask = serde_json::from_value(task_json(id)).unwrap();
+    h.worker
+        .spawn_task(task.clone(), Duration::from_millis(100));
+    wait_for(|| calls.load(Ordering::SeqCst) == 1).await;
+    h.worker.spawn_task(task, Duration::from_millis(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let releases = server.count(&format!("{id}/release"));
+    gate.add_permits(1);
+    wait_for(|| h.worker.stats().in_flight == 0).await;
+    assert_eq!(
+        releases, 0,
+        "a duplicate must not revoke a live claim because its slot is full"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn newer_mobile_claim_cancels_and_defers_while_the_predecessor_is_live() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let (h, gate, calls) = admission_harness(&server).await;
+    let id = uuid::Uuid::new_v4();
+    let old: RemoteTask = serde_json::from_value(task_json(id)).unwrap();
+    let mut new = old.clone();
+    new.claim_epoch += 1;
+    let worker = Arc::clone(&h.worker);
+    let first = tokio::spawn(async move { worker.execute(old, Duration::from_millis(100)).await });
+    wait_for(|| calls.load(Ordering::SeqCst) == 1).await;
+    let worker = Arc::clone(&h.worker);
+    let second = tokio::spawn(async move { worker.execute(new, Duration::from_millis(100)).await });
+    wait_for(|| calls.load(Ordering::SeqCst) == 2 || server.count(&format!("{id}/release")) > 0)
+        .await;
+    let observed = calls.load(Ordering::SeqCst);
+    gate.add_permits(2);
+    first.await.unwrap();
+    second.await.unwrap();
+    assert_eq!(
+        observed, 1,
+        "a newer generation must not overlap a live predecessor"
+    );
+    assert_eq!(
+        h.worker.stats().lost,
+        1,
+        "the superseded wrapper must stop promptly"
+    );
+    let releases = server.bodies(&format!("{id}/release"));
+    assert_eq!(releases.len(), 1);
+    assert_eq!(releases[0]["claim_epoch"], 8);
+    assert_eq!(releases[0]["started"], false);
+}
+
+#[tokio::test]
+async fn surplus_mobile_releases_are_bounded_and_block_additional_polls() {
+    let release_gate = Arc::new(Semaphore::new(0));
+    let tasks = (0..101).map(|_| task_json(uuid::Uuid::new_v4())).collect();
+    let server = crate::test_support::spawn_control_plane_gated(
+        route_with(tasks, 200, 200),
+        Some(("/release".into(), Arc::clone(&release_gate))),
+    )
+    .await;
+    let (h, handler_gate, calls) = admission_harness(&server).await;
+    h.worker.spawn(&tokio::runtime::Handle::current());
+    wait_for(|| calls.load(Ordering::SeqCst) == 1 && server.count("/release") >= 8).await;
+    handler_gate.add_permits(1);
+    wait_for(|| server.count("/complete") == 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let active_releases = server.count("/release");
+    let polls = server.count("/workers/tasks/poll");
+    h.worker.stop();
+    release_gate.add_permits(100);
+    wait_for(|| server.count("/release") == 100).await;
+    assert!(
+        active_releases <= 8,
+        "observed {active_releases} simultaneous blocked release requests"
+    );
+    assert_eq!(
+        polls, 1,
+        "a pending cleanup batch must backpressure claiming even after the callback ends"
+    );
+}
+
+#[tokio::test]
+async fn surplus_delivery_preserves_a_previously_recorded_outcome() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let (h, gate, calls) = admission_harness(&server).await;
+    let active = uuid::Uuid::new_v4();
+    h.worker.spawn_task(
+        serde_json::from_value(task_json(active)).unwrap(),
+        Duration::from_millis(100),
+    );
+    wait_for(|| calls.load(Ordering::SeqCst) == 1).await;
+    let known: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    h.store
+        .insert(&known, &h.client.worker_id(), h.client.api_base())
+        .await
+        .unwrap();
+    let key = ClaimKey::for_task(&known, &h.client.worker_id(), h.client.api_base());
+    h.store.mark_started(&key).await.unwrap();
+    let outcome = Outcome::Complete {
+        output: json!({"private": "already-performed"}),
+    };
+    h.store.record_outcome(&key, &outcome).await.unwrap();
+    h.worker
+        .spawn_task(known.clone(), Duration::from_millis(100));
+    wait_for(|| h.worker.admission.available() == 0).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    gate.add_permits(1);
+    wait_for(|| server.count(&format!("{active}/complete")) == 1).await;
+    wait_for(|| h.worker.admission.available() == 1).await;
+    assert_eq!(
+        server.count(&format!("{}/release", known.id)),
+        0,
+        "capacity must not replace a known outcome with an unstarted release"
+    );
+    assert_eq!(
+        h.store.get(&key).await.unwrap().unwrap().outcome,
+        Some(outcome)
+    );
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert_eq!(server.count(&format!("{}/complete", known.id)), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn pending_mobile_release_fences_redelivery_after_callback_capacity_returns() {
+    let release_gate = Arc::new(Semaphore::new(0));
+    let server = crate::test_support::spawn_control_plane_gated(
+        route_with(Vec::new(), 200, 200),
+        Some(("/release".into(), Arc::clone(&release_gate))),
+    )
+    .await;
+    let (h, gate, calls) = admission_harness(&server).await;
+    let active = uuid::Uuid::new_v4();
+    h.worker.spawn_task(
+        serde_json::from_value(task_json(active)).unwrap(),
+        Duration::from_millis(100),
+    );
+    wait_for(|| calls.load(Ordering::SeqCst) == 1).await;
+    let pending: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    h.worker
+        .spawn_task(pending.clone(), Duration::from_millis(100));
+    wait_for(|| server.count("/release") == 1).await;
+    gate.add_permits(1);
+    wait_for(|| server.count("/complete") == 1).await;
+    h.worker.spawn_task(pending, Duration::from_millis(100));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let observed = calls.load(Ordering::SeqCst);
+    release_gate.add_permits(1);
+    wait_for(|| h.worker.admission.available() == 1).await;
+    assert_eq!(observed, 1);
+    assert_eq!(server.count("/release"), 1);
+}
+
+#[tokio::test]
+async fn unpolled_mobile_task_future_owns_and_returns_shared_capacity() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let (h, _gate, calls) = admission_harness(&server).await;
+    let task = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    let future = h
+        .worker
+        .task_future(task, Duration::from_millis(100))
+        .unwrap();
+    assert_eq!(h.worker.stats().in_flight, 1);
+    assert_eq!(h.worker.admission.available(), 0);
+    drop(future);
+    assert_eq!(h.worker.stats().in_flight, 0);
+    assert_eq!(h.worker.admission.available(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    assert!(server.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn replacement_worker_does_not_overlap_its_predecessors_pending_poll() {
+    let poll_gate = Arc::new(Semaphore::new(0));
+    let server = crate::test_support::spawn_control_plane_gated(
+        route_with(vec![task_json(uuid::Uuid::new_v4())], 200, 200),
+        Some(("/workers/tasks/poll".into(), Arc::clone(&poll_gate))),
+    )
+    .await;
+    let (h, _gate, calls) = admission_harness(&server).await;
+    h.worker.spawn(&tokio::runtime::Handle::current());
+    wait_for(|| server.count("/workers/tasks/poll") == 1).await;
+    h.worker.stop();
+    let next = successor(&h);
+    next.spawn(&tokio::runtime::Handle::current());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let pending_polls = server.count("/workers/tasks/poll");
+    poll_gate.add_permits(1);
+    wait_for(|| server.count("/workers/tasks/poll") >= 2).await;
+    next.stop();
+    wait_for(|| server.count("/release") == 1).await;
+    assert_eq!(pending_polls, 1);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the stopped predecessor must release its late response unstarted"
+    );
+}
+
+#[tokio::test]
+async fn unreadable_start_evidence_cannot_be_released_as_unstarted() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    let task: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    h.store
+        .insert(&task, &h.client.worker_id(), h.client.api_base())
+        .await
+        .unwrap();
+    let key = ClaimKey::for_task(&task, &h.client.worker_id(), h.client.api_base());
+    h.store.mark_started(&key).await.unwrap();
+    let outcome = Outcome::Complete {
+        output: json!({"receipt": "already-performed"}),
+    };
+    h.store.record_outcome(&key, &outcome).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_claim_insert BEFORE INSERT ON mobile_worker_claims BEGIN SELECT RAISE(FAIL, 'injected journal failure'); END").execute(&h.pool).await.unwrap();
+    h.worker
+        .execute(task.clone(), Duration::from_millis(100))
+        .await;
+    assert_eq!(
+        server.count(&format!("{}/release", task.id)),
+        0,
+        "a journal error does not prove the prior effect never started"
+    );
+    assert!(h.inputs.lock().unwrap().is_empty());
+    assert_eq!(
+        h.store.get(&key).await.unwrap().unwrap().outcome,
+        Some(outcome)
+    );
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+}
+
+#[tokio::test]
+async fn concurrent_recovery_drains_share_the_cleanup_io_bound() {
+    let release_gate = Arc::new(Semaphore::new(0));
+    let server = crate::test_support::spawn_control_plane_gated(
+        route_with(Vec::new(), 200, 200),
+        Some(("/release".into(), Arc::clone(&release_gate))),
+    )
+    .await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    for _ in 0..20 {
+        seed(&h.store, &h.client, false, None).await;
+    }
+    let mut drains = tokio::task::JoinSet::new();
+    for _ in 0..20 {
+        let client = Arc::clone(&h.client);
+        let store = h.store.clone();
+        drains.spawn(async move { drain_orphans(&client, &store, None).await });
+    }
+    wait_for(|| server.count("/release") >= 8).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let simultaneous = server.count("/release");
+    release_gate.add_permits(20);
+    let mut resolved = 0;
+    while let Some(result) = drains.join_next().await {
+        resolved += result.unwrap();
+    }
+    assert!(
+        simultaneous <= 8,
+        "observed {simultaneous} concurrent recovery release requests"
+    );
+    assert_eq!(resolved, 20);
+    assert_eq!(server.count("/release"), 20);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn rejected_recovery_keeps_all_claim_evidence_until_authority_resolves_it() {
+    for rejected in [400, 401, 403, 405, 422, 429, 503] {
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(rejected));
+        let current = Arc::clone(&status);
+        let server = spawn_control_plane(Arc::new(move |_, _, _| {
+            (current.load(Ordering::Acquire), json!({}))
+        }))
+        .await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        seed(&h.store, &h.client, false, None).await;
+        seed(&h.store, &h.client, true, None).await;
+        seed(
+            &h.store,
+            &h.client,
+            true,
+            Some(Outcome::Complete {
+                output: json!({"receipt": "performed"}),
+            }),
+        )
+        .await;
+        seed(
+            &h.store,
+            &h.client,
+            true,
+            Some(Outcome::Fail {
+                message: "known failure".into(),
+                retryable: false,
+            }),
+        )
+        .await;
+        assert_eq!(
+            drain_orphans(&h.client, &h.store, None).await,
+            0,
+            "status {rejected} does not prove the claim ended"
+        );
+        assert_eq!(h.store.count().await.unwrap(), 4);
+        status.store(200, Ordering::Release);
+        assert_eq!(drain_orphans(&h.client, &h.store, None).await, 4);
+        assert_eq!(h.store.count().await.unwrap(), 0);
+        assert!(h.inputs.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rejected_legacy_release_fallback_retains_started_evidence() {
+    for rejected in [400, 401, 403, 405, 503] {
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(rejected));
+        let current = Arc::clone(&status);
+        let server = spawn_control_plane(Arc::new(move |_, path, _| {
+            (
+                if path.ends_with("/release") {
+                    404
+                } else {
+                    current.load(Ordering::Acquire)
+                },
+                json!({}),
+            )
+        }))
+        .await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        let id = seed(&h.store, &h.client, true, None).await;
+        assert_eq!(
+            drain_orphans(&h.client, &h.store, None).await,
+            0,
+            "fallback status {rejected} is not a settlement acknowledgement"
+        );
+        assert!(h.store.list().await.unwrap()[0].started);
+        status.store(200, Ordering::Release);
+        assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+        assert_eq!(server.bodies(&format!("{id}/release"))[1]["started"], true);
+        assert!(
+            server.bodies(&format!("{id}/fail"))[1]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown")
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejected_live_result_is_recovered_without_reinvoking_the_native_handler() {
+    for rejected in [400, 401, 403, 405] {
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(rejected));
+        let current = Arc::clone(&status);
+        let server = spawn_control_plane(Arc::new(move |_, path, _| {
+            (
+                if path.ends_with("/heartbeat") {
+                    200
+                } else {
+                    current.load(Ordering::Acquire)
+                },
+                json!({}),
+            )
+        }))
+        .await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        let id = uuid::Uuid::new_v4();
+        let task = serde_json::from_value(task_json(id)).unwrap();
+        h.worker.execute(task, Duration::from_millis(100)).await;
+        let rows = h.store.list().await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "status {rejected} must retain the known outcome"
+        );
+        assert!(
+            matches!(&rows[0].outcome, Some(Outcome::Complete { output }) if output == &json!({"scanned":true}))
+        );
+        assert_eq!(h.worker.stats().completed, 0);
+        status.store(200, Ordering::Release);
+        assert_eq!(
+            drain_orphans(&h.client, &h.store, Some(&h.worker.counters)).await,
+            1
+        );
+        assert_eq!(h.worker.stats().completed, 1);
+        assert_eq!(h.inputs.lock().unwrap().len(), 1);
+        assert_eq!(server.count(&format!("{id}/release")), 0);
+    }
+}
+
+#[tokio::test]
+async fn recovery_does_not_forget_old_claims_without_server_authority() {
+    let status = Arc::new(std::sync::atomic::AtomicU16::new(503));
+    let current = Arc::clone(&status);
+    let server = spawn_control_plane(Arc::new(move |_, _, _| {
+        (current.load(Ordering::Acquire), json!({}))
+    }))
+    .await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    seed(&h.store, &h.client, false, None).await;
+    seed(&h.store, &h.client, true, None).await;
+    seed(
+        &h.store,
+        &h.client,
+        true,
+        Some(Outcome::Complete {
+            output: json!({"receipt":"old-but-known"}),
+        }),
+    )
+    .await;
+    sqlx::query("UPDATE mobile_worker_claims SET claimed_at = '2010-01-01T00:00:00Z'")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 0);
+    assert_eq!(
+        h.store.count().await.unwrap(),
+        3,
+        "age alone does not prove that the server ended these attempts"
+    );
+    status.store(200, Ordering::Release);
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 3);
+    assert_eq!(
+        server.bodies("/complete")[1]["output"],
+        json!({"receipt":"old-but-known"})
+    );
+}
+
+#[tokio::test]
+async fn recovery_preserves_malformed_or_future_outcomes_instead_of_releasing_them() {
+    for raw in [
+        "{private-secret-invalid",
+        r#"{"kind":"future-outcome","private":"private-secret"}"#,
+    ] {
+        let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        let bad = seed(&h.store, &h.client, true, None).await;
+        sqlx::query("UPDATE mobile_worker_claims SET outcome = ? WHERE task_id = ?")
+            .bind(raw)
+            .bind(bad.to_string())
+            .execute(&h.pool)
+            .await
+            .unwrap();
+        seed(
+            &h.store,
+            &h.client,
+            true,
+            Some(Outcome::Complete {
+                output: json!({"healthy":true}),
+            }),
+        )
+        .await;
+        assert_eq!(
+            drain_orphans(&h.client, &h.store, None).await,
+            1,
+            "unknown evidence must not become an unknown-effect release"
+        );
+        assert_eq!(server.count(&format!("{bad}/release")), 0);
+        let preserved: String =
+            sqlx::query_scalar("SELECT outcome FROM mobile_worker_claims WHERE task_id = ?")
+                .bind(bad.to_string())
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved, raw);
+        let key = ClaimKey {
+            task_id: bad,
+            claim_epoch: 7,
+            worker_id: h.client.worker_id(),
+            api_base: h.client.api_base().into(),
+        };
+        let error = h.store.get(&key).await.unwrap_err().to_string();
+        assert!(
+            !error.contains("private-secret"),
+            "diagnostics must not include stored outcome content"
+        );
+    }
+}
+
+#[tokio::test]
+async fn recovery_reads_only_its_identity_even_when_another_outcome_is_corrupt() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    seed(
+        &h.store,
+        &h.client,
+        true,
+        Some(Outcome::Complete {
+            output: json!({"healthy":true}),
+        }),
+    )
+    .await;
+    let foreign: RemoteTask = serde_json::from_value(task_json(uuid::Uuid::new_v4())).unwrap();
+    h.store
+        .insert(&foreign, "foreign-runtime", h.client.api_base())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mobile_worker_claims SET started = 1, outcome = x'ff' WHERE worker_id = 'foreign-runtime'").execute(&h.pool).await.unwrap();
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert_eq!(h.store.count().await.unwrap(), 1);
+    assert_eq!(server.count(&format!("{}/release", foreign.id)), 0);
+    assert_eq!(server.count(&format!("{}/complete", foreign.id)), 0);
+}
+
+#[tokio::test]
+async fn recovery_paging_keeps_every_epoch_when_prior_pages_are_deleted() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    for id in [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)] {
+        for epoch in 1..=65 {
+            let mut task: RemoteTask = serde_json::from_value(task_json(id)).unwrap();
+            task.claim_epoch = epoch;
+            h.store
+                .insert(&task, &h.client.worker_id(), h.client.api_base())
+                .await
+                .unwrap();
+        }
+    }
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 130);
+    assert_eq!(h.store.count().await.unwrap(), 0);
+    let unique: HashSet<_> = server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path.ends_with("/release"))
+        .map(|(path, body)| (path.clone(), body["claim_epoch"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(unique.len(), 130);
+}
+
+#[tokio::test]
+async fn recovery_advances_past_a_full_page_of_invalid_identity_keys() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let h = harness(&server, ok_handler(Duration::ZERO)).await;
+    for index in 0..65 {
+        sqlx::query("INSERT INTO mobile_worker_claims (task_id,claim_epoch,worker_id,handler_name,api_base,started,claimed_at) VALUES (?,7,?,'scan',?,1,'2026-10-24T00:00:00Z')")
+            .bind(format!("!not-a-task-{index:03}"))
+            .bind(h.client.worker_id()).bind(h.client.api_base())
+            .execute(&h.pool).await.unwrap();
+    }
+    seed(
+        &h.store,
+        &h.client,
+        true,
+        Some(Outcome::Complete {
+            output: json!({"healthy":true}),
+        }),
+    )
+    .await;
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert_eq!(h.store.count().await.unwrap(), 65);
+    assert_eq!(server.count("/complete"), 1);
+    assert_eq!(server.count("/release"), 0);
+}
+
+#[tokio::test]
+async fn recovery_clears_claims_when_the_server_explicitly_fences_them() {
+    for status in [404, 409, 410] {
+        let server = spawn_control_plane(route_with(Vec::new(), status, status)).await;
+        let h = harness(&server, ok_handler(Duration::ZERO)).await;
+        seed(&h.store, &h.client, false, None).await;
+        seed(&h.store, &h.client, true, None).await;
+        seed(
+            &h.store,
+            &h.client,
+            true,
+            Some(Outcome::Complete {
+                output: json!({"receipt":"performed"}),
+            }),
+        )
+        .await;
+        assert_eq!(drain_orphans(&h.client, &h.store, None).await, 3);
+        assert_eq!(h.store.count().await.unwrap(), 0);
+        assert!(h.inputs.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn denied_renewal_stops_owned_native_work_but_retains_started_evidence() {
+    let handler = ok_handler(Duration::from_secs(2));
+    let entered = Arc::clone(&handler.inputs);
+    let restored = Arc::new(AtomicBool::new(false));
+    let healthy = Arc::clone(&restored);
+    let server = spawn_control_plane(Arc::new(move |_, _, _| {
+        let denied = !entered.lock().unwrap().is_empty() && !healthy.load(Ordering::Acquire);
+        (if denied { 403 } else { 200 }, json!({}))
+    }))
+    .await;
+    let h = harness(&server, handler).await;
+    let id = uuid::Uuid::new_v4();
+    let task = serde_json::from_value(task_json(id)).unwrap();
+    let start = tokio::time::Instant::now();
+    h.worker.execute(task, Duration::from_millis(50)).await;
+    let elapsed = start.elapsed();
+    let quarantined = h.worker.deps.stragglers.blocks("scan");
+    restored.store(true, Ordering::Release);
+    let rows = h.store.list().await.unwrap();
+    wait_for(|| !h.worker.deps.stragglers.blocks("scan")).await;
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "denied renewal must stop owned work immediately, elapsed: {elapsed:?}"
+    );
+    assert!(
+        quarantined,
+        "the physical native call must remain quarantined"
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].started);
+    assert_eq!(rows[0].outcome, None);
+    assert_eq!(
+        h.worker.stats().lost,
+        0,
+        "authorization denial is not proof of ownership loss"
+    );
+    assert_eq!(drain_orphans(&h.client, &h.store, None).await, 1);
+    assert!(
+        server
+            .bodies(&format!("{id}/release"))
+            .iter()
+            .all(|body| body["started"] == true)
+    );
+    assert_eq!(server.count(&format!("{id}/complete")), 0);
+    assert_eq!(h.inputs.lock().unwrap().len(), 1);
 }

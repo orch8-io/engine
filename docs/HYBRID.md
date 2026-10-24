@@ -88,6 +88,16 @@ effective lease: a positive per-task grant wins, with the poll-level default
 copied into legacy records that omit it. Invalid zero or out-of-range defaults
 fall back to the protocol lease when calculating heartbeat intervals.
 
+Before invoking a task, the executor confirms its current claim generation with
+an accepted heartbeat. Preparation, callback execution, output sealing, and
+outcome delivery share one monotonic lease deadline. Only accepted renewals
+extend it, measured from before the renewal request. A stalled heartbeat does
+not suspend callback/result polling. Rejected/unsupported renewals stop owned
+work as unconfirmed without asserting the lease ended; transient network failures
+can retry until the last confirmed deadline. Expiry also stops owned work and releases any started claim as ambiguous. This cannot roll back
+external side effects already accepted. Custom lease transports must implement
+real ownership checks rather than return unconditional heartbeat success.
+
 Orch8 Cloud's managed engines all sit behind one shared host and are reached
 only through the proxy's instance pin, so Cloud issues:
 

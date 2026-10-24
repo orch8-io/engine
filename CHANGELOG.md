@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Worker recovery evidence and authority
+
+- Preserve mobile start/outcome evidence after rejected live/recovery settlements
+  and legacy release fallback, including temporary authorization failures.
+- Remove unproven seven-day claim deletion. Retain malformed/future outcome bytes
+  with generic diagnostics and recover healthy records independently.
+- Page recovery keys by control-plane/worker identity; avoid aggregating unrelated
+  outcomes or skipping epochs when earlier pages are deleted.
+- Treat gRPC permission denial as rejection rather than ownership loss. Stop
+  owned work on denied renewal while preserving uncertain recovery evidence.
+
+### Mobile worker generation admission
+
+- Share task concurrency and in-flight accounting across restarted workers;
+  fence duplicate/stale deliveries before capacity admission and cancel live
+  predecessors before deferring newer lease generations.
+- Bound surplus/recovery cleanup to eight requests across generations, serialize
+  poll batches, and backpressure claiming while unstarted releases are pending.
+- Preserve journal start/outcome evidence at capacity and on insertion failures
+  instead of incorrectly releasing previously started work as unstarted.
+
+### Remote runtime lease supervision
+
+- Confirm task ownership before invoking core or mobile callbacks, preventing
+  fast callbacks from executing stale completed or fenced deliveries.
+- Share one conservative monotonic deadline across preparation, callback, output
+  sealing, and result delivery. Renew concurrently, stop on unconfirmed expiry,
+  and reject late acknowledgements without adding network latency to the grant.
+- Preserve known mobile outcomes for journal recovery at expiry. Drop cancelled
+  callbacks before cleanup I/O and quarantine native calls until physical return.
+
 ### Distributed HTTP worker contracts
 
 - Keep hybrid executor credentials and payloads at the configured endpoint by

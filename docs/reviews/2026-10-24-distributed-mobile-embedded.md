@@ -25,7 +25,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | REST workers | Claim generations, duplicate poll delivery, heartbeat loss, completion/failure/release retries, cancellation, queue and capability routing | Reviewing; shared HTTP contract and batch ownership fixes verified; supervision checks open |
 | gRPC workers | Reconnect, demand/backpressure, resumable transfers, session identity, cross-tenant control, cancellation | Reviewing; full 146-test library suite passes; demand/lease invariant audit ongoing |
 | Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
-| Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing |
+| Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Pending |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Pending |
@@ -248,16 +248,11 @@ union. All 146 gRPC library tests pass, including the 16 client/session checks.
 Already-existing controls include an 8 MiB response cap and status-based lease
 fencing; they were inspected rather than reimplemented.
 
-Next invariant checks remain open: duplicate/replayed deliveries while a callback
-is active (the executor running map currently keys by task UUID), renewal failure
-past the last known lease deadline, cancellation during slow claim/advertise
-calls, and gRPC demand/acknowledgement backpressure. Over-limit claim responses also
-need a bounded release-fanout review, and mobile re-registration must be checked
-against account/tenant changes as well as literal worker/control-plane identity.
-These observations are not
-claimed fixed or fully reproduced yet. They remain part of the original goal,
-alongside the pending mobile, embedded, binding, and sandbox areas above.
-
+At this stage, live duplicate admission, surplus release fanout, and lease
+supervision were still open. The subsequent sections record their fixes and
+limits. Slow advertise/claim shutdown, gRPC demand/acknowledgement backpressure,
+mobile account/tenant changes, and the remaining mobile, embedded, binding,
+and sandbox areas above remain part of the full goal.
 
 ## Live claim admission and bounded release cleanup
 
@@ -291,9 +286,155 @@ failure past the last confirmed lease deadline, and slow advertise/claim shutdow
 remain open. The release queue is backpressured to one transport claim batch;
 custom transports must bound that batch themselves. HTTP responses already have
 an 8 MiB cap. Mobile release fanout and admission across mobile worker generations
-remain separate pending review areas. This batch does not close the broader
+were still pending at this stage; the shared-admission section below records
+their subsequent fixes. This batch does not close the broader
 mobile, embedded, binding, sandbox, and security review above.
 
 Final merge-candidate validation: all 2,022 lean engine library tests and
 all 146 gRPC library tests, and all-target engine/server/mobile Clippy with
 warnings denied pass.
+
+
+## Confirmed lease authority across task phases
+
+Baseline: main `f2d88364`. Four executor regressions failed while all 25 existing
+executor tests passed. Through the real mobile HTTP client and native bridge,
+two more regressions failed while all 302 existing mobile tests passed.
+
+A shared `remote_worker::lease::ConfirmedLease` now requires a successful
+heartbeat before starting work. Transient confirmation failures retry within a
+bounded lease window; fenced or rejected confirmation cannot invoke a callback.
+Renewal runs concurrently with preparation, callback execution, output sealing,
+and outcome delivery. Every successful confirmation/renewal is measured from
+before its request, and an explicit clock check rejects late acknowledgements.
+Only confirmed renewals extend the deadline. The internal cadence also stays
+at most one third of the grant, including one-second grants.
+
+| ID | Finding | Correction and evidence | State |
+|---|---|---|---|
+| DME-032 | A fast callback executes a stale completed/fenced delivery before its first heartbeat | Check server ownership before invoking either Rust or native callbacks. Both core and mobile regressions fail on baseline. | Fixed; final validation below |
+| DME-033 | Repeated renewal failures allow callbacks to outlive confirmed authority | Stop owned work at the last confirmed deadline. Core callback expiry and mobile native quarantine regressions fail on baseline. | Fixed; final validation below |
+| DME-034 | Waiting inline for a heartbeat suspends callback and settlement polling | Poll lease supervision concurrently with the complete task operation. A blocked renewal must not block a callback result. | Fixed; final validation below |
+| DME-035 | Settlement fabricates a new lease budget and its RPC can outlive the grant | Preserve one supervisor through all phases and bound each pending RPC by that authority. Baseline stalled settlement never frees its slot. | Fixed; final validation below |
+| DME-036 | Expiry during mobile result delivery needs to preserve known outcome evidence | Keep the result outside the supervised future; retain/re-record it for orphan recovery rather than release it as unknown. New end-to-end recovery test requires one native invocation. | Covered by final validation below |
+| DME-037 | A ready late acknowledgement can be observed after a timeout deadline | Recheck the previous monotonic deadline explicitly before accepting any renewal. A deliberately delayed single-thread runtime must not resume the operation. | Covered by final validation below |
+
+Additional checks cover recovery after a transient renewal failure, request-time
+rather than response-time authority, one-second grants, and dropping a cancelled
+callback before waiting for its release RPC. Mobile stop continues to let already
+started work drain, while cancellation of a pending ownership check releases an
+unstarted claim. Mobile rechecks OS/power/stop admission after confirmation.
+
+A physically running native call cannot be forcibly stopped: its wrapper drops
+and quarantines it until physical completion. This does not guarantee rollback
+of an external mutation accepted before cancellation. An accepted heartbeat
+confirms server authority for the current generation; it is not durable evidence
+that an earlier process never started that generation. Cold restart ambiguity,
+core durable outcome recovery, ambiguous release replies, account/tenant
+boundaries, and the rest of the original review remain open. Mobile concurrency
+across worker generations is addressed in the next section.
+
+
+Final local validation passes all 2,031 lean engine library tests, all 305 mobile
+library tests, all 146 gRPC library tests, and all-target Clippy across the
+engine/server/mobile default-feature union with warnings denied. The native
+expiry regression observes quarantine while the physical callback is still
+blocked, then explicitly releases it and checks quarantine clears. The known
+outcome test restores server connectivity, drains the journal, and verifies
+exactly one handler invocation. Hosted checks for this batch remain pending.
+
+
+## Shared mobile admission and cleanup across generations
+
+Baseline: PR #266 `4da635cd`. Three behavioral regressions fail while the 28
+previous worker-level tests pass. Separate gated HTTP tests observe 100 blocked
+surplus release requests and 20 blocked requests from concurrent recovery passes.
+A SQLite trigger injecting an INSERT failure also reproduces an unsafe unstarted
+release despite a previously recorded start and outcome.
+
+The engine's cloned claim store now owns a shared admission ledger. It reserves
+capacity synchronously before spawning, keeps task scope separate from lease
+epoch, and retains an exact-generation fence while an unstarted release is queued
+or active. Newer deliveries cancel the old owned execution and defer the new
+callback; duplicate/stale deliveries cannot revoke the live lease at capacity.
+Stopping a worker still lets its existing tasks finish. A successor's configured
+limit includes predecessors; shrinking waits for existing tasks, and expanding
+adds capacity. Worker/window in-flight accounting includes draining predecessors.
+
+| ID | Finding | Correction and evidence | State |
+|---|---|---|---|
+| DME-038 | Restart grants independent slots while predecessor callbacks still execute | Share the engine admission budget across worker generations. Baseline runs two callbacks at configured concurrency one. Count predecessors in stats/windows. | Fixed; full mobile suite passes |
+| DME-039 | At-capacity duplicate delivery releases the live original | Apply task/generation ownership checks before the capacity decision. Baseline sends an unstarted release for an executing task. | Fixed; full mobile suite passes |
+| DME-040 | A new epoch can overlap a predecessor through execution/restart paths | Cancel the superseded owned future and release the replacement unstarted; retain independent epoch guards. Baseline enters both callbacks. | Fixed; full mobile suite passes |
+| DME-041 | Surplus deliveries and concurrent recovery bypass cleanup backpressure | Share eight cleanup I/O permits across surplus and orphan recovery; retain pending-release fences and block further polling while cleanup is pending. Baselines observe 100 and 20 blocked requests. | Fixed; full mobile suite passes |
+| DME-042 | A journal INSERT error is treated as proof a task never started | Preserve existing evidence and defer to recovery/expiry without an unstarted release. A real SQLite trigger failure reproduces the incorrect baseline release. | Fixed; regression and subsequent recovery pass |
+| DME-043 | Repeated restart can overlap predecessor poll batches | Serialize polls across engine worker generations with cancellable waiting. A gated pending-poll test also requires the stopped predecessor's late response to be released without invoking a callback. | Fixed; full mobile suite passes |
+
+Additional coverage requires pending release fencing after callback capacity
+returns, preservation and recovery of an already known outcome at capacity,
+capacity cleanup when a task future is dropped before first poll, and budget
+shrink/expand without cancelling existing work. All 317 mobile library tests pass.
+All-target Clippy passes across engine/server/mobile with warnings denied.
+Engine and gRPC sources are unchanged from the prior verified 2,031/146-test batch.
+
+Limits: admission belongs to one engine object, not every engine or process using
+the same database. The concurrency limit covers owned lease executions; physically
+running native calls whose leases expired remain separately quarantined by
+handler. Cleanup RPCs are bounded, while pending futures belong to a transport
+response batch bounded by the existing 8 MiB response limit. A replacement may
+wait for the predecessor's already-issued poll to finish; this does not claim
+immediate cancellation of slow HTTP calls. At this stage, recovery response
+classification and bulk journal reads still needed review; the next section
+records their fixes. Principal changes behind opaque token providers,
+independent-engine ownership, and the remaining mobile/embedded/binding/sandbox
+areas remain open.
+
+
+## Recovery authority, retained evidence, and scoped reads
+
+Baseline: PR #266 `5aacd57f`. Three rejected-response regressions fail against
+that production code: recovery clears four evidence states on rejection,
+pre-contract release fallback clears a started claim on rejected fail, and live
+result delivery clears its known outcome. The corrected matrix covers 400, 401,
+403, 405, 422, 429, and 503, plus restoration to accepted responses without native
+reinvocation. Explicit 404/409/410 fencing still clears resolved claims according
+to the existing lease protocol.
+
+Three further regressions reproduce deletion of old claims without a server
+request, conversion of malformed outcomes into releases, and recovery of one
+runtime being blocked by a different runtime's invalid UTF-8 outcome.
+A real tonic server using production node-role authorization also returns four
+permission denials that the old client misclassifies as ownership loss.
+A native handler continues for its full two seconds after renewal is denied;
+the corrected supervisor cancels its owned future promptly, observes quarantine,
+and retains started evidence when the release is also denied.
+
+| ID | Finding | Correction and evidence | State |
+|---|---|---|---|
+| DME-044 | Rejected recovery responses erase durable start/outcome evidence | Clear only accepted settlements or explicit ownership-loss replies; preserve all other records for correction/retry. | Fixed; status matrix and recovery pass |
+| DME-045 | Rejected legacy fail fallback is treated as an acknowledged release | Apply the same authority criterion to fallback, retaining started evidence and its unknown-effect semantics. | Fixed; fallback/restoration cases pass |
+| DME-046 | Live result rejection deletes the already performed outcome | Retain the journaled result for recovery instead of reporting settlement success. | Fixed; one native invocation across rejection/recovery |
+| DME-047 | Seven-day age is treated as proof the server reaped a claim | Remove unconditional age-based deletion. Old attempts are reconciled with server authority like other records. | Fixed; old unstarted, started, and known-result records survive outage and later resolve |
+| DME-048 | Malformed/future outcome encodings become absence of outcome | Return a generic decoding error, retain original bytes, and continue recovering healthy rows. Do not log stored content. | Fixed; malformed/future encodings and diagnostic secrecy checks pass |
+| DME-049 | Recovery aggregates every identity's payloads before filtering | Query matching API/worker identity keys in pages of 64 using `(task_id, claim_epoch)` cursors; load one reserved payload under the shared cleanup quota. | Fixed; foreign corruption isolation, deletion-safe 130-epoch paging, and invalid-key page progress pass |
+| DME-050 | gRPC permission denial falsely ends the task lease | Classify permission denial as rejection, matching HTTP authorization semantics. Explicit lease-fence statuses keep their existing mapping. | Fixed; production role-layer integration verifies heartbeat/complete/fail/release |
+| DME-051 | Denied renewal leaves owned native work running | Return unconfirmed authority on rejected/unsupported renewal, rather than wait for expiry or assert ownership loss. Drop owned work, quarantine the native call, and retain recovery evidence until resolved. | Fixed; denied-native-renewal regression passes |
+
+Final library validation passes 2,031 lean engine tests, 327 mobile tests, and
+147 gRPC tests. The full main CI and Mobile workflows also passed on `f2d88364`
+when rechecked; hosted checks for this follow-up are separate and still pending.
+
+Paging bounds identity aggregation and concurrent decoded recovery payloads; it
+does not bound the duration of a full recovery pass or the bytes in one native
+result. Unresolved evidence can remain on disk until authority is restored;
+explicit quota/backpressure, recovery scheduling/fairness, and retention policy
+still need review. Malformed records require repair or compatible decoding and
+are not silently discarded. This batch adds no journal schema change.
+Opaque-provider principal changes, independent-engine ownership, durable core
+outcomes, ambiguous core release replies, typed fencing versus generic gRPC
+precondition errors, and all remaining control/delegation/binding/sandbox areas
+remain part of the full objective. No exactly-once or external rollback guarantee
+is claimed.
+
+All-target Clippy also passes for the final engine/server/mobile default-feature
+union, with warnings denied.
