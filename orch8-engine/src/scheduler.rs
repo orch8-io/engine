@@ -1396,7 +1396,7 @@ async fn process_one_signalled_instance(
             && let Ok(Some(inst)) = storage.get_instance(instance_id).await
             && inst.state == InstanceState::Cancelled
             && let Ok(seq) = sequence_cache
-                .get_by_id(storage.as_ref(), inst.sequence_id)
+                .get_by_id_owned(storage, inst.sequence_id)
                 .await
         {
             // A sub-sequence parent parked on this child must observe the
@@ -1727,7 +1727,7 @@ async fn process_waiting_deadlines(
         let mut instance_sequences = Vec::with_capacity(waiting.len());
         for instance in &waiting {
             let Ok(seq) = sequence_cache
-                .get_by_id(storage.as_ref(), instance.sequence_id)
+                .get_by_id_owned(storage, instance.sequence_id)
                 .await
             else {
                 continue;
@@ -2414,7 +2414,7 @@ async fn collect_page_sla_candidates(
         }
         let Ok(seq) = ctx
             .sequence_cache
-            .get_by_id(ctx.storage.as_ref(), instance.sequence_id)
+            .get_by_id_owned(ctx.storage, instance.sequence_id)
             .await
         else {
             continue;
@@ -2883,7 +2883,7 @@ async fn process_instance(
 
     // Fetch sequence definition early — needed for cancellation scopes and evaluation.
     let sequence = sequence_cache
-        .get_by_id(storage.as_ref(), instance.sequence_id)
+        .get_by_id_owned(storage, instance.sequence_id)
         .await?;
     let optimization = sequence_cache.optimization_for(&sequence).await;
 
@@ -3392,7 +3392,7 @@ async fn cancel_orphans(
     };
     for inst in cancelled {
         let Ok(seq) = sequence_cache
-            .get_by_id(storage.as_ref(), inst.sequence_id)
+            .get_by_id_owned(storage, inst.sequence_id)
             .await
         else {
             continue;

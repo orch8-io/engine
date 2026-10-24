@@ -461,7 +461,7 @@ impl SyncReporter {
 
         let timestamp = chrono::Utc::now().to_rfc3339();
         let entries = collect_scan_entries(
-            storage.as_ref(),
+            storage,
             sequence_cache,
             instances,
             execution_steps.as_ref(),
@@ -1343,7 +1343,7 @@ fn group_execution_steps(
 }
 
 async fn collect_scan_entries(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     sequence_cache: &SequenceCache,
     instances: Vec<SyncInstanceProjection>,
     execution_steps: Option<&HashMap<InstanceId, Vec<SyncExecutionStepProjection>>>,
@@ -1361,7 +1361,7 @@ async fn collect_scan_entries(
         {
             entry.insert(
                 sequence_cache
-                    .get_by_id(storage, instance.sequence_id)
+                    .get_by_id_owned(storage, instance.sequence_id)
                     .await
                     .ok(),
             );
