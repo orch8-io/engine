@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Mobile remote worker recovery
+
+- Scope durable claim evidence to the control plane, worker runtime, task, and
+  claim epoch. Old callbacks cannot overwrite or delete a newer lease's journal.
+- Preserve start markers and outcomes on duplicate claim delivery. Share live
+  reservations across worker restarts and recovery passes, and clean execution
+  bookkeeping when a callback panics or its task is dropped.
+- Upgrade existing mobile worker journals atomically without losing their
+  recovery evidence. A failed upgrade retains the original table and records.
+
 ### Loop polling and scheduler fairness
 
 - Polling loops persist their next deadline through resets, restarts and early

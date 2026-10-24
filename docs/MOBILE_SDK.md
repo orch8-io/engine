@@ -953,6 +953,20 @@ else `registerNode`, and `startWorker`) the journal is drained:
 | started, no outcome  | `release {started: true}` — server marks the effect unknown |
 | outcome recorded     | re-deliver `complete` / `fail`                              |
 
+Claims are scoped to the control-plane API base, worker runtime ID, task ID,
+and claim epoch. A delayed settlement from an older lease cannot alter a newer
+lease's recovery evidence. Duplicate delivery preserves any recorded start or
+outcome instead of invoking the handler again.
+
+Live claim reservations are shared across worker generations and registration
+recovery. Stopping and restarting a worker does not make its still-running tasks
+orphans. Recovery uses only the matching control plane and worker identity.
+
+The older task-ID-only journal is upgraded in one SQLite write transaction,
+retaining the recorded identities, timestamps, and outcomes. Back up device
+storage before adopting a schema upgrade; restore that backup before downgrading
+to an engine that expects the old journal layout.
+
 Servers without `/release` (404/405) get a retryable `fail` instead.
 
 **Device-side timeouts.** A remote task's `timeout_ms` (and the engine's

@@ -1650,8 +1650,7 @@ impl MobileEngine {
         let store = self.claims.clone();
         let drain_client = Arc::clone(&client);
         self.runtime.handle().spawn(async move {
-            let none = StdMutex::new(HashSet::new());
-            worker::drain_orphans(&drain_client, &store, &none, None).await;
+            worker::drain_orphans(&drain_client, &store, None).await;
         });
         info!(runtime_id = %client.runtime_id(), "mobile runtime node registered");
         Ok(NodeRegistration {
@@ -1696,8 +1695,7 @@ impl MobileEngine {
             ) else {
                 return;
             };
-            let none = StdMutex::new(HashSet::new());
-            let settled = worker::drain_orphans(&client, &store, &none, None).await;
+            let settled = worker::drain_orphans(&client, &store, None).await;
             if settled > 0 {
                 warn!(settled, "released remote tasks held by a previous process");
             }
