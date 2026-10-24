@@ -304,33 +304,43 @@ internal class JsonBridgeBackend private constructor(
     private val handlers = HashMap<String, BlockingStepHandler>()
     private var sink: (EngineEvent) -> Unit = {}
 
-    // Only read while a sync() call is in flight; sync calls are serialized by the engine.
-    private var activeTokens: Orch8TokenSource? = null
+    private enum class TokenUse { NODE, MANIFEST }
 
-    private data class NodeSources(
+    private data class TokenSources(
         val serial: Long = 0,
         val closed: Boolean = false,
         val tokens: Map<String, Orch8TokenSource> = emptyMap(),
+        val manifestTokens: Map<String, Orch8TokenSource> = emptyMap(),
     )
-    private val nodeSources = MutableStateFlow(NodeSources())
+    private val tokenSources = MutableStateFlow(TokenSources())
 
-    private fun addNodeSource(tokens: Orch8TokenSource): String {
+    private fun addSource(tokens: Orch8TokenSource, use: TokenUse): String {
         while (true) {
-            val previous = nodeSources.value
+            val previous = tokenSources.value
             if (previous.closed) throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed")
             if (previous.serial == Long.MAX_VALUE) throw Orch8Exception(Orch8ErrorKind.RESOURCE_LIMIT, "provider identity exhausted")
             val id = (previous.serial + 1).toString()
-            if (nodeSources.compareAndSet(previous, previous.copy(serial = previous.serial + 1, tokens = previous.tokens + (id to tokens)))) return id
+            val next = when (use) {
+                TokenUse.NODE -> previous.copy(serial = previous.serial + 1, tokens = previous.tokens + (id to tokens))
+                TokenUse.MANIFEST -> previous.copy(serial = previous.serial + 1, manifestTokens = previous.manifestTokens + (id to tokens))
+            }
+            if (tokenSources.compareAndSet(previous, next)) return id
         }
     }
 
+    private fun releaseManifestSource(id: String) {
+        // Sources passed to sync are caller-owned; retiring a callback must not
+        // close a source the caller may also use for another sync or node.
+        tokenSources.getAndUpdate { it.copy(manifestTokens = it.manifestTokens - id) }
+    }
+
     private fun releaseNodeSource(id: String) {
-        val previous = nodeSources.getAndUpdate { it.copy(tokens = it.tokens - id) }
+        val previous = tokenSources.getAndUpdate { it.copy(tokens = it.tokens - id) }
         (previous.tokens[id] as? DeviceSessionTokens)?.close()
     }
 
     private fun <T> withNodeSource(tokens: Orch8TokenSource, call: (String) -> T): T {
-        val id = addNodeSource(tokens)
+        val id = addSource(tokens, TokenUse.NODE)
         return try { call(id) } catch (e: Throwable) { releaseNodeSource(id); throw e }
     }
 
@@ -356,13 +366,13 @@ internal class JsonBridgeBackend private constructor(
         override fun onStepPending(instanceId: String, stepName: String, handler: String) =
             sink(EngineEvent.StepPending(instanceId, stepName, handler))
 
-        override fun currentToken(): String = activeTokens?.currentToken().orEmpty()
+        override fun currentManifestToken(providerId: String): String = tokenSources.value.manifestTokens[providerId]?.currentToken().orEmpty()
 
-        override fun refreshToken(): String = refreshEnvelope(activeTokens)
+        override fun refreshManifestToken(providerId: String): String = refreshEnvelope(tokenSources.value.manifestTokens[providerId])
 
-        override fun currentNodeToken(providerId: String): String = nodeSources.value.tokens[providerId]?.currentToken().orEmpty()
+        override fun currentNodeToken(providerId: String): String = tokenSources.value.tokens[providerId]?.currentToken().orEmpty()
 
-        override fun refreshNodeToken(providerId: String): String = refreshEnvelope(nodeSources.value.tokens[providerId])
+        override fun refreshNodeToken(providerId: String): String = refreshEnvelope(tokenSources.value.tokens[providerId])
 
         override fun releaseNodeTokenSource(providerId: String) = releaseNodeSource(providerId)
 
@@ -379,7 +389,7 @@ internal class JsonBridgeBackend private constructor(
     }
 
     private fun call(method: String, args: JsonObjectBuilder.() -> Unit = {}): JsonElement {
-        if (nodeSources.value.closed && method != "shutdown") throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed")
+        if (tokenSources.value.closed && method != "shutdown") throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed")
         return BridgeCodec.unwrap(method, bridge.call(method, buildJsonObject(args).toString()))
     }
 
@@ -401,7 +411,7 @@ internal class JsonBridgeBackend private constructor(
     }
 
     override fun shutdown() {
-        val previous = nodeSources.getAndUpdate { it.copy(closed = true, tokens = emptyMap()) }
+        val previous = tokenSources.getAndUpdate { it.copy(closed = true, tokens = emptyMap(), manifestTokens = emptyMap()) }
         if (previous.closed) return
         try { call("shutdown") }
         finally { previous.tokens.values.forEach { (it as? DeviceSessionTokens)?.close() } }
@@ -463,16 +473,16 @@ internal class JsonBridgeBackend private constructor(
     override fun loadedSequences(): List<SequenceInfo> = BridgeCodec.sequences(call("loadedSequences"))
 
     override fun sync(manifestUrl: String, tokens: Orch8TokenSource?): SyncResult {
-        activeTokens = tokens
+        val providerId = tokens?.let { addSource(it, TokenUse.MANIFEST) }
         try {
             return BridgeCodec.sync(
                 call("sync") {
                     put("manifestUrl", manifestUrl)
-                    put("useTokenSource", tokens != null)
+                    providerId?.let { put("providerId", it) }
                 },
             )
         } finally {
-            activeTokens = null
+            providerId?.let(::releaseManifestSource)
         }
     }
 

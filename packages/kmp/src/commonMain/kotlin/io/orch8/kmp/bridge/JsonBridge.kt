@@ -41,10 +41,11 @@ interface Orch8BridgeCallbacks {
 
     fun onStepPending(instanceId: String, stepName: String, handler: String)
 
-    fun currentToken(): String
+    /** A manifest sync's immutable credential ID; empty after that call retires. */
+    fun currentManifestToken(providerId: String): String
 
-    /** Envelope: `{"ok": "<token>"}` or `{"error": {...}}`. */
-    fun refreshToken(): String
+    /** Envelope: `{"ok": "<token>"}` or `{"error": {...}}`; fails after retirement. */
+    fun refreshManifestToken(providerId: String): String
 
     /**
      * Cached credential for one immutable provider ID; empty when retired.
@@ -65,4 +66,4 @@ interface Orch8BridgeCallbacks {
 }
 
 /** Bumped when the method set or payload shapes change incompatibly. */
-const val ORCH8_BRIDGE_PROTOCOL: Int = 2
+const val ORCH8_BRIDGE_PROTOCOL: Int = 3

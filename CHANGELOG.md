@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### KMP manifest credential isolation
+
+- Capture immutable per-sync credential IDs in Kotlin and Swift instead of a
+  shared current token source. Overlapping syncs cannot borrow another account's
+  credential or clear its callbacks during cleanup. Retire IDs after return,
+  failure, or shutdown without closing caller-owned token sources.
+- Require bridge protocol 3; reject protocol-1/2 adapters during open. Add
+  controlled overlap, real two-thread concurrency, failure, late-callback,
+  shutdown, anonymous-sync, and shared-source lifetime regressions.
+
 ### KMP token ownership and fetch lifetime
 
 - Reserve native ownership before Kotlin's initial fetch and retire only that
@@ -14,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns to its dispatcher. Initial and refresh work share eight physical
   fetch slots; timeout/retirement cannot free a live non-cooperative fetch.
 - Scope iOS node-token callbacks to immutable provider IDs and release sources
-  with native ownership. The KMP Swift bridge protocol is now 2 and requires
+  with native ownership. The KMP Swift bridge protocol is now 3 and requires
   matching native artifacts/bindings. Qualify native Swift record names to fix
   collisions with Kotlin/Native exports.
 - Add common, real JVM/native, and real Apple bridge compilation to Mobile CI.

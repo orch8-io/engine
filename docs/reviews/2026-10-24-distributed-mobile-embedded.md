@@ -26,11 +26,11 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | gRPC workers | Reconnect, demand/backpressure, resumable transfers, session identity, cross-tenant control, cancellation | Reviewing; full 146-test library suite passes; demand/lease invariant audit ongoing |
 | Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
-| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider-installation/refresh/retry fencing verified below; durable principal binding and command/manifest review open |
+| Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; durable principal/cache binding and manifest callback execution remain open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Pending |
-| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Pending |
+| Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement and terminal shutdown verified; backend identity and callback execution remain open |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
-| Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Pending |
+| Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
 | Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
 | Operations and security | Payload bounds, resource retention, diagnostics without secrets, dependency advisories, migration/rollback and supported platforms | Pending |
 
@@ -895,31 +895,67 @@ ship together; the DME070 default-release gate is still open. RN/Flutter ports,
 principal binding, manifest-sync identity, and the original review matrix remain
 unfinished.
 
-### DME072 — KMP manifest-sync callback identity (open)
+### DME072 — KMP manifest-sync callback identity (fixed in source)
 
-**HIGH, effort M.** Node callback IDs do not fix manifest authentication:
-`JsonBridgeBackend.sync` still writes a mutable `activeTokens` field, and the
-Swift manifest token adapter consults the bridge's current callbacks. Concurrent
-sync calls can overwrite that source; an older callback can observe a newer
-call's token or the field cleared by another call's `finally`. The common
-`offload` API does not serialize concurrent callers. Audit cancellation and
-retained native callbacks as well as the direct overlap. Use immutable per-sync
-source ownership rather than relying on a wrapper-local scheduling assumption,
-and reproduce the crossing with controlled bridge/native callbacks before fixing.
+**HIGH, effort M.** On main `fb473301`, `JsonBridgeBackend.sync` still wrote a
+mutable `activeTokens`, and Swift's manifest adapter consulted the bridge's current
+callbacks. A controlled nested bridge call reproduced account A's callback
+returning account B's credential; the regression failed before the fix. Another
+call's finally block could also clear the first call's source.
 
-### DME073 — Parent wake after child cancellation (CI failure, open)
+Manifest sync now registers a unique, immutable ID in an atomic registry separate
+from node credentials. Swift captures both the callback object and ID. Return or
+failure removes only that ID, and shutdown closes admission and retires all IDs
+before native cleanup. Retired IDs cannot invoke the source or resolve a later
+installation. IDs share a non-reused monotonic counter across source kinds;
+manifest and node lookups remain separate. Sources supplied to sync are
+caller-owned and are not closed on retirement, including a source shared with a
+node. Anonymous calls do not acquire a source ID. Protocol 3 rejects stale
+protocol-1/2 Swift bridges at open; the matching KMP framework/Swift adapter must
+ship together. This does not resolve the existing native artifact release gate.
 
-**HIGH, effort M.** Draft #273's E2E job failed while the other 22 checks passed:
-[job 120848184366](https://github.com/orch8-io/engine/actions/runs/40085265140/job/120848184366).
-`subsequence_failures.test.ts` cancelled a child, but its parent remained Waiting
-for the full 20-second observation. The test comment already describes a lost
-wake if cancellation arrives before the parent parks; its setup loop asserts
-that the child exists but never asserts that the parent's Waiting condition was
-actually reached before the setup deadline.
+Coverage includes controlled nested overlap, a real two-thread bridge overlap,
+failure and late callbacks, shutdown during sync, anonymous overlap, separate
+node/manifest authority, non-reused IDs, and caller-owned source lifetime.
+All 65 JVM tests pass with the actual Rust library and no skipped cases (six
+added regressions). The portable run passes 63 cases and explicitly skips the
+two native tests. The real iOS simulator Kotlin/Native framework links, and the
+production Swift SDK and bridge type-check against it with warnings denied.
+Documentation links, example syntax, and diff checks pass. The JVM bridge fixtures exercise production Kotlin registry behavior; Apple
+compilation checks the actual Swift/Kotlin callback surface, not iOS runtime E2E.
 
-Do not address this solely by waiting longer or rerunning CI. Trace durable child
-terminal evidence and parent parking/wake transitions; reproduce cancellation
-before, during, and after parent parking with controlled storage/event gates on
-SQLite and Postgres. A terminal child must eventually resume/fail its parent
-without depending on an ephemeral wake arriving after a particular state write.
-The exact race and production fix remain to be established.
+### DME073 — Parent wake after handler-consumed cancellation (fixed and merged)
+
+**HIGH, effort M.** Main `fb473301` contains the repair, with the complete CI and
+Mobile workflows passing. The original draft #273 E2E failure was reproduced by
+waiting for the child sleep to be Running before cancellation. Cancellation
+consumed inside the sleep invalidated its claim; evaluation could exit before
+scheduler terminal handling. Both already-terminal scheduler return paths also
+skipped parent notification. This was distinct from the older parent-parking
+race, whose park-and-recheck mechanism already existed.
+
+Cancellation now notifies the parent at signal consumption, and both scheduler
+terminal return paths also notify without overwriting terminal child state.
+Direct signal and terminal-state matrix regressions pass; the strengthened
+running-child E2E case failed before the fix and passes on SQLite and isolated
+Postgres. The lean engine suite passed all 2,036 tests, and Clippy passed with
+warnings denied. The combined PR #274 passed all 24 hosted checks; merging it
+also included and marked #273 merged. The separate Swift startup-sensitive tests
+were changed to synchronize on physical callback entry and then cancel logical
+waiters; dedicated timeout tests remain intact. Both final Swift simulator runs
+passed, as did the two main workflows after merge.
+
+### DME074 — Manifest token getter can block the timed operation (source finding; regression pending)
+
+`MobileEngine.sync` calls the foreign `TokenProvider.current_token()` directly
+inside the `run_with_timeout` future before the first manifest request. This is a
+synchronous host call with no yield; the surrounding timeout/shutdown select
+cannot poll while this getter is blocked. The per-credential node refresh pool
+and wrapper async fetch budget do not bound arbitrary manifest sources. A
+controlled blocking native provider must establish timeout/shutdown behavior,
+physical ownership after caller abandonment, shared admission, resource cleanup,
+and the absence of network dispatch after retirement before choosing a fix.
+The per-sync callback identity repair does not claim to solve this execution
+boundary or add manifest `401` refresh (the native path currently snapshots one
+bearer token). Principal/cache ownership, RN/Flutter adoption, release artifacts,
+and the complete review matrix remain open.

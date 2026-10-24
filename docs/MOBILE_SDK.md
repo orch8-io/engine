@@ -569,7 +569,7 @@ artifacts. For the unreleased source, build a matching XCFramework and use
 `ORCH8_MOBILE_LOCAL_XCFRAMEWORK=1`; the default published 0.7.1 artifact pin must
 be updated with a matching release before distributing this API. Swift reserves
 before its initial fetch and rejects superseded completion across runtime-node
-aliases. KMP adopts tickets with bridge protocol 2 and matching native artifacts;
+aliases. KMP adopts tickets and per-sync callback identities with bridge protocol 3 and matching native artifacts;
 RN and Flutter wrapper adoption is still pending.
 
 ### MobileEngineConfig
