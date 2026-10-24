@@ -486,6 +486,34 @@ CREATE INDEX IF NOT EXISTS idx_usage_tenant_created ON usage_events(tenant_id, c
 -- Per-instance purge and token-budget aggregate (Postgres migration 102).
 CREATE INDEX IF NOT EXISTS idx_usage_events_instance ON usage_events(instance_id, kind);
 
+-- Explicit mobile owners. Legacy mobile rows remain separate and are never
+-- adopted by whichever account happens to open first.
+CREATE TABLE IF NOT EXISTS mobile_accounts (
+    id TEXT PRIMARY KEY,
+    account_key TEXT NOT NULL UNIQUE,
+    principal_issuer TEXT NOT NULL,
+    principal_subject TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK(epoch > 0),
+    active INTEGER NOT NULL CHECK(active IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS mobile_catalogs (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES mobile_accounts(id),
+    catalog_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    signing_authority TEXT NOT NULL,
+    UNIQUE(account_id, catalog_key),
+    UNIQUE(account_id, id)
+);
+CREATE TABLE IF NOT EXISTS mobile_catalog_metadata (
+    account_id TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY(account_id, catalog_id, key),
+    FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id)
+);
+
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
