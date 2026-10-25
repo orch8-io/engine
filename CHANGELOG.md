@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Native callback claim admission
+
+- Revalidate queued mobile native handlers against the original running instance,
+  tenant and scheduler claim before entering host code. SQLite also checks the
+  frozen scoped account epoch. Cancellation or timeout during verification cannot
+  start a late host call; physical quarantine lasts until verification settles.
+- Add required Rust `InstanceStore::verify_instance_claim`. Custom storage backends
+  must implement this read-only entry check, including their durable owner fences;
+  heartbeat is insufficient because it can retain ownership after completion.
+  SQLite, Postgres, encrypted storage and fault-injecting storage implement it.
+  HTTP and FFI callback signatures remain unchanged.
+
 ### Backend-owned embedded scheduler retries
 
 - Qualify process-local deferred parent wakes and transient failure budgets by

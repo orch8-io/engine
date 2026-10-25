@@ -34,7 +34,7 @@ hex = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
-orch8-storage = { path = "../orch8-storage", default-features = false, features = ["artifacts"] }
+orch8-storage = { path = "../orch8-storage", default-features = false, features = ["artifacts", "test-util"] }
 tempfile = { workspace = true }
 
 [[bin]]

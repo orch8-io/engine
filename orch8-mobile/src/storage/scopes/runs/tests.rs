@@ -964,3 +964,99 @@ async fn execution_scope_proof_cannot_be_relabelled_or_omitted() {
         );
     }
 }
+
+#[test]
+fn execution_scope_retirement_while_native_callback_is_queued_prevents_entry() {
+    use std::{
+        future::Future,
+        sync::atomic::{AtomicUsize, Ordering},
+        task::Poll,
+    };
+    struct Counter(Arc<AtomicUsize>);
+    impl crate::handlers::StepHandler for Counter {
+        fn execute(
+            &self,
+            _name: String,
+            _input: String,
+        ) -> Result<String, crate::error::HandlerError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok("{}".into())
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    for reopen in [false, true] {
+        let (storage, sqlite) = runtime.block_on(fixture());
+        let (scope, ctx) = runtime.block_on(async {
+            let scope = scope(&storage, "alice", "one").await;
+            let run = storage
+                .prepare_catalog_run(&scope, request(Some("queued"), "{}"), limits())
+                .await
+                .unwrap();
+            let native = native_fixture(&sqlite, &run).await;
+            let claim = sqlite
+                .claim_due_instances(chrono::Utc::now(), 1, 0)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            let ctx = orch8_engine::handlers::StepContext {
+                claim_token: claim.claimed_at,
+                instance_id: run.id,
+                tenant_id: native.tenant_id,
+                block_id: orch8_types::ids::BlockId::new("work"),
+                params: serde_json::json!({}),
+                context: Arc::new(orch8_types::context::ExecutionContext::default()),
+                attempt: 1,
+                storage: sqlite.clone(),
+                wait_for_input: None,
+            };
+            (scope, ctx)
+        });
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = orch8_engine::handlers::HandlerRegistry::new();
+        crate::handlers::register_foreign_handler(
+            &mut registry,
+            "queued",
+            Arc::new(Counter(calls.clone())),
+            std::time::Duration::from_secs(5),
+            Arc::new(crate::stragglers::Stragglers::default()),
+        );
+        runtime.block_on(async {
+            let mut pending = Box::pin(registry.get("queued").unwrap()(ctx));
+            std::future::poll_fn(|cx| {
+                assert!(pending.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            storage.retire_account_scope(&scope.account).await.unwrap();
+            if reopen {
+                storage
+                    .open_account_scope("alice", "issuer", "alice")
+                    .await
+                    .unwrap();
+            }
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            assert!(matches!(
+                pending.await,
+                Err(orch8_types::error::StepError::ClaimLost)
+            ));
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}

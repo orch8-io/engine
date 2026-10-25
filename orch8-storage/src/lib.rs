@@ -1027,6 +1027,17 @@ pub trait InstanceStore: Send + Sync + 'static {
         claimed_at: DateTime<Utc>,
     ) -> Result<InstanceLease, StorageError>;
 
+    /// Verify native callback entry against the exact running claim and tenant.
+    /// Unlike heartbeat, completed/waiting rows with a retained token are denied.
+    /// Backends must also apply any durable execution-owner/epoch fences.
+    /// This read is an entry preflight; writes still require claim-bound methods.
+    async fn verify_instance_claim(
+        &self,
+        instance_id: InstanceId,
+        tenant_id: &TenantId,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     // === Sub-Sequences ===
 
     /// Get child instances of a parent.
