@@ -1625,3 +1625,59 @@ exact-head checks remain required before merge.
 Public scoped instance/worker/delegation/handler ownership, SDK handles, production
 identity backend integration, public-catalog access policy, total storage/native
 callback quotas and the full original review matrix/ADR gates remain open.
+
+
+### DME098 — Durable owner-qualified run preparation (implemented internally)
+
+SQLite schema 54 adds durable scoped request records before scheduler materialization.
+Each record freezes account/catalog/epoch, definition/version, input identity,
+creation time and admitted manifest version/digest. Canonical input makes object-key
+order irrelevant to scoped idempotency. The request's version selector, not today's
+resolved `latest`, determines retry identity; upgrades cannot retarget a prior
+operation. Changed inputs/selectors conflict. Old login epochs cannot re-admit old
+keys; active owner handles may still inspect historical receipts.
+
+Admission serializes global/account/catalog record and UTF-8 input-byte ceilings
+with the insertion. Cancelled/retired records remain charged; explicit cleanup is
+limited to cancelled, never-dispatched records and refuses an ID present in native
+instances. The accounting query uses a covering metadata index rather than reading
+inputs. Schema byte checks prevent understated counters; reads verify immutable
+input fingerprints. These are request-store limits, not completed total cache,
+instance-history or physical native-callback quota gates.
+
+Prepared records pin their selected definition. Withdrawal preserves pinned data
+as deprecated; eviction and canonical native deletion refuse it. A schema constraint
+also rejects direct deletion that would detach a prepared record. Cancelled
+receipts retain their original selection after the definition is purged. No native
+scheduler row is emitted: an actual ordinary tick verifies no request is dispatched.
+Scoped materialization/handler/builtin ownership remains unimplemented and must
+precede exposing this as a public start API.
+
+### DME099 — New admission needed a durable removal-reconciliation boundary (fixed)
+
+A newer document can be accepted before removals finish. The HTTP contract exercises
+that window with the old cached definition still present, and verifies that a new
+request is refused. A protected version/digest marker now commits after the full
+removal pass. Admission verifies it against current acceptance in the same fenced
+transaction; an earlier marker cannot authorize a newer document. Completed
+accepted/applied state safely supports older fully evaluated caches offline.
+
+Download/evaluation remains a separate phase: a failed entry leaves the catalog
+pending while a valid reconciled cached workflow can prepare a request. Existing
+idempotent receipts remain readable without admitting work. Root and account
+retirement fences remain enforced, including phase metadata writes.
+
+Validation: 494 mobile library tests, 230 storage library tests and 15 migration
+rollback tests passed, along with workspace/all-target Clippy with warnings denied.
+The 15 request contracts and 14 scoped HTTP contracts cover four scopes, changed
+requests, upgrades, full-capacity retries, retirement, reopen, pin retention,
+injected insert failure, byte accounting/index plans, corruption and independent-
+pool races. Hosted checks must also pass on the submitted commit before merging.
+The full original matrix and ADR-0002 gates remain open.
+
+Next runtime review: legacy `InstanceLifecycleManager::start` still counts active
+instances before a separate insert and handles terminal-key reuse with a new salted
+key. Reproduce concurrent admission and terminal-key retry races, fix confirmed
+failures atomically, and retain the existing legacy API semantics. Continue scoped
+materialization/callback ownership after this admission work; do not substitute
+preparation for the required executable multi-account runtime.

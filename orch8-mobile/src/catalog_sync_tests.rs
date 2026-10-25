@@ -725,6 +725,24 @@ async fn one_unavailable_entry_does_not_starve_a_valid_entry_or_advance_the_curs
             .unwrap()
             .is_none()
     );
+    let prepared = fixture
+        .storage
+        .prepare_catalog_run(
+            &scope,
+            crate::storage::scopes::runs::CatalogRunRequest {
+                workflow: "good",
+                version: None,
+                input_json: "{}",
+                dedup_key: Some("good-operation"),
+            },
+            admission_limits(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.workflow, "good",
+        "pending downloads must not block reconciled, authorized cached work"
+    );
 }
 
 #[tokio::test]
@@ -1086,4 +1104,84 @@ async fn oversized_scoped_collections_are_refused_before_trust_changes() {
                 .is_empty()
         );
     }
+}
+
+fn admission_limits() -> crate::storage::scopes::runs::CatalogRunLimits {
+    crate::storage::scopes::runs::CatalogRunLimits {
+        global_records: 16,
+        account_records: 8,
+        catalog_records: 4,
+        global_input_bytes: 1024 * 1024,
+        account_input_bytes: 512 * 1024,
+        catalog_input_bytes: 256 * 1024,
+    }
+}
+
+#[tokio::test]
+async fn accepted_withdrawal_fences_new_admission_before_removal_reconciliation() {
+    let fixture = Fixture::new().await;
+    let (_, scope) = fixture.scope("alice", "one").await;
+    fixture.publish("alice", "one", true, &[]);
+    fixture.sync(&scope, "alice/v1").await.unwrap();
+    let request = |key| crate::storage::scopes::runs::CatalogRunRequest {
+        workflow: "flow",
+        version: None,
+        input_json: "{}",
+        dedup_key: Some(key),
+    };
+    let old = fixture
+        .storage
+        .prepare_catalog_run(&scope, request("old"), admission_limits())
+        .await
+        .unwrap();
+    fixture.publish("alice", "one", false, &[]);
+    let bytes = fixture.script.lock().unwrap().replies["/catalog/alice/one/manifest"]
+        .body
+        .clone();
+    fixture
+        .storage
+        .accept_signed_catalog_manifest(&scope, &bytes)
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .storage
+            .catalog_workflow(&scope, "flow", None)
+            .await
+            .unwrap()
+            .is_some(),
+        "exercise the accepted-but-not-yet-reconciled window"
+    );
+    assert!(
+        fixture
+            .storage
+            .prepare_catalog_run(&scope, request("new"), admission_limits())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .prepare_catalog_run(&scope, request("old"), admission_limits())
+            .await
+            .unwrap()
+            .id,
+        old.id
+    );
+    assert_eq!(fixture.sync(&scope, "alice/v2").await.unwrap().removed, 1);
+    assert!(
+        fixture
+            .storage
+            .catalog_workflow(&scope, "flow", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .storage
+            .prepare_catalog_run(&scope, request("new"), admission_limits())
+            .await
+            .is_err()
+    );
 }

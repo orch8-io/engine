@@ -433,6 +433,10 @@ impl CatalogSynchronizer {
             return Ok(SyncResult::default());
         }
         let removed = self.reconcile(transport, &accepted, expires).await?;
+        self.active(transport, Some(expires)).await?;
+        self.storage
+            .mark_catalog_reconciled(&self.scope, manifest.manifest_version, accepted.digest())
+            .await?;
         let (mut result, pending) = self
             .install_entries(transport, &auth, &accepted, handlers, expires)
             .await?;

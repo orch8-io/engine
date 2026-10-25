@@ -72,6 +72,15 @@ impl ManifestTrust {
         })
     }
 
+    /// A completed evaluation also proves that removal reconciliation ran.
+    /// This lets older fully evaluated scoped caches work offline without
+    /// inventing a reconciliation marker for an unproven/pending document.
+    pub(crate) fn evaluated_identity(&self) -> Option<(i64, &str)> {
+        let version = self.accepted_version?;
+        (self.applied_version == Some(version))
+            .then_some((version, self.accepted_digest.as_deref()?))
+    }
+
     pub(crate) fn check_candidate(&self, version: i64, digest: &str) -> Result<(), StorageError> {
         if version < 0 || !valid_digest(digest) {
             return Err(conflict("invalid manifest acceptance identity"));
